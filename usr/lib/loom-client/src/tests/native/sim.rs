@@ -346,7 +346,12 @@ fn shape(s: &Submission, pools: bool) -> i64 {
         o if o == OP_READ as u32 && pooled => {
             if !pools {
                 -95
-            } else if s.len == 0 || s.buf_idx_or_off >= 64 || s.args[2] == 0 || s.args[0] != 0 {
+            } else if s.len == 0
+                || s.len > i32::MAX as u32
+                || s.buf_idx_or_off >= 64
+                || s.args[2] == 0
+                || s.args[0] != 0
+            {
                 EINVAL
             } else {
                 0
@@ -449,6 +454,10 @@ impl State {
         let (gone, kept): (Vec<Op>, Vec<Op>) = self.ops.drain(..).partition(|o| o.scope == scope);
         self.ops = kept.into();
         for op in gone {
+            // A cancelled CLUNK still retires its fid (loom_fid_finish_clunk).
+            if matches!(op.kind, OpKind::Clunk) {
+                self.slots[op.source].as_mut().unwrap().state = RETIRED;
+            }
             if self.hold_terminals {
                 self.held.push((scope, op.user_data, result as i32));
             } else {
@@ -461,7 +470,7 @@ impl State {
             }
         }
     }
-    fn abort_all(&mut self) {
+    pub fn abort_all(&mut self) {
         for i in 0..64 {
             if self.slots[i]
                 .as_ref()
@@ -531,6 +540,9 @@ impl State {
                 self.ops.drain(..).partition(|o| o.scope == scope);
             self.ops = kept.into();
             for op in gone {
+                if matches!(op.kind, OpKind::Clunk) {
+                    self.slots[op.source].as_mut().unwrap().state = RETIRED;
+                }
                 let r = if op.deadline != 0 && op.deadline <= now {
                     ETIMEDOUT
                 } else {
@@ -714,11 +726,49 @@ impl State {
         });
         (claimed, borrowed)
     }
+    /// A FID whose CLUNK was admitted: the kernel retires its slot at once
+    /// (loom_fid_begin_clunk), so every exact lookup -- the scope pass, a WALK's
+    /// destination, QUERY -- answers ENOENT. ABORTING is how the kernel marks
+    /// one; the sims reach it for a fid only by a test's poke. A scope's slot
+    /// stays live until REAP whatever its state.
+    fn retiring(sl: &Slot) -> bool {
+        sl.kind == SlotKind::Fid && (sl.clunking || sl.state == ABORTING || sl.state == RETIRED)
+    }
     /// Whether an admitted WALK still claims slot i as its destination.
     fn walk_claimed(&self, i: usize) -> bool {
         self.ops
             .iter()
             .any(|o| matches!(o.kind, OpKind::Walk { dest, .. } if dest == i))
+    }
+    /// QUERY_SERVICE_SLOT: an exact lookup of a live slot (control_exact).
+    pub fn query(&self, q: &mut Snapshot) -> i64 {
+        let Some(sl) = self.live(q.object).cloned() else {
+            return ENOENT;
+        };
+        if Self::retiring(&sl) {
+            return ENOENT;
+        }
+        q.state = sl.state;
+        if sl.kind == SlotKind::Scope {
+            // loom_private_service_query: operations not yet terminal,
+            // and terminals not yet posted.
+            let i = q.object.slot as usize;
+            q.active_ops = self.ops.iter().filter(|o| o.scope == i).count() as u32;
+            let deferred = self
+                .deferred
+                .iter()
+                .filter(|d| d.0 == Some(i) && d.3 & CQE_MORE == 0)
+                .count();
+            let held = self.held.iter().filter(|h| h.0 == i).count();
+            q.pending_terminals = (deferred + held) as u32;
+        }
+        q.kind = match sl.kind {
+            SlotKind::Target => 1,
+            SlotKind::Scope => 2,
+            SlotKind::Fid => 3,
+            SlotKind::Pool => 4,
+        };
+        0
     }
     /// ENTER's admission of one SQE and nothing else: 0 admits it.
     pub fn admit_one(&mut self, s: Submission) -> i64 {
@@ -790,7 +840,7 @@ impl State {
                     SlotKind::Fid => src.scope,
                     _ => return ENOENT,
                 };
-                if src.state == RETIRED || src.clunking {
+                if Self::retiring(&src) {
                     return ENOENT;
                 }
                 if self.slots[scope].as_ref().unwrap().state != READY {
@@ -903,7 +953,7 @@ impl State {
                         let Some(d) = self.live(dest) else {
                             return ENOENT;
                         };
-                        if d.kind != SlotKind::Fid || d.state == RETIRED || d.clunking {
+                        if d.kind != SlotKind::Fid || Self::retiring(d) {
                             return ENOENT;
                         }
                         if d.scope != scope {
@@ -1162,33 +1212,7 @@ unsafe impl Kernel for SimKernel {
                 s.cancel_scope(i, ECANCELED);
                 0
             }
-            5 => {
-                let q = unsafe { &mut *arg.cast::<Snapshot>() };
-                let Some(sl) = s.live(q.object).cloned() else {
-                    return ENOENT;
-                };
-                q.state = sl.state;
-                if sl.kind == SlotKind::Scope {
-                    // loom_private_service_query: operations not yet terminal,
-                    // and terminals not yet posted.
-                    let i = q.object.slot as usize;
-                    q.active_ops = s.ops.iter().filter(|o| o.scope == i).count() as u32;
-                    let deferred = s
-                        .deferred
-                        .iter()
-                        .filter(|d| d.0 == Some(i) && d.3 & CQE_MORE == 0)
-                        .count();
-                    let held = s.held.iter().filter(|h| h.0 == i).count();
-                    q.pending_terminals = (deferred + held) as u32;
-                }
-                q.kind = match sl.kind {
-                    SlotKind::Target => 1,
-                    SlotKind::Scope => 2,
-                    SlotKind::Fid => 3,
-                    SlotKind::Pool => 4,
-                };
-                0
-            }
+            5 => s.query(unsafe { &mut *arg.cast::<Snapshot>() }),
             6 => {
                 let c = unsafe { &*arg.cast::<Control>() };
                 let Some(sl) = s.live(c.object).cloned() else {

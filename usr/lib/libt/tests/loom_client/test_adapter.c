@@ -1756,15 +1756,16 @@ static void a_dropped_ring_used_again_ends_the_process(void) {
 static unsigned char adm_buf[8];
 static struct sim *adm_fixture(void) {
     struct sim *s = new_sim();
-    static const struct { unsigned kind; uint32_t state; size_t scope; unsigned open; } k[9] = {
-        { SIM_SCOPE, SIM_READY, 0, 0 },    { SIM_FID, SIM_READY, 0, 0 }, { SIM_FID, SIM_READY, 0, 3 },
-        { SIM_FID, SIM_RESERVED, 0, 0 },   { SIM_SCOPE, SIM_READY, 4, 0 }, { SIM_FID, SIM_RESERVED, 4, 0 },
-        { SIM_FID, SIM_READY, 0, 0 },      { SIM_POOL, SIM_READY, 0, 0 }, { SIM_FID, SIM_READY, 0, 0 },
+    static const struct { unsigned kind; uint32_t state; size_t scope; unsigned open; } k[11] = {
+        { SIM_SCOPE, SIM_READY, 0, 0 },    { SIM_FID, SIM_READY, 0, 0 },     { SIM_FID, SIM_READY, 0, 3 },
+        { SIM_FID, SIM_RESERVED, 0, 0 },   { SIM_SCOPE, SIM_READY, 4, 0 },   { SIM_FID, SIM_RESERVED, 4, 0 },
+        { SIM_FID, SIM_READY, 0, 0 },      { SIM_POOL, SIM_READY, 0, 0 },    { SIM_FID, SIM_READY, 0, 0 },
+        { SIM_SCOPE, SIM_RETIRED, 9, 0 },  { SIM_FID, SIM_ABORTING, 0, 0 },
     };
-    for (size_t i = 0; i < 9; ++i)
+    for (size_t i = 0; i < 11; ++i)
         s->slots[i] = (struct sim_slot){ .used = 1, .kind = k[i].kind, .state = k[i].state, .scope = k[i].scope,
                                          .open = k[i].open, .inc = i + 1 };
-    s->next_inc = 10;
+    s->next_inc = 12;
     memcpy(adm_buf, "a/bxname", 8);
     s->buffers[0] = (struct sim_region){ (uintptr_t)adm_buf, sizeof(adm_buf), NULL };
     s->nbuffers = 1;
@@ -1833,7 +1834,7 @@ static void admission_follows_the_kernels_order(void) {
     s = adm_fixture();
     q = adm_walk(2, 3, 0, 3);
     assert(sim_admit(s, &q) == SIM_EINVAL);
-    q = adm_walk(2, 3, 4, 4);
+    q = adm_walk(2, 3, 4, 3);
     assert(sim_admit(s, &q) == SIM_EBADF);
     /* loom_fid_claim_walk: another scope's destination answers ECANCELED, one
      * already walked to EBUSY, and an admitted WALK claims its destination. */
@@ -1843,7 +1844,6 @@ static void admission_follows_the_kernels_order(void) {
     assert(sim_admit(s, &q) == SIM_EBUSY);
     q = adm_walk(1, 3, 0, 0);
     assert(sim_admit(s, &q) == 0);
-    q = adm_walk(0, 3, 0, 0);
     assert(sim_admit(s, &q) == SIM_EBUSY);
     free(s);
     /* loom_fid_begin_clunk: a FID only, retired the moment it is admitted. */
@@ -1857,6 +1857,34 @@ static void admission_follows_the_kernels_order(void) {
     assert(sim_admit(s, &q) == SIM_ENOENT);
     q = adm_sqe(T_LOOM_OP_CLUNK, 6);
     assert(sim_admit(s, &q) == 0);
+    /* A retiring fid is not queryable (control_exact); a READY one is. */
+    struct t_loom_service_snapshot snap = { .object = { 6, 0, 7 } };
+    assert(sim_query(s, &snap) == SIM_ENOENT);
+    snap.object = (struct t_loom_service_ref){ 1, 0, 2 };
+    assert(sim_query(s, &snap) == 0 && snap.state == SIM_READY);
+    /* A CLUNK cancelled with its scope still retires its fid
+     * (loom_fid_finish_clunk); uncancelled, the fid waits READY. */
+    assert(s->slots[6].state == SIM_READY);
+    s->hold_terminals = 1; /* the fixture maps no CQ: keep the terminals */
+    sim_latch_under(s);
+    assert(s->slots[6].state == SIM_RETIRED);
+    free(s);
+    /* The scope pass retires a FID, never a SCOPE: a fid the kernel has
+     * marked ABORTING is a retiring slot, ENOENT before its bad buffer, where
+     * READY fid 1 answered EINVAL above; a RETIRED scope's slot stays live
+     * until REAP and answers ECANCELED, where READY scope 0 is admitted. */
+    s = adm_fixture();
+    q = adm_read(10, 5, 4);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
+    q = adm_walk(9, 3, 0, 0);
+    assert(sim_admit(s, &q) == SIM_ECANCELED);
+    q = adm_walk(0, 3, 0, 0);
+    assert(sim_admit(s, &q) == 0);
+    /* A pooled length past INT32_MAX is refused before the scope pass. */
+    q = adm_pooled(11, 8, 0x80000000u);
+    assert(sim_admit(s, &q) == SIM_EINVAL);
+    q = adm_pooled(11, 8, 4);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
     free(s);
 }
 

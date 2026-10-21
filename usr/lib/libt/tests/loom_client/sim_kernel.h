@@ -157,6 +157,7 @@ void sim_engine_visit(struct sim *);
 void sim_step(struct sim *);
 /* ENTER's admission of one SQE and nothing else: 0 admits it. */
 int64_t sim_admit(struct sim *, const struct t_loom_sqe *);
+int64_t sim_query(struct sim *, struct t_loom_service_snapshot *);
 void sim_release_rejections(struct sim *);
 void sim_release_terminals(struct sim *);
 /* Post the last payload shot's CQE a second time, receipt and all: an I-29
