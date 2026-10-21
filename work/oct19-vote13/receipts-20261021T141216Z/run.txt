@@ -1,0 +1,10 @@
+PASS clean
+PASS early-tail: publication pairs payload receipt and lease before tail
+PASS wrong-receipt: publication pairs payload receipt and lease before tail
+PASS not-leased: publication pairs payload receipt and lease before tail
+PASS shared-tail: paired payload published
+PASS no-backpressure: full CQ retains pending payload
+PASS no-detached-refusal: detached consumer refuses publication
+PASS missing-clear: nonleased CQE clears old receipt
+PASS false-buffer: untyped publication cannot mint buffer flag
+PASS short-receipts: receipt geometry bounded aligned

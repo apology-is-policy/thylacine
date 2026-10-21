@@ -1,6 +1,7 @@
 #!/bin/sh
 # Sabotage runs for vote 13 (SYS_SRV_REGISTRY_NEW 127 -> 134, and round 1's
-# unknown-arm counter behind the gap pin). Each mutant (mutate.py) is applied to
+# unknown-arm counter behind the gap pin) and for the live publication path
+# that replaced loom_post_pool_cqe (its detached refusal). Each mutant (mutate.py) is applied to
 # the committed tree, built (ci image), booted through the whole suite, and
 # reverted. A mutant is KILLED when every test it names reports FAIL (or the
 # boot extincts inside one of them); the FAIL text is recorded so the assertion
@@ -21,8 +22,8 @@ export STRATUM_SRC=/Users/northkillpd/projects/stratum/v2
 GOFORK_PIN_DIR=/Users/northkillpd/projects/go-thylacine-pin-a6567ba
 GOFORK_PIN=a6567baeaa716811783031fdf543477fdcd1707d
 FLOOR_MB=${FLOOR_MB:-6144}
-NEW="syscall.native_gap_unassigned vivarium.rejects_are_deliberate"
-MUTANTS=${MUTANTS:-"M1 M2 M3 M4 M5"}
+NEW="syscall.native_gap_unassigned vivarium.rejects_are_deliberate loom.create_geometry"
+MUTANTS=${MUTANTS:-"M1 M2 M3 M4 M5 M6"}
 MUTATE="python3 -I work/oct19-vote13/mutate.py"
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
@@ -39,7 +40,7 @@ lease() {
 dirty() { git status --porcelain --untracked-files=no | wc -l | tr -d ' '; }
 MUTATED=0
 restore() {
-  git checkout -- kernel/syscall.c kernel/vivarium.c
+  git checkout -- kernel/syscall.c kernel/vivarium.c kernel/loom_service_provided.c
   MUTATED=0
   [ "$(dirty)" = 0 ] || { echo "RESTORE left $(dirty) tracked change(s)"; exit 8; }
 }

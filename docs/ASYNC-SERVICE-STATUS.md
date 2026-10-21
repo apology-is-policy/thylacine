@@ -5053,3 +5053,20 @@ record.
 production, `ci-smp-gate` N=10: `work/oct19-vote13/gate.sh`) batched with the
 pi bake, with mutants for the counter pin and the rt_sigaction pin
 (`work/oct19-vote13/mutants.sh`, M1-M5).
+
+### 2026-10-21: `loom_post_pool_cqe` deleted; the receipt harness drives the live path
+
+The October 4 publication helper never gained a production caller and never
+consulted the closing state (OPEN-BUGS 10-07, P3 latent). `loom_provided_deliver`
+is the one pooled publication path, and it refuses a detached consumer. The
+shared receipt fixture (guest `loom.create_geometry`, host
+`tools/test-loom-receipts.py`) now drives that function, with a pool built
+through the real slot and pool-table transactions. It has a fourth check: a
+detached consumer is refused and nothing is written. The host harness had not
+built since `a978d19c3`; it builds again on Homebrew LLVM, and the clean leg and
+nine mutants pass (`work/oct19-vote13/receipts-*/`). The guest gate's M6 drops
+the detached refusal. Dossiers: `sub-kernel-loom` (October 21) and
+`sub-kernel-loom-pools` (Paired publication integration).
+
+**Posture: UNBUILT, UNAUDITED.** It rides vote 13's gate after its own audit
+round (Loom is an audit-trigger surface).

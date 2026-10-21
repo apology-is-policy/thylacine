@@ -4,12 +4,16 @@
 #define THYLACINE_SPINLOCK_H
 #include <thylacine/types.h>
 typedef struct { int held; } spin_lock_t;
+typedef u64 irq_state_t;
 #define SPIN_LOCK_INIT ((spin_lock_t){0})
 static void spin_lock_init(spin_lock_t *l) {l->held=0;}
 static void spin_lock(spin_lock_t *l) {if(l->held)abort();l->held=1;}
 static void spin_unlock(spin_lock_t *l) {if(!l->held)abort();l->held=0;}
 #include <thylacine/loom.h>
 #include <thylacine/loom_service_pool.h>
+#include <thylacine/loom_service_pool_table.h>
+#include <thylacine/loom_service_operation.h>
+#include <thylacine/loom_service_requests.h>
 #include <thylacine/errno.h>
 #include <thylacine/page.h>
 struct Burrow { u8 *pages; size_t size; };
@@ -17,6 +21,7 @@ struct Burrow { u8 *pages; size_t size; };
 #define pa_to_kva(p) (p)
 static u64 g_loom_created;
 static unsigned heap_live,burrow_live,wakes;
+void extinction(const char *msg) {fprintf(stderr,"FAIL extinction: %s\n",msg);exit(1);}
 static void *kmalloc(size_t n,unsigned flags) {(void)flags;void *p=calloc(1,n);if(p)heap_live++;return p;}
 static void kfree(void *p) {if(p){if(!heap_live)abort();heap_live--;free(p);}}
 static struct Burrow *burrow_create_anon(size_t n,bool exempt) {
@@ -24,10 +29,13 @@ static struct Burrow *burrow_create_anon(size_t n,bool exempt) {
     b->pages=calloc(1,n+64);if(!b->pages){free(b);return NULL;}
     b->size=n;memset(b->pages+n,0xa5,64);burrow_live++;return b;
 }
+// The kernel's KERNEL_TESTS ring fault is keyed to a thread; the host has none.
+static bool loom_layout_ring_fault_take(const struct Loom *l) {(void)l;return false;}
 void poll_waiter_list_init(struct poll_waiter_list *l) {memset(l,0,sizeof(*l));}
 void poll_waiter_list_wake(struct poll_waiter_list *l) {(void)l;wakes++;}
 void loom_unref(struct Loom *l) {
     if(!l)return;
+    if(l->service_slots||l->service_pools){fputs("FAIL fixture tables reached the free path\n",stderr);exit(1);}
     for(unsigned i=0;i<64;i++) if(l->ring->pages[l->ring->size+i]!=0xa5) {
         fputs("FAIL ring guard corrupted\n",stderr);exit(1);
     }
@@ -41,6 +49,8 @@ static void rc_watch(struct Loom *l,struct loom_pool_bank *bank,
                       struct loom_service_buffer_receipt receipt) {
     watch_ring=l;watch_bank=bank;watch_receipt=receipt;
 }
+// At the release-tail store, everything a consumer may read through it is in
+// place: the CQE, its receipt, and the member LEASED.
 static void observed_store(u32 *p,u32 v,int order) {
     __atomic_store_n(p,v,order);
     if(!watch_ring)return;
@@ -66,5 +76,5 @@ int main(void) {
     const char *err=loom_receipt_fixture();
     if(err){fprintf(stderr,"FAIL %s\n",err);return 1;}
     if(heap_live||burrow_live||watched!=1||!wakes){fputs("FAIL fixture ownership/publication witnesses\n",stderr);return 1;}
-    puts("PASS actual paired CQ publication, full-CQ retention, explicit return and geometry");return 0;
+    puts("PASS actual provided publication: pairing, full-CQ retention, detached refusal, explicit return and geometry");return 0;
 }

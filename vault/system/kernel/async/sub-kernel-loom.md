@@ -81,7 +81,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-21
 ---
 
 ## Approved private service lifecycle
@@ -3742,3 +3742,51 @@ land. Audit round 3 (same-family, Opus on Opus, context-independent)
 re-derived the accounting and the borrow and closed 0 P0 / 0 P1 / 0 P2 / 1
 documented P3 (a sim-oracle edge unreachable via the safe API;
 [[sub-loom-native-adapter]] caveats).
+
+## October 21: one pooled publication path; the receipt harness follows it (Corona)
+
+`loom_post_pool_cqe` is deleted. It was the AS-2h publication helper (October
+4), and it never gained a production caller. The engine, wired in NA-2..NA-4d,
+publishes a pooled result through `loom_provided_deliver`
+(`loom_service_provided.c`). That function repeats the helper's steps and adds
+the one the helper lacked: under `Ll`, a consumer whose request table is
+`detached` gets -ECANCELED before any slot, mirror or ledger is written. The
+helper never consulted the closing state. That was OPEN-BUGS 10-07, a P3,
+latent only because nothing called it. Yet the helper was still the function
+the receipt harness pinned: the actual-source host test and its mutants
+exercised the copy that never ran, and the copy that ran had no host mutant.
+
+The shared fixture (`kernel/test/loom_receipt_fixture.h`, run by the guest's
+`loom.create_geometry` and by the host's `tools/test-loom-receipts.py`) now
+drives `loom_provided_deliver`. It starts from the state
+`loom_provided_commit_locked` leaves for a MORE shot. The pool is built
+through the real slot and pool-table transactions (`loom_service_pool_prepare`,
+`_publish` and `_reap`), in tables the fixture owns. They are lent to a public
+receipt ring for the checks and taken back before the free path; the host
+double for `loom_unref` fails if they reach it. The checks, in order:
+- a legacy ring with no pool table refuses (-ENOENT);
+- a full CQ keeps the member PENDING and the operation pending (-EAGAIN);
+- a detached consumer is refused even with CQ room, and the refusal writes
+  nothing (the private tail, the hostile shared tail, the stale receipt and the
+  slot are unchanged);
+- the paired publication writes the exact CQE and receipt at the private tail,
+  and leaves the member LEASED, the operation no longer pending, and its MORE
+  delivery recorded.
+An incarnation past 32 bits reaches the receipt whole: the slot table's counter
+starts at 2^32.
+
+The host harness had not built since `a978d19c3` (October 9). `loom.h` now
+reaches `proc.h`, which wants `irq_state_t`, and `loom_create_layout` calls the
+KERNEL_TESTS ring-fault hook. The harness now doubles both. It compiles the four
+ledger units (`loom_service_pool.c`, `_pool_table.c`, `_slots.c` and
+`_requests.c`) whole, extracts `loom_provided_deliver` with its three statics,
+and selects Homebrew LLVM plus the SDK sysroot, because Apple clang's ASan
+hangs at startup on macOS 26. The clean leg passes, and all nine mutants fail
+with their intended assertion. Six are on the live path: an early tail, a wrong
+receipt, no lease, a tail read from the shared mirror, no backpressure, and no
+detached refusal (new). Three are on `loom.c`: clearing, the untyped buffer
+flag and receipt geometry. In the guest gate, mutant M6 drops the detached
+refusal and expects `loom.create_geometry` to FAIL.
+
+`loom_pool_peek` (`loom_service_pool.c`) lost its only non-test caller with the
+helper. It remains a read accessor that `private_pool_fixture.h` uses.

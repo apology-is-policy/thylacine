@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # Sabotage edits for vote 13's new witnesses (the 134 renumber's gap and
 # rt_sigaction pins, and the round-1 counter that replaced the gap pin's value
-# check). Each mutant is a list of exact (file, old, new) replacements; every
-# `old` must occur EXACTLY once in the committed tree or the mutant refuses (a
-# stale anchor must never apply nothing).
+# check), and for the receipt fixture's detached refusal on the live
+# publication path. Each mutant is a list of exact (file, old, new)
+# replacements; every `old` must occur EXACTLY once in the committed tree or the
+# mutant refuses (a stale anchor must never apply nothing).
 # Usage: python3 -I work/oct19-vote13/mutate.py <root> <id>   |   --list   |   --check <root>
 import sys
 
 SC = "kernel/syscall.c"
 VC = "kernel/vivarium.c"
+LP = "kernel/loom_service_provided.c"
 
 COUNT = "        __atomic_fetch_add(&g_syscall_unknown, 1u, __ATOMIC_RELAXED);\n"
 UNKNOWN_ARM = ("    default:\n"
@@ -48,6 +50,11 @@ MUTANTS = {
     "M5": ("vivarium.rejects_are_deliberate", [
         (VC, "    { VIV_LINUX_RT_SIGSUSPEND,   VIV_ENOSYS },\n",
              "    { VIV_LINUX_RT_SIGSUSPEND,   VIV_FORWARD },\n"),
+    ]),
+    # The live publication path forgets the detached consumer -- the closing
+    # check the deleted loom_post_pool_cqe never made.
+    "M6": ("loom.create_geometry", [
+        (LP, "    if(l->service_requests.detached){rc=-T_E_CANCELED;goto done;}\n", ""),
     ]),
 }
 

@@ -1840,44 +1840,6 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     return 0;
 }
 
-int loom_post_pool_cqe(struct Loom *l, struct loom_pool_bank *bank,
-                       struct loom_pool *pool, u32 member) {
-    if (!l || l->magic != LOOM_MAGIC || !bank || !pool) return -T_E_INVAL;
-    if (!l->receipt_size) return -T_E_OPNOTSUPP;
-    spin_lock(&l->lock);
-    struct loom_ring_hdr *h = (void *)(l->ring_kva + l->hdr_off);
-    u32 tail = l->cq_tail;
-    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);
-    if ((u32)(tail - head) >= l->cq_entries) {
-        spin_unlock(&l->lock);
-        return -T_E_AGAIN;
-    }
-    struct loom_pool_result result;
-    int rc = loom_pool_peek(bank, pool, member, &result);
-    if (rc) { spin_unlock(&l->lock); return rc; }
-    // Only kernel-private tail/mask/offsets choose the destination. Shared
-    // receipts are an output mirror, never authority for the pool transition.
-    u32 idx = tail & (l->cq_entries - 1u);
-    struct loom_cqe *cq = (void *)(l->ring_kva + l->cqe_off);
-    struct loom_service_buffer_receipt *receipts =
-        (void *)(l->ring_kva + l->receipt_off);
-    cq[idx] = (struct loom_cqe){ .user_data = result.user_data,
-        .result = (s32)result.length,
-        .flags = LOOM_CQE_SERVICE_BUFFER | (result.more ? LOOM_CQE_MORE : 0) };
-    receipts[idx] = result.receipt;
-    // The member must be returnable before the consumer can observe the CQE.
-    // A failed transition leaves this unadvertised slot free to overwrite;
-    // the private tail is unchanged. No callback or unlock separates these.
-    rc = loom_pool_deliver(bank, pool, &result.receipt);
-    if (rc) { spin_unlock(&l->lock); return rc; }
-    l->cq_tail = tail + 1u;
-    __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
-    spin_unlock(&l->lock);
-    poll_waiter_list_wake(&l->cq_waiters);
-    return 0;
-}
-
-
 int loom_private_post_terminal(struct Loom *l, struct loom_request_ref ref) {
     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
     spin_lock(&l->lock);

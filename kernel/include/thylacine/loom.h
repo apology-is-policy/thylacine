@@ -790,14 +790,6 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
 // pipe.c producer precedent) and does NOT sleep or re-enter p9_client_*, so it
 // composes with the c->lock the async-completion path holds (the seam contract).
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
-// Publish one already committed pooled result, pairing CQE+receipt before the
-// release-tail. bank/pool belong to this ring and must remain pinned through
-// this call. All pool state mutations use l->lock. Full CQ returns -EAGAIN and
-// leaves the result PENDING; success makes it LEASED. No CQ acknowledgement can
-// return a payload. Returns -EOPNOTSUPP on a ring without receipt geometry.
-// Caller owns MORE-before-terminal queue ordering and scope/ring authority.
-int loom_post_pool_cqe(struct Loom *l, struct loom_pool_bank *bank,
-                       struct loom_pool *pool, u32 member);
 
 
 // KT-1.5: the KObj_Loom .poll hook (poll_scan_one's KOBJ_LOOM arm). Registers

@@ -22,7 +22,7 @@ abis: [abi-loom-service]
 design:
   - "docs/ASYNC-SERVICE-BUFFERS.md"
 created: 2026-10-04
-updated: 2026-10-09
+updated: 2026-10-21
 ---
 
 ## Purpose
@@ -178,15 +178,20 @@ ASYNC-SERVICE-STATUS.md. Review staffing is explicitly single-agent.
 
 ## Paired publication integration
 
-loom_post_pool_cqe supplies the Deliver binding: under the ring lock, copy the
-pending result into the matching CQ/receipt slot, move PENDING to LEASED, then
-release the shared tail. Full CQ keeps PENDING. A pool and bank must belong to
-and remain pinned by that ring; this internal API does not perform registration.
-The caller still establishes source authority and MORE-before-final order.
-The foundation core has50/50 clean combined matrix coverage at26c21df87. The
-new publication helper has actual-source eight-mutant/sanitizer, pool-model
-and native1830/1830 coverage; broad integration qualification remains owed.
-
+`loom_provided_deliver` (`loom_service_provided.c`) supplies the Deliver
+binding, all in one hold of the ring lock. A detached consumer is refused
+(-ECANCELED) before anything is written. A full CQ, or a single-shot terminal
+with no request-delivery room, keeps the member PENDING (-EAGAIN). Otherwise
+the pending cell's result is copied into the CQ slot and receipt that the
+private tail selects. The member then moves PENDING to LEASED, and a
+single-shot terminal's request is delivered. Only after that is the shared
+tail released. The pool must be LIVE in the ring's own table, and the receipt
+must name the exact cell. Source authority and MORE-before-final order remain
+the caller's. The shared receipt fixture drives this function in the guest
+(`loom.create_geometry`) and on the host (`tools/test-loom-receipts.py`, nine
+mutants); see [[sub-kernel-loom]], October 21. This section used to name the
+October 4 helper `loom_post_pool_cqe`. It was deleted on 2026-10-21: it had no
+production caller, and it never consulted the closing state.
 
 ## October 8, 23:22 UTC: joint pool registration and charged owner storage
 

@@ -1,10 +1,12 @@
 #!/bin/sh
 # Push gate for vote 13 (SYS_SRV_REGISTRY_NEW 127 -> 134; the AS-R9 backport
-# audit's twins on corona; round 1's fixes and close) at CORONA_PIN, against
-# canonical Stratum main at 7dd103d. Derived from work/oct19-1709z/gate.sh.
+# audit's twins on corona; round 1's fixes and close) and the deletion of
+# loom_post_pool_cqe, at CORONA_PIN, against canonical Stratum main at 7dd103d.
+# Derived from work/oct19-1709z/gate.sh.
 #   CONTROL    ci image: the whole suite; NAMED below PASS (the gap counter and
-#              the rt_sigaction pin, the five AS-R9 burrow tests, 17:09Z's vivsock
-#              tests, 13:05Z's narrowing witness, the NA-4d loom tests) with
+#              the rt_sigaction pin, the receipt fixture on the live publication
+#              path, the five AS-R9 burrow tests, 17:09Z's vivsock tests,
+#              13:05Z's narrowing witness, the NA-4d loom tests) with
 #              NA-4d's verdicts (fixture 76, probes 78/74, no ring, no
 #              connection); joey's D7 overlapping login PASS -- login is the one
 #              userspace caller of the renumbered syscall (libthyla-rs).
@@ -17,9 +19,12 @@
 #              ubsan-smp4/8) at N=10, with its disk floor at build.sh's 6 GiB.
 #              It bakes the bare (Halcyon-default) image, as main's gate does;
 #              corona's build/ stages no device toolchain, so CLADE=0 there.
-#   HOST       not run: the only host code changed since 3451af418 is
-#              tools/test-srv-registry-abi.py, whose run (kernel, libt and Rust
-#              agree on 134; a 127 oracle fails) is work/oct19-vote13/srv-registry-abi-*.log.
+#   HOST       not run here, because no build leg needs it. The host code changed
+#              since 3451af418 is tools/test-srv-registry-abi.py (kernel, libt
+#              and Rust agree on 134; a 127 oracle fails:
+#              work/oct19-vote13/srv-registry-abi-*.log) and the receipt
+#              harness, run clean and with its nine mutants on the committed
+#              tree (work/oct19-vote13/receipts-*/).
 #   Not proven here: the A72/KVM axis (work/oct19-pi/pi-smp.sh, baked after this).
 # DRYRUN=1 stops after the preconditions (no lease needed, nothing built).
 # Run from the checkout root (no cd): CORONA_PIN=<full sha> sh work/oct19-vote13/gate.sh
@@ -47,7 +52,7 @@ STRATUMD_LINE="==> building stratumd (aarch64-thylacine) from $STRATUM_SRC"
 D7_LINE='joey: D7 overlapping login probe PASS'
 GOFORK_PIN_DIR=/Users/northkillpd/projects/go-thylacine-pin-a6567ba
 GOFORK_PIN=a6567baeaa716811783031fdf543477fdcd1707d
-NAMED="syscall.native_gap_unassigned vivarium.rejects_are_deliberate burrow.settled_drop_retains_nonfinal_charge burrow.settled_drop_exact_payer burrow.settled_mapping_drop_defers_free burrow.unmap_failure_leaves_mapping_attached burrow.unmap_interior_start_refused loom.native_probe_rust loom.native_probe_c loom.bridge_probe vivsock.sendto_recvfrom_narrow_fd vivsock.ctl_verbs_need_their_ctl vivsock.ctl_verbs_meet_a_racing_peer vivsock.ctl_identity_travels_with_the_fd vivsock.connect_finished_by_a_peer vivsock.connect_commits_a_realiased_row"
+NAMED="syscall.native_gap_unassigned vivarium.rejects_are_deliberate loom.create_geometry burrow.settled_drop_retains_nonfinal_charge burrow.settled_drop_exact_payer burrow.settled_mapping_drop_defers_free burrow.unmap_failure_leaves_mapping_attached burrow.unmap_interior_start_refused loom.native_probe_rust loom.native_probe_c loom.bridge_probe vivsock.sendto_recvfrom_narrow_fd vivsock.ctl_verbs_need_their_ctl vivsock.ctl_verbs_meet_a_racing_peer vivsock.ctl_identity_travels_with_the_fd vivsock.connect_finished_by_a_peer vivsock.connect_commits_a_realiased_row"
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
 floor() {
