@@ -7472,6 +7472,10 @@ lib_tests_muster() {
     rm -rf "$lt"; mkdir -p "$lt/bin"
     "$LLVM_PREFIX/bin/llvm-strip" -o "$lt/bin/muster" "$muster" \
         || { echo "==> lib tests: llvm-strip muster failed" >&2; exit 1; }
+    # The manifest tool decides which tests the device cannot run: its rule is
+    # checked before it is trusted.
+    python3 "$REPO_ROOT/tools/test-libtests-manifest.py" > /dev/null \
+        || { echo "==> lib tests: tools/test-libtests-manifest.py failed" >&2; exit 1; }
     local lib lbase top dev json kind host devp d
     local -a extra skips
     : > "$out/writable"
@@ -7593,8 +7597,10 @@ lib_tests_muster() {
 # which must be the one the vendored faces came from: they are compared first.
 # Each family's licence goes beside its faces (DejaVu's is also in every
 # face's name table; Plex's only by reference). Writes fonts.count and
-# confd.count, which ls-libs.exp checks fc-list and fc-conflist against. Baked
-# only with the library tests, while they are its one consumer. ---
+# confd.count, which ls-libs.exp checks fc-list and fc-conflist against; each
+# set is derived from its sources and the stage must match it name for name,
+# so a stage that lost or gained an entry cannot agree with itself. Baked only
+# with the library tests, while they are its one consumer. ---
 stage_font_runtime() {
     local fc="$BUILD_DIR/pouch/fontconfig/stage"
     local out="$BUILD_DIR/pouch/lib-tests"
@@ -7619,6 +7625,40 @@ stage_font_runtime() {
     for f in etc/fonts/fonts.conf usr/bin/fc-match usr/share/xml/fontconfig/fonts.dtd; do
         [[ -f "$fc/$f" ]] || { echo "==> fonts: fontconfig's install has no $f" >&2; exit 1; }
     done
+    for f in dejavu-fonts ibm-plex; do
+        compgen -G "$REPO_ROOT/third_party/$f/ttf/*.ttf" > /dev/null \
+            || { echo "==> fonts: third_party/$f/ttf holds no face" >&2; exit 1; }
+    done
+    local want_faces want_confd meson
+    want_faces="$( { for f in "$REPO_ROOT/third_party/dejavu-fonts/ttf"/*.ttf "$REPO_ROOT/third_party/ibm-plex/ttf"/*.ttf; do
+                         basename "$f"; done; printf '%s.ttf\n' "${faces[@]}"; } | LC_ALL=C sort -u)"
+    # conf.d's links as fontconfig's own build lists them: conf.d/meson.build's
+    # conf_links, plus the link each of three options and a darwin host adds.
+    meson="$(meson_tool)" || exit 1
+    python3 "$meson" introspect --buildoptions --machines "$BUILD_DIR/pouch/fontconfig/build" > "$BUILD_DIR/pouch/fontconfig/introspect.json" \
+        || { echo "==> fonts: meson introspect of fontconfig's build failed" >&2; exit 1; }
+    want_confd="$(python3 - "$BUILD_DIR/pouch/fontconfig/src/fontconfig-$FC_VER/conf.d/meson.build" "$BUILD_DIR/pouch/fontconfig/introspect.json" <<'PY'
+import json, re, sys
+m = re.search(r"^conf_links = \[\n(.*?)^\]", open(sys.argv[1]).read(), re.M | re.S)
+if not m:
+    sys.exit("==> fonts: " + sys.argv[1] + " has no conf_links list")
+links = re.findall(r"^\s*'([^']+\.conf)',?\s*$", m.group(1), re.M)
+intro = json.load(open(sys.argv[2]))
+opt = {o["name"]: o["value"] for o in intro["buildoptions"]}
+if intro["machines"]["host"]["system"] == "darwin":
+    links.append("05-macos.conf")
+for name, fmt in (("default-hinting", "10-hinting-{}.conf"),
+                  ("default-sub-pixel-rendering", "10-sub-pixel-{}.conf")):
+    if opt[name] != "noinstall":
+        links.append(fmt.format(opt[name]))
+bitmap = {"yes": "yes-bitmaps", "no": "no-bitmaps-and-emoji",
+          "no-except-emoji": "no-bitmaps-except-emoji"}
+if opt["bitmap-conf"] in bitmap:
+    links.append("70-" + bitmap[opt["bitmap-conf"]] + ".conf")
+print("\n".join(sorted(set(links))))
+PY
+)" || exit 1
+    [[ -n "$want_confd" ]] || { echo "==> fonts: fontconfig's conf_links list is empty" >&2; exit 1; }
 
     rm -rf "$stage/etc" "$stage/usr" "$stage/lib"
     mkdir -p "$stage/etc" "$stage/usr/share/xml" "$stage/usr/bin" "$stage/lib/font"
@@ -7647,15 +7687,16 @@ stage_font_runtime() {
     local n=0
     for f in "$stage/etc/fonts/conf.d"/*.conf; do
         [[ -e "$f" || -L "$f" ]] || continue
-        if [[ -L "$f" ]]; then
-            [[ "$(readlink "$f")" == ../../../usr/share/fontconfig/conf.avail/* && -f "$f" ]] \
-                || { echo "==> fonts: $f is not a link into /usr/share/fontconfig/conf.avail" >&2; exit 1; }
-        fi
+        [[ -L "$f" && "$(readlink "$f")" == ../../../usr/share/fontconfig/conf.avail/* && -f "$f" ]] \
+            || { echo "==> fonts: $f is not a link into /usr/share/fontconfig/conf.avail" >&2; exit 1; }
         n=$((n + 1))
     done
-    (( n > 0 )) || { echo "==> fonts: /etc/fonts/conf.d holds no config" >&2; exit 1; }
+    [[ "$(cd "$stage/etc/fonts/conf.d" && ls | grep '\.conf$' | LC_ALL=C sort)" == "$want_confd" ]] \
+        || { echo "==> fonts: /etc/fonts/conf.d is not the $(wc -l <<< "$want_confd" | tr -d ' ') links fontconfig $FC_VER's build lists" >&2; exit 1; }
+    [[ "$(cd "$stage/lib/font" && ls | grep '\.ttf$' | LC_ALL=C sort)" == "$want_faces" ]] \
+        || { echo "==> fonts: /lib/font is not the $(wc -l <<< "$want_faces" | tr -d ' ') faces the sources name" >&2; exit 1; }
     echo "$n" > "$out/confd.count"
-    find "$stage/lib/font" -name '*.ttf' | wc -l | tr -d ' ' > "$out/fonts.count"
+    wc -l <<< "$want_faces" | tr -d ' ' > "$out/fonts.count"
     ledger "fonts: fontconfig $FC_VER's config, $(ls "$stage/usr/bin" | wc -l | tr -d ' ') tools and $(cat "$out/fonts.count") faces STAGED ($n conf.d links)"
 }
 

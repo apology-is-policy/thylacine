@@ -587,6 +587,8 @@ static long reap_bounded(long pid, int *status, unsigned long max_sec) {
 // its PT_INTERP loader by the program's own name, which only the argv spawn
 // carries (the nameless variants refuse it, VIVARIUM 13.10.6), and the loader
 // reports a failure before main on fd 2, which must land in the capture.
+// Returns 0, -2 when the spawn itself failed (the program is absent or the
+// spawn was refused), or -1 on any other failure.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
@@ -646,7 +648,7 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         t_putstr(msg);
         (void)t_close(rd);
         (void)t_close(wr);
-        return -1;
+        return -2;
     }
     // Drop joey's writer ref. The child's refs remain — released only
     // when the child is reaped below.
@@ -10617,34 +10619,24 @@ int main(void) {
             // the pre-pivot go-hello/go-goroutines which do no file I/O). The
             // binary self-checks every step and panics (exit != 0) on mismatch.
             //
-            // Same /dev/cons stdio wiring as the other go probes (Go writes via
-            // SYS_WRITE on fd 1/2, so a real stdout/stderr is required; the
-            // spawner provides it). GATING: a non-zero exit or fault FAILS the
-            // boot -- the Stage-3a regression sentinel. Fork-absent (the Go fork
-            // was not present at build) -> graceful skip.
+            // Its fds 0-2 are a pipe joey drains to EOF before the reap (a Go
+            // panic's trace is unbounded) and echoes to the boot log. GATING: a
+            // non-zero exit, a fault, or a missing leg census (GO_CENSUS_FS: a
+            // stale binary that never ran a newer leg) FAILS the boot -- the
+            // Stage-3a regression sentinel. Fork-absent (the Go fork was not
+            // present at build, so no /bin/go-fs) -> graceful skip.
             {
                 const char go_fs_name[] = "/bin/go-fs";  // #58: post-pivot /bin bind
-                long gf_cfd = t_console_open();
-                long gf_pid;
-                if (gf_cfd >= 0) {
-                    unsigned int gf_fds[3] = { (unsigned int)gf_cfd,
-                                               (unsigned int)gf_cfd,
-                                               (unsigned int)gf_cfd };
-                    gf_pid = t_spawn_with_fds(go_fs_name, sizeof(go_fs_name) - 1,
-                                              gf_fds, 3);
-                    (void)t_close(gf_cfd);
-                } else {
-                    gf_pid = t_spawn(go_fs_name, sizeof(go_fs_name) - 1);
-                }
-                if (gf_pid <= 0) {
+                const char gf_expect[]  = GO_CENSUS_FS;
+                int gf_rc = pouch_smoke_core(go_fs_name, sizeof(go_fs_name) - 1,
+                                             gf_expect, sizeof(gf_expect) - 1,
+                                             0, 0, 0, 1, -1, 1);
+                if (gf_rc == -2) {
                     t_putstr("joey: go-fs NOT spawned (Go fork absent at build) -- skipping\n");
+                } else if (gf_rc != 0) {
+                    t_putstr("joey: go-fs FAILED -- GOOS=thylacine Stage 3a regression (see fatal error / panic / snare:* above)\n");
+                    return 1;
                 } else {
-                    int gf_status = -1;
-                    long gf_reaped = t_wait_pid_for((int)gf_pid, 0, &gf_status);
-                    if (gf_reaped != gf_pid || gf_status != 0) {
-                        t_putstr("joey: go-fs FAILED -- GOOS=thylacine Stage 3a regression (see fatal error / panic / snare:* above)\n");
-                        return 1;
-                    }
                     t_putstr("joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM\n");
                 }
             }

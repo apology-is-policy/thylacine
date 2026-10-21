@@ -135,8 +135,12 @@ program is a Python script and nothing else, and a Python test not named is
 refused, so one upstream adds cannot drop out unseen. A program is a Python
 script when its name ends in `.py` or is `python*`, or when its `#!` line
 names `python*`, directly or through `env` (fontconfig's `pytest`, an
-installed command). A `#!/bin/sh` wrapper counts as compiled, so a skip of one
-is refused rather than allowed by guess. Measured on a fake meson list: a
+installed command), past `env`'s own options and assignments (`env -S python3
+-u`, `env -u NAME python3`, `env -i LC_ALL=C python3`). A `#!/bin/sh` wrapper
+counts as compiled, so a skip of one is refused rather than allowed by guess.
+`tools/test-libtests-manifest.py` holds the rule's cases in both directions
+(28; the rule before `env`'s options were skipped fails 10 of them), and
+`lib_tests_muster` runs it before it uses the translator. Measured on a fake meson list: a
 `pytest` with `#!/usr/bin/env python3` and one with `#!/opt/x/bin/python3.14`
 are skipped; unskipped, the first is refused as interpreter-driven; the
 committed translator before this rule refused its skip as compiled.

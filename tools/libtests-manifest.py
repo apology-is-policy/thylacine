@@ -345,21 +345,56 @@ MESON_KEYS = {"cmd", "depends", "env", "extra_paths", "is_parallel", "name", "pr
 MESON_LIBPATH = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")
 
 
+def env_program(words):
+    """env's arguments from its program on: its options and NAME=VALUE go."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w == b"--":
+            return words[i + 1:]
+        if w.startswith(b"--"):
+            opt, eq, val = w.partition(b"=")
+            if opt == b"--split-string" and eq:
+                return [val] + words[i + 1:]
+            if opt in (b"--unset", b"--chdir") and not eq:
+                i += 1
+            i += 1
+            continue
+        if w.startswith(b"-"):
+            for j in range(1, len(w)):
+                c = w[j:j + 1]
+                if c in (b"u", b"C", b"P"):
+                    if j + 1 == len(w):
+                        i += 1
+                    break
+                if c == b"S":
+                    if j + 1 < len(w):
+                        return [w[j + 1:]] + words[i + 1:]
+                    break
+            i += 1
+            continue
+        if b"=" in w:
+            i += 1
+            continue
+        return words[i:]
+    return []
+
+
 def interpreted(cmd):
     """A test whose program is a script, for an interpreter the device lacks."""
     prog = os.path.basename(cmd[0])
     if prog.endswith(".py") or re.fullmatch(r"python[0-9.]*", prog):
         return True
     # A Python program installed as a command (fontconfig's pytest): its #!
-    # line names the interpreter, directly or through env.
+    # line names the interpreter, directly or through env (`env -S python3 -u`).
     try:
         with open(cmd[0], "rb") as f:
             first = f.readline(512)
     except OSError:
         return False
     words = first[2:].split() if first.startswith(b"#!") else []
-    if len(words) > 1 and os.path.basename(words[0]) == b"env":
-        words = words[1:]
+    if words and os.path.basename(words[0]) == b"env":
+        words = env_program(words[1:])
     return bool(words) and re.fullmatch(rb"python[0-9.]*", os.path.basename(words[0])) is not None
 
 

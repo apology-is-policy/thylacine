@@ -8,7 +8,7 @@
 //
 // Self-checking: every step is asserted; any mismatch panics (exit != 0),
 // which joey's gating turns into a boot failure -- the Stage-3a regression
-// sentinel. On success it prints "go-fs: STAGE 3a OK" and exits 0.
+// sentinel. On success it prints its leg census and exits 0.
 package main
 
 import (
@@ -30,6 +30,11 @@ const (
 )
 
 var payload = []byte("thylacine go fs stage 3a\n") // 25 bytes
+
+// joey requires this line (GO_CENSUS_FS in usr/pouch-hello/pouch-census.h; Go
+// cannot include the header, and a disagreement fails the boot). It names every
+// leg, so a stale binary that never ran a newer one cannot pass for this one.
+const census = "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,rename,remove: exit 0"
 
 func must(what string, ok bool) {
 	if !ok {
@@ -190,6 +195,7 @@ func main() {
 	fmt.Printf("go-fs: wrote+read %d bytes; stat size=%d; seek+readdir+rename+remove OK; NumCPU=%d\n",
 		len(payload), fi.Size(), runtime.NumCPU())
 	fmt.Println("go-fs: STAGE 3a OK (fs file I/O: create/write/read/stat/seek/readdir/rename/remove)")
+	fmt.Println(census)
 }
 
 const fix = "/lib/pouch-links"

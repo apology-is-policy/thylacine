@@ -419,6 +419,13 @@ event-driven; no timing constant appears in this path.
   the only header it takes from outside `libt`. What those provers pin is
   documented with the mechanisms they pin ([[sub-pouch-seam]],
   [[sub-pouch-net]], [[sub-pouch-fs]], [[sub-pouch-thread]]), not here.
+  `/bin/go-fs` is matched the same way on `GO_CENSUS_FS`, which it prints
+  from its own copy (Go cannot include the header; a disagreement fails the
+  boot). joey runs it through `pouch_smoke_core` with its fds 0-2 on the
+  pipe, drained to EOF before the reap because a Go panic's trace is
+  unbounded. The core answers -2 when the spawn itself fails, which for
+  go-fs is the fork-absent skip (no Go fork at build, no `/bin/go-fs`);
+  every other failure is boot-fatal.
 
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never
