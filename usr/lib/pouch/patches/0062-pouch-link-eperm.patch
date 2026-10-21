@@ -1,0 +1,62 @@
+Pouch link and linkat answer EPERM (operator vote 2026-10-21).
+
+Thylacine makes no hard links. link() and linkat() reached the 0xFFFF
+sentinel (0001) and answered ENOSYS, which ported code does not expect from
+them: fontconfig's cache lock falls back to a directory lock only on EPERM,
+ENOTSUP or EACCES, so it could never write a cache. Both now answer EPERM,
+Linux's errno for a filesystem that cannot make hard links
+(dec-2026-10-21-pouch-link-eperm, docs/ERRORS.md "Hard links").
+
+linkat refuses a flag outside AT_SYMLINK_FOLLOW | AT_EMPTY_PATH with EINVAL
+first, as Linux does. Neither call reads a path or a descriptor, and nothing
+traps, so a missing source, an existing target, a bad descriptor, a read-only
+filesystem and a link across two filesystems all read EPERM, where Linux
+resolves the paths first and answers ENOENT, EEXIST, EBADF, EROFS or EXDEV.
+A caller's fallback (a rename, a copy, an O_EXCL create, a mkdir) meets those
+errors itself. Answering before the paths also keeps one lock protocol:
+fontconfig takes its directory lock whether or not one is already held, so it
+recovers a stale lock with rmdir. Were EEXIST answered first, it would unlink
+the stale directory, fail, and never recover it (fcatomic.c FcAtomicLock).
+
+musl's one other caller, sem_open, never reaches link here: its MAP_SHARED
+map is refused first (0047).
+
+--- a/src/unistd/link.c
++++ b/src/unistd/link.c
+@@ -1,12 +1,11 @@
++/* pouch boundary-line: Thylacine makes no hard links (operator vote 2026-10-21,
++ * docs/ERRORS.md "Hard links"). EPERM is Linux's answer for a filesystem that
++ * cannot make one; neither path is read and nothing traps. */
+ #include <unistd.h>
+-#include <fcntl.h>
++#include <errno.h>
+ #include "syscall.h"
+ 
+ int link(const char *existing, const char *new)
+ {
+-#ifdef SYS_link
+-	return syscall(SYS_link, existing, new);
+-#else
+-	return syscall(SYS_linkat, AT_FDCWD, existing, AT_FDCWD, new, 0);
+-#endif
++	return __syscall_ret(-EPERM);
+ }
+--- a/src/unistd/linkat.c
++++ b/src/unistd/linkat.c
+@@ -1,7 +1,15 @@
++/* pouch boundary-line: no hard links, as link.c. A flag outside
++ * AT_SYMLINK_FOLLOW | AT_EMPTY_PATH is EINVAL first, as on Linux; neither
++ * descriptor nor path is read. */
++#define _BSD_SOURCE
+ #include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
+ #include "syscall.h"
+ 
+ int linkat(int fd1, const char *existing, int fd2, const char *new, int flag)
+ {
+-	return syscall(SYS_linkat, fd1, existing, fd2, new, flag);
++	if (flag & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH))
++		return __syscall_ret(-EINVAL);
++	return __syscall_ret(-EPERM);
+ }

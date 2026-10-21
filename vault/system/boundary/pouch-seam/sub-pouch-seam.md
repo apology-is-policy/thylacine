@@ -22,8 +22,19 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-20
+updated: 2026-10-21
 ---
+## 0062: link and linkat answer EPERM (2026-10-21, B-3g)
+
+The series gains 0062 ([[dec-2026-10-21-pouch-link-eperm]]). `link.c` and
+`linkat.c` return `__syscall_ret(-EPERM)` and no longer call the seam, so a
+call that used to reach the 0xFFFF sentinel and answer `ENOSYS` makes no
+syscall at all; `linkat` answers `EINVAL` first for a flag Linux refuses
+([[sub-pouch-fs]]). `__NR_linkat` stays the sentinel in `bits/syscall.h`, so
+the seam check's list is unchanged. `tools/test-pouch-link.py` counts every
+call into its mocked seam and requires none. The census line
+`POUCH_CENSUS_LINKS` gains `hardlink`, the links prover's eleventh leg.
+
 ## 0061: fstat and the tty ioctls answer EBADF (2026-10-20)
 
 The series gains 0061. The kernel's `SYS_FSTAT` answers -EBADF for a handle

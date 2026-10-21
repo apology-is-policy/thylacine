@@ -192,3 +192,5 @@
 0060-pouch-raw-open.patch
 # 0061 (raw-open audit round 1 F1; ERRORS.md ER-2, the SYS_FSTAT half): fstat passes the kernel's EBADF through; ioctl answers EBADF for a dead descriptor (refuse_fd), which isatty keeps.
 0061-pouch-fstat-ebadf.patch
+# 0062 (B-3g, operator vote 2026-10-21): link and linkat answer EPERM without a trap, as Linux on a filesystem without hard links; linkat refuses a flag Linux refuses, EINVAL, first.
+0062-pouch-link-eperm.patch

@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-20
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -79,7 +79,8 @@ for a closed descriptor from fstat, isatty and tcgetattr) and, from B-3f'
 `/bin/pouch-hello-links` (`POUCH_CENSUS_LINKS`): ten legs over the real links
 the bake puts at `/lib/pouch-links` ([[sub-substrate-build]]), lstat and
 readlink through the native `SYS_LSTAT` and `SYS_READLINK`
-([[sub-pouch-fs]]), and then `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
+([[sub-pouch-fs]]), and since 2026-10-21 an eleventh, `hardlink`, where
+`link` answers EPERM and makes nothing (0062), and then `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
 legs over a TZif file the prover writes itself, which musl opens through
 `openat`'s translation and maps private (0060). Each is boot-fatal. The
 marker goes out on fd 1

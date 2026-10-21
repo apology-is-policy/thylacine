@@ -17,6 +17,7 @@ code:
   - usr/lib/pouch/patches/0059-pouch-symlinks.patch
   - usr/lib/pouch/patches/0060-pouch-raw-open.patch
   - usr/lib/pouch/patches/0061-pouch-fstat-ebadf.patch
+  - usr/lib/pouch/patches/0062-pouch-link-eperm.patch
   - usr/pouch-hello/pouch-hello-fd.c
   - usr/pouch-hello/pouch-hello-fs.c
   - usr/pouch-hello/pouch-hello-links.c
@@ -28,8 +29,32 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-20
+updated: 2026-10-21
 ---
+## link and linkat answer EPERM (2026-10-21, 0062)
+
+Thylacine makes no hard links ([[dec-2026-10-21-pouch-link-eperm]]). `link`
+and `linkat` answer `EPERM`, Linux's errno for a filesystem that cannot make
+one, where the 0xFFFF sentinel answered `ENOSYS`. `linkat` refuses a flag
+outside `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH` with `EINVAL` first, as Linux
+does. Neither call reads a path or a descriptor, and nothing traps: a missing
+source, an existing target and a bad descriptor all read `EPERM`, where Linux
+resolves the paths first and answers `ENOENT`, `EEXIST` or `EBADF`.
+fontconfig depends on that order. Its cache lock falls back to a directory
+lock on `EPERM`, and it removes a stale lock with `rmdir` only when its link
+was refused that way. If `EEXIST` came first, it would `unlink` a stale lock
+directory, fail, and never recover it (`fcatomic.c`, `FcAtomicLock`). musl's
+one other caller, `sem_open`, never reaches its link: its `MAP_SHARED` map is
+refused first (0047).
+
+`pouch-hello-links`' `hardlink` leg reads `EPERM` from `link` and from
+`linkat(AT_SYMLINK_FOLLOW)` and checks that no name was made. It reads
+`EPERM` again for a missing source and for an existing target, which is left
+the link it was, and `EINVAL` for `linkat(AT_SYMLINK_NOFOLLOW)`. The census
+line gains `hardlink` after `flags`. `tools/test-pouch-link.py` runs the real
+`link.c` and `linkat.c` over a mocked seam, with musl's `AT_` values: twelve
+checks, one of them every single flag bit, and five mutants.
+
 ## fstat answers EBADF for a dead descriptor (2026-10-20, 0061)
 
 The kernel's `SYS_FSTAT` answers -EBADF for a handle that names no Spoor
@@ -70,10 +95,11 @@ after `fdopendir`.
 Every POSIX path operation a ported program performs: `open` / `openat` /
 `fopen`, `stat` / `lstat` / `fstat` / `access`, `lseek` / `pread` /
 `pwrite`, `readdir`, the mutation family (`rename` / `unlink` / `rmdir` /
-`mkdir` / `chmod` / `ftruncate`), and the symlink calls (`lstat`,
+`mkdir` / `chmod` / `ftruncate`), the symlink calls (`lstat`,
 `readlink`, `lchmod`, and the open flags `O_NOFOLLOW`, `O_PATH` and
-`O_DIRECTORY`). musl's own raw opens -- the time zone, locale and catalog
-loaders and the stdio openers -- take the same translation. It is the
+`O_DIRECTORY`), and `link` / `linkat`, which make no hard link. musl's own
+raw opens -- the time zone, locale and catalog loaders and the stdio
+openers -- take the same translation. It is the
 largest surface in the series and the one that grew
 the most: `openat.c` alone has three generations.
 
@@ -160,6 +186,8 @@ the most: `openat.c` alone has three generations.
   `O_PATH|O_NOFOLLOW` and answers `EOPNOTSUPP` for a link, as musl and glibc
   do on Linux; a non-link's mode is set as `chmod` sets it. Any other flag is
   `EINVAL`.
+- `link` and `linkat` make no hard link (0062): `EPERM` without a trap, after
+  `linkat`'s `EINVAL` for a flag outside `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`.
 
 ## Mechanism
 

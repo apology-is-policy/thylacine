@@ -9,9 +9,10 @@
 //                              abs   -> /lib/pouch-links/target
 //                              chain -> live
 //
-// Pouch cannot make a link (symlink() is ENOSYS), so every leg only reads the
-// fixture; the two that create a name make it at the root and remove it. Legs,
-// each printed + boot-fatal via the joey expect string:
+// Pouch cannot make a link (symlink() is ENOSYS, link() EPERM), so every leg
+// only reads the fixture; the three that create or try to create a name use
+// the root and remove it. Legs, each printed + boot-fatal via the joey expect
+// string:
 //
 //   lstat           : lstat reports each link itself, S_IFLNK with the
 //                     target's length as its size, where stat follows it to
@@ -45,9 +46,14 @@
 //                     that follows changes nothing.
 //   flags           : fstatat and fchmodat refuse a flag they do not know,
 //                     EINVAL.
+//   hardlink        : link and linkat answer EPERM and make nothing (0062,
+//                     operator vote 2026-10-21), for a missing source and an
+//                     existing target too, since no path is read; linkat
+//                     refuses AT_SYMLINK_NOFOLLOW first, EINVAL.
 //
 // Every leg was red on the libc before 0059, which followed every link and
-// dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Each leg runs, so a red run
+// dropped O_NOFOLLOW, O_PATH and O_DIRECTORY; hardlink was red before 0062,
+// whose libc answered ENOSYS. Each leg runs, so a red run
 // names each failing leg and only those; the census line prints only when all
 // pass. fd 1 is a pipe write-end joey relays to the boot log, line-buffered.
 // Cross-compiled with tools/pouch-clang against the pouch sysroot.
@@ -70,6 +76,7 @@
 #define TARGET_TEXT "pouch-links target\n"
 #define CREAT_PROBE "/pouch-links-creat"
 #define CHMOD_PROBE "/pouch-links-chmod"
+#define LINK_PROBE "/pouch-links-hard"
 
 static const struct { const char *path; const char *target; } links[] = {
     { FIX "/live", "target" },          { FIX "/dead", "nosuch" },
@@ -319,6 +326,33 @@ static int leg_flags(void) {
     return 0;
 }
 
+static int leg_hardlink(void) {
+    struct stat st;
+    unlink(LINK_PROBE);
+    errno = 0;
+    if (link(FIX "/target", LINK_PROBE) != -1 || errno != EPERM)
+        return fail("link is not EPERM");
+    errno = 0;
+    if (linkat(AT_FDCWD, FIX "/target", AT_FDCWD, LINK_PROBE, AT_SYMLINK_FOLLOW) != -1 || errno != EPERM)
+        return fail("linkat AT_SYMLINK_FOLLOW is not EPERM");
+    if (lstat(LINK_PROBE, &st) == 0) {
+        unlink(LINK_PROBE);
+        return fail("link made a name");
+    }
+    errno = 0;
+    if (link(FIX "/nosuch", LINK_PROBE) != -1 || errno != EPERM)
+        return fail("link of a missing source is not EPERM");
+    errno = 0;
+    if (link(FIX "/target", FIX "/live") != -1 || errno != EPERM)
+        return fail("link onto an existing name is not EPERM");
+    if (lstat(FIX "/live", &st) != 0 || !S_ISLNK(st.st_mode))
+        return fail("link replaced an existing name");
+    errno = 0;
+    if (linkat(AT_FDCWD, FIX "/target", AT_FDCWD, LINK_PROBE, AT_SYMLINK_NOFOLLOW) != -1 || errno != EINVAL)
+        return fail("linkat AT_SYMLINK_NOFOLLOW is not EINVAL");
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     static const struct { const char *name; int (*run)(void); } legs[] = {
@@ -327,6 +361,7 @@ int main(void) {
         { "nofollow", leg_nofollow },             { "opath", leg_opath },
         { "directory", leg_directory },           { "creat-directory", leg_creat_directory },
         { "lchmod", leg_lchmod },                 { "flags", leg_flags },
+        { "hardlink", leg_hardlink },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
