@@ -26,7 +26,7 @@ needed the operator.
 
 **Why now.** The operator said to proceed with the thread overhaul after the regroup ("The thead overhaul is just the right and important arc. You can proceed!"). F-4 is the open P2 that needs no vote: C1 waits on decision 1, C4/C6/C7 on votes 2-6.
 
-**The chunk.** 7df5f6086..f8c3bdb2b on aux-3-c7a, landed as *(pending)* (+ f273fe493 for the set_tid_address docs).
+**The chunk.** 7df5f6086..f8c3bdb2b on aux-3-c7a, landed as 4e4c686ed (+ f273fe493 for the set_tid_address docs).
 - `devproc_focus_thread` returns a focus only while it is a live in-list thread; otherwise main, the oldest thread not exiting (`proc_main_thread_locked`, the definition `caught_pick` already computed inline and now calls); NULL when every thread is exiting.
 - The plan (SCRATCH c7a/PLAN.md) said "all exiting -> the head; each caller's EXITING gate refuses". Reading the four callers showed that is false: `devproc_apply_regs` and `devproc_step_walk_cb` have no EXITING gate. So the selector itself never returns an exiting thread. The same reading found a second F-4 consequence the review did not name: `step` armed the exiting head and resumed the whole Proc, so the step never fired and the target ran free.
 - Why the head stays exited for a whole stop: `proc_reap_exited_threads` runs only from a live peer's syscalls (proc.c:5061, syscall.c:5340/5473/7945), and in a stopped target no peer runs.

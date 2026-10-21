@@ -1415,7 +1415,7 @@ is unmeasured.
 ## Thread-model C7a: the debug focus falls back to main, never the newest thread — 2026-10-21
 
 A chunk of the thread-model overhaul (`docs/thread-model-review.html`; the Fable report
-`docs/THREAD-MODEL-REVIEW-FABLE.md` F-4, P2, I-39). No operator decision needed. Squashed from aux-3-c7a as *(pending)*;
+`docs/THREAD-MODEL-REVIEW-FABLE.md` F-4, P2, I-39). No operator decision needed. Squashed from aux-3-c7a as 4e4c686ed;
 the `set_tid_address` documentation correction is f273fe493.
 
 - **F-4 [P2] a manual stop read the newest thread.** With no breakpoint/step focus (a manual `stop` or an attach),

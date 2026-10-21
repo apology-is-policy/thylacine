@@ -4,7 +4,7 @@ type: chg
 title: "Thread-model C7a: the debug focus falls back to main, never the newest thread"
 date: 2026-10-21
 arc: arc-phase6-pouch
-commits: ["*(pending)*", "f273fe493"]
+commits: ["4e4c686ed", "f273fe493"]
 touched:
   - sub-kernel-devproc
   - sub-kernel-proc
