@@ -345,8 +345,16 @@ MESON_KEYS = {"cmd", "depends", "env", "extra_paths", "is_parallel", "name", "pr
 MESON_LIBPATH = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")
 
 
+def unquote(w):
+    """env -S's quoting: a word wrapped in a matched pair of quotes loses them."""
+    if len(w) >= 2 and w[:1] in (b"'", b'"') and w[-1:] == w[:1]:
+        return w[1:-1]
+    return w
+
+
 def env_program(words):
-    """env's arguments from its program on: its options and NAME=VALUE go."""
+    """env's arguments from its program on: its options and NAME=VALUE go.
+    -S's payload is unquoted and read as env arguments again, as GNU env does."""
     i = 0
     while i < len(words):
         w = words[i]
@@ -354,23 +362,23 @@ def env_program(words):
             return words[i + 1:]
         if w.startswith(b"--"):
             opt, eq, val = w.partition(b"=")
-            if opt == b"--split-string" and eq:
-                return [val] + words[i + 1:]
-            if opt in (b"--unset", b"--chdir") and not eq:
+            if opt == b"--split-string":
+                rest = ([val] if eq else []) + words[i + 1:]
+                return env_program([unquote(x) for x in rest])
+            if opt in (b"--unset", b"--chdir", b"--argv0") and not eq:
                 i += 1
             i += 1
             continue
         if w.startswith(b"-"):
             for j in range(1, len(w)):
                 c = w[j:j + 1]
-                if c in (b"u", b"C", b"P"):
+                if c in (b"u", b"C", b"P", b"a"):
                     if j + 1 == len(w):
                         i += 1
                     break
                 if c == b"S":
-                    if j + 1 < len(w):
-                        return [w[j + 1:]] + words[i + 1:]
-                    break
+                    rest = ([w[j + 1:]] if j + 1 < len(w) else []) + words[i + 1:]
+                    return env_program([unquote(x) for x in rest])
             i += 1
             continue
         if b"=" in w:
