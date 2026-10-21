@@ -1415,7 +1415,7 @@ is unmeasured.
 ## Thread-model C2: the kernel stack cache; guard toggles invalidate by address — 2026-10-20
 
 The second chunk of the thread-model overhaul (`docs/thread-model-review.html`; the Fable report
-`docs/THREAD-MODEL-REVIEW-FABLE.md` E-1, E-2, E-10). No operator decision needed. Squashed from aux-3-c2 as *(pending)*.
+`docs/THREAD-MODEL-REVIEW-FABLE.md` E-1, E-2, E-10). No operator decision needed. Squashed from aux-3-c2 as 31babb6ad.
 
 - **E-1 [P2 perf] a global TLB flush per create and per free.** Each of the three constructors allocated an order-3
   block, made its four guard pages no-access in the direct map and flushed every CPU's whole TLB

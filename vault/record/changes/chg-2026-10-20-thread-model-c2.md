@@ -4,7 +4,7 @@ type: chg
 title: "Thread-model C2: the kernel stack cache; the guard toggles invalidate by address"
 date: 2026-10-20
 arc: arc-phase6-pouch
-commits: ["*(pending)*"]
+commits: ["31babb6ad"]
 touched:
   - sub-kernel-thread
   - sub-kernel-mmu
