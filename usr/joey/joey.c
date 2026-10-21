@@ -565,6 +565,19 @@ static long reap_bounded(long pid, int *status, unsigned long max_sec) {
     }
 }
 
+// A program the build may leave out (the Go probes without the Go fork, the
+// C++ prover without the LLVM fork, an unbaked fixture) is absent only when a
+// walk to it answers ENOENT. Any other refusal, or a present program whose
+// spawn fails, is a broken image and must fail the boot rather than skip.
+static int optional_absent(const char *path, size_t path_len) {
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, path_len, T_OPATH);
+    if (fd >= 0) {
+        (void)t_close(fd);
+        return 0;
+    }
+    return fd == -2;   // -T_E_NOENT
+}
+
 // pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
 // cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
 // (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
@@ -587,8 +600,6 @@ static long reap_bounded(long pid, int *status, unsigned long max_sec) {
 // its PT_INTERP loader by the program's own name, which only the argv spawn
 // carries (the nameless variants refuse it, VIVARIUM 13.10.6), and the loader
 // reports a failure before main on fd 2, which must land in the capture.
-// Returns 0, -2 when the spawn itself failed (the program is absent or the
-// spawn was refused), or -1 on any other failure.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
@@ -648,7 +659,7 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         t_putstr(msg);
         (void)t_close(rd);
         (void)t_close(wr);
-        return -2;
+        return -1;
     }
     // Drop joey's writer ref. The child's refs remain — released only
     // when the child is reaped below.
@@ -4371,16 +4382,14 @@ static int clade_storm_gate(void) {
         g_clade_storm = "DECLINED";
         return 0;
     }
-    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
-    if (probe < 0) {
+    if (optional_absent("/storm/Makefile", 15)) {
         t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");
         g_clade_storm = "SKIPPED";
         return 0;  // not baked -> not a failure
     }
-    (void)t_close(probe);
     // The C-mode driver copy (stage_clade adds it for CL-5). Without it the
     // storm's .c sources would be compiled as C++ by a clang++ copy.
-    probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
     if (probe < 0) {
         t_putstr("joey: clade CL-5 storm FAILED: /clade/bin/clang missing "
                  "(stale /clade bake -- re-run stage_clade)\n");
@@ -6373,6 +6382,10 @@ int main(void) {
             gh_pid = t_spawn(go_hello_name, sizeof(go_hello_name) - 1);
         }
         if (gh_pid <= 0) {
+            if (!optional_absent(go_hello_name, sizeof(go_hello_name) - 1)) {
+                t_putstr("joey: go-hello FAILED -- in the image but not spawned\n");
+                return 1;
+            }
             t_putstr("joey: go-hello NOT spawned (Go fork absent at build) -- skipping\n");
         } else {
             int gh_status = -1;
@@ -6430,6 +6443,10 @@ int main(void) {
             (void)t_close(edir);
         }
         if (ge_pid <= 0) {
+            if (!optional_absent(go_env_name, sizeof(go_env_name) - 1)) {
+                t_putstr("joey: go-env FAILED -- in the image but not spawned\n");
+                return 1;
+            }
             t_putstr("joey: go-env NOT spawned (Go fork absent at build) -- skipping\n");
         } else {
             int ge_status = -1;
@@ -6560,6 +6577,10 @@ int main(void) {
             gg_pid = t_spawn(go_gor_name, sizeof(go_gor_name) - 1);
         }
         if (gg_pid <= 0) {
+            if (!optional_absent(go_gor_name, sizeof(go_gor_name) - 1)) {
+                t_putstr("joey: go-goroutines FAILED -- in the image but not spawned\n");
+                return 1;
+            }
             t_putstr("joey: go-goroutines NOT spawned (Go fork absent at build) -- skipping\n");
         } else {
             int gg_status = -1;
@@ -8561,12 +8582,9 @@ int main(void) {
                     // interactive go8d.exp is transport-fragile under ut's redraw
                     // storm (the #66 class). Gated on the baked /goroot/bin/gopls.
                     {
-                        long gpb = t_open(T_WALK_OPEN_FROM_ROOT,
-                                          "/goroot/bin/gopls", 17, T_OREAD);
-                        if (gpb < 0) {
+                        if (optional_absent("/goroot/bin/gopls", 17)) {
                             t_putstr("joey: go8d gopls absent -- skipping\n");
                         } else {
-                            (void)t_close(gpb);
                             long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4,
                                                T_OPATH);
                             long gpd = (tmpd >= 0)
@@ -10595,12 +10613,9 @@ int main(void) {
             // hard-failing ONLY when it is present but regresses.
             {
                 static const char phcxx_name[] = "/bin/pouch-hello-cxx";
-                long cxx_probe = t_open(T_WALK_OPEN_FROM_ROOT, phcxx_name,
-                                        sizeof(phcxx_name) - 1, T_OREAD);
-                if (cxx_probe < 0) {
+                if (optional_absent(phcxx_name, sizeof(phcxx_name) - 1)) {
                     t_putstr("joey: /pouch-hello-cxx NOT present (LLVM fork absent at build) -- skipping\n");
                 } else {
-                    (void)t_close(cxx_probe);
                     if (pouch_smoke_one(phcxx_name, sizeof(phcxx_name) - 1,
                                         "ALL C++ WIRES PASS", 18) != 0) {
                         t_putstr("joey: /pouch-hello-cxx FAILED (CL-2 C++ runtime regression)\n");
@@ -10628,12 +10643,11 @@ int main(void) {
             {
                 const char go_fs_name[] = "/bin/go-fs";  // #58: post-pivot /bin bind
                 const char gf_expect[]  = GO_CENSUS_FS;
-                int gf_rc = pouch_smoke_core(go_fs_name, sizeof(go_fs_name) - 1,
-                                             gf_expect, sizeof(gf_expect) - 1,
-                                             0, 0, 0, 1, -1, 1);
-                if (gf_rc == -2) {
+                if (optional_absent(go_fs_name, sizeof(go_fs_name) - 1)) {
                     t_putstr("joey: go-fs NOT spawned (Go fork absent at build) -- skipping\n");
-                } else if (gf_rc != 0) {
+                } else if (pouch_smoke_core(go_fs_name, sizeof(go_fs_name) - 1,
+                                            gf_expect, sizeof(gf_expect) - 1,
+                                            0, 0, 0, 1, -1, 1) != 0) {
                     t_putstr("joey: go-fs FAILED -- GOOS=thylacine Stage 3a regression (see fatal error / panic / snare:* above)\n");
                     return 1;
                 } else {
@@ -10669,6 +10683,10 @@ int main(void) {
                     ge_pid = t_spawn(go_exec_name, sizeof(go_exec_name) - 1);
                 }
                 if (ge_pid <= 0) {
+                    if (!optional_absent(go_exec_name, sizeof(go_exec_name) - 1)) {
+                        t_putstr("joey: go-exec FAILED -- in the image but not spawned\n");
+                        return 1;
+                    }
                     t_putstr("joey: go-exec NOT spawned (Go fork absent at build) -- skipping\n");
                 } else {
                     int ge_status = -1;
@@ -10711,6 +10729,10 @@ int main(void) {
                     gn_pid = t_spawn(go_net_name, sizeof(go_net_name) - 1);
                 }
                 if (gn_pid <= 0) {
+                    if (!optional_absent(go_net_name, sizeof(go_net_name) - 1)) {
+                        t_putstr("joey: go-net FAILED -- in the image but not spawned\n");
+                        return 1;
+                    }
                     t_putstr("joey: go-net NOT spawned (Go fork absent at build) -- skipping\n");
                 } else {
                     int gn_status = -1;

@@ -7659,7 +7659,17 @@ import json, re, sys
 m = re.search(r"^conf_links = \[\n(.*?)^\]", open(sys.argv[1]).read(), re.M | re.S)
 if not m:
     sys.exit("==> fonts: " + sys.argv[1] + " has no conf_links list")
-links = re.findall(r"^\s*'([^']+\.conf)',?\s*$", m.group(1), re.M)
+links = []
+for line in m.group(1).split("\n"):
+    entry = line.split("#", 1)[0].strip()
+    if not entry:
+        continue
+    e = re.fullmatch(r"""(['"])([^'"]+\.conf)\1,?""", entry)
+    if not e:
+        sys.exit("==> fonts: conf_links holds a line this reader cannot parse: " + line.strip())
+    links.append(e.group(2))
+if not links:
+    sys.exit("==> fonts: " + sys.argv[1] + "'s conf_links list is empty")
 intro = json.load(open(sys.argv[2]))
 opt = {o["name"]: o["value"] for o in intro["buildoptions"]}
 if intro["machines"]["host"]["system"] == "darwin":
@@ -7675,7 +7685,6 @@ if opt["bitmap-conf"] in bitmap:
 print("\n".join(sorted(set(links))))
 PY
 )" || exit 1
-    [[ -n "$want_confd" ]] || { echo "==> fonts: fontconfig's conf_links list is empty" >&2; exit 1; }
 
     rm -rf "$stage/etc" "$stage/usr" "$stage/lib"
     mkdir -p "$stage/etc" "$stage/usr/share/xml" "$stage/usr/bin" "$stage/lib/font"

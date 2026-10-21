@@ -657,7 +657,8 @@ faces. `var/` is never staged: there is no system font cache
 `confd.count` for `ls-libs.exp`, from sets derived apart from the stage: the
 faces are the vendored ones (each vendored directory must hold one) plus the
 twelve named, and `conf.d` is fontconfig's own `conf_links` list in
-`conf.d/meson.build` plus the link that `default-hinting`,
+`conf.d/meson.build`, read line by line (either quote; a line it cannot parse
+and an empty list each refuse the bake by name), plus the link that `default-hinting`,
 `default-sub-pixel-rendering`, `bitmap-conf` and a darwin host each add (read
 with `meson introspect --buildoptions --machines`). The stage must match each
 set name for name, and every `conf.d` entry must be a link. Measured on a fake
