@@ -25,7 +25,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native adapter (October 12)\""
 created: 2026-10-12
-updated: 2026-10-19
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -276,14 +276,23 @@ completion path allocates.
   -EACCES, a second LOPEN of an opening fid -ENOENT -- claim before ACCES, ACCES
   before BADF, as `loom_fid_borrow` orders them -- and a `refuse_clunk` knob
   refuses the next CLUNK at admission so the backstop's ring-fail can be driven.
+  Since 2026-10-21 both sims admit in the kernel's order (`frontend_dispatch`):
+  the source's scope (`loom_admission_scope_locked`), then the payload (the
+  buffer, the WALK name, the pool and every member's length), then the fid
+  (`loom_fid_*`). An admitted CLUNK retires its fid at once, so anything
+  naming it after answers -ENOENT; an admitted WALK claims its destination, so a
+  second WALK to it answers -EBUSY; a destination in another scope answers
+  -ECANCELED and one already walked to -EBUSY; a CLUNK of a scope -ENOENT.
+  `sim_admit` / `State::admit_one` run one SQE through admission alone, and
+  `admission_follows_the_kernels_order` pins each of these in both languages.
 - **The C twin's tests.** `tests/loom_client/sim_kernel.c` ports `sim.rs`
   knob for knob (the setup refusals, the misaligned attach and the stale pool
-  identity are knobs in both), and `test_adapter.c` runs the 69 scenarios of
+  identity are knobs in both), and `test_adapter.c` runs the 70 scenarios of
   `tests/native.rs` under their Rust names (`future` reads `operation`),
   then eight of the C interface's own: a bad setup shape, another kind's
   completion, a full operation table with a route-only stream cell, a
   foreign pool, a stream asked again after its end, and three death tests
-  for stale handles. A `_Static_assert` pins the count of 77. Each scenario also ends with the storage
+  for stale handles. A `_Static_assert` pins the count of 78. Each scenario also ends with the storage
   idle and every region detached. `tools/test-loom-client.sh` runs them
   sanitized (-O0, ASan and UBSan, no recovery) and optimized, and links
   `adapter.c` and `native_kernel.c` freestanding under `--no-undefined` with
@@ -336,7 +345,7 @@ completion path allocates.
    October 13 (a walked fid reaps once clunked or once its scope has RETIRED;
    fids pin their scope). Until then no kernel path freed a walked fid while
    its ring lived, and the sim was more lenient than the kernel. The sim has no
-   slot phase: the kernel's RETIRING FID is reachable by REAP only through
+   slot phase (only a fid whose CLUNK was admitted is marked retiring): the kernel's RETIRING FID is reachable by REAP only through
    `control_retiring_fid`, which only the guest test exercises. Since NA-4d the
    sim also models the kernel's fid claim at admission (EBUSY under an in-flight
    LOPEN, EBADF on a walk from an opened fid, EACCES on an unopened-fid I/O), and
@@ -349,16 +358,14 @@ completion path allocates.
    and `destroy_pool` answered -EBADF once the ring is lost. The sim answers
    -ENOENT for an operation on a FID that is not READY under a READY scope, as
    `loom_fid_borrow` does, and -EISDIR for a byte READ of the root.
-5. One sim-oracle edge remains, documented and unreachable (audit r3 P3-1):
-   both sims check a pooled READ's fid-access (EACCES) before resolving the pool
-   reference, the reverse of the kernel's order (pool first, then the fid
-   borrowed at publish), so for a fid no LOPEN opened for read plus an invalid
-   pool reference the sims answer EACCES where the kernel answers ENOENT. It is
-   unreachable through the safe `Fid::stream(&Pool)` API -- a `Stream` is built
-   only from a resolved pool -- so no host test or real program reaches it, and
-   the scoped change that added the access check was a net fidelity gain. A fix
-   would reorder the admit chain in both sims (invasive, warranting a re-audit
-   for an unreachable edge); it is tracked, not taken.
+5. The sims' admission order (audit r3 P3-1, widened 2026-10-21) is fixed:
+   both checked the fid before the payload, the reverse of the kernel, and
+   held no state for an admitted CLUNK or WALK (the order now modelled is in
+   the sim paragraph above). Still unmodelled: the fixed-buffer count limit
+   (-EAGAIN) and a fixed extent overlapping a pool member (-EBUSY) of
+   `loom_private_fixed_acquire`, an expired deadline refused at prepare
+   (-ETIMEDOUT; the sims time it out after admission), and WALK's fid-number
+   exhaustion (-ENOSPC).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

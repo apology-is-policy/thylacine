@@ -22,6 +22,8 @@ struct sim_slot {
     unsigned used, kind, has_name;
     /* A fid's access once an LOPEN opened it: 1 read, 2 write, 3 both. */
     unsigned open;
+    /* An admitted CLUNK retires the fid at once (loom_fid_begin_clunk). */
+    unsigned clunking;
     uint64_t inc;
     uint32_t state;
     /* A fid's scope slot; a scope's own. */
@@ -153,6 +155,8 @@ size_t sim_live_slots(const struct sim *);
  * every aborted scope with nothing in flight. */
 void sim_engine_visit(struct sim *);
 void sim_step(struct sim *);
+/* ENTER's admission of one SQE and nothing else: 0 admits it. */
+int64_t sim_admit(struct sim *, const struct t_loom_sqe *);
 void sim_release_rejections(struct sim *);
 void sim_release_terminals(struct sim *);
 /* Post the last payload shot's CQE a second time, receipt and all: an I-29

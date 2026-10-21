@@ -442,6 +442,12 @@ static void uses(const struct sim *s, size_t i, int *claimed, int *borrowed) {
             *borrowed = 1;
     }
 }
+/* Whether an admitted WALK still claims slot i as its destination. */
+static int walk_claimed(const struct sim *s, size_t i) {
+    for (size_t j = 0; j < s->nops; ++j)
+        if (s->ops[j].kind == SIM_OP_WALK && s->ops[j].dest == i) return 1;
+    return 0;
+}
 /* ENTER's admission of one copied SQE: shape, then the slots it names. */
 static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
     int64_t rc = shape(q);
@@ -460,6 +466,8 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
         op.target = source.slot;
     } else {
         if (q->opcode == T_LOOM_OP_CLUNK) ++s->clunk_sqes;
+        /* PREPARE, loom_admission_scope_locked: a live SCOPE or FID (a fid
+         * whose CLUNK was admitted is already retired), then its scope. */
         size_t scope;
         if (src->kind == SIM_SCOPE)
             scope = source.slot;
@@ -467,21 +475,11 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
             scope = src->scope;
         else
             return SIM_ENOENT;
-        /* The kernel's order (loom_fid_borrow, loom_fid_begin_clunk): the
-         * scope first, then the FID itself. */
+        if (src->state == SIM_RETIRED || src->clunking) return SIM_ENOENT;
         if (s->slots[scope].state != SIM_READY) return SIM_ECANCELED;
-        if (src->state != SIM_READY) return SIM_ENOENT;
-        int claimed, borrowed;
-        uses(s, source.slot, &claimed, &borrowed);
-        unsigned need = q->opcode == T_LOOM_OP_READ ? 1 : 2;
         op.scope = scope;
+        /* PREPARE, the payload (loom_private_io_prepare, loom_provided_prepare). */
         if (q->opcode == T_LOOM_OP_WALK) {
-            /* loom_fid_borrow_walk; walk(5) walks no further from a fid opened
-             * for I/O. */
-            if (claimed) return SIM_EBUSY;
-            if (src->open) return SIM_EBADF;
-            struct sim_slot *d = live(s, dest);
-            if (!d || d->kind != SIM_FID || d->state != SIM_RESERVED || d->scope != scope) return SIM_ENOENT;
             if (q->len) {
                 unsigned char *p = buffer(s, q->buf_idx_or_off, q->_resv1[0], q->len);
                 if (!p) return SIM_EINVAL;
@@ -495,45 +493,66 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
                 return SIM_EINVAL;
             op.kind = SIM_OP_WALK;
             op.dest = dest.slot;
-        } else if (q->opcode == T_LOOM_OP_LOPEN) {
-            /* loom_fid_claim_open: one LOPEN per fid, none beside a borrow. */
-            if (src->open || claimed) return SIM_ENOENT;
-            if (borrowed) return SIM_EBUSY;
-            op.kind = SIM_OP_OPEN;
-        } else if (q->opcode == T_LOOM_OP_CLUNK) {
-            if (s->has_refuse_clunk) {
-                s->has_refuse_clunk = 0;
-                return s->refuse_clunk;
-            }
-            /* loom_fid_begin_clunk. */
-            if (claimed) return SIM_EBUSY;
-            op.kind = SIM_OP_CLUNK;
-        } else if (claimed) {
-            /* loom_fid_borrow. */
-            return SIM_EBUSY;
-        } else if ((src->open & need) != need) {
-            /* Data moves only through a fid opened for it. */
-            return SIM_EACCES;
-        } else if (q->flags & T_LOOM_SQE_BUFFER_SELECT) {
+        } else if (q->opcode == T_LOOM_OP_READ && (q->flags & T_LOOM_SQE_BUFFER_SELECT)) {
             struct t_loom_service_ref pool = { q->buf_idx_or_off, 0, q->_resv1[2] };
             struct sim_slot *p = live(s, pool);
             if (!p || p->kind != SIM_POOL) return SIM_ENOENT;
+            /* provided_bounds: every member must hold the whole read. */
+            for (size_t m = 0; m < s->pool_members[pool.slot]; ++m)
+                if (s->pools[pool.slot][m].range.length < q->len) return SIM_EINVAL;
             op.kind = SIM_OP_POOLED;
             op.pool = pool.slot;
             op.limit = q->len;
             op.multi = !!(q->flags & T_LOOM_SQE_MULTISHOT);
-        } else {
+        } else if (q->opcode == T_LOOM_OP_READ || q->opcode == T_LOOM_OP_WRITE) {
             if (!buffer(s, q->buf_idx_or_off, q->_resv1[0], q->len)) return SIM_EINVAL;
             op.kind = q->opcode == T_LOOM_OP_READ ? SIM_OP_READ : SIM_OP_WRITE;
             op.buf = q->buf_idx_or_off;
             op.at = q->_resv1[0];
             op.len = q->len;
         }
+        /* PUBLISH, loom_admission_enqueue_locked: the fid itself. */
+        int claimed, borrowed;
+        uses(s, source.slot, &claimed, &borrowed);
+        if (q->opcode == T_LOOM_OP_LOPEN) {
+            /* loom_fid_claim_open: one LOPEN per fid, none beside a borrow. */
+            if (src->state != SIM_READY || src->open || claimed) return SIM_ENOENT;
+            if (borrowed) return SIM_EBUSY;
+            op.kind = SIM_OP_OPEN;
+        } else if (q->opcode == T_LOOM_OP_CLUNK) {
+            /* loom_fid_begin_clunk: a FID only, retired the moment it is admitted. */
+            if (src->kind != SIM_FID || src->state != SIM_READY) return SIM_ENOENT;
+            if (s->has_refuse_clunk) {
+                s->has_refuse_clunk = 0;
+                return s->refuse_clunk;
+            }
+            if (claimed) return SIM_EBUSY;
+            op.kind = SIM_OP_CLUNK;
+            src->clunking = 1;
+        } else {
+            /* loom_fid_borrow / loom_fid_borrow_walk. */
+            unsigned need = q->opcode == T_LOOM_OP_WALK ? 0 : q->opcode == T_LOOM_OP_READ ? 1 : 2;
+            if (src->state != SIM_READY) return SIM_ENOENT;
+            if (claimed) return SIM_EBUSY;
+            /* Data moves only through a fid opened for it. */
+            if ((src->open & need) != need) return SIM_EACCES;
+            /* walk(5) walks no further from a fid opened for I/O. */
+            if (q->opcode == T_LOOM_OP_WALK && src->open) return SIM_EBADF;
+            if (q->opcode == T_LOOM_OP_WALK) {
+                /* loom_fid_claim_walk: the destination is claimed until the WALK ends. */
+                struct sim_slot *d = live(s, dest);
+                if (!d || d->kind != SIM_FID || d->state == SIM_RETIRED || d->clunking) return SIM_ENOENT;
+                if (d->scope != scope) return SIM_ECANCELED;
+                if (d->state != SIM_RESERVED || walk_claimed(s, dest.slot)) return SIM_EBUSY;
+            }
+        }
     }
     assert(s->nops < SIM_MAX);
     s->ops[s->nops++] = op;
     return 0;
 }
+
+int64_t sim_admit(struct sim *s, const struct t_loom_sqe *q) { return admit_sqe(s, q); }
 
 static int header_ok(uint32_t size, uint32_t want, uint16_t version, uint16_t flags) {
     return size == want && version == 1 && !flags;

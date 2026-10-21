@@ -57,6 +57,8 @@ pub struct Slot {
     pub name: Option<Vec<u8>>,
     /// A fid's access once an LOPEN opened it: 1 read, 2 write, 3 both.
     pub open: Option<u32>,
+    /// An admitted CLUNK retires the fid at once (loom_fid_begin_clunk).
+    pub clunking: bool,
 }
 #[derive(Clone, Debug)]
 enum OpKind {
@@ -712,6 +714,36 @@ impl State {
         });
         (claimed, borrowed)
     }
+    /// Whether an admitted WALK still claims slot i as its destination.
+    fn walk_claimed(&self, i: usize) -> bool {
+        self.ops
+            .iter()
+            .any(|o| matches!(o.kind, OpKind::Walk { dest, .. } if dest == i))
+    }
+    /// ENTER's admission of one SQE and nothing else: 0 admits it.
+    pub fn admit_one(&mut self, s: Submission) -> i64 {
+        self.admit(s)
+    }
+    /// A registered buffer over `b`, which must outlive every admission.
+    pub fn add_buffer(&mut self, b: &mut [u8]) {
+        self.buffers.push((b.as_mut_ptr() as usize, b.len()));
+    }
+    /// Pool slot `slot`'s members, one per length.
+    pub fn set_pool(&mut self, slot: usize, lengths: &[u64]) {
+        let members = lengths
+            .iter()
+            .map(|&length| Member {
+                range: PoolMember {
+                    buffer_index: 0,
+                    reserved: 0,
+                    offset: 0,
+                    length,
+                },
+                lease: None,
+            })
+            .collect();
+        self.pools.insert(slot, members);
+    }
     /// ENTER's admission of one copied SQE: shape, then the slots it names.
     fn admit(&mut self, s: Submission) -> i64 {
         let rc = shape(&s, true);
@@ -751,36 +783,22 @@ impl State {
                 if o == OP_CLUNK as u32 {
                     self.clunk_sqes += 1;
                 }
+                // PREPARE, loom_admission_scope_locked: a live SCOPE or FID (a fid
+                // whose CLUNK was admitted is already retired), then its scope.
                 let scope = match src.kind {
                     SlotKind::Scope => source.slot as usize,
                     SlotKind::Fid => src.scope,
                     _ => return ENOENT,
                 };
-                // The kernel's order (loom_fid_borrow, loom_fid_begin_clunk): the
-                // scope first, then the FID itself.
+                if src.state == RETIRED || src.clunking {
+                    return ENOENT;
+                }
                 if self.slots[scope].as_ref().unwrap().state != READY {
                     return ECANCELED;
                 }
-                if src.state != READY {
-                    return ENOENT;
-                }
-                let (claimed, borrowed) = self.uses(source.slot as usize);
-                let need = if o == OP_READ as u32 { 1 } else { 2 };
-                let kind = if o == OP_WALK as u32 {
-                    // loom_fid_borrow_walk; walk(5) walks no further from a fid
-                    // opened for I/O.
-                    if claimed {
-                        return EBUSY;
-                    }
-                    if src.open.is_some() {
-                        return EBADF;
-                    }
-                    let Some(d) = self.live(dest) else {
-                        return ENOENT;
-                    };
-                    if d.kind != SlotKind::Fid || d.state != RESERVED || d.scope != scope {
-                        return ENOENT;
-                    }
+                // PREPARE, the payload (loom_private_io_prepare,
+                // loom_provided_prepare).
+                let payload = if o == OP_WALK as u32 {
                     let name = if s.len == 0 {
                         Vec::new()
                     } else {
@@ -793,35 +811,11 @@ impl State {
                     if name.iter().any(|&b| b == 0 || b == b'/') || name == b"." || name == b".." {
                         return EINVAL;
                     }
-                    OpKind::Walk {
+                    Some(OpKind::Walk {
                         dest: dest.slot as usize,
                         name,
-                    }
-                } else if o == OP_LOPEN as u32 {
-                    // loom_fid_claim_open: one LOPEN per fid, none beside a borrow.
-                    if src.open.is_some() || claimed {
-                        return ENOENT;
-                    }
-                    if borrowed {
-                        return EBUSY;
-                    }
-                    OpKind::Open
-                } else if o == OP_CLUNK as u32 {
-                    if let Some(rc) = self.refuse_clunk.take() {
-                        return rc;
-                    }
-                    // loom_fid_begin_clunk.
-                    if claimed {
-                        return EBUSY;
-                    }
-                    OpKind::Clunk
-                } else if claimed {
-                    // loom_fid_borrow.
-                    return EBUSY;
-                } else if src.open.is_none_or(|access| access & need != need) {
-                    // Data moves only through a fid opened for it.
-                    return EACCES;
-                } else if s.flags as u32 & SQE_BUFFER_SELECT != 0 {
+                    })
+                } else if o == OP_READ as u32 && s.flags as u32 & SQE_BUFFER_SELECT != 0 {
                     let pool = SlotRef {
                         slot: s.buf_idx_or_off,
                         reserved: 0,
@@ -830,21 +824,96 @@ impl State {
                     if self.live(pool).is_none_or(|p| p.kind != SlotKind::Pool) {
                         return ENOENT;
                     }
-                    OpKind::Pooled {
+                    // provided_bounds: every member must hold the whole read.
+                    if self.pools[&(pool.slot as usize)]
+                        .iter()
+                        .any(|m| m.range.length < s.len as u64)
+                    {
+                        return EINVAL;
+                    }
+                    Some(OpKind::Pooled {
                         pool: pool.slot as usize,
                         limit: s.len,
                         multi: s.flags & SQE_MULTISHOT != 0,
-                    }
-                } else {
+                    })
+                } else if o == OP_READ as u32 || o == OP_WRITE as u32 {
                     if self.buffer(s.buf_idx_or_off, s.args[0], s.len).is_none() {
                         return EINVAL;
                     }
                     let (buf, at, len) = (s.buf_idx_or_off, s.args[0], s.len);
-                    if o == OP_READ as u32 {
+                    Some(if o == OP_READ as u32 {
                         OpKind::Read { buf, at, len }
                     } else {
                         OpKind::Write { buf, at, len }
+                    })
+                } else {
+                    None
+                };
+                // PUBLISH, loom_admission_enqueue_locked: the fid itself.
+                let (claimed, borrowed) = self.uses(source.slot as usize);
+                let kind = if o == OP_LOPEN as u32 {
+                    // loom_fid_claim_open: one LOPEN per fid, none beside a borrow.
+                    if src.state != READY || src.open.is_some() || claimed {
+                        return ENOENT;
                     }
+                    if borrowed {
+                        return EBUSY;
+                    }
+                    OpKind::Open
+                } else if o == OP_CLUNK as u32 {
+                    // loom_fid_begin_clunk: a FID only, retired the moment it is
+                    // admitted.
+                    if src.kind != SlotKind::Fid || src.state != READY {
+                        return ENOENT;
+                    }
+                    if let Some(rc) = self.refuse_clunk.take() {
+                        return rc;
+                    }
+                    if claimed {
+                        return EBUSY;
+                    }
+                    self.slots[source.slot as usize].as_mut().unwrap().clunking = true;
+                    OpKind::Clunk
+                } else {
+                    // loom_fid_borrow / loom_fid_borrow_walk.
+                    let need = if o == OP_WALK as u32 {
+                        0
+                    } else if o == OP_READ as u32 {
+                        1
+                    } else {
+                        2
+                    };
+                    if src.state != READY {
+                        return ENOENT;
+                    }
+                    if claimed {
+                        return EBUSY;
+                    }
+                    // Data moves only through a fid opened for it.
+                    if src.open.unwrap_or(0) & need != need {
+                        return EACCES;
+                    }
+                    if o == OP_WALK as u32 {
+                        // walk(5) walks no further from a fid opened for I/O.
+                        if src.open.is_some() {
+                            return EBADF;
+                        }
+                        // loom_fid_claim_walk: the destination is claimed until
+                        // the WALK ends.
+                        let Some(d) = self.live(dest) else {
+                            return ENOENT;
+                        };
+                        if d.kind != SlotKind::Fid || d.state == RETIRED || d.clunking {
+                            return ENOENT;
+                        }
+                        if d.scope != scope {
+                            return ECANCELED;
+                        }
+                        if d.state != RESERVED || self.walk_claimed(dest.slot as usize) {
+                            return EBUSY;
+                        }
+                    }
+                    payload.unwrap()
                 };
                 (scope, kind)
             }
@@ -1020,6 +1089,7 @@ unsafe impl Kernel for SimKernel {
                     scope: 0,
                     name: Some(name),
                     open: None,
+                    clunking: false,
                 }) else {
                     return ENOSPC;
                 };
@@ -1042,6 +1112,7 @@ unsafe impl Kernel for SimKernel {
                         scope: 0,
                         name: None,
                         open: None,
+                        clunking: false,
                     },
                     3 => {
                         let Some(sc) = s.live(rec.scope) else {
@@ -1057,6 +1128,7 @@ unsafe impl Kernel for SimKernel {
                             scope: rec.scope.slot as usize,
                             name: None,
                             open: None,
+                            clunking: false,
                         }
                     }
                     _ => return EINVAL,
@@ -1162,6 +1234,7 @@ unsafe impl Kernel for SimKernel {
                     scope: 0,
                     name: None,
                     open: None,
+                    clunking: false,
                 }) else {
                     return ENOSPC;
                 };

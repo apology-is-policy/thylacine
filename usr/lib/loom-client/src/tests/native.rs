@@ -1509,3 +1509,121 @@ fn a_read_result_keeps_the_storage_until_it_drops() {
     drop(done);
     assert_eq!(sim.regions(), 0);
 }
+
+/// ENTER's admission in the kernel's order (frontend_dispatch): the source's
+/// scope (loom_admission_scope_locked), then the payload
+/// (loom_private_io_prepare, loom_provided_prepare), then the fid (loom_fid_*);
+/// and what an admitted CLUNK or WALK holds at once. Each pair is a refusal and
+/// its control one variable away. Slots: 0 scope, 1 fid, 2 fid opened for both,
+/// 3 a WALK's destination, 4 another scope, 5 its destination, 6 a READY fid,
+/// 7 a pool of members 16 and 4 bytes long, 8 a fid to clunk; slot i has
+/// incarnation i + 1.
+#[test]
+fn admission_follows_the_kernels_order() {
+    use crate::ring_records::{OP_CLUNK, OP_READ, OP_WALK, Submission};
+    use crate::service_abi::SQE_BUFFER_SELECT;
+    use sim::{READY, RESERVED, Slot};
+    let mut buf = *b"a/bxname";
+    let fixture = |buf: &mut [u8; 8]| {
+        let sim = Sim::new();
+        let k = [
+            (SlotKind::Scope, READY, 0, None),
+            (SlotKind::Fid, READY, 0, None),
+            (SlotKind::Fid, READY, 0, Some(3)),
+            (SlotKind::Fid, RESERVED, 0, None),
+            (SlotKind::Scope, READY, 4, None),
+            (SlotKind::Fid, RESERVED, 4, None),
+            (SlotKind::Fid, READY, 0, None),
+            (SlotKind::Pool, READY, 0, None),
+            (SlotKind::Fid, READY, 0, None),
+        ];
+        {
+            let mut s = sim.s();
+            for (i, &(kind, state, scope, open)) in k.iter().enumerate() {
+                s.slots[i] = Some(Slot {
+                    kind,
+                    inc: i as u64 + 1,
+                    state,
+                    scope,
+                    name: None,
+                    open,
+                    clunking: false,
+                });
+            }
+            s.add_buffer(buf);
+            s.set_pool(7, &[16, 4]);
+        }
+        sim
+    };
+    let sqe = |opcode: u8, source: u32| Submission {
+        opcode,
+        flags: 0,
+        reserved: 0,
+        handle_idx: source,
+        offset: 0,
+        len: 0,
+        buf_idx_or_off: 0,
+        user_data: 7,
+        args: [0, source as u64 + 1, 0, 0],
+    };
+    let read = |source: u32, buf: u32, len: u32| Submission {
+        buf_idx_or_off: buf,
+        len,
+        ..sqe(OP_READ, source)
+    };
+    let pooled = |source: u32, pool_inc: u64, len: u32| {
+        let mut q = sqe(OP_READ, source);
+        q.flags = SQE_BUFFER_SELECT as u8;
+        q.buf_idx_or_off = 7;
+        q.args[2] = pool_inc;
+        q.len = len;
+        q
+    };
+    let walk = |source: u32, dest: u32, at: u64, len: u32| {
+        let mut q = sqe(OP_WALK, source);
+        q.offset = dest as u64;
+        q.args[2] = dest as u64 + 1;
+        q.args[0] = at;
+        q.len = len;
+        q
+    };
+    // The payload before the fid's access: a bad buffer from a fid no LOPEN
+    // opened answers EINVAL, a good one EACCES.
+    let sim = fixture(&mut buf);
+    let mut s = sim.s();
+    assert_eq!(s.admit_one(read(1, 5, 4)), EINVAL);
+    assert_eq!(s.admit_one(read(1, 0, 4)), EACCES);
+    // ... and before the fid's state: a destination not yet walked to.
+    assert_eq!(s.admit_one(read(3, 5, 4)), EINVAL);
+    assert_eq!(s.admit_one(read(3, 0, 4)), ENOENT);
+    // The pool before the fid's access.
+    assert_eq!(s.admit_one(pooled(1, 99, 4)), ENOENT);
+    assert_eq!(s.admit_one(pooled(1, 8, 4)), EACCES);
+    // Every member must hold the whole pooled read (provided_bounds).
+    assert_eq!(s.admit_one(pooled(2, 8, 8)), EINVAL);
+    assert_eq!(s.admit_one(pooled(2, 8, 4)), 0);
+    drop(s);
+    drop(sim);
+    // The name before the fid: from an opened fid a bad name answers EINVAL, a
+    // good one EBADF (walk(5)).
+    let sim = fixture(&mut buf);
+    let mut s = sim.s();
+    assert_eq!(s.admit_one(walk(2, 3, 0, 3)), EINVAL);
+    assert_eq!(s.admit_one(walk(2, 3, 4, 4)), EBADF);
+    // loom_fid_claim_walk: another scope's destination answers ECANCELED, one
+    // already walked to EBUSY, and an admitted WALK claims its destination.
+    assert_eq!(s.admit_one(walk(1, 5, 0, 0)), ECANCELED);
+    assert_eq!(s.admit_one(walk(1, 6, 0, 0)), EBUSY);
+    assert_eq!(s.admit_one(walk(1, 3, 0, 0)), 0);
+    assert_eq!(s.admit_one(walk(0, 3, 0, 0)), EBUSY);
+    drop(s);
+    drop(sim);
+    // loom_fid_begin_clunk: a FID only, retired the moment it is admitted.
+    let sim = fixture(&mut buf);
+    let mut s = sim.s();
+    assert_eq!(s.admit_one(sqe(OP_CLUNK, 0)), ENOENT);
+    assert_eq!(s.admit_one(sqe(OP_CLUNK, 8)), 0);
+    assert_eq!(s.admit_one(sqe(OP_CLUNK, 8)), ENOENT);
+    assert_eq!(s.admit_one(read(8, 5, 4)), ENOENT);
+    assert_eq!(s.admit_one(sqe(OP_CLUNK, 6)), 0);
+}

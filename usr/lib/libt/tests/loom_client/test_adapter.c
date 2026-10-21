@@ -1746,6 +1746,120 @@ static void a_dropped_ring_used_again_ends_the_process(void) {
     expect_fatal("t_loom_retired", ask_a_dropped_ring_if_retired);
 }
 
+/* ENTER's admission in the kernel's order (frontend_dispatch): the source's
+ * scope (loom_admission_scope_locked), then the payload (loom_private_io_prepare,
+ * loom_provided_prepare), then the fid (loom_fid_*); and what an admitted CLUNK
+ * or WALK holds at once. Each pair is a refusal and its control one variable
+ * away. Slots: 0 scope, 1 fid, 2 fid opened for both, 3 a WALK's destination,
+ * 4 another scope, 5 its destination, 6 a READY fid, 7 a pool of members 16
+ * and 4 bytes long, 8 a fid to clunk; slot i has incarnation i + 1. */
+static unsigned char adm_buf[8];
+static struct sim *adm_fixture(void) {
+    struct sim *s = new_sim();
+    static const struct { unsigned kind; uint32_t state; size_t scope; unsigned open; } k[9] = {
+        { SIM_SCOPE, SIM_READY, 0, 0 },    { SIM_FID, SIM_READY, 0, 0 }, { SIM_FID, SIM_READY, 0, 3 },
+        { SIM_FID, SIM_RESERVED, 0, 0 },   { SIM_SCOPE, SIM_READY, 4, 0 }, { SIM_FID, SIM_RESERVED, 4, 0 },
+        { SIM_FID, SIM_READY, 0, 0 },      { SIM_POOL, SIM_READY, 0, 0 }, { SIM_FID, SIM_READY, 0, 0 },
+    };
+    for (size_t i = 0; i < 9; ++i)
+        s->slots[i] = (struct sim_slot){ .used = 1, .kind = k[i].kind, .state = k[i].state, .scope = k[i].scope,
+                                         .open = k[i].open, .inc = i + 1 };
+    s->next_inc = 10;
+    memcpy(adm_buf, "a/bxname", 8);
+    s->buffers[0] = (struct sim_region){ (uintptr_t)adm_buf, sizeof(adm_buf), NULL };
+    s->nbuffers = 1;
+    s->pool_members[7] = 2;
+    s->pools[7][0].range.length = 16;
+    s->pools[7][1].range.length = 4;
+    return s;
+}
+static struct t_loom_sqe adm_sqe(uint8_t opcode, uint32_t source) {
+    struct t_loom_sqe q = { 0 };
+    q.opcode = opcode;
+    q.handle_idx = source;
+    q.user_data = 7;
+    q._resv1[1] = source + 1;
+    return q;
+}
+static struct t_loom_sqe adm_read(uint32_t source, uint32_t buf, uint32_t len) {
+    struct t_loom_sqe q = adm_sqe(T_LOOM_OP_READ, source);
+    q.buf_idx_or_off = buf;
+    q.len = len;
+    return q;
+}
+static struct t_loom_sqe adm_pooled(uint32_t source, uint64_t pool_inc, uint32_t len) {
+    struct t_loom_sqe q = adm_sqe(T_LOOM_OP_READ, source);
+    q.flags = T_LOOM_SQE_BUFFER_SELECT;
+    q.buf_idx_or_off = 7;
+    q._resv1[2] = pool_inc;
+    q.len = len;
+    return q;
+}
+static struct t_loom_sqe adm_walk(uint32_t source, uint32_t dest, uint64_t at, uint32_t len) {
+    struct t_loom_sqe q = adm_sqe(T_LOOM_OP_WALK, source);
+    q.offset = dest;
+    q._resv1[2] = dest + 1;
+    q._resv1[0] = at;
+    q.len = len;
+    return q;
+}
+static void admission_follows_the_kernels_order(void) {
+    struct t_loom_sqe q;
+    /* The payload before the fid's access: a bad buffer from a fid no LOPEN
+     * opened answers EINVAL, a good one EACCES. */
+    struct sim *s = adm_fixture();
+    q = adm_read(1, 5, 4);
+    assert(sim_admit(s, &q) == SIM_EINVAL);
+    q = adm_read(1, 0, 4);
+    assert(sim_admit(s, &q) == SIM_EACCES);
+    /* ... and before the fid's state: a destination not yet walked to. */
+    q = adm_read(3, 5, 4);
+    assert(sim_admit(s, &q) == SIM_EINVAL);
+    q = adm_read(3, 0, 4);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
+    /* The pool before the fid's access. */
+    q = adm_pooled(1, 99, 4);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
+    q = adm_pooled(1, 8, 4);
+    assert(sim_admit(s, &q) == SIM_EACCES);
+    /* Every member must hold the whole pooled read (provided_bounds). */
+    q = adm_pooled(2, 8, 8);
+    assert(sim_admit(s, &q) == SIM_EINVAL);
+    q = adm_pooled(2, 8, 4);
+    assert(sim_admit(s, &q) == 0);
+    free(s);
+    /* The name before the fid: from an opened fid a bad name answers EINVAL,
+     * a good one EBADF (walk(5)). */
+    s = adm_fixture();
+    q = adm_walk(2, 3, 0, 3);
+    assert(sim_admit(s, &q) == SIM_EINVAL);
+    q = adm_walk(2, 3, 4, 4);
+    assert(sim_admit(s, &q) == SIM_EBADF);
+    /* loom_fid_claim_walk: another scope's destination answers ECANCELED, one
+     * already walked to EBUSY, and an admitted WALK claims its destination. */
+    q = adm_walk(1, 5, 0, 0);
+    assert(sim_admit(s, &q) == SIM_ECANCELED);
+    q = adm_walk(1, 6, 0, 0);
+    assert(sim_admit(s, &q) == SIM_EBUSY);
+    q = adm_walk(1, 3, 0, 0);
+    assert(sim_admit(s, &q) == 0);
+    q = adm_walk(0, 3, 0, 0);
+    assert(sim_admit(s, &q) == SIM_EBUSY);
+    free(s);
+    /* loom_fid_begin_clunk: a FID only, retired the moment it is admitted. */
+    s = adm_fixture();
+    q = adm_sqe(T_LOOM_OP_CLUNK, 0);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
+    q = adm_sqe(T_LOOM_OP_CLUNK, 8);
+    assert(sim_admit(s, &q) == 0);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
+    q = adm_read(8, 5, 4);
+    assert(sim_admit(s, &q) == SIM_ENOENT);
+    q = adm_sqe(T_LOOM_OP_CLUNK, 6);
+    assert(sim_admit(s, &q) == 0);
+    free(s);
+}
+
 #define T(name) { #name, name }
 static const struct { const char *name; void (*run)(void); } tests[] = {
     T(setup_registers_every_buffer_and_drop_detaches_every_region),
@@ -1817,6 +1931,7 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(a_refused_buffer_registration_closes_the_ring),
     T(a_misaligned_attach_is_detached),
     T(a_read_result_keeps_the_storage_until_it_drops),
+    T(admission_follows_the_kernels_order),
     /* The C interface's own. */
     T(setup_refuses_a_bad_shape_before_the_kernel),
     T(asking_for_another_kinds_completion_answers_einval),
@@ -1828,8 +1943,8 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(a_dropped_ring_used_again_ends_the_process),
 };
 #undef T
-/* The 69 scenarios of tests/native.rs, then the C interface's own eight. */
-_Static_assert(sizeof(tests) / sizeof(tests[0]) == 77, "every scenario of tests/native.rs and the C interface's own");
+/* The 70 scenarios of tests/native.rs, then the C interface's own eight. */
+_Static_assert(sizeof(tests) / sizeof(tests[0]) == 78, "every scenario of tests/native.rs and the C interface's own");
 
 /* With a name, runs only that scenario (exit 2 for an unknown one). */
 int main(int argc, char **argv) {
@@ -1846,6 +1961,6 @@ int main(int argc, char **argv) {
         printf("C native adapter scenario %s PASS\n", argv[1]);
         return 0;
     }
-    puts("C seventy-seven native adapter scenarios PASS");
+    puts("C seventy-eight native adapter scenarios PASS");
     return 0;
 }
