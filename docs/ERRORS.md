@@ -622,7 +622,9 @@ freopen with no name changes the status through fcntl's F_SETFL. The append bit
 is fixed when the file is opened, so a mode other than "a" restates the
 descriptor's own (an append descriptor keeps appending, where Linux would stop),
 and "a" on a descriptor opened without O_APPEND is EINVAL and, as POSIX directs
-for a failed freopen, closes the stream.
+for a failed freopen, closes the stream. Over a tagged Pouch socket the first
+F_GETFL answers ENOSYS, so freopen with no name fails and closes that stream
+too, as it did before B-3b, when every freopen with no name failed.
 
 ### Probe and parent (B-3b, vote 6)
 

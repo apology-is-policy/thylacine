@@ -136,6 +136,10 @@ int main(void) {
  RESET2(0,-EBADF);CASE("pipe2-gone-second-end",tested_pipe2(pf,O_CLOEXEC)==-1 && errno==EBADF && calls==2 && close_calls==1 && closed[0]==5 && args0[1]==6 && pf[0]==-7);
  RESET2(0,-EINVAL);CASE("pipe2-set-fails-closes-both",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==-1 && errno==EINVAL && close_calls==2 && closed[0]==5 && closed[1]==6 && cancellable_closes==0);
  RESET2(-1,0);CASE("pipe2-old-kernel",tested_pipe2(pf,O_CLOEXEC)==-1 && errno==ENOSYS && close_calls==2 && closed[0]==5 && closed[1]==6 && cancellable_closes==0 && args0[0]==5);
+ /* A refused close-on-exec set fails the call even when nonblock was asked
+  * too: the nonblock set never runs, so it cannot answer for it. */
+ RESET2(-1,0);CASE("pipe2-both-old-kernel",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==-1 && errno==ENOSYS && calls==1 && numbers[0]==130 && close_calls==2 && closed[0]==5 && closed[1]==6 && cancellable_closes==0 && pf[0]==-7);
+ RESET2(-EINVAL,0);CASE("pipe2-both-cloexec-refused",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==-1 && errno==EINVAL && calls==1 && numbers[0]==130 && close_calls==2 && closed[0]==5 && closed[1]==6 && pf[0]==-7);
  RESET(0);pipe_fail=1;CASE("pipe2-pipe-fails",tested_pipe2(pf,O_CLOEXEC)==-1 && errno==EMFILE && calls==0 && close_calls==0);
  /* pouch_set_cloexec (open, fdopen "e", freopen "e"): a tagged socket never
   * reaches the native call. */

@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-20
+updated: 2026-10-21
 ---
 ## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
 
@@ -168,9 +168,13 @@ and [[sub-kernel-syscall-abi]].
 
 ## Handle metadata query (October 11; main B-3b)
 
-Native 129 range-checks the full u64 argument before narrowing, then invokes
-`handle_get_cloexec` for the current process. The existing table lock covers
-live-slot validation and flag read. No user-memory access, object operation,
+Native 129 range-checks the full u64 argument before narrowing, then calls
+`handle_get_status` for the current process, which reads the slot's
+close-on-exec flag, its open mode and its nonblock flag in one hold of the
+table lock, and answers the status word: bit 0 close-on-exec, the access mode
+in bits 8-9 (masked, so OTRUNC and OAPPEND never reach it), nonblock 0x400 and
+append 0x800 (from the open mode's OAPPEND) -- the layout
+[[sub-kernel-syscall-abi]] gives. No user-memory access, object operation,
 allocation or rights/capability acquisition occurs. EBADF describes an invalid
 slot; EINVAL describes a missing current thread/process. Linux kill (129) is a
 Vivarium TIER2 row, consumed before native dispatch. The metadata does not
