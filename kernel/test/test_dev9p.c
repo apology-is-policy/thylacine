@@ -3543,11 +3543,13 @@ void test_dev9p_wb_server_ebadf_reads_eio(void) {
     long we = dev9p.write(f, chunk, 256, 0);
     g_twrite_fail_ecode = T_E_BADF;
     long fe = dev9p.fsync(f, 0);
+    u32 seen = g_twrite_seen;
     g_twrite_fail_ecode = 0;
     int crc = spoor_clunk_rc(f);
     wb_test_end(root);
 
     TEST_EXPECT_EQ((u64)we, 256ull, "stage");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "the fsync's flush Twrite went out");
     TEST_EXPECT_EQ((u64)(-fe), (u64)T_E_IO, "a server's EBADF on the flush reads EIO");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-T_E_IO, "the close returns the latched EIO");
 }

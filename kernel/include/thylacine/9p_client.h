@@ -489,7 +489,8 @@ void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out);
 
 // Drive the Tversion + Tattach handshake. After this returns 0 the
 // session is OPEN and the root_fid is bound. Returns 0 on success,
-// negative errno on failure. On Rlerror, returns -Rlerror.ecode.
+// negative errno on failure. On Rlerror, returns -Rlerror.ecode (EBADF
+// reads -EIO, as for every op).
 int  p9_client_handshake(struct p9_client *c,
                           const u8 *uname, size_t uname_len,
                           const u8 *aname, size_t aname_len,

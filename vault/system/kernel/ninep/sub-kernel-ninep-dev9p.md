@@ -615,6 +615,8 @@ A server's EBADF never reaches the arm: the client reads it as `-EIO` at
 `dev9p.wb_server_ebadf_reads_eio` drives it through an open file: a flush
 Twrite the server answers EBADF makes the fsync and the close read EIO, and
 `wb_fsync_flush_and_error`, whose ENOSPC crosses as itself, is the control.
+On a close the closer finishes (an exit close), that EIO takes the closer's
+bounded retry, as a server's EIO always did ([[sub-kernel-ninep-attach]]).
 [[seam-fstat-errno-flattened-above-the-leaf]] records the comment's earlier
 claim that both callers propagated, when the fstat half flattened to `-1`.
 

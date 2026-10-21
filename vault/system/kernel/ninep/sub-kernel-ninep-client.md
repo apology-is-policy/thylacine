@@ -643,9 +643,11 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   live, so passed through it would read as the handle gate's verdict. Every
   server errno reaches an errno at `map_error` and nowhere else, at all three
   sites (the sync op, the handshake, the async completion), so one test
-  covers every path: read, write, fsync and close on an open file, the
-  resolver's calls (open, stat, lstat, readlink, create) and the attach
-  beside a srv fd. `9p_client.rlerror_ebadf_reads_eio` reads ecode 9 as
+  covers every path, among them read, write, fsync and close on an open
+  file, the resolver's calls (open, stat, lstat, readlink, create), the name
+  ops that forward the server's verdict (unlink, rename), a Loom 9P op's CQE
+  and the attach beside a srv fd. The closer's bounded retry of a close
+  job's -EIO now covers a server's EBADF too ([[sub-kernel-ninep-attach]]). `9p_client.rlerror_ebadf_reads_eio` reads ecode 9 as
   `-EIO` and its neighbours 8 and 10 as themselves;
   `p9_attached.handshake_rlerror_ebadf_reads_eio` and
   `dev9p.wb_server_ebadf_reads_eio` (a flush Twrite answered EBADF: the

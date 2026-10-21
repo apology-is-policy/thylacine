@@ -34,9 +34,11 @@ changes.
 A 9P server's EBADF reads -EIO on every call that reaches a server (operator
 vote 2026-10-21 #16; `docs/ERRORS.md`: only the kernel's handle gate answers
 EBADF). The 9P client folds it where an Rlerror ecode becomes an errno, so
-read, write, fsync and close on an open file, the resolver's calls (SYS_OPEN,
-SYS_STAT, SYS_LSTAT, SYS_READLINK, the create arm) and SYS_ATTACH_9P /
-SYS_ATTACH_9P_SRV all answer -EIO where they answered -EBADF. Every other
+every call a server's errno reaches answers -EIO where it answered -EBADF:
+among them read, write, fsync and close on an open file, the resolver's calls
+(SYS_OPEN, SYS_STAT, SYS_LSTAT, SYS_READLINK, the create arm), SYS_UNLINK and
+SYS_RENAME, a Loom 9P operation's CQE, and SYS_ATTACH_9P /
+SYS_ATTACH_9P_SRV. Every other
 server errno crosses as itself. No number, record or layout changes.
 
 Mirrors: the libt and Rust wrapper comments say 0 / -errno, and libthyla-rs's

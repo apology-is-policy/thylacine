@@ -698,7 +698,8 @@ static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
 
 // Run a close job, retried like closer_send while the fid is still bound on a
 // live session: a write never sent for want of memory comes back -P9_E_IO
-// too, and a resend of the run's explicit offsets is idempotent.
+// too, as does a server's EIO or EBADF (map_error folds EBADF), and a resend
+// of the run's explicit offsets is idempotent.
 static int closer_run_job(struct p9_closer *self, struct p9_attached *a,
                           struct p9_closer_entry *e) {
     u64 backoff = CLOSER_RETRY_NS_MIN;

@@ -90,7 +90,9 @@ Tclunk is sent.
   the job-less form. A job whose run fails with `-P9_E_IO` while the fid is
   still bound is run again with `closer_send`'s backoff (`closer_run_job`: 10
   tries from 1 ms, about 1 s): a write never sent for want of memory comes
-  back as the same `-EIO` as a server's refusal, and a resend at the run's
+  back as the same `-EIO` as a server's refusal (its EIO, or its EBADF, which
+  `map_error` folds to EIO since vote 2026-10-21 #16, so a server's EBADF on a
+  close job is retried too where it once ended the job), and a resend at the run's
   explicit offsets is idempotent (witness
   `p9_closer.close_job_retries_a_refused_write`). A job whose run still fails
   while the session holds the fid prints `9p: close: flush of fid N failed rc R`

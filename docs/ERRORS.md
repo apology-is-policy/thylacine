@@ -416,13 +416,16 @@ errno almost always already exists at the failure source — it is only
   nothing. A 9P server's `EBADF` is a verdict on the server's own fid, and
   the caller's descriptor is live, so the 9P client reads an `Rlerror` ecode
   9 as `-T_E_IO` (`map_error`, the one place an ecode becomes an errno).
-  This covers every path a server's errno takes: `read`, `write`, `fsync`
-  and `close` on an open file, every call the resolver runs (`SYS_OPEN`,
-  `SYS_STAT`, `SYS_LSTAT`, `SYS_READLINK`, create), and `SYS_ATTACH_9P` /
+  Every path a server's errno takes passes through it, among them `read`,
+  `write`, `fsync` and `close` on an open file, every call the resolver
+  runs (`SYS_OPEN`, `SYS_STAT`, `SYS_LSTAT`, `SYS_READLINK`, create), the
+  name operations that forward the server's verdict (`SYS_UNLINK`,
+  `SYS_RENAME`), a Loom 9P operation's completion, and `SYS_ATTACH_9P` /
   `SYS_ATTACH_9P_SRV` beside the caller's server descriptor. Every other
   server errno still crosses as itself. Plan 9 and Linux's v9fs pass a
-  server's error through unchanged; this rule is Thylacine's own, and no
-  kernel or library code reads a server's `EBADF`.
+  server's error through unchanged; this rule is Thylacine's own. No kernel
+  or library code reads a server's `EBADF`; the closer's bounded retry of a
+  close job's `EIO` now covers it as well.
 - **Backward-compatible**: native `libthyla-rs`/`libt` callers test `r < 0`
   — a `-2`/`-17` is still `< 0`, so no native consumer regresses; pouch
   and Go observe the *correct* POSIX errno instead of `EIO`/`EPERM`.
@@ -515,7 +518,9 @@ predates this design and is NOT subsumed. Thylacine consumes Stratum
 errors via two surfaces:
 - 9P wire (Stratum's server translates `stm_status_t` -> 9P `Tlerror`
   with a POSIX errno). Thylacine kernel sees the POSIX errno on the
-  client side; no translation needed.
+  client side; no translation needed, except `EBADF`, which the client
+  reads as `EIO` (the binding rule "Only the kernel's handle gate answers
+  `EBADF`").
 - `libstratum-9p` C ABI (Thylacine-userland tools link against this).
   `stm_status_t` constants pass through; the caller must include
   Stratum's header.
