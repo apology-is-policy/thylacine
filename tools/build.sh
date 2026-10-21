@@ -4153,9 +4153,11 @@ populate_stratum_pool() {
 
     # B-3f': the symlink prover's fixture -> /lib/pouch-links, real links of
     # every shape pouch-hello-links reads (live, dangling, absolute, to a
-    # directory, a self-loop, a chain of two), and the dangling `long`, whose
+    # directory, a self-loop, a chain of two), the dangling `long`, whose
     # 64-byte target is exactly the first buffer go-fs's os.Readlink reads
-    # (Stratum keeps a target of at most 100 bytes). Staged from nothing here,
+    # (Stratum keeps a target of at most 100 bytes), and `up` (-> ..), a
+    # directory outside the fixture, which go-fs's os.Root must refuse in
+    # every spelling, a trailing slash included. Staged from nothing here,
     # so it cannot be stale; stratum-fs put copies a link AS a link (lstat +
     # readlink). /lib exists by now (the ndb bake). Nothing writes it after.
     local plinks="$BUILD_DIR/pouch-links"
@@ -4169,14 +4171,18 @@ populate_stratum_pool() {
     ln -s loop "$plinks/loop"
     ln -s live "$plinks/chain"
     ln -s "$(printf '%064d' 0 | tr 0 x)" "$plinks/long"
+    ln -s .. "$plinks/up"
     "$stratum_fs_bin" -s "$sock_path" put "$plinks" /lib/pouch-links \
         || { echo "==> populate pool: put /lib/pouch-links FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync (pouch-links) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     [[ "$("$stratum_fs_bin" -s "$sock_path" readlink /lib/pouch-links/abs)" == "/lib/pouch-links/target" ]] \
         || { echo "==> populate pool: /lib/pouch-links/abs readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    [[ "$("$stratum_fs_bin" -s "$sock_path" readlink /lib/pouch-links/long)" == "$(readlink "$plinks/long")" ]] \
-        || { echo "==> populate pool: /lib/pouch-links/long readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    local plink
+    for plink in long up; do
+        [[ "$("$stratum_fs_bin" -s "$sock_path" readlink "/lib/pouch-links/$plink")" == "$(readlink "$plinks/$plink")" ]] \
+            || { echo "==> populate pool: /lib/pouch-links/$plink readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    done
     echo "==> populate pool: /lib/pouch-links baked + readback-verified (B-3f' symlink fixture)"
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 

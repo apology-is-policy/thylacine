@@ -199,6 +199,7 @@ const fix = "/lib/pouch-links"
 var linkTargets = map[string]string{
 	"live": "target", "dead": "nosuch", "dir": "sub", "abs": fix + "/target",
 	"loop": "loop", "chain": "live", "long": strings.Repeat("x", 64),
+	"up": "..",
 }
 
 func links() {
@@ -239,8 +240,13 @@ func links() {
 	check(fmt.Sprintf("ReadDir types live as a link (got %v)", types["live"]), types["live"] == os.ModeSymlink)
 	check(fmt.Sprintf("ReadDir types sub as a directory (got %v)", types["sub"]), types["sub"] == os.ModeDir)
 	check(fmt.Sprintf("ReadDir types target as a file (got %v)", types["target"]), types["target"] == 0)
+	// A trailing slash makes even lstat follow a final link (the kernel's
+	// rule, which the Root below must model).
+	fi, err = os.Lstat(fix + "/up/")
+	check(fmt.Sprintf("os.Lstat(up/) follows to a directory (err %v)", err), err == nil && fi.IsDir())
 	// An os.Root follows the links that stay inside it and refuses the rest:
-	// an absolute target escapes it whatever it names.
+	// an absolute target escapes it whatever it names, and so does up (..),
+	// with or without a trailing slash.
 	r, err := os.OpenRoot(fix)
 	check(fmt.Sprintf("os.OpenRoot(%s) (err %v)", fix, err), err == nil)
 	if err == nil {
@@ -250,6 +256,17 @@ func links() {
 		check(fmt.Sprintf("Root.ReadFile(dir/leaf) goes through the link (err %v)", err), err == nil && string(text) == "pouch-links leaf\n")
 		_, err = r.ReadFile("abs")
 		check(fmt.Sprintf("Root.ReadFile(abs) is refused as an escape (err %v)", err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		for _, name := range []string{"up", "up/", "up//", "up/pouch-links/target"} {
+			f, err := r.Open(name)
+			if err == nil {
+				f.Close()
+			}
+			check(fmt.Sprintf("Root.Open(%s) is refused as an escape (err %v)", name, err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		}
+		_, err = r.Lstat("up/")
+		check(fmt.Sprintf("Root.Lstat(up/) is refused as an escape (err %v)", err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		fi, err = r.Lstat("up")
+		check(fmt.Sprintf("Root.Lstat(up) is the link itself (err %v)", err), err == nil && fi.Mode()&os.ModeSymlink != 0)
 		check("Root.Close", r.Close() == nil)
 	}
 	must(fmt.Sprintf("links: %d checks failed (above)", bad), bad == 0)
