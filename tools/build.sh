@@ -2420,6 +2420,36 @@ VIVEOF
     ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-net" ]] && echo " + alpine-net" )$( [[ -d "$vstage/git-probe" ]] && echo " + git-probe" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
+# apply_patch_exact <tree> <patch> <label>: apply one -p1 patch to <tree>, or
+# exit naming it. Every patch(1) site in this file applies through it.
+#   -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
+#   (the Linux builders) fuzzes up to 2 context lines by default and
+#   says so only on stdout -- a hand-maintained patch that drifted would
+#   apply somewhere near its target, exit 0. A perturbed context line
+#   applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
+#   An offset is refused too: exact context found away from its header
+#   is a hunk that drifted, and a context that recurs in the file is
+#   placed at the nearest copy. The hunk lines come from --verbose,
+#   which BSD and GNU patch print in the same form.
+#   -N: a patch already in the tree fails. -t alone answers it by
+#   applying it in reverse, exit 0, which takes its bytes out again.
+#   check-hunk-context.py: GNU patch matches a hunk with less trailing
+#   than leading context only at the end of its file, where BSD patch
+#   matches it anywhere, so a patch applied here could fail there.
+apply_patch_exact() {
+    local tree="$1" p="$2" label="$3" name out
+    name="$(basename "$p")"
+    python3 "$REPO_ROOT/tools/check-hunk-context.py" "$tree" "$p" >&2 \
+        || { echo "==> $label: $name has a hunk GNU patch cannot place" >&2; exit 1; }
+    out="$(patch --verbose -p1 -t -N -F 0 -d "$tree" -i "$p" 2>&1)" \
+        || { echo "$out" >&2; echo "==> $label: $name does not apply" >&2; exit 1; }
+    if grep -Eq '^Hunk #.*(offset|fuzz)' <<< "$out"; then
+        grep -E '^Hunk #' <<< "$out" >&2
+        echo "==> $label: $name applies away from its hunk headers -- correct them" >&2
+        exit 1
+    fi
+}
+
 build_sysroot() {
     # Phase 6 (Pouch) — build the pouch POSIX libc + cross-compilation sysroot.
     #
@@ -2459,38 +2489,15 @@ build_sysroot() {
     mkdir -p "$pouch_dir" "$musl_obj" "$sysroot"
     cp -R "$vendored" "$musl_src"
 
-    # 2. apply the boundary-line patch series. A failed patch aborts the
-    #    build (set -e); a rejected hunk also leaves a .rej file, caught
-    #    below. The read loop's || [[ -n ]] guard handles a final
+    # 2. apply the boundary-line patch series, each patch under
+    #    apply_patch_exact's rules. A rejected hunk also leaves a .rej file,
+    #    caught below. The read loop's || [[ -n ]] guard handles a final
     #    newline-less line in series.
-    #    -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
-    #    (the Linux builders) fuzzes up to 2 context lines by default and
-    #    says so only on stdout -- a hand-maintained patch that drifted would
-    #    apply somewhere near its target, exit 0. A perturbed context line
-    #    applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
-    #    An offset is refused too: exact context found away from its header
-    #    is a hunk that drifted, and a context that recurs in the file is
-    #    placed at the nearest copy. The hunk lines come from --verbose,
-    #    which BSD and GNU patch print in the same form.
-    #    -N: a patch already in the tree fails. -t alone answers it by
-    #    applying it in reverse, exit 0, which takes its bytes out again.
-    #    check-hunk-context.py: GNU patch matches a hunk with less trailing
-    #    than leading context only at the end of its file, where BSD patch
-    #    matches it anywhere, so a series applied here could fail there.
     echo "==> applying pouch patch series"
-    local patch_out
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac
         echo "    patch: $patch_line"
-        python3 "$REPO_ROOT/tools/check-hunk-context.py" "$musl_src" "$patches_dir/$patch_line" >&2 \
-            || { echo "==> pouch sysroot: $patch_line has a hunk GNU patch cannot place" >&2; exit 1; }
-        patch_out="$(patch --verbose -p1 -t -N -F 0 -d "$musl_src" -i "$patches_dir/$patch_line" 2>&1)" \
-            || { echo "$patch_out" >&2; echo "==> pouch sysroot: $patch_line does not apply" >&2; exit 1; }
-        if grep -Eq '^Hunk #.*(offset|fuzz)' <<< "$patch_out"; then
-            grep -E '^Hunk #' <<< "$patch_out" >&2
-            echo "==> pouch sysroot: $patch_line applies away from its hunk headers -- correct them" >&2
-            exit 1
-        fi
+        apply_patch_exact "$musl_src" "$patches_dir/$patch_line" "pouch sysroot"
     done < "$patches_dir/series"
     local rej
     rej="$(find "$musl_src" -name '*.rej')"
@@ -5218,9 +5225,8 @@ build_sdl2() {
 
     local p
     for p in "$port_dir"/patches/*.patch; do
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$sdl_src" -i "$p"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$sdl_src" "$p" "sdl2"
     done
     cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
     mkdir -p "$sdl_src/src/video/thylacine" "$sdl_src/src/audio/thylacine"
@@ -5657,9 +5663,8 @@ build_tyrquake() {
         "$tq_vendor/external" "$tq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$tq_src" -i "$qp"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$tq_src" "$qp" "tyrquake"
     done
 
     # The window-icon header is upstream-GENERATED (ImageMagick over the
@@ -6179,13 +6184,8 @@ build_dosbox_x() {
         # skipped hunk (patch -t) after a vendored-tree bump would compile with
         # __thylacine__ defined but WITHOUT the dynrec CAP_JIT arm -> the malloc
         # fallback hands back a non-executable region -> a runtime fault the gate
-        # only catches downstream. The dosbox patches all apply rc=0 (verified).
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$dbx_src" -i "$pp" || {
-            echo "==> dosbox-x: patch $(basename "$pp") FAILED to apply" >&2
-            exit 1
-        }
+        # only catches downstream. The pouch series' rules (apply_patch_exact).
+        apply_patch_exact "$dbx_src" "$pp" "dosbox-x"
     done
 
     # Include search: the src root (config.h + shared headers), the top include/,
@@ -6425,9 +6425,8 @@ build_vkquake() {
     cp -R "$vq_vendor/Quake" "$vq_vendor/Shaders" "$vq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$vq_src" -i "$qp"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$vq_src" "$qp" "vkquake"
     done
 
     # The curated object list (upstream Quake/Makefile OBJS; codecs
@@ -6553,9 +6552,8 @@ prepare_gnumake_src() {
     local p
     for p in "$port_dir"/patches/*.patch; do
         [[ -e "$p" ]] || continue
-        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
-        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
-        patch -s -p1 -t -F 0 -d "$dest" -i "$p"
+        # The pouch series' rules (apply_patch_exact); every port patch meets them.
+        apply_patch_exact "$dest" "$p" "gnumake"
     done
 }
 
@@ -7088,8 +7086,7 @@ cmake_lib() {
     [[ -f "$src/CMakeLists.txt" ]] \
         || { echo "==> $name: unexpected tarball layout (no $top/CMakeLists.txt)" >&2; exit 1; }
     for p in ${patches[@]+"${patches[@]}"}; do
-        patch -d "$src" -p1 -t -F 0 -s < "$p" \
-            || { echo "==> $name: patch $(basename "$p") does not apply" >&2; exit 1; }
+        apply_patch_exact "$src" "$p" "$name"
     done
     for x in ${extras[@]+"${extras[@]}"}; do
         tar -xf "$BUILD_DIR/cache/${x%%=*}" -C "$src" \
@@ -7291,8 +7288,7 @@ endian = 'little'
     [[ -f "$src/meson.build" ]] \
         || { echo "==> $name: unexpected tarball layout (no $top/meson.build)" >&2; exit 1; }
     for p in ${patches[@]+"${patches[@]}"}; do
-        patch -d "$src" -p1 -t -F 0 -s < "$p" \
-            || { echo "==> $name: patch $(basename "$p") does not apply" >&2; exit 1; }
+        apply_patch_exact "$src" "$p" "$name"
     done
     printf '%s' "$cross" > "$base/cross.ini"
     # nofallback: a dependency comes from the directories above or not at all,

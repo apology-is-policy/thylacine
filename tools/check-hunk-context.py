@@ -44,8 +44,10 @@ def hunks(lines):
             i += 1
             if b.startswith("\\"):
                 continue
+            # A tab-led or empty line is context, as GNU patch reads it (pch.c:
+            # "assume the space got eaten").
             tag = b[:1]
-            if tag in (" ", ""):
+            if tag in (" ", "\t", ""):
                 seen_o += 1
                 seen_n += 1
                 body.append(" ")

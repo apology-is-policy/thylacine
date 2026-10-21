@@ -236,8 +236,21 @@ and GNU agreed on all 62 patches and on 91 mutants (one middle hunk with a
 trailing or a leading context line dropped), refusing exactly 0012 and 0043
 before the fix and nothing after; the loop, extracted from this file and
 driven under both patches, applies the series, refuses the old series at
-0012 on either host, and refuses 0062 listed twice. The port patch loops are
-not yet fuzz-strict.
+0012 on either host, and refuses 0062 listed twice. A hunk body line that
+starts with a tab is context to GNU patch (a space taken by a mail or an
+editor), and the check reads it the same way.
+
+The rules live in one function, `apply_patch_exact`, which every `patch`
+site in this file calls: the series, the SDL2, tyrquake, dosbox-x, vkquake
+and gnumake copies, and the `cmake_lib` / `meson_lib` tarball ports. Before
+it, the port sites ran `patch -t -F 0` alone, with no offset check, no `-N`
+and no context check, and four port patches broke a rule: SDL2's 0002 had a
+hunk that GNU patch 2.7.6 refused at `-F 0` (so the SDL2 port could not
+build on a Linux host), and SDL2's 0003 and vkquake's 0003 and 0005 applied
+4 to 7 lines from their headers. 0002 now carries a third trailing context
+line and the other three name where their context sits; each port, applied
+through the function on a fresh copy of its tree, gives the same tree under
+both patches, and the same sources as the old patches gave.
 
 **The spawn-args mirror check runs beside it (2026-09-29).**
 `tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the

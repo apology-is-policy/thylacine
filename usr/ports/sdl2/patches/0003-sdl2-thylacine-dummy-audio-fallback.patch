@@ -18,7 +18,7 @@ One hunk against the pristine vendored tree.
 
 --- a/src/audio/dummy/SDL_dummyaudio.c
 +++ b/src/audio/dummy/SDL_dummyaudio.c
-@@ -54,7 +54,13 @@
+@@ -60,7 +60,13 @@
  }
  
  AudioBootStrap DUMMYAUDIO_bootstrap = {

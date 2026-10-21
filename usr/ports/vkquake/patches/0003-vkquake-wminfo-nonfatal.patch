@@ -10,7 +10,7 @@ Downgrade to a Con_Printf.
 
 --- a/Quake/gl_vidsdl.c	2026-08-31 16:02:15
 +++ b/Quake/gl_vidsdl.c	2026-08-31 16:02:15
-@@ -420,9 +420,13 @@
+@@ -424,9 +424,13 @@
  		if (!draw_context)
  			Sys_Error ("Couldn't create window: %s", SDL_GetError());
  
