@@ -13,9 +13,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -162,6 +165,13 @@ func main() {
 	ppid := os.Getppid()
 	must(fmt.Sprintf("os.Getppid names the parent (got %d)", ppid), ppid > 0 && ppid != os.Getpid())
 
+	// 6e. Symbolic links (dec-2026-10-20-native-lstat-readlink), on the pool's
+	//     baked fixture: os.Lstat reports the link itself (SYS_LSTAT),
+	//     os.Readlink reads its target (SYS_READLINK), so filepath.EvalSymlinks
+	//     expands it, and os.ReadDir types it from the qid. Every check runs
+	//     and prints before the leg fails, so one red boot shows them all.
+	links()
+
 	// 7. Rename within the directory (os.Rename -> SYS_RENAME).
 	must("os.Rename", os.Rename(file, renamed) == nil)
 	_, err = os.Stat(file)
@@ -180,4 +190,55 @@ func main() {
 	fmt.Printf("go-fs: wrote+read %d bytes; stat size=%d; seek+readdir+rename+remove OK; NumCPU=%d\n",
 		len(payload), fi.Size(), runtime.NumCPU())
 	fmt.Println("go-fs: STAGE 3a OK (fs file I/O: create/write/read/stat/seek/readdir/rename/remove)")
+}
+
+const fix = "/lib/pouch-links"
+
+// The fixture's targets, as build.sh bakes them. long's is 64 bytes: exactly
+// os.Readlink's first buffer, so reading it must grow the buffer once.
+var linkTargets = map[string]string{
+	"live": "target", "dead": "nosuch", "dir": "sub", "abs": fix + "/target",
+	"loop": "loop", "chain": "live", "long": strings.Repeat("x", 64),
+}
+
+func links() {
+	bad := 0
+	check := func(what string, ok bool) {
+		if !ok {
+			fmt.Printf("go-fs: FAIL: links: %s\n", what)
+			bad++
+		}
+	}
+	for name, want := range linkTargets {
+		p := fix + "/" + name
+		fi, err := os.Lstat(p)
+		check(fmt.Sprintf("os.Lstat(%s) (err %v)", name, err), err == nil)
+		if err == nil {
+			check(fmt.Sprintf("os.Lstat(%s) is a link (mode %v)", name, fi.Mode()), fi.Mode()&os.ModeSymlink != 0)
+			check(fmt.Sprintf("os.Lstat(%s) size is the target's length (got %d)", name, fi.Size()), fi.Size() == int64(len(want)))
+		}
+		got, err := os.Readlink(p)
+		check(fmt.Sprintf("os.Readlink(%s) = %q (err %v)", name, got, err), err == nil && got == want)
+	}
+	fi, err := os.Lstat(fix + "/target")
+	check(fmt.Sprintf("os.Lstat(target) is a regular file (err %v)", err), err == nil && fi.Mode().IsRegular())
+	fi, err = os.Stat(fix + "/live")
+	check(fmt.Sprintf("os.Stat(live) follows to the target (err %v)", err), err == nil && fi.Mode().IsRegular() && fi.Size() == int64(len("pouch-links target\n")))
+	_, err = os.Stat(fix + "/dead")
+	check(fmt.Sprintf("os.Stat(dead) is not-exist (err %v)", err), os.IsNotExist(err))
+	_, err = os.Readlink(fix + "/target")
+	check(fmt.Sprintf("os.Readlink of a file is EINVAL (err %v)", err), errors.Is(err, syscall.EINVAL))
+	resolved, err := filepath.EvalSymlinks(fix + "/chain")
+	check(fmt.Sprintf("filepath.EvalSymlinks(chain) = %q (err %v)", resolved, err), err == nil && resolved == fix+"/target")
+	ents, err := os.ReadDir(fix)
+	check(fmt.Sprintf("os.ReadDir(%s) (err %v)", fix, err), err == nil)
+	types := map[string]os.FileMode{}
+	for _, e := range ents {
+		types[e.Name()] = e.Type()
+	}
+	check(fmt.Sprintf("ReadDir types live as a link (got %v)", types["live"]), types["live"] == os.ModeSymlink)
+	check(fmt.Sprintf("ReadDir types sub as a directory (got %v)", types["sub"]), types["sub"] == os.ModeDir)
+	check(fmt.Sprintf("ReadDir types target as a file (got %v)", types["target"]), types["target"] == 0)
+	must(fmt.Sprintf("links: %d checks failed (above)", bad), bad == 0)
+	fmt.Printf("go-fs: links OK (%d links: lstat, readlink, EvalSymlinks, ReadDir types)\n", len(linkTargets))
 }

@@ -357,11 +357,14 @@ Every bake's pool also carries the symlink prover's fixture at
 `/lib/pouch-links` (B-3f', 2026-10-20): the files `target` and `sub/leaf` and
 real links of each shape the prover reads -- `live -> target`,
 `dead -> nosuch`, `dir -> sub`, `abs -> /lib/pouch-links/target`,
-`loop -> loop` and `chain -> live`. They are staged from nothing under
-`$BUILD_DIR/pouch-links` and put with `stratum-fs put`, which copies a link as
-a link (lstat, readlink, `stm_9p_symlink`) and refuses to omit one; the bake
-then syncs and reads `abs` back with `stratum-fs readlink`, and a failed put,
-sync or readback stops it. `pouch-hello-links` is on both curated Pouch lists,
+`loop -> loop` and `chain -> live` -- and the dangling `long`, whose target is
+64 `x`s, exactly the first buffer go-fs's `os.Readlink` reads (Stratum keeps
+a target of at most 100 bytes, so no longer one exists to grow it twice).
+They are staged from nothing under `$BUILD_DIR/pouch-links` and put with
+`stratum-fs put`, which copies a link as a link (lstat, readlink,
+`stm_9p_symlink`) and refuses to omit one; the bake then syncs and reads `abs`
+and `long` back with `stratum-fs readlink`, and a failed put, sync or readback
+stops it. `pouch-hello-links` is on both curated Pouch lists,
 `build_pouch_progs`' build list and the initrd's `bin/` list
 ([[sub-stratum-boot]] runs it), and `pouch-hello-tz` (0060) after it; the time
 zone prover writes its own fixture at run time, so the bake stages none.
