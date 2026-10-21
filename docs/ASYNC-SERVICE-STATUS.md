@@ -5049,10 +5049,14 @@ Folded with it: the corona twin of the backport audit's P3-4, which
 `vault/specs/spec-burrow.md`, which neither tree's close had taught the charge
 record.
 
-**Posture: CLOSED at `acd22142d`, UNBUILT.** Owed: the gate (ci, qual, UBSan,
-production, `ci-smp-gate` N=10: `work/oct19-vote13/gate.sh`) batched with the
-pi bake, with mutants for the counter pin and the rt_sigaction pin
-(`work/oct19-vote13/mutants.sh`, M1-M5).
+**Posture: CLOSED at `acd22142d`; GATE GREEN at `293cdbabe`** (2026-10-21,
+the batch plus the Loom close below; source identical to `5266dea09` outside
+`work/`): mutants M1-M5 killed at their named assertions (the counter pin and
+the rt_sigaction pin; `work/oct19-vote13/mutants-20261021T144327Z`); ci, qual,
+UBSan 1900/1900, production, `ci-smp-gate` 5 configs x N=10
+(`gate-20261021T154754Z`). Gate run 1 (`gate-20261021T145254Z`) was green but
+its program-hash capture was hollow (a glued `cat`); it is kept as the record,
+not counted. The A72/KVM (thyla-pi) axis is pending a re-bake.
 
 ### 2026-10-21: `loom_post_pool_cqe` deleted; the receipt harness drives the live path
 
@@ -5082,5 +5086,10 @@ Audit round (Fable 5.1, cross-family, MODEL start == end): 0 P0 / 0 P1 / 0 P2 /
   mutants (eighteen in all);
 - F4: the AS-2h trigger row did not name `loom_service_provided.c` -> amended.
 
-**Posture: UNBUILT in the guest.** Host: clean + 18 mutants. It rides vote 13's
-gate (M6 and M7 are its guest mutants).
+**Posture: GATE GREEN** (vote 13's gate, corona `293cdbabe`, source identical
+to the close `5266dea09` outside `work/`): guest mutants M1-M7 all killed at
+their named assertions, M6 and M7 being this close's two guards
+(`work/oct19-vote13/mutants-20261021T144327Z`); CONTROL, CONTROL-Q and UBSAN
+1900/1900 with NAMED and D7 PASS, PRODUCTION passes, SMP 5 configs x N=10
+green (`gate-20261021T154754Z`). Host: clean + 18 mutants. The A72/KVM
+(thyla-pi) axis is pending a re-bake.
