@@ -189,7 +189,7 @@ flag set + value verified); exits 0.
 + *   note fd read            SYS_note_open + SYS_read on the returned fd
 + * Audited in P6-pouch-signals-impl (sub-chunk 13a, 4 rounds: 10 P0 +
 + * 7 P1 + 12 P2 + 13 P3 closed). The boundary-line patch 0007-pouch-signals
-+ * adds these aliases so the rewritten src/signal/* references SYS_notify
++ * adds these aliases so the rewritten src/signal files reference SYS_notify
 + * etc. directly rather than the sentinel-blocked SYS_rt_sigaction /
 + * SYS_rt_sigprocmask / SYS_tkill / SYS_kill / SYS_rt_sigreturn.
 + */

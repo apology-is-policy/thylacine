@@ -206,8 +206,13 @@ the pouch musl series is applied with `patch -F 0`: a hunk whose context does
 not match exactly fails the build. That matters on the Linux builders, whose
 GNU `patch` fuzzes up to two context lines by default and says so only on
 stdout; the control was measured — a perturbed context line applies under
-`-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
-fuzz-strict.
+`-F 2` with exit 0 and fails under `-F 0`. `-F 0` does not refuse an offset,
+and three patches still landed away from their headers (0016's two
+`connect.c` hunks, 0028's and 0029's `ioctl.c` hunks; measured 2026-10-21
+with `patch --verbose`). Their headers now name where the context sits, and
+the loop reads each patch's `--verbose` hunk lines and refuses an offset or
+a fuzz: driven on the series with the old 0016, it stopped there. The port
+patch loops are not yet fuzz-strict.
 
 **The spawn-args mirror check runs beside it (2026-09-29).**
 `tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the

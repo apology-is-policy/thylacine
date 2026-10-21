@@ -2460,14 +2460,24 @@ build_sysroot() {
     #    -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
     #    (the Linux builders) fuzzes up to 2 context lines by default and
     #    says so only on stdout -- a hand-maintained patch that drifted would
-    #    apply somewhere near its target, exit 0. Measured 2026-09-21: the
-    #    series applies at fuzz 0 and zero offset; a perturbed context line
+    #    apply somewhere near its target, exit 0. A perturbed context line
     #    applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
+    #    An offset is refused too: exact context found away from its header
+    #    is a hunk that drifted, and a context that recurs in the file is
+    #    placed at the nearest copy. The hunk lines come from --verbose,
+    #    which BSD and GNU patch print in the same form.
     echo "==> applying pouch patch series"
+    local patch_out
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac
         echo "    patch: $patch_line"
-        patch -p1 -t -F 0 -d "$musl_src" -i "$patches_dir/$patch_line"
+        patch_out="$(patch --verbose -p1 -t -F 0 -d "$musl_src" -i "$patches_dir/$patch_line" 2>&1)" \
+            || { echo "$patch_out" >&2; echo "==> pouch sysroot: $patch_line does not apply" >&2; exit 1; }
+        if grep -Eq '^Hunk #.*(offset|fuzz)' <<< "$patch_out"; then
+            grep -E '^Hunk #' <<< "$patch_out" >&2
+            echo "==> pouch sysroot: $patch_line applies away from its hunk headers -- correct them" >&2
+            exit 1
+        fi
     done < "$patches_dir/series"
     local rej
     rej="$(find "$musl_src" -name '*.rej')"

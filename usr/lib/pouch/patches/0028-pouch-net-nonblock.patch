@@ -155,7 +155,7 @@ live TyrQuake connect (the ls-gfx-mp leg).
      char path[24];
 --- a/src/misc/ioctl.c
 +++ b/src/misc/ioctl.c
-@@ -229,6 +229,52 @@
+@@ -228,6 +228,52 @@
  	int fk;
  
  	switch (req) {
