@@ -211,8 +211,24 @@ and three patches still landed away from their headers (0016's two
 `connect.c` hunks, 0028's and 0029's `ioctl.c` hunks; measured 2026-10-21
 with `patch --verbose`). Their headers now name where the context sits, and
 the loop reads each patch's `--verbose` hunk lines and refuses an offset or
-a fuzz: driven on the series with the old 0016, it stopped there. The port
-patch loops are not yet fuzz-strict.
+a fuzz: driven on the series with the old 0016, it stopped there. Two more
+rules keep the series right on a GNU host. `-N` refuses a patch whose changes
+are already in the tree (with `-t` alone, both BSD and GNU patch apply it in
+reverse, exit 0, and the patch's bytes leave the tree with no line saying so).
+And GNU patch reads a hunk with less context after its changes than before as
+the end of a file, so at `-F 0` it places that hunk only there, where BSD
+patch places it anywhere: 0012's second hunk and 0043's first failed under
+GNU patch 2.7.6 and applied on macOS. Both now carry trailing context as long
+as their leading context, and `tools/check-hunk-context.py` runs before each
+patch against the tree it applies to, refusing any hunk with shorter
+trailing than leading context away from its file's end. Measured against GNU
+patch 2.7.6 built from source, walking the series patch by patch: the check
+and GNU agreed on all 62 patches and on 91 mutants (one middle hunk with a
+trailing or a leading context line dropped), refusing exactly 0012 and 0043
+before the fix and nothing after; the loop, extracted from this file and
+driven under both patches, applies the series, refuses the old series at
+0012 on either host, and refuses 0062 listed twice. The port patch loops are
+not yet fuzz-strict.
 
 **The spawn-args mirror check runs beside it (2026-09-29).**
 `tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the

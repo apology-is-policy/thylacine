@@ -19,6 +19,8 @@
 #include <thylacine/types.h>
 #include <thylacine/virtio_pci.h>  // virtio_pci_dev_count
 
+#include "../../arch/arm64/uart.h"
+
 void test_devpci_bestiary_smoke(void);
 void test_devpci_attach_root(void);
 void test_devpci_walk_read_ctl(void);
@@ -236,6 +238,8 @@ void test_devpci_readdir(void) {
     TEST_ASSERT(strict, "root cookies strictly increase");
     TEST_ASSERT(all_dirs, "every root entry is a directory");
     TEST_ASSERT(all_dt_dir, "every root entry's type byte is DT_DIR (4)");
+    if (count == 0)
+        uart_puts("    [skip] devpci.readdir: no PCI function, so no type byte was read\n");
 
     if (count > 0) {
         char bdf[32];

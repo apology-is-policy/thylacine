@@ -42,7 +42,7 @@ IDENTITY-DESIGN section 9.10 rather than decided here.
 diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
 --- a/src/internal/_pouch_fs.h	2026-09-22 10:00:00
 +++ b/src/internal/_pouch_fs.h	2026-09-22 10:00:00
-@@ -28,7 +28,9 @@
+@@ -28,10 +28,12 @@
  #define SYS_thyla_walk_create  54   /* (parent_fd, name, len, omode, perm) */
  #define SYS_thyla_chdir        69   /* (path, len) */
  #define SYS_thyla_getcwd       70   /* (buf, len) -> len */
@@ -52,6 +52,9 @@ diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
  
  /* SYS_open sentinels / omode (mirror kernel/include/thylacine/syscall.h). */
  #define POUCH_FROM_ROOT   ((long)-1)   /* SYS_WALK_OPEN_FROM_ROOT */
+ #define POUCH_OREAD       0u
+ #define POUCH_OWRITE      1u
+ #define POUCH_ORDWR       2u
 diff --color -ruN musl-base/src/unistd/getuid.c b/src/unistd/getuid.c
 --- a/src/unistd/getuid.c	2026-09-22 10:00:00
 +++ b/src/unistd/getuid.c	2026-09-22 10:00:00

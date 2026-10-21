@@ -2466,12 +2466,19 @@ build_sysroot() {
     #    is a hunk that drifted, and a context that recurs in the file is
     #    placed at the nearest copy. The hunk lines come from --verbose,
     #    which BSD and GNU patch print in the same form.
+    #    -N: a patch already in the tree fails. -t alone answers it by
+    #    applying it in reverse, exit 0, which takes its bytes out again.
+    #    check-hunk-context.py: GNU patch matches a hunk with less trailing
+    #    than leading context only at the end of its file, where BSD patch
+    #    matches it anywhere, so a series applied here could fail there.
     echo "==> applying pouch patch series"
     local patch_out
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac
         echo "    patch: $patch_line"
-        patch_out="$(patch --verbose -p1 -t -F 0 -d "$musl_src" -i "$patches_dir/$patch_line" 2>&1)" \
+        python3 "$REPO_ROOT/tools/check-hunk-context.py" "$musl_src" "$patches_dir/$patch_line" >&2 \
+            || { echo "==> pouch sysroot: $patch_line has a hunk GNU patch cannot place" >&2; exit 1; }
+        patch_out="$(patch --verbose -p1 -t -N -F 0 -d "$musl_src" -i "$patches_dir/$patch_line" 2>&1)" \
             || { echo "$patch_out" >&2; echo "==> pouch sysroot: $patch_line does not apply" >&2; exit 1; }
         if grep -Eq '^Hunk #.*(offset|fuzz)' <<< "$patch_out"; then
             grep -E '^Hunk #' <<< "$patch_out" >&2
