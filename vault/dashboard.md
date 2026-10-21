@@ -130,7 +130,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-20 [[chg-2026-10-20-fstat-ebadf]] — SYS_FSTAT answers its errnos: a closed descriptor reads EBADF from fstat and isatty (0061)
 - 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
 - 2026-10-20 [[chg-2026-10-20-raw-open]] — musl's raw opens through openat's translation, and __map_file maps private: time zone files load (0060)
+- 2026-10-20 [[chg-2026-10-20-thread-model-c0]] — Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse
+- 2026-10-20 [[chg-2026-10-20-thread-model-c2]] — Thread-model C2: the kernel stack cache; the guard toggles invalidate by address
 - 2026-10-19 [[chg-2026-10-19-anon-mapping-merge]] — Adjacent anonymous mappings merge; every unmap releases a lazy mapping's pages; a namespace reader keeps only the struct (B-3 vote 2 + SA-5)
-- 2026-10-19 [[chg-2026-10-19-mount-table-dynamic]] — A dynamic mount table, mount errnos, a create's group from its directory, and a windowed /proc/<pid>/ns (B-3 votes 5-7)
-- 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 <!-- generated:end -->

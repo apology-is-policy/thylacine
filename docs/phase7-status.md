@@ -1412,6 +1412,104 @@ table still reaches its caller as ENOENT (dev9p_walk drops the server's error; O
 2026-10-08). The cost of a paste into nora in a tile
 is unmeasured.
 
+## Thread-model C2: the kernel stack cache; guard toggles invalidate by address — 2026-10-20
+
+The second chunk of the thread-model overhaul (`docs/thread-model-review.html`; the Fable report
+`docs/THREAD-MODEL-REVIEW-FABLE.md` E-1, E-2, E-10). No operator decision needed. Squashed from aux-3-c2 as 31babb6ad.
+
+- **E-1 [P2 perf] a global TLB flush per create and per free.** Each of the three constructors allocated an order-3
+  block, made its four guard pages no-access in the direct map and flushed every CPU's whole TLB
+  (`tlbi vmalle1is`); `thread_release` restored them with a second flush. Now `kstack_free` keeps a freed stack in a
+  bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32 blocks, 1 MiB of the TCB reserve) with its guard still no-access, and
+  `kstack_alloc` reuses the most recent one before it asks the buddy, so a create that finds a block and a free that
+  finds room write no PTE and invalidate nothing. Past the bound a stack goes back to the buddy as before. The toggles
+  that remain (a miss, a release, the drain) invalidate the four pages by address, `tlbi vaae1is` each, with the
+  operand masked to VA[55:12]: a kernel address shifted right by 12 would set bits [47:44], the FEAT_TTL level hint.
+- **E-2 [perf] 48 KiB of stores per create.** The kernel stack is no longer zero-filled: the guard is never read, and
+  the whole usable region is poisoned before any block is handed out, fresh or cached. That poison is the ARCH 8.12
+  watermark's reset and the only scrub between two owners of a block, so it moved inside `kstack_alloc`, where a fourth
+  constructor cannot skip it (`thread_kstack_poison` became the static `kstack_poison`).
+- **E-10, partly.** A reap that frees many exited peers in one create now caches their stacks while the cache has
+  room and invalidates by address for the rest; freeing them at the switch is C1.
+
+Tests (`kernel/test/test_kstack.c`): `thread.kstack_cache_reuses_without_guard_toggle`,
+`thread.kstack_cache_keeps_the_guard` (an AT S1E1R probe: guard pages do not translate, usable pages do),
+`thread.kstack_recycled_stack_is_fully_poisoned` (the three start from a drained cache),
+`thread.kstack_cache_is_bounded` (the bound, the release past it and the drain, each released block fully readable
+again), `directmap.tlbi_operand_masks_the_ttl_hint` (against a value worked out by hand),
+`directmap.guard_toggle_invalidates_a_warm_entry` (a guard page this CPU has just read stops translating when the
+toggle returns: the invalidate reached the TLB; AT answers from the TLB on hardware, while QEMU's TCG walks the
+tables), and `thread.kstack_create_free_cost`, a report. - **First tree, 5b1f3dac7.** Suite 2023/2023 (2017 + 6). Boot-kstack peak 10160 bytes, the same as aux-3. A create+free cycle cost 1018 and 958 ns from the cache, 1518 and 1417 ns from the buddy (green, regreen). The baseline, aux-3 26329ad2d plus the cost report alone (a detached commit, 21f728a17), measured 2802 ns per cycle, peak 10160, suite 2018/2018.
+- **Each witness red without its property, on the first tree.** The push opening the guard plus no poison on a handed-out stack: 2014/2023, the four cache tests, the cost report's toggle check and four existing poison witnesses. The drain releasing nothing plus the unmasked operand: 2021/2023, exactly the drain and operand checks. Rebuilt byte-identical.
+- **Multi-CPU gate on 5b1f3dac7** (10:54-11:43Z): 50/50 boots, 0 corruption (the default kernel at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 boots each).
+- **Audit-close tree, c85d0e86c** (11:44-11:50Z). Suite 2024/2024; peak 10160; 924 and 1003 ns from the cache, 1514 and 1570 ns from the buddy. Red: the first pair 2015/2024, the same nine checks, the guard test now failing on the cached block while its control holds on a genuine buddy block; the second pair 2021/2024, the drain, the operand, and the reuse test's own check that the free cached one stack; the toggles invalidating nothing, 2023/2024, exactly the warm-entry check. So on the Mac's M2 under HVF, AT S1E1R answers from the TLB. The unmasked operand left the warm-entry test green: this M2 invalidated despite the wrong level hint, so only the operand test guards the mask. Rebuilt byte-identical.
+- **Multi-CPU gate on the docs tip** (code identical to c85d0e86c): 50/50 boots, 0 corruption (default at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 boots each; 2026-10-21 08:49-09:38Z, after the operator stopped the first attempt on 10-20 for the talk).
+
+Not in C2: E-3, the guard being half of each thread's kernel memory. Halving it needs a kernel-stack VA arena (one
+guard page of address space, four physical pages per stack), which moves stack addresses out of the direct map that
+`kva_to_pa` assumes. That is a chunk of its own, queued.
+
+Audit: Fable 5.1, round 1 (Fable reviewing Opus): 0 P0 / 0 P1 / 0 P2 / 4 P3, all closed. F1 fixed: `kstack_release` extincts when the guard restore fails instead of freeing pages that would fault their next user (no regression test: only a corrupted direct map makes the walk fail). F2 fixed: `directmap.guard_toggle_invalidates_a_warm_entry`, the one red test with the invalidate removed (2023/2024). F3 fixed: the three reuse tests drain the cache first, and the first asserts that the free cached exactly one stack. F4 closed: the dossiers ride the landing commit; nothing operator-visible changed, so the manual is untouched.
+
+## Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU — 2026-10-20
+
+The first chunk of the thread-model overhaul the operator asked for on 10-20 ("take a very close look at
+multi-threading ... together suggest an overhaul -- no matter the cost"). The joint plan is
+`docs/thread-model-review.html`, the Fable report `docs/THREAD-MODEL-REVIEW-FABLE.md`; C0 takes the four findings that
+need no operator decision. Squashed from aux-3-c0 as 099868b62.
+
+- **F-1 [P1] exec against an exiting peer.** `proc_exec_replace` swapped the address space once admission counted no
+  live peer, but a peer that had committed `THREAD_EXITING` could still be on another CPU, between its commit and its
+  last switch-out, and its tail stores the clear-child-tid word through the Proc's translation: into a page
+  `addrspace_destroy` frees, by a stale TLB entry, or into the new image, by a fault that demand-pages through `p->as`.
+  `proc_exec_wait_peers_off_cpu` now spins outside the lock, as `wait_pid` does, until every peer is off its CPU;
+  `proc_reap_exited_threads` then frees them, so the new image starts as one thread with its whole budget (where
+  Linux's `de_thread` leaves it). Test `proc.exec_waits_for_exiting_peer` fabricates the peer (EXITING, `on_cpu`
+  raised), so it runs at any CPU count: in this phase every test thread shares the boot CPU unless it is pinned
+  elsewhere, and an EXITING tail does not yield its CPU. Exec keeps the old address space for the 20 ms the test holds the peer, the wait counter moves (the
+  control), then the swap completes and `thread_count` reads 1. `proc.exec_waits_for_exiting_peer_on_another_cpu`
+  (added at the audit's close) holds the real shape: a real peer pinned to a parked secondary and that CPU kicked, as
+  `test_jit` does, its exit tail held there by a test hook while exec runs on the boot CPU. It does not run at one
+  CPU, and says so.
+- **F-6 [P3] an exit tail keeps its CPU.** `preempt_check_irq` gated on the preempt count and the in-syscall marker
+  only, and `sched()` never requeues an EXITING thread, so on a kthread-shaped path (`userland_enter`'s die-check, an
+  exec failure's exit: interrupts on, neither gate set) an IRQ return could end the tail early, and a last thread out
+  skipped the srv, cap and weft notifies. It now returns, without consuming `need_resched`, for a thread that is not
+  RUNNING. Every dispatch sets the incoming thread RUNNING, the idles included, and the sleep paths hold `wait_lock`
+  with interrupts masked from the state store to `sched()`, so only exit tails see the change. Test
+  `proc.exit_tail_runs_to_its_end`: a preempt armed across three tick returns in an exit tail with interrupts on; the
+  tail finishes, and the preempt is still pending for its own `sched()`. `specs/syscall_irqs.tla` models this
+  function's marker deferral: both clean cfgs at their pinned 18 states, all six must-fail cfgs on their named
+  property.
+- **F-8 [P3] spawn in a dying Proc.** Both spawn arms refuse -EAGAIN when `group_exit_msg` is set, before the reap and
+  the cap; a create racing the claim still dies at its trampoline die-check. (rfork already refuses a dying parent
+  under the lock, IM-2.) Test `proc.spawn_refused_in_dying_proc`, with the cap and the tid space ruled out as the
+  source of the EAGAIN.
+- **F-2 [P2] spent id spaces.** `alloc_next_tid` and the new `alloc_next_pid` saturate by compare-and-swap and return
+  -1 instead of extincting or wrapping; the three thread constructors claim the tid first, `proc_alloc_in` rolls back,
+  the spawn arms answer EAGAIN on a spent tid space (ENOMEM otherwise), and only the boot idles still extinct. Every
+  production caller of the constructors handles NULL; the ones that extinct run once, at boot. Test
+  `thread.tid_and_pid_spaces_refuse_when_spent` parks both counters at the edge.
+
+Evidence (`--config ci`): d75af1f9e suite 2016/2016 (2012 + 4); red with all four fixes dropped 2012/2016 FAIL,
+exactly the four tests, each on its own message; restored, the kernel is byte-identical to the green one (SHA-256)
+and 2016/2016 again. d000bfb1f reorders the exec test to fail on the hazard itself (its first red failed on the wait
+counter, which lives in the dropped function): red 2012/2016 on that line, restored 2016/2016. The audit-close tip
+86491105f (the four P3 fixes and the fifth test): suite 2017/2017 (2012 + 5); red with the same four fixes dropped 2012/2017 FAIL, exactly the five tests, each on its own message and both exec tests on their hazard lines; restored, the kernel is byte-identical to the green one (SHA-256 980d1bc1...) and 2017/2017 again. SMP gate: 50/50 PASS, 0 corruption, on d000bfb1f (the default kernel at 1, 4 and 8 CPUs and UBSan at 4 and 8, 10 boots each; 08:19:52-09:08:27Z), and 50/50 again, 0 corruption, on the audit-close tree (3cabd8927, 09:16:51-10:05:36Z).
+
+Audit: round 1, Fable 5.1 on Opus 5.5, 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed. The dying-gate comment overstated the
+waste (the spawner dies at its own call's return, so one kstack per spawning thread, not a loop's worth); the
+creators' contracts and two lists of who frees an EXITING thread did not name the new refusals or exec; the fabricated
+exec test, on a budget miss, could leave its child spinning in exec (it now abandons the child under the lock both
+read); SPEC-TO-CODE did not say the model leaves the new deferral out. Its one open question, the real two-CPU shape,
+became the fifth test. Docs: sub-kernel-thread, -proc, -sched, -syscall-dispatch and -death, inv-i32, the two thread
+seams, LINEAGE (L-2a amended), AUDIT-TRIGGERS row 66, and SPEC-TO-CODE (the deferral the model leaves out; its
+syscall_irqs pin read 11, and the gate has pinned 18 since dc77a4b06).
+
+Left for later chunks: an exited thread still waits for a create or an exec to be freed (C1 frees it at the switch),
+and the tid space is still a 31-bit cumulative counter a create loop spends in hours, now a refusal rather than an
+extinction (operator decision 2 on the page: 64-bit tids, never reused, recommended).
+
 ## An exited thread is freed at its Proc's next thread create — 2026-10-20
 
 OPEN-BUGS 2026-10-19 15:03Z (P1). An exited peer thread stayed on its Proc's list, counted by the thread cap, until

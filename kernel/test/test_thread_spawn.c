@@ -38,6 +38,23 @@
 //                                            one after another under a
 //                                            non-exempt principal: the cap
 //                                            never refuses (it did at 256).
+//   proc.exit_tail_runs_to_its_end        -- a preempt armed across tick
+//                                            returns does not cut an exit
+//                                            tail short; the tail keeps its
+//                                            CPU to its own sched().
+//   proc.exec_waits_for_exiting_peer      -- exec does not swap the address
+//                                            space while an EXITING peer is
+//                                            still on a CPU, then frees it.
+//   proc.exec_waits_for_exiting_peer_on_another_cpu
+//                                          -- the same with a real peer holding
+//                                            its exit tail on a second CPU.
+//   proc.spawn_refused_in_dying_proc      -- a dying Proc refuses a new
+//                                            thread -EAGAIN.
+//   thread.tid_and_pid_spaces_refuse_when_spent
+//                                          -- the last tid and pid are handed
+//                                            out; past them a create is
+//                                            refused and a spawn answers
+//                                            EAGAIN, never an extinction.
 //
 // The kernel test harness runs at EL1 so we can't drive a full eret-to-
 // EL0 from here; the user-mode SVC dispatch + the userland_enter eret
@@ -48,14 +65,21 @@
 #include "test.h"
 
 #include "../../arch/arm64/mmu.h"   // mmu_kernel_ttbr0_pa (RW-1 B-F1 ctx.ttbr0)
+#include "../../arch/arm64/gic.h"
+#include "../../arch/arm64/timer.h"
+#include "../../arch/arm64/uart.h"
 
+#include <thylacine/addrspace.h>
 #include <thylacine/context.h>
+#include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -65,6 +89,11 @@ void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_reap_exited_threads_frees_peers(void);
 void test_proc_reap_keeps_thread_cap_open(void);
 void test_proc_multi_thread_reap(void);
+void test_proc_exit_tail_runs_to_its_end(void);
+void test_proc_exec_waits_for_exiting_peer(void);
+void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
+void test_proc_spawn_refused_in_dying_proc(void);
+void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
 
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout
@@ -721,4 +750,361 @@ void test_proc_reap_before_sqpoll_charge(void) {
     TEST_EXPECT_EQ(g_rsq_sqpoll_after, 1, "the poller took its charge");
     TEST_EXPECT_EQ(g_rsq_close_rc, 0, "close the SQPOLL ring");
     TEST_EXPECT_EQ(g_rsq_sqpoll_closed, 0, "the charge settled on close");
+}
+
+// ---------------------------------------------------------------------------
+// The exit tail, exec against an exiting peer, a spawn in a dying Proc, and
+// the tid and pid spaces at their edge.
+// ---------------------------------------------------------------------------
+
+// Test hooks (the *_for_test convention; absent from the headers).
+u32  thread_tid_counter_swap_for_test(u32 v);
+u32  proc_pid_counter_swap_for_test(u32 v);
+void proc_exit_tail_test_set_hook(void (*fn)(void));
+u64  proc_exec_peer_oncpu_waits_for_test(void);
+s64  sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
+
+// A user entry and stack the spawn gates accept; nothing maps them, and no
+// thread spawned here reaches EL0 in a passing run.
+#define C0_USER_ENTRY 0x400000u
+#define C0_USER_SP    0x7fff0000u
+
+// The entry of a thread that is created and never readied.
+static void c0_never_entry(void *arg) {
+    (void)arg;
+    thread_exit_self();
+}
+
+static volatile bool g_ett_irqs_on, g_ett_deferred, g_ett_done;
+
+// On the exiting thread, after its EXITING commit: a preempt armed on this CPU
+// across three tick returns with interrupts on. Each return passes every
+// other gate preempt_check_irq has (no lock, no syscall), so only the state
+// gate keeps the tail running.
+static void ett_tail_hook(void) {
+    proc_exit_tail_test_set_hook(NULL);
+    g_ett_irqs_on = !irqs_masked();
+    if (!g_ett_irqs_on) return;              // ticks would never advance
+    unsigned self = smp_cpu_idx_self();
+    sched_set_need_resched_for_test(self);
+    u64 t0 = timer_get_ticks();
+    while (timer_get_ticks() < t0 + 3)
+        __asm__ __volatile__("" ::: "memory");
+    g_ett_deferred = sched_need_resched_pending(self);
+    g_ett_done     = true;
+}
+
+static void ett_entry(void *arg) {
+    (void)arg;
+    proc_exit_tail_test_set_hook(ett_tail_hook);
+    thread_exit_self();
+}
+
+void test_proc_exit_tail_runs_to_its_end(void) {
+    g_ett_irqs_on = g_ett_deferred = g_ett_done = false;
+    int child_pid = rfork(RFPROC, ett_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    proc_exit_tail_test_set_hook(NULL);
+    TEST_EXPECT_EQ(reaped, child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_ASSERT(g_ett_irqs_on, "the tail ran with interrupts on (the exposed shape)");
+    TEST_ASSERT(g_ett_done, "a preempt at a tick return did not end the exit tail");
+    TEST_ASSERT(g_ett_deferred, "the preempt stayed pending for the tail's own sched()");
+}
+
+static struct Proc      *volatile g_ewp_proc;
+static struct Thread    *volatile g_ewp_peer;
+static struct AddrSpace *volatile g_ewp_old;
+static volatile bool g_ewp_ready, g_ewp_setup_failed, g_ewp_swapped, g_ewp_abandoned;
+static volatile int  g_ewp_count_after;
+
+// The exec'ing thread. Its peer is FABRICATED: created, never readied, and
+// committed EXITING with on_cpu raised under the lock -- the state a real
+// peer holds between its exit commit and its last switch-out. The test thread
+// stands in for that peer's CPU and lowers on_cpu once it has seen exec wait,
+// so this runs at any CPU count; the next test holds a real peer on a second
+// CPU. The peer is raised only if the test thread has not given up on the
+// child, decided under the lock both read, so a late child leaves no raised
+// on_cpu for exec to spin on.
+static void ewp_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    struct Thread *peer = thread_create_with_arg(p, c0_never_entry, NULL);
+    struct AddrSpace *nas = peer ? addrspace_alloc(p->page_budget) : NULL;
+    if (!nas) {
+        if (peer) thread_free(peer);
+        __atomic_store_n(&g_ewp_setup_failed, true, __ATOMIC_RELEASE);
+        exits("setup");
+    }
+    irq_state_t s = proc_table_lock_acquire();
+    bool abandoned = g_ewp_abandoned;
+    if (!abandoned) {
+        peer->state = THREAD_EXITING;
+        __atomic_store_n(&peer->on_cpu, true, __ATOMIC_RELEASE);
+        g_ewp_old  = p->as;
+        g_ewp_peer = peer;
+        g_ewp_proc = p;
+        __atomic_store_n(&g_ewp_ready, true, __ATOMIC_RELEASE);
+    }
+    proc_table_lock_release(s);
+    if (abandoned) {
+        thread_free(peer);
+        addrspace_unref(nas);
+        exits("abandoned");
+    }
+
+    proc_exec_replace(p, nas, p->phenotype);
+    g_ewp_swapped = true;
+    s = proc_table_lock_acquire();
+    g_ewp_count_after = p->thread_count;
+    proc_table_lock_release(s);
+    exits("ok");
+}
+
+static bool ewp_as_swapped(struct Proc *p) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool swapped = p->as != g_ewp_old;
+    proc_table_lock_release(s);
+    return swapped;
+}
+
+void test_proc_exec_waits_for_exiting_peer(void) {
+    g_ewp_proc = NULL;
+    g_ewp_peer = NULL;
+    g_ewp_old  = NULL;
+    g_ewp_ready = g_ewp_setup_failed = g_ewp_swapped = g_ewp_abandoned = false;
+    g_ewp_count_after = -1;
+    u64 waits0 = proc_exec_peer_oncpu_waits_for_test();
+
+    int child_pid = rfork(RFPROC, ewp_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    // Soft: past the budget the child is abandoned, not left behind (above).
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_ewp_ready, __ATOMIC_ACQUIRE) ||
+                          __atomic_load_n(&g_ewp_setup_failed, __ATOMIC_ACQUIRE));
+    irq_state_t s = proc_table_lock_acquire();
+    bool abandoned = !g_ewp_ready && !g_ewp_setup_failed;
+    g_ewp_abandoned = abandoned;
+    proc_table_lock_release(s);
+
+    bool waited = false, swapped_early = true;
+    if (g_ewp_ready) {
+        struct Proc *cp = g_ewp_proc;
+        u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (proc_exec_peer_oncpu_waits_for_test() == waits0 && !ewp_as_swapped(cp) &&
+               timer_now_ns() < deadline)
+            sched();
+        waited = proc_exec_peer_oncpu_waits_for_test() != waits0;
+        // The peer stays on its CPU a while longer; exec must keep waiting.
+        u64 hold = timer_now_ns() + 20000000ull;
+        while (timer_now_ns() < hold)
+            sched();
+        swapped_early = ewp_as_swapped(cp);
+        // Lowered on every path: wait_pid's reap waits on it too.
+        __atomic_store_n(&g_ewp_peer->on_cpu, false, __ATOMIC_RELEASE);
+    }
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(!abandoned, "the child reached exec within the budget");
+    TEST_ASSERT(!g_ewp_setup_failed, "setup: a peer and a new address space");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_ASSERT(!swapped_early, "exec kept the old address space while the peer was on its CPU");
+    // The control for the line above: exec was waiting, not merely slow to swap.
+    TEST_ASSERT(waited, "exec found the peer on its CPU and waited");
+    TEST_ASSERT(g_ewp_swapped, "exec finished once the peer was off its CPU");
+    TEST_EXPECT_EQ(g_ewp_count_after, 1, "exec freed the exited peer: the new image starts alone");
+}
+
+static struct Proc      *volatile g_ewr_proc;
+static struct AddrSpace *volatile g_ewr_old;
+static volatile u64      g_ewr_waits0;
+static volatile unsigned g_ewr_peer_cpu, g_ewr_exec_cpu;
+static volatile bool     g_ewr_in_tail, g_ewr_waited, g_ewr_swapped_early;
+static volatile bool     g_ewr_setup_failed, g_ewr_late, g_ewr_swapped;
+static volatile int      g_ewr_count_after;
+
+static bool ewr_as_swapped(void) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool swapped = g_ewr_proc->as != g_ewr_old;
+    proc_table_lock_release(s);
+    return swapped;
+}
+
+// On the peer, after its EXITING commit, still on its own CPU: wait until exec
+// has found it busy (or has swapped without waiting), then hold a while.
+static void ewr_tail_hook(void) {
+    proc_exit_tail_test_set_hook(NULL);
+    g_ewr_peer_cpu = smp_cpu_idx_self();
+    __atomic_store_n(&g_ewr_in_tail, true, __ATOMIC_RELEASE);
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (proc_exec_peer_oncpu_waits_for_test() == g_ewr_waits0 && !ewr_as_swapped() &&
+           timer_now_ns() < deadline)
+        __asm__ __volatile__("yield" ::: "memory");
+    g_ewr_waited = proc_exec_peer_oncpu_waits_for_test() != g_ewr_waits0;
+    u64 hold = timer_now_ns() + 20000000ull;
+    while (timer_now_ns() < hold)
+        __asm__ __volatile__("yield" ::: "memory");
+    g_ewr_swapped_early = ewr_as_swapped();
+}
+
+static void ewr_peer_entry(void *arg) {
+    (void)arg;
+    proc_exit_tail_test_set_hook(ewr_tail_hook);
+    thread_exit_self();
+}
+
+// The exec'ing thread. Its peer is pinned to another CPU and that CPU kicked:
+// the in-kernel phase keeps secondaries parked, and a cross-CPU enqueue does
+// not wake one (test_jit does the same).
+static void ewr_entry(void *arg) {
+    unsigned cpu = (unsigned)(uintptr_t)arg;
+    struct Proc *p = current_thread()->proc;
+    struct AddrSpace *nas = addrspace_alloc(p->page_budget);
+    struct Thread *peer = nas ? thread_create_with_arg(p, ewr_peer_entry, NULL) : NULL;
+    if (!peer) {
+        if (nas) addrspace_unref(nas);
+        __atomic_store_n(&g_ewr_setup_failed, true, __ATOMIC_RELEASE);
+        exits("setup");
+    }
+    irq_state_t s = proc_table_lock_acquire();
+    g_ewr_old = p->as;
+    proc_table_lock_release(s);
+    g_ewr_proc   = p;
+    g_ewr_waits0 = proc_exec_peer_oncpu_waits_for_test();
+    peer->cpu_pinned = true;
+    ready_on(cpu, peer);
+    (void)gic_send_ipi(cpu, IPI_RESCHED);
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!__atomic_load_n(&g_ewr_in_tail, __ATOMIC_ACQUIRE) && timer_now_ns() < deadline)
+        sched();
+    if (!__atomic_load_n(&g_ewr_in_tail, __ATOMIC_ACQUIRE)) {
+        // No exec without the peer in its tail. It runs its entry when its CPU
+        // does and leaves as the last thread, so the Proc still reaps.
+        __atomic_store_n(&g_ewr_late, true, __ATOMIC_RELEASE);
+        addrspace_unref(nas);
+        exits("peer-late");
+    }
+    g_ewr_exec_cpu = smp_cpu_idx_self();
+    proc_exec_replace(p, nas, p->phenotype);
+    g_ewr_swapped = true;
+    s = proc_table_lock_acquire();
+    g_ewr_count_after = p->thread_count;
+    proc_table_lock_release(s);
+    exits("ok");
+}
+
+void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void) {
+    unsigned self = smp_cpu_idx_self();
+    unsigned cpu  = DTB_MAX_CPUS;
+    for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS; c++)
+        if (c != self && g_cpu_alive[c]) { cpu = c; break; }
+    if (cpu == DTB_MAX_CPUS) {
+        uart_puts("  proc.exec_waits_for_exiting_peer_on_another_cpu: one CPU, so it did not run\n");
+        return;
+    }
+    g_ewr_proc   = NULL;
+    g_ewr_old    = NULL;
+    g_ewr_waits0 = 0;
+    g_ewr_peer_cpu = g_ewr_exec_cpu = DTB_MAX_CPUS;
+    g_ewr_in_tail = g_ewr_waited = g_ewr_setup_failed = g_ewr_late = g_ewr_swapped = false;
+    g_ewr_swapped_early = true;
+    g_ewr_count_after   = -1;
+
+    int child_pid = rfork(RFPROC, ewr_entry, (void *)(uintptr_t)cpu);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    proc_exit_tail_test_set_hook(NULL);
+    TEST_EXPECT_EQ(reaped, child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(!g_ewr_setup_failed, "setup: a peer and a new address space");
+    TEST_ASSERT(!g_ewr_late, "the peer reached its exit tail in time");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_EXPECT_EQ(g_ewr_peer_cpu, cpu, "the peer's tail ran on the CPU it was pinned to");
+    TEST_ASSERT(g_ewr_exec_cpu != g_ewr_peer_cpu, "exec ran on another CPU: the real shape");
+    TEST_ASSERT(!g_ewr_swapped_early,
+        "exec kept the old address space while the peer's tail held its CPU");
+    // The control for the line above: exec was waiting, not merely slow to swap.
+    TEST_ASSERT(g_ewr_waited, "exec found the peer on its CPU and waited");
+    TEST_ASSERT(g_ewr_swapped, "exec finished once the peer was off its CPU");
+    TEST_EXPECT_EQ(g_ewr_count_after, 1, "exec freed the exited peer: the new image starts alone");
+}
+
+static volatile bool g_srd_exempt, g_srd_tid_spent;
+static volatile s64  g_srd_rc;
+
+static void srd_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_srd_exempt    = proc_resource_exempt(p);
+    g_srd_tid_spent = thread_tid_space_spent();
+    irq_state_t s = proc_table_lock_acquire();
+    proc_group_terminate(p, 0, "c0-dying");
+    proc_table_lock_release(s);
+    g_srd_rc = sys_thread_spawn_for_test(C0_USER_ENTRY, C0_USER_SP, 0, 0, 0);
+    thread_exit_self();
+}
+
+void test_proc_spawn_refused_in_dying_proc(void) {
+    g_srd_exempt = g_srd_tid_spent = false;
+    g_srd_rc = 0;
+    int child_pid = rfork(RFPROC, srd_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    // EAGAIN has two other sources; rule both out.
+    TEST_ASSERT(g_srd_exempt, "the child is exempt, so the thread cap cannot refuse");
+    TEST_ASSERT(!g_srd_tid_spent, "the tid space has room, so it cannot refuse");
+    TEST_EXPECT_EQ(g_srd_rc, (s64)-T_E_AGAIN, "a dying Proc refuses a new thread");
+}
+
+static volatile int  g_tps_tid;
+static volatile bool g_tps_exempt, g_tps_spent, g_tps_refused, g_tps_pid_refused;
+static volatile s64  g_tps_spawn_rc;
+
+static void tps_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_tps_exempt = proc_resource_exempt(p);
+    // Parked one short of the end: one create fits, then the space is spent.
+    // Nothing between the swaps sleeps, so the window stays short.
+    u32 saved = thread_tid_counter_swap_for_test(0x7ffffffeu);
+    struct Thread *last    = thread_create_with_arg(p, c0_never_entry, NULL);
+    g_tps_spent            = thread_tid_space_spent();
+    struct Thread *refused = thread_create_with_arg(p, c0_never_entry, NULL);
+    g_tps_spawn_rc         = sys_thread_spawn_for_test(C0_USER_ENTRY, C0_USER_SP, 0, 0, 0);
+    thread_tid_counter_swap_for_test(saved);
+    g_tps_tid     = last ? last->tid : -1;
+    g_tps_refused = refused == NULL;
+    if (last)    thread_free(last);
+    if (refused) thread_free(refused);
+
+    u32 saved_pid = proc_pid_counter_swap_for_test(0x7fffffffu);
+    struct Proc *q = proc_alloc();
+    proc_pid_counter_swap_for_test(saved_pid);
+    g_tps_pid_refused = q == NULL;
+    if (q) {
+        q->state = PROC_STATE_ZOMBIE;
+        proc_free(q);
+    }
+    exits("ok");
+}
+
+void test_thread_tid_and_pid_spaces_refuse_when_spent(void) {
+    g_tps_tid = 0;
+    g_tps_exempt = g_tps_spent = g_tps_refused = g_tps_pid_refused = false;
+    g_tps_spawn_rc = 0;
+    int child_pid = rfork(RFPROC, tps_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_EXPECT_EQ(g_tps_tid, 0x7ffffffe, "the last tid in the space is handed out");
+    TEST_ASSERT(g_tps_spent, "the space reads spent once its last tid is out");
+    TEST_ASSERT(g_tps_refused, "a create past the last tid is refused");
+    TEST_ASSERT(g_tps_exempt, "the child is exempt, so the thread cap cannot refuse");
+    TEST_EXPECT_EQ(g_tps_spawn_rc, (s64)-T_E_AGAIN,
+        "a spawn past the last tid answers EAGAIN, a system limit, not ENOMEM");
+    TEST_ASSERT(g_tps_pid_refused, "a Proc past the last pid is refused");
 }

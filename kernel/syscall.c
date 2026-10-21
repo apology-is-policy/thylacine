@@ -5540,6 +5540,12 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
         if (ptid_va >= UACCESS_USER_VA_TOP)          return -T_E_INVAL;
     }
 
+    // A dying Proc admits no new thread: one made now would only die at its
+    // first entry's die-check, after a kstack allocation, and the spawner
+    // itself dies at this call's own return. A create racing the claim is
+    // still caught by the new thread's first die-check.
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -T_E_AGAIN;
+
     // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at PROC_THREAD_MAX is
     // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) before the kstack
     // alloc -- bounding a thread bomb (each thread pins unswappable kernel
@@ -5552,7 +5558,7 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
     struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
-    if (!nt)                                         return -T_E_NOMEM;
+    if (!nt) return thread_tid_space_spent() ? -T_E_AGAIN : -T_E_NOMEM;
 
     // CLONE_PARENT_SETTID (#112): publish the new tid into the parent-
     // supplied user word BEFORE the child is made runnable. Parent and
@@ -5589,6 +5595,15 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     ready(nt);
     return (s64)nt->tid;
 }
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): the native
+// spawn arm, called from a kernel-entry thread of the Proc under test.
+s64 sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
+s64 sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va) {
+    return sys_thread_spawn_handler(entry_va, sp_va, arg_va, tls_va, ptid_va);
+}
+#endif
 
 // P6-pouch-threads (sub-chunk 9): SYS_THREAD_EXIT handler. Wraps
 // thread_exit_self (in kernel/proc.c) which never returns.
@@ -5663,6 +5678,12 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
         if (ctid_va >= UACCESS_USER_VA_TOP)          return -(s64)T_E_INVAL;
     }
 
+    // A dying Proc admits no new thread: one made now would only die at its
+    // first entry's die-check, after a kstack allocation, and the spawner
+    // itself dies at this call's own return. A create racing the claim is
+    // still caught by the new thread's first die-check.
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -(s64)T_E_AGAIN;
+
     // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
     // sys_thread_spawn_handler, exited peers freed first). A pthread_create
     // storm fails clean -EAGAIN.
@@ -5675,7 +5696,7 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // a fresh Proc) is the single line that makes this a CLONE_THREAD rather than
     // a fork: shared address space, one pid, one ASID (I-31).
     struct Thread *nt = thread_create_forked(p, ctx, child_sp, child_tls);
-    if (!nt)                                         return -(s64)T_E_NOMEM;
+    if (!nt) return thread_tid_space_spent() ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
 
     // CLONE_PARENT_SETTID: publish the tid into the parent word BEFORE ready(),
     // so the child can never observe a 0 tid, and read nt->tid HERE (pre-ready)

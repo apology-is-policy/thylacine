@@ -69,7 +69,8 @@ void phys_zone_bounds(paddr_t *base, paddr_t *end);
 // the machine so a tiny guest still boots with a usable pool. 256 MiB is the
 // TCB's measured ceiling with headroom: the Larder caches at most 128 MiB
 // (LARDER_PAGE_ENTRIES), the DMA envelope 64 MiB, the slabs, kernel stacks and
-// the L0 root (one per thread / address space -- the thread and child axes),
+// the L0 root (one per thread / address space -- the thread and child axes --
+// plus at most THREAD_KSTACK_CACHE_MAX stacks cached between threads, 1 MiB),
 // DMA buffers (the warden's allowance, I-34), the direct map's tables. The
 // Image cache is NOT reserve memory: a cached file's pages are user pages,
 // charged to the pool like every other, and they are what the pool reclaims

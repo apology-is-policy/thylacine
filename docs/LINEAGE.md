@@ -479,6 +479,14 @@ same stack VA, so the successor reads *plausible but wrong* argv out of a
 translation whose page tables have already been freed. Measured at L-2a as a
 revert probe.
 
+**Amended at thread-model C0 (2026-10-20).** Step 4 now begins with a wait.
+Every peer is EXITING by admission, but one can still be on another CPU between
+its exit commit and its last switch-out, storing its clear-child-tid word
+through the OLD translation, so the commit waits until each peer is off its
+CPU, then frees them (`proc_exec_wait_peers_off_cpu`,
+`proc_reap_exited_threads`). The step stays infallible: the wait is bounded by
+a tail that neither sleeps nor is switched out at an interrupt return.
+
 #### As built at L-6a — the split, and what envp measured
 
 The phenotype cannot hand `SYS_EXECVE` a user VA: Linux passes a

@@ -12,7 +12,7 @@ updated: 2026-10-20
 ## Owed
 
 A thread that exits while its peers live is freed by its Proc's next thread
-create or Loom SQPOLL setup (`proc_reap_exited_threads`), or by `wait_pid` once
+create, Loom SQPOLL setup or exec (`proc_reap_exited_threads`), or by `wait_pid` once
 the whole Proc is dead -- not as soon as it has left its CPU, which is when
 Plan 9 and Linux free it. Until then:
 
@@ -23,7 +23,8 @@ Plan 9 and Linux free it. Until then:
   then creates nothing keeps about 32 MiB until it creates again or exits.
 - **When it clears.** The next `SYS_THREAD_SPAWN`, vivarium clone or SQPOLL
   setup frees every exited peer that is off its CPU; one still on its CPU waits
-  for the call after.
+  for the call after. An exec frees them all, waiting first for any still on a
+  CPU.
 - **Behaviour that follows.** `proc_holds_tid_locked` (tkill, tgkill) finds an
   exited worker until a create frees it and answers ESRCH after, so the answer
   depends on whether a create ran since the exit.

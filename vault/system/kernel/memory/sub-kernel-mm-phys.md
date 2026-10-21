@@ -268,7 +268,8 @@ fault (`FAULT_UNHANDLED_USER` -> `snare:segv`) of the Proc that asked,
 never a bystander. `/ctl/memory` publishes `reserve` / `pool` / `charged`
 ([[sub-kernel-devctl]]).
 
-**What the pool does not count**: kernel stacks, slabs, the direct-map
+**What the pool does not count**: kernel stacks (with at most 32 cached
+between threads, 1 MiB, [[sub-kernel-thread]]), slabs, the direct-map
 tables, DMA buffers ([[inv-i34]]'s allowance), the per-space L0 root
 (bounded by the Proc axes like a kernel stack) -- the kernel memory the
 reserve exists for. The Image cache's FILE pages ARE counted (they are user

@@ -22,6 +22,64 @@ needed the operator.
 
 
 ---
+## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- thread-model C2: freed kernel stacks keep their guard and are reused; the guard toggles stop flushing every TLB
+
+**Why now.** C2 is the overhaul's second chunk (`docs/thread-model-review.html`) and needs no operator decision. It comes before C1 because C1 frees a thread at its last switch, and that free should be cheap. The Fable review's E-1 named the cost: every thread create and every free ran `tlbi vmalle1is` to toggle the kstack guard, which drops every address space's TLB entries on every CPU, so a pthread storm in one program flushed all the others. E-2: each create wrote 48 KiB, a 32 KiB zero-fill (the guard included, though it is then made unreadable) and the 16 KiB poison.
+
+**The chunk.** 5b1f3dac7 and its audit-close commit c85d0e86c, with the docs on top on aux-3-c2, squashed onto aux-3 as 31babb6ad.
+- `kstack_alloc` / `kstack_free` replace the stack code the three constructors and `thread_release` each carried. A freed stack waits in a LIFO of at most 32 with its guard still no-access; the next create takes it. Past 32 it goes back to the buddy with its guard restored, as before. The cache lock is a leaf, the free still sits behind the `on_cpu` spin, and nothing restores a guard but `kstack_release`, just before `free_pages`.
+- Every block handed out, fresh or cached, is poisoned whole inside `kstack_alloc`. A reused block is never zeroed, so the poison is both the ARCH 8.12 watermark's reset and the only scrub between two owners; it moved out of the constructors so a fourth one cannot skip it. KP_ZERO is gone from the stack.
+- The four direct-map guard toggles invalidate each page by address (`tlbi vaae1is`) instead of the whole TLB. The operand is masked to bits [43:0]: a kernel address shifted right by 12 also sets bits [51:44], and [47:44] of those is the FEAT_TTL level hint, where a wrong value lets the invalidate miss.
+
+**Evidence.**
+- **First tree, 5b1f3dac7.** Suite 2023/2023 (2017 + 6). Boot-kstack peak 10160 bytes, the same as aux-3. A create+free cycle cost 1018 and 958 ns from the cache, 1518 and 1417 ns from the buddy (green, regreen). The baseline, aux-3 26329ad2d plus the cost report alone (a detached commit, 21f728a17), measured 2802 ns per cycle, peak 10160, suite 2018/2018.
+- **Each witness red without its property, on the first tree.** The push opening the guard plus no poison on a handed-out stack: 2014/2023, the four cache tests, the cost report's toggle check and four existing poison witnesses. The drain releasing nothing plus the unmasked operand: 2021/2023, exactly the drain and operand checks. Rebuilt byte-identical.
+- **Multi-CPU gate on 5b1f3dac7** (10:54-11:43Z): 50/50 boots, 0 corruption (the default kernel at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 boots each).
+- **Audit-close tree, c85d0e86c** (11:44-11:50Z). Suite 2024/2024; peak 10160; 924 and 1003 ns from the cache, 1514 and 1570 ns from the buddy. Red: the first pair 2015/2024, the same nine checks, the guard test now failing on the cached block while its control holds on a genuine buddy block; the second pair 2021/2024, the drain, the operand, and the reuse test's own check that the free cached one stack; the toggles invalidating nothing, 2023/2024, exactly the warm-entry check. So on the Mac's M2 under HVF, AT S1E1R answers from the TLB. The unmasked operand left the warm-entry test green: this M2 invalidated despite the wrong level hint, so only the operand test guards the mask. Rebuilt byte-identical.
+- **Multi-CPU gate on the docs tip** (code identical to c85d0e86c): 50/50 boots, 0 corruption (default at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 boots each; 2026-10-21 08:49-09:38Z, after the operator stopped the first attempt on 10-20 for the talk).
+
+**The audit.** Fable 5.1, round 1 (Fable reviewing Opus): 0 P0 / 0 P1 / 0 P2 / 4 P3, all closed. F1 fixed: `kstack_release` extincts when the guard restore fails instead of freeing pages that would fault their next user (no regression test: only a corrupted direct map makes the walk fail). F2 fixed: `directmap.guard_toggle_invalidates_a_warm_entry`, the one red test with the invalidate removed (2023/2024). F3 fixed: the three reuse tests drain the cache first, and the first asserts that the free cached exactly one stack. F4 closed: the dossiers ride the landing commit; nothing operator-visible changed, so the manual is untouched.
+
+**Wrong turns, and what caught them.**
+- **My guard tests checked the PTE, not the TLB.** The only witness for the by-address invalidate was an AT S1E1R probe, and nothing warmed the TLB first, so deleting the invalidate would have left every test green; under QEMU's TCG, AT never reads the TLB at all. The Fable round caught it (F2). The warm-entry test loads each guard page first, IRQs masked through the probes; with the invalidate removed it is the one red test.
+- **Three reuse tests assumed no other CPU touches the cache between a free and a create.** True today, stated nowhere (F3). They drain first now, and the drain also fixed a weak control: on the first tree, the first sabotage failed the guard test at its control line, because the "fresh" block had come from the cache with its guard opened. From a drained cache the control is a genuine buddy block, and the same sabotage fails the cached-block check instead.
+- **The first baseline script committed with the hooks off and made a throwaway branch.** CLAUDE.md forbids skipping hooks unasked, and deleting the branch would have needed the operator. Rewritten before it ran: the baseline went through the hooks with a WIP trailer on a detached HEAD (21f728a17), so no branch exists.
+- **A draft said only the first freed stack goes into the cache.** The dossier's burst caveat read "the first into the stack cache and the rest each a guard restore"; every free is cached while there is room. Caught rereading the drafts after the audit.
+- **C0 left a contradiction in sub-kernel-thread.** Its error-path list still said a tid overflow extincts, two sections after C0's own text saying a spent tid space refuses. Found in this docs pass and fixed.
+
+**Still open.** E-3: the guard is still half of each thread's kernel memory. Halving it needs a kernel-stack VA arena (a guard page of address space, four physical pages), which takes stack addresses out of the direct map that `kva_to_pa` assumes, so every `kva_to_pa` that might see a stack address has to be audited first. It is queued as its own chunk. C1, freeing at the switch, waits on the operator's decision 1.
+
+**Decisions the operator made.** None new.
+
+## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- thread-model C0: exec waits for its exiting peers, and three smaller holes closed, each witness run both ways
+
+**Why now.** The overhaul the operator asked for at 04:46:56Z ("take a very close look at multi-threading ... together suggest an overhaul -- no matter the cost") is planned in `docs/thread-model-review.html`. Its first chunk, C0, takes the four findings that need no operator decision, starting with the one P1. The reap fix had landed at 07:36Z (e7d6f2f47); C0 was cut on top of it, on aux-3-c0, and squashed onto aux-3 as 099868b62.
+
+**The chunk.**
+- 6f98bf134, the code. F-1: `proc_exec_replace` now waits, spinning outside the lock, until every peer of the exec'ing thread is off its CPU, then frees them, before it swaps the address space; a peer between its EXITING commit and its last switch-out was still storing its clear-child-tid word through the old translation. F-6: `preempt_check_irq` returns without consuming `need_resched` for a thread that is not RUNNING, so an exit tail on a kthread-shaped path runs to its own `sched()`. F-8: both spawn arms refuse a dying Proc -EAGAIN. F-2: the tid and pid counters saturate by compare-and-swap and refuse (NULL, EAGAIN) instead of extincting.
+- d75af1f9e, four kernel tests, one per finding; d000bfb1f, the exec test reordered (below); 86491105f, the audit's four P3 fixes and a fifth test, the exec hazard in its real shape: a real peer's exit tail held on a second CPU while exec runs on the first.
+- Before landing I checked three things the fixes lean on. Every dispatch sets the incoming thread RUNNING (sched.c:1454, thread.c:870), the idles included, so the new gate skips nothing that is really running. The sleep paths hold `wait_lock` with interrupts masked from the state store to `sched()`, so only exit tails see the gate. Every production caller of the thread and Proc constructors handles NULL; the ones that extinct (the boot threads in main.c, joey's launch) run once, at boot, before any user can spend a counter.
+
+**Evidence.**
+- `--config ci` on d75af1f9e: tools/test.sh 2016/2016 (the reap's 2012 plus four), boot OK.
+- Red, all four fixes dropped by a script that refuses unless each anchor matches once: 2012/2016 FAIL, exactly the four new tests, each on its own message. Reverted, the tree is clean and the rebuilt kernel is byte-identical to the green one (SHA-256 ad5a917b...), 2016/2016 again.
+- On d000bfb1f (the exec test reordered) the same cycle: red 2012/2016 with the exec test failing on the hazard line, restored 2016/2016, boot OK.
+- `specs/check-syscall-irqs.sh` (the spec models `preempt_check_irq`'s marker deferral): both clean cfgs at their pinned 18 states, all six must-fail cfgs on their named property, the kthread control included.
+- On 86491105f (the audit's fixes and the fifth test): suite 2017/2017 (2012 + 5); red with the same four fixes dropped 2012/2017 FAIL, exactly the five tests, each on its own message and both exec tests on their hazard lines; restored, the kernel is byte-identical to the green one (SHA-256 980d1bc1...) and 2017/2017 again.
+- SMP gate: 50/50 PASS, 0 corruption, on d000bfb1f (the default kernel at 1, 4 and 8 CPUs and UBSan at 4 and 8, 10 boots each; 08:19:52-09:08:27Z), and 50/50 again, 0 corruption, on the audit-close tree (3cabd8927, 09:16:51-10:05:36Z).
+
+**The audit.** Round 1, Fable 5.1 on Opus 5.5 (MODEL start and end the same): 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed. (1) The dying-gate comment said a spawn loop under a kill would repeat the wasted kstack until its own tail; the spawner dies at this call's own return, so it is one per spawning thread. (2) The creators' contracts still said "NULL on OOM", and two lists of who frees an EXITING thread did not name exec. (3) The fabricated exec test, on a budget miss, left its child free to raise the peer's `on_cpu` later and spin in exec forever; the child now checks, under the lock the test thread also takes, whether it has been given up on. (4) SPEC-TO-CODE bound the model's deferral to the marker only, so it now says the new state gate is outside the model and names its witness. The reviewer withdrew a dozen candidates it found guarded (the list is in the closed list) and named one gap: nothing exercised the hazard as it really happens, on two CPUs. That became the fifth test. In this phase the secondaries are parked, so the test pins the peer to one and kicks it, the way `test_jit` does.
+
+**Wrong turns, and what caught them.**
+- The exec test's first red failed on its wait counter. That counter is incremented inside the very function the red removed, so the failure proved only that the instrument was gone. The test now asserts the hazard first (the address space was not swapped while the peer was on its CPU) and keeps the counter as that line's control; the second red failed on the hazard line.
+- The red script's sched.c anchor counted 2 with grep, which would have stopped it; the second match carried a trailing comment, so the newline-terminated anchor was unique, and I tied it to the preceding comment line anyway. The docs script's sched-dossier anchor began a line too early ("the placement;" straddles a wrap) and refused on the dry run, before any file was written.
+- `tools/thyla-wake.sh hold` from the reap worktree died with "yip presence names no '(you)' line"; run from the session's own directory it armed and the lease came within a minute.
+- I derived the second red script from the first with sed, renaming its logs. The rule for `green-elf.sha` ran first and matched inside `regreen-elf.sha`, which became `rer1x-green-elf.sha`. Reading the diff before running it caught that; substitutions that rename by substring have to run longest name first.
+
+**Still open.** C0 does not free an exited thread any sooner: that waits for a create or an exec until C1 frees it at the switch. The tid space is still a cumulative 31-bit counter that an unprivileged create loop spends in hours; spending it is now a refusal, not an extinction, and the fix is the operator's decision 2 (64-bit tids, never reused). The sleep half of `seam-exiting-tails-never-sleep` stays owed, and exec's wait is a new dependent on it.
+
+**Decisions the operator made.** None new; the six on the review page are open.
+
 ## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- the exited-thread reap for the talk, and a review of the whole thread model with Fable
 
 **Why now.** The operator, 04:46:56Z: "Let us implement your small fix for the presentation, but then let's take a very close look at multi-threading. I'm thinking, let both you and a dedicated Fable subagent review its efficiency, soundness, and elegance, and together suggest an overhaul -- no matter the cost." The small fix is the one aux proposed on 10-19 after the OpenRCT2 freeze (OPEN-BUGS 10-19 15:03Z, P1): free an exited thread inside its own Proc instead of waiting for the parent's `wait_pid`. The talk is today, so the demo folder needed the fix without losing the 10-19 image.
@@ -336,10 +394,53 @@ On the device, testparser passes: the merge removed the ceiling it stopped at. l
   restored", and the ported test comment called the null-Proc unmap probe a
   behaviour pin, which main's wrapper (it reads `p->as` right after the
   guard) makes a guard pin.
-- *Open at this entry:* nothing has been built or run. Owed: the Fable 5.1
-  audit round on the adapted form (main counts it as the review), the specs
-  above, and the gate main named on 0232 (default `test.sh` with zero FAIL,
-  `test-fault.sh`, the ci suite, UBSan, `ci-smp-gate` N=10).
+- *Gate*, written after the land: main's five legs from 0232, every one on
+  `107c5c1bd`. corona's scripts and logs are in its `work/oct19-asr9/`.
+  Default, ci and UBSan suites 2005/2005 (main's 2000 and the five): no FAIL
+  line, no extinction, the five AS-R9 tests PASS. `test-fault.sh` 8/8.
+  Kernels: default = ci `0bd67a7c2b57`, UBSan `2a4b8dee30d0`. `ci-smp-gate.sh`
+  N=10 ran in two parts. default-smp1 and default-smp4 went 10/10 each under
+  corona's lease; the operator stopped that run at 11:15Z, eight boots into
+  default-smp8. default-smp8, ubsan-smp4 and ubsan-smp8 then went 10/10 each
+  under main's lease (21:54-22:38Z, on a detached checkout of `107c5c1bd`).
+  Every row: 0 corruption, 0 external-kill, 0 timing, 0 other. The specs ran
+  on the committed content (every spec file's last write predates the run,
+  and the tree is clean at `107c5c1bd`). `check-burrow.sh` is ALL AS CLAIMED:
+  clean 100 states, the three old buggy cfgs on `NoUseAfterFree`,
+  `burrow_buggy_claim_restore` on `NoRecordAfterFree`, `_ledger` on
+  `RefundExactlyOnce`. `check-capacity.sh` is ALL AS CLAIMED. Pins: Stratum
+  `7dd103d`, checked after every build. The shared go fork (unpinned) read
+  `f67e51e66`, clean, at the start of each corona run and before and after
+  main's.
+- *Two of corona's run records are wrong, and say so here.* The first SMP
+  attempt never booted: `ci-smp-gate.sh`'s UBSan rebuild met `build.sh`'s
+  6 GiB floor at 5982 MiB free. The operator had corona's old AS-R9 gate
+  inputs deleted rather than lower the floor (2026-10-19). That run's
+  `stages.txt` ends "exit 0": its EXIT trap read `$?` after
+  `kill ... || true` had replaced it, and the real status was 1. The re-run's
+  trap took the status first, and its `stages.txt` still ends "exit 0",
+  because the run was killed. Killed by TERM, `/bin/sh` (bash 3.2) runs the
+  EXIT trap with `$?` holding the last COMPLETED command's status. Measured
+  2026-10-21: a TERM to a script waiting on a subshell records "exit 0"
+  where the process exits 143; a TERM trap that exits 143 makes the record
+  true. Neither record says SMP GREEN. The verdict above comes from each
+  row's own summary line.
+- *Landed.* main fast-forwarded `115465888` -> `107c5c1bd` on 2026-10-19 and
+  pushed both mirrors (ls-remote github and codeberg, yip 0232 note 2).
+- *Docs twins, after the land.* corona's vote-13 audit (Fable 5.1) found the
+  rule this backport retires still written as the rule. ARCH 25.4's
+  resource-floor row, the copy AUDIT-TRIGGERS row 107 names as the
+  authoritative prosecution copy, said "callers claim BEFORE the drop" and
+  "restore must only ever run where the Burrow provably survives (`!freed`
+  ...)", and it named `burrow_is_shared_out`, deleted above. main's tree
+  carries the same row. The operator voted to amend both trees. The row and
+  its AUDIT-TRIGGERS copy now state that the claim is taken inside the drop,
+  and why the old order was a use-after-free write; they also fold in the
+  note `cb6722ddd` had appended. The same commit restates the two
+  `sub-kernel-syscall-dispatch` sentences ("claim before drop" and the ANON
+  arm's "claim-before-drop attribution"). It also teaches the `spec-burrow`
+  note the charge record: it pins I-32, lists the two new cfgs, and maps
+  `Settle` and the buggy actions to code. It changes no build input.
 
 ## 2026-10-18 (main, Opus 5.5, effort max) -- two votes; B-3b's last red control finds a third blind witness
 

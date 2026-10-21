@@ -210,7 +210,11 @@ rolls back through `state = ZOMBIE; proc_free(child)`, which is why
 **Allocation ordering** is deliberately fallible-first: the pid and the
 `stripes` tag are consumed **last**, after the handle table, pgtable and
 note queue have all succeeded, so a rolled-back allocation never sparsifies
-either space (R5-H F89's discipline, extended to the tag space).
+either space (R5-H F89's discipline, extended to the tag space). The pid is
+claimed by a saturating compare-and-swap (`alloc_next_pid`): pids are never
+recycled (a session's identity leans on it), so at the end of the space
+`proc_alloc` refuses through the same rollback as any other failure, rather
+than extincting or wrapping onto the -1 sentinel ([[inv-i32]]).
 
 **Wait.** `wait_pid_for` is one loop with a single authoritative scan under
 the table lock. Per iteration it walks `p->children` once, applying the
@@ -362,6 +366,23 @@ kind of stale pointer as the three below, one layer down. The rule
 governing everything it clears is one sentence: **the image is gone, so anything
 holding an address into it, or a disposition installed by it, is now a pointer
 into someone else's program.**
+
+**Before the swap, exec waits for its peers to leave their CPUs**
+(`proc_exec_wait_peers_off_cpu`), then frees them (`proc_reap_exited_threads`,
+[[sub-kernel-thread]]). Admission counted no live peer, and only a live thread
+creates one, so every peer is EXITING; but one can still be on another CPU between
+its exit commit and its last switch-out, and its tail stores its clear-child-tid
+word through this Proc's translation -- by a stale TLB entry into a page the drain
+below frees, or by a fault that demand-pages through `p->as` into the new image.
+The wait spins outside the lock, as `wait_pid`'s does, and a peer it found stays
+allocated across it: while the Proc lives only a running thread of it frees a
+peer, and the exec'ing thread is the only one. It ends because an EXITING tail
+neither sleeps ([[seam-exiting-tails-never-sleep]]) nor is switched out at an
+interrupt return ([[sub-kernel-sched]]). The new image starts as this thread
+alone, with its whole thread budget, as Linux's `de_thread` leaves it.
+Regressions: `proc.exec_waits_for_exiting_peer` fabricates the peer, so it runs
+at any CPU count; `proc.exec_waits_for_exiting_peer_on_another_cpu` holds a real
+peer's exit tail on a second CPU while exec runs on the first.
 
 Three such things are reset, and they are worth reading together because the
 second and third share a failure mode the first does not.

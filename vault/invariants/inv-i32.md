@@ -36,7 +36,7 @@ address-space extraction three of them are **not per-Proc at all**:
 | live VMAs | `vma_count` | `AddrSpace` | `PROC_VMA_MAX` | [[lock-vma]] — same |
 | shared-in pages | `shared_map_pages` | `AddrSpace` | `PROC_SHARED_MAP_MAX_PAGES` | [[lock-vma]] — same |
 | direct children | `child_count` | `Proc` | `PROC_CHILD_MAX` | [[lock-proc-table]] — bounded overshoot |
-| threads not yet freed (live, plus peers exited since the Proc's last thread create, which frees them) | `thread_count` (+ the poll-thread count) | `Proc` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
+| threads not yet freed (live, plus peers exited since the Proc's last thread create or exec, which free them) | `thread_count` (+ the poll-thread count) | `Proc` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
 
 **The first three moved with the mapping list, and that changed what they
 bound.** Two Procs sharing an address space share its pages, so one charge is
@@ -105,7 +105,11 @@ creation path (`proc_alloc`, `thread_create`, `territory_clone`,
 `burrow_create_anon`, the demand-page install) returns an error or
 per-Proc-terminates, never a box extinction. So a bomb that evades a
 per-Proc cap by spreading across Procs still terminates at the physical
-cliff instead of taking the machine.
+cliff instead of taking the machine. The identifier spaces are on the same
+footing since 2026-10-20: tids and pids are never recycled, so a create-and-join
+or spawn loop walks their counters toward INT_MAX, and a spent space is a
+refusal (NULL from the creator, EAGAIN from both spawn arms) where it used to be
+an extinction.
 
 **Subsystem-local bounds are the same invariant at a smaller scale, and they are
 not on this table.** The per-Proc environment ([[sub-kernel-content]]) caps its

@@ -1075,7 +1075,10 @@ eager anonymous region". A region that was never charged now refunds nothing,
 enforced by attribution rather than by enumerating shapes. Two discriminations
 are load-bearing and easy to collapse: **shared-out**, not "does anything else
 still hold this" (the process's *own* other claim also keeps the region alive,
-and there the charge must stay); and **claim before drop**, not after.
+and there the charge must stay); and **the claim taken inside the drop**,
+under the Burrow's lock -- not after it, when a freeing drop has taken the
+record with it, and not before it with a restore on a nonfinal drop, which
+AS-R9 showed is a use-after-free write.
 
 ## Invariants enforced
 
@@ -1102,10 +1105,14 @@ spawn-permission bit taking the one-hop delegation shape — console-attached
 build driver can carry it without any of them being console-attached. The bit
 gates conferring the *authority*; the raise it authorises is still bounded by
 the hard maximum. Both thread-create arms (`sys_thread_spawn_handler` and
-`viv_clone_thread`) first free the Proc's exited peers
+`viv_clone_thread`) first refuse a dying Proc -EAGAIN (`group_exit_msg` set: a
+thread made then would only die at its first die-check, after a kstack
+allocation, and the spawner dies at the call's own return), then free the
+Proc's exited peers
 (`proc_reap_exited_threads`, [[sub-kernel-thread]]), then ask
 `proc_thread_cap_ok`, so the thread cap counts what is alive plus what exited
-since the last create, not every thread the Proc ever ran. The Loom SQPOLL
+since the last create, not every thread the Proc ever ran. A create that then
+fails on a spent tid space answers EAGAIN, a system limit, not ENOMEM. The Loom SQPOLL
 setup, the budget's third consumer, frees them too before `proc_sqpoll_charge`.
 
 **[[inv-i34]]** — the three hardware-mint handlers carry the CreateBegin /
@@ -1504,8 +1511,9 @@ lazy Burrow had one VMA, an I-32 under-count once one has several (a D-3b
 window reached it; a protect split reaches it on every thread stack); B-1a made
 it the piece's own range through `burrow_decommit` on the exact match. B-1a'
 deleted `detach_one_locked` and `detach_args_check` outright: the refund, the
-ANON arm's claim-before-drop attribution and the CODE refusal all live in
-`vma_detach_range_in`, once, for every caller (the B-1a' section below).
+ANON arm's payer attribution (claimed inside the drop since AS-R9) and the CODE
+refusal all live in `vma_detach_range_in`, once, for every caller (the B-1a'
+section below).
 
 **The phenotype `munmap`'s window confinement no longer leaks a MAP_FIXED
 mapping below the window (closed at B-1a').** The row is window-confined
