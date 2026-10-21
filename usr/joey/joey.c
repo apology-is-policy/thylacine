@@ -3954,31 +3954,35 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
                                    max_sec, hb_sec, cap_mask, (unsigned int *)0);
 }
 
-// #231/#232: the three clade gates' dispositions, for the one structured
-// CLADE-GATES line below. Same contract as g_arc_* above, for the same reason:
+// #231/#232: the clade gates' dispositions (the three gates and the C++
+// runtime prover), for the one structured CLADE-GATES line below. Same contract as g_arc_* above, for the same reason:
 // these gates SOFT-SKIP on an unbaked pool, and a skip that reaches no exit
 // status is a silent UNKNOWN reported as a pass (#212).
 //
 // MISSING is the load-bearing default -- a gate call dropped by a later edit
 // prints MISSING and reddens the boot rather than printing nothing.
 //
-// FAILED is deliberately absent: all three gates are BOOT-FATAL, so a failure
+// FAILED is deliberately absent: all four are BOOT-FATAL, so a failure
 // returns from main() before the report line and can never be observed there.
 // The failure is already carried by the missing boot banner.
 static const char *g_clade_cl4   = "MISSING";
 static const char *g_clade_gl    = "MISSING";
 static const char *g_clade_storm = "MISSING";
+static const char *g_clade_cxx   = "MISSING";
 
-// The six Go boot probes' dispositions, for the GO-GATES line below. Same
-// contract as g_clade_*: a probe skips when its binary is absent (no Go fork at
-// build), and the boot passes, so only this line lets the harness see it. A
-// failure returns from main() before the line, so FAILED never appears.
+// The Go boot probes' dispositions (the six probes, the on-device `go build`
+// and gopls), for the GO-GATES line below. Same contract as g_clade_*: a probe
+// skips when its binary is absent (no Go fork, GOROOT or gopls fork at build),
+// and the boot passes, so only this line lets the harness see it. A failure
+// returns from main() before the line, so FAILED never appears.
 static const char *g_go_hello      = "MISSING";
 static const char *g_go_env        = "MISSING";
 static const char *g_go_goroutines = "MISSING";
 static const char *g_go_fs         = "MISSING";
 static const char *g_go_exec       = "MISSING";
 static const char *g_go_net        = "MISSING";
+static const char *g_go_go4c       = "MISSING";
+static const char *g_go_gopls      = "MISSING";
 
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
@@ -6398,7 +6402,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-hello NOT spawned (Go fork absent at build) -- skipping\n");
-        g_go_hello = "SKIPPED";
+            g_go_hello = "SKIPPED";
         } else {
             int gh_status = -1;
             long gh_reaped = t_wait_pid_for((int)gh_pid, 0, &gh_status);
@@ -6407,7 +6411,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-hello reaped status=0 -- GOOS=thylacine Stage 1 RUNS in-VM\n");
-        g_go_hello = "PASS";
+            g_go_hello = "PASS";
         }
     }
 
@@ -6461,7 +6465,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-env NOT spawned (Go fork absent at build) -- skipping\n");
-        g_go_env = "SKIPPED";
+            g_go_env = "SKIPPED";
         } else {
             int ge_status = -1;
             long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
@@ -6470,7 +6474,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM\n");
-        g_go_env = "PASS";
+            g_go_env = "PASS";
         }
     }
 
@@ -6597,7 +6601,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-goroutines NOT spawned (Go fork absent at build) -- skipping\n");
-        g_go_goroutines = "SKIPPED";
+            g_go_goroutines = "SKIPPED";
         } else {
             int gg_status = -1;
             long gg_reaped = t_wait_pid_for((int)gg_pid, 0, &gg_status);
@@ -6606,7 +6610,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM\n");
-        g_go_goroutines = "PASS";
+            g_go_goroutines = "PASS";
         }
     }
 
@@ -8275,13 +8279,13 @@ int main(void) {
             // goenvs -> os.Getenv), runs `go version` + `go build` + the built
             // binary, then UNSETs the vars so they do not leak into the session.
             {
-                long goprobe = t_open(T_WALK_OPEN_FROM_ROOT, "/goroot/bin/go",
-                                      14, T_OPATH);
-                if (goprobe < 0) {
+                if (optional_absent("/goroot/bin/go", 14)) {
                     t_putstr("joey: Go-4c /goroot absent (THYLACINE_BAKE_GOROOT "
                              "not set) -- skipping\n");
+                    t_putstr("joey: go8d gopls absent -- skipping\n");
+                    g_go_go4c  = "SKIPPED";
+                    g_go_gopls = "SKIPPED";
                 } else {
-                    (void)t_close(goprobe);
                     // Writable scratch on the pool root: /tmp ($WORK + the build
                     // output). mkdir idempotent (the pool persists across boots).
                     {
@@ -8601,6 +8605,7 @@ int main(void) {
                     {
                         if (optional_absent("/goroot/bin/gopls", 17)) {
                             t_putstr("joey: go8d gopls absent -- skipping\n");
+                            g_go_gopls = "SKIPPED";
                         } else {
                             long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4,
                                                T_OPATH);
@@ -8784,6 +8789,7 @@ int main(void) {
                                 t_putstr("joey: go8d OK -- gopls "
                                          "(GOOS=thylacine) type-checks + "
                                          "resolves a definition on-device\n");
+                                g_go_gopls = "PASS";
                                 // The 8e-2 gate. Separate from go8d's above so
                                 // the boot log names WHICH surface broke: the
                                 // engine (go8d) or the LSP client (8e-2). Placed
@@ -8834,6 +8840,7 @@ int main(void) {
                         t_putstr("joey: Go-4c reaped status=0 -- the "
                                  "GOOS=thylacine toolchain BUILT + RAN a "
                                  "program ON-DEVICE\n");
+                        g_go_go4c = "PASS";
                     }
                 }
 
@@ -10632,6 +10639,7 @@ int main(void) {
                 static const char phcxx_name[] = "/bin/pouch-hello-cxx";
                 if (optional_absent(phcxx_name, sizeof(phcxx_name) - 1)) {
                     t_putstr("joey: /pouch-hello-cxx NOT present (LLVM fork absent at build) -- skipping\n");
+                    g_clade_cxx = "SKIPPED";
                 } else {
                     if (pouch_smoke_one(phcxx_name, sizeof(phcxx_name) - 1,
                                         "ALL C++ WIRES PASS", 18) != 0) {
@@ -10639,6 +10647,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: /pouch-hello-cxx PASS; CL-2 C++ runtime (EH/RTTI/threads/TLS-dtors/filesystem) verified\n");
+                    g_clade_cxx = "PASS";
                 }
             }
 
@@ -12502,7 +12511,7 @@ int main(void) {
     }
 
     // #231/#232: the line tools/check-arc-gates.sh keys on. All three gates
-    // have run and recorded a disposition; say which, in a form an exit status
+    // and CL-2's prover have run and recorded a disposition; say which, in a form an exit status
     // can carry -- otherwise a boot where all three silently skipped is
     // indistinguishable from one where the calls were deleted (#212).
     //
@@ -12513,7 +12522,8 @@ int main(void) {
     {
         const char *parts[] = { "joey: CLADE-GATES cl4=", g_clade_cl4,
                                 " gl=", g_clade_gl,
-                                " storm=", g_clade_storm, "\n" };
+                                " storm=", g_clade_storm,
+                                " cxx=", g_clade_cxx, "\n" };
         char   rb[128];
         size_t rn = 0;
         for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)
@@ -12529,7 +12539,9 @@ int main(void) {
                                 " goroutines=", g_go_goroutines,
                                 " fs=", g_go_fs,
                                 " exec=", g_go_exec,
-                                " net=", g_go_net, "\n" };
+                                " net=", g_go_net,
+                                " go4c=", g_go_go4c,
+                                " gopls=", g_go_gopls, "\n" };
         char   rb[160];
         size_t rn = 0;
         for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)

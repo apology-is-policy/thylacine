@@ -460,15 +460,27 @@ case "$result" in
         # THYLA_CLADE_GATES=require is its separate opt-in (a clade bake is far
         # rarer than the Alpine bundle, so folding it into --require would
         # break that flag's existing callers).
-        # The Go probes' family: build_go_probes leaves its binaries in
-        # build/go only when it built them, so their presence says this image
-        # was built to run them, and a skip there is a lost binary.
-        local_go_require=""
-        [[ -f "$BUILD_DIR/go/go-hello" ]] && local_go_require="--require-go"
-        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" ${local_go_require:+"$local_go_require"} "$LOG_FILE")"; then
+        # The optional binaries: each build step leaves its binary in build/
+        # only when it built it, so its presence says this image was built to
+        # run it, and a skip there is a lost binary.
+        gate_requires=()
+        [[ -f "$BUILD_DIR/go/go-hello" ]] && gate_requires+=( --require-go )
+        [[ -f "$BUILD_DIR/go/goroot/bin/go" ]] && gate_requires+=( --require-goroot )
+        [[ -f "$BUILD_DIR/go/goroot/bin/gopls" ]] && gate_requires+=( --require-gopls )
+        [[ -f "$BUILD_DIR/pouch/progs/pouch-hello-cxx" ]] && gate_requires+=( --require-cxx )
+        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" ${gate_requires[@]+"${gate_requires[@]}"} "$LOG_FILE")"; then
             echo "==> FAIL: arc/clade gate verdict (see the reason above)." >&2
             exit 1
         fi
+        # A checker that died before its verdicts exits 0 with nothing to say
+        # (bash 3.2 did, on a bash-4 construct), so each family's line must be
+        # in the report.
+        for gate_family in "arc gates:" "clade gates:" "go gates:"; do
+            if [[ "$gate_report" != *"$gate_family"* ]]; then
+                echo "==> FAIL: the gate checker reported no '$gate_family' verdict -- it did not run to its end." >&2
+                exit 1
+            fi
+        done
         while IFS= read -r gate_line; do
             [[ -n "$gate_line" ]] && echo "==> $gate_line"
         done <<<"$gate_report"

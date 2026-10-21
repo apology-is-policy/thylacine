@@ -428,10 +428,15 @@ event-driven; no timing constant appears in this path.
   Go fork, the C++ prover without the LLVM fork, the storm fixture, gopls) is
   skipped only when a walk to it answers ENOENT (`optional_absent`, an
   `O_PATH` open of the same name the spawn resolves); a present program whose
-  spawn fails, or any other refusal, is boot-fatal. The six Go probes record
-  PASS or SKIPPED and joey prints them in one `joey: GO-GATES` line beside
-  `CLADE-GATES` (one write, MISSING by default), which
-  `tools/check-arc-gates.sh` reads ([[sub-substrate-gates]]).
+  spawn fails, or any other refusal, is boot-fatal (Go-4c's `/goroot/bin/go`
+  probe included). The six Go probes, Go-4c and gopls record PASS or SKIPPED
+  and joey prints them in one `joey: GO-GATES` line, CL-2's prover as `cxx=`
+  in `CLADE-GATES` (one write each, MISSING by default), which
+  `tools/check-arc-gates.sh` reads ([[sub-substrate-gates]]). An ENOENT from a
+  pool-served name is weaker than from the ramfs: a 9P walk that fails for
+  any reason reaches the resolver as ENOENT, so a present gopls or storm
+  fixture can skip; `--require-gopls` (set wherever the build made gopls) and
+  `--require-clade` turn those skips into failures.
 
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never
