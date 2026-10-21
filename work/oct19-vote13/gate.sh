@@ -106,7 +106,11 @@ occurs() { # occurs <file> <count> <fixed text>: the text occurs exactly that of
 smp_row_clean() { # smp_row_clean <smp log> <label>: the row's own summary, N=10, every boot a PASS
   occurs "$1" 1 "== $2: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) =="
 }
-probes_hash() { cat"$FX_BIN" "$RP_BIN" "$CP_BIN" "$BR_BIN" | shasum -a 256 | cut -d' ' -f1; }
+probes_hash() { # probes_hash <file>...: one hash over the guest programs; a missing or empty one fails
+  for _f in "$@"; do [ -s "$_f" ] || { echo "probes_hash: $_f is missing or empty" >&2; return 1; }; done
+  cat "$@" | shasum -a 256 | cut -d' ' -f1
+}
+PROBES="$FX_BIN $RP_BIN $CP_BIN $BR_BIN"
 all_pass() {
   for t in $NAMED; do
     v=$(verdict "$2" "$t")
@@ -166,6 +170,15 @@ printf '[test] a.x ... PASS\n[test] a.y ... \n  noise\nFAIL: the y message\n[tes
 [ "$(verdict "$_t" a.x)" = PASS ] && [ "$(verdict "$_t" a.y)" = "FAIL: the y message" ] && [ "$(verdict "$_t" a.q)" = NONE ] \
   || { echo "REFUSING: verdict() misreads its self-check"; exit 3; }
 record "verdict self-check: PASS, a FAIL's message and an absent test read as such"
+# a59667812 glued `cat"$FX_BIN"`: every hash was the empty input's and the
+# program comparisons could not fail. Same files, same hash; one byte, not.
+printf a > "$OUT/probes-a"; printf b > "$OUT/probes-b"
+_same=$(probes_hash "$OUT/probes-a" "$OUT/probes-a") && _diff=$(probes_hash "$OUT/probes-a" "$OUT/probes-b") \
+  && [ "$_same" = "$(probes_hash "$OUT/probes-a" "$OUT/probes-a")" ] && [ "$_same" != "$_diff" ] \
+  && [ "$_same" != e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] \
+  || { echo "REFUSING: probes_hash does not tell the programs apart"; exit 3; }
+( probes_hash "$OUT/probes-a" "$OUT/probes-none" ) > /dev/null 2>&1 && { echo "REFUSING: probes_hash accepts a missing program"; exit 3; } || true
+record "probes_hash self-check: equal files agree, a changed byte differs, a missing program refuses"
 [ -x "$YIP" ] || { echo "REFUSING: no yip at $YIP"; exit 3; }
 lease pre
 dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
@@ -198,7 +211,7 @@ built_from_canonical CONTROL "$OUT/control-build.log"
 stratum_head_ok post-control-build; stratum_tree_ok post-control-build
 for f in "$FX_BIN" "$RP_BIN" "$CP_BIN"; do [ -f "$f" ] || { echo "CONTROL: $f was not built"; exit 1; }; done
 CONTROL_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
-CONTROL_PROBES=$(probes_hash)
+CONTROL_PROBES=$(probes_hash $PROBES)
 record "control kernel $CONTROL_BIN; programs $CONTROL_PROBES"
 find build/ramfs-src build/pouch -name stratumd -type f ! -path '*stale*' ! -path '*pre-d7*' -exec shasum -a 256 {} \; | tee -a "$OUT/stages.txt"
 run_suite control
@@ -217,7 +230,7 @@ built_from_canonical CONTROL-Q "$OUT/control-q-build.log"
 stratum_head_ok post-control-q-build; stratum_tree_ok post-control-q-build
 Q_BIN=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
 record "control-q kernel $Q_BIN"
-[ "$(probes_hash)" = "$CONTROL_PROBES" ] || { echo "CONTROL-Q: the programs differ from the control's"; exit 1; }
+[ "$(probes_hash $PROBES)" = "$CONTROL_PROBES" ] || { echo "CONTROL-Q: the programs differ from the control's"; exit 1; }
 [ "$Q_BIN" != "$CONTROL_BIN" ] || { echo "CONTROL-Q: the qualification kernel equals the default one"; exit 1; }
 run_suite control-q --private-async-qual
 image control-q "$OUT/control-q-boot.log" 77 79 75 2 6
@@ -234,7 +247,7 @@ built_from_canonical UBSAN "$OUT/ubsan-build.log"
 stratum_head_ok post-ubsan-build; stratum_tree_ok post-ubsan-build
 U_BIN=$(shasum -a 256 build/kernel-undefined/thylacine.bin | cut -d' ' -f1)
 record "ubsan kernel $U_BIN"
-[ "$(probes_hash)" = "$CONTROL_PROBES" ] || { echo "UBSAN: the programs differ from the control's"; exit 1; }
+[ "$(probes_hash $PROBES)" = "$CONTROL_PROBES" ] || { echo "UBSAN: the programs differ from the control's"; exit 1; }
 [ "$U_BIN" != "$CONTROL_BIN" ] || { echo "UBSAN: the sanitized kernel equals the default one"; exit 1; }
 run_suite ubsan --sanitize=ubsan
 image ubsan "$OUT/ubsan-boot.log" 76 78 74 0 0

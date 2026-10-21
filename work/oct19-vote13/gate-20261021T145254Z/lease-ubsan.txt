@@ -1,0 +1,5 @@
+mac   HELD by you for 15m, 3.7h left
+        why: corona: Loom audit-close host checks (receipt harness + kernel object compile), then vote 13's gate: 7 guest mutants, ci/qual/UBSan/production/SMP rows, then the pi bake. Length uncertain; released as soon as the cores free.
+        queue 1: main (13m waiting)
+pi    FREE
+disk: 11.1 GiB available at /Users/northkillpd/projects/thylacine-corona

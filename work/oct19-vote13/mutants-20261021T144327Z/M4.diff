@@ -1,0 +1,13 @@
+diff --git a/kernel/vivarium.c b/kernel/vivarium.c
+index 0a3608576..f7eb3f5d6 100644
+--- a/kernel/vivarium.c
++++ b/kernel/vivarium.c
+@@ -3362,7 +3362,7 @@ enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
+     // Linux checks sizeof(sigset_t) FIRST and answers EINVAL; musl passes
+     // _NSIG/8 == 8 at every call site. A different size means a caller whose
+     // sigset layout we have not reasoned about.
+-    if (sigsetsize != 8) return VIV_FORWARD;
++    if (sigsetsize != 8 && sigsetsize != 0) return VIV_FORWARD;
+ 
+     // 1..64. Linux's own check is `sig-1u >= _NSIG-1`, i.e. the same range.
+     if (signum < 1 || signum > VIV_NSIG) return VIV_FORWARD;

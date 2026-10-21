@@ -1,0 +1,27 @@
+2026-10-21T14:52:55Z  occurs self-check: a true count passes, a false one fails
+2026-10-21T14:52:55Z  verdict self-check: PASS, a FAIL's message and an absent test read as such
+2026-10-21T14:52:55Z  HEAD 5266dea09aadca9efac97290c4cb9e0ff46ded8f, clean
+2026-10-21T14:52:55Z  expected tests (derived from test.c): 1900; named: 17
+2026-10-21T14:52:55Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla' (self-check: a wrong set refuses); no untracked build input
+2026-10-21T14:52:55Z  go fork /Users/northkillpd/projects/go-thylacine-pin-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+2026-10-21T14:52:55Z  disk pre: 11586 MiB free (floor 8192)
+2026-10-21T14:53:46Z  disk post-control-build: 11582 MiB free (floor 8192)
+2026-10-21T14:53:46Z  control kernel abed765847a70303c952c20e199679d7463ee3e1a39d7957c8c007013adb0e4f; programs e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/ramfs-src/bin/stratumd
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/pouch/stratumd-cmake/src/cmd/stratumd/stratumd
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/pouch/progs/stratumd
+2026-10-21T14:54:38Z  control: test.sh exit 0
+2026-10-21T14:54:38Z  CONTROL GREEN: 1900/1900, NAMED PASS, D7 PASS; measured: loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-native-probe:;fixture status 76 expected 76;probe status 78 expected 78;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-c-probe:;fixture status 76 expected 76;probe status 74 expected 74;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;
+2026-10-21T14:55:54Z  disk post-control-q-build: 11545 MiB free (floor 8192)
+2026-10-21T14:55:54Z  control-q kernel b85eb20c3081642cd38464de5a2f96aa73ef7659ccee73b53b48ab0f0f9f1876
+2026-10-21T14:56:51Z  control-q: test.sh exit 0
+2026-10-21T14:56:51Z  CONTROL-Q GREEN: 1900/1900, NAMED PASS, D7 PASS; measured: loom-fixture: sessions 6 ended 6 violations 0 stalled 2 flushes 0 clunks 92 getattrs 127 walks 110 opens 16 reads 31 writes 1;loom-native-probe:;fixture status 77 expected 77;probe status 79 expected 79;rings made 2 expected 2;rings retired 2 expected 2;connections made 6 expected 6;connections freed 6 expected 6;registries destroyed 1 expected 1;loom-fixture: sessions 6 ended 6 violations 0 stalled 2 flushes 0 clunks 92 getattrs 127 walks 110 opens 16 reads 31 writes 1;loom-c-probe:;fixture status 77 expected 77;probe status 75 expected 75;rings made 2 expected 2;rings retired 2 expected 2;connections made 6 expected 6;connections freed 6 expected 6;registries destroyed 1 expected 1;
+2026-10-21T14:58:09Z  disk post-ubsan-build: 11460 MiB free (floor 8192)
+2026-10-21T14:58:09Z  ubsan kernel 59d8ed28cb945f8a555e70277569a5aaa2ee1b633869443c9b7e1cfe11b33931
+2026-10-21T14:59:01Z  ubsan: test.sh exit 0
+2026-10-21T14:59:01Z  UBSAN GREEN: 1900/1900, NAMED PASS, D7 PASS, no trap; measured: loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-native-probe:;fixture status 76 expected 76;probe status 78 expected 78;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-c-probe:;fixture status 76 expected 76;probe status 74 expected 74;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;
+2026-10-21T15:00:29Z  PRODUCTION: tools/check-production.sh --all passes
+2026-10-21T15:00:29Z  disk pre-smp: 11464 MiB free (floor 8192)
+2026-10-21T15:45:18Z  SMP GREEN: 5 configs x N=10; default kernel abed765847a70303c952c20e199679d7463ee3e1a39d7957c8c007013adb0e4f; ubsan kernel 59d8ed28cb945f8a555e70277569a5aaa2ee1b633869443c9b7e1cfe11b33931; == ci-smp-gate: bake config -- CLADE=0 GOROOT=1 ==
+2026-10-21T15:45:18Z  ALL GREEN: corona 5266dea09aadca9efac97290c4cb9e0ff46ded8f, stratum 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, go fork a6567baeaa716811783031fdf543477fdcd1707d (CONTROL, CONTROL-Q, UBSAN, PRODUCTION, SMP)
+2026-10-21T15:45:18Z  exit 0

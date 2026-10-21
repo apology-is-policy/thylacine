@@ -1,0 +1,1 @@
+M6 -> loom.create_geometry
