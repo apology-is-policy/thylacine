@@ -298,17 +298,21 @@ hides) and otherwise states what ran; `THYLA_ARC_GATES=require` /
 A third family answers for joey's Go boot probes (`joey: GO-GATES hello=...
 net=... go4c=... gopls=...`: the six probes, the on-device `go build`, gopls):
 each skips when the image has no binary for it. `tools/test.sh` derives a
-require flag per binary from what the build left in `build/`, which holds a
-binary only when that build made it: `--require-go` from `build/go/go-hello`,
-`--require-goroot` from `build/go/goroot/bin/go`, `--require-gopls` from
-`build/go/goroot/bin/gopls`, `--require-cxx` from
-`build/pouch/progs/pouch-hello-cxx`. So a binary that went missing from an image
-built to run it fails the run; a lean image's `not-built` passes under them,
-the shape being the build's choice. The checker runs under macOS's bash 3.2
+require flag per binary from what this image was built with. The ramfs is
+rebaked every build and each build step leaves its binary in `build/` only
+when it built it, so `--require-go` keys on `build/go/go-hello` and
+`--require-cxx` on `build/pouch/progs/pouch-hello-cxx`. The pool can outlive
+a build (`THYLACINE_MKFS_PRESERVE`), so `--require-goroot` and
+`--require-gopls` key on the `GOROOT` and `GOPLS` payloads the populate
+verified in the pool (`build/pool-contents`, which a preserved pool keeps),
+never on the goroot stage. So a binary that went missing from an image built
+to run it fails the run; a lean image's `not-built` passes under them, the
+shape being the build's choice. `--require-clade` asks for the three clade
+gates and not the prover, which has its own flag. The checker runs under macOS's bash 3.2
 (no associative arrays: one aborted it there with exit 0 and no report), an
 empty prose for a key fails rather than matching every line, and test.sh
 fails a report that lacks any family's line, since a checker that dies early
-can exit 0. The selftest drives 61 cases, under bash 3.2 and 5, and each pass
+can exit 0. The selftest drives 62 cases, under bash 3.2 and 5, and each pass
 string matches joey's text.
 
 **netd's boot selftests reach the exit status (2026-09-24).** netd prints a

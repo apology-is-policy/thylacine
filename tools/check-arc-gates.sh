@@ -37,9 +37,11 @@
 # Their require knobs are set by tools/test.sh from the bake itself: when
 # build/ holds a binary, the image was built to run it, and a skip is a lost
 # binary, not a missing fork. --require-go (THYLA_GO_GATES=require) covers the
-# six probes (build/go/go-hello), --require-goroot go4c (build/go/goroot/bin/go),
-# --require-gopls gopls (build/go/goroot/bin/gopls), and --require-cxx the C++
-# prover (build/pouch/progs/pouch-hello-cxx).
+# six probes (build/go/go-hello), --require-cxx the C++ prover
+# (build/pouch/progs/pouch-hello-cxx), and --require-goroot go4c and
+# --require-gopls gopls (the GOROOT and GOPLS payloads the populate verified in
+# the pool, build/pool-contents). --require-clade covers the three clade gates,
+# not the prover.
 #
 # Bash 3.2 must run this file: macOS's /bin/bash is 3.2, and `env bash` finds it
 # wherever Homebrew's bash is not on PATH. A bash-4 construct (an associative
@@ -343,6 +345,9 @@ check_clade_log() {
     one_gate "CL-7b" "$gl"    "$CLADE_GL_PASS_PROSE"    "$CLADE_GL_SKIP_PROSE"    || return 1
     one_gate "CL-5"  "$storm" "$CLADE_STORM_PASS_PROSE" "$CLADE_STORM_SKIP_PROSE" \
              "$CLADE_STORM_DECLINE_PROSE" || return 1
+    # The three gates' non-runs, before the prover's own counts join them:
+    # --require-clade asks for the gates, --require-cxx for the prover.
+    local gates_not_run=$((skipped+declined+blocked))
     one_gate "CL-2"  "$cxx"   "$CLADE_CXX_PASS_PROSE"   "$CLADE_CXX_SKIP_PROSE"   || return 1
 
     local report="clade gates: $ran/4 ran -- CL-4=$cl4 CL-7b=$gl CL-5=$storm CL-2=$cxx"
@@ -357,8 +362,8 @@ check_clade_log() {
     fi
     echo "$report"
 
-    if (( require_clade && (skipped || declined || blocked) )); then
-        echo "check-arc-gates: FAIL -- --require-clade given, but $((skipped+declined+blocked)) gate(s) did not run." >&2
+    if (( require_clade && gates_not_run )); then
+        echo "check-arc-gates: FAIL -- --require-clade given, but $gates_not_run gate(s) did not run." >&2
         return 1
     fi
     if (( require_cxx )) && [[ "$cxx" != "PASS" ]]; then
@@ -604,6 +609,9 @@ joey: CLADE-GATES cl4=PASS gl=PASS storm=MISSING cxx=PASS"
     expect_clade CO-cxx-no-prose     1 -            "${CL_PASS_ALL/$CLADE_CXX_PASS_PROSE/}"
     expect_clade CP-cxx-failure      1 -            "${CL_PASS_ALL/$CLADE_CXX_PASS_PROSE/joey: /pouch-hello-cxx FAILED (CL-2 C++ runtime regression)}"
     expect_clade CQ-cxx-skip-ok      0 "3/4 ran"    "$CL_CXX_SKIP"
+    require_clade=1
+    expect_clade CR-require-clade-cxx-skip 0 "3/4 ran" "$CL_CXX_SKIP"
+    require_clade=0
     require_cxx=1
     expect_clade CQ-require-cxx-skip 1 -            "$CL_CXX_SKIP"
     expect_clade CQ-require-cxx-pass 0 "4/4 ran"    "$CL_PASS_ALL"

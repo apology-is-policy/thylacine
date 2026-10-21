@@ -435,8 +435,9 @@ event-driven; no timing constant appears in this path.
   `tools/check-arc-gates.sh` reads ([[sub-substrate-gates]]). An ENOENT from a
   pool-served name is weaker than from the ramfs: a 9P walk that fails for
   any reason reaches the resolver as ENOENT, so a present gopls or storm
-  fixture can skip; `--require-gopls` (set wherever the build made gopls) and
-  `--require-clade` turn those skips into failures.
+  fixture can skip; `--require-goroot` and `--require-gopls` (set wherever the
+  pool was populated with them) and `--require-clade` turn those skips into
+  failures.
 
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never

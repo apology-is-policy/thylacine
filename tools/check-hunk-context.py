@@ -12,6 +12,11 @@ shorter than its leading context and whose old range does not end at the
 file's last line. GNU patch 2.7.6 locate_hunk: suffix_fuzz = fuzz +
 suffix_context - context, and a negative suffix_fuzz can only match the end of
 the file.
+
+It over-refuses one shape GNU accepts: a hunk short of its last one or two
+blank context lines at the end of the patch file, which GNU restores ("assume
+blank lines got chopped"). A refusal there stops the build; it never hides a
+hunk GNU cannot place.
 """
 import os
 import re

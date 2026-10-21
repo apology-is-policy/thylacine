@@ -80,7 +80,11 @@ footgun.** It pulls the whole chain including a pool re-bake driven by the
 / `THYLACINE_BAKE_GOROOT` / `THYLACINE_MKFS_PRESERVE` silently produces a
 pool missing payloads a previous invocation had baked in. The gate learned
 this the expensive way (#101); the countermeasure lives at the chokepoint,
-in [[sub-substrate-gates]].
+in [[sub-substrate-gates]]. The populate also checks each staged, requested
+payload is in the pool it just baked (`/goroot/bin/go`, `/goroot/bin/gopls`
+when the stage has it, the game and library-test trees) and refuses the
+bake when one is missing; the payloads it found go to `build/pool-contents`,
+the list the host gates and `tools/test.sh`'s require flags read.
 
 **Two staleness checks make the cache trustworthy, and both were added
 after a stale artifact shipped.**

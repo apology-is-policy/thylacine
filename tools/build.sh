@@ -4662,6 +4662,10 @@ populate_stratum_pool() {
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$vp_goroot" ]]; then
         bake_want="$bake_want
 GOROOT /goroot/bin/go"
+        if [[ -f "$vp_goroot/bin/gopls" ]]; then
+            bake_want="$bake_want
+GOPLS /goroot/bin/gopls"
+        fi
         if [[ -d "$vp_gocache" && -d "$vp_go4c" ]]; then
             bake_want="$bake_want
 GOCACHE /go-cache
