@@ -6,7 +6,13 @@
 # tree, built (ci image), booted through the whole suite, and reverted. A
 # mutant is KILLED only by the race's own evidence: a stamp check's FAIL (the
 # witness asserts its premise, a drain beside a live owner, before the stamps)
-# or a magazine count guard extincting inside the witness. Any other FAIL, the
+# or an extinction inside the witness that the race itself causes: a magazine
+# count guard, or a kernel fault whose crash backtrace runs from an owner
+# (dmo_owner) into the allocator. A page freed into the buddy twice is still
+# linked after its first pop clears its links, so the second pop faults near
+# NULL in buddy_alloc; the run of 2026-10-21 20:48Z died that way in all three
+# mutants before any stamp was checked. Only gate.sh's CONTROL, the same twin
+# on the unmutated tree, makes such a kill evidence. Any other FAIL, the
 # premise's included, is recorded and counts as a survivor. Survivors make the
 # run exit 1. The witness
 # races real CPUs, so a kill is evidence and a survivor is a finding to read,
@@ -29,6 +35,9 @@ FLOOR_MB=${FLOOR_MB:-6144}
 NEW="phys.drain_meets_live_owners"
 KILL_FAIL='^FAIL: (no page may be handed to two owners|every owner allocation must succeed)$'
 KILL_EXT='mag_(alloc|free): count corrupt'
+# A fault counts only with both frames in the first crash dump's backtrace.
+KILL_BT_OWNER='HALLS: +#[0-9]+ .* dmo_owner\+'
+KILL_BT_ALLOC='HALLS: +#[0-9]+ .* (buddy_(alloc|free)|alloc_locked|free_locked|mag_(alloc|free|refill|drain))\+'
 MUTANTS=${MUTANTS:-"G2 G1 G3"}
 MUTATE="python3 -I work/oct21-mag/mutate.py"
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
@@ -68,6 +77,12 @@ verdict() { # verdict <boot log> <test>: prints PASS, FAIL: <msg>, or NONE
     inblk { sub(/\r$/, ""); if ($0 ~ /^(PASS|FAIL)/) { print; found = 1; exit } }
     END { if (!found) print "NONE" }
   ' "$1"
+}
+# race_fault <boot log>: true when its first crash dump's backtrace runs from an
+# owner into the allocator.
+race_fault() {
+  _bt=$(tr -d '\r' < "$1" | awk '/HALLS: --- Halls of Extinction/ { n++ } n == 1 && /HALLS: +#[0-9]+ / { print }')
+  printf '%s\n' "$_bt" | /usr/bin/grep -qE "$KILL_BT_OWNER" && printf '%s\n' "$_bt" | /usr/bin/grep -qE "$KILL_BT_ALLOC"
 }
 last_test() { tr -d '\r' < "$1" | /usr/bin/grep -oE '\[test\] [^ ]+ \.\.\.' | tail -1 | sed -E 's/^\[test\] ([^ ]+) \.\.\./\1/'; }
 tally() { /usr/bin/grep -E '  tests: [0-9]+/[0-9]+' "$1" | tail -1 | sed -E 's/.*tests: ([0-9]+)\/([0-9]+).*/\1\/\2/'; }
@@ -110,6 +125,18 @@ _p="no drain ran beside an owner on another CPU"
 for _m in "mag_alloc: count corrupt" "mag_free: count corrupt"; do
   /usr/bin/grep -qF "\"$_m\"" mm/magazines.c || { echo "REFUSING: '$_m' is not in mm/magazines.c"; exit 3; }
 done
+# race_fault checks itself: owner + allocator frames in the FIRST dump pass; an
+# allocator fault with no owner, an owner fault outside the allocator, and an
+# owner+allocator pair only in a SECOND dump do not.
+_d=$OUT/race-fault-self-check
+mkdir -p "$_d"
+_h='HALLS: --- Halls of Extinction (crash dump) ---'
+printf '%s\nHALLS:   #0  0x1  link 0x1  buddy_alloc+0xb4\nHALLS:   #3  0x1  link 0x1  dmo_owner+0xb4\n' "$_h" > "$_d/yes"
+printf '%s\nHALLS:   #0  0x1  link 0x1  buddy_alloc+0xb4\nHALLS:   #3  0x1  link 0x1  slab_new+0x10\n' "$_h" > "$_d/no-owner"
+printf '%s\nHALLS:   #0  0x1  link 0x1  memset+0x4\nHALLS:   #3  0x1  link 0x1  dmo_owner+0xb4\n' "$_h" > "$_d/no-alloc"
+printf '%s\nHALLS:   #0  0x1  link 0x1  memset+0x4\n%s\nHALLS:   #0  0x1  link 0x1  buddy_alloc+0xb4\nHALLS:   #3  0x1  link 0x1  dmo_owner+0xb4\n' "$_h" "$_h" > "$_d/second"
+race_fault "$_d/yes" && ! race_fault "$_d/no-owner" && ! race_fault "$_d/no-alloc" && ! race_fault "$_d/second" \
+  || { echo "REFUSING: race_fault() misreads its self-check"; exit 3; }
 record "HEAD $CORONA_PIN, clean; go fork $GOFORK_PIN, clean; anchors checked; verdict self-check passes; mutants: $MUTANTS"
 [ -z "${DRYRUN:-}" ] || { record "DRYRUN: the preconditions hold; stopping before any build"; exit 0; }
 
@@ -145,6 +172,8 @@ for m in $MUTANTS; do
                || { record "$m: $t failed elsewhere than a stamp check: proves nothing"; killed=0; } ;;
       *) if [ -n "$ext" ] && [ "$(last_test "$B")" = "$t" ] && printf '%s\n' "$ext" | /usr/bin/grep -qE "$KILL_EXT"; then
            record "$m: $t extincted at a magazine guard: $ext"
+         elif [ -n "$ext" ] && [ "$(last_test "$B")" = "$t" ] && race_fault "$B"; then
+           record "$m: $t extincted in the allocator under an owner: $ext; $(tr -d '\r' < "$B" | /usr/bin/grep -m1 -E 'HALLS: ESR')"
          else
            killed=0
          fi ;;
