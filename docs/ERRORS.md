@@ -747,3 +747,13 @@ differs from Linux: `O_DIRECTORY` with `O_NOFOLLOW`, without `O_PATH`, on a
 final link answers the kernel's `ELOOP` where Linux answers `ENOTDIR`. `lchmod` and
 `fchmodat(AT_SYMLINK_NOFOLLOW)` answer `EOPNOTSUPP` for a link and change
 nothing, as musl's own `fchmodat` does on Linux.
+
+### Hard links (operator vote 2026-10-21)
+
+Operator vote 2026-10-21 (`dec-2026-10-21-pouch-link-eperm`). Thylacine makes
+no hard links, and no native call creates one. Pouch's `link` and `linkat`
+answer `EPERM` without a trap, which is Linux's errno for a filesystem that
+cannot make hard links. Before the vote they reached the unimplemented-call
+sentinel and answered `ENOSYS`. Ported code falls back on `EPERM`:
+fontconfig's cache lock takes a directory lock instead (Boosty B-3g). Plan 9's
+APE answers `EMLINK`. `EPERM` is the answer the ported code is tested against.
