@@ -245,7 +245,9 @@ proc lib_fc_list {tag log} {
 }
 set fcfaces [lib_build_count fonts.count]
 set fcconfd [lib_build_count confd.count]
-set fccache "\$home/.cache/fontconfig"
+# ut joins a variable to the text after it only through ^ (UTOPIA-SHELL-DESIGN
+# 6.7): `$home/.cache` is two words, and `rm -rf` would take the whole home.
+set fccache "\$home^/.cache/fontconfig"
 lc_send "rm -rf $fccache; echo fcrm-\$status | tr a-z A-Z"
 expect {
     -ex "FCRM- 0\r"  { lc_step "saw: $fccache removed" }
