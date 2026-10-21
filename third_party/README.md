@@ -153,12 +153,15 @@ for the exact kept/pruned split and the re-vendor recipe.
 
 Halcyon's proportional faces (halcyond H-A, `ed45a164f`; the Medium, SemiBold
 and Text faces added at I-0, `d3958d68f`): Regular, Italic, Bold, Medium,
-SemiBold, Text and Text Italic, plus `OFL.txt`.
+SemiBold, Text and Text Italic, plus `OFL.txt`. Vendored PRUNED — see
+`third_party/ibm-plex/PRUNE-MANIFEST.md` for the kept/pruned split and the
+re-vendor recipe.
 
 | Field | Value |
 |---|---|
 | Version | 3.005 (each face's name table, ID 5) |
-| Source | IBM's `plex` releases (`https://github.com/IBM/plex`); the release archive and its digest were not recorded when the faces were vendored |
+| Source | `https://github.com/IBM/plex/releases/download/%40ibm/plex-sans%401.1.0/ibm-plex-sans.zip` (IBM's `@ibm/plex-sans@1.1.0`) |
+| sha256 | `fb365d910566e6d199cc2c15579a7dd9a267128e18431a394ed81f1970c69200` (the whole package, measured 2026-10-21: the release publishes none; the seven faces and `OFL.txt`, its `LICENSE.txt`, are byte-identical to its contents) |
 | License | SIL Open Font License 1.1 — see `third_party/ibm-plex/OFL.txt` (the faces' name tables carry the copyright and a reference to it) |
 | Patch series | none — font data is consumed as-is |
 | Consumed by | `usr/halcyond` (`include_bytes!` at build); `/lib/font` when the library tests are baked (B-3g), with `OFL.txt` beside the faces as `IBMPlex-OFL.txt` |
