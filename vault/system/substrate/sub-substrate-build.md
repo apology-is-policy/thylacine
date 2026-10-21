@@ -615,10 +615,15 @@ follow `dec-2026-10-21-fontconfig-layout-dejavu`: the libxml2 backend,
 `default-fonts-dirs=/lib/font`, `additional-fonts-dirs=no` (`yes` would
 probe this host's X11 directories), and NLS, iconv, the docs, bwrap, the
 external test fonts, fontations and `cache-build` off (`cache-build` runs
-the cross-built `fc-cache` at install). The port's one patch names two
+the cross-built `fc-cache` at install). The port's first patch names two
 tests' data (`SRCDIR`, `FONTFILE`) relative to the build root, where the
 tests run on the host and on the device alike, instead of the build host's
-absolute source path. The muster half adds fontconfig to the meson
+absolute source path. Its second lets `fcstat.c` read `statfs` the Linux way
+on `__thylacine__`: musl's `struct statfs` has `f_flags`, so fontconfig takes
+its fstatfs arm, and with no BSD `MNT_LOCAL`, no `f_fstypename` and no
+`__linux__` that arm is an `#error`. Pouch's `fstatfs` answers ENOSYS, so
+`FcFStatFs` returns -1 and its callers keep their defaults (mmap safe, mtime
+not broken). The muster half adds fontconfig to the meson
 libraries, stages `test/4x6.pcf` for those two tests, skips the pytest suite
 by name when the build host has pytest (meson registers it only then), and
 lists `test_d1f48f11` as not run (`dec-2026-10-21-d1f48f11-not-run`; its
