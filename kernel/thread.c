@@ -163,17 +163,98 @@ static void thread_unlink_from_proc(struct Thread *t) {
 
 // The kernel-stack watermark (ARCH 8.12). See thread.h for why it exists.
 //
-// The usable region is [kstack_base + GUARD_SIZE, kstack_base + TOTAL_SIZE):
-// kstack_base is the LOW address and the guard pages sit below the usable
-// stack, which grows DOWN from the top. So the first non-poison word scanning
-// UPWARD from the guard is the deepest point ever touched.
-void thread_kstack_poison(struct Thread *t) {
-    if (!t || !t->kstack_base)
-        return;
-    u64 *p   = (u64 *)((char *)t->kstack_base + THREAD_KSTACK_GUARD_SIZE);
-    u64 *end = (u64 *)((char *)t->kstack_base + THREAD_KSTACK_TOTAL_SIZE);
+// The usable region is [base + GUARD_SIZE, base + TOTAL_SIZE): base is the LOW
+// address and the guard pages sit below the usable stack, which grows DOWN
+// from the top. So the first non-poison word scanning UPWARD from the guard is
+// the deepest point ever touched.
+static void kstack_poison(void *base) {
+    u64 *p   = (u64 *)((char *)base + THREAD_KSTACK_GUARD_SIZE);
+    u64 *end = (u64 *)((char *)base + THREAD_KSTACK_TOTAL_SIZE);
     while (p < end)
         *p++ = THREAD_KSTACK_POISON;
+}
+
+// The kernel stack cache. A block's guard is made no-access once, when
+// it leaves the buddy, and stays that way while the block waits here between
+// threads, so a create that finds one pays no guard toggle and no TLB
+// invalidate, and a free that finds room pays none either. At most
+// THREAD_KSTACK_CACHE_MAX blocks; past that a freed stack goes back to the
+// buddy. LIFO, so the block reused is the one written most recently. A leaf
+// lock: nothing is taken under it.
+static spin_lock_t g_kstack_cache_lock = SPIN_LOCK_INIT;
+static void       *g_kstack_cache[THREAD_KSTACK_CACHE_MAX];
+static u32         g_kstack_cache_n;
+
+static void *kstack_cache_pop(void) {
+    void *base = NULL;
+    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    if (g_kstack_cache_n != 0)
+        base = g_kstack_cache[--g_kstack_cache_n];
+    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    return base;
+}
+
+// A kernel stack for a new thread: the cached block freed last, else a fresh
+// block with its guard made no-access. Either way the whole usable region is
+// poisoned before it is handed out. That resets the watermark, and it is the
+// only thing that keeps a dead thread's frames from being readable on the next
+// thread's stack: a reused block is never zeroed. NULL on OOM.
+static void *kstack_alloc(void) {
+    void *base = kstack_cache_pop();
+    if (!base) {
+        // No KP_ZERO: nothing reads the guard, and the poison covers the usable
+        // region whole.
+        struct page *pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, 0);
+        if (!pg) return NULL;
+        paddr_t pa = page_to_pa(pg);
+        // The block is 32-KiB-aligned, so its guard pages share one L3 (one
+        // 2 MiB region): one call, one batch of invalidates.
+        if (!mmu_set_no_access_range(pa, THREAD_KSTACK_GUARD_PAGES)) {
+            free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
+            return NULL;
+        }
+        base = pa_to_kva(pa);
+    }
+    kstack_poison(base);
+    return base;
+}
+
+// Back to the buddy. The guard pages become normal RW first: whoever is handed
+// these pages next, for any purpose, expects to be able to use them, so a
+// guard that cannot be restored is never freed.
+static void kstack_release(void *base) {
+    paddr_t pa = kva_to_pa(base);
+    if (!mmu_restore_normal_range(pa, THREAD_KSTACK_GUARD_PAGES))
+        extinction("kstack_release: a kernel stack's guard could not be restored");
+    free_pages(pa_to_page(pa), THREAD_KSTACK_TOTAL_ORDER);
+}
+
+// A dead thread's stack: cached with its guard intact while there is room,
+// released otherwise. The caller has seen the thread's last switch-out
+// complete (on_cpu clear), so nothing executes on the block any more.
+static void kstack_free(void *base) {
+    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    if (g_kstack_cache_n < THREAD_KSTACK_CACHE_MAX) {
+        g_kstack_cache[g_kstack_cache_n++] = base;
+        base = NULL;
+    }
+    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    if (base)
+        kstack_release(base);
+}
+
+u32 thread_kstack_cache_count(void) {
+    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    u32 n = g_kstack_cache_n;
+    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    return n;
+}
+
+u32 thread_kstack_cache_drain(void) {
+    u32 n = 0;
+    for (void *base; (base = kstack_cache_pop()) != NULL; n++)
+        kstack_release(base);
+    return n;
 }
 
 // Bytes of kernel stack this thread has ever used. 0 for a thread with no
@@ -426,21 +507,10 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
-    if (!stack_pg) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-    paddr_t guard_pa = page_to_pa(stack_pg);
-    void *kalloc_base = pa_to_kva(guard_pa);
-
-    // P2-Dc / P3-Bca: protect the lower THREAD_KSTACK_GUARD_PAGES as
-    // no-access in the direct map. The 8-page allocation at order=3 is
-    // 32-KiB-aligned, so the 4 guard pages at the bottom always lie
-    // within a single 2 MiB block (32 KiB ≪ 2 MiB). One demote chain +
-    // one TLB flush covers all guards.
-    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
-        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+    // P2-Dc / P3-Bca: the guard pages below the stack are no-access in the
+    // direct map; kstack_alloc hands the block out guarded and poisoned.
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
@@ -457,7 +527,6 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     t->proc        = proc;
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -550,16 +619,8 @@ struct Thread *thread_create_user(struct Proc *proc,
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
-    if (!stack_pg) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-    paddr_t guard_pa = page_to_pa(stack_pg);
-    void *kalloc_base = pa_to_kva(guard_pa);
-
-    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
-        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
@@ -570,7 +631,6 @@ struct Thread *thread_create_user(struct Proc *proc,
     t->proc        = proc;
     t->kstack_base = kalloc_base;
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -631,16 +691,8 @@ struct Thread *thread_create_forked(struct Proc *proc,
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
-    if (!stack_pg) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-    paddr_t guard_pa = page_to_pa(stack_pg);
-    void *kalloc_base = pa_to_kva(guard_pa);
-
-    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
-        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
@@ -651,7 +703,6 @@ struct Thread *thread_create_forked(struct Proc *proc,
     t->proc        = proc;
     t->kstack_base = kalloc_base;
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -794,20 +845,8 @@ static void thread_release(struct Thread *t, bool unlink) {
     if (unlink)
         thread_unlink_from_proc(t);
 
-    if (t->kstack_base) {
-        // P2-Dc / P3-Bca: restore guard pages to normal RW in the direct
-        // map before returning the allocation to buddy. If a future
-        // allocation reuses these pages (for any purpose, kstack or
-        // otherwise), they need normal access; leaving them no-access
-        // would silently fault the next user. Batched into one TLB
-        // flush. kstack_base is a direct-map KVA; recover the PA via
-        // kva_to_pa.
-        paddr_t guard_pa = kva_to_pa(t->kstack_base);
-        mmu_restore_normal_range(guard_pa, THREAD_KSTACK_GUARD_PAGES);
-
-        struct page *pg = pa_to_page(guard_pa);
-        free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
-    }
+    if (t->kstack_base)
+        kstack_free(t->kstack_base);
 
     kmem_cache_free(g_thread_cache, t);
     __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);

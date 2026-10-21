@@ -1221,6 +1221,56 @@ static u64 *directmap_walk_to_l3(paddr_t pa) {
     return l3;
 }
 
+// A guard toggle changes direct-map leaves and nothing else, so each page is
+// invalidated by its VA (all ASIDs, inner-shareable) rather than by
+// `tlbi vmalle1is`, which drops every address space's entries on every CPU.
+// The operand is VA[55:12] in bits [43:0] with every bit above zero: a TTBR1
+// VA shifted right by 12 carries ones into [47:44], the FEAT_TTL level hint,
+// and a wrong hint lets the invalidate miss the entry.
+static inline u64 directmap_tlbi_operand(paddr_t pa) {
+    u64 va = (u64)(uintptr_t)pa_to_kva(pa);
+    return (va >> 12) & ((1ull << 44) - 1);
+}
+
+static void directmap_tlbi_pages(paddr_t pa, unsigned n_pages) {
+    dsb_ishst();
+    for (unsigned i = 0; i < n_pages; i++)
+        __asm__ __volatile__("tlbi vaae1is, %0"
+                             :: "r" (directmap_tlbi_operand(pa + (paddr_t)i * PAGE_SIZE))
+                             : "memory");
+    dsb_ish();
+    isb();
+}
+
+#ifdef KERNEL_TESTS
+// Test hooks (the *_for_test convention; absent from the header): the
+// invalidate operand for a page, the count of kstack guard toggles (the two
+// range calls below), and whether a privileged read of `kva` translates right
+// now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs masked across the pair
+// so no handler can replace PAR_EL1 between them.
+u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
+u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa) {
+    return directmap_tlbi_operand(pa);
+}
+static u64 g_guard_toggles_for_test;
+u64 mmu_guard_toggles_for_test(void);
+u64 mmu_guard_toggles_for_test(void) {
+    return __atomic_load_n(&g_guard_toggles_for_test, __ATOMIC_RELAXED);
+}
+bool mmu_kva_readable_for_test(const void *kva);
+bool mmu_kva_readable_for_test(const void *kva) {
+    u64 par;
+    irq_state_t s = spin_lock_irqsave(NULL);
+    __asm__ __volatile__(
+        "at s1e1r, %1\n"
+        "isb\n"
+        "mrs %0, par_el1\n"
+        : "=r"(par) : "r"(kva) : "memory");
+    spin_unlock_irqrestore(NULL, s);
+    return (par & 1ull) == 0;
+}
+#endif
+
 bool mmu_set_no_access(paddr_t pa) {
     if (pa & (PAGE_SIZE - 1)) return false;
 
@@ -1229,10 +1279,7 @@ bool mmu_set_no_access(paddr_t pa) {
 
     u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
     l3[idx] = 0;
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
+    directmap_tlbi_pages(pa, 1);
     return true;
 }
 
@@ -1244,10 +1291,7 @@ bool mmu_restore_normal(paddr_t pa) {
 
     u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
     l3[idx] = make_page_pte_l3(pa, PTE_KERN_RW);
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
+    directmap_tlbi_pages(pa, 1);
     return true;
 }
 
@@ -1269,10 +1313,10 @@ bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages) {
         u32 idx = (u32)(((pa >> PAGE_SHIFT) + i) & 0x1ff);
         l3[idx] = 0;
     }
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
+    directmap_tlbi_pages(pa, n_pages);
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_guard_toggles_for_test, 1, __ATOMIC_RELAXED);
+#endif
     return true;
 }
 
@@ -1291,10 +1335,10 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
         u32 idx = (u32)((page_pa >> PAGE_SHIFT) & 0x1ff);
         l3[idx] = make_page_pte_l3(page_pa, PTE_KERN_RW);
     }
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
+    directmap_tlbi_pages(pa, n_pages);
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_guard_toggles_for_test, 1, __ATOMIC_RELAXED);
+#endif
     return true;
 }
 

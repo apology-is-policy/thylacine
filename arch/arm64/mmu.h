@@ -285,8 +285,11 @@ void mmu_retire_ttbr0_identity(void);
 // calls hitting the same GiB / 2 MiB block reuse the existing L2 / L3.
 //
 // `mmu_restore_normal(pa)` restores the page to RW + XN in the direct
-// map (PTE_KERN_RW). Called on thread_free before the underlying pages
-// are returned to buddy.
+// map (PTE_KERN_RW), before the pages go back to the buddy.
+//
+// Each flip is followed by a by-VA invalidate of the flipped page on every
+// CPU (`tlbi vaae1is`), never a whole-TLB flush: only the direct-map leaf
+// changed, and every other address space's entries stay cached.
 //
 // SMP-safe without a lock (RW-1 F2): #808 (mmu_pagemap_directmap)
 // pre-demotes the entire buddy zone to L3 at boot, so every runtime call
@@ -294,9 +297,9 @@ void mmu_retire_ttbr0_identity(void);
 // flip on the shared global tables -- never a block->table BBM. Each kstack
 // PA lies in [zone_base, zone_end) (fully covered by the pagemap loop), and
 // concurrent flips of distinct 8-byte-aligned slots are single-copy-atomic,
-// each with its own broadcast tlbi. Multi-thread Procs (stratumd) do drive
-// concurrent thread_create -> these calls from multiple CPUs; no mmu_lock
-// is needed and none exists.
+// each with its own broadcast invalidate. Multi-thread Procs (stratumd) do
+// drive concurrent thread_create -> these calls from multiple CPUs; no
+// mmu_lock is needed and none exists.
 //
 // Returns false on OOM (L2 / L3 table allocation failed) or if the PA
 // is outside the direct-map range (PA < 1 GiB or PA >= 9 GiB at v1.0).
@@ -306,8 +309,8 @@ bool mmu_restore_normal(paddr_t pa);
 // Batched variants for callers protecting / unprotecting a contiguous
 // run of pages within a single 2 MiB L2 block (the common case for
 // per-thread guard regions: 4 pages ≪ 1 block). Operates on
-// `[pa, pa + n_pages * PAGE_SIZE)`. One TLB flush at the end instead
-// of per-page.
+// `[pa, pa + n_pages * PAGE_SIZE)`. One `dsb` pair around the batch of
+// per-page invalidates.
 //
 // Constraints:
 //   - pa must be 4 KiB aligned.

@@ -904,6 +904,13 @@ void test_proc_reap_before_sqpoll_charge(void);
 void test_proc_exit_tail_runs_to_its_end(void);
 void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
+void test_thread_kstack_cache_reuses_without_guard_toggle(void);
+void test_thread_kstack_cache_keeps_the_guard(void);
+void test_thread_kstack_recycled_stack_is_fully_poisoned(void);
+void test_thread_kstack_cache_is_bounded(void);
+void test_directmap_tlbi_operand_masks_the_ttl_hint(void);
+void test_directmap_guard_toggle_invalidates_a_warm_entry(void);
+void test_thread_kstack_create_free_cost(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
@@ -3175,6 +3182,13 @@ struct test_case g_tests[] = {
     { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },
     { "proc.spawn_refused_in_dying_proc",       test_proc_spawn_refused_in_dying_proc,       false, NULL },
     { "thread.tid_and_pid_spaces_refuse_when_spent", test_thread_tid_and_pid_spaces_refuse_when_spent, false, NULL },
+    { "thread.kstack_cache_reuses_without_guard_toggle", test_thread_kstack_cache_reuses_without_guard_toggle, false, NULL },
+    { "thread.kstack_cache_keeps_the_guard",     test_thread_kstack_cache_keeps_the_guard,     false, NULL },
+    { "thread.kstack_recycled_stack_is_fully_poisoned", test_thread_kstack_recycled_stack_is_fully_poisoned, false, NULL },
+    { "thread.kstack_cache_is_bounded",          test_thread_kstack_cache_is_bounded,          false, NULL },
+    { "directmap.tlbi_operand_masks_the_ttl_hint", test_directmap_tlbi_operand_masks_the_ttl_hint, false, NULL },
+    { "directmap.guard_toggle_invalidates_a_warm_entry", test_directmap_guard_toggle_invalidates_a_warm_entry, false, NULL },
+    { "thread.kstack_create_free_cost",          test_thread_kstack_create_free_cost,          false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },

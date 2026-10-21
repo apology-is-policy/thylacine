@@ -1412,6 +1412,45 @@ table still reaches its caller as ENOENT (dev9p_walk drops the server's error; O
 2026-10-08). The cost of a paste into nora in a tile
 is unmeasured.
 
+## Thread-model C2: the kernel stack cache; guard toggles invalidate by address — 2026-10-20
+
+The second chunk of the thread-model overhaul (`docs/thread-model-review.html`; the Fable report
+`docs/THREAD-MODEL-REVIEW-FABLE.md` E-1, E-2, E-10). No operator decision needed. Squashed from aux-3-c2 as *(pending)*.
+
+- **E-1 [P2 perf] a global TLB flush per create and per free.** Each of the three constructors allocated an order-3
+  block, made its four guard pages no-access in the direct map and flushed every CPU's whole TLB
+  (`tlbi vmalle1is`); `thread_release` restored them with a second flush. Now `kstack_free` keeps a freed stack in a
+  bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32 blocks, 1 MiB of the TCB reserve) with its guard still no-access, and
+  `kstack_alloc` reuses the most recent one before it asks the buddy, so a create that finds a block and a free that
+  finds room write no PTE and invalidate nothing. Past the bound a stack goes back to the buddy as before. The toggles
+  that remain (a miss, a release, the drain) invalidate the four pages by address, `tlbi vaae1is` each, with the
+  operand masked to VA[55:12]: a kernel address shifted right by 12 would set bits [47:44], the FEAT_TTL level hint.
+- **E-2 [perf] 48 KiB of stores per create.** The kernel stack is no longer zero-filled: the guard is never read, and
+  the whole usable region is poisoned before any block is handed out, fresh or cached. That poison is the ARCH 8.12
+  watermark's reset and the only scrub between two owners of a block, so it moved inside `kstack_alloc`, where a fourth
+  constructor cannot skip it (`thread_kstack_poison` became the static `kstack_poison`).
+- **E-10, partly.** A reap that frees many exited peers in one create now caches their stacks while the cache has
+  room and invalidates by address for the rest; freeing them at the switch is C1.
+
+Tests (`kernel/test/test_kstack.c`): `thread.kstack_cache_reuses_without_guard_toggle`,
+`thread.kstack_cache_keeps_the_guard` (an AT S1E1R probe: guard pages do not translate, usable pages do),
+`thread.kstack_recycled_stack_is_fully_poisoned` (the three start from a drained cache),
+`thread.kstack_cache_is_bounded` (the bound, the release past it and the drain, each released block fully readable
+again), `directmap.tlbi_operand_masks_the_ttl_hint` (against a value worked out by hand),
+`directmap.guard_toggle_invalidates_a_warm_entry` (a guard page this CPU has just read stops translating when the
+toggle returns: the invalidate reached the TLB; AT answers from the TLB on hardware, while QEMU's TCG walks the
+tables), and `thread.kstack_create_free_cost`, a report. - **First tree, 5b1f3dac7.** Suite 2023/2023 (2017 + 6). Boot-kstack peak 10160 bytes, the same as aux-3. A create+free cycle cost 1018 and 958 ns from the cache, 1518 and 1417 ns from the buddy (green, regreen). The baseline, aux-3 26329ad2d plus the cost report alone (a detached commit, 21f728a17), measured 2802 ns per cycle, peak 10160, suite 2018/2018.
+- **Each witness red without its property, on the first tree.** The push opening the guard plus no poison on a handed-out stack: 2014/2023, the four cache tests, the cost report's toggle check and four existing poison witnesses. The drain releasing nothing plus the unmasked operand: 2021/2023, exactly the drain and operand checks. Rebuilt byte-identical.
+- **Multi-CPU gate on 5b1f3dac7** (10:54-11:43Z): 50/50 boots, 0 corruption (the default kernel at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 boots each).
+- **Audit-close tree, c85d0e86c** (11:44-11:50Z). Suite 2024/2024; peak 10160; 924 and 1003 ns from the cache, 1514 and 1570 ns from the buddy. Red: the first pair 2015/2024, the same nine checks, the guard test now failing on the cached block while its control holds on a genuine buddy block; the second pair 2021/2024, the drain, the operand, and the reuse test's own check that the free cached one stack; the toggles invalidating nothing, 2023/2024, exactly the warm-entry check. So on the Mac's M2 under HVF, AT S1E1R answers from the TLB. The unmasked operand left the warm-entry test green: this M2 invalidated despite the wrong level hint, so only the operand test guards the mask. Rebuilt byte-identical.
+- **Multi-CPU gate on the docs tip** (code identical to c85d0e86c): 50/50 boots, 0 corruption (default at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 boots each; 2026-10-21 08:49-09:38Z, after the operator stopped the first attempt on 10-20 for the talk).
+
+Not in C2: E-3, the guard being half of each thread's kernel memory. Halving it needs a kernel-stack VA arena (one
+guard page of address space, four physical pages per stack), which moves stack addresses out of the direct map that
+`kva_to_pa` assumes. That is a chunk of its own, queued.
+
+Audit: Fable 5.1, round 1 (Fable reviewing Opus): 0 P0 / 0 P1 / 0 P2 / 4 P3, all closed. F1 fixed: `kstack_release` extincts when the guard restore fails instead of freeing pages that would fault their next user (no regression test: only a corrupted direct map makes the walk fail). F2 fixed: `directmap.guard_toggle_invalidates_a_warm_entry`, the one red test with the invalidate removed (2023/2024). F3 fixed: the three reuse tests drain the cache first, and the first asserts that the free cached exactly one stack. F4 closed: the dossiers ride the landing commit; nothing operator-visible changed, so the manual is untouched.
+
 ## Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU — 2026-10-20
 
 The first chunk of the thread-model overhaul the operator asked for on 10-20 ("take a very close look at

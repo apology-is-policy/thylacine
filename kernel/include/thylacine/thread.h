@@ -668,14 +668,18 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 //
 // P2-Dc adds a 4-page (16 KiB) guard region BELOW the kstack. Total
 // allocation per thread is 8 pages = 32 KiB at order=3 from buddy.
-// The guard pages are marked no-access in TTBR0 — a stack-overflow
-// access faults via the kernel's identity mapping, the exception
-// handler reports it, and extinction("kstack overflow") fires.
+// The guard pages are no-access in the kernel direct map (P3-Bca) — a
+// stack-overflow access faults, the exception handler reports it, and
+// extinction("kstack overflow") fires.
 #define THREAD_KSTACK_SIZE         (16 * 1024)
 #define THREAD_KSTACK_GUARD_SIZE   (16 * 1024)
 #define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
 #define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
 #define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
+
+// Freed stacks kept with their guard still no-access, for the next create:
+// 1 MiB of the TCB reserve (phys.h) at most.
+#define THREAD_KSTACK_CACHE_MAX    32
 
 // The kernel-stack WATERMARK (ARCH 8.12).
 //
@@ -688,9 +692,10 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 // rather than trust. Linux carries the same instrument for the same reason
 // (CONFIG_DEBUG_STACK_USAGE).
 //
-// The usable region is filled with THREAD_KSTACK_POISON at thread_create and
-// scanned upward from the guard for the first word that is not poison. That
-// word is the deepest the stack has EVER reached, not the depth right now.
+// The usable region is filled with THREAD_KSTACK_POISON at thread_create, a
+// cached stack's as well as a fresh one's, and scanned upward from the guard
+// for the first word that is not poison. That word is the deepest the stack
+// has EVER reached, not the depth right now.
 //
 // Reading a RUNNING thread's watermark is safe and its answer is honest: a
 // running thread can only push the frontier LOWER, so a concurrent write can
@@ -698,8 +703,12 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 // Thread (the #95 proc-walk discipline); the scan itself needs no lock.
 #define THREAD_KSTACK_POISON  0x5354414b57415445ULL   // "STAKWATE", big-endian
 
-void thread_kstack_poison(struct Thread *t);
 u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
+
+// How many freed stacks the cache holds, and release every one of them to the
+// buddy (answers how many it released).
+u32  thread_kstack_cache_count(void);
+u32  thread_kstack_cache_drain(void);
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the

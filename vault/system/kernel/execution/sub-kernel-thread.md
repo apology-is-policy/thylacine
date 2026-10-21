@@ -72,7 +72,22 @@ address (the guard base), so `free_pages` and the guard restore both work
 from it. Overflow past the usable region lands in the guard and faults.
 
 The 32 KiB allocation is 32 KiB-aligned, so all four guard pages fall inside
-one 2 MiB block — one demote chain, one TLB flush.
+one 2 MiB block: one L3 (pre-demoted at boot, #808) and one batch of by-VA
+invalidates ([[sub-kernel-mmu]]).
+
+**The stack cache.** A freed stack does not go straight back to the buddy.
+`kstack_free` pushes it on a bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32
+blocks, 1 MiB of the TCB reserve) with its guard still no-access, and
+`kstack_alloc` pops the most recent block before it asks the buddy. Past the
+bound a freed stack is released -- guard restored, `free_pages` -- as before.
+So a create that finds a block, and a free that finds room, write no PTE and
+invalidate nothing, where every create and every free used to flush every
+CPU's whole TLB. Whatever its source, a block is poisoned whole before it is
+handed out. That resets the watermark, and it is the only scrub a reused block
+gets, so it is also what keeps a dead thread's frames off the next thread's
+stack. The stack is not zero-filled: the guard is never read and the poison
+covers the usable region. `thread_kstack_cache_drain` releases every cached
+block; only tests call it, since the cache is a fixed slice of the reserve.
 
 **First-switch-in.** There is no "initial save". Each constructor lays out
 `ctx` so `cpu_switch_context`'s `ret` lands at a trampoline: `ctx.lr` is the
@@ -152,7 +167,8 @@ in the middle of the register-save half of its own switch.
 uninitialized; `sched_remove_if_runnable` (walks every CPU's run tree under
 their locks); re-check RUNNING as a loud backstop (a peer transitioning `t`
 here should now be impossible, so extinct rather than free-under-run); then
-**spin on `on_cpu`**. Only then unlink, restore the guard pages, free.
+**spin on `on_cpu`**. Only then unlink and hand the stack to `kstack_free`,
+which caches it or restores its guard and frees it.
 
 ## Data structures
 
@@ -225,7 +241,8 @@ it extincts on. A kernel thread carries no marker and stays preemptible, which
 #810 depends on.
 
 The kernel-stack **watermark** -- the usable region is filled with a
-distinctive constant at every `thread_create` and scanned upward from the guard
+distinctive constant at every `thread_create`, a cached block's as well as a
+fresh one's, and scanned upward from the guard
 for the first word that is not it. That word is the deepest the stack has EVER
 reached. Reading a RUNNING thread's watermark is deliberate and its answer is
 honest in the direction that matters: a running thread only pushes its frontier
@@ -299,17 +316,25 @@ restored when `prev` is switched back to.
 ## Error paths
 
 Every constructor returns NULL on OOM with internal cleanup (descriptor
-freed, pages freed, guard restored). Everything else extincts: `thread_free`
+freed; a fresh block whose guard could not be set goes back to the buddy),
+and on a spent tid space. Everything else extincts: `thread_free`
 of a corrupted/already-freed/RUNNING/current/uninitialized Thread;
 `thread_switch` into a corrupted, uninitialized, EXITING, or `on_cpu`
-thread; `thread_unlink` on a list-head mismatch; tid overflow.
+thread; `thread_unlink` on a list-head mismatch; a stack whose guard cannot
+be restored on its way back to the buddy (`kstack_release`); a spent tid
+space at a boot idle's create.
 
 ## Performance
 
-Thread creation is one SLUB alloc + one order-3 buddy alloc + one
-guard-demote chain + a TLB flush. `thread_free`'s `on_cpu` spin is bounded
-by a single in-flight switch (the peer always resumes and clears it) and
-cannot deadlock because `thread_free` is always called lock-free;
+Thread creation is one SLUB alloc + a stack from the cache (a leaf lock, a
+pop, the 16 KiB poison) or, on a miss, one order-3 buddy alloc + four leaf
+PTE writes + four by-VA invalidates + the poison. A free is a push, or past
+the bound the miss in reverse. Measured on the Mac under HVF (`--config ci`,
+the suite's `thread.kstack_create_free_cost`), a create+free cycle costs
+924-1018 ns from the cache and 1417-1570 ns from the buddy, against 2802 ns
+before C2. `thread_free`'s `on_cpu` spin is bounded by a single in-flight
+switch (the peer always resumes and clears it) and cannot deadlock because
+`thread_free` is always called lock-free;
 `g_thread_free_oncpu_waits` counts how often it actually had to wait, which
 is the running proof that the window is real.
 
@@ -317,8 +342,9 @@ is the running proof that the window is real.
 
 - **#788 is the shape to keep in mind.** `thread_free` freeing a
   SLEEPING-but-still-`on_cpu` thread returns its slot and kstack to the
-  allocators while a peer CPU is still writing them; buddy LIFO hands the
-  same memory to the very next `thread_create`, and the stale register-save
+  allocators while a peer CPU is still writing them; the stack cache's LIFO
+  (buddy LIFO before it) hands the same memory to the very next
+  `thread_create`, and the stale register-save
   corrupts the *recycled* thread's `ctx.sp` → a wild SP fault in its own
   guard, reported as "kernel stack overflow". SMP-only, ~10-20% on the exact
   clean binary. Any change to the free path must preserve the gate order.
@@ -329,7 +355,15 @@ is the running proof that the window is real.
 - `ctx.ttbr0` baked to the kernel root is a fail-safe, not an optimization —
   do not "fix" it to the Proc's root.
 - The guard restore before `free_pages` is not optional: a page left
-  no-access would silently fault its next user, whatever that user is.
+  no-access would silently fault its next user, whatever that user is. It
+  is the ONLY restore: a cached block whose guard is open loses overflow
+  detection for every thread that runs on it next. A restore that fails
+  extincts; a guard that could not be restored never reaches the buddy.
+- **A reused block is never zeroed.** The poison in `kstack_alloc` is the only
+  scrub between two owners, so it must cover the whole usable region on both
+  paths. Re-poisoning only down to the last owner's watermark would be sound
+  only from an exact scan; a budgeted scan is a lower bound and would leave the
+  deepest frames in place.
 - `_Alignof` in the cache creation must stay; a hardcoded alignment is a
   latent slab-misalignment bug.
 - **The fork frame copy enumerates fields, so it is complete only for the
@@ -375,12 +409,14 @@ is the running proof that the window is real.
   each a 32 KiB kstack plus its descriptor, until it exits. The Proc pays: the
   dead count against its own `PROC_THREAD_MAX`, so a user Proc holds at most 255
   (about 8 MiB), while a system-principal Proc, which the cap exempts, holds a
-  whole burst. One create frees every exited peer, each a guard restore with a
-  system-wide TLB flush. A tid-addressed post (`proc_holds_tid_locked`, behind
-  tkill and tgkill) finds an exited worker until a create frees it, and answers
-  ESRCH after. It does not run at exit because kernel tests walk `p->threads`
-  without the lock while peers exit. Freeing at the switch, as Plan 9 and Linux
-  do, belongs to the multi-threading overhaul
+  whole burst. One create frees every exited peer: each stack goes into the
+  stack cache while it has room, and past the bound is released with a guard
+  restore and four by-VA invalidates. A tid-addressed post
+  (`proc_holds_tid_locked`, behind tkill and tgkill) finds an exited worker
+  until a create frees it, and answers ESRCH after. It does not run at exit
+  because kernel tests walk `p->threads` without the lock while peers exit.
+  Freeing at the switch, as Plan 9 and Linux do, belongs to the multi-threading
+  overhaul
   ([[seam-exited-threads-wait-for-a-create]]).
 
 ## Provenance

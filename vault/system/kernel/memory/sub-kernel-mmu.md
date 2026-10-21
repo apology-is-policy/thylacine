@@ -112,6 +112,13 @@ is pre-demoted to page granularity in one single-CPU pass. Every runtime call
 then finds page-grain tables already present and does nothing but flip one leaf
 entry. Concurrent flips of distinct entries are single-copy-atomic and each
 carries its own broadcast invalidate, so no lock is needed and none exists.
+That invalidate is by address -- one `tlbi vaae1is` per flipped page, its
+operand masked to VA[55:12] so a kernel address puts nothing in the FEAT_TTL
+level hint -- never a whole-TLB flush: only the direct-map leaf changed, and
+every other address space's cached entries stay. Flips are rare as well: the
+thread layer keeps freed stacks with their guard in place and reuses them
+([[sub-kernel-thread]]), so a guard is set when a block leaves the buddy and
+restored when it goes back.
 
 That is worth stating as a pattern: **the race was removed by making the
 dangerous transition impossible at runtime, not by locking it.**
