@@ -425,17 +425,18 @@ static const char *loom_private_fixture(void) {
     // back out, because its instrument cannot be made sound HERE. phys_free_pages
     // reports g_zone0.total_free_pages alone (mm/phys.c:267) and an order-0 free
     // goes to a per-CPU magazine instead, flags cleared, "magazine ownership, not
-    // free list" (mm/magazines.c:134), so the reading exists only after
-    // magazines_drain_all -- which walks EVERY CPU's magazine with no lock and no
-    // IRQ mask (mm/magazines.c:154). The tree's other page-accounting tests free
-    // on the CPU they measure from, so for them that cross-CPU pass is a hazard
-    // only. This leg cannot: the retirer frees the dying image on whatever CPU it
-    // ran on, which makes the cross-CPU pass LOAD-BEARING for the reading, in a
-    // suite that runs after smp_init (main.c:689 vs :874) with kthreads runnable.
-    // A measurement whose instrument needs a quiescence this fixture cannot
-    // establish is not a weaker witness but a different claim. So release stays
-    // OPEN and recorded, and restoring it wants a quiescent drain or a production
-    // counter, plus an omitted-put-only mutant to show the gauge can redden at
+    // free list" (mm/magazines.c:141), so the reading exists only after
+    // magazines_drain_all (mm/magazines.c:163). That walk was unlocked when
+    // this was written; each set is drained under its own lock now, so it is
+    // safe, but it still gives no stable global count: a peer may refill its set
+    // the moment the drain lets go. The tree's other page-accounting tests free
+    // on the CPU they measure from. This leg cannot: the retirer frees the dying
+    // image on whatever CPU it ran on, which makes the cross-CPU pass
+    // LOAD-BEARING for the reading, in a suite that runs after smp_init
+    // (main.c:689 vs :874) with kthreads runnable. A measurement whose instrument
+    // needs a quiescence this fixture cannot establish is not a weaker witness
+    // but a different claim. So release stays OPEN and recorded, and restoring
+    // it wants a production counter, plus an omitted-put-only mutant to show the gauge can redden at
     // all -- the balanced mutant tests acquisition (astra, yip 0161 t55; the
     // symmetric discipline the tree does encode is test_cow.c:249-253).
     p = test_proc_make();

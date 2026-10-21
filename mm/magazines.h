@@ -9,10 +9,15 @@
 // my_cpu() = MPIDR_EL1.Aff0. The fast path runs with IRQs masked so a
 // CPU touches only its own set, non-reentrantly (an IRQ-context alloc
 // cannot re-enter; preemption -- being IRQ-driven -- cannot migrate the
-// thread mid-op onto another CPU's set). The interface is fixed so
-// callers don't change. Before this (#807) NCPUS was pinned at 1 with
-// my_cpu()==0 and no IRQ discipline -- all CPUs shared one set and
-// raced the non-atomic count RMW under -smp >1.
+// thread mid-op onto another CPU's set). Each set also has its own
+// spinlock, taken inside the mask by the owner on every alloc and free
+// and by any CPU that drains the set: the mask alone excludes nothing
+// running on a peer, so without the lock a peer's drain could pop an
+// entry the owner was pushing or popping and hand one page to two
+// owners with every count in range. The interface is fixed so callers
+// don't change. Before #807 NCPUS was pinned at 1 with my_cpu()==0 and
+// no IRQ discipline -- all CPUs shared one set and raced the non-atomic
+// count RMW under -smp >1.
 //
 // Per ARCHITECTURE.md §6.3.
 
@@ -21,6 +26,7 @@
 
 #include <thylacine/page.h>
 #include <thylacine/smp.h>      // DTB_MAX_CPUS
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 // 16 entries per magazine matches Linux's per-CPU page cache default.
@@ -39,6 +45,7 @@ struct magazine {
 };
 
 struct percpu_data {
+    spin_lock_t lock;                       // both sets; magazine lock -> zone lock
     struct magazine mags[NUM_MAG_ORDERS];
 };
 
@@ -60,9 +67,11 @@ struct page *mag_alloc(unsigned order);
 // (caller should fall through to buddy_free).
 bool mag_free(struct page *p, unsigned order);
 
-// Drain ALL per-CPU magazines back to the buddy. Used by the boot
-// smoke test for clean accounting; in production this is also useful
-// for memory pressure responses (Phase 2+).
+// Drain ALL per-CPU magazines back to the buddy, each set under its own
+// lock, so it is safe at any time: a peer allocating concurrently sees its
+// set before or after the drain, never during. Used by the in-kernel suite
+// for clean accounting; in production this is also useful for memory
+// pressure responses (Phase 2+).
 void magazines_drain_all(void);
 
 #endif // THYLACINE_MM_MAGAZINES_H

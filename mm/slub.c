@@ -314,9 +314,8 @@ void kmem_cache_destroy(struct kmem_cache *c) {
 
     // Contract: the caller must have quiesced the cache (no concurrent
     // kmem_cache_alloc/free on any CPU) AND freed every object. Both are
-    // the caller's responsibility -- same discipline as magazines_drain_all
-    // -- so the live-count read + the partial-drain below run without
-    // c->lock (RW-1 F-S2).
+    // the caller's responsibility, so the live-count read + the partial-drain
+    // below run without c->lock (RW-1 F-S2).
     //
     // RW-1 F-S1: a cache holding ANY live object must not be destroyed.
     // The partial-drain below returns each partial slab's page to the

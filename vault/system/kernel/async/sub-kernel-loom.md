@@ -3819,3 +3819,9 @@ guard, and each expects `loom.create_geometry` to FAIL.
 
 `loom_pool_peek` (`loom_service_pool.c`) lost its only non-test caller with the
 helper. It remains a read accessor that `private_pool_fixture.h` uses.
+
+Also October 21: the magazine drain that the October 7 account above calls
+unlocked now takes each CPU's set lock ([[sub-kernel-mm-phys]], October 21),
+so it is safe while peers allocate. The private fixture's unpinned-reap
+release witness still stays out: it needs a stable global page count, which
+a drain cannot give and a production counter would.

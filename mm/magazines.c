@@ -27,6 +27,7 @@ struct percpu_data g_percpu[NCPUS];
 
 void magazines_init(void) {
     for (int cpu = 0; cpu < NCPUS; cpu++) {
+        spin_lock_init(&g_percpu[cpu].lock);
         for (int i = 0; i < NUM_MAG_ORDERS; i++) {
             g_percpu[cpu].mags[i].count = 0;
         }
@@ -58,7 +59,8 @@ static unsigned mag_idx_to_order(int idx) {
 // gic.c (redistributor base), fault.c, and halls.c already require -- and
 // per_cpu_main is even handed the dense DTB index as its sched id. On a
 // clustered SoC (big.LITTLE: Aff0 repeats per cluster) this folds two CPUs
-// onto one slot, re-opening the shared-set race for them -- so the Lazarus
+// onto one slot. The set's lock keeps a folded slot correct (contended, not
+// corrupt), but sched/gic/fault/halls have no such lock -- so the Lazarus
 // / PORTABILITY arc must introduce ONE canonical MPIDR->dense-id map and
 // route smp_cpu_idx_self() through it (fixing magazines/sched/gic/fault/
 // halls uniformly). Dormant on QEMU virt + RPi 400 (dense Aff0).
@@ -94,11 +96,14 @@ struct page *mag_alloc(unsigned order) {
 
     // IRQ-masked across my_cpu() + the pop (+ any refill): pins this CPU's
     // set so no IRQ-context alloc re-enters it and preemption can't migrate
-    // us onto another CPU's set mid-op. NULL lock = mask-only (spinlock.h).
-    // mag_refill's buddy_alloc takes the zone lock with its own nested
-    // irqsave -- fine (zone lock is a leaf; order is IRQ-off -> zone lock).
+    // us onto another CPU's set mid-op. The mask must come first: it is what
+    // makes my_cpu() name the set whose lock we take. The set's lock then
+    // excludes a peer draining it. mag_refill's buddy_alloc takes the zone
+    // lock with its own nested irqsave (order: magazine lock -> zone lock).
     irq_state_t s = spin_lock_irqsave(NULL);
-    struct magazine *m = &g_percpu[my_cpu()].mags[idx];
+    struct percpu_data *pc = &g_percpu[my_cpu()];
+    spin_lock(&pc->lock);
+    struct magazine *m = &pc->mags[idx];
     // #807 regression guard: a corrupt count (e.g. a regressed cross-CPU
     // race re-opening this set) trips here LOUDLY instead of silently
     // double-allocating. Cheap (a compare under the mask we already hold).
@@ -106,11 +111,13 @@ struct page *mag_alloc(unsigned order) {
     if (m->count == 0) {
         mag_refill(m, mag_idx_to_order(idx));
         if (m->count == 0) {
+            spin_unlock(&pc->lock);
             spin_unlock_irqrestore(NULL, s);
             return NULL;
         }
     }
     struct page *p = m->entries[--m->count];
+    spin_unlock(&pc->lock);
     spin_unlock_irqrestore(NULL, s);
 
     // p is out of the magazine now -- private to this caller; init outside
@@ -133,33 +140,38 @@ bool mag_free(struct page *p, unsigned order) {
     p->prev  = NULL;
     p->flags = 0;       // not PG_FREE — magazine ownership, not free list
 
-    // IRQ-masked across my_cpu() + the push (+ any drain): same rationale
-    // as mag_alloc -- pins this CPU's set, non-reentrantly.
+    // IRQ-masked across my_cpu() + the push (+ any drain), then the set's
+    // lock: same rationale as mag_alloc.
     irq_state_t s = spin_lock_irqsave(NULL);
-    struct magazine *m = &g_percpu[my_cpu()].mags[idx];
+    struct percpu_data *pc = &g_percpu[my_cpu()];
+    spin_lock(&pc->lock);
+    struct magazine *m = &pc->mags[idx];
     ASSERT_OR_DIE((unsigned)m->count <= MAGAZINE_SIZE, "mag_free: count corrupt");
     if (m->count == MAGAZINE_SIZE) {
         mag_drain(m, mag_idx_to_order(idx));
     }
     m->entries[m->count++] = p;
+    spin_unlock(&pc->lock);
     spin_unlock_irqrestore(NULL, s);
     return true;
 }
 
-// Drains EVERY CPU's set back to the buddy. QUIESCENT-ONLY: it touches
-// peer CPUs' sets without IRQ-masking or cross-CPU coordination, so it is
-// safe only when no CPU is concurrently allocating -- i.e. the in-kernel
-// test harness (secondaries parked in WFI) or a single-threaded shutdown.
-// Never call it during active SMP workload.
+// Drains EVERY CPU's set back to the buddy, each under its own lock (one
+// at a time, IRQs masked), so it is safe while peers allocate: the owner's
+// fast path holds the same lock. What it cannot give is a stable global
+// count -- a peer may refill its set the moment the drain lets go.
 void magazines_drain_all(void) {
     for (int cpu = 0; cpu < NCPUS; cpu++) {
+        struct percpu_data *pc = &g_percpu[cpu];
+        irq_state_t s = spin_lock_irqsave(&pc->lock);
         for (int idx = 0; idx < NUM_MAG_ORDERS; idx++) {
-            struct magazine *m = &g_percpu[cpu].mags[idx];
+            struct magazine *m = &pc->mags[idx];
             unsigned order = mag_idx_to_order(idx);
             while (m->count > 0) {
                 struct page *p = m->entries[--m->count];
                 buddy_free(&g_zone0, p, order);
             }
         }
+        spin_unlock_irqrestore(&pc->lock, s);
     }
 }
