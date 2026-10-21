@@ -239,6 +239,19 @@ func links() {
 	check(fmt.Sprintf("ReadDir types live as a link (got %v)", types["live"]), types["live"] == os.ModeSymlink)
 	check(fmt.Sprintf("ReadDir types sub as a directory (got %v)", types["sub"]), types["sub"] == os.ModeDir)
 	check(fmt.Sprintf("ReadDir types target as a file (got %v)", types["target"]), types["target"] == 0)
+	// An os.Root follows the links that stay inside it and refuses the rest:
+	// an absolute target escapes it whatever it names.
+	r, err := os.OpenRoot(fix)
+	check(fmt.Sprintf("os.OpenRoot(%s) (err %v)", fix, err), err == nil)
+	if err == nil {
+		text, err := r.ReadFile("chain")
+		check(fmt.Sprintf("Root.ReadFile(chain) reads the target (err %v)", err), err == nil && string(text) == "pouch-links target\n")
+		text, err = r.ReadFile("dir/leaf")
+		check(fmt.Sprintf("Root.ReadFile(dir/leaf) goes through the link (err %v)", err), err == nil && string(text) == "pouch-links leaf\n")
+		_, err = r.ReadFile("abs")
+		check(fmt.Sprintf("Root.ReadFile(abs) is refused as an escape (err %v)", err), err != nil && strings.Contains(err.Error(), "path escapes"))
+		check("Root.Close", r.Close() == nil)
+	}
 	must(fmt.Sprintf("links: %d checks failed (above)", bad), bad == 0)
-	fmt.Printf("go-fs: links OK (%d links: lstat, readlink, EvalSymlinks, ReadDir types)\n", len(linkTargets))
+	fmt.Printf("go-fs: links OK (%d links: lstat, readlink, EvalSymlinks, ReadDir types, Root)\n", len(linkTargets))
 }
