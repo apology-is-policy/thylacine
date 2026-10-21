@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -791,7 +791,9 @@ performance backlog.
 ## Seams
 
 - **Per-thread files.** Registers, stack and step all operate on a single
-  *focus* thread — the thread that trapped, or the head thread absent one. A
+  *focus* thread — the thread that trapped, or main (the oldest thread not
+  exiting) absent one; never an exiting thread, and nothing when every thread
+  is exiting. A
   `/proc/<pid>/thread/<tid>/` layer is unbuilt, and until it exists a
   multi-threaded target is inspected one thread at a time.
 - **Single-step resumes the whole process.** Peers briefly run during a step.
@@ -824,11 +826,6 @@ performance backlog.
   outgrows any path (1 KiB), so the clamp cuts nothing; it is the defence for
   the day either bound moves, and its comment now says so rather than
   describing an overflow past a 512-byte buffer the code no longer has.
-- **The focus-thread selector cites a test case that does not exist under that
-  name.** The coverage is real and load-bearing — four assertions, including the
-  foreign-focus fallback the comment insists must not be deleted — but it lives
-  inside the stop/start/resume test rather than as the separately-registered case
-  the citation names. Grep the symbol, not the cited name.
 - **`ctl` reads are self-scoped by content, not by a gate.** A cross-Proc read
   returns zero bytes because the only readable content is the reader's own
   hardware-verify result. There is no authority check on that path; the emptiness

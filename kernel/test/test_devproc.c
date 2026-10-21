@@ -2210,36 +2210,54 @@ void test_devproc_debug_stop_start_resume(void) {
     TEST_EXPECT_EQ(f_step, -1, "the dying target is gone to the step's wait too");
     TEST_EXPECT_EQ(f_wait, 0, "/proc/<pid>/wait still waits for a dying target's exit");
 
-    // (F3, #95-audit) devproc_focus_thread selection: a matched in-list focus is
-    // returned; a foreign / NULL focus falls back to head. The deterministic twin
-    // of the /ambush-probe stage-C multi-M E2E (the kproc harness cannot reproduce a
-    // real off-head fault-stop). Revert-probe: a loop that returns head regardless
-    // of match fails the in-list-peer leg. devproc_focus_thread reads only pointer
-    // identity + ->next_in_proc, so two zero-init stack Threads suffice (unlinked
-    // before free so proc_free never touches them). Only ->next_in_proc + pointer
-    // identity are read, so set those explicitly (NOT `= {0}`: a large struct
-    // Thread zero-init would emit a memset the freestanding kernel does not link).
+    // (F3, #95-audit; F-4) devproc_focus_thread selection: a matched, live in-list
+    // focus is returned; a NULL / foreign / exiting focus falls back to main, the
+    // oldest thread not exiting -- the TAIL of the head-inserted list, never the
+    // head -- and NULL when every thread is exiting. The deterministic twin of the
+    // /ambush-probe stage-C multi-M E2E (the kproc harness cannot reproduce a real
+    // off-main fault-stop). Revert-probes: a loop that returns main regardless of
+    // match fails the head-focus leg; the pre-F-4 head fallback fails the NULL,
+    // foreign and exited legs. The selection reads only pointer identity,
+    // ->next_in_proc and ->state, so two stack Threads with those set suffice (NOT
+    // `= {0}`: a large struct Thread zero-init would emit a memset the
+    // freestanding kernel does not link). ft is never linked into the proc table;
+    // the lock is the selector's contract. Recorded under it, asserted after the
+    // stack Threads are unlinked.
     extern struct Thread *devproc_focus_thread(struct Proc *target);
     struct Proc *ft = proc_alloc();
     TEST_ASSERT(ft != NULL, "alloc focus-select target");
     ft->state = PROC_STATE_ALIVE;
-    struct Thread fhth, fpth;
-    fhth.proc = ft;  fpth.proc = ft;
-    fhth.next_in_proc = &fpth;  fpth.next_in_proc = NULL;
+    struct Thread fhth, fmth;
+    fhth.proc = ft;  fmth.proc = ft;
+    fhth.state = THREAD_RUNNABLE;  fmth.state = THREAD_RUNNABLE;
+    fhth.next_in_proc = &fmth;  fmth.next_in_proc = NULL;
+    struct Thread *sel[8];
+    irq_state_t fs = proc_table_lock_acquire();
     struct Thread *ft_saved = ft->threads;   // NULL for a fresh proc_alloc
-    ft->threads = &fhth;                       // head = fhth, in-list peer = fpth
-    ft->debug_focus_thread = NULL;
-    TEST_ASSERT(devproc_focus_thread(ft) == &fhth, "focus NULL -> head");
-    ft->debug_focus_thread = &fpth;
-    TEST_ASSERT(devproc_focus_thread(ft) == &fpth, "in-list peer focus -> that thread (not head)");
-    ft->debug_focus_thread = &fhth;
-    TEST_ASSERT(devproc_focus_thread(ft) == &fhth, "in-list head focus -> head");
-    ft->debug_focus_thread = t;   // a foreign thread (t->proc == kproc/test-proc != ft)
-    TEST_ASSERT(devproc_focus_thread(ft) == &fhth, "foreign focus -> head fallback (the validation is load-bearing)");
+    ft->threads = &fhth;                       // head = fhth (newest), tail = fmth (main)
+    ft->debug_focus_thread = NULL;   sel[0] = devproc_focus_thread(ft);
+    ft->debug_focus_thread = &fhth;  sel[1] = devproc_focus_thread(ft);
+    ft->debug_focus_thread = &fmth;  sel[2] = devproc_focus_thread(ft);
+    ft->debug_focus_thread = t;      sel[3] = devproc_focus_thread(ft);   // t->proc != ft
+    fhth.state = THREAD_EXITING;
+    ft->debug_focus_thread = NULL;   sel[4] = devproc_focus_thread(ft);
+    ft->debug_focus_thread = &fhth;  sel[5] = devproc_focus_thread(ft);
+    fhth.state = THREAD_RUNNABLE;  fmth.state = THREAD_EXITING;
+    ft->debug_focus_thread = NULL;   sel[6] = devproc_focus_thread(ft);
+    fhth.state = THREAD_EXITING;     sel[7] = devproc_focus_thread(ft);
     ft->threads = ft_saved;        // unlink the stack Threads before free
     ft->debug_focus_thread = NULL;
+    proc_table_lock_release(fs);
     ft->state = PROC_STATE_ZOMBIE;
     proc_free(ft);
+    TEST_ASSERT(sel[0] == &fmth, "focus NULL -> main (the oldest thread), not the head");
+    TEST_ASSERT(sel[1] == &fhth, "in-list focus -> that thread (not main)");
+    TEST_ASSERT(sel[2] == &fmth, "focus on main -> main");
+    TEST_ASSERT(sel[3] == &fmth, "foreign focus -> main (the validation is load-bearing)");
+    TEST_ASSERT(sel[4] == &fmth, "newest thread exited, focus NULL -> main (F-4)");
+    TEST_ASSERT(sel[5] == &fmth, "focus on an exited thread -> main, never the exited thread");
+    TEST_ASSERT(sel[6] == &fhth, "main exited -> the oldest thread still live");
+    TEST_ASSERT(sel[7] == NULL, "every thread exited -> NULL (each caller refuses it)");
 }
 
 // 8a-2c F1: a whole-Proc stop SUPERSEDES an in-flight single-step. proc_debug_
@@ -2601,14 +2619,50 @@ void test_devproc_debug_regs(void) {
     if (regs3) spoor_clunk(regs3);
     __atomic_store_n(&tgt->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
 
-    // (b) The EXITING-head backstop: all-EXITING peers are SKIPPED by
+    // (b) The EXITING backstop: all-EXITING peers are SKIPPED by
     //     all_threads_parked (vacuously parked, group_exit_msg already NULL
-    //     again), so build_regs itself must refuse an EXITING head thread.
+    //     again), so the read must refuse rather than report an exiting thread
+    //     (devproc_focus_thread selects none; build_regs backstops it).
     th.state = THREAD_EXITING;
     struct Spoor *regs4 = open_pidfile_for(tgt->pid, "regs", 2);
     long hf1_exiting_rc = regs4 ? devproc.read(regs4, &ur, (long)sizeof(ur), 0) : -2;
     if (regs4) spoor_clunk(regs4);
     th.state = THREAD_SLEEPING;
+
+    // (c) F-4: the newest thread has exited. p->threads is head-inserted, so a
+    //     thread that exited and that no live peer has reaped sits at the head,
+    //     EXITING, while main parks (all_threads_parked skips it). A manual stop
+    //     sets no focus, so regs reads and writes main -- before the fix both
+    //     took the head and refused. A focus naming the exited thread falls back
+    //     to main the same way. One variable away from (b): main is live.
+    //     The exited thread is static: a second struct Thread on this frame
+    //     would deepen the suite's kernel stack by its whole size.
+    static struct Thread ex;
+    for (size_t i = 0; i < sizeof(ex); i++) ((u8 *)&ex)[i] = 0;
+    ex.magic = THREAD_MAGIC;
+    ex.state = THREAD_EXITING;
+    tgt->debug_stop_req = 1;
+    irq_state_t xs = proc_table_lock_acquire();
+    ex.next_in_proc = &th;
+    tgt->threads    = &ex;
+    proc_table_lock_release(xs);
+    u64 f4_main_pc = tf->elr;
+    struct Spoor *regs5 = open_pidfile_for(tgt->pid, "regs", 2);
+    ur.pc = 0;
+    long f4_read_rc = regs5 ? devproc.read(regs5, &ur, (long)sizeof(ur), 0) : -2;
+    u64  f4_read_pc = ur.pc;
+    wr.pc = 0xF4F40000ull;
+    long f4_write_rc = regs5 ? devproc.write(regs5, &wr, (long)sizeof(wr), 0) : -2;
+    u64  f4_written  = tf->elr;
+    __atomic_store_n(&tgt->debug_focus_thread, &ex, __ATOMIC_RELEASE);
+    ur.pc = 0;
+    long f4_focus_rc = regs5 ? devproc.read(regs5, &ur, (long)sizeof(ur), 0) : -2;
+    u64  f4_focus_pc = ur.pc;
+    __atomic_store_n(&tgt->debug_focus_thread, NULL, __ATOMIC_RELEASE);
+    if (regs5) spoor_clunk(regs5);
+    xs = proc_table_lock_acquire();
+    tgt->threads = &th;
+    proc_table_lock_release(xs);
 
     // The dump seal refuses regs/fpregs READS (extraction) and neither WRITE
     // (control, NOTRACE's). LAST, because the bit is one-way and every leg above
@@ -2642,7 +2696,14 @@ void test_devproc_debug_regs(void) {
     TEST_EXPECT_EQ(hf1_msg_rc, (long)-1,
                    "regs of a group-terminating target is refused (HF1)");
     TEST_EXPECT_EQ(hf1_exiting_rc, (long)-1,
-                   "regs of an EXITING head thread is refused (HF1 backstop)");
+                   "regs with every thread EXITING is refused (HF1; the selector returns NULL)");
+    TEST_ASSERT(f4_main_pc != 0, "premise: main's pc is nonzero, so a failed read cannot match it");
+    TEST_EXPECT_EQ(f4_read_rc, (long)sizeof(ur), "F-4: regs reads main while the newest thread has exited");
+    TEST_EXPECT_EQ(f4_read_pc, f4_main_pc, "F-4: the frame read is main's");
+    TEST_EXPECT_EQ(f4_write_rc, (long)sizeof(wr), "F-4: a regs write lands while the newest thread has exited");
+    TEST_EXPECT_EQ(f4_written, 0xF4F40000ull, "F-4: the write went to main's frame");
+    TEST_EXPECT_EQ(f4_focus_rc, (long)sizeof(ur), "F-4: a focus naming the exited thread falls back to main");
+    TEST_EXPECT_EQ(f4_focus_pc, 0xF4F40000ull, "F-4: the fallback frame is main's");
     TEST_EXPECT_EQ(nd_regs_ctl, (long)sizeof(ur), "control: regs reads before the seal");
     TEST_EXPECT_EQ(nd_fp_ctl,   (long)sizeof(uf), "control: fpregs reads before the seal");
     TEST_EXPECT_EQ(nd_regs_rd,  (long)-T_E_ACCES, "the dump seal refuses a regs READ (EACCES)");
@@ -2918,7 +2979,9 @@ void test_devproc_debug_kstack_settled(void) {
     if (kn) { slen_nonowner = devproc.read(kn, jbuf, (long)sizeof(jbuf), 0); spoor_clunk(kn); }
     tgt->principal_id = saved_pid;
 
-    // (d) F3: an EXITING head -> empty (never walk a head running its exit path).
+    // (d) F3: the only thread EXITING -> empty (never walk a thread running its
+    //     exit path). Since F-4 the selector returns NULL here, before the
+    //     format-time state clause.
     char dbuf[64]; for (size_t i = 0; i < sizeof(dbuf); i++) dbuf[i] = 0;
     long slen_exiting = -999;
     th.state = THREAD_EXITING;
@@ -2952,9 +3015,9 @@ void test_devproc_debug_kstack_settled(void) {
     TEST_ASSERT(contains(rbuf, (size_t)slen_running, "running"), "8b: running head reports <running>");
     // I-39 authorization preserved for the inspect tier.
     TEST_EXPECT_EQ(slen_nonowner, (long)-T_E_ACCES, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39, EACCES)");
-    // F3: an EXITING head -> empty (the death-adjacent guard; the relaxed gate no
-    // longer rejects a dying target, so the format-time EXITING guard is load-bearing).
-    TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: EXITING head -> empty read (never walk a dying head)");
+    // F3: the only thread EXITING -> empty (the death-adjacent guard; the relaxed
+    // gate no longer rejects a dying target, so the selection must refuse it).
+    TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: every thread EXITING -> empty read (never walk a dying thread)");
 }
 
 // =============================================================================

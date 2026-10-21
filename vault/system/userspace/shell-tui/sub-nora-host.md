@@ -15,7 +15,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-10-08
+updated: 2026-10-21
 area: userspace
 ---
 ## Purpose
@@ -189,7 +189,8 @@ the Invariants section otherwise reads as "no kernel surface at all":
   row. The pid arrives out of band: parley decodes the DAP `process` event into
   the debuggee's system pid, so a backend that does not emit one simply yields no
   kernel frames.
-- **The frame it reads is the target's head thread** (the M at the stop), not the
+- **The frame it reads is the target's focus thread** (the M at the stop, else
+  main, the oldest thread not exiting), not the
   stopped goroutine's own M — the goroutine-accurate kernel stack is a deferred
   Ambush stitch. At a user breakpoint the kernel rows are the debug-trap path; a
   goroutine blocked in a syscall shows its block path. Selecting a kernel frame

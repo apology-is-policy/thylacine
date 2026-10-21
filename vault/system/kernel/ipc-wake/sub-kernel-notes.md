@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -407,8 +407,9 @@ value back.
 **The pick.** For each caught family queued and held by nobody,
 `proc_caught_note_walk` picks one candidate: not exiting, the family unmasked,
 no handler running, and not in a wait that holds. It prefers the posting
-thread, then main (the oldest live thread: `p->threads` is head-inserted, so
-the last one not exiting), any thread not blocked, main blocked in an unwinding
+thread, then main (the oldest live thread, `proc_main_thread_locked`:
+`p->threads` is head-inserted, so the last one not exiting), any thread not
+blocked, main blocked in an unwinding
 wait, and any thread blocked in one. In a Linux-phenotype Proc it designates the
 pick under the pick's `wait_lock`: it re-checks the pick there, CASes the
 family's claim bit while the family is still caught and unclaimed, sets

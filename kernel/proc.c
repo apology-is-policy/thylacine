@@ -3388,18 +3388,15 @@ static bool caught_waits(const struct Thread *x, u8 kind) {
 }
 
 // The preference among candidates: the posting thread, main (the oldest live
-// thread -- p->threads is head-inserted, so the last one not exiting), any
-// thread not blocked, main blocked in an unwinding wait, then any thread
-// blocked in one. A thread not blocked reaches an EL0-return tail soon (an EL0
-// spinner by the kick), so a sleeper is interrupted only when none can. This
-// is the operator's order, not Linux's: complete_signal takes the target
-// (main, for kill) whenever it can take the signal, waking it from an
-// interruptible sleep even while a worker runs.
+// thread, proc_main_thread_locked), any thread not blocked, main blocked in an
+// unwinding wait, then any thread blocked in one. A thread not blocked reaches
+// an EL0-return tail soon (an EL0 spinner by the kick), so a sleeper is
+// interrupted only when none can. This is the operator's order, not Linux's:
+// complete_signal takes the target (main, for kill) whenever it can take the
+// signal, waking it from an interruptible sleep even while a worker runs.
 static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster,
                                   struct Thread *skip) {
-    struct Thread *main_t = NULL;
-    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
-        if (x->state != THREAD_EXITING) main_t = x;
+    struct Thread *main_t = proc_main_thread_locked(p);
     if (main_t == skip) main_t = NULL;
     if (poster && poster != skip && caught_candidate(poster, fam)) return poster;
     static const u8 order[2] = { CAUGHT_WAIT_NONE, CAUGHT_WAIT_UNWINDS };
@@ -4277,6 +4274,17 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
         if (peer->state != THREAD_EXITING) n++;
     }
     return n;
+}
+
+// p->threads is head-inserted (thread_link_into_proc), so the oldest thread not
+// exiting is the last one on the list. The plain state reads are sound for the
+// reason above: a user Proc's thread is marked EXITING under g_proc_table_lock.
+// (kproc's kthreads mark themselves without it; no caller passes kproc.)
+struct Thread *proc_main_thread_locked(struct Proc *p) {
+    struct Thread *main_t = NULL;
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->state != THREAD_EXITING) main_t = x;
+    return main_t;
 }
 
 // P6 hardening #3a (scripture e45a571 -- docs/ERRORS.md + the snare:*
@@ -5707,7 +5715,7 @@ static void proc_stop_wake_cascade_locked(struct Proc *p) {
 // proc_debug_cancel_steps_locked -- see proc.h. Under g_proc_table_lock, so
 // p->threads is stable; the RELEASE store pairs with hwdebug_switch_in's and
 // el0_return_stop_check's ACQUIRE reads of debug_ss_armed. (v1.0 arms only the
-// head thread, so this is usually a one-element clear.)
+// focus thread, so this is usually a one-element clear.)
 void proc_debug_cancel_steps_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
@@ -5767,8 +5775,8 @@ bool proc_debug_fault_stop(struct Proc *p) {
     bool deliver = (p->debug_owner != NULL) && proc_debug_stop_deliver(p);
     if (deliver) {
         // 8c-2 #95: the firing M becomes the debug-fs FOCUS, so
-        // /proc/<pid>/{regs,kregs,kstack} + step report the M at the stop, not the
-        // head. Every bp/step/wp fire routes through here, so this one store covers
+        // /proc/<pid>/{regs,kregs,kstack} + step report the M at the stop, not
+        // main. Every bp/step/wp fire routes through here, so this one store covers
         // all three; cleared by proc_debug_resume. The `ct->proc == p` guard pins
         // "the focus is always a thread of p" AT THE STORE (#95-audit F2): the EC
         // handlers already pass `p == current->proc`, but a foreign current_thread()
@@ -5802,7 +5810,7 @@ void proc_debug_resume(struct Proc *p) {
 
     // 8c-2 #95: the FOCUS is valid only for the stop we are leaving -- clear it so
     // the next stop re-establishes it (a bp/step/wp fire via proc_debug_fault_stop,
-    // or a manual ctl `stop` which then reads NULL -> head). A resume implies the
+    // or a manual ctl `stop` which then reads NULL -> main). A resume implies the
     // target runs, so no debug-fs reader (fully-stopped-gated) observes a stale
     // focus after this.
     __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
