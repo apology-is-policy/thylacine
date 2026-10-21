@@ -23,7 +23,7 @@
 #           Data errors count: intltest runs without -w, so a test that cannot
 #           find its data fails rather than warns.
 #   libpng, libjpeg-turbo, libwebp (B-3d), libxml2 (B-3e), freetype and
-#   harfbuzz (B-3f):
+#   harfbuzz (B-3f), fontconfig (B-3g):
 #           /var/lib_tests/bin/muster runs each library's CTest or meson list
 #           (tools/libtests-manifest.py wrote it from upstream's registration;
 #           libwebp's from tools/libtests-webp.json),
@@ -31,6 +31,26 @@
 #           build/pouch/lib-tests/<lib>.count, the build's own count of the
 #           manifest, so a device run of fewer tests than the build listed
 #           cannot match.
+#   fontconfig  (B-3g) fontconfig itself on the device's own config
+#           (/etc/fonts) and faces (/lib/font), as the logged-in user, whose
+#           font cache starts empty: each generic family resolves to the face
+#           upstream's 60-latin.conf prefers among /lib/font's (sans-serif
+#           DejaVu Sans, serif DejaVu Serif, monospace DejaVu Sans Mono; a
+#           native build of the pinned fontconfig over the same faces answers
+#           the same); fc-list lists every face the bake staged and
+#           fc-conflist loads every conf.d link (the build's fonts.count and
+#           confd.count); the first lookup scans /lib/font and writes one
+#           cache file and its CACHEDIR.TAG into $home/.cache/fontconfig,
+#           leaving no lock, and nothing under /var/cache (there is no system
+#           cache); the second reads that cache rather than scanning. One
+#           file, where Linux shows four names: fontconfig also links each
+#           older cache version's name to it with symlink(), which this
+#           system does not make (dec-2026-10-20-native-lstat-readlink),
+#           and goes on.
+#           fontconfig takes its cache lock with link() and falls back to a
+#           directory only on EPERM, ENOTSUP or EACCES, so a libc whose link
+#           answers ENOSYS writes no cache (Pouch 0062): the cache checks go
+#           red while the families stay green.
 #
 # EVERY verdict is grepped in lower case (the device's grep matches a literal,
 # -i for case) and asserted in UPPER case through `tr`: the terminal echoes
@@ -48,7 +68,8 @@ if {![lc_pool_has ICUTEST]} {
           ICUTEST payload -- THYLACINE_BAKE_LIBS unset, or a pool baked before it existed)"
     exit 77
 }
-foreach need {ICUDATA MF2DATA MUSTER PNGTESTS JPEGTESTS WEBPTESTS XMLTESTS XMLCONF FTTESTS FTFONT HBTESTS HBFONTS} {
+foreach need {ICUDATA MF2DATA MUSTER PNGTESTS JPEGTESTS WEBPTESTS XMLTESTS XMLCONF FTTESTS FTFONT HBTESTS HBFONTS
+              FCTESTS FCDATA FCCONF FCAVAIL FCDTD FCMATCH FONTSANS FONTSERIF FONTMONO FONTPLEX} {
     if {![lc_pool_has $need]} {
         puts "LS-CI FAIL: this pool holds ICU's tests but not their $need payload\
               (a partial bake; rebake with THYLACINE_BAKE_LIBS=1)"
@@ -163,14 +184,95 @@ if {[lib_leg icux /var/icu_tests/bin/intltest /tmp/icu-cxx.log "all tests passed
     lc_pass "ls-libs(icu-cxx): intltest exit 0, all tests passed"
 }
 # The muster lists: each manifest's count as the build wrote it.
-foreach lib {libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz} tag {png jpg webp xml ft hb} {
-    set cf [file join $::lc_repo build pouch lib-tests $lib.count]
+# A count the build wrote beside the stage (build/pouch/lib-tests/<name>).
+proc lib_build_count {name} {
+    set cf [file join $::lc_repo build pouch lib-tests $name]
     if {[catch {set fh [open $cf r]; set n [string trim [read $fh]]; close $fh}] || ![string is integer -strict $n] || $n < 1} {
-        lc_fail "no test count for $lib at $cf (the bake and this tree disagree; rebake)"
+        lc_fail "no count at $cf (the bake and this tree disagree; rebake)"
     }
+    return $n
+}
+foreach lib {libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz fontconfig} tag {png jpg webp xml ft hb fc} {
+    set n [lib_build_count $lib.count]
     if {[lib_leg $tag "/var/lib_tests/bin/muster /var/lib_tests/$lib.manifest" /tmp/muster-$lib.log "$lib: $n of $n passed" "muster: FAIL"]} {
         lc_pass "ls-libs($lib): muster exit 0, $n of $n passed"
     }
+}
+
+# fontconfig on the device's own config and faces (the header). The muster
+# tests above have already written a cache as this user, so the leg removes
+# it first. FC_DEBUG reaches fc-list through /env, which every child copies
+# at spawn (ut passes no envp): 128 prints each directory scanned, 16 each
+# cache's validity check.
+set ::lc_cmd_timeout 300
+set timeout 300
+# One value a device command prints, read through a tag of its own and
+# upper-cased, so the typed command's echo cannot satisfy it.
+proc lib_value {tag cmd} {
+    set up [string toupper $tag]
+    lc_send "echo $tag-\$($cmd) | tr a-z A-Z"
+    expect {
+        -re "$up- ?(\[^\r\n\]*)\r"  { set v [string trim $expect_out(1,string)] }
+        -re {EXTINCTION:}          { lc_extinction_fail "kernel extinction during $cmd" }
+        timeout                    { lc_fail "timeout waiting for $cmd ($tag)" }
+        eof                        { lc_fail "unexpected EOF during $cmd ($tag)" }
+    }
+    lc_step "saw: $tag = $v"
+    return $v
+}
+# "yes" when a count is at least n; else what it was.
+proc lib_atleast {v n} {
+    if {[string is integer -strict $v] && $v >= $n} { return yes }
+    return "no ($v)"
+}
+# A value against what it must be; a miss is a red leg, not an abort.
+proc lib_check {what got want} {
+    if {$got eq $want} {
+        lc_pass "ls-libs(fontconfig): $what"
+    } else {
+        lappend ::lib_red "fontconfig: $what -- got '$got'"
+    }
+}
+proc lib_fc_list {tag log} {
+    lc_send "echo 144 > /env/FC_DEBUG; /usr/bin/fc-list > $log; echo $tag-\$status | tr a-z A-Z; rm /env/FC_DEBUG"
+    expect {
+        -ex "[string toupper $tag]- 0\r"     { lc_step "saw: fc-list exited 0 ($tag)" }
+        -re "[string toupper $tag]- \[1-9\]" { lappend ::lib_red "fontconfig: fc-list ($tag) exited non-zero" }
+        -re {EXTINCTION:}                   { lc_extinction_fail "kernel extinction during fc-list ($tag)" }
+        timeout                             { lc_fail "timeout waiting for fc-list ($tag)" }
+        eof                                 { lc_fail "unexpected EOF during fc-list ($tag)" }
+    }
+}
+set fcfaces [lib_build_count fonts.count]
+set fcconfd [lib_build_count confd.count]
+set fccache "\$home/.cache/fontconfig"
+lc_send "rm -rf $fccache; echo fcrm-\$status | tr a-z A-Z"
+expect {
+    -ex "FCRM- 0\r"  { lc_step "saw: $fccache removed" }
+    -re "FCRM- \[1-9\]" { lc_fail "could not remove $fccache before the fontconfig leg" }
+    timeout          { lc_fail "timeout removing $fccache" }
+    eof              { lc_fail "unexpected EOF removing $fccache" }
+}
+lib_fc_list fccold /tmp/fc-cold.log
+lib_check "the first lookup scans /lib/font" [lib_atleast [lib_value fcscan1 "grep -c 'Scanning dir /lib/font' /tmp/fc-cold.log"] 1] yes
+lib_check "the first lookup writes one cache file" [lib_value fccf "ls --color=never $fccache | grep -c cache-"] 1
+lib_check "the first lookup writes CACHEDIR.TAG" [lib_value fctag "ls --color=never $fccache | grep -c CACHEDIR.TAG"] 1
+lib_check "the cache lock is released" [lib_value fclck "ls --color=never $fccache | grep -c .LCK"] 0
+lib_check "no temporary file is left" [lib_value fctmp "ls --color=never $fccache | grep -c .TMP"] 0
+lc_send "stat --color=never /var/cache/fontconfig; echo fcsys-\$status | tr a-z A-Z"
+expect {
+    -re "FCSYS- \[1-9\]"  { lc_pass "ls-libs(fontconfig): no system cache directory" }
+    -ex "FCSYS- 0\r"      { lappend ::lib_red "fontconfig: /var/cache/fontconfig exists" }
+    timeout              { lc_fail "timeout looking for /var/cache/fontconfig" }
+    eof                  { lc_fail "unexpected EOF looking for /var/cache/fontconfig" }
+}
+lib_fc_list fcwarm /tmp/fc-warm.log
+lib_check "the second lookup checks the cache" [lib_atleast [lib_value fcvalid "grep -c 'FcCacheTimeValid dir' /tmp/fc-warm.log"] 1] yes
+lib_check "the second lookup scans nothing" [lib_value fcscan2 "grep -c 'Scanning dir /lib/font' /tmp/fc-warm.log"] 0
+lib_check "fc-list lists the $fcfaces faces" [lib_value fcfaces "/usr/bin/fc-list -f '%{file}\\n' | grep -c /lib/font/"] $fcfaces
+lib_check "fc-conflist loads the $fcconfd conf.d configs" [lib_value fcconf "/usr/bin/fc-conflist | grep -c '+ /etc/fonts/conf.d/'"] $fcconfd
+foreach {tag family face} {fcsans sans-serif DejaVuSans.ttf fcserif serif DejaVuSerif.ttf fcmono monospace DejaVuSansMono.ttf} {
+    lib_check "fc-match $family is /lib/font/$face" [lib_value $tag "/usr/bin/fc-match -f '%{file}' $family"] [string toupper /lib/font/$face]
 }
 if {[llength $::lib_red]} {
     lc_fail "[join $::lib_red {; }] (each log's tail is above)"

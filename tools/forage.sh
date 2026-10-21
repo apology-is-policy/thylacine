@@ -283,7 +283,7 @@ target_sections() {
         icu)      echo "cache.icu4c" ;;
         codecs)   echo "cache.libpng cache.libjpeg-turbo cache.libwebp" ;;
         libxml2)  echo "cache.libxml2 cache.xmlts" ;;
-        fonts)    echo "cache.meson cache.freetype cache.ftfont cache.harfbuzz" ;;
+        fonts)    echo "cache.meson cache.freetype cache.ftfont cache.harfbuzz cache.fontconfig cache.dejavu" ;;
         alpine)   echo "cache.alpine cache.busybox" ;;
         busybox)  echo "cache.busybox" ;;
         static-curl) echo "cache.static-curl" ;;

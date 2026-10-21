@@ -80,6 +80,31 @@ for pin in "source.webkit commit" "cache.icu4c sha256" "cache.icu4c file"; do
 done
 assert_grep "$(manifest_sections source.)" "source.webkit" "A10 enum: source. includes webkit"
 
+# A11: every pin feeding the library tests (CHUNK_LIBTESTS) is the same shape:
+# build.sh refuses a tarball by its own literal file name and sha256. Derived
+# from the manifest, so a new pin is covered without editing this list; the
+# enum asserts below prove the derivation found the sections. (Sabotage: edit
+# one hex digit of a CHUNK_LIBTESTS sha256 in build.sh -> FAIL.)
+lt_secs=""
+for csec in $(manifest_sections cache.); do
+    case "$(manifest_get "$csec" feeds)" in
+        CHUNK_LIBTESTS*) lt_secs="$lt_secs $csec" ;;
+    esac
+done
+assert_grep "$lt_secs" "cache.harfbuzz"   "A11 enum: CHUNK_LIBTESTS includes harfbuzz"
+assert_grep "$lt_secs" "cache.fontconfig" "A11 enum: CHUNK_LIBTESTS includes fontconfig"
+assert_grep "$lt_secs" "cache.dejavu"     "A11 enum: CHUNK_LIBTESTS includes dejavu"
+for csec in $lt_secs; do
+    for ckey in file sha256; do
+        cval="$(manifest_get "$csec" "$ckey")"
+        if [[ -n "$cval" ]] && grep -qF -- "\"$cval\"" "$BUILDSH"; then
+            ok "A11 pin: $csec.$ckey matches build.sh"
+        else
+            bad "A11 pin: $csec.$ckey NOT in build.sh (${cval:-empty}) -- manifest/build.sh drift"
+        fi
+    done
+done
+
 # --- B. status + gather via a fixture manifest (isolated to a temp root) ------
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 FIX="$TMP/manifest.toml"

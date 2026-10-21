@@ -238,6 +238,22 @@ sha256     = "d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586"
 feeds      = "CHUNK_LIBTESTS (HarfBuzz 14.6.0 static with FreeType and ICU, GitHub's published digest; its meson tests run by muster)"
 forageable = "download"
 
+[cache.fontconfig]
+file       = "fontconfig-2.18.3.tar.xz"
+dir        = "build/cache"
+url        = "https://gitlab.freedesktop.org/api/v4/projects/890/packages/generic/fontconfig/2.18.3/fontconfig-2.18.3.tar.xz"
+sha256     = "4f7b554a38cdf78c033f666c8871f3749e14a094f65a07f630c91ed0b43d35e3"
+feeds      = "CHUNK_LIBTESTS (fontconfig 2.18.3 static with libxml2 and FreeType, upstream's published .sha256sum; its meson tests run by muster, its tools and config baked under /usr and /etc/fonts)"
+forageable = "download"
+
+[cache.dejavu]
+file       = "dejavu-fonts-ttf-2.37.tar.bz2"
+dir        = "build/cache"
+url        = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2"
+sha256     = "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7"
+feeds      = "CHUNK_LIBTESTS (/lib/font: DejaVu Sans, Serif and Sans Mono, the release the vendored third_party/dejavu-fonts Condensed faces came from, byte-identical)"
+forageable = "download"
+
 # --- network: build.sh fetches it itself at build time -----------------------
 
 [network.quake]

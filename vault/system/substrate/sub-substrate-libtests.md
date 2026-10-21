@@ -10,6 +10,7 @@ code:
   - tools/libtests-webp.json
   - usr/ports/libpng/patches/0001-tests-link-the-static-library.patch
   - usr/ports/libxml2/patches/0001-tests-restore-the-cmake-test-scripts.patch
+  - usr/ports/fontconfig/patches/0001-tests-name-the-test-data-relative-to-the-build-root.patch
 audit: none
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -17,14 +18,14 @@ locks: []
 abis: []
 design: ["docs/BROWSER-DESIGN.md"]
 created: 2026-10-15
-updated: 2026-10-20
+updated: 2026-10-21
 ---
 ## Purpose
 
 Run each browser library's compiled upstream tests on the device, with their
 data, as the B-3 exit bar asks (`dec-2026-10-14-b3-test-bar`), without writing
 a second copy of upstream's test list. A CMake library registers its tests
-with CTest, and a meson one (FreeType, HarfBuzz) with meson; the build dumps
+with CTest, and a meson one (FreeType, HarfBuzz, fontconfig) with meson; the build dumps
 that registration, `tools/libtests-manifest.py` rewrites it for the device,
 and `muster`, a native program, runs it there.
 ICU is not here: its test programs carry their own drivers (B-3c, run
@@ -43,8 +44,13 @@ directly by `tools/interactive/ls-libs.exp`).
   an unknown shape, a path outside every map, an argument holding a newline,
   or a relative argument that resolves elsewhere on the device than on the
   host.
-- `--meson <dump> --meson-build <dir> --meson-source <dir> [--skip <name>]...`
-  takes meson's list instead (`meson introspect --tests`, B-3f). It also
+- `--meson <dump> --meson-build <dir> --meson-source <dir> [--skip <name>]...
+  [--not-run <name>=<reason>]...`
+  takes meson's list instead (`meson introspect --tests`, B-3f). `--not-run`
+  leaves out a compiled test by an operator decision its reason names, and
+  writes `# not run, compiled: <name> -- <reason>` into the manifest; it
+  refuses an interpreter-driven test (that takes `--skip`), an empty reason,
+  a name given twice, and, like `--skip`, a name the list does not hold. It also
   refuses a key the list holds that the translator does not know, a protocol
   other than `exitcode` and `tap`, `extra_paths`, a directory argument, an
   env path outside every map, a skipped compiled test, an unskipped Python
@@ -126,7 +132,14 @@ timeouts (the gate's own bound covers the run), and the harness's
 `MALLOC_PERTURB_` and sanitizer variables, which this libc does not read.
 Interpreter-driven tests are skipped by name only: `--skip` takes a test whose
 program is a Python script and nothing else, and a Python test not named is
-refused, so one upstream adds cannot drop out unseen.
+refused, so one upstream adds cannot drop out unseen. A program is a Python
+script when its name ends in `.py` or is `python*`, or when its `#!` line
+names `python*`, directly or through `env` (fontconfig's `pytest`, an
+installed command). A `#!/bin/sh` wrapper counts as compiled, so a skip of one
+is refused rather than allowed by guess. Measured on a fake meson list: a
+`pytest` with `#!/usr/bin/env python3` and one with `#!/opt/x/bin/python3.14`
+are skipped; unskipped, the first is refused as interpreter-driven; the
+committed translator before this rule refused its skip as compiled.
 
 **The runner.** `muster` is native (libthyla-rs): it is authored here and only
 spawns the ported test programs. libthyla-rs's `Command` has no working
@@ -207,6 +220,27 @@ varc ("Could not open file", an emptied `varc-static-gvar.ttf`), issue-1441
 ("wrong Cyrillic, unreachable, or small-cap style": the mixed font copied over
 the Latin one, which opens but classifies wrongly) and
 `repacker-fuzzer-chunk-0` (an `assert(blob)` abort, one graph removed).
+
+**fontconfig (B-3g).** fontconfig 2.18.3 registers seventeen compiled tests in
+a static cross build (`test_d1f48f11` and `test-issue110` only when static),
+plus `pytest` when the build host has pytest; this host has none, and the
+build adds `--skip pytest` only when the list holds it. `test_d1f48f11`
+is listed as not run (`dec-2026-10-21-d1f48f11-not-run`): its fixture is a
+`symlink()`, which Thylacine does not provide. Two tests compile in their
+data's path (`test-bz89617`'s `SRCDIR`, `test-bz106632`'s `FONTFILE`); the
+port's patch names it relative to the build root
+(`fs.relative_to(meson.current_source_dir(), meson.project_build_root())`,
+`../src/fontconfig-2.18.3/test` with the pinned meson), so it resolves in
+the copied trees on the device as on the host, and `build.sh` stages
+`test/4x6.pcf`, which the list cannot name. `test-bz106632` copies the font
+with `system("sleep 1; cp -a ...")`, so it needs `/bin/sh`. Several tests
+make their fixtures in `mkdtemp` directories under `/tmp`; the ones that load
+the default config (`test-bz106618`, `test-crbug1004254`, `test-mt-fccfg`)
+read the device's own `/etc/fonts` and `/lib/font`
+([[sub-substrate-build]]) and cache into the user's home.
+`test-crbug1004254` creates up to 3000 threads, half matching and half
+reinitializing, stops at the first refused create, and exits 0 whatever
+happens; its errors are only printed.
 
 ## Data structures
 

@@ -16,8 +16,12 @@ device needs.
                 meson-info/intro-targets.json names each target's outputs
   --meson-source D  its source tree, searched for what the list cannot carry
   --skip NAME   a meson test not translated (repeat): only one whose program
-                is a Python script, and every such test must be named, so an
+                is a Python script (by its name, or by a #! line naming
+                Python), and every such test must be named, so an
                 interpreter-driven test upstream adds is refused, not dropped
+  --not-run NAME=REASON  a compiled meson test not translated (repeat), by
+                an operator decision the REASON names; the manifest records
+                both. An interpreter-driven test takes --skip instead.
   --lib NAME    the library's name, for the verdict line
   --map H=D     a host directory and where it sits on the device (repeat;
                 the build tree and the source tree, at least)
@@ -344,7 +348,19 @@ MESON_LIBPATH = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")
 def interpreted(cmd):
     """A test whose program is a script, for an interpreter the device lacks."""
     prog = os.path.basename(cmd[0])
-    return prog.endswith(".py") or re.fullmatch(r"python[0-9.]*", prog) is not None
+    if prog.endswith(".py") or re.fullmatch(r"python[0-9.]*", prog):
+        return True
+    # A Python program installed as a command (fontconfig's pytest): its #!
+    # line names the interpreter, directly or through env.
+    try:
+        with open(cmd[0], "rb") as f:
+            first = f.readline(512)
+    except OSError:
+        return False
+    words = first[2:].split() if first.startswith(b"#!") else []
+    if len(words) > 1 and os.path.basename(words[0]) == b"env":
+        words = words[1:]
+    return bool(words) and re.fullmatch(rb"python[0-9.]*", os.path.basename(words[0])) is not None
 
 
 def log_name(test):
@@ -413,10 +429,18 @@ def meson_list(args, mapper):
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
         die(f"test names {dup} repeat (meson tells them apart by suite; the manifest cannot)")
-    unknown = sorted(set(args.skip) - set(names))
+    not_run = {}
+    for nr in args.not_run:
+        nname, sep, reason = nr.partition("=")
+        if not sep or not nname or not reason.strip() or "\n" in reason:
+            die(f"--not-run {nr!r}: give NAME=REASON, the reason on one line")
+        if nname in not_run or nname in args.skip:
+            die(f"--not-run {nname!r} is named twice")
+        not_run[nname] = reason.strip()
+    unknown = sorted((set(args.skip) | set(not_run)) - set(names))
     if unknown:
-        die(f"--skip {unknown}: no such test")
-    out, skipped = [], []
+        die(f"--skip/--not-run {unknown}: no such test")
+    out, skipped, not_ran = [], [], []
     # mtest.py runs a higher priority first, otherwise in registration order.
     for t in sorted(tests, key=lambda t: -t.get("priority", 0)):
         name = t["name"]
@@ -424,6 +448,11 @@ def meson_list(args, mapper):
         if extra:
             die(f"test {name!r}: keys {sorted(extra)} are not supported")
         cmd = list(t["cmd"])
+        if name in not_run:
+            if interpreted(cmd):
+                die(f"test {name!r} runs {cmd[0]}, an interpreter-driven test: --skip it")
+            not_ran.append((name, not_run[name]))
+            continue
         if name in args.skip:
             if not interpreted(cmd):
                 die(f"test {name!r} runs {cmd[0]}, a compiled program: it may not be skipped")
@@ -461,7 +490,7 @@ def meson_list(args, mapper):
         tr, st = lower(name, cwd, steps, env, [], args, mapper)
         depends_staged(name, t.get("depends", []), outputs, st, mapper)
         out.append((tr, st))
-    return out, skipped
+    return out, skipped, not_ran
 
 
 def order(tests):
@@ -493,6 +522,7 @@ def main():
     ap.add_argument("--meson-build")
     ap.add_argument("--meson-source")
     ap.add_argument("--skip", action="append", default=[])
+    ap.add_argument("--not-run", action="append", default=[])
     ap.add_argument("--lib", required=True)
     ap.add_argument("--map", action="append", default=[], required=True)
     ap.add_argument("--logs", required=True)
@@ -504,16 +534,16 @@ def main():
     if bool(args.json) == bool(args.meson):
         die("give one of --json (CTest) and --meson")
     mapper = Mapper(args.map)
-    skipped = []
+    skipped, not_ran = [], []
     if args.json:
-        if args.skip:
-            die("--skip is for a meson list")
+        if args.skip or args.not_run:
+            die("--skip and --not-run are for a meson list")
         dump = json.load(open(args.json))
         if not dump.get("tests"):
             die(f"{args.json} lists no tests")
         translated = [translate(t, args, mapper) for t in dump["tests"]]
     else:
-        translated, skipped = meson_list(args, mapper)
+        translated, skipped, not_ran = meson_list(args, mapper)
     tests, stage = [], {}
     for tr, st in translated:
         tests.append(tr)
@@ -528,6 +558,8 @@ def main():
                 " tools/libtests-manifest.py\n")
         if skipped:
             f.write(f"# skipped, interpreter-driven: {' '.join(skipped)}\n")
+        for name, reason in not_ran:
+            f.write(f"# not run, compiled: {name} -- {reason}\n")
         f.write(f"lib {args.lib}\ncount {len(tests)}\nlogs {args.logs}\n")
         for t in tests:
             f.write(f"test {t['name']}\ncwd {t['cwd']}\n")
@@ -550,7 +582,8 @@ def main():
             kind, host = stage[dev]
             f.write(f"{kind} {host} {dev}\n")
     print(f"libtests-manifest: {args.lib}: {len(tests)} tests, {len(stage)} staged entries"
-          + (f", {len(skipped)} skipped" if skipped else ""))
+          + (f", {len(skipped)} skipped" if skipped else "")
+          + (f", {len(not_ran)} not run" if not_ran else ""))
 
 
 if __name__ == "__main__":

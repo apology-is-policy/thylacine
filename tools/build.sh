@@ -4542,6 +4542,39 @@ populate_stratum_pool() {
         || { echo "==> populate pool: ca-certificates.crt readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /etc/ssl/certs/ca-certificates.crt baked + readback-verified ($(grep -c 'BEGIN CERTIFICATE' "$cabundle_src" | tr -d ' ') roots, NET-DESIGN s9)"
 
+    # --- B-3g: fontconfig's runtime, staged with the library tests
+    # (stage_font_runtime): /etc/fonts, /usr/share/fontconfig,
+    # /usr/share/xml/fontconfig, its tools in /usr/bin, and /lib/font. Here,
+    # after the blocks that make /etc and /lib with single-level mkdirs that
+    # fail on an existing directory; the pool has no /usr before it. No
+    # /var/cache/fontconfig: there is no system font cache
+    # (dec-2026-10-21-no-system-font-cache), so a user's lookups cache in
+    # their own home. Read-only SYSTEM masters, like /var/lib_tests. ---
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/usr/bin/fc-match" ]]; then
+        for d in /usr /usr/share /usr/share/xml; do
+            "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
+                || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        for d in etc/fonts usr/share/fontconfig usr/share/xml/fontconfig usr/bin lib/font; do
+            "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/$d" "/$d" \
+                || { echo "==> populate pool: put /$d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (fontconfig) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        # Every conf.d link reads back as the link that was staged: one put as
+        # a file, or with another target, would load nothing from conf.avail.
+        local fcl fcn=0
+        for fcl in "$libt_stage/etc/fonts/conf.d"/*.conf; do
+            [[ -L "$fcl" ]] || continue
+            [[ "$("$stratum_fs_bin" -s "$sock_path" readlink "/etc/fonts/conf.d/${fcl##*/}")" == "$(readlink "$fcl")" ]] \
+                || { echo "==> populate pool: /etc/fonts/conf.d/${fcl##*/} readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            fcn=$((fcn + 1))
+        done
+        (( fcn > 0 )) \
+            || { echo "==> populate pool: $libt_stage/etc/fonts/conf.d holds no links to read back" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: fontconfig baked (/etc/fonts, $fcn conf.d links readback-verified; /usr/share/fontconfig; /usr/bin/fc-*; /lib/font, $(find "$libt_stage/lib/font" -name '*.ttf' | wc -l | tr -d ' ') faces)"
+    fi
+
     # --- #101: VERIFY THE ARTIFACT, NOT THE INTENT --------------------------
     # Every large payload above is `put` behind a flag, and a flag that is set
     # proves nothing about what reached the pool. The CL-6 close shipped a
@@ -4642,7 +4675,20 @@ XMLCONF /var/lib_tests/libxml2/src/libxml2-$XML_VER/xmlconf/xmlconf.xml
 FTTESTS /var/lib_tests/freetype.manifest
 FTFONT /var/lib_tests/freetype/src/freetype-$FT_VER/tests/data/As.I.Lay.Dying.ttf
 HBTESTS /var/lib_tests/harfbuzz.manifest
-HBFONTS /var/lib_tests/harfbuzz/src/harfbuzz-$HB_VER/perf/fonts/Roboto-Regular.ttf"
+HBFONTS /var/lib_tests/harfbuzz/src/harfbuzz-$HB_VER/perf/fonts/Roboto-Regular.ttf
+FCTESTS /var/lib_tests/fontconfig.manifest
+FCDATA /var/lib_tests/fontconfig/src/fontconfig-$FC_VER/test/4x6.pcf"
+    fi
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$vp_libtests/usr/bin/fc-match" ]]; then
+        bake_want="$bake_want
+FCCONF /etc/fonts/fonts.conf
+FCAVAIL /usr/share/fontconfig/conf.avail/60-latin.conf
+FCDTD /usr/share/xml/fontconfig/fonts.dtd
+FCMATCH /usr/bin/fc-match
+FONTSANS /lib/font/DejaVuSans.ttf
+FONTSERIF /lib/font/DejaVuSerif.ttf
+FONTMONO /lib/font/DejaVuSansMono.ttf
+FONTPLEX /lib/font/IBMPlexSans-Regular.ttf"
     fi
 
     local bake_missing=""
@@ -6830,6 +6876,15 @@ FTFONT_TTF_SHA256="ef146bbc2673b38715afcc70dca484cc64457438da8627a27cf95680e982f
 HB_VER="14.6.0"
 HB_TARBALL="harfbuzz-14.6.0.tar.xz"
 HB_SHA256="d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586"
+# --- Boosty B-3g: fontconfig, and the DejaVu release /lib/font's DejaVu faces
+# come from (third_party/dejavu-fonts vendors that release's four Sans
+# Condensed faces). Pins mirror [cache.fontconfig] / [cache.dejavu]. ---
+FC_VER="2.18.3"
+FC_TARBALL="fontconfig-2.18.3.tar.xz"
+FC_SHA256="4f7b554a38cdf78c033f666c8871f3749e14a094f65a07f630c91ed0b43d35e3"
+DEJAVU_VER="2.37"
+DEJAVU_TARBALL="dejavu-fonts-ttf-2.37.tar.bz2"
+DEJAVU_SHA256="fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7"
 
 webkit_jobs() {
     # JSC's unified sources peak well over 1 GiB per job; this host has 8 GiB.
@@ -7095,7 +7150,10 @@ meson_tool() {
 # pinned tarball, the port's patches (usr/ports/<project>/patches, the project
 # named by the tarball's top directory, so FreeType's two passes share one
 # series), static, its tests built, a stamp of every input. `--pc DIR`
-# (repeated, first) names a dependency's pkg-config directory; the rest are
+# (repeated, first) names a dependency's pkg-config directory; `--prefix DIR`
+# (first too) is the prefix on the device, for a library that compiles its
+# install paths in: it installs under the stage with DESTDIR, so the stage
+# holds DIR's tree rather than lib/ and include/ at its top. The rest are
 # meson -D options. The cross file is cmake/Toolchain-aarch64-pouch-cxx.cmake
 # in meson's terms, and only the named pkg-config directories are searched,
 # so nothing from this host's own libraries can be found. The toolchain flags
@@ -7107,10 +7165,18 @@ meson_lib() {
     local name="$1" tarball="$2" sha="$3" top="$4"; shift 4
     local sysroot="$BUILD_DIR/sysroot"
     local -a pcdirs=( "$sysroot/lib/pkgconfig" )
-    while [[ "${1:-}" == --pc ]]; do pcdirs+=("$2"); shift 2; done
+    local prefix=""
+    while [[ "${1:-}" == --pc || "${1:-}" == --prefix ]]; do
+        if [[ "$1" == --pc ]]; then pcdirs+=("$2"); else prefix="$2"; fi
+        shift 2
+    done
+    [[ -z "$prefix" || "$prefix" == /* ]] \
+        || { echo "==> $name: --prefix $prefix is not an absolute device path" >&2; exit 1; }
     local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
     local base="$BUILD_DIR/pouch/$name"
     local src="$base/src/$top" bdir="$base/build" stage="$base/stage"
+    # Where lib/ and include/ land: the stage, or the prefix's tree inside it.
+    local root="$stage$prefix"
     local file="$BUILD_DIR/cache/$tarball"
     local cc="$fork/build/bin/clang" cxx="$fork/build/bin/clang++"
     local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
@@ -7178,7 +7244,7 @@ endian = 'little'
     dep_sums="$(for d in "${pcdirs[@]}"; do find "$d" "$d/.." -maxdepth 1 -type f \( -name '*.pc' -o -name '*.a' \); done \
                 | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
     cross_sum="$(printf '%s' "$cross" | shasum -a 256 | awk '{print $1}')"
-    local want_stamp="$sha | $patch_sums | meson $MESON_VER | cross $cross_sum | deps $dep_sums | $*"
+    local want_stamp="$sha | $patch_sums | meson $MESON_VER | cross $cross_sum | deps $dep_sums | ${prefix:+prefix $prefix | }$*"
     local stamp="$stage/.thylacine-config"
     if [[ -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" ]]; then
         ledger "$name: REUSED (cached + up-to-date)"
@@ -7198,16 +7264,24 @@ endian = 'little'
     # nofallback: a dependency comes from the directories above or not at all,
     # never from a subproject meson would fetch.
     python3 "$meson" setup "$bdir" "$src" --cross-file "$base/cross.ini" \
-        --prefix "$stage" --libdir lib --wrap-mode=nofallback "$@" > "$base/configure.log" 2>&1 \
+        --prefix "${prefix:-$stage}" --libdir lib --wrap-mode=nofallback "$@" > "$base/configure.log" 2>&1 \
         || { echo "==> $name: meson setup failed -- see $base/configure.log" >&2; tail -20 "$base/configure.log" >&2; exit 1; }
     ninja -C "$bdir" -j"$jobs" > "$base/build.log" 2>&1 \
         || { echo "==> $name: build failed -- see $base/build.log" >&2; tail -30 "$base/build.log" >&2; exit 1; }
-    python3 "$meson" install -C "$bdir" > "$base/install.log" 2>&1 \
-        || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
-    [[ -d "$stage/lib" && -d "$stage/include" ]] \
-        || { echo "==> $name: the install left no lib/ and include/ under $stage" >&2; exit 1; }
+    # A device prefix installs under DESTDIR, which meson also applies to the
+    # absolute directories it derives from that prefix (/usr's sysconfdir is
+    # /etc), so nothing is written outside the stage.
+    if [[ -n "$prefix" ]]; then
+        DESTDIR="$stage" python3 "$meson" install -C "$bdir" > "$base/install.log" 2>&1 \
+            || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
+    else
+        python3 "$meson" install -C "$bdir" > "$base/install.log" 2>&1 \
+            || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
+    fi
+    [[ -d "$root/lib" && -d "$root/include" ]] \
+        || { echo "==> $name: the install left no lib/ and include/ under $root" >&2; exit 1; }
     printf '%s' "$want_stamp" > "$stamp"
-    ledger "$name: BUILT (static, meson $MESON_VER, $(du -sh "$stage/lib" | cut -f1) of libs at $stage)"
+    ledger "$name: BUILT (static, meson $MESON_VER, $(du -sh "$root/lib" | cut -f1) of libs at $root)"
 }
 
 # FreeType and HarfBuzz each use the other: HarfBuzz shapes FreeType faces, and
@@ -7284,6 +7358,33 @@ build_freetype() {
     fi
 }
 
+# fontconfig, against the FreeType the browser links and libxml2
+# (dec-2026-10-14-b3-fontconfig-port). It compiles in its config, cache and
+# template directories from its prefix, so it is built for /usr on the device
+# (meson then puts sysconfdir at /etc) and installed under the stage. The
+# layout is upstream's (dec-2026-10-21-fontconfig-layout-dejavu): /etc/fonts,
+# /usr/share/fontconfig/conf.avail, /usr/share/xml/fontconfig. Its one font
+# directory is /lib/font, and none of this host's X11 directories is probed.
+# The system cache directory it installs (/var/cache/fontconfig) is never
+# staged, so it caches in the user's own directory
+# (dec-2026-10-21-no-system-font-cache). NLS, iconv and the docs are off;
+# gperf and python3 run on the host. cache-build would run the cross-built
+# fc-cache at install.
+build_fontconfig() {
+    build_freetype
+    build_libxml2
+    meson_lib fontconfig "$FC_TARBALL" "$FC_SHA256" "fontconfig-$FC_VER" \
+        --pc "$BUILD_DIR/pouch/freetype/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/harfbuzz/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/libxml2/stage/lib/pkgconfig" \
+        --prefix /usr \
+        -Dxml-backend=libxml2 -Dnls=disabled -Ddoc=disabled -Diconv=disabled \
+        -Dtests=enabled -Dtests-external-fonts=disabled -Dtests-bwrap=disabled \
+        -Dcache-build=disabled -Dtools=enabled -Dfontations=disabled \
+        -Ddefault-fonts-dirs=/lib/font -Dadditional-fonts-dirs=no
+}
+
 build_lib_tests() {
     # Boosty B-3 (dec-2026-10-14-b3-test-bar): each browser library's compiled
     # upstream test programs, cross-built against the same static archives the
@@ -7349,7 +7450,7 @@ lib_tests_icu() {
 lib_tests_muster() {
     build_libwebp           # libpng and libjpeg-turbo first
     build_libxml2
-    build_freetype          # HarfBuzz, and FreeType's first pass, first
+    build_fontconfig        # FreeType, HarfBuzz and FreeType's first pass first
     local meson; meson="$(meson_tool)" || exit 1
     local out="$BUILD_DIR/pouch/lib-tests"
     local stage="$out/stage"
@@ -7363,7 +7464,7 @@ lib_tests_muster() {
     local lib lbase top dev json kind host devp d
     local -a extra skips
     : > "$out/writable"
-    for lib in libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz; do
+    for lib in libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz fontconfig; do
         lbase="$BUILD_DIR/pouch/$lib"
         top="$(basename "$(find "$lbase/src" -mindepth 1 -maxdepth 1 -type d)")"
         dev="/var/lib_tests/$lib"
@@ -7379,7 +7480,7 @@ lib_tests_muster() {
         skips=()
         [[ "$lib" == harfbuzz ]] && skips=( --skip check-c-linkage-decls --skip check-externs
             --skip check-header-guards --skip check-includes --skip check-release-notes )
-        if [[ "$lib" == freetype || "$lib" == harfbuzz ]]; then
+        if [[ "$lib" == freetype || "$lib" == harfbuzz || "$lib" == fontconfig ]]; then
             # What `meson test` builds before it runs (mtest.py rebuild_deps):
             # a target only a test depends on -- issue-1441's two fonts -- is
             # outside `all`, which is all meson_lib builds.
@@ -7388,6 +7489,15 @@ lib_tests_muster() {
             json="$out/$lib.meson.json"
             python3 "$meson" introspect --tests "$lbase/build" > "$json" \
                 || { echo "==> lib tests: meson could not list $lib's tests" >&2; exit 1; }
+            # fontconfig registers its pytest suite only on a build host that
+            # has pytest (test/meson.build); dec-2026-10-14-b3-test-bar skips it.
+            if [[ "$lib" == fontconfig ]] && python3 -c 'import json, sys; sys.exit(0 if any(t["name"] == "pytest" for t in json.load(open(sys.argv[1]))) else 1)' "$json"; then
+                skips+=( --skip pytest )
+            fi
+            # test-d1f48f11 builds its fixture with symlink(), which this
+            # system does not provide; its subject runs on every config load
+            # through /etc/fonts/conf.d's links (ls-libs.exp checks them).
+            [[ "$lib" == fontconfig ]] && skips+=( --not-run "test_d1f48f11=its fixture needs symlink(), which is ENOSYS (dec-2026-10-20-native-lstat-readlink); listed as not run by dec-2026-10-21-d1f48f11-not-run" )
             extra=( --meson "$json" --meson-build "$lbase/build" --meson-source "$lbase/src/$top" )
         elif [[ "$lib" == libwebp ]]; then
             sed -e "s|@BUILD@|$lbase/build|g" -e "s|@SRC@|$lbase/src/$top|g" \
@@ -7439,6 +7549,14 @@ lib_tests_muster() {
             # build/, as build<name>.res.
             echo "$dev" >> "$out/writable"
         fi
+        if [[ "$lib" == fontconfig ]]; then
+            # test-bz89617 and test-bz106632 read 4x6.pcf by a path compiled
+            # in, relative to the build tree (the port's 0001), which the test
+            # list does not carry.
+            mkdir -p "$stage$dev/src/$top/test"
+            cp "$lbase/src/$top/test/4x6.pcf" "$stage$dev/src/$top/test/4x6.pcf" \
+                || { echo "==> lib tests: $lib's test/4x6.pcf did not stage" >&2; exit 1; }
+        fi
         if [[ "$lib" == harfbuzz ]]; then
             # The thread tests read fonts and texts their source names
             # (test/threads/*.cc default_tests), run from the source top.
@@ -7450,7 +7568,84 @@ lib_tests_muster() {
         fi
         grep -c '^test ' "$lt/$lib.manifest" > "$out/$lib.count"
     done
-    ledger "lib tests: muster lists STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count"), libxml2 $(cat "$out/libxml2.count"), freetype $(cat "$out/freetype.count"), harfbuzz $(cat "$out/harfbuzz.count") tests)"
+    ledger "lib tests: muster lists STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count"), libxml2 $(cat "$out/libxml2.count"), freetype $(cat "$out/freetype.count"), harfbuzz $(cat "$out/harfbuzz.count"), fontconfig $(cat "$out/fontconfig.count") tests)"
+    stage_font_runtime
+}
+
+# --- B-3g: what fontconfig reads on the device, from its install under its
+# stage (prefix /usr): /etc/fonts (conf.d's relative links into conf.avail
+# stay links), /usr/share/fontconfig/conf.avail, the DTD, the tools in
+# /usr/bin, and /lib/font. Never var/: the system cache directory stays unmade
+# (dec-2026-10-21-no-system-font-cache). /lib/font holds the vendored DejaVu
+# Sans Condensed and IBM Plex Sans faces, and DejaVu Sans, Serif and Sans Mono
+# from the pinned DejaVu release (dec-2026-10-21-fontconfig-layout-dejavu),
+# which must be the one the vendored faces came from: they are compared first.
+# Each family's licence goes beside its faces (DejaVu's is also in every
+# face's name table; Plex's only by reference). Writes fonts.count and
+# confd.count, which ls-libs.exp checks fc-list and fc-conflist against. Baked
+# only with the library tests, while they are its one consumer. ---
+stage_font_runtime() {
+    local fc="$BUILD_DIR/pouch/fontconfig/stage"
+    local out="$BUILD_DIR/pouch/lib-tests"
+    local stage="$out/stage"
+    local file="$BUILD_DIR/cache/$DEJAVU_TARBALL" dv="$BUILD_DIR/pouch/dejavu" have f
+    local ttf="$dv/dejavu-fonts-ttf-$DEJAVU_VER/ttf"
+    local -a faces=( DejaVuSans DejaVuSans-Bold DejaVuSans-Oblique DejaVuSans-BoldOblique
+                     DejaVuSerif DejaVuSerif-Bold DejaVuSerif-Italic DejaVuSerif-BoldItalic
+                     DejaVuSansMono DejaVuSansMono-Bold DejaVuSansMono-Oblique DejaVuSansMono-BoldOblique )
+    [[ -f "$file" ]] \
+        || { echo "==> fonts: $file is absent -- run 'tools/forage.sh cache.dejavu'" >&2; exit 1; }
+    have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$DEJAVU_SHA256" ]] \
+        || { echo "==> fonts: $DEJAVU_TARBALL sha256 mismatch (got $have, want $DEJAVU_SHA256)" >&2; exit 1; }
+    rm -rf "$dv"; mkdir -p "$dv"
+    tar -xjf "$file" -C "$dv" \
+        || { echo "==> fonts: $DEJAVU_TARBALL did not unpack" >&2; exit 1; }
+    for f in "$REPO_ROOT/third_party/dejavu-fonts/ttf"/*.ttf; do
+        cmp -s "$f" "$ttf/$(basename "$f")" \
+            || { echo "==> fonts: third_party/dejavu-fonts/ttf/$(basename "$f") is not DejaVu $DEJAVU_VER's" >&2; exit 1; }
+    done
+    for f in etc/fonts/fonts.conf usr/bin/fc-match usr/share/xml/fontconfig/fonts.dtd; do
+        [[ -f "$fc/$f" ]] || { echo "==> fonts: fontconfig's install has no $f" >&2; exit 1; }
+    done
+
+    rm -rf "$stage/etc" "$stage/usr" "$stage/lib"
+    mkdir -p "$stage/etc" "$stage/usr/share/xml" "$stage/usr/bin" "$stage/lib/font"
+    ( cd "$fc/etc" && tar -cf - fonts ) | ( cd "$stage/etc" && tar -xf - ) \
+        || { echo "==> fonts: /etc/fonts did not stage" >&2; exit 1; }
+    ( cd "$fc/usr/share" && tar -cf - fontconfig ) | ( cd "$stage/usr/share" && tar -xf - ) \
+        || { echo "==> fonts: /usr/share/fontconfig did not stage" >&2; exit 1; }
+    ( cd "$fc/usr/share/xml" && tar -cf - fontconfig ) | ( cd "$stage/usr/share/xml" && tar -xf - ) \
+        || { echo "==> fonts: /usr/share/xml/fontconfig did not stage" >&2; exit 1; }
+    for f in "$fc/usr/bin"/fc-*; do
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$stage/usr/bin/$(basename "$f")" "$f" \
+            || { echo "==> fonts: llvm-strip $f failed" >&2; exit 1; }
+    done
+    cp "$REPO_ROOT/third_party/dejavu-fonts/ttf"/*.ttf "$REPO_ROOT/third_party/ibm-plex/ttf"/*.ttf "$stage/lib/font/" \
+        || { echo "==> fonts: the vendored faces did not stage" >&2; exit 1; }
+    for f in "${faces[@]}"; do
+        cp "$ttf/$f.ttf" "$stage/lib/font/" \
+            || { echo "==> fonts: DejaVu $DEJAVU_VER has no ttf/$f.ttf" >&2; exit 1; }
+    done
+    cp "$REPO_ROOT/third_party/dejavu-fonts/LICENSE" "$stage/lib/font/DejaVu-LICENSE.txt" \
+        && cp "$REPO_ROOT/third_party/ibm-plex/OFL.txt" "$stage/lib/font/IBMPlex-OFL.txt" \
+        || { echo "==> fonts: the licences did not stage" >&2; exit 1; }
+
+    # conf.d's links name conf.avail relative to /etc/fonts/conf.d, so the
+    # same text resolves on the device; each one must resolve here too.
+    local n=0
+    for f in "$stage/etc/fonts/conf.d"/*.conf; do
+        [[ -e "$f" || -L "$f" ]] || continue
+        if [[ -L "$f" ]]; then
+            [[ "$(readlink "$f")" == ../../../usr/share/fontconfig/conf.avail/* && -f "$f" ]] \
+                || { echo "==> fonts: $f is not a link into /usr/share/fontconfig/conf.avail" >&2; exit 1; }
+        fi
+        n=$((n + 1))
+    done
+    (( n > 0 )) || { echo "==> fonts: /etc/fonts/conf.d holds no config" >&2; exit 1; }
+    echo "$n" > "$out/confd.count"
+    find "$stage/lib/font" -name '*.ttf' | wc -l | tr -d ' ' > "$out/fonts.count"
+    ledger "fonts: fontconfig $FC_VER's config, $(ls "$stage/usr/bin" | wc -l | tr -d ' ') tools and $(cat "$out/fonts.count") faces STAGED ($n conf.d links)"
 }
 
 # The tree the pin plus the patch series builds, applied IN ORDER in a scratch
@@ -8388,7 +8583,7 @@ case "$target" in
     lib-tests)   build_lib_tests   ;;
     codecs)      build_libwebp     ;;
     libxml2)     build_libxml2     ;;
-    fonts)       build_freetype    ;;
+    fonts)       build_fontconfig  ;;
     jsc)         build_jsc         ;;
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;

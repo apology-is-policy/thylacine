@@ -147,7 +147,21 @@ for the exact kept/pruned split and the re-vendor recipe.
 | sha256 | `fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7` (the full tarball; kept files byte-identical to its contents) |
 | License | Bitstream Vera + Arev public-domain terms — see `third_party/dejavu-fonts/LICENSE` |
 | Patch series | none — font data is consumed as-is |
-| Consumed by | `usr/halcyond` (`include_bytes!` at build; rasterized by the vendored fontdue) |
+| Consumed by | `usr/halcyond` (`include_bytes!` at build; rasterized by the vendored fontdue); `/lib/font` when the library tests are baked (`stage_font_runtime` in `tools/build.sh`, B-3g), beside DejaVu Sans, Serif and Sans Mono taken from the same release by `[cache.dejavu]` in `tools/build-manifest.toml`. That staging refuses to run unless the four kept faces are byte-identical to the tarball's. |
+
+### IBM Plex Sans 3.005 — `third_party/ibm-plex/`
+
+Halcyon's proportional faces (halcyond H-A, `ed45a164f`; the Medium, SemiBold
+and Text faces added at I-0, `d3958d68f`): Regular, Italic, Bold, Medium,
+SemiBold, Text and Text Italic, plus `OFL.txt`.
+
+| Field | Value |
+|---|---|
+| Version | 3.005 (each face's name table, ID 5) |
+| Source | IBM's `plex` releases (`https://github.com/IBM/plex`); the release archive and its digest were not recorded when the faces were vendored |
+| License | SIL Open Font License 1.1 — see `third_party/ibm-plex/OFL.txt` (the faces' name tables carry the copyright and a reference to it) |
+| Patch series | none — font data is consumed as-is |
+| Consumed by | `usr/halcyond` (`include_bytes!` at build); `/lib/font` when the library tests are baked (B-3g), with `OFL.txt` beside the faces as `IBMPlex-OFL.txt` |
 
 ### Rust registry vendor — `third_party/rust/`
 

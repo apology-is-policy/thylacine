@@ -23,7 +23,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-20
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -412,7 +412,11 @@ one line in `ExecutableAllocator.cpp` passed) and could not express a stacked
 series. `test-forage.sh` D1-D5 lift the two functions from `build.sh` and drive
 them; D5 is the extra hunk over a one-patch series, which the old check accepted. So `WEBKIT_PIN` / `ICU_SHA256` in
 `build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
-fails when they drift (sabotaged: one hex digit -> FAIL).
+fails when they drift (sabotaged: one hex digit -> FAIL). A11 does the same for
+every `cache.*` pin whose `feeds` names `CHUNK_LIBTESTS`, found from the
+manifest rather than listed: its `file` and `sha256` must appear quoted in
+`build.sh` (sabotaged: one hex digit of `FC_SHA256`, and the DejaVu tarball's
+name -> one FAIL each).
 
 *With the chunk ON, an absent input is an error, not an announced skip.* Every
 default-on chunk skips gracefully so a bare checkout still builds. This one
@@ -585,8 +589,46 @@ the translator refuses a test whose depends are not built or not staged
 ([[sub-substrate-libtests]]). The muster half also stages HarfBuzz's
 `perf/fonts`, `perf/texts` and `test/subset/data/fonts` for the thread tests.
 bake-verify adds `FTTESTS`, `FTFONT`, `HBTESTS` and `HBFONTS`.
-`tools/build.sh fonts` builds the three passes, and `tools/forage.sh fonts`
-gathers meson, both tarballs and the font.
+`tools/build.sh fonts` builds the three passes and fontconfig, and
+`tools/forage.sh fonts` gathers meson, the four tarballs and the font.
+
+**fontconfig (B-3g).** `build_fontconfig` builds fontconfig 2.18.3
+(`[cache.fontconfig]`) after the final FreeType and libxml2, against the
+`.pc` directories of FreeType, HarfBuzz, libpng and libxml2. fontconfig
+compiles in its config, cache and template directories from its prefix, so
+`meson_lib` takes `--prefix /usr`: meson is configured with the device's
+prefix (its sysconfdir is then `/etc`, its localstatedir `/var`), and the
+install runs under `DESTDIR=<stage>`, which meson also applies to those
+absolute directories, so the stage holds `etc/`, `usr/` and `var/` and
+nothing is written outside it. The reuse stamp names the prefix. The options
+follow `dec-2026-10-21-fontconfig-layout-dejavu`: the libxml2 backend,
+`default-fonts-dirs=/lib/font`, `additional-fonts-dirs=no` (`yes` would
+probe this host's X11 directories), and NLS, iconv, the docs, bwrap, the
+external test fonts, fontations and `cache-build` off (`cache-build` runs
+the cross-built `fc-cache` at install). The port's one patch names two
+tests' data (`SRCDIR`, `FONTFILE`) relative to the build root, where the
+tests run on the host and on the device alike, instead of the build host's
+absolute source path. The muster half adds fontconfig to the meson
+libraries, stages `test/4x6.pcf` for those two tests, skips the pytest suite
+by name when the build host has pytest (meson registers it only then), and
+lists `test_d1f48f11` as not run (`dec-2026-10-21-d1f48f11-not-run`; its
+fixture needs `symlink()`). `stage_font_runtime` then stages what fontconfig
+reads on the device into the library-test stage: `/etc/fonts` with
+`conf.d`'s relative links into `conf.avail` kept as links (each checked to
+resolve), `/usr/share/fontconfig`, `/usr/share/xml/fontconfig`, the stripped
+`fc-*` tools in `/usr/bin`, and `/lib/font`. `/lib/font` is the vendored
+DejaVu Sans Condensed and IBM Plex Sans faces plus DejaVu Sans, Serif and
+Sans Mono from `[cache.dejavu]`, the release the vendored faces came from:
+the tarball is checked by its sha256 and the four vendored faces must be
+byte-identical to its copies. Each family's licence text goes beside its
+faces. `var/` is never staged: there is no system font cache
+(`dec-2026-10-21-no-system-font-cache`). It writes `fonts.count` and
+`confd.count` for `ls-libs.exp`. The populate puts all of it after the
+blocks that make `/etc` and `/lib`, makes `/usr`, `/usr/share` and
+`/usr/share/xml`, and reads back every `conf.d` link; bake-verify adds
+`FCTESTS`, `FCDATA`, `FCCONF`, `FCAVAIL`, `FCDTD`, `FCMATCH`, `FONTSANS`,
+`FONTSERIF`, `FONTMONO` and `FONTPLEX`. All of it is baked only with the
+library tests (`CHUNK_LIBTESTS`), their one consumer until the browser.
 
 ## Data structures
 
