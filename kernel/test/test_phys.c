@@ -9,6 +9,7 @@
 
 #include "../../mm/phys.h"
 #include "../../mm/magazines.h"
+#include "../../arch/arm64/gic.h"    // drain_meets_live_owners: wake each owner's CPU
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -144,7 +145,17 @@ void test_phys_drain_meets_live_owners(void) {
         t[i] = thread_create_with_arg(kproc(), dmo_owner, (void *)(uintptr_t)i);
         TEST_ASSERT(t[i] != NULL, "thread_create_with_arg(owner) failed");
     }
-    for (unsigned i = 0; i < DMO_OWNERS; i++) ready(t[i]);
+    // In-kernel tests send no idle-peer IPIs, and sched() steals only when its
+    // own tree is empty, so a ready()d owner runs on this CPU and the secondaries
+    // stay parked. Each owner is placed on a peer, which is woken to run it.
+    unsigned me = smp_cpu_idx_self(), ncpu = smp_cpu_count();
+    bool smp = smp_cpu_online_count() > 1;
+    for (unsigned i = 0; i < DMO_OWNERS; i++) {
+        if (!smp) { ready(t[i]); continue; }
+        unsigned peer = (me + 1u + i % (ncpu - 1u)) % ncpu;
+        ready_on(peer, t[i]);
+        (void)gic_send_ipi(peer, IPI_RESCHED);
+    }
 
     // A drain counts as beside an owner when that owner last reported a CPU
     // other than the drainer's: without one, nothing here raced.
@@ -158,16 +169,22 @@ void test_phys_drain_meets_live_owners(void) {
         }
         magazines_drain_all();
         drains++;
-        sched();    // -smp 1: the owners run only when the drainer yields
+        // With one CPU the owners run only when the drainer yields; with more, a
+        // yield onto an empty tree would steal back an owner not yet started.
+        if (!smp) sched();
     }
-    TEST_EXPECT_EQ(__atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE), 0u,
-        "every owner must finish its churn");
+    u32 left = __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE);
     for (unsigned i = 0; i < DMO_OWNERS; i++)
         test_kthread_join_free(t[i], &g_dmo_exited[i]);
+    // The next test's gauge reads the buddy without draining first: leave none of
+    // the owners' pages, or their freed stacks, in a magazine.
+    magazines_drain_all();
 
+    TEST_EXPECT_EQ(left, 0u, "every owner must finish its churn");
+    TEST_ASSERT(drains > 0, "the drainer never drained");
+    // The premise comes before the stamps, so a stamp failure is reported only
+    // when a drain did run beside a live owner.
+    if (smp) TEST_ASSERT(beside > 0, "no drain ran beside an owner on another CPU");
     TEST_EXPECT_EQ(g_dmo_bad, 0u, "no page may be handed to two owners");
     TEST_EXPECT_EQ(g_dmo_short, 0u, "every owner allocation must succeed");
-    TEST_ASSERT(drains > 0, "the drainer never drained");
-    if (smp_cpu_online_count() > 1)
-        TEST_ASSERT(beside > 0, "no drain ran beside an owner on another CPU");
 }

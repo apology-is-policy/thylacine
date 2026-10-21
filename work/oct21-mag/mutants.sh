@@ -4,9 +4,11 @@
 # (b057de8eb's mm/magazines.{c,h}), G1 drops the drainer's side of the lock, G3
 # the owner's alloc side. Each mutant (mutate.py) is applied to the committed
 # tree, built (ci image), booted through the whole suite, and reverted. A
-# mutant is KILLED when every test it names reports FAIL (or the boot extincts
-# inside one of them); the FAIL text is recorded so the assertion that fired
-# can be read, not just the verdict. Survivors make the run exit 1. The witness
+# mutant is KILLED only by the race's own evidence: a stamp check's FAIL (the
+# witness asserts its premise, a drain beside a live owner, before the stamps)
+# or a magazine count guard extincting inside the witness. Any other FAIL, the
+# premise's included, is recorded and counts as a survivor. Survivors make the
+# run exit 1. The witness
 # races real CPUs, so a kill is evidence and a survivor is a finding to read,
 # not a proof of absence. build/ is left holding the LAST mutant's kernel: run
 # gate.sh afterwards. Derived from work/oct19-vote13/mutants.sh.
@@ -25,6 +27,8 @@ GOFORK_PIN_DIR=/Users/northkillpd/projects/go-thylacine-pin-a6567ba
 GOFORK_PIN=a6567baeaa716811783031fdf543477fdcd1707d
 FLOOR_MB=${FLOOR_MB:-6144}
 NEW="phys.drain_meets_live_owners"
+KILL_FAIL='^FAIL: (no page may be handed to two owners|every owner allocation must succeed)$'
+KILL_EXT='mag_(alloc|free): count corrupt'
 MUTANTS=${MUTANTS:-"G2 G1 G3"}
 MUTATE="python3 -I work/oct21-mag/mutate.py"
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
@@ -94,6 +98,18 @@ _t=$OUT/verdict-self-check.txt
 printf '[test] a.x ... PASS\n[test] a.y ... \n  noise\nFAIL: the y message\n[test] a.z ... PASS\n' > "$_t"
 [ "$(verdict "$_t" a.x)" = PASS ] && [ "$(verdict "$_t" a.y)" = "FAIL: the y message" ] && [ "$(verdict "$_t" a.q)" = NONE ] \
   || { echo "REFUSING: verdict() misreads its self-check"; exit 3; }
+# The kill patterns check themselves: each stamp message is the witness's own
+# text and matches; the premise's message does not.
+for _m in "no page may be handed to two owners" "every owner allocation must succeed"; do
+  /usr/bin/grep -qF "\"$_m\"" kernel/test/test_phys.c || { echo "REFUSING: '$_m' is not in test_phys.c"; exit 3; }
+  printf 'FAIL: %s\n' "$_m" | /usr/bin/grep -qE "$KILL_FAIL" || { echo "REFUSING: KILL_FAIL misses '$_m'"; exit 3; }
+done
+_p="no drain ran beside an owner on another CPU"
+/usr/bin/grep -qF "\"$_p\"" kernel/test/test_phys.c || { echo "REFUSING: the premise message is not in test_phys.c"; exit 3; }
+! printf 'FAIL: %s\n' "$_p" | /usr/bin/grep -qE "$KILL_FAIL" || { echo "REFUSING: KILL_FAIL matches the premise"; exit 3; }
+for _m in "mag_alloc: count corrupt" "mag_free: count corrupt"; do
+  /usr/bin/grep -qF "\"$_m\"" mm/magazines.c || { echo "REFUSING: '$_m' is not in mm/magazines.c"; exit 3; }
+done
 record "HEAD $CORONA_PIN, clean; go fork $GOFORK_PIN, clean; anchors checked; verdict self-check passes; mutants: $MUTANTS"
 [ -z "${DRYRUN:-}" ] || { record "DRYRUN: the preconditions hold; stopping before any build"; exit 0; }
 
@@ -125,9 +141,10 @@ for m in $MUTANTS; do
     v=$(verdict "$B" "$t")
     record "$m: $t -> $v"
     case "$v" in
-      FAIL*) ;;
-      *) if [ -n "$ext" ] && [ "$(last_test "$B")" = "$t" ]; then
-           record "$m: $t extincted: $ext"
+      FAIL*) printf '%s\n' "$v" | /usr/bin/grep -qE "$KILL_FAIL" \
+               || { record "$m: $t failed elsewhere than a stamp check: proves nothing"; killed=0; } ;;
+      *) if [ -n "$ext" ] && [ "$(last_test "$B")" = "$t" ] && printf '%s\n' "$ext" | /usr/bin/grep -qE "$KILL_EXT"; then
+           record "$m: $t extincted at a magazine guard: $ext"
          else
            killed=0
          fi ;;

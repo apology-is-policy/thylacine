@@ -15,9 +15,10 @@
 /* MAGAZINE_DEFINES */
 typedef int irq_state_t;
 typedef struct { pthread_mutex_t m; } spin_lock_t;
-// Inline so a body that no longer takes one of them (a mutant, an older
+// Inline (and a macro for init, which -Wunused-function still reports when
+// inline) so a body that no longer takes one of them (a mutant, an older
 // magazines.c) still builds under -Werror.
-static inline void spin_lock_init(spin_lock_t *l) {pthread_mutex_init(&l->m,NULL);}
+#define spin_lock_init(l) ((void)pthread_mutex_init(&(l)->m,NULL))
 static inline void spin_lock(spin_lock_t *l) {pthread_mutex_lock(&l->m);}
 static inline void spin_unlock(spin_lock_t *l) {pthread_mutex_unlock(&l->m);}
 static inline irq_state_t spin_lock_irqsave(spin_lock_t *l) {if(l)spin_lock(l);return 0;}
