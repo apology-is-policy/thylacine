@@ -35,7 +35,9 @@ void poll_waiter_list_init(struct poll_waiter_list *l) {memset(l,0,sizeof(*l));}
 void poll_waiter_list_wake(struct poll_waiter_list *l) {(void)l;wakes++;}
 void loom_unref(struct Loom *l) {
     if(!l)return;
-    if(l->service_slots||l->service_pools){fputs("FAIL fixture tables reached the free path\n",stderr);exit(1);}
+    if(l->service_slots||l->service_pools||l->service_requests.records){
+        fputs("FAIL fixture tables reached the free path\n",stderr);exit(1);
+    }
     for(unsigned i=0;i<64;i++) if(l->ring->pages[l->ring->size+i]!=0xa5) {
         fputs("FAIL ring guard corrupted\n",stderr);exit(1);
     }
@@ -59,6 +61,10 @@ static void observed_store(u32 *p,u32 v,int order) {
     u32 idx=(v-1)&(l->cq_entries-1);
     struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
     struct loom_service_buffer_receipt *r=(void *)(l->ring_kva+l->receipt_off);
+    // The slot still holds the fill CQE: the payload went somewhere else.
+    if(cq[idx].user_data==9) {
+        fputs("FAIL publication wrote a slot the private tail did not select\n",stderr);exit(1);
+    }
     if(cq[idx].user_data!=0x8877665544332211ULL||cq[idx].result!=4||
        cq[idx].flags!=(LOOM_CQE_MORE|LOOM_CQE_SERVICE_BUFFER)||
        memcmp(&r[idx],&watch_receipt,sizeof(watch_receipt))||
@@ -76,5 +82,6 @@ int main(void) {
     const char *err=loom_receipt_fixture();
     if(err){fprintf(stderr,"FAIL %s\n",err);return 1;}
     if(heap_live||burrow_live||watched!=1||!wakes){fputs("FAIL fixture ownership/publication witnesses\n",stderr);return 1;}
-    puts("PASS actual provided publication: pairing, full-CQ retention, detached refusal, explicit return and geometry");return 0;
+    puts("PASS actual provided publication: pairing, geometry and full-CQ refusals, wakes, "
+         "cancelled MORE shot, single-shot terminal, explicit return and geometry");return 0;
 }

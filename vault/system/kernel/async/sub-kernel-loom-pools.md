@@ -179,8 +179,10 @@ ASYNC-SERVICE-STATUS.md. Review staffing is explicitly single-agent.
 ## Paired publication integration
 
 `loom_provided_deliver` (`loom_service_provided.c`) supplies the Deliver
-binding, all in one hold of the ring lock. A detached consumer is refused
-(-ECANCELED) before anything is written. A full CQ, or a single-shot terminal
+binding, all in one hold of the ring lock. A ring with no receipt geometry is
+refused (-EOPNOTSUPP), and so is a detached request table (-ECANCELED, a
+backstop the engine never reaches; the READY scan keeps publication out of
+close), both before anything is written. A full CQ, or a single-shot terminal
 with no request-delivery room, keeps the member PENDING (-EAGAIN). Otherwise
 the pending cell's result is copied into the CQ slot and receipt that the
 private tail selects. The member then moves PENDING to LEASED, and a
@@ -188,10 +190,11 @@ single-shot terminal's request is delivered. Only after that is the shared
 tail released. The pool must be LIVE in the ring's own table, and the receipt
 must name the exact cell. Source authority and MORE-before-final order remain
 the caller's. The shared receipt fixture drives this function in the guest
-(`loom.create_geometry`) and on the host (`tools/test-loom-receipts.py`, nine
-mutants); see [[sub-kernel-loom]], October 21. This section used to name the
-October 4 helper `loom_post_pool_cqe`. It was deleted on 2026-10-21: it had no
-production caller, and it never consulted the closing state.
+(`loom.create_geometry`) and on the host (`tools/test-loom-receipts.py`,
+eighteen mutants), on the MORE, cancelled-MORE and single-shot terminal arms;
+see [[sub-kernel-loom]], October 21. This section used to name the October 4
+helper `loom_post_pool_cqe`. It was deleted on 2026-10-21: it had no production
+caller.
 
 ## October 8, 23:22 UTC: joint pool registration and charged owner storage
 

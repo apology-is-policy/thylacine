@@ -1,6 +1,33 @@
 # The autonomous-run journal
 
 
+## 2026-10-21 -- the dead publication helper deleted; its harness follows the live path (corona)
+
+- *AS-R9 is closed on main.* main ff'd to the vote-15 docs twins `cba52ec9f`
+  (both mirrors, checked with ls-remote); the code had landed as `107c5c1bd`.
+- *Why delete `loom_post_pool_cqe`.* It never gained a production caller; the
+  engine publishes through `loom_provided_deliver`. Yet the actual-source
+  receipt harness and its mutants pinned the helper, so the copy that ran had
+  no host mutant (`c9c9f4393`). The harness also had not built since
+  `a978d19c3`.
+- *The round* (Fable 5.1, start == end, cross-family): 0/0/0/4. F2 is the one
+  worth remembering. I had written that the live path "adds the closing check
+  the helper lacked". The detached refusal is unreachable: the engine detaches
+  only with no operation linked, and DELIVER needs a linked one. Had it fired,
+  the engine would have extincted (`loom_service_engine.c:313`), because it
+  reads any refusal of a selected action other than BUSY/AGAIN as broken
+  ownership. I had seen the same thing in my parallel self-audit. What keeps
+  publication out of close is the READY scan's arm order. The reviewer also
+  offered a `service_closing` refusal in the leaf; declined, since by the same
+  rule it would turn a benign claim-to-execute publication into an
+  extinction.
+- *F1:* the deletion had removed the publication path's only receipt-geometry
+  guard (receipt_off 0 is the shared header); latent behind pool prepare and
+  the SQE shape. The leaf refuses it now; a legacy-ring leg and M7 pin it.
+- *F3:* the host harness never entered the single-shot terminal arm or the
+  cancelled-MORE phase, and never saw the publication's wake. Legs added,
+  eighteen host mutants in all.
+
 ## 2026-10-19 -- vote 13 (SRV_REGISTRY_NEW -> 134) and the AS-R9 backport to main (corona)
 
 - *The backport.* AS-R9's fix had lived only on corona since 10-05 while main

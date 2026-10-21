@@ -5056,17 +5056,31 @@ pi bake, with mutants for the counter pin and the rt_sigaction pin
 
 ### 2026-10-21: `loom_post_pool_cqe` deleted; the receipt harness drives the live path
 
-The October 4 publication helper never gained a production caller and never
-consulted the closing state (OPEN-BUGS 10-07, P3 latent). `loom_provided_deliver`
-is the one pooled publication path, and it refuses a detached consumer. The
-shared receipt fixture (guest `loom.create_geometry`, host
-`tools/test-loom-receipts.py`) now drives that function, with a pool built
-through the real slot and pool-table transactions. It has a fourth check: a
-detached consumer is refused and nothing is written. The host harness had not
-built since `a978d19c3`; it builds again on Homebrew LLVM, and the clean leg and
-nine mutants pass (`work/oct19-vote13/receipts-*/`). The guest gate's M6 drops
-the detached refusal. Dossiers: `sub-kernel-loom` (October 21) and
+The October 4 publication helper never gained a production caller, yet it was
+what the receipt harness pinned. `loom_provided_deliver` is the one pooled
+publication path. The shared receipt fixture (guest `loom.create_geometry`,
+host `tools/test-loom-receipts.py`) now drives that function, with a pool built
+through the real slot and pool-table transactions, on three arms: a MORE shot,
+a cancelled multishot's last shot, and a single-shot terminal with its request
+record. The host harness had not built since `a978d19c3`; it builds again on
+Homebrew LLVM. Dossiers: `sub-kernel-loom` (October 21) and
 `sub-kernel-loom-pools` (Paired publication integration).
 
-**Posture: UNBUILT, UNAUDITED.** It rides vote 13's gate after its own audit
-round (Loom is an audit-trigger surface).
+Audit round (Fable 5.1, cross-family, MODEL start == end): 0 P0 / 0 P1 / 0 P2 /
+4 P3, all fixed:
+- F1: the deletion removed the publication path's only receipt-geometry guard
+  -> `loom_provided_deliver` refuses a ring with no receipt geometry
+  (-EOPNOTSUPP), pinned by a legacy-ring leg, host mutant no-geometry-guard and
+  guest mutant M7;
+- F2: the detached refusal is a backstop the engine never reaches (it detaches
+  with no operation linked; a refusal there would extinct), and the READY scan
+  is what keeps publication out of close -> the dossiers and this entry say so;
+  a `service_closing` refusal in the leaf was declined (it would turn a benign
+  claim-to-execute publication into an extinction);
+- F3: no host witness for the wake, the TERMINAL-phase MORE delivery, the
+  single-shot terminal arm, or the shared mask -> legs and nine more host
+  mutants (eighteen in all);
+- F4: the AS-2h trigger row did not name `loom_service_provided.c` -> amended.
+
+**Posture: UNBUILT in the guest.** Host: clean + 18 mutants. It rides vote 13's
+gate (M6 and M7 are its guest mutants).

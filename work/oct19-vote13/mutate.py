@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Sabotage edits for vote 13's new witnesses (the 134 renumber's gap and
 # rt_sigaction pins, and the round-1 counter that replaced the gap pin's value
-# check), and for the receipt fixture's detached refusal on the live
-# publication path. Each mutant is a list of exact (file, old, new)
+# check), and for the receipt fixture's two guards on the live publication
+# path (the detached refusal and the receipt geometry). Each mutant is a list of exact (file, old, new)
 # replacements; every `old` must occur EXACTLY once in the committed tree or the
 # mutant refuses (a stale anchor must never apply nothing).
 # Usage: python3 -I work/oct19-vote13/mutate.py <root> <id>   |   --list   |   --check <root>
@@ -51,10 +51,15 @@ MUTANTS = {
         (VC, "    { VIV_LINUX_RT_SIGSUSPEND,   VIV_ENOSYS },\n",
              "    { VIV_LINUX_RT_SIGSUSPEND,   VIV_FORWARD },\n"),
     ]),
-    # The live publication path forgets the detached consumer -- the closing
-    # check the deleted loom_post_pool_cqe never made.
+    # The live publication path forgets the detached consumer (a backstop the
+    # engine never reaches; the fixture reaches it by setting the flag).
     "M6": ("loom.create_geometry", [
         (LP, "    if(l->service_requests.detached){rc=-T_E_CANCELED;goto done;}\n", ""),
+    ]),
+    # ... or its receipt-geometry guard: a ring with no receipt array, lent a
+    # pool table, would take the receipt at offset 0, its shared header.
+    "M7": ("loom.create_geometry", [
+        (LP, "    if(!l->receipt_size){rc=-T_E_OPNOTSUPP;goto done;}\n", ""),
     ]),
 }
 

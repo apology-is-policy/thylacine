@@ -3748,30 +3748,56 @@ documented P3 (a sim-oracle edge unreachable via the safe API;
 `loom_post_pool_cqe` is deleted. It was the AS-2h publication helper (October
 4), and it never gained a production caller. The engine, wired in NA-2..NA-4d,
 publishes a pooled result through `loom_provided_deliver`
-(`loom_service_provided.c`). That function repeats the helper's steps and adds
-the one the helper lacked: under `Ll`, a consumer whose request table is
-`detached` gets -ECANCELED before any slot, mirror or ledger is written. The
-helper never consulted the closing state. That was OPEN-BUGS 10-07, a P3,
-latent only because nothing called it. Yet the helper was still the function
-the receipt harness pinned: the actual-source host test and its mutants
-exercised the copy that never ran, and the copy that ran had no host mutant.
+(`loom_service_provided.c`), in one hold of `Ll`. The helper was still the
+function the receipt harness pinned: the actual-source host test and its
+mutants exercised the copy that never ran, and the copy that ran had no host
+mutant.
+
+Neither function keeps publication out of a closing ring; the READY scan does.
+Under `service_closing` the scan's DISCARD, QUIESCE and CANCEL arms come before
+DELIVER (`loom_service_ready.c`), and closing an operation discards a member
+still PENDING (`loom_provided_discard_closed_locked`). A DELIVER claimed just
+before close flips still publishes; that is benign, because the ring stays
+pinned and the consumer has not detached. `loom_provided_deliver`'s refusal of a
+`detached` request table is a backstop the engine never reaches:
+`engine_discard_closed` detaches only once no operation is linked, and DELIVER
+is selected only for a linked operation. If it ever fired, the engine would
+read the refusal as broken ownership and extinct (`loom_service_engine.c`,
+"engine action refused valid ownership"). So the leaf must never refuse in
+the claim-to-execute window; a `service_closing` refusal there would turn that
+benign publication into an extinction.
+
+The leaf does keep one guard of its own: a ring with no receipt geometry is
+refused (-EOPNOTSUPP) before anything is resolved, because its `receipt_off`
+of 0 would aim the receipt at the shared header. Pool prepare and the SQE shape
+already refuse pools on such a ring; `loom_post_cqe` and the frontend keep the
+same local guard. (Audit round, October 21, F1: the deletion had removed the
+publication path's only direct one.)
 
 The shared fixture (`kernel/test/loom_receipt_fixture.h`, run by the guest's
-`loom.create_geometry` and by the host's `tools/test-loom-receipts.py`) now
-drives `loom_provided_deliver`. It starts from the state
-`loom_provided_commit_locked` leaves for a MORE shot. The pool is built
-through the real slot and pool-table transactions (`loom_service_pool_prepare`,
-`_publish` and `_reap`), in tables the fixture owns. They are lent to a public
-receipt ring for the checks and taken back before the free path; the host
-double for `loom_unref` fails if they reach it. The checks, in order:
-- a legacy ring with no pool table refuses (-ENOENT);
+`loom.create_geometry` and by the host's `tools/test-loom-receipts.py`) drives
+`loom_provided_deliver` from the states `loom_provided_commit_locked` leaves.
+The pool is built through the real slot and pool-table transactions
+(`loom_service_pool_prepare`, `_publish` and `_reap`), in tables the fixture
+owns. They are lent to the rings for the checks and taken back before the free
+path; the host double for `loom_unref` fails if they reach it. The checks, in
+order:
+- a legacy ring lent a pool table refuses (-EOPNOTSUPP) and writes nothing;
+- a receipt ring with no pool table refuses (-ENOENT);
 - a full CQ keeps the member PENDING and the operation pending (-EAGAIN);
-- a detached consumer is refused even with CQ room, and the refusal writes
-  nothing (the private tail, the hostile shared tail, the stale receipt and the
-  slot are unchanged);
-- the paired publication writes the exact CQE and receipt at the private tail,
-  and leaves the member LEASED, the operation no longer pending, and its MORE
-  delivery recorded.
+- with the request table forced `detached`, the backstop refuses even with CQ
+  room, and writes nothing (the private tail, the hostile shared tail, the
+  stale receipt, the slot and the MORE-delivered flag are unchanged);
+- a MORE shot publishes the exact CQE and receipt at the private tail, and
+  leaves the member LEASED, the operation no longer pending, and its MORE
+  delivery recorded;
+- a cancelled multishot's last committed shot (phase TERMINAL) still publishes
+  as a MORE payload;
+- a single-shot terminal, whose request record is TERMINAL, is refused when
+  the record's result differs (-EIO) and when the request table has no
+  delivery room (-EAGAIN), and otherwise shares one CQE with its payload: no
+  MORE flag, the member LEASED, the record DELIVERED.
+On the host, every refusal wakes no consumer and every publication wakes one.
 An incarnation past 32 bits reaches the receipt whole: the slot table's counter
 starts at 2^32.
 
@@ -3781,12 +3807,15 @@ KERNEL_TESTS ring-fault hook. The harness now doubles both. It compiles the four
 ledger units (`loom_service_pool.c`, `_pool_table.c`, `_slots.c` and
 `_requests.c`) whole, extracts `loom_provided_deliver` with its three statics,
 and selects Homebrew LLVM plus the SDK sysroot, because Apple clang's ASan
-hangs at startup on macOS 26. The clean leg passes, and all nine mutants fail
-with their intended assertion. Six are on the live path: an early tail, a wrong
-receipt, no lease, a tail read from the shared mirror, no backpressure, and no
-detached refusal (new). Three are on `loom.c`: clearing, the untyped buffer
-flag and receipt geometry. In the guest gate, mutant M6 drops the detached
-refusal and expects `loom.create_geometry` to FAIL.
+hangs at startup on macOS 26. The clean leg passes, and eighteen mutants fail
+with their intended assertion. Fifteen are on the live path: an early tail, a
+wrong receipt, no lease, a tail read from the shared mirror, a slot chosen by
+the shared mask, no backpressure, no detached refusal, no geometry guard, no
+wake, a wake on refusal, SETTLING-only MORE delivery, a dead terminal arm, no
+request-room check, no request delivery, and a MORE flag on a single shot.
+Three are on `loom.c`: clearing, the untyped buffer flag and receipt geometry.
+In the guest gate, mutants M6 and M7 drop the detached refusal and the geometry
+guard, and each expects `loom.create_geometry` to FAIL.
 
 `loom_pool_peek` (`loom_service_pool.c`) lost its only non-test caller with the
 helper. It remains a read accessor that `private_pool_fixture.h` uses.
