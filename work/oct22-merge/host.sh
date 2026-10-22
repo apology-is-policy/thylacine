@@ -2,7 +2,8 @@
 # Host legs for the main merge, at MERGE_PIN: the userspace Rust host tests;
 # every tools/test-*.py, its arguments read from its own argparse (--logs or
 # --out into this run's directory, --mutants when it has one, and a second run
-# with --sanitize when it has that); the loom-client suite; corona's
+# with --sanitize when it has that, its mutants included: a negative control
+# must be killed by its own assertion under the sanitizer too); the loom-client suite; corona's
 # sims mutants; the burrow spec cfgs; and the Loom service ABI and index
 # checkers and the authority ABI checker, which build.sh does not run. Every
 # leg runs whatever an earlier one did; each exit status is recorded, and any
@@ -56,6 +57,7 @@ for f in tools/test-*.py; do
   if has_opt "$f" --sanitize; then
     set -- python3 -I "$f" --sanitize
     if has_opt "$f" --logs; then set -- "$@" --logs "$OUT/$s-san"; fi
+    if has_opt "$f" --mutants; then set -- "$@" --mutants; fi
     leg "$s-san" "$@"
   fi
 done
