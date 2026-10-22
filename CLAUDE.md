@@ -155,6 +155,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-45 | GPU authority bounded by the context; guest half ENFORCED, host half on virgl/Venus trusted | prose GPU-DESIGN 8 + audits |
 | I-46 | RESERVED: Nocturne audio authority + no-stall cycle | planned `nocturne_cycle.tla` |
 | I-47 | RESERVED: inline media -- decode outside halcyond, bounded place-request | planned prose + audit |
+| I-48 | Thread reclamation: a thread is freed exactly once, only after its last switch-out, by its reaper (a user thread's: that switch's resume path) or joiner; no address space swapped or freed while a thread of its Proc is on a CPU or unfreed | `thread_reap.tla` |
 
 ---
 

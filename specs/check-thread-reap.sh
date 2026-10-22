@@ -8,8 +8,10 @@
 # fired. Every run is `-workers 1` and `-lncheck final`, so each count is fixed.
 #
 # What this script CANNOT see, said so the green reads no larger: the model is
-# one Proc (the one-thread-lock-per-CPU rule is a kernel assert), and it has no
-# death-wake walk (death_wake.tla) and no reap or free (C1).
+# one Proc (the one-thread-lock-per-CPU rule is a kernel assert), it has no
+# death-wake walk (death_wake.tla), no CPUs (the reaper running before its CPU
+# runs anything else is the resume path's code, not the model's), and no kernel
+# threads (a kproc thread is freed by its joiner, outside this model).
 set -u
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
@@ -19,14 +21,20 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="thread_reap:158"
+CLEAN="thread_reap:3528"
 
-# buggy: cfg, invariant that must be the one reported
+# buggy: cfg, invariant that must be the one reported ("~Name" = a temporal
+# property, which TLC reports in its own words)
 BUGGY="thread_reap_buggy_admit_claim:NoAdmitAfterClaim
 thread_reap_buggy_admit_cap:CapExact
 thread_reap_buggy_count:NoOrphanedProc
 thread_reap_buggy_spawner:CloseStable
-thread_reap_buggy_zombie:ZombieImpliesAllExiting"
+thread_reap_buggy_zombie:ZombieImpliesAllExiting
+thread_reap_buggy_free_on_cpu:NoFreeOnCpu
+thread_reap_buggy_two_reapers:ExactlyOnce
+thread_reap_buggy_exec_early:NoSwapWhileOnCpu
+thread_reap_buggy_waitpid_unlocked:ProcFreedLast
+thread_reap_buggy_reap_at_spawn:~ExitedThreadsFreed"
 
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"
@@ -55,6 +63,12 @@ echo "$BUGGY" | while IFS=: read -r cfg want; do
     run "$cfg"
     if [ "$RC" -eq 0 ]; then
         fail "FAIL $cfg: rc=0 -- the counterexample did NOT fire; $want is unguarded"
+    elif [ "${want#\~}" != "$want" ]; then
+        if grep -q "Temporal property ${want#\~} was violated" "$LOG"; then
+            echo "ok   $cfg: rc=$RC, ${want#\~} violated as claimed ($GOT distinct states)"
+        else
+            fail "FAIL $cfg: rc=$RC but no temporal violation -- got: $(grep -m1 -E 'Error|violated' "$LOG")"
+        fi
     elif ! grep -q "Invariant $want is violated" "$LOG"; then
         fail "FAIL $cfg: rc=$RC but not via $want -- got: $(grep -o -E '(Invariant|property) [A-Za-z]* (is|was) violated' "$LOG" | head -1)"
     else

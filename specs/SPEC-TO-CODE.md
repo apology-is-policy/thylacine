@@ -1483,8 +1483,9 @@ the code (C3a), and C3b's code is written to it. This first part models one Proc
 thread admission, the EXITING commit, the last thread out (decide, drop every lock,
 close), the group claim and `wait_pid` (ARCH §7.3.1). Every action is ONE critical
 section; each buggy cfg splits one of them in two with the lock free between.
-C1 adds the final switch-out, the reaper and the free (the section-28 Thread
-reclamation row lands with it).
+C1 (C1a spec-first, then C1b) adds the final switch-out, the reaper and the free,
+exec's wait for its dead peers and `wait_pid` freeing only the Proc (ARCH §7.3.2,
+section 28 I-48, Thread reclamation).
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
@@ -1496,19 +1497,26 @@ reclamation row lands with it).
 | `ExitRead` / `ExitApply` (`BUGGY_COUNT_SPLIT`) | (none -- the read of the live count and the commit in separate holds) | `thread_reap_buggy_count` violates `NoOrphanedProc` (both see another live, neither is last, nobody publishes ZOMBIE) |
 | `CloseDone(t)` (one `g_proc_table_lock` hold: the commit under the nested `threads_lock`, then ZOMBIE) | the last-out tail of `thread_exit_self` / `exits_term`: `proc_release_territory_at_exit`, the commit, `proc_become_zombie_locked` | `CloseStable` (the drop-and-retake's premise), `ZombieImpliesAllExiting` |
 | `CloseZombie` / `CloseCommit` (`BUGGY_ZOMBIE_BEFORE_COMMIT`) | (none -- ZOMBIE published in a hold before the commit) | `thread_reap_buggy_zombie` violates `ZombieImpliesAllExiting` (`wait_pid_for` extincts on a ZOMBIE with a live thread) |
-| `WaitPid` | `kernel/proc.c::wait_pid_for` (under `g_proc_table_lock`, the zombie's `threads_lock` nested for its list) | `EventuallyReaped` (liveness: once claimed, the Proc reaches ZOMBIE and is reaped) |
+| `SwitchOut(t)` (the final `sched()` of an EXITING thread; the resume path that clears `on_cpu` keeps it in a local) | `kernel/sched.c`: both resume tails (`sched()` after `cpu_switch_context`, `sched_finish_task_switch` for a new thread's trampoline) read the decision (EXITING, not `g_kproc`) BEFORE the RELEASE clear of `prev->on_cpu`, while `on_cpu` still pins the thread | `NoParkedDead`, `ExitedThreadsFreed` |
+| `ReapUnlink(t)` / `ReapUnlock(t)` (the reaper: one `threads_lock` hold to fold, clear the focus and unlink; the unlock is its last touch of the Proc) | `kernel/thread.c::thread_reap_dead`, called by both resume tails after the run-queue lock is released and before interrupts are restored; it frees the stack and the slot after the unlock | `ExactlyOnce` (no claim: no other path frees a user thread), `NoFreeOnCpu`, `ProcFreedLast` |
+| `FreeEarly(t)` (`BUGGY_FREE_ON_CPU`) | (none -- a free on THREAD_EXITING alone, without the final switch-out: the #788 shape) | `thread_reap_buggy_free_on_cpu` violates `NoFreeOnCpu` |
+| `Sweep(t)` (`BUGGY_TWO_REAPERS`, `BUGGY_REAP_AT_SPAWN`) | (none after C1 -- the shapes C1 deletes: `proc_reap_exited_threads` at each spawn and at exec, and `wait_pid_for`'s per-thread `thread_free` walk) | `thread_reap_buggy_two_reapers` violates `ExactlyOnce`; `thread_reap_buggy_reap_at_spawn` violates `ExitedThreadsFreed` (the 10-19 freeze's leftover, `seam-exited-threads-wait-for-a-create`) |
+| `Exec(s)` (the swap, once `s` is the only thread on the list) | `kernel/proc.c::proc_exec_replace`: waits for `thread_count == 1` under the thread lock, then re-checks it at the swap under `g_proc_table_lock` with the thread lock nested | `NoSwapWhileOnCpu` (F-1); `thread_reap_buggy_exec_early` (the swap once the caller is the only LIVE thread) violates it |
+| `WaitPid` (C1: frees only the Proc, once the count read under the zombie's thread lock is zero) | `kernel/proc.c::wait_pid_for`: after `proc_unlink_child`, waits for `thread_count == 0` read under the zombie's `threads_lock`, then `proc_free` | `ProcFreedLast`, `EventuallyReaped`; `thread_reap_buggy_waitpid_unlocked` (a bare load of the count) violates `ProcFreedLast` |
 
 What the model does not see, so the green reads no larger: two Procs (the
 one-thread-lock-per-CPU rule, which the kernel asserts under KERNEL_TESTS), the
-death-wake walk itself (`death_wake.tla`), the reap of exited peers and the free
-(C1), and the clear-child-tid store, which follows the commit and must not sleep
+death-wake walk itself (`death_wake.tla`), CPUs (the reaper running before its CPU
+runs anything else is the resume path's code, not an action), kernel threads (freed
+by their joiners), and the clear-child-tid store, which follows the commit and must not sleep
 (`demand_page_locked` refuses the file page-in to a thread that is not RUNNING;
 a kernel test pins it).
 
 Pre-commit gate: `specs/check-thread-reap.sh` -- the clean cfg green at its pinned
 state count and every buggy cfg violating the named invariant -- on any change to
-thread admission, the EXITING commit, the last-out close, the group claim or
-`wait_pid_for`'s zombie check.
+thread admission, the EXITING commit, the last-out close, the group claim,
+the final switch-out and its reaper, exec's wait for its dead peers, or
+`wait_pid_for`'s zombie wait.
 
 ---
 
