@@ -34,7 +34,8 @@ thread_reap_buggy_free_on_cpu:NoFreeOnCpu
 thread_reap_buggy_two_reapers:ExactlyOnce
 thread_reap_buggy_exec_early:NoSwapWhileOnCpu
 thread_reap_buggy_waitpid_unlocked:ProcFreedLast
-thread_reap_buggy_reap_at_spawn:~ExitedThreadsFreed"
+thread_reap_buggy_reap_at_spawn:~ExitedThreadsFreed
+thread_reap_buggy_cap_counts_exited:ExitedNotCharged"
 
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"

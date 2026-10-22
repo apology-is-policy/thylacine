@@ -5334,8 +5334,8 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) -- bounding a thread
     // bomb (each thread pins unswappable kernel kstack). kproc is already
     // rejected above; the SYSTEM boot/service chain is exempt. The cap counts
-    // every Thread still on the list, an exited one only until the resume path
-    // of its last switch-out frees it (ARCH 7.3.2).
+    // live threads: one that has committed its exit no longer counts, though
+    // the resume path of its last switch-out has yet to free it (ARCH 7.3.2).
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
     struct Thread *nt = thread_alloc_user(p, entry_va, sp_va, arg_va, tls_va);

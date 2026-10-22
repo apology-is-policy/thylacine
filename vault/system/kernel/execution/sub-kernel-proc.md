@@ -684,7 +684,10 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   ([[inv-i48]]), so a Proc can briefly show `thread_count > 1` with zero live
   peers. Mistaking one for the other was #68 round-2 F2 ([[fnd-68-r2-f2]]), and
   the other way round it let exited peers fill `PROC_THREAD_MAX` while they
-  waited for a reaper: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19 15:03Z). The live count is `proc_count_live_peers_locked`. Main, the oldest
+  waited for a reaper: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19 15:03Z).
+  The cap charges `live_threads`, not `thread_count` (vote 7, 2026-10-22): a
+  joiner is woken right after the exit commit, before the free, so a Proc at
+  the cap that joined a thread can start another at once ([[inv-i32]]). The live count is `proc_count_live_peers_locked`. Main, the oldest
   thread not exiting, is `proc_main_thread_locked` -- the last such thread on
   the head-inserted list, never the head -- shared by the debug surface's
   default thread ([[sub-kernel-devproc]]) and the caught-note pick

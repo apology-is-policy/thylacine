@@ -995,6 +995,7 @@ void test_proc_reap_keeps_thread_cap_open(void);
 void test_proc_threads_lock_slot(void);
 void test_proc_spawn_arms_decide_at_the_admit(void);
 void test_proc_sqpoll_charge_after_finished_workers(void);
+void test_proc_cap_counts_live_threads(void);
 void test_proc_exit_tail_runs_to_its_end(void);
 void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
@@ -3278,6 +3279,7 @@ struct test_case g_tests[] = {
     { "proc.threads_lock_slot",                 test_proc_threads_lock_slot,                 false, NULL },
     { "proc.spawn_arms_decide_at_the_admit",    test_proc_spawn_arms_decide_at_the_admit,    false, NULL },
     { "proc.sqpoll_charge_after_finished_workers", test_proc_sqpoll_charge_after_finished_workers, false, NULL },
+    { "proc.cap_counts_live_threads",           test_proc_cap_counts_live_threads,           false, NULL },
     { "proc.exit_tail_runs_to_its_end",         test_proc_exit_tail_runs_to_its_end,         false, NULL },
     { "proc.exec_waits_for_exiting_peer",       test_proc_exec_waits_for_exiting_peer,       false, NULL },
     { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },

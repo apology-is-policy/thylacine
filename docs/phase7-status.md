@@ -2448,6 +2448,14 @@ aux-3-c1). Replaces the 2026-10-20 interim fix above, in which an exited thread 
   `proc.sqpoll_charge_after_finished_workers` (was `reap_before_sqpoll_charge`), `scheduler.run_counts_match_trees`;
   `proc.reap_keeps_thread_cap_open` and both exec-wait tests kept. The old `proc.reap_exited_threads_frees_peers` is
   gone with its function.
+- **The cap counts live threads** (operator vote 7, raised by corona on yip 0245). Both exit paths wake a joiner
+  right after the EXITING commit, before the resume path frees the thread, so a cap on `thread_count` refused a
+  process at 256 that had just joined a thread. `proc_thread_room_locked` (admission, the SQPOLL charge, the
+  private executor's charge) now reads `live_threads + loom_sqpoll_count`; spec first: `thread_reap.tla`'s
+  `ExitedNotCharged` and `ListBound`, and `thread_reap_buggy_cap_counts_exited` red on the old count. Witness
+  `proc.cap_counts_live_threads`: a fabricated peer committed EXITING with `on_cpu` raised, at the cap, then the
+  pre-check, the charge and a real admit all succeed (the control: every slot live, refused). The I-32 dossier
+  row, missed by the C1 dossier pass, now says so.
 - **Audit.** Round 1, holotype-reviewer on Fable 5.1 reviewing Opus 5.5 (MODEL start == end): 0 P0, 0 P1, 1 P2,
   2 P3, no production defect. F1 [P2]: test fixtures read user-Proc Threads after the reaper freed them -> every
   readied fixture thread is read by tid under its Proc's threads_lock (`test_thread_view`, `test_thread_sleeping`,

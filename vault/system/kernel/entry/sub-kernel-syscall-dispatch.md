@@ -921,13 +921,14 @@ thread made then would only die at its first die-check, after a kstack
 allocation, and the spawner dies at the call's own return), then pre-check
 `proc_thread_cap_ok`; both reads are lockless early refusals, and
 `proc_thread_admit` decides both exactly under [[lock-proc-threads]]. The cap
-counts every thread still on the list, and an exited thread leaves it when the
-resume path of its last switch-out frees it ([[inv-i48]], [[sub-kernel-thread]]),
-so at most one exited thread per CPU counts and a Proc that starts and joins
-workers never fills the cap with the dead. A create that then fails on a spent
-tid space answers EAGAIN, a system limit, not ENOMEM. The Loom SQPOLL setup, the
-budget's third consumer, charges through `proc_sqpoll_charge` against the same
-count.
+counts live threads (`live_threads`, operator vote 7): a thread stops counting at
+its EXITING commit, and its joiner is woken only after that commit, so a Proc at
+the cap that has just joined a thread can start another at once, though the
+thread stays on the list until the resume path of its last switch-out frees it,
+at most one per CPU ([[inv-i48]], [[inv-i32]], [[sub-kernel-thread]]). A create
+that then fails on a spent tid space answers EAGAIN, a system limit, not ENOMEM.
+The Loom SQPOLL setup, the budget's third consumer, charges through
+`proc_sqpoll_charge` against the same count.
 
 **[[inv-i34]]** — the three hardware-mint handlers carry the CreateBegin /
 CreateCommit pair described above. The allowance is what bounds them; this file

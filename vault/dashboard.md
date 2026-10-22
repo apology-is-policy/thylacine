@@ -126,6 +126,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-22 [[chg-2026-10-22-thread-cap-live]] — The thread cap charges live threads (thread-model C1, vote 7)
 - 2026-10-22 [[chg-2026-10-22-thread-model-c1]] — Thread-model C1: an exited user thread is freed by the resume path of its last switch-out
 - 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
@@ -133,5 +134,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-20 [[chg-2026-10-20-thread-model-c0]] — Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse
 - 2026-10-20 [[chg-2026-10-20-thread-model-c2]] — Thread-model C2: the kernel stack cache; the guard toggles invalidate by address
 - 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
-- 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
 <!-- generated:end -->

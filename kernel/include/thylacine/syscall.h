@@ -798,8 +798,9 @@ enum {
     //   3. yield via sched(); never returns.
     //
     // After-exit reaping: the Thread descriptor + kstack are freed by
-    // the resume path of the thread's last switch-out (ARCH 7.3.2), so
-    // an exited thread stops counting against PROC_THREAD_MAX at once.
+    // the resume path of the thread's last switch-out (ARCH 7.3.2). It
+    // stops counting against PROC_THREAD_MAX at step 1's commit, before
+    // step 2 wakes a joiner.
     //
     // Never returns to userspace — userspace must treat any return as
     // a kernel bug. The x0 the SVC dispatch writes on a fall-through

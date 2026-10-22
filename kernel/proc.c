@@ -1291,11 +1291,14 @@ void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
 }
 
 // SQPOLL kthreads share the budget (fid-lift audit F1): the Proc's workers,
-// whether they run under it or under kproc on its behalf.
+// whether they run under it or under kproc on its behalf. The live count, not
+// thread_count: a thread stops counting at its EXITING commit, after which its
+// joiner is woken, so a Proc that joined a thread may start another at once
+// (ARCH 7.3.2, vote 7). The exited threads not yet freed are one per CPU.
 static bool proc_thread_room_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
     return proc_resource_exempt(p) ||
-           p->thread_count + p->loom_sqpoll_count < PROC_THREAD_MAX;
+           p->live_threads + p->loom_sqpoll_count < PROC_THREAD_MAX;
 }
 
 bool proc_thread_cap_ok(struct Proc *p) {

@@ -109,11 +109,12 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 //                      as->lock so it is exact). B-1a' (ARCH 6.5 "Capacity, and
 //                      the I-32 default"): no longer a constant -- see
 //                      proc_default_page_budget below.
-//   PROC_THREAD_MAX -- threads not yet freed (the live ones, plus peers that
-//                      exited since the Proc's last thread create, which frees
-//                      them) and SQPOLL kthreads. Tighter than the others
-//                      because a thread pins THREAD_KSTACK_TOTAL bytes of
-//                      UNSWAPPABLE kernel kstack (256 threads -> 8 MiB kstacks).
+//   PROC_THREAD_MAX -- live threads (an exited one stops counting at its
+//                      EXITING commit; until its last switch-out frees it, it
+//                      is one of at most one per CPU) and SQPOLL kthreads.
+//                      Tighter than the others because a thread pins
+//                      THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel kstack
+//                      (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
 //
 // B-1a': the DEFAULT anon budget a Proc is seeded with, and the hard maximum a
@@ -923,7 +924,7 @@ struct Proc {
     // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
     // kstacks. They are this Proc's workers in every meaningful sense, so
     // they SHARE the PROC_THREAD_MAX budget: proc_thread_cap_ok and
-    // proc_sqpoll_charge both gate on thread_count + loom_sqpoll_count.
+    // proc_sqpoll_charge both gate on live_threads + loom_sqpoll_count.
     // A SEPARATE field (not thread_count) because exit/teardown logic
     // drains thread_count and must never wait on a kthread the Proc does
     // not own; the kthreads are reaped by loom_free's join at handle close.
@@ -1616,13 +1617,13 @@ u32 proc_kstack_peak(struct Proc *p, int *tid_out, u32 *budget_words);
 u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 
 // proc_thread_cap_ok -- the thread-spawn PRE-check, so a refused spawn
-//   usually allocates nothing. True if the Proc is exempt OR thread_count +
+//   usually allocates nothing. True if the Proc is exempt OR live_threads +
 //   loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL kthreads share the budget --
 //   fid-lift audit F1), read under p->threads_lock. Not the gate: a peer can
 //   spawn between it and the admit, which re-checks (proc_thread_admit).
-//   thread_count counts every Thread on the list, an exited one included until
-//   the resume path of its last switch-out frees it (ARCH 7.3.2), at most one
-//   per CPU.
+//   A thread stops counting at its EXITING commit, before its joiner is woken;
+//   thread_count, which keeps it until its last switch-out frees it, may
+//   exceed the cap by at most one thread per CPU (ARCH 7.3.2, vote 7).
 bool proc_thread_cap_ok(struct Proc *p);
 
 // proc_thread_admit -- the thread-spawn GATE (ARCH 7.3.1). Links `nt` (built

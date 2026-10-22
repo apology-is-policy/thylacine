@@ -36,7 +36,7 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS
     Threads,                    \* every Thread the Proc may ever hold
     Main,                       \* the Thread the Proc starts with
-    Cap,                        \* PROC_THREAD_MAX (counts linked Threads)
+    Cap,                        \* PROC_THREAD_MAX (counts live Threads)
     BUGGY_ADMIT_SPLIT,          \* the claim/cap check and the link are two holds
     BUGGY_COUNT_SPLIT,          \* the live-count read and its decrement are two holds
     BUGGY_SPAWNER_FREE,         \* a Thread admitted with no RUNNING spawner
@@ -45,7 +45,8 @@ CONSTANTS
     BUGGY_TWO_REAPERS,          \* a sweep frees dead threads beside the resume path
     BUGGY_EXEC_EARLY,           \* exec swaps once it is the only LIVE thread
     BUGGY_WAITPID_UNLOCKED,     \* wait_pid reads the thread count without the lock
-    BUGGY_REAP_AT_SPAWN         \* the interim fix: only a later spawn frees the dead
+    BUGGY_REAP_AT_SPAWN,        \* the interim fix: only a later spawn frees the dead
+    BUGGY_CAP_COUNTS_EXITED     \* the cap counts every linked thread, the dead too
 
 ASSUME Main \in Threads /\ Cap \in Nat /\ Cap >= 1
 
@@ -116,6 +117,11 @@ Init ==
 
 Running == {s \in linked : pc[s] = "run"}
 
+(* What admission charges against the cap: the live count, which the       *)
+(* EXITING commit lowers. BUGGY_CAP_COUNTS_EXITED charges every linked      *)
+(* thread, so a dead one counts until its reaper unlinks it.                 *)
+CapCount == IF BUGGY_CAP_COUNTS_EXITED THEN Cardinality(linked) ELSE live
+
 (* Every C3 action takes threads_lock, so none runs while a reaper holds it. *)
 C3Vars == <<pc, linked, live, seen, gflag, lastout, zombie, reaped, late>>
 C1Vars == <<oncpu, inhand, frees, tlheld, execbad>>
@@ -123,8 +129,8 @@ C1Vars == <<oncpu, inhand, frees, tlheld, execbad>>
 (***************************************************************************)
 (* Admission (proc_thread_admit). The spawner s is a RUNNING thread of the *)
 (* Proc. One hold: refuse if claimed or at the cap, else link + live++.    *)
-(* A refusal changes nothing, so it is not an action. A dead thread not    *)
-(* yet freed still counts against the cap.                                  *)
+(* A refusal changes nothing, so it is not an action. A thread stops        *)
+(* counting at its EXITING commit, so one not yet freed does not count.     *)
 (***************************************************************************)
 Admit(s, t) ==
     /\ ~BUGGY_ADMIT_SPLIT
@@ -132,7 +138,7 @@ Admit(s, t) ==
     /\ s \in Running
     /\ pc[t] = "unborn"
     /\ ~gflag
-    /\ Cardinality(linked) < Cap
+    /\ CapCount < Cap
     /\ pc'     = [pc EXCEPT ![t] = "run"]
     /\ linked' = linked \cup {t}
     /\ live'   = live + 1
@@ -147,7 +153,7 @@ AdmitCheck(s, t) ==
     /\ s \in Running
     /\ pc[t] = "unborn"
     /\ ~gflag
-    /\ Cardinality(linked) < Cap
+    /\ CapCount < Cap
     /\ pc' = [pc EXCEPT ![t] = "admit_ok"]
     /\ UNCHANGED <<linked, live, seen, gflag, lastout, zombie, reaped, late>>
     /\ UNCHANGED C1Vars
@@ -171,7 +177,7 @@ AdmitFree(t) ==
     /\ pc[t] = "unborn"
     /\ ~gflag
     /\ ~zombie
-    /\ Cardinality(linked) < Cap
+    /\ CapCount < Cap
     /\ pc'     = [pc EXCEPT ![t] = "run"]
     /\ linked' = linked \cup {t}
     /\ live'   = live + 1
@@ -419,9 +425,18 @@ LiveMatches ==
 (* refusal, exact).                                                         *)
 NoAdmitAfterClaim == ~late
 
-(* The cap counts every linked thread, a dead one not yet freed included,  *)
-(* and is never exceeded (exact, not a floor).                              *)
-CapExact == Cardinality(linked) <= Cap
+(* The cap is never exceeded (exact, not a floor).                          *)
+CapExact == CapCount <= Cap
+
+(* What the cap counts is exactly the threads that have not committed      *)
+(* EXITING. A joiner is woken after the commit (the clear-child-tid wake),  *)
+(* so a Proc that has joined a thread can admit another at once.            *)
+ExitedNotCharged == CapCount = Cardinality({s \in linked : pc[s] \notin Exited})
+
+(* The list exceeds the cap only by threads still on their CPU or in the   *)
+(* hand of the resume path that switched them out -- one per CPU (ARCH     *)
+(* 7.3.2's bound).                                                          *)
+ListBound == Cardinality(linked) <= Cap + Cardinality(oncpu \cup inhand)
 
 (* At most one thread ever decides it is the last out.                     *)
 OneLastOut == Cardinality(lastout) <= 1
@@ -468,6 +483,8 @@ Safety ==
     /\ LiveMatches
     /\ NoAdmitAfterClaim
     /\ CapExact
+    /\ ExitedNotCharged
+    /\ ListBound
     /\ OneLastOut
     /\ NoOrphanedProc
     /\ CloseStable

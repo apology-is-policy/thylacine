@@ -97,6 +97,7 @@ void test_proc_exited_threads_freed_at_switch(void);
 void test_proc_exited_threads_bounded_by_cpus(void);
 void test_proc_reap_keeps_thread_cap_open(void);
 void test_proc_sqpoll_charge_after_finished_workers(void);
+void test_proc_cap_counts_live_threads(void);
 void test_proc_threads_lock_slot(void);
 void test_proc_spawn_arms_decide_at_the_admit(void);
 void test_proc_multi_thread_reap(void);
@@ -1063,6 +1064,83 @@ void test_proc_exec_waits_for_exiting_peer(void) {
     TEST_ASSERT(waited, "exec found the peer not yet freed and waited");
     TEST_ASSERT(g_ewp_swapped, "exec finished once the peer was freed");
     TEST_EXPECT_EQ(g_ewp_count_after, 1, "the new image starts alone");
+}
+
+// ---------------------------------------------------------------------------
+// proc.cap_counts_live_threads
+//
+// The cap charges live threads (ARCH 7.3.2, vote 7). A thread stops counting
+// at its EXITING commit -- its joiner is woken right after -- although the
+// resume path of its last switch-out has yet to free it. The exited peer is
+// fabricated in that window (created, never readied, committed with on_cpu
+// raised), so this runs at any CPU count.
+// ---------------------------------------------------------------------------
+
+static struct Thread *g_ccl_held[PROC_THREAD_MAX];
+static volatile bool  g_ccl_exempt, g_ccl_setup_failed, g_ccl_full_refused;
+static volatile bool  g_ccl_room, g_ccl_charge, g_ccl_admit;
+static volatile int   g_ccl_count, g_ccl_live;
+
+static void ccl_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    proc_apply_identity(p, 1000u, 1000u, NULL, 0);   // a user, so the cap applies
+    g_ccl_exempt = proc_resource_exempt(p);
+    int n = 0;
+    while (n < PROC_THREAD_MAX - 1 &&
+           (g_ccl_held[n] = thread_create_with_arg(p, c0_never_entry, NULL)) != NULL)
+        n++;
+    if (n != PROC_THREAD_MAX - 1) {
+        for (int i = 0; i < n; i++) thread_free(g_ccl_held[i]);
+        g_ccl_setup_failed = true;
+        exits("setup");
+    }
+    g_ccl_full_refused = !proc_thread_cap_ok(p);
+
+    struct Thread *dead = g_ccl_held[n - 1];
+    irq_state_t s = proc_threads_lock(p);
+    thread_commit_exiting_locked(dead);
+    proc_threads_unlock(p, s);
+    __atomic_store_n(&dead->on_cpu, true, __ATOMIC_RELEASE);
+    s = proc_threads_lock(p);
+    g_ccl_count = p->thread_count;
+    g_ccl_live  = p->live_threads;
+    proc_threads_unlock(p, s);
+
+    g_ccl_room   = proc_thread_cap_ok(p);
+    g_ccl_charge = proc_sqpoll_charge(p);
+    if (g_ccl_charge) proc_sqpoll_uncharge(p);
+    struct Thread *nt = thread_alloc_user(p, C0_USER_ENTRY, C0_USER_SP, 0u, 0u);
+    g_ccl_admit = nt && proc_thread_admit(p, nt);
+    if (nt && g_ccl_admit) thread_free(nt);
+    else if (nt)           thread_free_unlinked(nt);
+
+    // Freed as its resume path would, then the never-run rest.
+    irq_state_t ms = spin_lock_irqsave(NULL);
+    __atomic_store_n(&dead->on_cpu, false, __ATOMIC_RELEASE);
+    thread_reap_dead(dead);
+    spin_unlock_irqrestore(NULL, ms);
+    for (int i = 0; i < n - 1; i++) thread_free(g_ccl_held[i]);
+    exits("ok");
+}
+
+void test_proc_cap_counts_live_threads(void) {
+    g_ccl_exempt = g_ccl_setup_failed = g_ccl_full_refused = false;
+    g_ccl_room = g_ccl_charge = g_ccl_admit = false;
+    g_ccl_count = g_ccl_live = -1;
+    int child_pid = rfork(RFPROC, ccl_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_ASSERT(!g_ccl_exempt, "the child runs as a user, so the cap applies");
+    TEST_ASSERT(!g_ccl_setup_failed, "setup: 255 threads beside the caller");
+    TEST_ASSERT(g_ccl_full_refused, "control: with every slot live, the cap refuses");
+    TEST_EXPECT_EQ(g_ccl_count, PROC_THREAD_MAX, "the exited peer is still on the list");
+    TEST_EXPECT_EQ(g_ccl_live, PROC_THREAD_MAX - 1, "and no longer live");
+    TEST_ASSERT(g_ccl_room, "a thread that committed its exit no longer counts, though unfreed");
+    TEST_ASSERT(g_ccl_charge, "the executor charge sees the same room");
+    TEST_ASSERT(g_ccl_admit, "and a create is admitted at once");
 }
 
 static struct Proc      *volatile g_ewr_proc;
