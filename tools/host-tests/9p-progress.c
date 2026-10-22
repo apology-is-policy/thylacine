@@ -43,11 +43,17 @@ static int legacy_send(void *ctx,const u8 *buf,size_t n) {
 static int legacy_recv(void *ctx,u8 *buf,size_t n) {
     (void)ctx;(void)buf;(void)n;CHECK(false,"blocking recv invoked");return -1;
 }
+static bool legacy_recv_ready(void *ctx,struct poll_waiter *pw) {
+    (void)ctx;(void)pw;CHECK(false,"readiness sample invoked");return false;
+}
+static int legacy_recv_now(void *ctx,u8 *buf,size_t n) {
+    (void)ctx;(void)buf;(void)n;CHECK(false,"reader-role recv invoked");return -1;
+}
 static int close_pipe(void *ctx) { ((struct pipe*)ctx)->closes++;return 0; }
 struct fixture { struct pipe pipe; struct p9_transport t; struct p9_transport_progress p;u8 buf[512]; };
 static void init(struct fixture *f) {
     memset(f,0,sizeof(*f));f->pipe.chunk=512;
-    struct p9_transport_ops ops={.send=legacy_send,.recv=legacy_recv,.close=close_pipe,.ctx=&f->pipe};
+    struct p9_transport_ops ops={.send=legacy_send,.recv=legacy_recv,.close=close_pipe,.recv_ready=legacy_recv_ready,.recv_now=legacy_recv_now,.ctx=&f->pipe};
     struct p9_transport_try_ops nonblock={.send=try_send,.recv=try_recv,.abort=abort_pipe,.ctx=&f->pipe};
     CHECK(p9_transport_init(&f->t,ops,f->buf,sizeof(f->buf))==0,"transport init");
     CHECK(p9_transport_progress_init(&f->p,&f->t,nonblock,256)==0,"progress init");

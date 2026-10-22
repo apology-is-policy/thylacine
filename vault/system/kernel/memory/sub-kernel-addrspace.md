@@ -620,7 +620,8 @@ The host fixture (`tools/test-addrspace-lifetime.py`) compiles the actual
 declaration and lifecycle, the release/destroy pair with it, and the actual
 `addrspace_quiesce_mapped_devices`; allocator, VMA drain, page-table destruction
 and the device resets are host doubles, and its VMA list is real nodes the walk
-can follow. Its mutants carry the last-owner/last-pin counterexamples onto the
+can follow. The drain double has the kernel's external linkage, so a mutant
+that removes destroy's only drain still compiles and meets its assertion. Its mutants carry the last-owner/last-pin counterexamples onto the
 split: a release that drains while another owner remains, a destroy without its
 drain or with its lifetime drop first, a last-owner release that drops the
 lifetime destroy still needs, a release that calls itself last one owner early.

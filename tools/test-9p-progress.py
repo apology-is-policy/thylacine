@@ -35,7 +35,7 @@ def main():
                 text=text.replace(old,new)
             path.write_text(text)
             exe=d/name
-            cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'tools/host-tests/host-env'),str(ROOT/'kernel/9p_transport.c') if name.startswith('version:') else str(path),str(ROOT/'kernel/9p_wire.c'),str(path) if name.startswith('version:') else str(ROOT/'kernel/9p_session.c'),str(ROOT/'tools/host-tests/9p-progress.c'),'-o',str(exe)]
+            cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'tools/host-tests/host-env'),'-iquote',str(ROOT/'kernel'),str(ROOT/'kernel/9p_transport.c') if name.startswith('version:') else str(path),str(ROOT/'kernel/9p_wire.c'),str(path) if name.startswith('version:') else str(ROOT/'kernel/9p_session.c'),str(ROOT/'tools/host-tests/9p-progress.c'),'-o',str(exe)]
             cmd += cc_extra+shlex.split(os.environ.get('CFLAGS',''))
             if a.sanitize:cmd += ['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
             with (logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)

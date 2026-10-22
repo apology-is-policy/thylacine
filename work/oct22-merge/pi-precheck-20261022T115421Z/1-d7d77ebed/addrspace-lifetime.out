@@ -1,0 +1,18 @@
+PASS clean: actual-source lifetime
+PASS private-sharing: private guard refuses sharing
+PASS already-shared: shared image refuses private guard
+PASS guard-no-pin: guard pins lifetime without adding owner
+PASS guard-leak: final guard releases pin and exclusion
+PASS pin-as-owner: pin is not an owner
+PASS no-owner-get: owner increments both counts
+Traceback (most recent call last):
+  File "/home/cora/corona-harness-d7d77ebed/tools/test-addrspace-lifetime.py", line 62, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/home/cora/corona-harness-d7d77ebed/tools/test-addrspace-lifetime.py", line 57, in main
+    with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+                                                        ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['gcc', '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread', '/tmp/addrspace-lifetime-yrqwyezo/skip-drain.c', '-o', '/tmp/addrspace-lifetime-yrqwyezo/skip-drain']' returned non-zero exit status 1.

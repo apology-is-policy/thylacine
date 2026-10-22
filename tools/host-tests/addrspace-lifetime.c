@@ -45,7 +45,8 @@ static bool kobj_pci_quiesce(struct KObj_PCI *k) { k->full++; resets++; last_res
 static bool kobj_pci_quiesce_dma_only(struct KObj_PCI *k) { k->dma_only++; resets++; last_reset = ++stamp; return true; }
 
 /* ACTUAL_ADDRSPACE_DECL */
-static void vma_drain_in(struct AddrSpace *as) {
+// External, as vma.h declares it: a mutant that removes destroy's drain must still compile.
+void vma_drain_in(struct AddrSpace *as) {
     drains++; drained_at = ++stamp;
     pthread_mutex_lock(&mu);
     entered_drain = true;

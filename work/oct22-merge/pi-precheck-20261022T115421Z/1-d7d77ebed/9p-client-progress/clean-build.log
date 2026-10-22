@@ -1,0 +1,273 @@
+/home/cora/corona-harness-d7d77ebed/kernel/9p_session.c:49:10: fatal error: ../mm/slub.h: No such file or directory
+   49 | #include "../mm/slub.h"
+      |          ^~~~~~~~~~~~~~
+compilation terminated.
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_build_tversion’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:302:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  302 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:302:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  302 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:304:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  304 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:304:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  304 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rversion’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:317:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  317 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:317:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  317 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:319:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  319 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:319:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  319 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_build_tattach’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:351:54: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  351 |                                                      if (rc < 0) return -1; off += (size_t)rc;
+      |                                                      ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:351:77: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  351 |                                                      if (rc < 0) return -1; off += (size_t)rc;
+      |                                                                             ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:353:54: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  353 |                                                      if (rc < 0) return -1; off += (size_t)rc;
+      |                                                      ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:353:77: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  353 |                                                      if (rc < 0) return -1; off += (size_t)rc;
+      |                                                                             ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rattach’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:366:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  366 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:366:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  366 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rwalk’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:418:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  418 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:418:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  418 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rlerror’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:503:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  503 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:503:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  503 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘parse_open_create_body’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:538:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  538 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:538:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  538 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:540:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  540 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:540:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  540 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_build_tlcreate’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:565:53: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  565 |                                                     if (rc < 0) return -1; off += (size_t)rc;
+      |                                                     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:565:76: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  565 |                                                     if (rc < 0) return -1; off += (size_t)rc;
+      |                                                                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rread’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:600:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  600 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:600:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  600 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rwrite’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:639:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  639 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:639:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  639 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_getattr_body’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:679:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  679 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:679:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  679 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:682:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  682 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:682:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  682 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:685:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  685 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:685:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  685 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:687:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  687 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:687:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  687 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:689:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  689 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:689:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  689 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:692:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  692 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:692:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  692 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:694:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  694 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:694:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  694 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:696:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  696 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:696:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  696 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:698:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  698 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:698:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  698 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:700:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  700 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:700:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  700 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:703:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  703 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:703:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  703 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:705:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  705 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:705:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  705 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:707:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  707 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:707:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  707 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:709:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  709 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:709:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  709 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:711:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  711 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:711:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  711 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:713:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  713 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:713:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  713 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:715:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  715 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:715:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  715 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:717:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  717 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:717:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  717 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:720:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  720 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:720:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  720 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:722:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  722 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:722:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  722 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rwalkgetattr’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:790:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  790 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:790:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  790 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rreaddir’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:868:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  868 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:868:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  868 |     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_unpack_dirent’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:887:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  887 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:887:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  887 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:889:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  889 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:889:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  889 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:891:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  891 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:891:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  891 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:893:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  893 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:893:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  893 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘parse_qid_body’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:981:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+  981 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:981:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  981 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c: In function ‘p9_parse_rreadlink’:
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:1083:5: error: this ‘if’ clause does not guard... [-Werror=misleading-indentation]
+ 1083 |     if (rc < 0) return -1; off += (size_t)rc;
+      |     ^~
+/home/cora/corona-harness-d7d77ebed/kernel/9p_wire.c:1083:28: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+ 1083 |     if (rc < 0) return -1; off += (size_t)rc;
+      |                            ^~~
+cc1: all warnings being treated as errors

@@ -1,0 +1,38 @@
+2026-10-22T11:54:21Z  host Linux 6.18.34+rpt-rpi-v8 aarch64; gcc (Debian 14.2.0-19) 14.2.0; Python 3.13.5
+2026-10-22T11:54:21Z  START srvconn-admission: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-srvconn-admission.py
+2026-10-22T11:54:26Z  END srvconn-admission rc=1
+2026-10-22T11:54:26Z  START service-admission: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-service-admission.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/service-admission
+2026-10-22T11:54:33Z  END service-admission rc=0
+2026-10-22T11:54:33Z  START service-admission-san: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-service-admission.py --sanitize --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/service-admission-san
+2026-10-22T11:54:33Z  END service-admission-san rc=3
+2026-10-22T11:54:33Z  START loom-receipts: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-receipts.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-receipts
+2026-10-22T11:54:34Z  END loom-receipts rc=3
+2026-10-22T11:54:34Z  START 9p-client-progress: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-9p-client-progress.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/9p-client-progress
+2026-10-22T11:54:36Z  END 9p-client-progress rc=1
+2026-10-22T11:54:36Z  START 9p-client-progress-san: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-9p-client-progress.py --sanitize --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/9p-client-progress-san
+2026-10-22T11:54:36Z  END 9p-client-progress-san rc=3
+2026-10-22T11:54:36Z  START 9p-progress: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-9p-progress.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/9p-progress
+2026-10-22T11:54:38Z  END 9p-progress rc=1
+2026-10-22T11:54:38Z  START 9p-progress-san: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-9p-progress.py --sanitize --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/9p-progress-san
+2026-10-22T11:54:39Z  END 9p-progress-san rc=3
+2026-10-22T11:54:39Z  START addrspace-lifetime: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-addrspace-lifetime.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/addrspace-lifetime
+2026-10-22T11:54:43Z  END addrspace-lifetime rc=1
+2026-10-22T11:54:43Z  START addrspace-lifetime-san: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-addrspace-lifetime.py --sanitize --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/addrspace-lifetime-san
+2026-10-22T11:54:43Z  END addrspace-lifetime-san rc=3
+2026-10-22T11:54:43Z  START loom-service-nodes: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-service-nodes.py --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-service-nodes
+2026-10-22T11:54:43Z  END loom-service-nodes rc=3
+2026-10-22T11:54:43Z  START loom-service-pool: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-service-pool.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-service-pool
+2026-10-22T11:54:51Z  END loom-service-pool rc=0
+2026-10-22T11:54:51Z  START loom-service-pool-san: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-service-pool.py --sanitize --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-service-pool-san
+2026-10-22T11:54:51Z  END loom-service-pool-san rc=3
+2026-10-22T11:54:51Z  START loom-service-pool-table: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-service-pool-table.py --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-service-pool-table
+2026-10-22T11:54:51Z  END loom-service-pool-table rc=3
+2026-10-22T11:54:51Z  START loom-service-slots: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-service-slots.py --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-service-slots
+2026-10-22T11:54:52Z  END loom-service-slots rc=3
+2026-10-22T11:54:52Z  START loom-service-fids: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-loom-service-fids.py --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/loom-service-fids
+2026-10-22T11:54:52Z  END loom-service-fids rc=3
+2026-10-22T11:54:52Z  START sqpoll-ticket: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-sqpoll-ticket.py --mutants --logs /home/cora/corona-harness-d7d77ebed/precheck-20261022T115421Z/sqpoll-ticket
+2026-10-22T11:54:53Z  END sqpoll-ticket rc=3
+2026-10-22T11:54:53Z  START pty-interaction-abi: python3 -I /home/cora/corona-harness-d7d77ebed/tools/test-pty-interaction-abi.py
+2026-10-22T11:54:58Z  END pty-interaction-abi rc=0
+2026-10-22T11:54:58Z  DONE

@@ -284,7 +284,7 @@ mutants = {
         "srvconn_unreserve(cn->domain, cn->credit_charge);\n    srvconn_ctl_unlink(cn);",
         "in-flight or retained storage lost its reservation"),
     "principals-crossed": (
-        "cn->server_principal   = server_principal;", "cn->server_principal   = peer_principal;",
+        "cn->server_principal   = server_principal;", "cn->server_principal   = peer_principal; (void)server_principal;",
         "connection does not carry both ends' principals"),
 }
 

@@ -372,7 +372,11 @@ and errno limits. It detects 13 intended source mutations, each matching one
 site (EAGAIN's send and receive arms are separate mutants). --sanitize accepts
 CC/CFLAGS for a working host sanitizer toolchain. The session's tag table
 allocates through host `kmalloc`/`kfree` doubles, and `mm/slub.h` reaches
-`atomic_lse.h` through the host-env double ([[sub-substrate-gates]]). The real-channel guest witness
+`atomic_lse.h` through the host-env double ([[sub-substrate-gates]]). The fixture's
+backend supplies the mandatory `recv_ready` and `recv_now` as sentinels that fail
+when called, since the byte-boundary engine reads only through its try ops. The
+`version:` mutants compile a mutated copy of `9p_session.c` from a temporary
+directory, so its quoted includes resolve through `-iquote kernel`. The real-channel guest witness
 is the expanded srvconn.nonblocking_backpressure test. These are bounded fixture
 claims, blind to future Loom table admission/retirement and full concurrent use.
 See docs/ASYNC-SERVICE-STATUS.md for measured qualification and remaining work.

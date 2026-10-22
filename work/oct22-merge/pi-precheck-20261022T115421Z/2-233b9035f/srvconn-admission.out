@@ -1,0 +1,13 @@
+PASS: domains, partitions, retained tickets, allocation rollback, in-flight admission, retained teardown, final free
+EXPECTED FAILURE combined-bulk-undercharge: srvconn_unreserve: corrupt admission count
+EXPECTED FAILURE bulk-unit-charge: bulk must cost four credits
+EXPECTED FAILURE bulk-return-one: bulk final free did not return four credits
+EXPECTED FAILURE local-domain-limit: local domain limit bypass
+EXPECTED FAILURE combined-domain-limit: session combined limit bypass
+EXPECTED FAILURE domain-retention: srv_domain_unref: charged domain
+EXPECTED FAILURE ignored-admission-refusal: in-flight or retained storage lost its reservation
+EXPECTED FAILURE missing-reservation: srvconn_unreserve: corrupt admission count
+EXPECTED FAILURE struct-rollback-leak: reservation leaked after rollback or destruction
+EXPECTED FAILURE ring-rollback-leak: reservation leaked after rollback or destruction
+EXPECTED FAILURE premature-release: in-flight or retained storage lost its reservation
+EXPECTED FAILURE principals-crossed: connection does not carry both ends' principals
