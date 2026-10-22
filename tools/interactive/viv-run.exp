@@ -101,6 +101,18 @@ if {$have_ash} {
     lc_expect "G50" "getdents64 lists the moved name (dirent64 encode + cursor from EL0)"
     lc_send "rm /tmp/d50/g50 && rmdir /tmp/d50 && ls /tmp/d50 2>&1 | tr a-z A-Z"
     lc_expect "NO SUCH FILE" "unlinkat removed the file and (AT_REMOVEDIR) the dir; the name is gone"
+    # G12: file times through Linux utimensat (88, VIVARIUM.md 6.30). busybox
+    # touch -d sets an explicit time, cp -p copies it, and a bare touch takes
+    # the clock (the both-to-now form); stat -c %Y reads each back as epoch
+    # seconds. Braces keep Tcl off the shell's $ and [.
+    lc_send {touch -d @1000000000 /tmp/t12 && echo t=$(stat -c %Y /tmp/t12) | tr a-z A-Z}
+    lc_expect "T=1000000000" "touch -d set an explicit mtime (utimensat with times)"
+    lc_send {cp -p /tmp/t12 /tmp/t12p && echo p=$(stat -c %Y /tmp/t12p) | tr a-z A-Z}
+    lc_expect "P=1000000000" "cp -p kept the source's mtime"
+    lc_send {a=$(date +%s); touch /tmp/t12; d=$(( $(stat -c %Y /tmp/t12) - a )); [ $d -ge -2 ] && [ $d -le 2 ] && echo touch-now | tr a-z A-Z}
+    lc_expect "TOUCH-NOW" "a bare touch took the clock (utimensat with null times)"
+    lc_send {rm /tmp/t12 /tmp/t12p && echo t12-gone | tr a-z A-Z}
+    lc_expect "T12-GONE" "the times files are removed"
     # `>/dev/null` inside a container (the curl-demo census item, 2026-08-25:
     # ash's `>` is openat(O_WRONLY|O_CREAT|O_TRUNC); the openat then refused
     # O_CREAT outright and the staged /dev/null was a plain file). Two things

@@ -52,10 +52,47 @@ lc_run_expect "echo tee-3b91 | tee /home/michael/l3b/tee3b" "tee-3b91"
 lc_run_expect "cat /home/michael/l3b/tee3b" "tee-3b91"
 lc_pass "LS-3b(e): tee (stdout + file)"
 
+# (g) G12: file times. stat prints each time as epoch seconds; every leg sets a
+# different time, so one leg's token left in the buffer cannot satisfy the next.
+# touch -t / -d / -r and cp -p / -a set explicit times (the owner's); a bare
+# touch sets both to the file server's clock, the form write permission allows.
+lc_run_expect "touch -t 200109090146.40 /home/michael/l3b/tch3b; stat /home/michael/l3b/tch3b" "Modify: 1000000000"
+lc_pass "LS-3b(g): touch -t sets the mtime"
+lc_run_expect "touch -d 2004-11-09T11:33:20Z /home/michael/l3b/src3b; cp -p /home/michael/l3b/src3b /home/michael/l3b/cpp3b; stat /home/michael/l3b/cpp3b" "Modify: 1100000000"
+lc_pass "LS-3b(h): cp -p keeps the source's mtime"
+lc_send "mkdir /home/michael/l3b/arc; touch -d 2008-01-10T21:20:00Z /home/michael/l3b/arc/f; touch -d 2009-02-13T23:31:30Z /home/michael/l3b/arc; cp -a /home/michael/l3b/arc /home/michael/l3b/arc2; stat /home/michael/l3b/arc2/f; stat /home/michael/l3b/arc2"
+lc_expect "Modify: 1200000000" "cp -a kept a file's mtime"
+lc_expect "Modify: 1234567890" "cp -a kept the directory's mtime, set after its entries"
+lc_pass "LS-3b(i): cp -a keeps a tree's times"
+lc_run_expect "touch -t 201603151200 /home/michael/l3b/ref3b; touch -r /home/michael/l3b/ref3b /home/michael/l3b/tch3b; stat /home/michael/l3b/tch3b" "Modify: 1458043200"
+lc_pass "LS-3b(j): touch -r copies a reference's times"
+
+# The bare touch: its mtime is the clock's, within two seconds of date's.
+proc expect_touch_now {phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {Modify: ([0-9]+) .*?\n([0-9]{9,11})\r?\n} {
+            set m $expect_out(1,string)
+            set d $expect_out(2,string)
+            if {abs($m - $d) > 2} {
+                lc_fail "touch set mtime $m against the clock's $d ($phase)"
+            }
+            lc_step "saw: $phase (mtime $m, clock $d)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+lc_send "touch /home/michael/l3b/tch3b; stat /home/michael/l3b/tch3b; date +%s"
+expect_touch_now "a bare touch takes the clock"
+lc_pass "LS-3b(k): touch sets both times to now"
+
 # (f) rm -r removes the whole tree; ls of the gone dir errors.
 lc_run_expect "rm -r /home/michael/l3b; ls /home/michael/l3b" "ls:"
 lc_pass "LS-3b(f): rm -r removes the tree"
 
 lc_quit
-lc_pass "LS-CI ls-3b: mkdir + touch + cp + mv + tee + rm all verified"
+lc_pass "LS-CI ls-3b: mkdir + touch + cp + mv + tee + times + rm all verified"
 exit 0

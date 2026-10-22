@@ -22,6 +22,7 @@ code:
   - usr/pouch-hello/pouch-hello-fd.c
   - usr/pouch-hello/pouch-hello-fs.c
   - usr/pouch-hello/pouch-hello-links.c
+  - usr/pouch-hello/pouch-hello-times.c
   - usr/pouch-hello/pouch-hello-tz.c
 audit: hard
 guarded-by: [inv-i28]
@@ -69,7 +70,18 @@ a negative nanosecond). Its 61 checks pin every number to the kernel's header,
 read x6 as the kernel does (a null pointer under a `_SET` bit faults), and run
 at -O0 and -O2 under ASan and UBSan. It refuses 25 mutants. It also derives
 the seam's `__syscall0..7` shapes from `syscall_arch.h` ([[sub-pouch-seam]]).
-The guest leg is G12-e's.
+
+On the guest, `/bin/pouch-hello-times` (`POUCH_CENSUS_TIMES`) runs after the
+links prover in its own directory at the pool root, as the owner: explicit
+times read back in seconds, `UTIME_OMIT` keeping one time, two `UTIME_OMIT`
+succeeding for a missing path, null times and two `UTIME_NOW` landing within
+two seconds of the guest's clock, `futimens` on a read-only descriptor,
+`utimes`, `futimes`, `utime` and `lutimes`, `AT_EMPTY_PATH` on a descriptor and
+on the working directory, `AT_SYMLINK_NOFOLLOW` on the fixture's dangling link
+(lstat reads its own times; following it is `ENOENT`), and the errnos of the
+refusals that do not need another identity. Each leg sets an old time first,
+so a call that did nothing fails. The authority refusals are the kernel tests'
+and the host test's ([[sub-kernel-perm]]).
 
 ## link and linkat answer EPERM (2026-10-21, 0062)
 

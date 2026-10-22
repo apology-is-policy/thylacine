@@ -81,7 +81,10 @@ the bake puts at `/lib/pouch-links` ([[sub-substrate-build]]), lstat and
 readlink through the native `SYS_LSTAT` and `SYS_READLINK`
 ([[sub-pouch-fs]]), `hardlink`, where `link` answers EPERM and makes
 nothing (0062), and `dtype`, readdir's `d_type` on the fixture and on `/hw`
-([[sub-kernel-spoor]]), and then `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
+([[sub-kernel-spoor]]), then, from G12 (2026-10-22), `/bin/pouch-hello-times`
+(`POUCH_CENSUS_TIMES`): file times set, kept and read back through every musl
+spelling, a link's own times included ([[sub-pouch-fs]]), and then
+`/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
 legs over a TZif file the prover writes itself, which musl opens through
 `openat`'s translation and maps private (0060). Each is boot-fatal. The
 marker goes out on fd 1

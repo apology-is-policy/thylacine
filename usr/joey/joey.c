@@ -12057,6 +12057,25 @@ int main(void) {
                      "link EPERM; readdir d_type)\n");
         }
 
+        // G12: the file-times prover (0063, operator votes 2026-10-22). Spawn
+        // /bin/pouch-hello-times -- in its own directory at the pool root it
+        // sets times explicitly, leaves one with UTIME_OMIT, takes the
+        // server's clock with null times, and goes through futimens, utimes,
+        // futimes, utime, lutimes, AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW (the
+        // fixture's dangling link), then the refusals' errnos. Boot-fatal.
+        {
+            const char tm_name[]   = "/bin/pouch-hello-times";
+            const char tm_expect[] = POUCH_CENSUS_TIMES;
+            if (pouch_smoke_one(tm_name, sizeof(tm_name) - 1,
+                                tm_expect, sizeof(tm_expect) - 1) != 0) {
+                t_putstr("joey: G12 PROBE pouch-hello-times FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: G12 PROBE OK (file times: explicit, OMIT, now, "
+                     "the descriptor and legacy forms, AT_EMPTY_PATH, a "
+                     "link's own times; the refusals' errnos)\n");
+        }
+
         // The time zone prover (patch 0060). Spawn /bin/pouch-hello-tz -- it
         // writes a TZif file and has musl read it: tzset opens it through
         // openat's translation and maps it private and read-only (one row of

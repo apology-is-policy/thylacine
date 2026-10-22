@@ -9,7 +9,7 @@
 // `table` op for stat is deferred: the GNU block is deliberately NOT tabular;
 // a table would break the strip identity. Recorded in BEACON.md 12.5.)
 //
-// atime/mtime/ctime are 0 at v1.0 (most Devs don't track timestamps).
+// atime/mtime/ctime are epoch seconds; a Dev that keeps no times reports 0.
 
 #![no_std]
 #![no_main]

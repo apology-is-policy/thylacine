@@ -52,6 +52,10 @@ exit status. The difference is the colour flag. Each accepts
 `--color[=WHEN]`, resolves it once at startup, and threads the resulting
 boolean through every formatting call.
 
+`stat` prints the three times as epoch seconds on one line, `Access: A
+Modify: M   Change: C`; a Dev that keeps no times reports 0. `ls-3b.exp` reads
+`Modify:` to check `touch` and `cp -p` (2026-10-22).
+
 **Every one of the sixteen now defaults `--color=auto`** — the H-1c-2
 unification. That collapsed the asymmetry this dossier once described (the
 introspection tools defaulting ON, `grep` defaulting OFF): with a working

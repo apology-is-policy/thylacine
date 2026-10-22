@@ -55,7 +55,9 @@ call into its mocked seam and requires none. The census line
 the fixture and on `/hw`; [[sub-pouch-fs]]). `pouch-census.h` also holds
 `GO_CENSUS_FS`, the census go-fs prints: a Go
 program cannot include the header, so it prints its own copy and a
-disagreement fails the boot ([[sub-stratum-boot]]).
+disagreement fails the boot ([[sub-stratum-boot]]). G12 (2026-10-22) adds
+`POUCH_CENSUS_TIMES`, the file-times prover's nine legs, and `chtimes` to
+`GO_CENSUS_FS`.
 
 ## 0061: fstat and the tty ioctls answer EBADF (2026-10-20)
 

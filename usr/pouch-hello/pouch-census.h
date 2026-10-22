@@ -29,12 +29,14 @@
     "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,v2,sock-seek,sock-fstat,dup,dupfd,getfl,setfl,cloexec,fdopendir,umask,fstat-ebadf,isatty-ebadf: exit 0"
 #define POUCH_CENSUS_LINKS \
     "pouch-hello-links: legs=lstat,readlink,readlink-trunc,realpath,nofollow,opath,directory,creat-directory,lchmod,flags,hardlink,dtype: exit 0"
+#define POUCH_CENSUS_TIMES \
+    "pouch-hello-times: legs=explicit,omit,both-omit,now,futimens,utimes,empty-path,nofollow,errors: exit 0"
 #define POUCH_CENSUS_TZ \
     "pouch-hello-tz: legs=tz-file,tz-map,tz-unmap,tz-reload,tz-posix: exit 0"
 // go-fs prints its own copy (main.go's census): Go cannot include this header,
 // and a disagreement fails the boot rather than passing it.
 #define GO_CENSUS_FS \
-    "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,rename,remove: exit 0"
+    "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,chtimes,rename,remove: exit 0"
 // The FAULT child's marker: joey requires it AND a non-zero exit status, so the
 // census here is the one line it prints BEFORE the write that kills it.
 #define POUCH_CENSUS_GUARD \

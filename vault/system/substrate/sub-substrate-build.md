@@ -420,7 +420,8 @@ They are staged from nothing under `$BUILD_DIR/pouch-links` and put with
 `long` and `up` back with `stratum-fs readlink`, and a failed put, sync or readback
 stops it. `pouch-hello-links` is on both curated Pouch lists,
 `build_pouch_progs`' build list and the initrd's `bin/` list
-([[sub-stratum-boot]] runs it), and `pouch-hello-tz` (0060) after it; the time
+([[sub-stratum-boot]] runs it), then `pouch-hello-times` (G12, 0063), whose
+own directory it makes at run time, and `pouch-hello-tz` (0060) after it; the time
 zone prover writes its own fixture at run time, so the bake stages none.
 
 `HALCYON_PROFILE` (`choice:instrument,legacy`, default `instrument`, since

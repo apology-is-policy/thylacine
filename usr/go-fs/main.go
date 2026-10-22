@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -34,7 +35,7 @@ var payload = []byte("thylacine go fs stage 3a\n") // 25 bytes
 // joey requires this line (GO_CENSUS_FS in usr/pouch-hello/pouch-census.h; Go
 // cannot include the header, and a disagreement fails the boot). It names every
 // leg, so a stale binary that never ran a newer one cannot pass for this one.
-const census = "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,rename,remove: exit 0"
+const census = "go-fs: legs=mkdir,create,read,stat,seek,readdir,race-create,excl,umask,getppid,links,root,chtimes,rename,remove: exit 0"
 
 func must(what string, ok bool) {
 	if !ok {
@@ -177,6 +178,10 @@ func main() {
 	//     and prints before the leg fails, so one red boot shows them all.
 	links()
 
+	// 6f. File times (G12, dec-2026-10-22-wstat-times): os.Chtimes and
+	//     syscall.UtimesNano / Futimes over SYS_WSTAT's time bits.
+	chtimes()
+
 	// 7. Rename within the directory (os.Rename -> SYS_RENAME).
 	must("os.Rename", os.Rename(file, renamed) == nil)
 	_, err = os.Stat(file)
@@ -277,4 +282,64 @@ func links() {
 	}
 	must(fmt.Sprintf("links: %d checks failed (above)", bad), bad == 0)
 	fmt.Printf("go-fs: links OK (%d links: lstat, readlink, EvalSymlinks, ReadDir types, Root)\n", len(linkTargets))
+}
+
+// Two times well before any boot, so a call that changed nothing cannot pass.
+const (
+	tOld = 1000000000
+	tNew = 1100000000
+)
+
+// chtimes sets times through every Go spelling and reads them back in seconds
+// (the kernel's stat carries no nanoseconds). The caller owns the file, so the
+// refusals are the kernel tests' to prove.
+func chtimes() {
+	f := root + "/times.txt"
+	must("os.WriteFile(times.txt)", os.WriteFile(f, payload, 0o644) == nil)
+	timesAre := func(what string, at, mt int64) {
+		var st syscall.Stat_t
+		err := syscall.Stat(f, &st)
+		must(fmt.Sprintf("%s (atime %d mtime %d, want %d %d)", what, st.Atime, st.Mtime, at, mt),
+			err == nil && int64(st.Atime) == at && int64(st.Mtime) == mt)
+	}
+
+	must("os.Chtimes", os.Chtimes(f, time.Unix(tOld, 5), time.Unix(tNew, 7)) == nil)
+	timesAre("os.Chtimes read back", tOld, tNew)
+	fi, err := os.Stat(f)
+	must("ModTime after os.Chtimes", err == nil && fi.ModTime().Unix() == tNew)
+
+	// A zero time.Time leaves that time.
+	must("os.Chtimes, zero atime", os.Chtimes(f, time.Time{}, time.Unix(tOld, 0)) == nil)
+	timesAre("a zero atime is left", tOld, tOld)
+	must("os.Chtimes, zero mtime", os.Chtimes(f, time.Unix(tNew, 0), time.Time{}) == nil)
+	timesAre("a zero mtime is left", tNew, tOld)
+
+	err = os.Chtimes(root+"/nosuch", time.Unix(tOld, 0), time.Unix(tOld, 0))
+	must("os.Chtimes of a missing file is ErrNotExist", errors.Is(err, os.ErrNotExist))
+
+	// Linux's UTIME_NOW in both: the file server's clock.
+	const utimeNow = (1 << 30) - 1
+	t0 := time.Now().Unix()
+	must("syscall.UtimesNano(now, now)",
+		syscall.UtimesNano(f, []syscall.Timespec{{Nsec: utimeNow}, {Nsec: utimeNow}}) == nil)
+	var st syscall.Stat_t
+	must("stat after now", syscall.Stat(f, &st) == nil)
+	t1 := time.Now().Unix()
+	must(fmt.Sprintf("now is the clock (mtime %d, clock %d..%d)", st.Mtime, t0, t1),
+		int64(st.Mtime) >= t0-2 && int64(st.Mtime) <= t1+2 && int64(st.Atime) >= t0-2 && int64(st.Atime) <= t1+2)
+
+	// The descriptor form, on a read-only file.
+	g, err := os.Open(f)
+	must("os.Open(times.txt)", err == nil)
+	err = syscall.Futimes(int(g.Fd()), []syscall.Timeval{{Sec: tNew}, {Sec: tNew}})
+	g.Close()
+	must("syscall.Futimes on a read-only descriptor", err == nil)
+	timesAre("Futimes read back", tNew, tNew)
+
+	// A directory takes times through its path.
+	must("os.Chtimes(dir)", os.Chtimes(root, time.Unix(tOld, 0), time.Unix(tNew, 0)) == nil)
+	var dst syscall.Stat_t
+	must("the directory's times", syscall.Stat(root, &dst) == nil && dst.Atime == tOld && dst.Mtime == tNew)
+
+	must("os.Remove(times.txt)", os.Remove(f) == nil)
 }
