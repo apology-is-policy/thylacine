@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <pthread.h>
 #include <sched.h>
 #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
@@ -197,8 +198,38 @@ static void mapped_devices(void) {
           drains == 1 && last_reset < drained_at, "last owner stops each mapped device once, before the drain");
     CHECK(frees == 1 && destroys == 1, "device teardown frees once");
 }
-int main(void) {
+static void split_interval(void) {
+    // Between the last owner's release and its destroy (exec resets the handle
+    // table there) the space is ownerless but still held by that owner's
+    // lifetime reference, and nothing of it has been torn down.
+    reset_fixture();
+    struct KObj_MMIO mmio = {0x0a000000u, 0x200};
+    struct Burrow virtio = {BURROW_TYPE_MMIO, &mmio, NULL};
+    struct Vma v = {NULL, &virtio};
+    struct AddrSpace *a = addrspace_alloc(32); a->vmas = &v;
+    addrspace_pin(a);
+    CHECK(addrspace_release(a), "the last owner's release reports last");
+    CHECK(addrspace_owner_count(a) == 0 && addrspace_ref_count(a) == 2,
+          "between release and destroy the last owner's lifetime is held");
+    CHECK(a->vmas == &v && drains == 0 && resets == 0 && frees == 0 && destroys == 0,
+          "release tears nothing down before destroy");
+    addrspace_unpin(a);
+    CHECK(addrspace_ref_count(a) == 1 && frees == 0 && destroys == 0 && a->vmas == &v,
+          "the retained owner reference outlives a pin dropped between release and destroy");
+    addrspace_destroy(a);
+    CHECK(resets == 1 && drains == 1 && last_reset < drained_at, "destroy stops the mapped device before the drain");
+    CHECK(frees == 1 && destroys == 1, "destroy frees exactly once");
+}
+int main(int argc, char **argv) {
+    // "split" runs the release/destroy interval alone, so a control can reach
+    // it past the earlier cases that would otherwise stop the same mutant.
+    if (argc > 1 && strcmp(argv[1], "split") == 0) {
+        split_interval();
+        puts("PASS actual AddrSpace release/destroy interval");
+        return 0;
+    }
     serial_cases(); during_drain(); simultaneous_drops(); private_guards(); private_vs_share(); mapped_devices();
-    puts("PASS actual AddrSpace lifecycle: serial, paused drain, concurrent final drops, private/shared exclusion, mapped devices");
+    split_interval();
+    puts("PASS actual AddrSpace lifecycle: serial, paused drain, concurrent final drops, private/shared exclusion, mapped devices, release/destroy interval");
     return 0;
 }

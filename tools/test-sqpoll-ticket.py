@@ -25,12 +25,11 @@ def main():
    s=fixture
    if old:assert s.count(old)==1,(name,s.count(old));s=s.replace(old,new)
    f=Path(tmp)/(name+'.c');f.write_text(s);exe=f.with_suffix('')
-   cmd=[cc,'-std=c11','-Wall','-Wextra','-Werror','-O1','-pthread','-fsanitize=address,undefined','-fno-sanitize-recover=all','-g',str(f),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
-   with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+   cmd=[cc,'-std=c11','-Wall','-Wextra','-Werror','-O1','-pthread',*sanitizer_cc.SANITIZE,str(f),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
+   sanitizer_cc.build(cmd,a.logs/(name+'-build.log'))
    r=subprocess.run([str(exe)],text=True,capture_output=True,timeout=30);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
    # Overflow mutant is stopped by UBSan before the boolean postcondition.
    message='signed integer overflow' if name=='overflow' else expected
-   if expected:assert r.returncode!=0 and message in r.stderr,(name,r.returncode,r.stdout,r.stderr)
-   else:assert r.returncode==0,(r.stdout,r.stderr)
+   sanitizer_cc.check(name,r,message if expected else None,any_failure=True,by_sanitizer=name=='overflow')
    print('PASS '+name+(': '+message if expected else ''),flush=True)
 if __name__=='__main__':main()

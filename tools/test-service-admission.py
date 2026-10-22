@@ -41,10 +41,9 @@ def main():
    if old:assert s.count(old)==1,(name,s.count(old));s=s.replace(old,new)
    f=Path(tmp)/(name+'.c');f.write_text(s);exe=f.with_suffix('')
    cmd=[cc,'-std=c11','-Wall','-Wextra','-Werror','-O1','-pthread',str(f),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
-   if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-   with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+   if a.sanitize:cmd+=sanitizer_cc.SANITIZE
+   sanitizer_cc.build(cmd,a.logs/(name+'-build.log'))
    r=subprocess.run([str(exe)],text=True,capture_output=True,timeout=15);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
-   if expected:assert r.returncode==1 and expected in r.stderr,(name,r.returncode,r.stdout,r.stderr)
-   else:assert r.returncode==0,(r.stdout,r.stderr)
+   sanitizer_cc.check(name,r,expected)
    print('PASS '+name+(': '+expected if expected else ': actual-source admission'),flush=True)
 if __name__=='__main__':main()

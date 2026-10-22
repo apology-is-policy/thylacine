@@ -439,6 +439,26 @@ start is reported as tooling, never as a case's result. The compiler's source,
 resolved path, version, sysroot and the probe's outcome go to the run's
 `compiler.txt`.
 
+The module also judges each case. UBSan recovers by default, so a run can print
+a sanitizer report and then the wanted assertion and exit 1, which a test of
+"exit status and wanted text" alone would count as the control's kill; and a
+clean run can exit 0 carrying a report. `check()` refuses any report line in
+either stream (`runtime error:`, `==N==ERROR:`/`WARNING:` from a sanitizer, a
+sanitizer `SUMMARY:`) before it reads the exit status, and the fixtures build
+with `-fno-sanitize-recover=all`, so a report also stops the run where it
+happened. The one case whose wanted kill IS the report (sqpoll-ticket's
+`overflow`) says so, and then the first report must name the wanted error.
+Run directly with `--logs DIR`, the module tests `check()` against real reports:
+a recoverable UBSan report before the wanted assertion and a report on a clean
+exit are refused, an ASan use-after-free after the wanted assertion is refused,
+and the assertion alone and a clean exit are accepted -- each refused control
+must also show the report, so the pattern is seen to match the runtime's own
+text. `build()` opens each build log with the compiler's argv, the environment
+that shapes it (`CC`, `CFLAGS`, `LLVM_PREFIX`, the sanitizer options) and the
+sha256 of every C input, the generated fixture source included. Four drivers
+(the loom-service nodes, pool-table, slots and fids fixtures) already demand
+an exact stderr, which a report breaks; the substring drivers call `check()`.
+
 A fixture compiles the actual body of what it exercises and of every callee
 those bodies reach; only environment primitives -- allocator, panic, hardware,
 scheduler -- are host doubles, named as such. `tools/host-tests/host-env/

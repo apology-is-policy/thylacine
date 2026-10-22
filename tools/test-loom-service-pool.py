@@ -29,11 +29,10 @@ def main():
     assert s.count(old)==1,(name,s.count(old));s=s.replace(old,new)
    path=Path(tmp)/(name+'.c');path.write_text(s);exe=path.with_suffix('')
    cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-I',str(ROOT/'kernel/include'),str(path),str(ROOT/'tools/host-tests/loom-service-pool.c'),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
-   if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-   with (a.logs/(name+'-build.log')).open('wb') as f:subprocess.run(cmd,stdout=f,stderr=subprocess.STDOUT,check=True)
+   if a.sanitize:cmd+=sanitizer_cc.SANITIZE
+   sanitizer_cc.build(cmd,a.logs/(name+'-build.log'))
    r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
-   if want:assert r.returncode==1 and 'FAIL '+want in r.stderr,(name,r.returncode,r.stdout,r.stderr)
-   else:assert r.returncode==0,(r.returncode,r.stdout,r.stderr)
+   sanitizer_cc.check(name,r,'FAIL '+want if want else None)
    print('PASS',name,want or r.stdout.strip(),flush=True);results.append(name)
  (a.logs/'result.json').write_text(json.dumps(dict(cases=results,sanitized=a.sanitize,source_sha256=hashlib.sha256(source.encode()).hexdigest()),indent=2)+'\n')
 if __name__=='__main__':main()

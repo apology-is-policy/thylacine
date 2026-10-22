@@ -625,8 +625,16 @@ that removes destroy's only drain still compiles and meets its assertion. Its mu
 split: a release that drains while another owner remains, a destroy without its
 drain or with its lifetime drop first, a last-owner release that drops the
 lifetime destroy still needs, a release that calls itself last one owner early.
-Two more are the devices': no quiesce, and quiesce after the drain. Each is
-killed by its named assertion, ordinary and under ASan/UBSan. Native
+Two more are the devices': no quiesce, and quiesce after the drain. A direct
+case drives `addrspace_release` and `addrspace_destroy` apart and observes the
+interval between them: the space ownerless and still held by the last owner's
+lifetime reference, its mappings and devices untouched, a pin dropped inside
+the interval freeing nothing, then destroy stopping the device before the drain
+and freeing once. Its controls: a release that tears down early (the device
+quiesce moved into release), which only this case can see; and, run on this
+case alone, a last release that drops its lifetime and a lifetime drop that
+frees under a live reference (the kernel's own drain-before-free extinction).
+Each mutant is killed by its named assertion, ordinary and under ASan/UBSan. Native
 process/device/refund tests are recorded in ASYNC-SERVICE-SELF-REVIEW.md. Source
 extraction excludes clone/MMU code; existing COW/capacity models do not model
 this descriptor-pin distinction.

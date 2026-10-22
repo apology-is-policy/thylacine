@@ -48,10 +48,9 @@ def main():
     altered=altered.replace(old,new)
    src=Path(tmp)/(label+'.c');src.write_text(template.replace('/* ACTUAL_CLIENT */',altered));exe=src.with_suffix('')
    cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel/test'),'-I',str(ROOT/'tools/host-tests/host-env'),str(src),str(ROOT/'kernel/9p_transport.c'),str(ROOT/'kernel/9p_session.c'),str(ROOT/'kernel/9p_wire.c'),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
-   if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-   with (a.logs/(label+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+   if a.sanitize:cmd+=sanitizer_cc.SANITIZE
+   sanitizer_cc.build(cmd,a.logs/(label+'-build.log'))
    r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(label+'.log')).write_text(r.stdout+r.stderr)
-   if want:assert r.returncode==1 and want in r.stderr,(label,r.returncode,r.stdout,r.stderr)
-   else:assert r.returncode==0,(r.returncode,r.stdout,r.stderr)
+   sanitizer_cc.check(label,r,want)
    print('PASS '+label+(': '+want if want else ': actual private client fixture'),flush=True)
 if __name__=='__main__':main()

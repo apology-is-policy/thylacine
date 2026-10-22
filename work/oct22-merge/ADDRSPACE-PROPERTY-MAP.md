@@ -36,10 +36,38 @@ file copies it into the tree so it can be reviewed without that memory.
 ## Contract changes the split makes (named, each with a counterexample)
 
 - C1. The last owner's release keeps the lifetime reference for destroy: the
-  space is ownerless but held between the two. A new serial case drives
-  release/destroy directly. Counterexample `release-drops-lifetime` (the last
-  release also puts its lifetime), killed by
-  "last owner drains before last pin".
+  space is ownerless but held between the two. Counterexample
+  `release-drops-lifetime` (the last release also puts its lifetime), killed
+  in the full run by "last owner drains before last pin", which sees the drop
+  only through `addrspace_unref`.
+  CORRECTION (Astra's review, yip 0243 turn 4): this line first said "a new
+  serial case drives release/destroy directly". No such case existed at
+  9d00b5ee3 -- the line described a planned case, not the fixture. The case
+  now exists (`split_interval`, run last in the full run and alone with the
+  argument `split`). It drives release and destroy apart, with a pin held and
+  a virtio device mapped. It asserts:
+  - after release: "the last owner's release reports last";
+  - "between release and destroy the last owner's lifetime is held" (owners
+    0, ref 2);
+  - "release tears nothing down before destroy" (mappings, drains, resets,
+    frees and destroys untouched);
+  - after the pin drops: "the retained owner reference outlives a pin dropped
+    between release and destroy";
+  - after destroy: "destroy stops the mapped device before the drain" and
+    "destroy frees exactly once".
+
+  Its controls:
+  - `release-drops-lifetime@split` (C1's counterexample, on that case alone),
+    killed by "between release and destroy the last owner's lifetime is
+    held";
+  - `teardown-in-release` (the device quiesce moved from destroy into the
+    last release, which every earlier case cannot tell apart), killed by
+    "release tears nothing down before destroy";
+  - `early-destroy@split` (a lifetime drop that frees under a live
+    reference), killed by the kernel's own "extinction: AddrSpace final
+    lifetime drop before mapping drain".
+
+  `clean@split` is the focused positive control.
 - C2. destroy refuses a space that is still owned. Counterexample
   `release-early-last` (release reports "last" one owner early, `pre <= 2`),
   killed by "extinction: addrspace_destroy of an AddrSpace still owned".

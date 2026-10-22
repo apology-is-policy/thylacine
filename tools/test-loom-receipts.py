@@ -50,12 +50,11 @@ def main():
    s=actual
    if old:assert s.count(old)==1,name;s=s.replace(old,new)
    f=Path(tmp)/(name+'.c');f.write_text(template.replace('/* ACTUAL_LOOM */',s));exe=f.with_suffix('')
-   cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer','-g','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel/test'),str(f)]+[str(ROOT/x) for x in LEDGERS]+['-o',str(exe)]+shlex.split(os.environ.get('CFLAGS',''))
+   cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror',*sanitizer_cc.SANITIZE,'-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel/test'),str(f)]+[str(ROOT/x) for x in LEDGERS]+['-o',str(exe)]+shlex.split(os.environ.get('CFLAGS',''))
    if '-isysroot' not in cmd:cmd+=cc_extra
    (a.logs/(name+'-command.json')).write_text(json.dumps(cmd)+'\n')
-   with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+   sanitizer_cc.build(cmd,a.logs/(name+'-build.log'))
    r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
-   if want:assert r.returncode!=0 and want in r.stderr,(name,r.returncode,r.stdout,r.stderr)
-   else:assert r.returncode==0,(r.stdout,r.stderr)
+   sanitizer_cc.check(name,r,want,any_failure=True)
    print('PASS '+name+(': '+want if want else ''),flush=True)
 if __name__=='__main__':main()

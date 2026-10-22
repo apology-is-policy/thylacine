@@ -29,6 +29,11 @@ MUTANTS=[
  ('release-early-last','if (pre == 1) return true;','if (pre <= 2) return true;','extinction: addrspace_destroy of an AddrSpace still owned'),
  ('no-quiesce',QUIESCE,'int reset = 0;','last owner stops each mapped device once, before the drain'),
  ('quiesce-after-drain',[(QUIESCE,'int reset = 0;'),(DESTROY_TAIL,'    vma_drain_in(as);\n    reset += addrspace_quiesce_mapped_devices(as);\n    addrspace_lifetime_put(as);\n}')],None,'last owner stops each mapped device once, before the drain'),
+ # The release/destroy interval. A fifth element runs the fixture on that case
+ # alone, past earlier cases that stop the same mutant first.
+ ('release-drops-lifetime@split','    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_lifetime_put(as); return true; }\n',"between release and destroy the last owner's lifetime is held",'split'),
+ ('teardown-in-release',[('    if (pre == 1) return true;\n','    if (pre == 1) { addrspace_quiesce_mapped_devices(as); return true; }\n'),(QUIESCE,'int reset = 0;')],None,'release tears nothing down before destroy'),
+ ('early-destroy@split','if (pre > 1) return;','if (false) return;','extinction: AddrSpace final lifetime drop before mapping drain','split'),
 ]
 def main():
  p=argparse.ArgumentParser();p.add_argument('--mutants',action='store_true');p.add_argument('--sanitize',action='store_true');p.add_argument('--logs',type=Path,required=True);a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
@@ -47,16 +52,15 @@ def main():
  template=template.replace('/* ACTUAL_ADDRSPACE_DECL */',decl).replace('/* ACTUAL_QUIESCE */',helper.function((ROOT/'kernel/proc.c').read_text(),'addrspace_quiesce_mapped_devices'))
  cc,cc_extra=sanitizer_cc.select(a.logs,a.sanitize)
  with tempfile.TemporaryDirectory(prefix='addrspace-lifetime-') as tmp:
-  for name,old,new,want in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
+  for name,old,new,want,*case in [('clean',None,None,None),('clean@split',None,None,None,'split')]+(MUTANTS if a.mutants else []):
    s=source
    for o,n in (old if isinstance(old,list) else [(old,new)] if old else []):
     assert s.count(o)==1,(name,o,s.count(o));s=s.replace(o,n)
    c=Path(tmp)/(name+'.c');c.write_text(template.replace('/* ACTUAL_ADDRSPACE_LIFECYCLE */',s));exe=c.with_suffix('')
    cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-pthread',str(c),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
-   if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-   with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
-   r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=15);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
-   if want:assert r.returncode==1 and want in r.stderr,(name,r.returncode,r.stdout,r.stderr)
-   else:assert r.returncode==0,(r.stdout,r.stderr)
+   if a.sanitize:cmd+=sanitizer_cc.SANITIZE
+   sanitizer_cc.build(cmd,a.logs/(name+'-build.log'))
+   r=subprocess.run([str(exe)]+case,capture_output=True,text=True,timeout=15);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
+   sanitizer_cc.check(name,r,want)
    print('PASS '+name+(': '+want if want else ': actual-source lifetime'),flush=True)
 if __name__=='__main__':main()

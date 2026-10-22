@@ -37,12 +37,11 @@ def main():
             exe=d/name
             cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'tools/host-tests/host-env'),'-iquote',str(ROOT/'kernel'),str(ROOT/'kernel/9p_transport.c') if name.startswith('version:') else str(path),str(ROOT/'kernel/9p_wire.c'),str(path) if name.startswith('version:') else str(ROOT/'kernel/9p_session.c'),str(ROOT/'tools/host-tests/9p-progress.c'),'-o',str(exe)]
             cmd += cc_extra+shlex.split(os.environ.get('CFLAGS',''))
-            if a.sanitize:cmd += ['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
-            with (logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+            if a.sanitize:cmd += sanitizer_cc.SANITIZE
+            sanitizer_cc.build(cmd,logs/(name+'-build.log'))
             r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=10)
             (logs/(name+'.log')).write_text(r.stdout+r.stderr)
-            if want:assert r.returncode==1 and want in r.stderr,(name,r.returncode,r.stdout,r.stderr)
-            else:assert r.returncode==0,(r.stdout,r.stderr)
+            sanitizer_cc.check(name,r,want)
             print('PASS '+name+(': '+want if want else ': actual transport byte-boundary fixture'),flush=True)
         with (logs/'arm64.log').open('wb') as out:
             subprocess.run([cc,'--target=aarch64-none-elf','-ffreestanding','-std=c11','-Wall','-Wextra','-Werror','-fsyntax-only','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'arch/arm64'),str(ROOT/'kernel/9p_transport.c'),str(ROOT/'kernel/9p_srvconn_transport.c')],stdout=out,stderr=subprocess.STDOUT,check=True)
