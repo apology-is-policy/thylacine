@@ -2402,28 +2402,34 @@ static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
-// Native chmod/chown surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum
-// Tsetattr. The SYS_WSTAT handler has already validated the mask (>=1 T_WSTAT_*
-// bit, no reserved bit) + value bounds (mode in 0777, uid/gid != INVALID); this
-// maps the T_WSTAT_* mask onto P9_SETATTR_* (identical bit values, pinned below)
-// and forwards. Like dev9p_rename / dev9p_unlink it borrows the caller's fid and
-// allocates no transient fid, so the create-path fid-leak class cannot arise.
+// Native chmod/chown/truncate/utimens surface (A-2a + G12; IDENTITY-DESIGN.md
+// §9.5) -> Stratum Tsetattr. The SYS_WSTAT handler has already validated the
+// mask (>=1 T_WSTAT_* bit, no reserved bit, no _SET bit without its time) +
+// value bounds (mode in 0777, uid/gid != INVALID, times in range); this maps
+// the T_WSTAT_* mask onto P9_SETATTR_* (identical bit values, pinned below) and
+// forwards. A time without its _SET bit goes out with zeroed fields: the
+// server stamps its own clock. Like dev9p_rename / dev9p_unlink it borrows the
+// caller's fid and allocates no transient fid, so the create-path fid-leak
+// class cannot arise. Every refusal is a -errno (the .wstat_native contract).
 static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size) {
+                              u32 uid, u32 gid, u64 size,
+                              const struct t_timespec *times) {
     struct dev9p_priv *p = priv_of(c);
-    if (!p) return -1;
+    if (!p) return -T_E_IO;
+    if ((valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) && !times)
+        return -T_E_INVAL;
     // IDENTITY-DESIGN 3.2: a caped session imposes its ownership, so chown and
     // chgrp are refused before anything else happens (a write-behind flush
-    // included). chmod and truncate pass: the mode is the server's own.
-    if (p->client->cape && (valid & (T_WSTAT_UID | T_WSTAT_GID))) return -1;
+    // included). chmod, truncate and the times pass: they are the server's own.
+    if (p->client->cape && (valid & (T_WSTAT_UID | T_WSTAT_GID))) return -T_E_ACCES;
     // FID-LIFECYCLE cached-open seam (section 3.3, documented + tested):
     // Tsetattr is fid-addressed and a fidless Spoor cannot late-bind (no
     // fid-from-qid op; a retained-path re-walk is rename-unsound), so
-    // fchmod/fchown ON a cached-open fd fails LOUD. No v1.0 consumer does
-    // this (cmd/go's cache mtime updates are path-based Chtimes); path-based
-    // chmod/chown are untouched. The v1.x fix, if a consumer appears, is the
-    // retain-the-walk-fid-unopened variant.
-    if (p->cached_open) return -1;
+    // fchmod/fchown/futimens ON a cached-open fd fails LOUD (EOPNOTSUPP).
+    // cmd/go's cache mtime updates are path-based Chtimes; path-based
+    // chmod/chown/utimensat are untouched. The fix, if a consumer appears, is
+    // the retain-the-walk-fid-unopened variant (OPEN-BUGS 2026-10-22 06:54Z).
+    if (p->cached_open) return -T_E_OPNOTSUPP;
     // F1 write-behind: a metadata write is a non-append op -- flush the
     // staged run FIRST (the staged bytes are older; a truncate must land
     // after them), then STOP staging on this priv (a size change moves the
@@ -2444,7 +2450,7 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
         p->wb_known = false;
         wb_release_dead_locked(p);
         spin_unlock(&p->wb_lock);
-        if (fe != 0) return fe;
+        if (fe != 0) return dev9p_wire_errno(fe);
     }
     struct p9_setattr sa;
     for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
@@ -2453,14 +2459,23 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     sa.uid   = uid;
     sa.gid   = gid;
     sa.size  = size;         // applied only when T_WSTAT_SIZE is in valid
+    // The handler bounded each _SET time to sec >= 0, nsec in [0, 1e9).
+    if (valid & T_WSTAT_ATIME_SET) {
+        sa.atime_sec  = (u64)times[0].tv_sec;
+        sa.atime_nsec = (u64)times[0].tv_nsec;
+    }
+    if (valid & T_WSTAT_MTIME_SET) {
+        sa.mtime_sec  = (u64)times[1].tv_sec;
+        sa.mtime_nsec = (u64)times[1].tv_nsec;
+    }
     int rc = p9_client_setattr(p->client, p->fid, &sa);
-    if (rc != 0) { p->fid_suspect = true; return -1; }
+    if (rc != 0) { p->fid_suspect = true; return dev9p_wire_errno(rc); }
     // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown changed
-    // mode/uid/gid; a T_WSTAT_SIZE truncate changed CONTENT + size. The
-    // attr drop covers both axes. CRITICAL -- the base X-check perm_checks
-    // the cached mode, so a stale mode after a tighten would be a bounded
-    // I-28 window; the invalidate keeps the window at zero for the guest's
-    // own chmod.
+    // mode/uid/gid; a time change the times; a T_WSTAT_SIZE truncate changed
+    // CONTENT + size. The attr drop covers every axis. CRITICAL -- the base
+    // X-check perm_checks the cached mode, so a stale mode after a tighten
+    // would be a bounded I-28 window; the invalidate keeps the window at zero
+    // for the guest's own chmod.
     larder_attr_invalidate(&p->client->larder, c->qid.path);
     // A size change makes every cached page stale (bytes at/past the new
     // end are gone; an extend zero-fills) -- whole-file drop, the same
@@ -2482,6 +2497,17 @@ _Static_assert(T_WSTAT_GID == P9_SETATTR_GID,
                "T_WSTAT_GID must equal the 9P Tsetattr GID bit");
 _Static_assert(T_WSTAT_SIZE == P9_SETATTR_SIZE,
                "T_WSTAT_SIZE must equal the 9P Tsetattr SIZE bit");
+_Static_assert(T_WSTAT_ATIME == P9_SETATTR_ATIME,
+               "T_WSTAT_ATIME must equal the 9P Tsetattr ATIME bit");
+_Static_assert(T_WSTAT_MTIME == P9_SETATTR_MTIME,
+               "T_WSTAT_MTIME must equal the 9P Tsetattr MTIME bit");
+_Static_assert(T_WSTAT_ATIME_SET == P9_SETATTR_ATIME_SET,
+               "T_WSTAT_ATIME_SET must equal the 9P Tsetattr ATIME_SET bit");
+_Static_assert(T_WSTAT_MTIME_SET == P9_SETATTR_MTIME_SET,
+               "T_WSTAT_MTIME_SET must equal the 9P Tsetattr MTIME_SET bit");
+// The wire's CTIME bit is the server's; SYS_WSTAT keeps it reserved.
+_Static_assert((T_WSTAT_VALID & P9_SETATTR_CTIME) == 0,
+               "SYS_WSTAT must not pass the 9P Tsetattr CTIME bit");
 
 static struct Spoor *dev9p_power(struct Spoor *c, int on) {
     (void)c; (void)on;

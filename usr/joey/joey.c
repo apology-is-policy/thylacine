@@ -7209,25 +7209,37 @@ int main(void) {
         // the real SYS_FSTAT + SYS_WSTAT handlers. /bin/system.key is on the
         // read-only system boot FS (devramfs): fstat now reports owner/group
         // (system-owned), and wstat must reject structurally-invalid requests
-        // AND a chmod on a Dev with no wstat_native. The handle carries
-        // RIGHT_WRITE (walk_open grants R|W|T), so the RIGHT_WRITE gate passes
-        // and the handler validation + dispatch is what's under test.
+        // with EINVAL, ahead of the Dev, AND a chmod or a time on a Dev with no
+        // wstat_native with EOPNOTSUPP (G12: an errno per refusal). Each leg
+        // asserts its own errno, so a leg refused at the wrong gate fails.
         if (sk_st.uid != T_PRINCIPAL_SYSTEM || sk_st.gid != T_GID_SYSTEM) {
             t_putstr("joey: probe /bin/system.key not system-owned (A-2a)\n");
             (void)t_close(sk_fd);
             return 1;
         }
-        if (t_wstat(sk_fd, 0, 0, 0, 0) != -1 ||              // empty mask
-            t_wstat(sk_fd, 0x8u, 0, 0, 0) != -1 ||           // reserved valid bit
-            t_wstat(sk_fd, T_WSTAT_MODE, 04000u, 0, 0) != -1) {  // setuid in mode
-            t_putstr("joey: probe SYS_WSTAT bad-arg not rejected (A-2a)\n");
-            (void)t_close(sk_fd);
-            return 1;
-        }
-        if (t_chmod(sk_fd, 0600u) != -1) {   // read-only Dev: no wstat_native slot
-            t_putstr("joey: probe chmod on read-only FS not rejected (A-2a)\n");
-            (void)t_close(sk_fd);
-            return 1;
+        {
+            // -22 = -T_E_INVAL, -95 = -T_E_OPNOTSUPP.
+            static const struct { unsigned long valid, mode; long want; } wl[] = {
+                { 0,                 0,      -22 },   // empty mask
+                { 0x40u,             0,      -22 },   // reserved bit 6 (9P CTIME)
+                { 0x200u,            0,      -22 },   // past T_WSTAT_VALID
+                { T_WSTAT_MTIME_SET, 0,      -22 },   // _SET without its time
+                { T_WSTAT_MODE,      04000u, -22 },   // setuid in mode
+                { T_WSTAT_MODE,      0600u,  -95 },   // no wstat_native slot
+                { T_WSTAT_MTIME,     0,      -95 },   // a time ("now") likewise
+            };
+            for (unsigned i = 0; i < sizeof(wl) / sizeof(wl[0]); i++) {
+                long wrc = t_wstat(sk_fd, wl[i].valid, wl[i].mode, 0, 0);
+                if (wrc != wl[i].want) {
+                    t_putstr("joey: probe SYS_WSTAT leg ");
+                    t_putstr(itoa_dec((long)i, buf, sizeof(buf)));
+                    t_putstr(" wrong rc=");
+                    t_putstr(itoa_dec(wrc, buf, sizeof(buf)));
+                    t_putstr(" (A-2a/G12)\n");
+                    (void)t_close(sk_fd);
+                    return 1;
+                }
+            }
         }
         // POUNCE: SYS_STAT end-to-end through the real SVC dispatch + uaccess
         // path copy-in + the stalk walk-query (devramfs walk_attrs) + t_stat

@@ -178,10 +178,16 @@ _Static_assert(sizeof(struct t_timespec) == 16, "t_timespec is the 16-byte ABI r
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Mirror the kernel
 // T_WSTAT_* / wire P9_SETATTR_* bits. chmod sets T_WSTAT_MODE; chown sets
-// T_WSTAT_UID | T_WSTAT_GID.
+// T_WSTAT_UID | T_WSTAT_GID; a time alone is "now" (G12), with its _SET bit
+// the value at x6.
 #define T_WSTAT_MODE       0x1u
 #define T_WSTAT_UID        0x2u
 #define T_WSTAT_GID        0x4u
+#define T_WSTAT_SIZE       0x8u
+#define T_WSTAT_ATIME      0x10u
+#define T_WSTAT_MTIME      0x20u
+#define T_WSTAT_ATIME_SET  0x80u
+#define T_WSTAT_MTIME_SET  0x100u
 #define T_WSTAT_MODE_MASK  0777u
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -2055,10 +2061,12 @@ static inline long t_unlink(long parent_fd, const char *name, size_t name_len,
     return x0;
 }
 
-// t_wstat — apply chmod/chown to `fd` (KOBJ_SPOOR, RIGHT_WRITE) via Tsetattr.
-// `valid` selects which of (mode, uid, gid) to set (T_WSTAT_* bits; >=1 bit).
-// mode is the 9 rwx bits only (setuid/setgid/sticky rejected). Returns 0 / -1.
-// A-2a (IDENTITY-DESIGN.md §9.5). The per-file permission policy is A-2d.
+// t_wstat — apply chmod/chown/"now" times to `fd` (KOBJ_SPOOR, any rights) via
+// Tsetattr. `valid` selects which of (mode, uid, gid) to set, and may add
+// T_WSTAT_ATIME / T_WSTAT_MTIME (>=1 bit); never T_WSTAT_SIZE or a _SET bit,
+// whose x5 / x6 this wrapper does not set. mode is the 9 rwx bits only
+// (setuid/setgid/sticky rejected). Returns 0 / -errno (EINVAL, EBADF, EACCES,
+// EOPNOTSUPP, the server's). A-2a (IDENTITY-DESIGN.md §9.5); policy A-2d.
 __attribute__((always_inline))
 static inline long t_wstat(long fd, unsigned long valid, unsigned long mode,
                            unsigned long uid, unsigned long gid) {

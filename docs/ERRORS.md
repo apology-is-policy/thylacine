@@ -97,7 +97,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. THREE emitters share the code. Two are the resolver's, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead. (3) SYS_MOUNT refuses a mount that would close a cycle in the mount graph, I-3 (operator vote 2026-10-19; "Mount and unmount" below) |
 | `T_E_NOTSOCK`   | 88    | `ENOTSOCK`   | Not a socket: a socket call names an fd with no socktab entry (a plain file, or a socket whose entry was dropped) |
 | `T_E_PROTONOSUPPORT` | 93 | `EPROTONOSUPPORT` | Protocol not supported: a `SOCK_*` type or `IPPROTO_*` the `/net` tree has no directory for |
-| `T_E_OPNOTSUPP` | 95    | `EOPNOTSUPP` | Operation not supported. Reserved, append-only: its first emitter (`SYS_TTY_SIGNAL`'s stop class) became live at PTY-1f; kept for future not-yet-supported dispositions |
+| `T_E_OPNOTSUPP` | 95    | `EOPNOTSUPP` | Operation not supported. Reserved, append-only: its first emitter (`SYS_TTY_SIGNAL`'s stop class) became live at PTY-1f; `SYS_WSTAT` answers it for a Dev with no metadata slot and for dev9p's fidless cached open (G12, 2026-10-22); kept for future not-yet-supported dispositions |
 | `T_E_AFNOSUPPORT` | 97  | `EAFNOSUPPORT` | Address family not supported: everything that is not `AF_INET` (`AF_INET6` included) |
 | `T_E_ADDRINUSE` | 98    | `EADDRINUSE` | Address in use: netd refused an `announce` for the port; reported by `listen()`, where the announce happens, not `bind()` |
 | `T_E_CONNABORTED` | 103 | `ECONNABORTED` | Connection aborted before it was handed back: an `accept()` whose listen fid produced a connection the data open then refused |
@@ -441,6 +441,8 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WALK_CREATE` | not a directory | `-T_E_NOTDIR` (20) |
 | `SYS_UNLINK` (rmdir) | directory not empty | `-T_E_NOTEMPTY` (39) |
 | `SYS_FSTAT` / `SYS_*` | bad / wrong-kind handle | `-T_E_BADF` (9) |
+| `SYS_WSTAT` | not the owner (chmod, chown, an explicit time), or no write permission ("now") | `-T_E_ACCES` (13); the POSIX front ends answer `EPERM` for the owner-only kinds |
+| `SYS_WSTAT` | the Dev has no metadata slot, or the fd is dev9p's fidless cached open | `-T_E_OPNOTSUPP` (95) |
 | `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
 | any handler | structurally bad argument | `-T_E_INVAL` (22) |
 | any handler | uaccess fault on a user VA | `-T_E_FAULT` (14) |
@@ -473,10 +475,22 @@ trigger surfaces; self + Fable audit before the arc closes):
   `SYS_FSTAT`'s `EBADF` means only that the handle names nothing. (A 9P
   server's `EBADF` already arrives as `-T_E_IO`; the client folds it, per
   the binding rule above.)
-  `SYS_READDIR`, `SYS_WSTAT` and `SYS_CHDIR` still answer a bare `-1` at most
-  refusals (OPEN-BUGS 2026-10-20 08:24Z): `SYS_WSTAT`'s denial is POSIX's
-  `EPERM`, which the `-1` alias forbids, and `SYS_CHDIR`'s over-long path
-  wants `ENAMETOOLONG`, which this registry does not name.
+  **`SYS_WSTAT` LANDED 2026-10-22** (G12, operator vote 18 of that day): it
+  answers `-T_E_INVAL` for a mask or a value out of its domain (a `_SET` time
+  bit without its time, a time before the epoch or an nsec outside
+  [0, 999999999] among them), `-T_E_BADF` for a handle that names no Spoor
+  and for a truncate through a handle not opened for writing or through an
+  O_PATH handle, `-T_E_FAULT` for an unreadable times pointer,
+  `-T_E_ACCES` for a permission denial, `-T_E_OPNOTSUPP` for a Dev with no
+  metadata slot and for dev9p's fidless cached open, and a server's or a
+  stat's errno by value (`EBADF` reading `-T_E_IO`, as for `SYS_FSTAT`).
+  A denial is `EACCES`, never `EPERM`: `-EPERM` is the `-1` alias. The POSIX
+  front ends answer `EPERM` where ownership is the only possible refusal
+  (chmod, chown, an explicit time), as POSIX asks, and leave `EACCES` where
+  write permission would also have done ("now"). `SYS_READDIR` and
+  `SYS_CHDIR` still answer a bare `-1` at most refusals (OPEN-BUGS
+  2026-10-20 08:24Z): `SYS_CHDIR`'s over-long path wants `ENAMETOOLONG`,
+  which this registry does not name.
 - **ER-3** — the rest of the surface: the local-validation `-1` sites
   (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
   **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,

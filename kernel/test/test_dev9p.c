@@ -66,6 +66,10 @@ void test_dev9p_poll_reads_every_client(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
+void test_dev9p_wstat_times_wire(void);
+void test_dev9p_wstat_times_einval(void);
+void test_dev9p_wstat_times_permission(void);
+void test_dev9p_wstat_errnos(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -115,6 +119,9 @@ static u8 g_loopback_resp[8192];
 // test can assert the T_WSTAT_* -> P9_SETATTR_* mask + values reached it.
 static u32 g_setattr_valid, g_setattr_mode, g_setattr_uid, g_setattr_gid;
 static u64 g_setattr_size;
+static u64 g_setattr_atime_sec, g_setattr_atime_nsec;
+static u64 g_setattr_mtime_sec, g_setattr_mtime_nsec;
+static u32 g_setattr_fail_ecode;     // != 0: every Tsetattr answers Rlerror(ecode)
 static u32 le32_at(const u8 *p) {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
@@ -664,6 +671,23 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
             g_setattr_gid   = le32_at(req + 23);
             g_setattr_size  = le64_at(req + 27);
         }
+        if (req_len >= P9_HDR_LEN + 4 + 4 + 4 + 4 + 4 + 8 + 4 * 8) {
+            g_setattr_atime_sec  = le64_at(req + 35);
+            g_setattr_atime_nsec = le64_at(req + 43);
+            g_setattr_mtime_sec  = le64_at(req + 51);
+            g_setattr_mtime_nsec = le64_at(req + 59);
+        }
+        if (g_setattr_fail_ecode) {
+            u32 ec = g_setattr_fail_ecode;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);         resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Rsetattr = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -678,6 +702,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
 // responder, returning a Spoor at the bound root.
 static struct Spoor *make_open_client_and_root(void) {
     g_tlopen_fail_ecode = 0;
+    g_setattr_fail_ecode = 0;
     if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                             dev9p_responder, NULL) != 0) return NULL;
     if (p9_client_init(&g_client, /*root_fid=*/0, 8192,
@@ -1592,7 +1617,7 @@ void test_dev9p_wstat_native_drives_setattr(void) {
     g_setattr_valid = g_setattr_mode = g_setattr_uid = g_setattr_gid = 0xdeadbeefu;
     TEST_EXPECT_EQ((u64)dev9p.wstat_native(root,
                        T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID,
-                       0640u, 1000u, 2000u, 0), (u64)0,
+                       0640u, 1000u, 2000u, 0, NULL), (u64)0,
                     "wstat_native -> 0 (Rsetattr)");
     TEST_EXPECT_EQ((u64)g_setattr_valid,
                     (u64)(T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID),
@@ -2420,7 +2445,8 @@ extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
 extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
                               u64 len);
 extern s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size);
+                              u32 uid, u32 gid, u64 size,
+                              const struct t_timespec *times);
 
 // #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
 // never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
@@ -2500,7 +2526,7 @@ void test_dev9p_wstat_readonly_fd(void) {
     TEST_ASSERT(fd >= 0, "handle_alloc R-only");
 
     g_setattr_valid = g_setattr_mode = 0xdeadbeefu;
-    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL), 0L,
                    "owner chmod through a READ-only handle succeeds (#47)");
     TEST_EXPECT_EQ(g_setattr_mode, 0644u, "mode reached the wire");
 
@@ -2517,8 +2543,9 @@ void test_dev9p_wstat_readonly_fd(void) {
     q->caps         = 0;
     hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc2);
     TEST_ASSERT(fq >= 0, "handle_alloc q");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0600u, 0, 0, 0), -1L,
-                   "non-owner chmod denied by perm_wstat_check despite R|W");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES,
+                   "non-owner chmod denied by perm_wstat_check despite R|W (EACCES)");
 
     q->state = PROC_STATE_ZOMBIE;
     proc_free(q);
@@ -2555,7 +2582,7 @@ void test_dev9p_wstat_size(void) {
     // value proves the u64 plumbing end to end).
     g_setattr_valid = 0xdeadbeefu; g_setattr_size = 0;
     TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_SIZE, 0, 0, 0,
-                                      0x112233445566ull), 0L,
+                                      0x112233445566ull, NULL), 0L,
                    "truncate through an R|W handle succeeds");
     TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_SIZE,
                    "wire valid carries exactly the SIZE bit");
@@ -2564,8 +2591,8 @@ void test_dev9p_wstat_size(void) {
 
     // (b) the s64 domain bound.
     TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_SIZE, 0, 0, 0,
-                                      (1ull << 63)), -1L,
-                   "size past INT64_MAX rejected");
+                                      (1ull << 63), NULL), -(s64)T_E_INVAL,
+                   "size past INT64_MAX rejected (EINVAL)");
 
     // (c) an R-only fd cannot truncate (the rights gate) -- while the SAME
     // fd still chmods (#47 unchanged; regression-guards the per-axis split).
@@ -2575,9 +2602,10 @@ void test_dev9p_wstat_size(void) {
     walkqid_free(w2);
     hidx_t fr = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, nc2);
     TEST_ASSERT(fr >= 0, "handle_alloc R-only");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_SIZE, 0, 0, 0, 16), -1L,
-                   "truncate through a READ-only handle rejected");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_SIZE, 0, 0, 0, 16, NULL),
+                   -(s64)T_E_BADF,
+                   "truncate through a READ-only handle rejected (EBADF)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL), 0L,
                    "chmod through the same READ-only handle still works");
 
     // (d) a NON-owner with an R|W fd truncates (size skips the identity
@@ -2594,10 +2622,10 @@ void test_dev9p_wstat_size(void) {
     q->caps         = 0;
     hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc3);
     TEST_ASSERT(fq >= 0, "handle_alloc q");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE, 0, 0, 0, 8), 0L,
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE, 0, 0, 0, 8, NULL), 0L,
                    "non-owner truncate via a WRITE fd succeeds (open carried W)");
     TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE | T_WSTAT_MODE,
-                                      0600u, 0, 0, 8), -1L,
+                                      0600u, 0, 0, 8, NULL), -(s64)T_E_ACCES,
                    "combined SIZE|MODE still denied by the identity gate");
 
     // (e) the #81 O_PATH class: a CWALKONLY handle is born RIGHT_WRITE but
@@ -2612,13 +2640,230 @@ void test_dev9p_wstat_size(void) {
     nc4->flag |= CWALKONLY;   // model the T_OPATH born-R|W navigation handle
     hidx_t fo = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc4);
     TEST_ASSERT(fo >= 0, "handle_alloc O_PATH-like");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_SIZE, 0, 0, 0, 16), -1L,
-                   "truncate through an O_PATH (CWALKONLY) handle rejected (#81)");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_SIZE, 0, 0, 0, 16, NULL),
+                   -(s64)T_E_BADF,
+                   "truncate through an O_PATH (CWALKONLY) handle rejected (#81, EBADF)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL), 0L,
                    "owner chmod through the O_PATH handle still works");
 
     q->state = PROC_STATE_ZOMBIE;
     proc_free(q);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// G12 test fixture: a Proc holding one handle on the loopback's "file" (whose
+// Rgetattr reports uid 0x1234, gid g_ga_gid, mode g_ga_mode).
+static hidx_t wt_open(struct Spoor *root, struct Proc *p, u32 principal,
+                      rights_t rights, bool opath) {
+    const char *name = "file";
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    if (!w) return -1;
+    walkqid_free(w);
+    if (opath) nc->flag |= CWALKONLY;
+    p->principal_id = principal;
+    p->primary_gid  = 0x9999u;
+    p->caps         = 0;
+    return handle_alloc(p, KOBJ_SPOOR, rights, nc);
+}
+
+// G12: the time bits reach the Tsetattr wire as the 9P bits they equal. An
+// explicit time carries the caller's value; "now" carries the bit alone with
+// zeroed fields (the server stamps its clock); a time whose _SET bit is clear
+// travels as zero whatever the caller left in its slot.
+void test_dev9p_wstat_times_wire(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd = wt_open(root, p, 0x1234u, RIGHT_READ, false);
+    TEST_ASSERT(fd >= 0, "owner handle");
+
+    struct t_timespec tv[2] = { { 100, 5 }, { 200, 999999999 } };
+    const u32 both_set = T_WSTAT_ATIME | T_WSTAT_ATIME_SET |
+                         T_WSTAT_MTIME | T_WSTAT_MTIME_SET;
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, both_set, 0, 0, 0, 0, tv), 0L,
+                   "owner sets both times explicitly");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)both_set, "wire valid = the four bits");
+    TEST_EXPECT_EQ(g_setattr_atime_sec, 100ull, "wire atime sec");
+    TEST_EXPECT_EQ(g_setattr_atime_nsec, 5ull, "wire atime nsec");
+    TEST_EXPECT_EQ(g_setattr_mtime_sec, 200ull, "wire mtime sec");
+    TEST_EXPECT_EQ(g_setattr_mtime_nsec, 999999999ull, "wire mtime nsec (the top of the range)");
+
+    g_setattr_atime_sec = g_setattr_mtime_sec = 0xdeadull;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_ATIME | T_WSTAT_MTIME,
+                                      0, 0, 0, 0, NULL), 0L,
+                   "owner sets both times to now");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)(T_WSTAT_ATIME | T_WSTAT_MTIME),
+                   "wire valid = the time bits without _SET");
+    TEST_EXPECT_EQ(g_setattr_atime_sec, 0ull, "now: atime fields zeroed");
+    TEST_EXPECT_EQ(g_setattr_mtime_sec, 0ull, "now: mtime fields zeroed");
+
+    // Explicit mtime, now atime: the atime slot's 77 must not travel.
+    struct t_timespec mix[2] = { { 77, 77 }, { 300, 1 } };
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_ATIME | T_WSTAT_MTIME |
+                                      T_WSTAT_MTIME_SET, 0, 0, 0, 0, mix), 0L,
+                   "explicit mtime with now atime");
+    TEST_EXPECT_EQ(g_setattr_atime_sec, 0ull, "the unset atime slot stayed home");
+    TEST_EXPECT_EQ(g_setattr_atime_nsec, 0ull, "...nsec too");
+    TEST_EXPECT_EQ(g_setattr_mtime_sec, 300ull, "explicit mtime sec");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// G12: the structural refusals, each EINVAL and each before the wire, one
+// variable from the accepted control just above it.
+void test_dev9p_wstat_times_einval(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd = wt_open(root, p, 0x1234u, RIGHT_READ, false);
+    TEST_ASSERT(fd >= 0, "owner handle");
+    const u32 am = T_WSTAT_ATIME | T_WSTAT_ATIME_SET;
+    const u32 mm = T_WSTAT_MTIME | T_WSTAT_MTIME_SET;
+    struct t_timespec ok[2] = { { 0, 0 }, { 0, 999999999 } };
+    struct t_timespec bad[2];
+
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, am | mm, 0, 0, 0, 0, ok), 0L,
+                   "control: epoch atime, top-of-range mtime accepted");
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_ATIME_SET, 0, 0, 0, 0, ok),
+                   -(s64)T_E_INVAL, "ATIME_SET without ATIME");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_ATIME | T_WSTAT_MTIME_SET,
+                                      0, 0, 0, 0, ok),
+                   -(s64)T_E_INVAL, "MTIME_SET without MTIME (ATIME present)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, am, 0, 0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "a _SET bit with no times");
+    bad[0] = ok[0]; bad[1] = ok[1]; bad[1].tv_nsec = 1000000000;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, mm, 0, 0, 0, 0, bad),
+                   -(s64)T_E_INVAL, "mtime nsec 1e9");
+    bad[1].tv_nsec = -1;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, mm, 0, 0, 0, 0, bad),
+                   -(s64)T_E_INVAL, "mtime nsec -1");
+    bad[1] = ok[1]; bad[0].tv_sec = -1;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, am, 0, 0, 0, 0, bad),
+                   -(s64)T_E_INVAL, "atime before the epoch");
+    // The bad atime does not matter when atime is not explicit: only a _SET
+    // entry is read.
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no refusal reached the wire");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_ATIME | mm, 0, 0, 0, 0, bad), 0L,
+                   "control: a bad atime slot is ignored when atime is now");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, (1u << 6), 0, 0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "the 9P CTIME bit stays reserved");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, (1u << 9), 0, 0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "the first bit past T_WSTAT_VALID");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, 0, 0, 0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "an empty mask");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 04755u, 0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "setuid in the mode");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// G12: who may set times, through the syscall path on the perm-enforced dev9p
+// (the file is 0x1234's). A stranger may set "now" when the mode grants other
+// W, and never an explicit time; without W, not even now. The O_PATH handle
+// (chmod's route, so utimensat's) carries the times like any other. Refusals
+// answer EACCES and do not reach the wire.
+void test_dev9p_wstat_times_permission(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc");
+    hidx_t fq = wt_open(root, q, 0x9999u, RIGHT_READ, false);
+    TEST_ASSERT(fq >= 0, "stranger handle");
+    struct Proc *o = proc_alloc();
+    TEST_ASSERT(o != NULL, "proc_alloc o");
+    hidx_t fo = wt_open(root, o, 0x9999u, RIGHT_READ | RIGHT_WRITE, true);
+    TEST_ASSERT(fo >= 0, "stranger O_PATH handle");
+    struct t_timespec tv[2] = { { 1, 0 }, { 2, 0 } };
+    const u32 now = T_WSTAT_ATIME | T_WSTAT_MTIME;
+
+    g_ga_mode = 0100646u;                     // other W
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, now, 0, 0, 0, 0, NULL), 0L,
+                   "stranger with other-W: now");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)now, "...reached the wire");
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, now | T_WSTAT_MTIME_SET,
+                                      0, 0, 0, 0, tv),
+                   -(s64)T_E_ACCES, "stranger with other-W: explicit mtime denied");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0666u, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "stranger with other-W: chmod denied");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no denial reached the wire");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(o, fo, now, 0, 0, 0, 0, NULL), 0L,
+                   "stranger with other-W: now through O_PATH");
+
+    g_ga_mode = 0100644u;                     // no W for the stranger
+    larder_attr_invalidate(&g_client.larder, 0x33u);
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, now, 0, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "stranger without W: now denied");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(o, fo, T_WSTAT_MTIME, 0, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "stranger without W: now-mtime through O_PATH denied");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no denial reached the wire");
+
+    g_ga_mode = 0100644u;
+    o->state = PROC_STATE_ZOMBIE;
+    proc_free(o);
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+    teardown(root);
+}
+
+// G12 / the 08:24Z item: SYS_WSTAT answers an errno per refusal. A handle that
+// is not a Spoor is EBADF; a Dev with no .wstat_native is EOPNOTSUPP; the
+// server's Tsetattr verdict crosses by value, its EPERM (-1, the pouch EIO
+// sentinel) folded to EACCES and its EBADF (vote 16) to EIO; a stat that fails
+// answers its errno.
+void test_dev9p_wstat_errnos(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd = wt_open(root, p, 0x1234u, RIGHT_READ, false);
+    TEST_ASSERT(fd >= 0, "owner handle");
+
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd + 40, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL),
+                   -(s64)T_E_BADF, "an empty handle slot");
+    struct Spoor *dn = spoor_alloc(&devnone);
+    TEST_ASSERT(dn != NULL, "devnone Spoor");
+    hidx_t fn = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, dn);
+    TEST_ASSERT(fn >= 0, "devnone handle");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fn, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL),
+                   -(s64)T_E_OPNOTSUPP, "a Dev without .wstat_native");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fn, T_WSTAT_MTIME, 0, 0, 0, 0, NULL),
+                   -(s64)T_E_OPNOTSUPP, "...for a time too");
+
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL), 0L,
+                   "control: the dev9p chmod succeeds");
+    g_setattr_fail_ecode = 28;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL),
+                   -28L, "the server's ENOSPC crosses by value");
+    g_setattr_fail_ecode = 30;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MTIME, 0, 0, 0, 0, NULL),
+                   -30L, "the server's EROFS crosses by value");
+    g_setattr_fail_ecode = 1;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "the server's EPERM folds to EACCES");
+    g_setattr_fail_ecode = 9;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL),
+                   -(s64)T_E_IO, "the server's EBADF reads EIO (vote 16)");
+    g_setattr_fail_ecode = 0;
+
+    larder_attr_invalidate(&g_client.larder, 0x33u);
+    g_ga_fail_ecode = 2;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0, NULL),
+                   -(s64)T_E_NOENT, "the owner stat's ENOENT");
+    g_ga_fail_ecode = 0;
+
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     teardown(root);
@@ -3126,8 +3371,9 @@ void test_dev9p_cached_open(void) {
     TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fidless fstat serves");
     TEST_EXPECT_EQ(st.size, 0x200ull, "fstat size");
     TEST_EXPECT_EQ(st.qid_path, 0x20ull, "fstat qid");
-    TEST_ASSERT(dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0) == -1,
-                "wstat on a fidless fd fails LOUD (the documented seam)");
+    TEST_ASSERT(dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL) ==
+                -(int)T_E_OPNOTSUPP,
+                "wstat on a fidless fd fails LOUD (the documented seam, EOPNOTSUPP)");
     TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync no-ops 0 (read-only fd)");
     TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
     TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");
@@ -3646,7 +3892,7 @@ void test_dev9p_wb_dying_flush_keeps_run(void) {
 // stand in for that sharer.
 static void wbd_truncate(void *arg) {
     (void)arg;
-    g_wbd_rc = dev9p.wstat_native(g_wbd_spoor, T_WSTAT_SIZE, 0, 0, 0, 0);
+    g_wbd_rc = dev9p.wstat_native(g_wbd_spoor, T_WSTAT_SIZE, 0, 0, 0, 0, NULL);
 }
 
 void test_dev9p_wb_dying_wstat_keeps_staging(void) {
@@ -3700,7 +3946,7 @@ void test_dev9p_wb_wstat_keeps_the_latch(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
     long fe0 = dev9p.fsync(f, 0);
-    int  wrc = dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0);
+    int  wrc = dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL);
     long we  = dev9p.write(f, chunk, 256, 256);
     long fe1 = dev9p.fsync(f, 0);
     int  crc = spoor_clunk_rc(f);
@@ -3916,7 +4162,7 @@ void test_dev9p_wb_nonappend_writethrough(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 500, 1000), 500ull, "re-stage");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…wire-free");
     // wstat flushes the new run + stops staging on this priv.
-    TEST_EXPECT_EQ((u64)dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0), 0ull,
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL), 0ull,
                    "wstat ok");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
     struct dev9p_priv *fp = dev9p_priv_of(f);
@@ -4362,7 +4608,7 @@ void test_dev9p_cape(void) {
     TEST_EXPECT_EQ((u64)st.uid, (u64)0x1234u, "uncaped: the server's uid");
     TEST_EXPECT_EQ((u64)st.gid, (u64)0x5678u, "uncaped: the server's gid");
     g_setattr_valid = 0xdeadbeefu;
-    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root, T_WSTAT_UID, 0, 1000u, 0, 0), (u64)0,
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root, T_WSTAT_UID, 0, 1000u, 0, 0, NULL), (u64)0,
                    "uncaped chown");
     TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_UID, "uncaped: the chown reached the wire");
     teardown(root);
@@ -4388,15 +4634,15 @@ void test_dev9p_cape(void) {
 
     // chown / chgrp refused before the wire; chmod passes.
     g_setattr_valid = 0xdeadbeefu;
-    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_UID, 0, 1000u, 0, 0),
-                   (u64)(s64)-1, "caped chown refused");
-    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_GID, 0, 0, 2000u, 0),
-                   (u64)(s64)-1, "caped chgrp refused");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_UID, 0, 1000u, 0, 0, NULL),
+                   (u64)(s64)-T_E_ACCES, "caped chown refused");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_GID, 0, 0, 2000u, 0, NULL),
+                   (u64)(s64)-T_E_ACCES, "caped chgrp refused");
     TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_MODE | T_WSTAT_GID, 0600u,
-                                                0, 2000u, 0),
-                   (u64)(s64)-1, "caped chmod+chgrp refused whole");
+                                                0, 2000u, 0, NULL),
+                   (u64)(s64)-T_E_ACCES, "caped chmod+chgrp refused whole");
     TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)0xdeadbeefu, "no refused call reached the wire");
-    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root, T_WSTAT_MODE, 0640u, 0, 0, 0), (u64)0,
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root, T_WSTAT_MODE, 0640u, 0, 0, 0, NULL), (u64)0,
                    "caped chmod");
     TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_MODE, "caped: the chmod reached the wire");
     TEST_EXPECT_EQ((u64)g_setattr_mode, (u64)0640u, "caped: the chmod's mode");

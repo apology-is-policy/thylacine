@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -362,6 +362,16 @@ surface is unswept).
 
 Every step returns 1 and fails the boot. The one deliberate non-fatality is
 the drainer spawn.
+
+**The `/bin/system.key` metadata probe asserts each refusal's errno
+(2026-10-22, G12).** On the read-only boot FS it checks that SYS_WSTAT
+refuses an empty mask, the reserved bit 6, the first bit past
+`T_WSTAT_VALID`, a `_SET` time bit alone and a setuid mode with EINVAL
+(-22), and a chmod and a "now" mtime with EOPNOTSUPP (-95: devramfs has no
+metadata slot). It used to accept any -1, which let its "reserved bit"
+leg, 0x8, keep passing after 0x8 became `T_WSTAT_SIZE` (Go Stage 5), refused
+by the Dev and not by the mask. A wrong answer prints the leg and the rc
+(`joey: probe SYS_WSTAT leg <n> wrong rc=<rc>`).
 
 ## Performance
 

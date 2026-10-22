@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-20
+updated: 2026-10-22
 ---
 ## Native ceiling 136 (B-3f', 2026-10-20)
 
@@ -1159,3 +1159,19 @@ group, a dead child, the tid forms, the refusals), and `viv-pheno-probe` L334-L3
 (a child's `tkill(gettid(), SIGABRT)` reads `SIGABRT`; a child killed with
 `SIGTERM` reads `SIGTERM`; the probe's parent is `EPERM`; the refusals by
 shape; a `SIGTERM` handler runs once per call while `SIGINT` is ignored).
+
+## fchmodat answers the wstat's errno; pipe2's collision proof re-read (2026-10-22, G12)
+
+`fchmodat` (53) opens the path `O_PATH` and changes the mode through
+`sys_wstat_for_proc`, which since [[dec-2026-10-22-wstat-times]] answers an
+errno per refusal instead of a flat -1. The row turns the inner's EACCES,
+the ownership denial, into Linux's -EPERM (a Linux caller reads -1 as
+EPERM; only the Pouch seam reserves it) and passes every other refusal
+as it is, so a server's ENOSPC or EROFS now reaches the program where every
+refusal used to read EPERM. utimensat (88) is not served yet; G12-b serves
+it the same way.
+
+The pipe2 (59) paragraph in `vivarium.h` proves a mis-declared native
+SYS_WSTAT call cannot pass pipe2's flag check: every legal wstat mask is
+now in [1, 0x1BF] (bits 0-5 and 7-8, `T_WSTAT_VALID`), and pipe2's domain is
+still only {0, O_CLOEXEC = 0x80000}, so the proof holds with the time bits.

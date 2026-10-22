@@ -35,6 +35,7 @@ void test_perm_check_dac_override_cap(void);
 void test_perm_wstat_chown_cap(void);
 void test_perm_check_want_zero_denied(void);
 void test_perm_wstat_rejects_unknown_valid_bit(void);
+void test_perm_wstat_times(void);
 
 // =============================================================================
 // Helpers.
@@ -204,39 +205,40 @@ void test_perm_oexec_no_read_leak(void) {
 
 void test_perm_wstat_policy(void) {
     struct Proc p;
+    struct t_stat f100 = mkstat(0100644u, 100u, 200u);   // the file, owned by 100
 
     // chmod: owner allowed, non-owner denied, CAP_HOSTOWNER allowed.
     mkproc(&p, 100u, 200u, CAP_NONE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_MODE, 0u), 0,
                    "owner may chmod");
     mkproc(&p, 999u, 200u, CAP_NONE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_MODE, 0u), -1,
                    "non-owner may not chmod");
     mkproc(&p, 999u, 200u, CAP_HOSTOWNER);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_MODE, 0u), 0,
                    "CAP_HOSTOWNER may chmod any file");
 
     // chown(uid): no give-away -- owner denied, only CAP_HOSTOWNER.
     mkproc(&p, 100u, 200u, CAP_NONE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_UID, 0u), -1,
                    "owner may NOT give a file away");
     mkproc(&p, 100u, 200u, CAP_HOSTOWNER);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_UID, 0u), 0,
                    "CAP_HOSTOWNER may chown");
 
     // chgrp: owner -> a group they belong to; foreign group denied; hostowner any.
     mkproc(&p, 100u, 200u, CAP_NONE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_GID, 200u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_GID, 200u), 0,
                    "owner may chgrp to its primary group");
     mkproc(&p, 100u, 200u, CAP_NONE);
     p.supp_gids[0] = 300u; p.supp_gid_count = 1;
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_GID, 300u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_GID, 300u), 0,
                    "owner may chgrp to a supplementary group");
     mkproc(&p, 100u, 200u, CAP_NONE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_GID, 777u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_GID, 777u), -1,
                    "owner may NOT chgrp to a foreign group");
     mkproc(&p, 999u, 200u, CAP_HOSTOWNER);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_GID, 777u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_GID, 777u), 0,
                    "CAP_HOSTOWNER may chgrp to any group");
 }
 
@@ -326,28 +328,29 @@ void test_perm_check_dac_override_cap(void) {
 
 void test_perm_wstat_chown_cap(void) {
     struct Proc p;
+    struct t_stat f100 = mkstat(0100644u, 100u, 200u);   // the file, owned by 100
 
     // chown(uid): CAP_CHOWN authorizes it (the no-give-away chown right), like
     // CAP_HOSTOWNER.
     mkproc(&p, 999u, 200u, CAP_CHOWN);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_UID, 0u), 0,
                    "CAP_CHOWN may chown");
     // chgrp to any group: CAP_CHOWN authorizes it.
     mkproc(&p, 999u, 200u, CAP_CHOWN);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_GID, 777u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_GID, 777u), 0,
                    "CAP_CHOWN may chgrp to any group");
 
     // chmod-any stays CAP_HOSTOWNER-only: neither CAP_CHOWN nor CAP_DAC_OVERRIDE
     // grants chmod of another principal's file (no CAP_FOWNER split at v1.0).
     mkproc(&p, 999u, 200u, CAP_CHOWN);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_MODE, 0u), -1,
                    "CAP_CHOWN does NOT grant chmod of another's file");
     mkproc(&p, 999u, 200u, CAP_DAC_OVERRIDE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_MODE, 0u), -1,
                    "CAP_DAC_OVERRIDE does NOT grant chmod of another's file");
     // CAP_DAC_OVERRIDE does NOT grant chown (that authority is CAP_CHOWN/HOSTOWNER).
     mkproc(&p, 999u, 200u, CAP_DAC_OVERRIDE);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_UID, 0u), -1,
                    "CAP_DAC_OVERRIDE does NOT grant chown");
 }
 
@@ -382,25 +385,79 @@ void test_perm_check_want_zero_denied(void) {
 // CAP_HOSTOWNER does not rescue it.
 void test_perm_wstat_rejects_unknown_valid_bit(void) {
     struct Proc p;
-    u32 unknown = (1u << 4);   // outside T_WSTAT_VALID (MODE|UID|GID|SIZE = bits 0-3)
+    struct t_stat f100 = mkstat(0100644u, 100u, 200u);   // the file, owned by 100
+    // Bit 6 is the 9P CTIME bit, the one hole inside T_WSTAT_VALID's span
+    // (bits 0-5 and 7-8). Bit 4, this test's first choice, became T_WSTAT_ATIME.
+    u32 unknown = (1u << 6);
 
     mkproc(&p, 100u, 200u, CAP_HOSTOWNER);
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, unknown, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, unknown, 0u), -1,
                    "perm_wstat_check rejects an unknown valid bit (self-defend)");
     // A known|unknown combination is also rejected (the unknown bit taints it).
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE | unknown, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_MODE | unknown, 0u), -1,
                    "perm_wstat_check rejects known|unknown valid bits");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, (1u << 9), 0u), -1,
+                   "perm_wstat_check rejects the first bit past T_WSTAT_VALID");
     // T_WSTAT_SIZE is KNOWN but outside this policy's jurisdiction (a content
     // axis, rights-gated at the syscall layer): it passes through untainted,
     // and the metadata policy still applies to the rest of a combined mask.
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_SIZE, 0u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_SIZE, 0u), 0,
                    "SIZE alone passes (no identity policy on the content axis)");
-    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), 0,
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &f100, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), 0,
                    "owner SIZE|MODE passes (mode policy applies, size tolerated)");
     struct Proc q;
     mkproc(&q, 999u, 200u, 0);   // non-owner, no caps
-    TEST_EXPECT_EQ(perm_wstat_check(&q, 100u, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), -1,
+    TEST_EXPECT_EQ(perm_wstat_check(&q, &f100, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), -1,
                    "non-owner SIZE|MODE still denied by the mode policy");
+}
+
+// G12: the time axes (POSIX utimensat). An explicit time (a _SET bit) needs the
+// owner or CAP_HOSTOWNER -- write permission and CAP_DAC_OVERRIDE do not suffice;
+// "now" alone also admits write permission, by owner/group/other bits or the
+// DAC override (perm_check's own cap bypass). Each refusal sits one variable
+// from an allowed control.
+void test_perm_wstat_times(void) {
+    struct Proc p;
+    const u32 now      = T_WSTAT_ATIME | T_WSTAT_MTIME;
+    const u32 explicit_a = T_WSTAT_ATIME | T_WSTAT_ATIME_SET;
+    const u32 explicit_m = T_WSTAT_MTIME | T_WSTAT_MTIME_SET;
+    struct t_stat ro   = mkstat(0100444u, 100u, 200u);   // no W for anyone
+    struct t_stat gw   = mkstat(0100664u, 100u, 200u);   // group W
+    struct t_stat ow   = mkstat(0100646u, 100u, 200u);   // other W only
+
+    // Explicit: the owner, even of a read-only file; CAP_HOSTOWNER.
+    mkproc(&p, 100u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, explicit_a, 0u), 0, "owner explicit atime");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, explicit_m, 0u), 0, "owner explicit mtime");
+    mkproc(&p, 999u, 888u, CAP_HOSTOWNER);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, explicit_m, 0u), 0, "CAP_HOSTOWNER explicit");
+    // ...but not a non-owner holding W, nor the DAC override.
+    mkproc(&p, 999u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, now, 0u), 0, "group-W non-owner: now");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, explicit_m, 0u), -1,
+                   "group-W non-owner: explicit mtime denied");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, explicit_a, 0u), -1,
+                   "group-W non-owner: explicit atime denied");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, now | T_WSTAT_MTIME_SET, 0u), -1,
+                   "an explicit time anywhere in the mask needs the owner");
+    mkproc(&p, 999u, 888u, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, now, 0u), 0, "DAC override: now");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, explicit_m, 0u), -1,
+                   "DAC override: explicit denied");
+
+    // Now: owner without W; other-W; group-W member; a stranger without W denied.
+    mkproc(&p, 100u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, now, 0u), 0, "owner now on a read-only file");
+    mkproc(&p, 999u, 888u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ow, now, 0u), 0, "other-W stranger: now");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, now, 0u), -1,
+                   "stranger outside the W group: now denied");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, T_WSTAT_ATIME, 0u), -1,
+                   "no W: now-atime alone denied");
+    // A time riding with chmod: the mode policy still applies.
+    mkproc(&p, 999u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, now | T_WSTAT_MODE, 0u), -1,
+                   "group-W non-owner: now|chmod denied by the mode policy");
 }
 
 // M8 (IDENTITY-DESIGN 9.7): the umask, then Plan 9 open(5)'s bound. Each row

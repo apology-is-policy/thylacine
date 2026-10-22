@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
 
@@ -774,13 +774,20 @@ post branch ignoring the bit.
 
 ### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
 
-`sys_wstat_handler` thins to the all-scalar `sys_wstat_for_proc(p, h, valid, mode,
-uid, gid, size)` — the handler/inner split that makes the gate testable without a
-live EL0 thread (the #37 pattern). It validates structurally first: at least one
+`sys_wstat_handler` thins to `sys_wstat_for_proc(p, h, valid, mode, uid, gid,
+size, times)` — the handler/inner split that makes the gate testable without a
+live EL0 thread (the #37 pattern). The handler's one piece of work is the x6
+copy-in: the two `struct t_timespec` (atime, mtime) are read from the caller only
+when `ATIME_SET` or `MTIME_SET` is in the mask, so the residue a chmod or a "now"
+leaves in x6 is never touched; an unreadable pointer is EFAULT. The inner takes a
+kernel copy. It validates structurally first, each refusal EINVAL: at least one
 known `valid` bit and no reserved one (so a future `T_WSTAT_*` cannot be silently
-dropped), the mode masked to the rwx nine (setuid/setgid/sticky reject), `uid`/
-`gid` rejected on the invalid sentinel, a `size` with its sign bit set rejected up
-front.
+dropped), no `_SET` bit without its time bit, the mode masked to the rwx nine
+(setuid/setgid/sticky reject), `uid`/`gid` rejected on the invalid sentinel, a
+`size` with its sign bit set rejected up front, and an explicit time with a
+negative second or an nsec outside [0, 999999999]. Only a `_SET` entry is read
+and checked; the Dev is handed a local copy holding those entries alone, so the
+other slot never travels.
 
 **The fd is kind-gated, not rights-gated — for the metadata axes.** The handle
 need only be a `KOBJ_SPOOR` of *any* rights (it rejects `KOBJ_SRV`), so `fchmod(2)`
@@ -805,12 +812,28 @@ with `CWALKONLY` set is rejected. A navigation handle is not a byte-I/O channel,
 and truncate is byte I/O.
 
 **The metadata policy check is placed here; the policy itself is not.**
-`perm_wstat_check` runs only for `{MODE, UID, GID}` and only on a `perm_enforced`
-Dev, reading the file's *current* owner first — the who-may-chmod/chown/chgrp
-adjudication is [[sub-kernel-perm]]'s three-authority rule. A size-only call skips
-it (its identity check was the open-time `perm_check`). Since #47 this is the
-*sole* write-authority gate on the mode/uid/gid path: load-bearing, not additive
-to a handle right.
+`perm_wstat_check` runs for `{MODE, UID, GID}` and the time bits, only on a
+`perm_enforced` Dev, reading the file's *current* stat first — the who-may
+adjudication is [[sub-kernel-perm]]'s table (owner or CAP for an explicit time,
+also write permission for "now"). A size-only call skips it (its identity check
+was the open-time `perm_check`). Since #47 this is the *sole* write-authority gate
+on the mode/uid/gid/times path: load-bearing, not additive to a handle right. The
+times, like chmod, work through an `O_PATH` handle, which is how a path-form
+`utimensat` reaches them.
+
+**Every refusal answers its errno** (G12, operator vote 18 of 2026-10-22; until
+then a flat -1): EINVAL for the structure above, EBADF for a handle naming no
+Spoor and for a truncate through a handle without `RIGHT_WRITE` or through
+`O_PATH`, EFAULT for x6, EACCES for the policy's denial, EOPNOTSUPP for a Dev
+with no `.wstat_native`, and a stat's or the Dev's `-errno` by `wstat_dev_errno`,
+which is `SYS_FSTAT`'s rule (a value in [-4095,-2] as itself, EBADF and anything
+else as EIO, so a live fd is never blamed). The denial is EACCES, never EPERM:
+`-EPERM` is -1, the pouch seam's EIO sentinel ([[sub-pouch-seam]]). The POSIX
+front ends answer EPERM where ownership is the only refusal; the vivarium's
+fchmodat does so here, turning the inner's EACCES into Linux's -EPERM.
+Witnesses: `dev9p.wstat_times_wire`, `dev9p.wstat_times_einval`,
+`dev9p.wstat_times_permission`, `dev9p.wstat_errnos`, and the errno-asserting
+legs of `dev9p.wstat_readonly_fd` / `dev9p.wstat_size`.
 
 ### Positioned byte I/O reuses the read/write inner with the cursor held still
 

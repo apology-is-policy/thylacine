@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-20
+updated: 2026-10-22
 ---
 ## SYS_FSTAT answers an errno (2026-10-20, ERRORS.md ER-2)
 
@@ -698,10 +698,10 @@ be one 4 KiB staging buffer per round trip.
 
 - **The two return conventions converge call by call.** New syscalls use errno,
   and the old `-1` calls move to it in the error rollout's stages
-  (`docs/ERRORS.md`, ER-2 and ER-3). Most of SYS_READDIR's, SYS_WSTAT's and
-  SYS_CHDIR's refusals and SYS_STAT's path checks still answer a bare -1
-  (OPEN-BUGS 2026-10-20 08:24Z). Until a call converts, a caller handling both
-  must know which is which per call.
+  (`docs/ERRORS.md`, ER-2 and ER-3). Most of SYS_READDIR's and SYS_CHDIR's
+  refusals and SYS_STAT's path checks still answer a bare -1 (OPEN-BUGS
+  2026-10-20 08:24Z); SYS_WSTAT converted on 2026-10-22. Until a call
+  converts, a caller handling both must know which is which per call.
 - **The `svc` immediate is unused.** Reserved as a class selector; nothing reads
   it.
 - **Environment pass-through at spawn was reserved and never built.** The
@@ -1150,3 +1150,20 @@ group a create sends is the parent directory's, not the caller's
 `primary_gid`. The argument record is unchanged; the `SYS_WALK_CREATE` comment
 in `kernel/include/thylacine/syscall.h` and libt's `t_walk_create` comment say
 so. The mechanism is [[sub-kernel-syscall-dispatch]]'s.
+
+## SYS_WSTAT sets times and answers errnos (2026-10-22)
+
+[[dec-2026-10-22-wstat-times]]: SYS_WSTAT (59) gains `T_WSTAT_ATIME` /
+`T_WSTAT_MTIME` (bits 4/5, the file server's clock) and `T_WSTAT_ATIME_SET`
+/ `T_WSTAT_MTIME_SET` (bits 7/8, the caller's values), equal to 9P's
+`P9_SETATTR_*`. Its argument record grows by one register: x6 points at a
+`struct t_timespec[2]` (atime, mtime; the SYS_CLOCK_GETTIME record, 16 bytes
+each), read only when a `_SET` bit asks. Bit 6 stays reserved. Every refusal
+now answers its errno, never EPERM (the -1 alias); the list is in the
+`SYS_WSTAT` comment in `kernel/include/thylacine/syscall.h` and in
+`docs/ERRORS.md` ER-2. Old callers keep working: a mask without time bits
+reads no x6, and a native caller testing `r < 0` sees the same sign. The
+mechanism is [[sub-kernel-syscall-dispatch]]'s; the policy
+[[sub-kernel-perm]]'s. The Pouch, vivarium, libthyla-rs and go-thylacine
+front ends follow in G12's later steps; until then a Pouch chmod by a
+non-owner reads EACCES where it read EIO.

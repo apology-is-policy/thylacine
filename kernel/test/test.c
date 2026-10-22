@@ -1435,6 +1435,7 @@ void test_perm_check_dac_override_cap(void);
 void test_perm_wstat_chown_cap(void);
 void test_perm_check_want_zero_denied(void);
 void test_perm_wstat_rejects_unknown_valid_bit(void);
+void test_perm_wstat_times(void);
 void test_path_make_root(void);
 void test_path_addelem_forms(void);
 void test_path_parent_forms(void);
@@ -2006,6 +2007,10 @@ void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
+void test_dev9p_wstat_times_wire(void);
+void test_dev9p_wstat_times_einval(void);
+void test_dev9p_wstat_times_permission(void);
+void test_dev9p_wstat_errnos(void);
 void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
@@ -4514,6 +4519,10 @@ struct test_case g_tests[] = {
                                        test_dev9p_prw_wire_offset_and_cursor, false, NULL },
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
+    { "dev9p.wstat_times_wire",        test_dev9p_wstat_times_wire,           false, NULL },
+    { "dev9p.wstat_times_einval",      test_dev9p_wstat_times_einval,         false, NULL },
+    { "dev9p.wstat_times_permission",  test_dev9p_wstat_times_permission,     false, NULL },
+    { "dev9p.wstat_errnos",            test_dev9p_wstat_errnos,               false, NULL },
     { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
     { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
     { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
@@ -4986,6 +4995,7 @@ struct test_case g_tests[] = {
     { "perm.check_want_zero_denied",   test_perm_check_want_zero_denied,   false, NULL },
     { "perm.wstat_rejects_unknown_valid_bit",
                                        test_perm_wstat_rejects_unknown_valid_bit, false, NULL },
+    { "perm.wstat_times",              test_perm_wstat_times,              false, NULL },
     { "path.make_root",                test_path_make_root,                false, NULL },
     { "path.addelem_forms",            test_path_addelem_forms,            false, NULL },
     { "path.parent_forms",             test_path_parent_forms,             false, NULL },

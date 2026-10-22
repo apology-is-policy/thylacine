@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 3.7.1", "docs/IDENTITY-DESIGN.md section 9.6"]
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## perm_create_mode: the umask, then the directory's bound (2026-10-19, B-3e M8)
 
@@ -59,8 +59,9 @@ the question is decided.
 `rights_for_omode(omode)` maps the same mode to the handle rights envelope.
 **These two are a matched pair and must be read together.**
 
-`perm_wstat_check(p, cur_uid, valid, new_gid)` adjudicates metadata changes
-for exactly `{MODE, UID, GID}`.
+`perm_wstat_check(p, cur, valid, new_gid)` adjudicates metadata changes for
+`{MODE, UID, GID}` and the four time bits, against the file's current
+`t_stat` (`cur`). `SIZE` passes through it with no arm.
 
 `perm_create_mode(mode, is_dir, umask, dir)` returns the rwx bits a create
 sends: the asked mode less the umask, bounded by the parent's mode when `dir`
@@ -128,13 +129,15 @@ normally-opened handle gets it at the syscall walk-open site) and the
 is the pure `omode -> RIGHT_*` half; the transfer bit and the `T_OPATH`
 exception live in `sys_walk_open_handler` ([[sub-kernel-syscall-dispatch]]).
 
-**The wstat policy is three different authorities, not one.**
+**The wstat policy is four different authorities, not one.**
 
 | Op | Who may |
 |---|---|
 | chmod (`MODE`) | the owner, or `CAP_HOSTOWNER` |
 | chown (`UID`) | **only** `CAP_HOSTOWNER` or `CAP_CHOWN` |
 | chgrp (`GID`) | chown-any authority, or the owner *to a group they belong to* |
+| an explicit time (`ATIME_SET` / `MTIME_SET`) | the owner, or `CAP_HOSTOWNER` |
+| "now" (`ATIME` / `MTIME` alone) | the owner, `CAP_HOSTOWNER`, or anyone `perm_check` grants W |
 
 chown is **no-give-away**: an owner may not hand a file to another
 principal. That is the Plan 9 fileserver-owner rule and Linux's `CAP_CHOWN`,
@@ -143,6 +146,16 @@ and it is why chown is the one op with no owner branch at all.
 chmod deliberately has no finer split — there is no `CAP_FOWNER` at v1.0, so
 chmod-by-non-owner stays inside the unified `CAP_HOSTOWNER`. The clearance
 set (`DAC_OVERRIDE`, `CHOWN`, `KILL`) contains nothing that grants chmod.
+
+The time rows are POSIX utimensat's (G12, 2026-10-22). An explicit time can
+rewrite a file's history, which a backup, a build or a font cache trusts, so
+it takes the owner or chmod-any authority, as chmod does; write permission
+and `CAP_DAC_OVERRIDE` do not suffice (Linux asks `CAP_FOWNER`). "Now" only
+does what any write would do, so write permission also admits it, and
+`perm_check` brings its own DAC override (`CAP_HOSTOWNER` or
+`CAP_DAC_OVERRIDE`) with it, as Linux's `inode_permission` does. An explicit
+time anywhere in the mask makes the whole request explicit. Witness:
+`perm.wstat_times`, each refusal one variable from an allowed control.
 
 **`T_WSTAT_SIZE` has deliberately no policy arm here.** A truncate is a
 *content* mutation: its authority is the fd's `RIGHT_WRITE` plus the
@@ -154,7 +167,9 @@ while metadata policy still applies to any bits combined with it.
 
 None owned. Reads `Proc.principal_id`, `primary_gid`, `supp_gids[]`,
 `supp_gid_count`, `caps`; and the `t_stat` uid/gid/mode filled by the Dev's
-`stat_native`.
+`stat_native` (`perm_wstat_check` reads `cur->uid`, and for "now" the whole
+stat through `perm_check`). Loom's create-gid rule asks the chgrp question of
+a stat whose only set field is the creator as owner.
 
 ## Concurrency
 
@@ -204,7 +219,10 @@ path — which is why it does no allocation and takes no lock.
   worked example of getting this wrong.
 - A new `T_WSTAT_*` bit must be adjudicated here or explicitly justified as
   content-not-metadata, as `SIZE` is; the self-defend mask fails closed
-  until then.
+  until then. Bit 6 (the 9P CTIME bit) is the one hole in the set; the
+  self-defend witness uses it and bit 9.
+- An explicit time must never be granted on write permission or the DAC
+  override alone.
 - The chown arm must stay owner-less — no-give-away is the property.
 - `p->caps` reads must stay atomic.
 

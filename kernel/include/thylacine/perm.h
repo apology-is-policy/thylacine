@@ -50,14 +50,18 @@ unsigned perm_want_for_omode(u32 omode);
 // base are caller policy (sys_walk_open_handler), not derived here.
 rights_t rights_for_omode(u32 omode);
 
-// perm_wstat_check — the SYS_WSTAT ownership-change policy (chmod/chown/chgrp).
-// cur_uid is the file's CURRENT owner; valid is the T_WSTAT_* field mask; new_gid
-// is the requested group (meaningful only when T_WSTAT_GID is set). Returns 0
-// (allowed) / -1 (denied):
+// perm_wstat_check — the SYS_WSTAT metadata policy (chmod/chown/chgrp/times).
+// cur is the file's CURRENT stat (owner, group, mode); valid is the T_WSTAT_*
+// field mask; new_gid is the requested group (meaningful only when T_WSTAT_GID
+// is set). Returns 0 (allowed) / -1 (denied):
 //   MODE -> file owner OR CAP_HOSTOWNER
-//   UID  -> CAP_HOSTOWNER only (no give-away)
-//   GID  -> (owner AND member of new_gid) OR CAP_HOSTOWNER
-int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid);
+//   UID  -> CAP_HOSTOWNER or CAP_CHOWN only (no give-away)
+//   GID  -> (owner AND member of new_gid) OR CAP_HOSTOWNER or CAP_CHOWN
+//   ATIME_SET / MTIME_SET (an explicit time) -> file owner OR CAP_HOSTOWNER
+//   ATIME / MTIME alone ("now") -> also perm_check(p, cur, PERM_W)
+//   SIZE -> no policy here (the fd's RIGHT_WRITE, at the syscall layer)
+int perm_wstat_check(const struct Proc *p, const struct t_stat *cur, u32 valid,
+                     u32 new_gid);
 
 // perm_create_mode — the rwx bits a create sends (IDENTITY-DESIGN 9.7 M8).
 // `mode` is the asked mode, `umask` the creator's mask, `dir` the parent's stat,

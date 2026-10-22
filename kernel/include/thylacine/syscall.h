@@ -1330,10 +1330,11 @@ enum {
     // MECHANISM: set a file's mode/owner/group via 9P Tsetattr. The kernel 9P
     // client already implements the wire half (p9_client_setattr); this is the
     // syscall wrapper + a new NULL-permitted Dev vtable slot (.wstat_native ->
-    // dev9p_wstat_native). Register-passed (no user buffer): the only fields a
-    // v1.0 chmod/chown sets are mode + uid + gid, which fit in x1..x4 with the
-    // valid mask in x1. SIZE (truncate) + ATIME/MTIME stay out -- separate
-    // concerns; a v1.x SYS_WSTAT2 or O_TRUNC covers them.
+    // dev9p_wstat_native). Register-passed: mode + uid + gid fit in x1..x4 with
+    // the valid mask in x1. SIZE (truncate) later took x5 (Go Stage 5), and
+    // ATIME/MTIME took x6, a pointer to the two times (G12, vote 18 of
+    // 2026-10-22: one metadata syscall, the Plan 9 wstat shape, rather than a
+    // separate utimens number).
     //
     // This chunk builds the MECHANISM only. The per-file rwx PERMISSION check
     // (who may chmod/chown -- owner-only chmod, CAP_HOSTOWNER chown) is A-2d
@@ -1350,7 +1351,7 @@ enum {
     // reachable by re-walking the path -- the fd is just a name for the file;
     // the SYS_FSTAT/#46 + SYS_LSEEK precedent).
     //
-    // SYS_WSTAT(fd, valid, mode, uid, gid, size) -> 0 / -1
+    // SYS_WSTAT(fd, valid, mode, uid, gid, size, times) -> 0 / -errno
     //   x0 = fd     (hidx_t; must be KOBJ_SPOOR -- any rights (kind-gate only,
     //                #47) for the METADATA axes. The write-authority gate for
     //                mode/uid/gid is perm_wstat_check on perm-enforced Devs,
@@ -1359,25 +1360,48 @@ enum {
     //                so the fd must carry RIGHT_WRITE -- "opened for writing"
     //                under the A-3 F1 omode-derived rights; the open-time
     //                perm_check already enforced the identity W axis.)
-    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID
-    //                | T_WSTAT_SIZE; at least one bit set; any other bit -> -1.)
+    //   x1 = valid  (u32 bitmask of the T_WSTAT_* bits below; at least one
+    //                set; any other bit -> EINVAL; a _SET bit without its time
+    //                bit -> EINVAL.)
     //   x2 = mode   (u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits
     //                only -- setuid/setgid/sticky (07000) + any bit outside 0777
-    //                are REJECTED (-1). setuid is explicitly unsupported, §S5.)
+    //                are REJECTED (EINVAL). setuid is explicitly unsupported, §S5.)
     //   x3 = uid    (u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_-
-    //                INVALID (0) -> -1.)
-    //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> -1.)
+    //                INVALID (0) -> EINVAL.)
+    //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> EINVAL.)
     //   x5 = size   (u64; new file length when T_WSTAT_SIZE (Go Stage 5:
     //                ftruncate for cmd/go's module cache). size > INT64_MAX
-    //                -> -1 (the s64 offset domain). Shrink discards; extend
+    //                -> EINVAL (the s64 offset domain). Shrink discards; extend
     //                zero-fills (Tsetattr semantics, Stratum-side).)
-    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR; valid 0 or with a
-    //   reserved bit; mode outside 0777; uid/gid INVALID; size out of the s64
-    //   domain; T_WSTAT_SIZE on a handle without RIGHT_WRITE; perm_wstat_check
-    //   denial (perm-enforced Dev, metadata axes, caller neither owner nor
-    //   CAP-holder); Dev has no .wstat_native slot; server Rlerror.
+    //   x6 = times  (user pointer to struct t_timespec[2], atime then mtime,
+    //                read ONLY when T_WSTAT_ATIME_SET or T_WSTAT_MTIME_SET is
+    //                set, and only the entry whose _SET bit is set. tv_sec < 0,
+    //                or tv_nsec outside [0, 999999999] -> EINVAL; an unreadable
+    //                pointer -> EFAULT. T_WSTAT_ATIME / T_WSTAT_MTIME alone set
+    //                that time to the file server's clock and read nothing.)
+    //   Times follow POSIX utimensat(2): an explicit time (a _SET bit) needs the
+    //   owner or CAP_HOSTOWNER; "now" alone also admits a caller with write
+    //   permission on the file (perm_check W). Like chmod they work through an
+    //   O_PATH handle. ctime is the server's: every change stamps it.
+    //   Returns 0, or a -errno per refusal:
+    //     EINVAL      the mask or a value above is out of its domain;
+    //     EBADF       fd is not a KOBJ_SPOOR handle; T_WSTAT_SIZE on a handle
+    //                 without RIGHT_WRITE or on an O_PATH handle;
+    //     EFAULT      x6 unreadable while a _SET bit is set;
+    //     EACCES      perm_wstat_check denial (perm-enforced Dev; caller neither
+    //                 owner nor CAP-holder, or for "now" without write
+    //                 permission); a caped session refusing chown/chgrp. Never
+    //                 EPERM: -EPERM is -1, which the pouch boundary-line reads
+    //                 as EIO (<thylacine/errno.h>). The POSIX front ends answer
+    //                 EPERM where ownership is the only possible refusal (mode,
+    //                 uid, gid, an explicit time);
+    //     EOPNOTSUPP  the Dev has no .wstat_native slot, or the fd is a
+    //                 fidless cached open (dev9p);
+    //     the server's errno (crossing by value, -1 folded to EACCES like every
+    //     dev9p mutation) for a Tsetattr Rlerror or a write-behind flush
+    //     failure; the file's stat failing answers its errno; EIO otherwise.
     //   Audit-bearing: CLAUDE.md A-2 FS-permission row.
-    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4), size (x5)
+    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4), size (x5), times (x6)
 
     // SYS_EXIT_GROUP(status) -- terminate the WHOLE Proc (POSIX exit_group(2)).
     // NEVER returns. Cascades termination to every peer Thread of the calling
@@ -3346,12 +3370,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define T_S_IFLNK   0120000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
-// (mode, uid, gid, size) register arguments the kernel applies. Chosen to
-// equal the 9P Tsetattr P9_SETATTR_{MODE,UID,GID,SIZE} bit values so
+// (mode, uid, gid, size, times) arguments the kernel applies. Chosen to
+// equal the 9P Tsetattr P9_SETATTR_* bit values so
 // dev9p_wstat_native maps the mask with no translation; the equality is
 // pinned by a _Static_assert in dev9p.c (the only TU that sees both).
 // Userspace chmod() sets T_WSTAT_MODE; chown() sets T_WSTAT_UID |
-// T_WSTAT_GID (or just one); ftruncate() sets T_WSTAT_SIZE (Go Stage 5).
+// T_WSTAT_GID (or just one); ftruncate() sets T_WSTAT_SIZE (Go Stage 5);
+// utimensat() sets the time bits (G12).
 // SIZE is a CONTENT axis: it additionally requires RIGHT_WRITE on the fd
 // (POSIX ftruncate needs a write-opened fd), unlike the #47 kind-gate-only
 // metadata axes.
@@ -3359,7 +3384,18 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define T_WSTAT_UID    (1u << 1)
 #define T_WSTAT_GID    (1u << 2)
 #define T_WSTAT_SIZE   (1u << 3)
-#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_SIZE)
+// The times, as 9P2000.L's Tsetattr has them: ATIME / MTIME set that time to
+// the file server's clock; with ATIME_SET / MTIME_SET as well, to the value
+// x6 points at. A _SET bit alone is EINVAL. Bit 6, the wire's CTIME, stays
+// reserved: ctime is the server's to stamp.
+#define T_WSTAT_ATIME      (1u << 4)
+#define T_WSTAT_MTIME      (1u << 5)
+#define T_WSTAT_ATIME_SET  (1u << 7)
+#define T_WSTAT_MTIME_SET  (1u << 8)
+#define T_WSTAT_TIMES  (T_WSTAT_ATIME | T_WSTAT_MTIME | \
+                        T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)
+#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | \
+                        T_WSTAT_SIZE | T_WSTAT_TIMES)
 
 // Permission bits a SYS_WSTAT mode may carry (the 9 rwx bits). setuid/setgid/
 // sticky (07000) + any bit outside 0777 are rejected -- setuid is explicitly

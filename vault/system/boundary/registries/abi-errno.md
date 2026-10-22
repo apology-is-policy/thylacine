@@ -10,7 +10,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## The surface
 
@@ -48,7 +48,7 @@ anywhere.
 | 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), `O_NOFOLLOW` on a final symlink (DISTRO D-1), or a mount that would close a cycle in the mount graph (`SYS_MOUNT`, I-3) |
 | 88 | `T_E_NOTSOCK` | ENOTSOCK | a socket call names an fd with no socktab entry |
 | 93 | `T_E_PROTONOSUPPORT` | EPROTONOSUPPORT | a `SOCK_*`/`IPPROTO_*` the `/net` tree has no directory for |
-| 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | reserved; appended at PTY-1d, no current emitter |
+| 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | appended at PTY-1d; emitted by `SYS_TTY_SIGNAL`'s stop class (PTY-1f) and `SYS_WSTAT` (a Dev with no metadata slot, dev9p's fidless cached open; G12) |
 | 97 | `T_E_AFNOSUPPORT` | EAFNOSUPPORT | AF_INET6 and everything that is not AF_INET |
 | 98 | `T_E_ADDRINUSE` | EADDRINUSE | netd refused an `announce` for this port — reported by `listen()`, not `bind()` |
 | 103 | `T_E_CONNABORTED` | ECONNABORTED | an `accept()` whose connection the data open then refused |

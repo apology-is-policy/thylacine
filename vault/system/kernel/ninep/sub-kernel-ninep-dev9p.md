@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-20
+updated: 2026-10-22
 ---
 ## Create admission by session end (2026-10-19, B-3e M7)
 
@@ -330,9 +330,17 @@ drop), then `wb_note_through` advances the append anchor.
 channel** (the voted NFS model: a latched flush error surfaces here even
 after the run is gone) — then Tfsync with real-errno propagation.
 
-`dev9p_wstat_native` (Tsetattr; `T_WSTAT_* == P9_SETATTR_*` pinned by four
-`_Static_assert`s): a caped session refuses UID/GID before anything else
-(the cape, below); cached-open fails LOUD ([[seam-co-fidless-wstat]]);
+`dev9p_wstat_native` (Tsetattr; `T_WSTAT_* == P9_SETATTR_*` pinned by eight
+`_Static_assert`s, and a ninth keeps the wire's CTIME bit out of
+`T_WSTAT_VALID`): every refusal is a `-errno`, the slot's contract. The
+times (G12) go out as the 9P bits they equal: an explicit time carries the
+caller's `t_timespec` in the atime/mtime fields, and "now" carries its bit
+with zeroed fields, which the server answers with its own clock (Stratum
+honours that since its 2026-10-22 Tsetattr fix; before it stored the
+fields, the epoch). A caped session refuses UID/GID before anything else
+with EACCES (the cape, below); cached-open fails LOUD with EOPNOTSUPP
+([[seam-co-fidless-wstat]]); a failed flush or Tsetattr answers the wire's
+errno through `dev9p_wire_errno` (its EPERM folded to EACCES);
 write-behind: flush first (a truncate must land after the staged bytes)
 then stop staging by clearing the append anchor (`wb_known`; a size change
 destroys it) -- never the eligibility flag, which gates the read overlay,
@@ -412,8 +420,8 @@ the fields). dev9p consults it at exactly three points:
   `fchownat` as the group; `haul-cape.exp`'s create and mkdir land on the
   host through it). The creator's group never crosses.
 - **wstat_native.** UID or GID in `valid` is refused FIRST -- ahead of the
-  cached-open seam and any write-behind flush -- with the path's generic
-  -1. chmod and truncate pass: the mode is the server's own.
+  cached-open seam and any write-behind flush -- with EACCES. chmod,
+  truncate and the times pass: they are the server's own.
 
 Kernel DAC stays on. The owner bits of the server's mode now apply to the
 mounter, so a 0600 host file is readable by the principal that mounted it,
@@ -579,8 +587,9 @@ deliberately not owned here — the resolver post-scans.
 ## Error paths
 
 Real-errno propagation on read/write/fsync/getattr (#3/Area-F) and on
-rename/unlink (#80). A chown/chgrp on a caped session answers `-1` before
-the wire (sys_wstat's generic refusal, like its other refusals). `dev9p_create`'s errno record + accessor (#99).
+rename/unlink (#80), and on wstat (G12): a chown/chgrp on a caped session
+answers EACCES before the wire, a cached open EOPNOTSUPP, and a flush or
+Tsetattr failure the wire's errno. `dev9p_create`'s errno record + accessor (#99).
 NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
 distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
 a walk failure — nothing about the path was learned).

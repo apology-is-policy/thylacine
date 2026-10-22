@@ -316,9 +316,10 @@ enum {
     // native occupant is SYS_WSTAT(fd, valid, mode, uid, gid, size). The mis-
     // declared native program is refused TWICE OVER, and the outer refusal is
     // the DOMAIN CHECK rather than a memory guard: `valid` is a bitmask of
-    // T_WSTAT_{MODE,UID,GID,SIZE} == 0xF, so every legal wstat mask lands in
-    // [1,15], and the pipe2 domain admits only {0, O_CLOEXEC == 0x80000}. No
-    // wstat a native caller can legally make is even reachable past the decide.
+    // T_WSTAT_VALID == 0x1BF (bits 0-5 and 7-8), so every legal wstat mask
+    // lands in [1, 0x1BF], and the pipe2 domain admits only {0, O_CLOEXEC ==
+    // 0x80000}. No wstat a native caller can legally make is even reachable
+    // past the decide.
     // Should a garbage `valid` of 0 slip through anyway, args[0] -- the fd index
     // wstat put there -- becomes the VA the fd pair is written to, which is page
     // zero, so the copy-out faults, both freshly-made fds are closed, and the

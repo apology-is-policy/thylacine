@@ -42,6 +42,7 @@ struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-usi
 struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
 struct poll_snap;   // <thylacine/poll.h>; a remote fd's snapshot slot (.poll_snapshot)
 struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
+struct t_timespec;  // <thylacine/syscall.h>; a SYS_WSTAT time
 
 // Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
 // non-9P Devs and the resolver need no wire header; dev9p _Static_asserts
@@ -159,17 +160,19 @@ struct Dev {
     //                    leaf Devs reached only by a direct attach
     //                    (devnull / devzero / devfull / devrandom) leave
     //                    it NULL.
-    //   wstat_native(c, valid, mode, uid, gid, size) — Thylacine-native
-    //                    chmod/chown/ftruncate surface (A-2a + Go Stage 5;
-    //                    IDENTITY-DESIGN.md §9.5). Apply the subset of
-    //                    (mode, uid, gid, size) selected by the `valid`
-    //                    mask (T_WSTAT_* bits) to the file backed by c.
-    //                    Returns 0 on success, -1 on failure. NULL-permitted
+    //   wstat_native(c, valid, mode, uid, gid, size, times) — Thylacine-
+    //                    native chmod/chown/ftruncate/utimens surface (A-2a +
+    //                    Go Stage 5 + G12; IDENTITY-DESIGN.md §9.5). Apply the
+    //                    subset of (mode, uid, gid, size, times) selected by
+    //                    the `valid` mask (T_WSTAT_* bits) to the file backed
+    //                    by c. `times` is a KERNEL copy of {atime, mtime}, read
+    //                    only for a _SET bit (NULL when none is set). Returns 0
+    //                    on success, or a -errno in [-4095, -2]. NULL-permitted
     //                    (like .stat_native / .fsync): a NULL slot => SYS_WSTAT
-    //                    returns -1. dev9p -> Tsetattr; read-only / metadata-
-    //                    less Devs (devramfs at v1.0) leave it NULL. The
-    //                    handler has already validated the mask + value bounds;
-    //                    the Dev forwards to its backing.
+    //                    answers EOPNOTSUPP. dev9p -> Tsetattr; read-only /
+    //                    metadata-less Devs (devramfs at v1.0) leave it NULL.
+    //                    The handler has already validated the mask + value
+    //                    bounds; the Dev forwards to its backing.
     //                    A Dev exposing this MUST set .perm_enforced = true
     //                    (#47 audit F1): SYS_WSTAT's fd gate is kind-only, so
     //                    perm_wstat_check -- which runs only when
@@ -182,7 +185,8 @@ struct Dev {
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
     int             (*wstat_native)(struct Spoor *c, u32 valid,
-                                    u32 mode, u32 uid, u32 gid, u64 size);
+                                    u32 mode, u32 uid, u32 gid, u64 size,
+                                    const struct t_timespec *times);
 
     // walk_attrs(c, nc, names, name_lens, nname, sts) — the walk-fused getattr
     // (POUNCE; docs/POUNCE-DESIGN.md §4). OPTIONAL (NULL-permitted, like

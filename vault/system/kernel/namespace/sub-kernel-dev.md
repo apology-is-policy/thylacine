@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-20
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -157,7 +157,10 @@ closed audit finding (#47): `SYS_WSTAT`'s fd gate is kind-only, so
 `perm_wstat_check` — which runs ONLY when `perm_enforced` is set — is
 the sole write-authority check on the metadata-mutation path. A Dev
 that offered metadata mutation without enforcement would let any handle
-holder rewrite mode/uid/gid with no identity check at all. Rather than
+holder rewrite mode/uid/gid or a file's times with no identity check at
+all. (The slot takes the times as a kernel copy since G12, 2026-10-22, and
+answers a `-errno`; a NULL slot makes `SYS_WSTAT` answer EOPNOTSUPP.)
+Rather than
 document that as a rule for Dev authors, the registration path makes it
 un-shippable: the combination fails the boot. **This is the pattern
 worth copying** — a vtable-shape constraint whose violation is caught

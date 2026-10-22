@@ -576,6 +576,11 @@ ships the name-based form, and the handle-based upgrade lands *with* symlinks/G1
 — they force it), `find -exec`, atime/mtime setter (G12), `uname`-real sysinfo
 (G16). Each a named kernel/lib surface; mostly v1.x.
 
+G12 was pulled forward into the browser arc's B-3 on 2026-10-22 (operator vote
+17): fontconfig's upstream test copies with `cp -a`, which needs the setter, and
+runs unmodified. Vote 18 shaped it: SYS_WSTAT gains the 9P time bits (x6 points
+at the two times), with no new syscall number, and answers an errno per refusal.
+
 ---
 
 ## Sequencing + the MVP line

@@ -5261,51 +5261,71 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
 }
 
 // =============================================================================
-// SYS_WSTAT — chmod/chown MECHANISM (A-2a; IDENTITY-DESIGN.md §9.5). Apply the
-// (mode, uid, gid) subset selected by the `valid` mask to an open Spoor via
-// dev->wstat_native (dev9p -> Tsetattr). Register-passed (no user buffer).
-//
-// This is the mechanism only: the handle RIGHT_WRITE gate is the sole gate;
-// the per-file rwx PERMISSION policy (owner-only chmod, CAP_HOSTOWNER chown)
-// is A-2d (the kernel rwx-enforcement layer). I-22 stands -- no rwx enforcement
-// exists yet to bypass. The value checks here are structural (mask sanity,
-// mode in 0777 with setuid rejected per §S5, uid/gid != INVALID), not policy.
+// SYS_WSTAT — chmod/chown/ftruncate/utimens (A-2a + Go Stage 5 + G12;
+// IDENTITY-DESIGN.md §9.5). Apply the (mode, uid, gid, size, times) subset
+// selected by the `valid` mask to an open Spoor via dev->wstat_native (dev9p
+// -> Tsetattr). The value checks here are structural (mask sanity, mode in
+// 0777 with setuid rejected per §S5, uid/gid != INVALID, size in the s64
+// domain, times in range); the authority is perm_wstat_check for the metadata
+// axes (perm-enforced Devs, A-2d) and the fd's RIGHT_WRITE for SIZE. Every
+// refusal answers its errno (the SYS_WSTAT ABI comment lists them).
 // =============================================================================
 
 static int spoor_wstat_native(struct Spoor *c, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size) {
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->wstat_native)            return -1;
-    return c->dev->wstat_native(c, valid, mode, uid, gid, size);
+                              u32 uid, u32 gid, u64 size,
+                              const struct t_timespec *times) {
+    if (!c->dev || !c->dev->wstat_native)            return -(int)T_E_OPNOTSUPP;
+    return c->dev->wstat_native(c, valid, mode, uid, gid, size, times);
 }
 
-// Inner — testable without a live EL0 thread (all-scalar args, no user
-// buffer). The handler thins to current_thread() + this.
+// A stat's or a Dev's answer on its way out of SYS_WSTAT, by SYS_FSTAT's rule:
+// a -errno in [-4095,-2] crosses as itself, except EBADF, which would blame an
+// fd that is fine (EIO, as fstat answers it); anything else is EIO.
+static s64 wstat_dev_errno(int rc) {
+    if (rc == -(int)T_E_BADF)                        return -(s64)T_E_IO;
+    return (rc <= -2 && rc >= -4095) ? (s64)rc : -(s64)T_E_IO;
+}
+
+// A SYS_WSTAT time from the caller: POSIX's range for a stored time, and no
+// time before the epoch (the 9P wire carries an unsigned second).
+static bool wstat_time_ok(const struct t_timespec *ts) {
+    return ts->tv_sec >= 0 && ts->tv_nsec >= 0 && ts->tv_nsec <= 999999999;
+}
+
+// Inner — testable without a live EL0 thread. `times` is a KERNEL copy of
+// {atime, mtime}, read only for a _SET bit (NULL when none is set). The
+// handler thins to current_thread() + the x6 copy-in + this.
 s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                       u32 uid, u32 gid, u64 size) {
+                       u32 uid, u32 gid, u64 size,
+                       const struct t_timespec *times) {
     if (!p)                                          return -1;
 
     // Mask sanity: at least one known bit, no reserved bit (so a future
     // T_WSTAT_* extension cannot be silently dropped -- same discipline as
-    // SYS_UNLINK's flags / SYS_WALK_CREATE's perm).
-    if (valid == 0)                                  return -1;
-    if (valid & ~(u32)T_WSTAT_VALID)                 return -1;
+    // SYS_UNLINK's flags / SYS_WALK_CREATE's perm). A _SET bit modifies its
+    // time bit and means nothing alone.
+    if (valid == 0)                                  return -(s64)T_E_INVAL;
+    if (valid & ~(u32)T_WSTAT_VALID)                 return -(s64)T_E_INVAL;
+    if ((valid & T_WSTAT_ATIME_SET) && !(valid & T_WSTAT_ATIME))
+        return -(s64)T_E_INVAL;
+    if ((valid & T_WSTAT_MTIME_SET) && !(valid & T_WSTAT_MTIME))
+        return -(s64)T_E_INVAL;
 
     // Per-field structural bounds. A field whose valid bit is clear is forced
     // to 0 before the Dev call (the server ignores it -- its valid bit is
     // clear -- but a defined 0 avoids passing a caller-controlled stale value).
     if (valid & T_WSTAT_MODE) {
-        if (mode & ~(u32)T_WSTAT_MODE_MASK)          return -1;  // setuid/sgid/sticky + stray bits
+        if (mode & ~(u32)T_WSTAT_MODE_MASK)          return -(s64)T_E_INVAL;  // setuid/sgid/sticky + stray bits
     } else {
         mode = 0;
     }
     if (valid & T_WSTAT_UID) {
-        if (uid == PRINCIPAL_INVALID)                return -1;
+        if (uid == PRINCIPAL_INVALID)                return -(s64)T_E_INVAL;
     } else {
         uid = 0;
     }
     if (valid & T_WSTAT_GID) {
-        if (gid == GID_INVALID)                      return -1;
+        if (gid == GID_INVALID)                      return -(s64)T_E_INVAL;
     } else {
         gid = 0;
     }
@@ -5313,9 +5333,27 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
         // The s64 offset domain (the SYS_LSEEK/SYS_PREAD bound): a length
         // whose sign bit is set cannot be represented by the size_t/off_t
         // plumbing below and is rejected up front.
-        if (size > 0x7FFFFFFFFFFFFFFFull)            return -1;
+        if (size > 0x7FFFFFFFFFFFFFFFull)            return -(s64)T_E_INVAL;
     } else {
         size = 0;
+    }
+    // The times reach the Dev through a local copy holding only the entries
+    // whose _SET bit is set (the rest stay 0), so nothing the caller left in
+    // the other slot travels.
+    struct t_timespec tv[2];
+    for (size_t i = 0; i < sizeof(tv); i++) ((u8 *)tv)[i] = 0;
+    const struct t_timespec *tvp = NULL;
+    if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
+        if (!times)                                  return -(s64)T_E_INVAL;
+        if (valid & T_WSTAT_ATIME_SET) {
+            if (!wstat_time_ok(&times[0]))           return -(s64)T_E_INVAL;
+            tv[0] = times[0];
+        }
+        if (valid & T_WSTAT_MTIME_SET) {
+            if (!wstat_time_ok(&times[1]))           return -(s64)T_E_INVAL;
+            tv[1] = times[1];
+        }
+        tvp = tv;
     }
 
     // #47 (the #46 sibling): kind-gate only -- KOBJ_SPOOR, ANY rights (rights
@@ -5340,7 +5378,7 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     // that open, so no perm_wstat_check applies to the size axis below.
     u32 want_rights = (valid & T_WSTAT_SIZE) ? RIGHT_WRITE : 0;
     struct Spoor *c = sys_lookup_rw_handle(p, h, want_rights);
-    if (!c)                                          return -1;
+    if (!c)                                          return -(s64)T_E_BADF;
 
     // #81 class, extended to the size axis: an O_PATH (CWALKONLY) handle is
     // born RIGHT_WRITE but is perm_check-EXEMPT at open (it needs only path
@@ -5352,35 +5390,52 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     // navigation handle is not a byte-I/O channel, and truncate IS byte I/O.
     if ((valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY)) {
         spoor_clunk(c);
-        return -1;
+        return -(s64)T_E_BADF;
     }
 
-    // A-2d: the ownership-change policy (IDENTITY-DESIGN.md 3.7.1 + perm.c).
-    // Gated on perm_enforced (dev9p live since A-3; devramfs .wstat_native is
-    // NULL so SYS_WSTAT on it returns -1 below regardless). Reads the file's
-    // CURRENT owner, then applies the policy -- for the METADATA axes only:
-    // since #47 this identity check is the ONLY write-authority gate on the
-    // mode/uid/gid path -- do not weaken it. A size-only call skips it (its
-    // identity check was the open-time perm_check, above).
-    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID)) &&
+    // A-2d: the metadata policy (IDENTITY-DESIGN.md 3.7.1 + perm.c). Gated on
+    // perm_enforced (dev9p live since A-3; devramfs .wstat_native is NULL so
+    // SYS_WSTAT on it answers EOPNOTSUPP below regardless). Reads the file's
+    // CURRENT stat, then applies the policy -- for the METADATA axes and the
+    // times: since #47 this identity check is the ONLY write-authority gate on
+    // the mode/uid/gid/times path -- do not weaken it. A size-only call skips
+    // it (its identity check was the open-time perm_check, above). Its denial
+    // is EACCES, never EPERM (-EPERM is the -1 the pouch seam reads as EIO).
+    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_TIMES)) &&
         c->dev && c->dev->perm_enforced) {
         struct t_stat cur;
-        if (spoor_stat_native(c, &cur) != 0)              { spoor_clunk(c); return -1; }
-        if (perm_wstat_check(p, cur.uid, valid, gid) != 0){ spoor_clunk(c); return -1; }
+        int sr = spoor_stat_native(c, &cur);
+        if (sr != 0)                                 { spoor_clunk(c); return wstat_dev_errno(sr); }
+        if (perm_wstat_check(p, &cur, valid, gid) != 0) {
+            spoor_clunk(c);
+            return -(s64)T_E_ACCES;
+        }
     }
-    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size);
+    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size, tvp);
     spoor_clunk(c);
-    return rc == 0 ? 0 : -1;
+    return rc == 0 ? 0 : wstat_dev_errno(rc);
 }
 
 static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
-                             u64 uid_raw, u64 gid_raw, u64 size_raw) {
+                             u64 uid_raw, u64 gid_raw, u64 size_raw,
+                             u64 times_va) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    return sys_wstat_for_proc(p, (hidx_t)hraw, (u32)valid_raw, (u32)mode_raw,
-                              (u32)uid_raw, (u32)gid_raw, size_raw);
+    // x6 is read only when a _SET bit asks for it: a caller setting mode, or
+    // "now", leaves x6 as register residue, and that is never touched.
+    u32 valid = (u32)valid_raw;
+    struct t_timespec tv[2];
+    const struct t_timespec *tvp = NULL;
+    if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
+        if (!sys_validate_user_buf(times_va, sizeof(tv)) ||
+            uaccess_copy_in(tv, times_va, sizeof(tv)) != 0)
+            return -(s64)T_E_FAULT;
+        tvp = tv;
+    }
+    return sys_wstat_for_proc(p, (hidx_t)hraw, valid, (u32)mode_raw,
+                              (u32)uid_raw, (u32)gid_raw, size_raw, tvp);
 }
 
 // =============================================================================
@@ -15528,11 +15583,14 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // The mode change runs through the audited sys_wstat_for_proc, whose
         // perm_wstat_check is the POSIX owner-or-CAP authority (the #47 note:
         // the metadata axis is kind-gated, works on any-rights incl. O_PATH).
-        // Its bare -1 (perm denial / server refusal) maps to EPERM, chmod's
-        // permission-failure errno.
-        s64 rc = sys_wstat_for_proc(p, (hidx_t)fd, T_WSTAT_MODE, mode, 0, 0, 0);
+        // Its EACCES is chmod's EPERM: only ownership refuses a chmod, and a
+        // Linux caller reads -EPERM as EPERM (only the pouch seam reserves
+        // -1). Every other refusal crosses as it is.
+        s64 rc = sys_wstat_for_proc(p, (hidx_t)fd, T_WSTAT_MODE, mode, 0, 0, 0,
+                                    NULL);
         (void)handle_close(p, (hidx_t)fd);
-        return (rc == 0) ? 0 : -(s64)T_E_PERM;
+        if (rc == -(s64)T_E_ACCES)                   return -(s64)T_E_PERM;
+        return rc;
     }
 
     case VIV_LINUX_READLINKAT: {
@@ -16803,7 +16861,8 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
                                               ctx->regs[2],
                                               ctx->regs[3],
                                               ctx->regs[4],
-                                              ctx->regs[5]);
+                                              ctx->regs[5],
+                                              ctx->regs[6]);
         return;
 
     case SYS_CHROOT:

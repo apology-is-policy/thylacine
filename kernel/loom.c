@@ -1207,8 +1207,8 @@ static bool loom_op_creates(u8 opcode) {
 // the parent directory's group (IDENTITY-DESIGN 3.5 F-5), as the sync create
 // sends, read from the parent's stat (taken for it where the Dev enforces no rwx
 // and loom_dir_writable took none); any other must be one the creator may chgrp
-// a file it owns to (perm_wstat_check, cur_uid = the creator: a member group, or
-// chown-any authority). On a caped session (IDENTITY-DESIGN 3.2) the group is
+// a file it owns to (perm_wstat_check against a stat the creator owns: a member
+// group, or chown-any authority). On a caped session (IDENTITY-DESIGN 3.2) the group is
 // the cape's and the wire carries P9_NOGID, so the server leaves its own alone;
 // naming a group there is a chgrp, which the cape refuses.
 //
@@ -1250,8 +1250,13 @@ static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *s
     } else if (gid == GID_INVALID) {
         if (!bound_by && spoor_stat_native(dir, &st) != 0) return -(s32)T_E_IO;
         gid = st.gid;
-    } else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0) {
-        return -(s32)T_E_ACCES;
+    } else {
+        // Only the owner field is read for T_WSTAT_GID.
+        struct t_stat own;
+        for (size_t i = 0; i < sizeof(own); i++) ((u8 *)&own)[i] = 0;
+        own.uid = who->principal_id;
+        if (perm_wstat_check(who, &own, T_WSTAT_GID, gid) != 0)
+            return -(s32)T_E_ACCES;
     }
     *gid_out = gid;
     *gid_set = true;
@@ -1410,7 +1415,10 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     //     chmod/chown ANY X-reachable file. v1.0 Loom SETATTR therefore supports ONLY
     //     size-truncate; the identity axes are rejected FAIL-CLOSED. Async
     //     identity-setattr is a v1.x seam (a submit-stat or a completion-recheck).
-    //   * atime/mtime (and any other bit) are unsupported -- reject (sync parity).
+    //   * atime/mtime (and any other bit) are rejected. A time needs the owner, or
+    //     for "now" write permission: the same owner-stat the identity axes lack
+    //     at submit. The sync path takes that stat (G12), so this is a Loom-only
+    //     seam, like async identity-setattr.
     if (sqe->opcode == LOOM_OP_SETATTR) {
         struct p9_setattr sa_chk;
         loom_bufcopy((u8 *)&sa_chk, buf_kva, (u32)sizeof(sa_chk));

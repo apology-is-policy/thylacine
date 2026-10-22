@@ -83,12 +83,13 @@ rights_t rights_for_omode(u32 omode) {
     return r;
 }
 
-int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) {
-    if (!p) return -1;
-    // RW-5 R4-F2: self-defend. This policy gates exactly {MODE,UID,GID}; a future
-    // T_WSTAT_* growth must not pass ungated through here just because the syscall
-    // layer happens to reject unknown bits upstream. Fail closed on any bit outside
-    // the set this function actually adjudicates.
+int perm_wstat_check(const struct Proc *p, const struct t_stat *cur, u32 valid,
+                     u32 new_gid) {
+    if (!p || !cur) return -1;
+    // RW-5 R4-F2: self-defend. This policy gates exactly the T_WSTAT_VALID set; a
+    // future T_WSTAT_* growth must not pass ungated through here just because the
+    // syscall layer happens to reject unknown bits upstream. Fail closed on any bit
+    // outside the set this function actually adjudicates.
     if (valid & ~(u32)T_WSTAT_VALID) return -1;
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of p->caps since A-4a; a plain load is C11-racy.
@@ -101,7 +102,7 @@ int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) 
     // finer no-give-away chown right split out of CAP_HOSTOWNER, conferable via
     // a legate clearance grant).
     bool chown_any = (caps & (CAP_HOSTOWNER | CAP_CHOWN)) != 0;
-    bool owner     = (p->principal_id == cur_uid);
+    bool owner     = (p->principal_id == cur->uid);
     // chmod: only the owner may change a file's mode bits (or chmod-any authority).
     if ((valid & T_WSTAT_MODE) && !owner && !fowner)     return -1;
     // chown(uid): no give-away -- the owner may NOT hand a file to another
@@ -112,6 +113,15 @@ int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) 
     // authority to any group.
     if ((valid & T_WSTAT_GID)  && !chown_any &&
         !(owner && proc_in_group(p, new_gid)))           return -1;
+    // Times (G12; POSIX utimensat): an explicit time only by the owner or chmod-any
+    // authority -- it can forge a file's history, which a backup or a build would
+    // trust. "Now" is what any write would do anyway, so write permission also
+    // suffices (perm_check carries the CAP_HOSTOWNER DAC-override itself).
+    if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
+        if (!owner && !fowner)                           return -1;
+    } else if (valid & (T_WSTAT_ATIME | T_WSTAT_MTIME)) {
+        if (!owner && !fowner && perm_check(p, cur, PERM_W) != 0) return -1;
+    }
     // T_WSTAT_SIZE (Go Stage 5) deliberately has NO policy arm here: a
     // truncate is a CONTENT mutation whose write authority is the fd's
     // RIGHT_WRITE (enforced at the syscall layer) + the open-time perm_check

@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## The create ops answer to M7 and M8 (2026-10-19, B-3e)
 
@@ -198,7 +198,12 @@ The audit that found this found the same `O_PATH` truncate bypass on the async
 path as on the sync one, *plus* the broader gap that the async path ran no
 identity check at all — both closed by the split. (`9p_client.loom_setattr_e2e`:
 chmod rejected and never on the wire; truncate reaches the wire; `O_PATH`
-truncate rejected.)
+truncate rejected.) The time bits stay refused too (EINVAL), for the same
+reason: a time needs the owner, or for "now" write permission, the owner-stat
+the submit path lacks. The sync SYS_WSTAT has set times since G12
+(2026-10-22), so this is a Loom-only gap like async identity-setattr. Loom's
+create-gid rule asks `perm_wstat_check`, which now takes a `t_stat`, of a
+stat whose only field is the creator as owner.
 
 **The directory-mutation ops re-check the DAC at submit (LOOM.md 8.5.1,
 2026-09-23).** `MKDIR`, `MKNOD`, `SYMLINK`, `UNLINKAT`, `RENAMEAT` and `LINK`
