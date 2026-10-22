@@ -227,7 +227,10 @@ run() {
     echo 'date -u +%Y-%m-%dT%H:%M:%SZ > DONE'
   } > "$OUT/pi-driver.sh"
   scp -q -o BatchMode=yes "$OUT/pi-driver.sh" "$PI_HOST:$PI_TREE/pi-driver.sh"
-  pi "cd ~/$PI_TREE && nohup setsid sh pi-driver.sh > pi-driver.log 2>&1 < /dev/null &"
+  # Only the driver goes to the background: backgrounding `cd && nohup ...`
+  # puts a subshell holding ssh's output open there too, and ssh then waits
+  # for the whole run (an old-form sleep 15 held it 16 s; this form, 0 s).
+  pi "cd ~/$PI_TREE || exit 9; nohup setsid sh pi-driver.sh > pi-driver.log 2>&1 < /dev/null &"
   echo "$OUT" > "$LASTRUN"
   record "driver started on the pi: $PI_CONFIGS, N=$PI_N"
   wait_run
