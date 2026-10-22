@@ -2381,3 +2381,36 @@ tools/test.sh
 
 - Phase 6 (Pouch; ROADMAP `§7A`) — `docs/phase6-status.md` — CLOSED at `218feb0`. Delivered the cross-compilation environment + the boundary-line for ported code.
 - Phase 5 (9P + Stratum integration + corvus; ROADMAP `§7`) — `docs/phase5-status.md` — CLOSED. Delivered the 9P client + Spoor + Territory + the corvus precedent for native Rust on libthyla-rs.
+
+## Thread-model C3: each Proc's threads under their own lock — 2026-10-22
+
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`; Fable's E-6). Spec-first by operator vote
+(2026-10-21, decision 1, which named this lock as covered): C3a (`specs/thread_reap.tla` + ARCH 7.3.1) before C3b
+(the code). Squashed from aux-3-c3 as *(pending)*.
+
+- **The lock.** `p->threads_lock` (IRQ-off, under `g_proc_table_lock`) guards the thread list, `thread_count`, a new
+  `live_threads`, `loom_sqpoll_count`, every `THREAD_EXITING` commit (`thread_commit_exiting_locked`, the only writer),
+  the debugger's focus and the per-Proc walks. A spawn and a non-last exit take no global lock. One per CPU; under
+  KERNEL_TESTS a per-CPU slot extincts on a second acquire, a non-holder release, or a `_locked` walker without it.
+- **Admission.** Spawn builds the thread unlinked and admits it in one hold: the claim, the cap, the link. The cap is
+  exact and no thread joins a group whose claim is set; the lockless pre-checks stay, so a doomed spawn rarely allocates.
+- **Exit.** The last thread out decides under the thread lock, drops it for the handle close, then commits nested in the
+  `g_proc_table_lock` hold that publishes ZOMBIE. The clear-child-tid store stays after the commit (exec's sole-thread
+  check relies on it; the plan to move it earlier was dropped before coding) and the FILE page-in refuses a thread that
+  is not RUNNING, so nothing past the commit sleeps.
+- **Found on the way.** Both spawn arms read the new tid after `ready()` (fixed; OPEN-BUGS 10-21 21:30Z). #237 F1, an
+  open P2 that lived only in its audit file, was enqueued (OPEN-BUGS 10-21 21:32Z) and folded into C4.
+- **Tests.** `resource.thread_admit_exact` (cap and claim, each a replayed race), `proc.threads_lock_slot`,
+  `demand_page.file_miss_refuses_exiting_thread`, `proc.spawn_arms_decide_at_the_admit` (both arms). Sabotage, each run
+  reading exactly its expected reds: A four reds (the cap leg, the slot, the fault guard, and the existing
+  `p9_closer.kill_at_final_close_start_forces_it` with the last-out mark moved past its window); B the claim leg plus
+  `EXTINCTION: threads_lock: a second Proc's thread lock on one CPU`; C `EXTINCTION: threads_lock: a _locked
+  thread-list walker without its Proc's lock`; D and D2 the new arm test, each arm alone.
+- **Audit.** Fable 5.1 r1 (cross-family, start == end): 0 P0 / 0 P1 / 1 P2 / 4 P3, all addressed (memory
+  `audit_thread_c3_closed_list.md`): F1 the section-28 I-24 / I-32 / I-39 cells re-pointed; F2 comments; F3 a test
+  terminal masks IRQs; F4 the lost-wake hazard recorded in the seam; F5 the arm-wiring test.
+- **Posture.** ci suite 2027/2027 (cb69dcfb6) and 2028/2028 (b86a0dafa), regreened after every sabotage set;
+  SMP matrix 50/50 PASS, 0 corruption (default smp1/4/8 + UBSan smp4/8, N=10, on b86a0dafa, ended 07:43Z 2026-10-22); thread_reap (clean 158 + 5 buggy), death_wake, caught_target, debug_stop and debug_step every cfg as claimed.
+  The `cpubench storm` before/after measurement (four concurrent at -smp 4, and one alone) is owed to the next Mac lease; its numbers land as a docs update.
+- **Votes.** Operator votes 5 (thread-directed notes, C4) and 6 (`/proc/<pid>/thread/<tid>/`, C7) answered during this
+  chunk, both as recommended.

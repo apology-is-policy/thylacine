@@ -117,11 +117,11 @@ static void sys_exit_group_handler(u64 status) {
     int code = (int)(status & 0xff);
     const char *msg = code ? "fail" : "ok";
     if (p && p->magic == PROC_MAGIC) {
-        // proc_group_terminate's universal death-wake walks p->threads, which
-        // requires g_proc_table_lock (#811, ARCH §8.8.1). Acquire it around the
-        // call and RELEASE before thread_exit_self -- thread_exit_self
-        // re-acquires it for the last-out ZOMBIE transition (spinlocks are not
-        // recursive).
+        // proc_group_terminate's contract is g_proc_table_lock, which
+        // serializes group terminations (its walk takes p->threads_lock
+        // itself, ARCH 7.3.1). Acquire it around the call and RELEASE before
+        // thread_exit_self -- thread_exit_self re-acquires it for the last-out
+        // ZOMBIE transition (spinlocks are not recursive).
         irq_state_t s = proc_table_lock_acquire();
         proc_group_terminate_code(p, code, msg);
         proc_table_lock_release(s);
@@ -5325,23 +5325,30 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
 
     // A dying Proc admits no new thread: one made now would only die at its
     // first entry's die-check, after a kstack allocation, and the spawner
-    // itself dies at this call's own return. A create racing the claim is
-    // still caught by the new thread's first die-check.
+    // itself dies at this call's own return. This read and the cap pre-check
+    // below are lockless early refusals, so a refused spawn usually allocates
+    // nothing; proc_thread_admit decides both exactly.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -T_E_AGAIN;
 
     // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at PROC_THREAD_MAX is
-    // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) before the kstack
-    // alloc -- bounding a thread bomb (each thread pins unswappable kernel
-    // kstack). kproc is already rejected above; the SYSTEM boot/service chain is
-    // exempt. A bounded TOCTOU overshoot (<= ncpus-1) is acceptable for a floor.
-    // The exited peers are freed first: the cap counts every Thread still on the
-    // list, so a program that starts and joins workers would otherwise reach it
-    // with a handful of live threads.
+    // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) -- bounding a thread
+    // bomb (each thread pins unswappable kernel kstack). kproc is already
+    // rejected above; the SYSTEM boot/service chain is exempt. The exited peers
+    // are freed first: the cap counts every Thread still on the list, so a
+    // program that starts and joins workers would otherwise reach it with a
+    // handful of live threads.
     proc_reap_exited_threads();
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
-    struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
+    struct Thread *nt = thread_alloc_user(p, entry_va, sp_va, arg_va, tls_va);
     if (!nt) return thread_tid_space_spent() ? -T_E_AGAIN : -T_E_NOMEM;
+    // The gate (ARCH 7.3.1): the claim and the cap again, and the link, in one
+    // threads_lock hold -- so the cap is exact and no thread joins a group
+    // whose claim is set (specs/thread_reap.tla Admit).
+    if (!proc_thread_admit(p, nt)) {
+        thread_free_unlinked(nt);
+        return -T_E_AGAIN;
+    }
 
     // CLONE_PARENT_SETTID (#112): publish the new tid into the parent-
     // supplied user word BEFORE the child is made runnable. Parent and
@@ -5375,8 +5382,11 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
 
     // ready() inserts the new RUNNABLE Thread into the run-tree. From
     // here it can be picked by any CPU on the next sched() tick.
+    // The tid is read before ready(): once runnable, the thread can exit and be
+    // freed by a sibling's reap before this thread loads from it.
+    int tid = nt->tid;
     ready(nt);
-    return (s64)nt->tid;
+    return (s64)tid;
 }
 
 #ifdef KERNEL_TESTS
@@ -5463,8 +5473,8 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
 
     // A dying Proc admits no new thread: one made now would only die at its
     // first entry's die-check, after a kstack allocation, and the spawner
-    // itself dies at this call's own return. A create racing the claim is
-    // still caught by the new thread's first die-check.
+    // itself dies at this call's own return. Lockless early refusals, as in
+    // sys_thread_spawn_handler; proc_thread_admit decides exactly.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -(s64)T_E_AGAIN;
 
     // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
@@ -5473,13 +5483,18 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     proc_reap_exited_threads();
     if (!proc_thread_cap_ok(p))                      return -(s64)T_E_AGAIN;
 
-    // The crux. thread_create_forked copies `ctx` (the parent's trap frame) with
+    // The crux. thread_alloc_forked copies `ctx` (the parent's trap frame) with
     // x0=0 + sp=child_sp, sets tpidr_el0=child_tls, copies the parent's LIVE FP,
-    // and links the Thread into `p` -- the CALLER's Proc. Passing cur->proc (not
-    // a fresh Proc) is the single line that makes this a CLONE_THREAD rather than
-    // a fork: shared address space, one pid, one ASID (I-31).
-    struct Thread *nt = thread_create_forked(p, ctx, child_sp, child_tls);
+    // and the admit links the Thread into `p` -- the CALLER's Proc. Passing
+    // cur->proc (not a fresh Proc) is the single line that makes this a
+    // CLONE_THREAD rather than a fork: shared address space, one pid, one ASID
+    // (I-31).
+    struct Thread *nt = thread_alloc_forked(p, ctx, child_sp, child_tls);
     if (!nt) return thread_tid_space_spent() ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
+    if (!proc_thread_admit(p, nt)) {
+        thread_free_unlinked(nt);
+        return -(s64)T_E_AGAIN;
+    }
 
     // CLONE_PARENT_SETTID: publish the tid into the parent word BEFORE ready(),
     // so the child can never observe a 0 tid, and read nt->tid HERE (pre-ready)
@@ -5500,15 +5515,23 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
         nt->clear_child_tid = ctid_va;
 
     // ready() inserts the RUNNABLE Thread into the run tree. The link
-    // (thread_create_forked -> thread_link_into_proc, under g_proc_table_lock)
-    // already happened, so a proc_group_terminate racing this either saw the
+    // (proc_thread_admit, under p->threads_lock) already happened, so a
+    // proc_group_terminate racing this either saw the
     // linked Thread (and marked it -- its EL0-return die-check fires before it
     // reaches EL0) or has not run yet (and marks it when it does): the I-24
     // shootdown covers every Thread linked into p, exactly as for a
     // sys_thread_spawn_handler thread created the same way.
+    int tid = nt->tid;   // before ready(), as in sys_thread_spawn_handler
     ready(nt);
-    return (s64)nt->tid;
+    return (s64)tid;
 }
+
+#ifdef KERNEL_TESTS
+s64 viv_clone_thread_for_test(struct exception_context *ctx, const u64 *args);
+s64 viv_clone_thread_for_test(struct exception_context *ctx, const u64 *args) {
+    return viv_clone_thread(ctx, args);
+}
+#endif
 
 // N-3: the futex shell -- FUTEX_WAIT/WAKE/REQUEUE onto torpor. `p` is the
 // caller's Proc (== current_thread()->proc, which torpor's user-VA load
@@ -5738,12 +5761,15 @@ struct postnote_walk_ctx {
                                   // notes_post's own EINVAL or EAGAIN)
 };
 
-// Does `p` hold the thread `tid`? Caller holds g_proc_table_lock, which every
-// thread-list walk holds (#811).
-static bool proc_holds_tid_locked(const struct Proc *p, int tid) {
+// Does `p` hold the thread `tid`? Walked under p->threads_lock (ARCH 7.3.1);
+// the caller pins p and holds no threads_lock.
+static bool proc_holds_tid(struct Proc *p, int tid) {
+    bool held = false;
+    irq_state_t s = proc_threads_lock(p);
     for (const struct Thread *x = p->threads; x; x = x->next_in_proc)
-        if (x->tid == tid) return true;
-    return false;
+        if (x->tid == tid) { held = true; break; }
+    proc_threads_unlock(p, s);
+    return held;
 }
 
 // N-4 in ONE place: `kill` terminates its target, whatever the target's thread
@@ -5759,9 +5785,10 @@ static bool proc_holds_tid_locked(const struct Proc *p, int tid) {
 // either one. A third spelling already exists in devproc.c's `/proc/<pid>/ctl`
 // kill verb -- fold it in here if that file is ever touched for this reason.
 //
-// CALLER MUST HOLD g_proc_table_lock: proc_group_terminate's universal
-// death-wake walks p->threads (#811, ARCH section 8.8.1). The cross arm holds
-// it via proc_for_each; the self arm takes it around this call.
+// CALLER MUST HOLD g_proc_table_lock, proc_group_terminate's contract (it
+// serializes group terminations; the death-wake walk takes p->threads_lock
+// itself, ARCH 7.3.1). The cross arm holds it via proc_for_each; the self arm
+// takes it around this call.
 static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) {
     if (!notes_name_is_kill(name)) return false;
     proc_group_kill(target);
@@ -5771,7 +5798,7 @@ static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) 
 static int postnote_walk_cb(struct Proc *target, void *arg) {
     struct postnote_walk_ctx *w = (struct postnote_walk_ctx *)arg;
     if (w->target_tid > 0) {
-        if (!proc_holds_tid_locked(target, w->target_tid)) return 0;
+        if (!proc_holds_tid(target, w->target_tid)) return 0;
         // A tid names one thread, so the Proc holding it is the only candidate:
         // a tgkill whose tgid is some other Proc names no thread at all.
         if (w->target_pid > 0 && target->pid != w->target_pid) {
@@ -5860,8 +5887,8 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // `interrupt` to a handler-less non-self-managing target -- the shell's
     // Ctrl-C forward to a blocked foreground child is the canonical case),
     // wake the target's blocked threads so the LS-5b terminate fires at
-    // their EL0-return tails. Internally gated on the latch; the walk's
-    // g_proc_table_lock contract is satisfied (proc_for_each holds it).
+    // their EL0-return tails. Internally gated on the latch; the walk takes
+    // the target's threads_lock, and proc_for_each's lock pins the target.
     if (rc == 0) {
         proc_interrupt_terminate_wake(target);
         proc_caught_note_wake(target);   // item 11: caught-note twin
@@ -5934,15 +5961,12 @@ static s64 postnote_self(struct Proc *p, const char *name) {
     // may arm the terminate latch while a PEER thread is blocked in a rendez
     // sleep -- wake the peers so they unwind to their tails (the posting thread
     // itself is running and reaches its own tail at this syscall's return). The
-    // wake walks p->threads, so it needs g_proc_table_lock (the #811 contract);
-    // take it only when the latch armed (the read is a benign pre-check -- the
-    // wake re-validates under its own internal gate, and `p` is self, immune to
-    // reap here).
+    // wakes walk p->threads under p->threads_lock, which they take themselves;
+    // `p` is self, so nothing reaps it here. Only when a latch armed (a benign
+    // pre-check -- each wake re-validates under its own internal gate).
     if (rc == 0 && (proc_intr_terminate_pending(p) || proc_caught_note_pending(p))) {
-        irq_state_t ws = proc_table_lock_acquire();
         proc_interrupt_terminate_wake(p);
         proc_caught_note_wake(p);   // item 11: caught-note twin
-        proc_table_lock_release(ws);
     }
     return (s64)rc;
 }
@@ -13916,9 +13940,7 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
     if (tid > 0) {
         // The caller's own thread list can change under it (a peer exits), so
         // it is read under the lock every thread-list walk holds.
-        irq_state_t s = proc_table_lock_acquire();
-        self = proc_holds_tid_locked(p, tid);
-        proc_table_lock_release(s);
+        self = proc_holds_tid(p, tid);
         if (self && pid > 0 && pid != p->pid) return -(s64)T_E_SRCH;
     } else {
         // A negative pid is a process group, or every process: the gate admits

@@ -2744,7 +2744,7 @@ void loom_sqpoll_main(void *arg) {
     loom_reap_terminal(l);
 
     (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
     // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
     // the release it pairs with has already published state==EXITING. wakeup()

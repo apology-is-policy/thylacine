@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -454,6 +454,11 @@ field offsets — size alone would let a same-size field reorder shift the layou
 the userspace mirror reads.
 
 ## Concurrency
+
+An SQPOLL kthread is charged to its creator's thread budget under the
+creator's thread lock (`proc_sqpoll_charge` / `proc_sqpoll_uncharge`,
+`loom_sqpoll_count`, [[lock-proc-threads]]), and its terminal commits through
+`thread_kthread_retire` with IRQs masked to its final switch.
 
 The ring lock is a leaf. It is taken under the engine's client lock (the
 completion path) and never the reverse; it nests nothing except brief atomics.

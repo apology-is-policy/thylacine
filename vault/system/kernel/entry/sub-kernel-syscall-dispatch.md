@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1654,9 +1654,12 @@ three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
 `EINVAL` first, as Linux does). The walk's context gained two fields:
 
 - `target_tid` (> 0): the target is the Proc holding that thread, found with
-  `proc_holds_tid_locked` under `g_proc_table_lock`, the lock every thread
-  list walk holds (#811); a `tgkill` whose tgid is a different Proc names no
-  thread (`ESRCH`).
+  `proc_holds_tid`, which walks the candidate's threads under its thread lock
+  ([[lock-proc-threads]]); a `tgkill` whose tgid is a different Proc names no
+  thread (`ESRCH`). Both spawn arms build the thread unlinked and admit it with
+  `proc_thread_admit` (the claim and the cap again, then the link, in one hold),
+  after lockless pre-checks that spare a doomed spawn its allocation; each reads
+  the new tid before `ready()`.
 - `err`: with `result` -1, why, as `SYS_POSTNOTE` answers it since S-3 (below):
   `ESRCH` for a mismatched tgid, `EACCES` for the gate, `notes_post`'s own
   `EINVAL` or `EAGAIN`. `viv_kill` turns `EACCES` back into Linux's `EPERM`.

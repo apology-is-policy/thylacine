@@ -56,7 +56,7 @@ void test_kthread_park_terminal(volatile bool *exited) {
     // DAIF is discarded when sched() resumes the next thread (it restores its
     // own DAIF) -- this kthread never runs again, so there is nothing to undo.
     (void)spin_lock_irqsave(NULL);
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(exited, true, __ATOMIC_RELEASE);   // joiner's ACQUIRE pair
     sched();                                            // switch away permanently
     extinction("test_kthread_park_terminal: returned from terminal sched");
@@ -428,6 +428,7 @@ void test_resource_page_peak_high_water(void);
 void test_resource_spawn_budget_resolve(void);
 void test_resource_measured_compile_needs_raise(void);
 void test_resource_thread_cap_ok(void);
+void test_resource_thread_admit_exact(void);
 void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
@@ -658,6 +659,7 @@ void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_read_error_dying_is_death(void);
+void test_demand_page_file_miss_refuses_exiting_thread(void);
 void test_demand_page_file_read_revoked_latch_is_dying(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
@@ -900,6 +902,8 @@ void test_proc_fault_in_dying_group_reaps_exited_packed(void);   // gcpark-b
 void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
 void test_proc_reap_exited_threads_frees_peers(void);
 void test_proc_reap_keeps_thread_cap_open(void);
+void test_proc_threads_lock_slot(void);
+void test_proc_spawn_arms_decide_at_the_admit(void);
 void test_proc_reap_before_sqpoll_charge(void);
 void test_proc_exit_tail_runs_to_its_end(void);
 void test_proc_exec_waits_for_exiting_peer(void);
@@ -2565,6 +2569,7 @@ struct test_case g_tests[] = {
     { "resource.spawn_budget_resolve", test_resource_spawn_budget_resolve,  false, NULL },
     { "resource.measured_compile_needs_raise", test_resource_measured_compile_needs_raise, false, NULL },
     { "resource.thread_cap_ok",        test_resource_thread_cap_ok,        false, NULL },
+    { "resource.thread_admit_exact",   test_resource_thread_admit_exact,   false, NULL },
     { "resource.child_cap_ok",         test_resource_child_cap_ok,         false, NULL },
     { "resource.child_count_tracks_list",
                                        test_resource_child_count_tracks_list, false, NULL },
@@ -2848,6 +2853,8 @@ struct test_case g_tests[] = {
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_read_error_dying_is_death",
                                        test_demand_page_file_read_error_dying_is_death, false, NULL },
+    { "demand_page.file_miss_refuses_exiting_thread",
+                                       test_demand_page_file_miss_refuses_exiting_thread, false, NULL },
     { "demand_page.file_read_revoked_latch_is_dying",
                                        test_demand_page_file_read_revoked_latch_is_dying, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
@@ -3176,6 +3183,8 @@ struct test_case g_tests[] = {
     { "proc.note_death_with_live_peer_reaps_signalled", test_proc_note_death_with_live_peer_reaps_signalled, false, NULL },
     { "proc.reap_exited_threads_frees_peers",   test_proc_reap_exited_threads_frees_peers,   false, NULL },
     { "proc.reap_keeps_thread_cap_open",        test_proc_reap_keeps_thread_cap_open,        false, NULL },
+    { "proc.threads_lock_slot",                 test_proc_threads_lock_slot,                 false, NULL },
+    { "proc.spawn_arms_decide_at_the_admit",    test_proc_spawn_arms_decide_at_the_admit,    false, NULL },
     { "proc.reap_before_sqpoll_charge",         test_proc_reap_before_sqpoll_charge,         false, NULL },
     { "proc.exit_tail_runs_to_its_end",         test_proc_exit_tail_runs_to_its_end,         false, NULL },
     { "proc.exec_waits_for_exiting_peer",       test_proc_exec_waits_for_exiting_peer,       false, NULL },

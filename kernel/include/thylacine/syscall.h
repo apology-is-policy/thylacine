@@ -786,17 +786,16 @@ enum {
     // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
     //   (no args)
     //
-    // Atomically:
-    //   1. If clear_child_tid != 0 on this Thread (set via
+    // In order (thread_exit_self, proc.h):
+    //   1. Commit THREAD_EXITING under p->threads_lock; the LAST live
+    //      thread first closes the Proc's handles, then commits and
+    //      transitions the Proc to ZOMBIE (exit_status 0, or the group
+    //      claim's) + wakes the parent's child_waiters.
+    //   2. If clear_child_tid != 0 on this Thread (set via
     //      SYS_SET_TID_ADDRESS): uaccess_store_u32(0) at that user-VA +
-    //      torpor_wake(UINT32_MAX) on the same address. Best-effort —
-    //      a failed store (page unmapped) skips the wake but does not
-    //      extinct.
-    //   2. Mark self THREAD_EXITING under g_proc_table_lock.
-    //   3. If this is the LAST non-EXITING thread in the Proc, also
-    //      transition the Proc to ZOMBIE with exit_status = 0 + wake
-    //      parent's child_waiters (mirrors exits() with status 0).
-    //   4. yield via sched(); never returns.
+    //      torpor_wake(UINT32_MAX) on the same address. Best-effort --
+    //      a failed store skips the wake but does not extinct.
+    //   3. yield via sched(); never returns.
     //
     // After-exit reaping: the Thread descriptor + kstack stay
     // allocated, counted against PROC_THREAD_MAX, until the Proc's

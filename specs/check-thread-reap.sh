@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="thread_reap:-"
+CLEAN="thread_reap:158"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="thread_reap_buggy_admit_claim:NoAdmitAfterClaim

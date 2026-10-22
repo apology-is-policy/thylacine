@@ -787,7 +787,7 @@ static void closer_retire(struct p9_closer *self) {
     // RELEASE so no preempt lands between them, then a switch that never
     // returns (EXITING is never re-enqueued).
     (void)spin_lock_irqsave(NULL);
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&self->exited, true, __ATOMIC_RELEASE);
     sched();
     extinction("p9 closer: returned from its terminal sched");

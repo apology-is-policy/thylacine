@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-08
+updated: 2026-10-22
 ---
 ## Graphical grant commit
 
@@ -244,7 +244,11 @@ tag — untidy, not a violation. The teardown walk is a tidiness sweep; the
 root dies on its own exit or self-terminates at `valid_until`. A member the
 sweep terminates dies as if killed: `proc_group_terminate(m, NOTE_SIG_KILL,
 "legate scope ended")` records `SIGKILL`, so a waiting parent's packed word
-reads `WIFSIGNALED` `SIGKILL` (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
+reads `WIFSIGNALED` `SIGKILL` (gcpark-b, 2026-10-12; [[sub-kernel-death]]). The
+sweep runs from `proc_become_zombie_locked` under `g_proc_table_lock` alone --
+the dying root's own thread lock already released -- and each member's
+termination takes that member's thread lock in turn ([[lock-proc-threads]]: one
+per CPU).
 
 **The arm-6 session hangup is this teardown's structural sibling, and is *not* a
 cap.** `proc_session_hangup_if_leader` ([[sub-kernel-death]]) rides the same

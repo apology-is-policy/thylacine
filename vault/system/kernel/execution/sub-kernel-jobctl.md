@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-08
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -284,7 +284,7 @@ debugger's flag discipline exactly, because the park predicate reads both (and,
 when either is set, `group_exit_msg`, acquire-loaded too).
 
 The catchability gate reads the handler address, the process flags, and each
-thread's note mask lock-free. The thread walk is pinned by the caller's lock;
+thread's note mask lock-free. The thread walk holds the member's thread lock, taken per member under the fan's `g_proc_table_lock` ([[lock-proc-threads]]);
 the mask is owner-written, so the cross-thread load is a benign race made
 explicit.
 

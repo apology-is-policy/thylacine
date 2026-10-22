@@ -350,7 +350,8 @@ static void notify_test_thread(void) {
     // caller's obligation -- see the cleanup wait in
     // test_sched_notify_idle_peer_smoke, which exists because that inference
     // was once made the other way.
-    current_thread()->state = THREAD_EXITING;
+    (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     sched();
     // Unreachable -- EXITING is never re-dispatched.
 }

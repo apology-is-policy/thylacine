@@ -31,9 +31,11 @@
 #include <thylacine/burrow.h>       // #106/#122: burrow_backing_pages + share_into
 #include <thylacine/exec.h>         // #122: EXEC_USER_BURROW_BASE/TOP for the gap search
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>        // C3: NOTE_SIG_KILL for the claim leg
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>       // C3: thread_alloc_user + proc_thread_admit
 #include <thylacine/types.h>
 #include <thylacine/vma.h>          // #122: vma_find_gap + VMA_PROT_RW
 
@@ -346,6 +348,58 @@ void test_resource_thread_cap_ok(void) {
 
     p->thread_count = 0; sys->thread_count = 0;   // reset for proc_free's gate
     res_drop(p); res_drop(sys);
+}
+
+// The admit decides the cap and the claim in the hold that links (ARCH 7.3.1,
+// thread_reap.tla CapExact / NoAdmitAfterClaim). Each leg replays a race in
+// sequence: spawn A's lockless pre-check passes, a rival then changes the
+// answer, and A's admit must refuse -- the split shape linked A on the
+// pre-check's word. The rival's own admit is the positive control.
+static void res_admit_free(struct Thread *t, bool admitted) {
+    if (admitted) thread_free(t);
+    else          thread_free_unlinked(t);
+}
+
+void test_resource_thread_admit_exact(void) {
+    struct Proc *p = res_make(A_REAL_USER);   // non-exempt
+
+    // Cap: A and B both pre-check at cap-1; B is admitted, A is refused.
+    p->thread_count = PROC_THREAD_MAX - 1;
+    struct Thread *a = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
+    struct Thread *b = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
+    TEST_ASSERT(a && b, "two unlinked threads built for p");
+    bool pre_a = proc_thread_cap_ok(p);
+    bool pre_b = proc_thread_cap_ok(p);
+    bool adm_b = proc_thread_admit(p, b);
+    bool adm_a = proc_thread_admit(p, a);
+    int  cap_count = p->thread_count, cap_live = p->live_threads;
+    res_admit_free(a, adm_a);
+    res_admit_free(b, adm_b);
+
+    // Claim: A pre-checks no claim, a kill claims, A's admit is refused.
+    p->thread_count = 0;
+    struct Thread *c = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
+    TEST_ASSERT(c != NULL, "an unlinked thread built for p");
+    bool pre_c = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL;
+    irq_state_t s = proc_table_lock_acquire();
+    proc_group_terminate(p, NOTE_SIG_KILL, "killed");
+    proc_table_lock_release(s);
+    bool adm_c = proc_thread_admit(p, c);
+    int  claim_count = p->thread_count, claim_live = p->live_threads;
+    res_admit_free(c, adm_c);
+
+    TEST_ASSERT(pre_a && pre_b, "premise: both pre-checks passed at cap-1");
+    TEST_ASSERT(adm_b, "control: the first admit at cap-1 links");
+    TEST_ASSERT(!adm_a, "the second admit at the cap is refused, whatever its pre-check said");
+    TEST_EXPECT_EQ(cap_count, PROC_THREAD_MAX, "exactly the cap is linked");
+    TEST_EXPECT_EQ(cap_live, 1, "one thread counted live");
+    TEST_ASSERT(pre_c, "premise: the pre-check read no claim");
+    TEST_ASSERT(!adm_c, "an admit after the claim is refused, whatever its pre-check said");
+    TEST_EXPECT_EQ(claim_count, 0, "nothing linked into the claimed Proc");
+    TEST_EXPECT_EQ(claim_live, 0, "nothing counted live in the claimed Proc");
+
+    p->thread_count = 0;   // reset for proc_free's gate
+    res_drop(p);
 }
 
 void test_resource_child_cap_ok(void) {

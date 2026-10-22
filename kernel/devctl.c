@@ -291,8 +291,8 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     }
 
     // prowl-1: cumulative on-CPU time (ns) as the trailing column -- the reader
-    // diffs it across polls for %CPU. proc_cpu_ns walks p->threads; safe here
-    // because format_procs runs under g_proc_table_lock (proc_for_each). Shown
+    // diffs it across polls for %CPU. proc_cpu_ns walks p->threads under
+    // p->threads_lock; format_procs pins p (proc_for_each). Shown
     // only to the row's owner or a hostowner (IMPERIUM-DESIGN 11.3 item 10): the
     // trusted episode's authority accrues it per key.
     n = fmt_str(s->buf, s->cap, s->off, "    ");

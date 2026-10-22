@@ -13,7 +13,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -73,7 +73,7 @@ nothing here takes a lock ([[sub-kernel-addrspace]]).
 Two leaves are gated, on the SAME `CAP_HOSTOWNER` check and for DIFFERENT
 reasons. `kernel-base` discloses the live KASLR slide. `kstack` discloses no
 address at all — it is gated because of its COST: its formatter walks every
-live Proc under `g_proc_table_lock` with IRQs MASKED and scans each thread's
+live Proc under `g_proc_table_lock`, each Proc's threads under its thread lock, with IRQs MASKED, and scans each thread's
 16 KiB stack for the poison boundary, recomputed on every `read()` at every
 offset, since these leaves are stateless. Left world-readable, a `pread` loop
 would hold a CPU masked and block every fork/exit/wait behind the proc-table
@@ -287,8 +287,9 @@ per-CPU scheduler meters.
 
 ## Concurrency
 
-Only `g_proc_table_lock`, and only for the process list (taken by
-`proc_for_each`; the CPU-time helper walks a Proc's threads under it).
+`g_proc_table_lock` for the process list (taken by `proc_for_each`), and each
+Proc's [[lock-proc-threads]] for its threads (the CPU-time and stack-peak
+helpers take it themselves).
 
 The CPU-time gates read the reader's principal and capabilities with acquire
 loads and take no lock.

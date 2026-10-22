@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -286,9 +286,10 @@ completed anyway cannot make the call's next wait refuse the note only it may
 unwind for. The drain of a family's last queued note clears the caught bit
 alone. Exec clears the claim byte, the claim and the designation under the
 thread's `wait_lock` (exec runs alone, but a walk can have designated it). A
-thread that exits gives up both at its `THREAD_EXITING` commit, under the
-process-table lock (`notes_exit_drop_locked`), and walks again if a family's
-note is still queued.
+thread that exits gives up both at its `THREAD_EXITING` commit, under its
+Proc's thread lock (`notes_exit_drop_locked`), and walks again if a family's
+note is still queued. The caught-note walks run under that lock
+([[lock-proc-threads]]) and take no note queue's lock.
 Each woken thread re-checks a lock-free predicate,
 `thread_caught_note_deliverable`: a caught note is deliverable to *this* thread
 iff it is armed AND unmasked by the thread's own `note_mask` AND in the supported

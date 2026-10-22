@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -653,6 +653,11 @@ poll round rather than caching a pointer, so a target reaped mid-wait is simply
 "not found" instead of a use-after-free. This is the single discipline that makes
 a cross-Proc control surface safe here, and it should not be traded away for the
 convenience of a cached pointer.
+
+The debug callbacks take the target's [[lock-proc-threads]] after the pid
+match and hold it from the fully-stopped check through every use of the
+focus `Thread *` (regs, kregs, the step arm, the kstack walk, `sched`); the
+step releases it before `proc_debug_resume`, which takes it itself.
 
 Lock order, all nested *under* `g_proc_table_lock` and all acyclic on the same
 ground (each is a leaf; nothing held under it takes the global lock):

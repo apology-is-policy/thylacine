@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i44]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-20
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -247,7 +247,7 @@ for the first word that is not it. That word is the deepest the stack has EVER
 reached. Reading a RUNNING thread's watermark is deliberate and its answer is
 honest in the direction that matters: a running thread only pushes its frontier
 lower, so a concurrent write makes the reported depth deeper, never shallower.
-The caller pins the Thread under the proc-table lock; the scan needs no lock.
+The caller pins the Thread under its Proc's thread lock; the scan needs no lock.
 `/ctl/kstack` reports it per Proc and as a whole-system peak.
 
 It exists because nothing in the tree could report stack depth at all, and ARCH
@@ -269,8 +269,14 @@ out. Found by the ARCH 8.12 audit round (F2).
 
 ## Concurrency
 
-`thread_link_into_proc` / `thread_unlink_from_proc` take
-[[lock-proc-table]]. Before multi-thread Procs the lock was unnecessary
+`thread_link_into_proc` / `thread_unlink_from_proc` take the Proc's
+[[lock-proc-threads]] (they took [[lock-proc-table]] until thread-model C3).
+The link counts the thread in `thread_count` and `live_threads`; the unlink
+drops `live_threads` too when the thread never committed. The user spawn arms
+build a thread unlinked (`thread_alloc_user` / `thread_alloc_forked`) and link
+it through `proc_thread_admit`, or free it with `thread_free_unlinked`.
+`thread_commit_exiting_locked` is the only writer of `THREAD_EXITING`; a kernel
+thread's terminal uses `thread_kthread_retire`, under the same lock. Before multi-thread Procs the lock was unnecessary
 (one writer per Proc, ever); the P6 lift introduced a second writer
 (`SYS_THREAD_SPAWN` from a peer Thread on a peer CPU) and without the lock a
 walker could observe `p->threads = new_head` published before

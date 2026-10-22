@@ -49,6 +49,7 @@
 #include <thylacine/notes.h>          // groupstatus r1 P3-2: a latch revoked mid-read
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/spinlock.h>      // C3: the IRQ mask around the forged EXITING state
 #include <thylacine/spoor.h>         // REVENANT R-2: spoor_alloc for the FILE Burrow's backing Chan
 #include <thylacine/thread.h>        // ARCH 8.8.3: current_thread + note_interruptible
 #include <thylacine/types.h>
@@ -74,6 +75,7 @@ void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_read_error_dying_is_death(void);
+void test_demand_page_file_miss_refuses_exiting_thread(void);
 void test_demand_page_file_multi_page(void);
 // REVENANT R-5 audit SA-F1: the slow path must LOOP over a short-returning read.
 void test_demand_page_file_short_read_fills_page(void);
@@ -1050,6 +1052,63 @@ void test_demand_page_file_read_error_dying_is_death(void) {
         "a failed page-in with the thread's death pending is answered by the death");
     TEST_EXPECT_EQ(g_rev_read_calls, 2, "both faults attempted the read");
     TEST_EXPECT_EQ(status, 5, "the child reaped with its group's claimed status");
+}
+
+// Nothing past the EXITING commit sleeps (ARCH 7.3.1): the exit's
+// clear-child-tid store follows the commit, and a FILE miss is the one fault
+// arm that sleeps, so it refuses a thread that is not RUNNING -- nothing read,
+// nothing installed, the store fails as on an unmapped page. No writable FILE
+// mapping exists, so no store reaches the arm today; a read fault with the
+// state forged EXITING does. Runs in an rfork'd child, because the pager asks
+// the faulting thread; IRQs stay masked while the state says EXITING, so
+// nothing switches the thread out on its word. Control one variable away: the
+// same fault RUNNING reads the page and installs it.
+static volatile int g_ns_r, g_ns_reads, g_ns_installed;
+static volatile int g_ns_ctl_r, g_ns_ctl_reads, g_ns_ctl_installed;
+
+static void no_sleep_after_commit_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    g_ns_r = g_ns_ctl_r = -1;
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
+    if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
+        struct fault_info fi;
+        make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/false);
+        int calls = g_rev_read_calls;
+        irq_state_t is = spin_lock_irqsave(NULL);
+        t->state = THREAD_EXITING;
+        g_ns_r = (int)userland_demand_page(p, &fi);
+        t->state = THREAD_RUNNING;
+        spin_unlock_irqrestore(NULL, is);
+        g_ns_reads     = g_rev_read_calls - calls;
+        g_ns_installed = burrow_file_slot_for_test(v, 0) != NULL;
+
+        make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/false);
+        calls = g_rev_read_calls;
+        g_ns_ctl_r         = (int)userland_demand_page(p, &fi);
+        g_ns_ctl_reads     = g_rev_read_calls - calls;
+        g_ns_ctl_installed = burrow_file_slot_for_test(v, 0) != NULL;
+    }
+    if (v) burrow_unref(v);
+    thread_exit_self();
+}
+
+void test_demand_page_file_miss_refuses_exiting_thread(void) {
+    g_rev_read_calls = 0;
+    int pid = rfork(RFPROC, no_sleep_after_commit_entry, NULL);
+    int status = -1;
+    int reaped = pid > 0 ? wait_pid(&status) : -1;
+    TEST_ASSERT(pid > 0, "rfork");
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid reaped the child");
+    TEST_EXPECT_EQ(g_ns_r, (int)FAULT_UNHANDLED_USER,
+        "a FILE miss refuses a thread past its EXITING commit");
+    TEST_EXPECT_EQ(g_ns_reads, 0, "the refused fault read nothing");
+    TEST_EXPECT_EQ(g_ns_installed, 0, "the refused fault installed nothing");
+    TEST_EXPECT_EQ(g_ns_ctl_r, (int)FAULT_HANDLED, "control: the same fault RUNNING is handled");
+    TEST_EXPECT_NE(g_ns_ctl_reads, 0, "control: it read the page");
+    TEST_EXPECT_EQ(g_ns_ctl_installed, 1, "control: it installed the page");
 }
 
 // Pending is sampled before the page-in as well as after. A terminate latch

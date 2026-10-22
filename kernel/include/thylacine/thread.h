@@ -433,7 +433,7 @@ struct Thread {
     // stepping (the step-over-breakpoint dance: a thread stopped AT a bp would
     // re-trap on the resume instead of stepping, so switch_in loads that bp
     // disabled for this thread's step). Both set only while the target is
-    // fully-stopped (the `step` verb, under g_proc_table_lock) + on the local
+    // fully-stopped (the `step` verb, under the target's threads_lock) + on the local
     // CPU under IRQ-mask; read (ACQUIRE) in the ctx-switch install. KP_ZERO inits
     // them (not stepping); NOT propagated by rfork.
     bool               debug_ss_armed;
@@ -518,7 +518,7 @@ struct Thread {
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
     // on-CPU time telemetry. run_ns accumulates (now - switched_in_at) at every
     // switch-OUT; the per-Proc cpu_ns a /proc reader reports is the sum over
-    // p->threads (proc_cpu_ns, under g_proc_table_lock). READ-ONLY -- NO
+    // p->threads (proc_cpu_ns, under p->threads_lock). READ-ONLY -- NO
     // scheduling decision reads run_ns, so EEVDF placement / the vd_t math /
     // liveness / latency are byte-unchanged; this is telemetry, not policy.
     //
@@ -819,6 +819,13 @@ struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_sp_va,
                                   u64 user_arg,
                                   u64 user_tls_va);
+// The same Thread, built but NOT linked into `proc`: the user spawn arms admit
+// it with proc_thread_admit, or free it with thread_free_unlinked.
+struct Thread *thread_alloc_user(struct Proc *proc,
+                                 u64 user_entry_va,
+                                 u64 user_sp_va,
+                                 u64 user_arg,
+                                 u64 user_tls_va);
 
 // LINEAGE L-3b: build the child's EL0 frame for a forked Thread.
 //
@@ -887,6 +894,11 @@ struct Thread *thread_create_forked(struct Proc *proc,
                                     const struct exception_context *frame,
                                     u64 child_sp,
                                     u64 child_tls);
+// Built but not linked, as thread_alloc_user.
+struct Thread *thread_alloc_forked(struct Proc *proc,
+                                   const struct exception_context *frame,
+                                   u64 child_sp,
+                                   u64 child_tls);
 
 // Release a Thread descriptor + its kstack. Caller must ensure the
 // thread is not current (current_thread() != t) and not still on any
@@ -897,10 +909,22 @@ void thread_free(struct Thread *t);
 // failed then reports EAGAIN, a system limit, rather than ENOMEM.
 bool thread_tid_space_spent(void);
 
-// The in-Proc reap's halves (proc_reap_exited_threads): unlink under the
-// caller's g_proc_table_lock hold, then free with no lock held.
+// The thread list's mutators (ARCH 7.3.1), each under the caller's hold of
+// the Proc's threads_lock. The link counts the thread live; the unlink drops a
+// thread that never committed from live_threads too. The in-Proc reap unlinks
+// under the lock, then frees with thread_free_unlinked and no lock held.
+void thread_link_into_proc_locked(struct Thread *t, struct Proc *p);
 void thread_unlink_from_proc_locked(struct Thread *t);
 void thread_free_unlinked(struct Thread *t);
+
+// The one writer of state = THREAD_EXITING: under t->proc's threads_lock, and
+// it takes t out of live_threads. Nothing t runs after it may sleep.
+void thread_commit_exiting_locked(struct Thread *t);
+
+// A kernel thread's terminal commit on its own Proc (kproc, or a test's), with
+// the lock taken here. The caller keeps IRQs masked from before this call to
+// its final sched().
+void thread_kthread_retire(void);
 
 // Direct context switch from current_thread to `next`. Updates state
 // fields (prev → RUNNABLE, next → RUNNING), parks `next` in TPIDR_EL1,

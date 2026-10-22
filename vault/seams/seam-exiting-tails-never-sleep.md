@@ -7,7 +7,7 @@ surface: [sub-kernel-death]
 opened-by: chg-2026-07-14-68-last-thread-out-close
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-10-20
+updated: 2026-10-21
 ---
 ## Owed
 
@@ -51,6 +51,24 @@ A new dependent: exec waits for every peer to leave its CPU before it swaps the
 address space ([[sub-kernel-proc]]). A tail that slept would leave its CPU as
 SLEEPING, not EXITING, so exec's reap would not free it and the swap's live-peer
 re-check would extinct.
+
+## The sleep half (refused at the one sleeping arm, 2026-10-21)
+
+Thread-model C3 kept the clear-child-tid store after the `THREAD_EXITING`
+commit (exec's sole-thread check relies on a joiner that reads the zeroed word
+finding the worker EXITING) and enforced the sleep half where it can break
+today: `demand_page_locked`'s FILE miss, the only fault arm that sleeps,
+refuses a current thread that is not RUNNING before it pins anything
+([[sub-kernel-fault]]; regression `demand_page.file_miss_refuses_exiting_thread`).
+The store then fails as on an unmapped page.
+
+What stays owed: a refused store skips the joiner's wake, so the program hangs
+where the kernel used to extinct. No store can reach the arm today (FILE
+mappings are never writable). The first writable private FILE mapping, or any
+new blocking arm, must therefore either fault the clear-child-tid page in at
+`SYS_SET_TID_ADDRESS` (and keep it resident), or move the store before the
+commit together with exec's check; and a new blocking arm must add the same
+refusal.
 
 ## Risk while open
 

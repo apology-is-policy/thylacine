@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -271,7 +271,7 @@ leaves the spare to that spawn, so a failed attempt tries again while a
 session waits and no closer is idle, up to `CLOSER_SPAWN_TRIES` (3)
 attempts; then it clears the flag. A
 kernel thread cannot free itself: a retired closer parks terminally (the
-loom SQPOLL shape -- IRQs masked across `THREAD_EXITING` and the RELEASE of
+loom SQPOLL shape -- IRQs masked across the `THREAD_EXITING` commit (`thread_kthread_retire`) and the RELEASE of
 `exited`, then a switch that never returns) after kicking the idle closer,
 which reaps it with `thread_free` once `exited` reads true (ACQUIRE); while a
 retired closer is unreaped the idle one sleeps with a 10 ms deadline, in case

@@ -3,10 +3,10 @@ id: lock-proc-table
 type: lock
 title: "g_proc_table_lock — the Proc-lineage lock"
 kind: spin-irqsave
-guards: "children lists + sibling chains + parent pointers, ALIVE->ZOMBIE transitions, exit_status/exit_msg, the companion Thread's THREAD_EXITING commit, p->threads link/unlink + thread_count, sid/pgid, the PTY-1e report latches, the stop flags' set/clear walks, g_init_proc, and the three console-role pointers"
+guards: "children lists + sibling chains + parent pointers, ALIVE->ZOMBIE transitions, exit_status/exit_msg, sid/pgid, the PTY-1e report latches, the stop flags' set/clear walks, g_init_proc, and the three console-role pointers"
 orders-before: []
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-22
 ---
 ## Discipline
 
@@ -23,8 +23,8 @@ console kthread.
 lock, after none. The full chain:
 
 ```
-g_proc_table_lock -> wait_lock -> g_timerwait.lock -> r->lock -> cs->lock
-g_proc_table_lock -> torpor_lock -> g_timerwait.lock -> r->lock
+g_proc_table_lock -> p->threads_lock -> wait_lock -> g_timerwait.lock -> r->lock -> cs->lock
+g_proc_table_lock -> p->threads_lock -> torpor_lock -> g_timerwait.lock -> r->lock
 g_proc_table_lock -> allowance->lock          (the I-34 revoke)
 g_proc_table_lock -> q->lock                  (a note post)
 g_proc_table_lock -> poll_waiter_list -> rendez
@@ -53,6 +53,11 @@ window (`unlock → proc_close_handles_at_exit → relock → recount-assert`) a
 the clear-child-tid handoff, which runs *after* the release because
 `uaccess_store_u32` may demand-page (`vma_lock` + buddy) and `torpor_wake`
 takes `torpor_lock` — neither of which composes with this lock.
+
+**The threads moved out (thread-model C3, 2026-10-22).** A Proc's thread
+list, its counts, every `THREAD_EXITING` commit and the per-Proc walks are
+under that Proc's own [[lock-proc-threads]]; a spawn and a non-last exit no
+longer take this lock. The group claim is written under both.
 
 **Callback contract.** `proc_for_each` holds it across the whole DFS, so a
 callback must not re-enter `proc_find_by_pid` / `rfork` / `exits` /

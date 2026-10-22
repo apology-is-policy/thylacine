@@ -556,7 +556,11 @@ static int bh_spawn_hello_held(void) {
 }
 
 static bool bh_parked_pred(void *arg) {
-    return devproc_all_threads_parked((struct Proc *)arg);
+    struct Proc *c = (struct Proc *)arg;
+    irq_state_t s = proc_threads_lock(c);
+    bool parked = devproc_all_threads_parked(c);
+    proc_threads_unlock(c, s);
+    return parked;
 }
 
 // What the frame must hold before the child's first instruction: userland_enter's
@@ -587,12 +591,14 @@ static void bh_inspect_parked(struct Proc *c, bool *one_thread, bool *birth,
                               const struct exception_context **frame, u64 *elr) {
     irq_state_t s = proc_table_lock_acquire();
     if (c->state == PROC_STATE_ALIVE) {
+        irq_state_t ts = proc_threads_lock(c);
         struct Thread *th = c->threads;
         const struct exception_context *f = th ? th->debug_trapframe : NULL;
         if (one_thread) *one_thread = th && th->next_in_proc == NULL;
         if (birth)      *birth = bh_frame_is_birth(f);
         if (frame)      *frame = f;
         if (elr)        *elr = f ? f->elr : 0;
+        proc_threads_unlock(c, ts);
     }
     proc_table_lock_release(s);
 }
@@ -738,14 +744,18 @@ static bool bh_alive(struct Proc *c) {
 // thread, so it holds for a child already on its way out.
 static bool bh_head_parked(struct Proc *c, u64 *nsched) {
     irq_state_t s = proc_table_lock_acquire();
-    struct Thread *th = (c->state == PROC_STATE_ALIVE) ? c->threads : NULL;
     bool parked = false;
-    if (th) {
-        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
-        parked = __atomic_load_n(&th->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
-                 th->rendez_blocked_on == &th->debug_rendez;
-        spin_unlock_irqrestore(&th->wait_lock, ws);
-        *nsched = __atomic_load_n(&th->nsched, __ATOMIC_RELAXED);
+    if (c->state == PROC_STATE_ALIVE) {
+        irq_state_t ts = proc_threads_lock(c);
+        struct Thread *th = c->threads;
+        if (th) {
+            irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+            parked = __atomic_load_n(&th->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+                     th->rendez_blocked_on == &th->debug_rendez;
+            spin_unlock_irqrestore(&th->wait_lock, ws);
+            *nsched = __atomic_load_n(&th->nsched, __ATOMIC_RELAXED);
+        }
+        proc_threads_unlock(c, ts);
     }
     proc_table_lock_release(s);
     return parked;
@@ -882,12 +892,14 @@ void test_birth_hold_held_spawn_death_wins(void) {
         stop_quiet = resettled && bh_head_parked(c, &at) && at == since;
         s = proc_table_lock_acquire();
         if (resettled && c->state == PROC_STATE_ALIVE) {
+            irq_state_t ts = proc_threads_lock(c);
             struct Thread *th = c->threads;
             struct exception_context *f = th ? th->debug_trapframe : NULL;
             if (f) {
                 f->sp = 0;
                 sp_zeroed = true;
             }
+            proc_threads_unlock(c, ts);
         }
         proc_table_lock_release(s);
         if (sp_zeroed)

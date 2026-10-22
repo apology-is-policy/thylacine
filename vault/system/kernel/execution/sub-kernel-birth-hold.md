@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-10-12
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -167,7 +167,8 @@ syscall-time park ever needs to see the hold.
 ### Conversion and release
 
 Converting a hold and releasing one differ only in the order of two writes,
-all under `g_proc_table_lock`:
+all under `g_proc_table_lock` (the deliver's and the resume's thread walks take
+the target's thread lock nested in it, [[lock-proc-threads]]):
 
 - **`stop` converts.** It delivers the stop as usual (`proc_debug_stop_deliver`
   sets `debug_stop_req` and wakes the target's blocked threads), and only then

@@ -702,7 +702,7 @@ bool thread_caught_note_claim(struct Thread *t);
 // target ends the designations that wait cannot honour, keeping only `keep`,
 // and walks again for a family still queued; no lock held. notes_exit_drop_
 // locked ends `t`'s claim and designation at its THREAD_EXITING commit, under
-// g_proc_table_lock.
+// t->proc->threads_lock.
 u8   thread_caught_wait_kind(const struct Thread *t, bool caught_ok);
 void notes_handoff_target(struct Thread *t, u8 keep);
 void notes_exit_drop_locked(struct Thread *t);

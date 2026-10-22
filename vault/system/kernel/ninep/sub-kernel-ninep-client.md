@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -542,6 +542,10 @@ the principals at its two ends, the system principal and a hostowner
   `stop_unwound` — owner-written only, same-call-stack read.
 
 ## Concurrency
+
+A retired closer kthread commits `THREAD_EXITING` through
+`thread_kthread_retire` (under kproc's thread lock, [[lock-proc-threads]]) with
+IRQs masked to its final switch, before the idle closer reaps it.
 
 The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
 

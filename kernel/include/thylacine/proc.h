@@ -631,10 +631,10 @@ struct Proc {
     // focus uniformly. CLEARED (RELEASE) to NULL by proc_debug_resume (the focus is
     // valid only for the current stop; a manual ctl `stop` follows a resume, so it
     // reads NULL -> main, preserving the attach/8a-2b single-thread behavior).
-    // READ (ACQUIRE) under g_proc_table_lock: devproc_focus_thread validates the
+    // READ (ACQUIRE) under p->threads_lock: devproc_focus_thread validates the
     // pointer is still a live thread of `target` (else main). NO UAF -- and the
-    // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): every
-    // unlink from p->threads holds g_proc_table_lock and comes before the free --
+    // load-bearing reason is the threads_lock PIN, not a stop gate (#95-audit
+    // F1): every unlink from p->threads holds p->threads_lock and comes before the free --
     // wait_pid_for's thread_free loop, run after proc_unlink_child put the target
     // out of proc_for_each's reach, and the in-Proc reap, which clears a focus
     // naming the thread it frees in the same hold -- so a pointer that matches an
@@ -928,7 +928,7 @@ struct Proc {
     // A SEPARATE field (not thread_count) because exit/teardown logic
     // drains thread_count and must never wait on a kthread the Proc does
     // not own; the kthreads are reaped by loom_free's join at handle close.
-    // Guarded by g_proc_table_lock like its siblings.
+    // Guarded by p->threads_lock, with thread_count.
     int loom_sqpoll_count;
 
     // #91 (I-24): the real integer exit code (low byte, 0..255) recorded for a
@@ -939,10 +939,9 @@ struct Proc {
     // always matches the winning msg. thread_exit_self reads it (the gmsg!=NULL
     // arm) to seed proc_become_zombie_locked. A PLAIN int, not atomic: unlike
     // group_exit_msg (which the LOCKLESS el0_return_die_check also reads), this
-    // field is read ONLY by thread_exit_self under g_proc_table_lock -- the same
-    // lock every proc_group_terminate caller holds (its p->threads walk requires
-    // it, #811) -- so the lock is the writer/reader ordering, exactly like the
-    // sibling exit_status / exit_msg. Fills the 4-byte tail pad after
+    // field is read ONLY by the last-out tails under p->threads_lock -- the lock
+    // the claim's winner writes it under (inside g_proc_table_lock) -- so the
+    // lock is the writer/reader ordering. Fills the 4-byte tail pad after
     // loom_sqpoll_count -- no struct growth. KP_ZERO-fresh 0 (never read unless a
     // group-terminate set it; the single-thread exits() path passes its own code
     // straight to proc_become_zombie_locked and never consults this).
@@ -991,6 +990,20 @@ struct Proc {
     u64                reaped_run_ns;
     u32                reaped_kstack_peak;
     int                reaped_kstack_tid;
+
+    // The lock on this Proc's threads (thread-model C3, ARCH 7.3.1). It guards
+    // `threads` and the links, thread_count, live_threads, loom_sqpoll_count,
+    // every THREAD_EXITING commit (thread_commit_exiting_locked is the one
+    // writer), debug_focus_thread, the per-Proc thread walks and EXIT_CLOSING;
+    // the group claim is written under it AND g_proc_table_lock, so a reader
+    // holding either reads it exactly. An IRQ-off leaf below g_proc_table_lock,
+    // at most one held per CPU. A Thread * read from `threads` stays valid only
+    // while it is held. Taken through proc_threads_lock; KP_ZERO is unlocked.
+    spin_lock_t        threads_lock;
+    // The linked threads not yet EXITING: +1 at the link, -1 at the EXITING
+    // commit, or at the unlink of a thread freed without ever exiting. The
+    // last-out, exec and kill decisions read it. Under threads_lock.
+    int                live_threads;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1308,8 +1321,10 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 424,
- "struct Proc size: the in-Proc thread reap appended reaped_run_ns u64 + "
+_Static_assert(sizeof(struct Proc) == 432,
+ "struct Proc size: thread-model C3 appended threads_lock (a u32 spinlock) + "
+ "live_threads int: 424 -> 432. Before that: "
+ "the in-Proc thread reap appended reaped_run_ns u64 + "
  "reaped_kstack_peak u32 + reaped_kstack_tid int (what a freed exited peer "
  "leaves behind): 408 -> 424. Before that: "
  "IM-2 appended the propagating-legate pair (legate_caps "
@@ -1462,6 +1477,10 @@ _Static_assert(__builtin_offsetof(struct Proc, page_budget) == 360,
                "the merge therefore pushed 360/368 -> 368/376 (sizeof 376 -> 384). "
                "Adding a field grows the SLUB cache; update the size assert "
                "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 424 &&
+               __builtin_offsetof(struct Proc, live_threads) == 428,
+               "thread-model C3: threads_lock and live_threads append after "
+               "reaped_kstack_tid; nothing moves.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
  "magic must be at offset 0 so SLUB's freelist write on "
  "kmem_cache_free clobbers it (double-free defense — "
@@ -1578,41 +1597,51 @@ void proc_shared_map_uncharge(struct Proc *p, u32 npages);
 void proc_set_name(struct Proc *p, const char *path, size_t len);
 
 // proc_cpu_ns -- sum run_ns over p->threads (the per-Proc cumulative on-CPU
-//   time, PROWL-DESIGN section 3.1). PRECONDITION: the CALLER HOLDS
-//   g_proc_table_lock -- the threads list is mutated only under that lock
-//   (thread_link_into_proc / thread_unlink_from_proc), so the walk is coherent
-//   only while it is held; the formatters call this from inside proc_for_each
-//   (which holds it). Each run_ns is read __atomic (a single-writer coherent
+//   time, PROWL-DESIGN section 3.1). Takes p->threads_lock for the walk (the
+//   list's mutation domain, ARCH 7.3.1); the CALLER pins p -- the formatters
+//   call this from inside proc_for_each, under g_proc_table_lock -- and holds
+//   no threads_lock of its own. Each run_ns is read __atomic (a single-writer coherent
 //   snapshot); the sum is a snapshot-of-snapshots, exact enough for the
 //   diff-across-polls %CPU the reader derives. Does NOT include the currently-
 //   running thread's in-flight slice since its last switch-in (< 1 slice; the
 //   design accepts the lag). Returns 0 for a NULL p.
-u64 proc_cpu_ns(const struct Proc *p);
+u64 proc_cpu_ns(struct Proc *p);
 
 // proc_kstack_peak -- the deepest kernel stack any of p's threads has ever
-// reached, in bytes, and (via tid_out) which thread. Caller holds
-// g_proc_table_lock, exactly as for proc_cpu_ns. ARCH 8.12.
-u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words);
+// reached, in bytes, and (via tid_out) which thread. Locking as for
+// proc_cpu_ns. ARCH 8.12.
+u32 proc_kstack_peak(struct Proc *p, int *tid_out, u32 *budget_words);
 
 // The whole-system peak + its owning pid/tid. The boot-complete report's
 // witness for the ARCH 8.12 static stack bound (audit F8).
 u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 
-// proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
-//   exempt OR thread_count + loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL
-//   kthreads share the budget -- fid-lift audit F1). Takes g_proc_table_lock
-//   for the read (the thread_count write domain). The check and the later
-//   thread_link_into_proc ++ are at different lock holds, so a bounded TOCTOU
-//   overshoot (<= ncpus-1 concurrent spawners) is possible -- acceptable for a
-//   floor. thread_count counts every Thread on the list, an exited one included
-//   until it is freed, so both spawn paths call proc_reap_exited_threads first.
+// proc_thread_cap_ok -- the thread-spawn PRE-check, so a refused spawn
+//   usually allocates nothing. True if the Proc is exempt OR thread_count +
+//   loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL kthreads share the budget --
+//   fid-lift audit F1), read under p->threads_lock. Not the gate: a peer can
+//   spawn between it and the admit, which re-checks (proc_thread_admit).
+//   thread_count counts every Thread on the list, an exited one included until
+//   it is freed, so both spawn paths call proc_reap_exited_threads first.
 bool proc_thread_cap_ok(struct Proc *p);
+
+// proc_thread_admit -- the thread-spawn GATE (ARCH 7.3.1). Links `nt` (built
+//   by thread_alloc_user / thread_alloc_forked, on no list) into p, in ONE
+//   p->threads_lock hold with the two refusals: the group claim is set
+//   (group_exit_msg) or the thread cap is reached (exempt Procs skip only the
+//   cap). On refusal returns false and nt stays unlinked -- the caller frees it
+//   with thread_free_unlinked. The hold makes the cap exact and admits no
+//   thread to a dying group (specs/thread_reap.tla Admit). Caller: a RUNNING
+//   thread of p, holding no threads_lock.
+bool proc_thread_admit(struct Proc *p, struct Thread *nt);
 
 // proc_reap_exited_threads -- free every Thread of the caller's Proc that has
 //   exited (THREAD_EXITING) and fully left its CPU (on_cpu clear), folding its
 //   run_ns and kstack watermark into the Proc and clearing a debug focus that
 //   names it. Without it an exited peer stays on p->threads, pinning its kstack
-//   and counted by proc_thread_cap_ok, until wait_pid reaps the whole Proc.
+//   and counted by the thread cap, until wait_pid reaps the whole Proc. One
+//   p->threads_lock hold per dead peer, so the IRQ-off time stays one kstack
+//   scan however many peers exited together.
 //   Caller: a RUNNING thread of that Proc, holding no lock -- being RUNNING pins
 //   the Proc ALIVE (it cannot become a ZOMBIE that wait_pid frees under us), and
 //   thread_free_unlinked takes the allocator locks. An exited peer still on a
@@ -1621,7 +1650,7 @@ void proc_reap_exited_threads(void);
 
 // proc_sqpoll_charge / _uncharge -- the SQPOLL-kthread half of the shared
 //   thread budget (fid-lift audit F1). Charge is check-AND-increment under one
-//   g_proc_table_lock hold (a Loom setup has no other serialization point);
+//   p->threads_lock hold (a Loom setup has no other serialization point);
 //   false = at the cap, the setup must refuse. The setup frees the Proc's
 //   exited peers first (proc_reap_exited_threads), as the spawn paths do, since
 //   thread_count counts them until then. Counts even for exempt Procs
@@ -1865,15 +1894,15 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr);
 
 // P6-pouch-threads (sub-chunk 9): terminate the calling Thread.
 //
-// NEVER returns. Atomically:
-//   1. If t->clear_child_tid != 0, uaccess_store_u32(0) at that user-VA
-//      + torpor_wake(UINT32_MAX). Best-effort; an unmapped tidptr skips
-//      the wake but does not extinct.
-//   2. Mark self THREAD_EXITING under g_proc_table_lock.
-//   3. If this was the last non-EXITING Thread in the Proc, ALSO mark
-//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_waiters
-//      (mirrors exits("ok")).
-//   4. yield via sched(); never returns.
+// NEVER returns. In order:
+//   1. Commit THREAD_EXITING under p->threads_lock. The last live Thread
+//      first closes the Proc's handles (still RUNNING), then commits and
+//      marks the Proc ZOMBIE -- exit_status 0, or the group claim's -- in
+//      one g_proc_table_lock hold (mirrors exits("ok")).
+//   2. If t->clear_child_tid != 0, uaccess_store_u32(0) at that user-VA
+//      + torpor_wake(UINT32_MAX). Best-effort; an unmapped tidptr, or a
+//      page only a sleeping read could bring in, skips the wake.
+//   3. yield via sched(); never returns.
 //
 // Used by SYS_THREAD_EXIT. Distinct from exits() in two ways:
 //   - exits() requires the caller to be the last live Thread (extincts
@@ -1902,10 +1931,10 @@ void thread_exit_self(void);
 // another CPU traps + hits its IRQ-from-EL0 die-check (the periodic timer is
 // the floor if the IPI is missed).
 //
-// LOCK CONTRACT (#811): the caller MUST hold g_proc_table_lock -- the
-// p->threads walk races a concurrent thread_free into a UAF otherwise. It
-// additionally takes torpor_lock + per-peer wait_lock + (via wakeup)
-// rendez/timerwait locks, all strictly BELOW g_proc_table_lock in the order.
+// LOCK CONTRACT (#811, C3): the caller MUST hold g_proc_table_lock and no
+// threads_lock. The claim, the stashes and the p->threads walk run inside
+// p->threads_lock, taken here; the walk then takes torpor_lock + per-peer
+// wait_lock + (via wakeup) rendez/timerwait locks, all below it in the order.
 //
 // gcpark-b: `sig` is the POSIX signal the termination records (notes.h
 // NOTE_SIG_*; 0 = none): every production caller is a kill-class termination
@@ -2000,9 +2029,9 @@ void el0_return_die_check(void);
 // stop -- death wins, and the flag would serve no park and no report
 // (pty_stop.tla's StopDebug is guarded ~gflag) -- so it sets nothing and returns
 // false; true iff it delivered. LOCK CONTRACT: caller holds g_proc_table_lock
-// (mirrors proc_group_terminate, whose set-once group_exit_msg CAS runs under
-// it, so the dying check is exact; the flag-set + wake + IPI take no sleeping
-// lock; the per-peer wait_lock walk is g_proc_table_lock -> wait_lock ->
+// and no threads_lock; this takes p->threads_lock, under which the set-once
+// group_exit_msg CAS runs, so the dying check is exact (the flag-set + wake +
+// IPI take no sleeping lock; the per-peer walk is threads_lock -> wait_lock ->
 // r->lock).
 bool proc_debug_stop_deliver(struct Proc *p);
 
@@ -2010,7 +2039,7 @@ bool proc_debug_stop_deliver(struct Proc *p);
 // (debug_ss_armed and the step-over VA). A whole-Proc stop does it, and so does
 // the end of the debugger's slot (a detach, the ctl-fd close's release): a step
 // left armed would stop the target for whoever attaches next, before it asked.
-// Caller holds g_proc_table_lock.
+// Caller holds p->threads_lock.
 void proc_debug_cancel_steps_locked(struct Proc *p);
 
 // proc_stop_sleeper_park: the nested stop park a blocking sleep()/tsleep()
@@ -2060,8 +2089,8 @@ bool proc_debug_fault_stop(struct Proc *p);
 // StartResume (start verb) AND ReleaseSlot (detach / ctl-fd close / debugger
 // death) -- the release paths in devproc.c call this after clearing debug_owner,
 // so a dead/detached debugger provably resumes its quarry (NoStrand). LOCK
-// CONTRACT: caller holds g_proc_table_lock (the p->threads walk + the
-// g_proc_table_lock -> wait_lock -> r->lock chain, acyclic).
+// CONTRACT: caller holds no threads_lock; the p->threads walk runs under
+// p->threads_lock, taken here (threads_lock -> wait_lock -> r->lock).
 // PTY-1f (pty_stop.tla ResumeDebug): clears ONLY the debug owner -- a woken
 // thread whose Proc is ALSO job-stopped re-checks the park cond (both flags)
 // and re-parks; job_stop_req is never touched here (StopCompatI39's twin:
@@ -2243,19 +2272,17 @@ void el0_return_stop_check(struct exception_context *ctx);
 void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp);
 void el0_birth_park(struct exception_context *ctx);
 
-// P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
-// `g_proc_table_lock` (kept static in proc.c). thread.c's
-// thread_link_into_proc / thread_unlink_from_proc must serialize against
-// proc_count_live_peers_locked's walk by holding the same lock; expose
-// the lock as a pair of acquire/release helpers rather than the raw
-// spin_lock_t to keep the lock's storage private to proc.c.
+// Cross-module access to `g_proc_table_lock` (kept static in proc.c), for the
+// callers that need the process tree: the cross-Proc fans, proc_group_terminate's
+// contract, the tests. The thread list is NOT under it any more -- it is each
+// Proc's threads_lock (ARCH 7.3.1, below). Exposed as an acquire/release pair
+// rather than the raw spin_lock_t to keep the lock's storage private to proc.c.
 //
 // Lock-order discipline (per CLAUDE.md §28 + the existing exits/wait_pid
 // commentary): proc_table_lock is at the "lineage" level — acquired
 // BEFORE r->lock-via-wakeup but AFTER any leaf locks the caller already
 // holds. Sound iff no path that holds a per-thread Rendez or per-Proc
-// vma_lock tries to acquire it. The current callers (thread_link /
-// thread_unlink at thread_create_*) hold no other locks; they're safe.
+// vma_lock tries to acquire it.
 //
 // The helpers wrap spin_lock_irqsave / spin_unlock_irqrestore so the
 // IRQ-state thread-through stays explicit at the call site (irq_state_t
@@ -2264,16 +2291,36 @@ void el0_birth_park(struct exception_context *ctx);
 irq_state_t proc_table_lock_acquire(void);
 void        proc_table_lock_release(irq_state_t s);
 
+// p->threads_lock (thread-model C3, ARCH 7.3.1). Order: g_proc_table_lock ->
+// threads_lock -> {t->wait_lock, torpor_lock}. Never two threads_locks on one
+// CPU: cross-Proc work holds g_proc_table_lock and takes each Proc's lock in
+// turn. Under KERNEL_TESTS a per-CPU slot names the held lock -- a second
+// acquire extincts, and ASSERT_TL_HELD(p) extincts unless this CPU holds p's.
+irq_state_t proc_threads_lock(struct Proc *p);
+void        proc_threads_unlock(struct Proc *p, irq_state_t s);
+#ifdef KERNEL_TESTS
+void        proc_threads_assert_held(const struct Proc *p, const char *who);
+// The slot both checks read: the Proc whose lock this CPU holds, or NULL.
+const struct Proc *proc_threads_held_here_for_test(void);
+// Run fn(p) at the top of the calling thread's own proc_thread_admit calls.
+void proc_thread_admit_test_set_hook(void (*fn)(struct Proc *));
+#define ASSERT_TL_HELD(p) proc_threads_assert_held((p), __func__)
+#else
+#define ASSERT_TL_HELD(p) ((void)(p))
+#endif
+
 // P6-pouch-signals-impl (sub-chunk 13a) audit F4 close: cross-module
 // access to the live-peer count for the kill-delivery defense-in-depth
 // check + the SYS_POSTNOTE multi-thread gate. Counts peer Threads (NOT
 // `self`) whose state is not THREAD_EXITING. PRECONDITION: caller holds
-// g_proc_table_lock. `self` may be NULL to count all live Threads.
+// p->threads_lock. `self` may be NULL to count all live Threads. The
+// decisions read p->live_threads instead (ARCH 7.3.1); this walk is its
+// KERNEL_TESTS cross-check.
 int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 
 // The Proc's main thread: its oldest thread not exiting -- the debug surface's
 // default thread and the caught-note pick's preference. NULL when every thread
-// is exiting. PRECONDITION: caller holds g_proc_table_lock; `p` is not kproc.
+// is exiting. PRECONDITION: caller holds p->threads_lock; `p` is not kproc.
 struct Thread *proc_main_thread_locked(struct Proc *p);
 
 // WAIT_WNOHANG — wait_pid_for flag: do not block; if no matching zombie
@@ -2896,10 +2943,10 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // debug_rendez) is skipped: the park is death-only and could only absorb the
 // wake (DEBUG-FS-DESIGN 5g).
 //
-// CALLER MUST HOLD g_proc_table_lock (the walk reads p->threads, mutated
-// only under that lock -- the #811 contract proc_group_terminate carries).
+// Takes p->threads_lock for the walk (ARCH 7.3.1); the CALLER pins p -- holds
+// g_proc_table_lock, or is a thread of p -- and holds no threads_lock.
 // The body is the #811 universal death-wake template: per-peer wait_lock ->
-// rendez_blocked_on -> wakeup, lock order g_proc_table_lock -> wait_lock ->
+// rendez_blocked_on -> wakeup, lock order threads_lock -> wait_lock ->
 // (wakeup: g_timerwait.lock -> r->lock). Deliberately NO
 // torpor_wake_all_for_proc (a torpor waiter's stack rendez is reachable via
 // rendez_blocked_on, and tsleep's widened register-then-observe closes the
@@ -2921,8 +2968,8 @@ bool proc_caught_note_pending(const struct Proc *p);
 // proc_caught_note_wake — choose which Thread of `p` takes a queued caught note
 // and make it take it soon: proc_caught_note_walk(p, NULL), with the current
 // thread as the poster when it is one of p's. The non-death twin of
-// proc_interrupt_terminate_wake, on its lock contract (CALLER MUST HOLD
-// g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
+// proc_interrupt_terminate_wake, on its lock contract (takes p->threads_lock;
+// per-peer wait_lock -> rendez_blocked_on -> wakeup),
 // internally gated on proc_caught_note_pending so a caller invokes it
 // unconditionally after posting. EVERY site that posts a catchable note to a
 // Proc under g_proc_table_lock calls it (ARCH 8.8.3: the wake runs on every
@@ -2931,7 +2978,7 @@ bool proc_caught_note_pending(const struct Proc *p);
 // posts that have no
 // terminate twin: child_exit (proc_exit_notify_parent_locked), a caught
 // tty:susp, tty:cont. Two posters run outside the lock: postnote_self (a Proc
-// noting itself), which takes the lock for its wakes after the post, and
+// noting itself), which wakes after the post with no lock held, and
 // notes_post_pipe, which needs no wake -- it posts to the writer's own Proc from
 // inside the write, which delivers at that thread's EL0-return tail, as Linux
 // sends SIGPIPE to the writing thread alone.
@@ -2945,8 +2992,11 @@ void proc_caught_note_wake(struct Proc *p);
 // Linux-phenotype walk designates the pick (claims the family on its behalf,
 // re-checked under its wait_lock) and wakes it if it is blocked; a native walk
 // only kicks it. A pick running on another CPU is kicked (sched_kick_thread).
-// CALLER MUST HOLD g_proc_table_lock. specs/caught_target.tla.
+// specs/caught_target.tla. proc_caught_note_walk takes p->threads_lock (the
+// caller pins p and holds no threads_lock); the _locked form runs inside the
+// caller's hold -- the EXITING commit's, so no walk designates the exiter.
 void proc_caught_note_walk(struct Proc *p, struct Thread *skip);
+void proc_caught_note_walk_locked(struct Proc *p, struct Thread *skip);
 
 // The parent's side of p's exit: wake the parent's wait_pid sleepers, post it
 // child_exit, and wake a parent blocked in a caught-note-interruptible wait

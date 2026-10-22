@@ -761,8 +761,8 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
 
     // LS-5c (P3-terminate): a freshly-enqueued `interrupt` whose disposition
     // is terminate arms the lock-free latch the #811 sleep predicate reads.
-    // The WAKE of already-blocked threads is the caller's duty (it requires
-    // g_proc_table_lock for the p->threads walk): every interrupt-posting
+    // The WAKE of already-blocked threads is the caller's duty (it walks
+    // p->threads under p->threads_lock, never under q->lock): every interrupt-posting
     // site calls proc_interrupt_terminate_wake after this returns. A
     // not-yet-sleeping thread is covered without the wake -- its sleep's
     // register-then-observe reads the latch. (notes_post_pipe does NOT yet do
@@ -1610,9 +1610,7 @@ static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip)
                                           __ATOMIC_ACQ_REL);
     u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if ((caught & mine) == 0) return;
-    irq_state_t s = proc_table_lock_acquire();
     proc_caught_note_walk(p, skip);
-    proc_table_lock_release(s);
 }
 
 // ARCH 8.8.3: the hand-off. sleep_common and tsleep_common call this after they
@@ -1628,19 +1626,20 @@ void notes_handoff_target(struct Thread *t, u8 keep) {
 }
 
 // ARCH 8.8.3: an exiting thread gives up its claim and its designation at the
-// THREAD_EXITING commit. The caller holds g_proc_table_lock, which every walk
+// THREAD_EXITING commit. The caller holds p->threads_lock, which every walk
 // holds, so no walk can designate `t` after this: the walk refuses an EXITING
 // thread.
 void notes_exit_drop_locked(struct Thread *t) {
     struct Proc *p = t->proc;
     if (!p || p == kproc()) return;
+    ASSERT_TL_HELD(p);
     u32 mine = t->note_claim | __atomic_exchange_n(&t->note_target, 0, __ATOMIC_ACQ_REL);
     __atomic_store_n(&t->note_claim, 0, __ATOMIC_RELAXED);
     if (mine == 0) return;
     u16 was = __atomic_fetch_and(&p->note_caught, (u16)~(mine << CAUGHT_CLAIM_SHIFT),
                                  __ATOMIC_ACQ_REL);
     u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
-    if (caught & mine) proc_caught_note_walk(p, NULL);
+    if (caught & mine) proc_caught_note_walk_locked(p, NULL);
 }
 
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
@@ -1853,9 +1852,9 @@ again:
     // R2-F7 audit close: pop the kill atomically with the peek (under
     // the same q->lock) so a concurrent consumer cannot race-pop it
     // between peek and pop. We then drop q->lock to acquire
-    // proc_table_lock for the live_peers check (q->lock -> proc_table_
-    // lock would reverse the established proc_table_lock -> q->lock
-    // order). If live_peers > 0, re-enqueue the kill at head; else
+    // p->threads_lock for the live_peers check (ARCH 7.3.1 has no
+    // threads_lock -> q->lock edge and wants no q->lock -> threads_lock
+    // one either). If live_peers > 0, re-enqueue the kill at head; else
     // exits.
     if (notes_name_is_kill(candidate.name)) {
         struct Note kill_popped;
@@ -1866,9 +1865,9 @@ again:
             // lock must return kill too. Reaching here would be a bug.
             return false;
         }
-        irq_state_t s = proc_table_lock_acquire();
-        int live_peers = proc_count_live_peers_locked(p, t);
-        proc_table_lock_release(s);
+        irq_state_t s = proc_threads_lock(p);
+        int live_peers = p->live_threads - 1;   // live_threads counts t
+        proc_threads_unlock(p, s);
         if (live_peers != 0) {
             // Re-enqueue the kill at head. This path is defense-in-depth
             // for a kernel-internal poster (or the R3-F3 TOCTOU race

@@ -127,6 +127,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
 - 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
 - 2026-10-20 [[chg-2026-10-20-thread-model-c0]] — Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse
@@ -134,5 +135,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 - 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
 - 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
-- 2026-10-13 [[chg-2026-10-13-icache-sync-space]] — The address space's CPUs synchronized on request: SYS_ICACHE_SYNC_SPACE at 128, a per-CPU space record, the barrier IPI acknowledged by ticket, 128 MiB code regions
 <!-- generated:end -->

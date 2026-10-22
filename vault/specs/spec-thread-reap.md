@@ -36,8 +36,9 @@ which sleeps); `CloseStable` is the premise that makes the drop safe.
 
 Beneath the model: two Procs and the one-thread-lock-per-CPU rule (a
 KERNEL_TESTS assert in the kernel), the death-wake walk (`spec-death-wake`),
-the reap of exited peers and the free (C1), and the position of the
-clear-child-tid store before the commit (a kernel test pins it).
+the reap of exited peers and the free (C1), and the clear-child-tid store,
+which follows the commit and must not sleep (`demand_page_locked` refuses the
+file page-in to a thread that is not RUNNING; a kernel test pins it).
 
 ## Action-site map
 

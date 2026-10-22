@@ -65,6 +65,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/mmu.h"   // mmu_kernel_ttbr0_pa (RW-1 B-F1 ctx.ttbr0)
+#include "../../arch/arm64/exception.h"   // struct exception_context for the clone arm
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uart.h"
@@ -88,6 +89,8 @@ void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_reap_exited_threads_frees_peers(void);
 void test_proc_reap_keeps_thread_cap_open(void);
+void test_proc_threads_lock_slot(void);
+void test_proc_spawn_arms_decide_at_the_admit(void);
 void test_proc_multi_thread_reap(void);
 void test_proc_exit_tail_runs_to_its_end(void);
 void test_proc_exec_waits_for_exiting_peer(void);
@@ -578,7 +581,7 @@ static void ret_frees_entry(void *arg) {
     for (int i = 0; i < RET_N_WORKERS; i++)
         TEST_YIELD_UNTIL_PROC(ret_dead(w[i]));
 
-    irq_state_t s = proc_table_lock_acquire();
+    irq_state_t s = proc_threads_lock(p);
     g_ret_count_before = p->thread_count;
     u64 run = 0;
     u32 used_max = 0;
@@ -588,7 +591,7 @@ static void ret_frees_entry(void *arg) {
         if (used > used_max) used_max = used;
     }
     __atomic_store_n(&p->debug_focus_thread, w[0], __ATOMIC_RELEASE);
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     g_ret_run_sum  = run;
     g_ret_used_max = used_max;
 
@@ -596,22 +599,22 @@ static void ret_frees_entry(void *arg) {
     proc_reap_exited_threads();
     g_ret_destroyed = thread_total_destroyed() - destroyed_before;
 
-    s = proc_table_lock_acquire();
+    g_ret_cpu_after     = proc_cpu_ns(p);              // each takes p->threads_lock
+    g_ret_peak_after    = proc_kstack_peak(p, NULL, NULL);
+    s = proc_threads_lock(p);
     g_ret_count_after   = p->thread_count;
     g_ret_alone         = p->threads == self && !self->next_in_proc;
     g_ret_reaped_run    = p->reaped_run_ns;
     g_ret_reaped_peak   = p->reaped_kstack_peak;
-    g_ret_cpu_after     = proc_cpu_ns(p);
-    g_ret_peak_after    = proc_kstack_peak(p, NULL, NULL);
     g_ret_focus_cleared = __atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == NULL;
     __atomic_store_n(&p->debug_focus_thread, self, __ATOMIC_RELEASE);
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
 
     proc_reap_exited_threads();                 // nothing dead: a live focus stays
-    s = proc_table_lock_acquire();
+    s = proc_threads_lock(p);
     g_ret_focus_kept = __atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == self;
     __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     exits("ok");
 }
 
@@ -660,16 +663,16 @@ static void rkc_entry(void *arg) {
         if (!proc_thread_cap_ok(p)) { g_rkc_refused_at = i; break; }
         struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
         if (!w) extinction("rkc_entry: thread_create_with_arg failed");
-        irq_state_t s = proc_table_lock_acquire();
+        irq_state_t s = proc_threads_lock(p);
         if (p->thread_count > g_rkc_max_count) g_rkc_max_count = p->thread_count;
-        proc_table_lock_release(s);
+        proc_threads_unlock(p, s);
         ready(w);
         TEST_YIELD_UNTIL_PROC(ret_dead(w));
     }
     proc_reap_exited_threads();
-    irq_state_t s = proc_table_lock_acquire();
+    irq_state_t s = proc_threads_lock(p);
     g_rkc_count_end = p->thread_count;
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     exits("ok");
 }
 
@@ -687,16 +690,43 @@ void test_proc_reap_keeps_thread_cap_open(void) {
     TEST_EXPECT_EQ(g_rkc_count_end, 1, "the last worker was freed too");
 }
 
+// The one-thread-lock-per-CPU rule (ARCH 7.3.1) is a per-CPU slot: a second
+// acquire, a release by a non-holder and a _locked walker without its lock each
+// extinct on what the slot says, which a suite cannot watch. This pins the slot
+// they read: empty, then naming exactly the Proc whose lock is held, then empty.
+void test_proc_threads_lock_slot(void) {
+    struct Proc *p = current_thread()->proc;
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc");
+    const struct Proc *before = proc_threads_held_here_for_test();
+    irq_state_t s = proc_threads_lock(p);
+    const struct Proc *held_p = proc_threads_held_here_for_test();
+    proc_threads_unlock(p, s);
+    const struct Proc *between = proc_threads_held_here_for_test();
+    s = proc_threads_lock(q);
+    const struct Proc *held_q = proc_threads_held_here_for_test();
+    proc_threads_unlock(q, s);
+    const struct Proc *after = proc_threads_held_here_for_test();
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+
+    TEST_ASSERT(before == NULL, "no thread lock held at entry");
+    TEST_ASSERT(held_p == p, "the slot names the Proc whose lock is held");
+    TEST_ASSERT(between == NULL, "the release empties the slot");
+    TEST_ASSERT(held_q == q, "and names the next Proc, not the last");
+    TEST_ASSERT(after == NULL, "empty again at exit");
+}
+
 static volatile int g_rsq_count_before, g_rsq_count_after, g_rsq_setup_rc;
 static volatile int g_rsq_sqpoll_after, g_rsq_close_rc, g_rsq_sqpoll_closed;
 static volatile bool g_rsq_exempt;
 
 static bool rsq_peers_dead(struct Proc *p, struct Thread *self) {
     bool dead = true;
-    irq_state_t s = proc_table_lock_acquire();
+    irq_state_t s = proc_threads_lock(p);
     for (struct Thread *t = p->threads; t; t = t->next_in_proc)
         if (t != self && !ret_dead(t)) { dead = false; break; }
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     return dead;
 }
 
@@ -716,21 +746,21 @@ static void rsq_entry(void *arg) {
     }
     TEST_YIELD_UNTIL_PROC(rsq_peers_dead(p, self));
 
-    irq_state_t s = proc_table_lock_acquire();
+    irq_state_t s = proc_threads_lock(p);
     g_rsq_count_before = p->thread_count;
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     struct loom_params kp;
     hidx_t fd = -1;
     g_rsq_setup_rc = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd);
-    s = proc_table_lock_acquire();
+    s = proc_threads_lock(p);
     g_rsq_count_after  = p->thread_count;
     g_rsq_sqpoll_after = p->loom_sqpoll_count;
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     if (g_rsq_setup_rc == 0) {
         g_rsq_close_rc = handle_close(p, fd);
-        s = proc_table_lock_acquire();
+        s = proc_threads_lock(p);
         g_rsq_sqpoll_closed = p->loom_sqpoll_count;
-        proc_table_lock_release(s);
+        proc_threads_unlock(p, s);
     }
     exits("ok");
 }
@@ -841,7 +871,9 @@ static void ewp_entry(void *arg) {
     irq_state_t s = proc_table_lock_acquire();
     bool abandoned = g_ewp_abandoned;
     if (!abandoned) {
-        peer->state = THREAD_EXITING;
+        irq_state_t ts = proc_threads_lock(p);
+        thread_commit_exiting_locked(peer);
+        proc_threads_unlock(p, ts);
         __atomic_store_n(&peer->on_cpu, true, __ATOMIC_RELEASE);
         g_ewp_old  = p->as;
         g_ewp_peer = peer;
@@ -857,9 +889,9 @@ static void ewp_entry(void *arg) {
 
     proc_exec_replace(p, nas, p->phenotype);
     g_ewp_swapped = true;
-    s = proc_table_lock_acquire();
+    s = proc_threads_lock(p);
     g_ewp_count_after = p->thread_count;
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     exits("ok");
 }
 
@@ -989,9 +1021,9 @@ static void ewr_entry(void *arg) {
     g_ewr_exec_cpu = smp_cpu_idx_self();
     proc_exec_replace(p, nas, p->phenotype);
     g_ewr_swapped = true;
-    s = proc_table_lock_acquire();
+    s = proc_threads_lock(p);
     g_ewr_count_after = p->thread_count;
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
     exits("ok");
 }
 
@@ -1057,6 +1089,67 @@ void test_proc_spawn_refused_in_dying_proc(void) {
     TEST_ASSERT(g_srd_exempt, "the child is exempt, so the thread cap cannot refuse");
     TEST_ASSERT(!g_srd_tid_spent, "the tid space has room, so it cannot refuse");
     TEST_EXPECT_EQ(g_srd_rc, (s64)-T_E_AGAIN, "a dying Proc refuses a new thread");
+}
+
+// Both user spawn arms decide through proc_thread_admit (ARCH 7.3.1): a claim
+// that lands after an arm's lockless pre-checks, at the top of its admit, is
+// refused there and links nothing. An arm that linked at create, as before C3,
+// returns a thread instead -- the primitive's own test cannot see that. The hook
+// running is the proof the arm reached its admit, past every earlier refusal.
+s64 viv_clone_thread_for_test(struct exception_context *ctx, const u64 *args);
+
+static volatile s64  g_sta_rc;
+static volatile int  g_sta_linked;
+static volatile bool g_sta_hook_ran, g_sta_exempt;
+
+static void sta_claim(struct Proc *p) {
+    g_sta_hook_ran = true;
+    irq_state_t s = proc_table_lock_acquire();
+    proc_group_terminate(p, NOTE_SIG_KILL, "killed");
+    proc_table_lock_release(s);
+}
+
+static void sta_entry(void *arg) {
+    struct Proc *p = current_thread()->proc;
+    g_sta_exempt = proc_resource_exempt(p);
+    int before = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);
+    proc_thread_admit_test_set_hook(sta_claim);
+    if (arg) {
+        struct exception_context ctx;
+        for (size_t i = 0; i < sizeof(ctx); i++) ((u8 *)&ctx)[i] = 0;
+        u64 args[5];
+        args[0] = 0;               // flags: no settid / cleartid words
+        args[1] = C0_USER_SP;      // child_sp
+        args[2] = 0;
+        args[3] = 0;
+        args[4] = 0;
+        g_sta_rc = viv_clone_thread_for_test(&ctx, args);
+    } else {
+        g_sta_rc = sys_thread_spawn_for_test(C0_USER_ENTRY, C0_USER_SP, 0, 0, 0);
+    }
+    proc_thread_admit_test_set_hook(NULL);
+    g_sta_linked = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) - before;
+    thread_exit_self();
+}
+
+void test_proc_spawn_arms_decide_at_the_admit(void) {
+    static const char *const arm[2] = { "thread_spawn", "clone" };
+    for (int i = 0; i < 2; i++) {
+        g_sta_rc = 0;
+        g_sta_linked = -1;
+        g_sta_hook_ran = g_sta_exempt = false;
+        int child_pid = rfork(RFPROC, sta_entry, i ? (void *)1 : NULL);
+        TEST_ASSERT(child_pid > 0, "rfork failed");
+        int status = -1;
+        TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+        uart_puts("    sta arm=");
+        uart_puts(arm[i]);
+        uart_puts("\n");
+        TEST_ASSERT(g_sta_exempt, "the child is exempt, so the thread cap cannot refuse");
+        TEST_ASSERT(g_sta_hook_ran, "the arm reached proc_thread_admit");
+        TEST_EXPECT_EQ(g_sta_rc, (s64)-T_E_AGAIN, "a claim at the admit refuses the spawn");
+        TEST_EXPECT_EQ(g_sta_linked, 0, "the refused thread was never linked");
+    }
 }
 
 static volatile int  g_tps_tid;

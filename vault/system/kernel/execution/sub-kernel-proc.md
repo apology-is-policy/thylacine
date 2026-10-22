@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Graphical seat incarnations
 
@@ -431,8 +431,8 @@ This is the commit half of Design D — the decision half is
 
 ### `proc_kstack_peak_system` -- the whole-system stack watermark
 
-Walks the proc table under `g_proc_table_lock` (which is also the lifetime pin
-the per-thread scan needs) and returns the deepest kernel stack ANY live thread
+Walks the proc table under `g_proc_table_lock`, and each Proc's threads under
+its thread lock (the per-thread scan's lifetime pin) and returns the deepest kernel stack ANY live thread
 has ever reached, with the owning pid and tid. Unbudgeted, unlike the
 `/ctl/kstack` path: its one caller is the boot-complete report, which runs once
 on a tree of a few dozen threads before any untrusted program could inflate the
@@ -504,12 +504,17 @@ flag below it.
 
 ## Concurrency
 
-One lock: [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
-and exposed to `thread.c` only as an acquire/release pair. It guards the
-children lists, the `parent` pointers, the ALIVE→ZOMBIE transitions, the
-exit status/msg, the companion Thread's EXITING commit, the `sid`/`pgid`
-mutations, the report latches, the console-role pointers, and
-`g_init_proc`.
+Two locks. [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
+and exposed only as an acquire/release pair, guards the children lists, the
+`parent` pointers, the ALIVE→ZOMBIE transitions, the exit status/msg, the
+`sid`/`pgid` mutations, the report latches, the console-role pointers, and
+`g_init_proc`. Each Proc's [[lock-proc-threads]] (thread-model C3) guards its
+thread list, `thread_count`, `live_threads`, `loom_sqpoll_count`, every
+`THREAD_EXITING` commit, the debugger's focus and the per-Proc walks. The group
+claim is written under both, so a reader under either is exact. A spawn
+admits its new thread in one hold of the thread lock (`proc_thread_admit`:
+the claim, the cap, the link), so `PROC_THREAD_MAX` is exact and no thread
+joins a group whose claim is set.
 
 Everything else on a Proc is either (a) written once before the Proc runs at
 EL0 and read plainly thereafter (identity, `stripes`), (b) an atomic RMW

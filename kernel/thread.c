@@ -101,45 +101,41 @@ u32 thread_tid_counter_swap_for_test(u32 v) {
 }
 #endif
 
-// P6-pouch-threads (sub-chunk 9a) audit F1 close: link/unlink under
-// g_proc_table_lock so concurrent walkers (proc_count_live_peers_locked,
-// wait_pid's reap-loop pre-unlink_child snapshot) observe a coherent
-// list. Pre-9a the lock was unnecessary because Procs were single-
-// threaded (only one writer per Proc, ever). Multi-thread Procs at 9a
-// introduce a second writer (sys_thread_spawn from another peer Thread
-// on a peer CPU) — without the lock, a walker can see `p->threads =
-// new_head` published before `new_head->next_in_proc = old_head` is
-// visible (aarch64 weak memory), terminate the walk at the new head,
-// and miss the previously-existing threads. Taking the lock makes the
-// (head, next_in_proc, thread_count) trio a single linearizable
-// observation.
-//
-// Boot ordering: proc_init runs before thread_init (kernel/main.c), so
-// g_proc_table_lock is initialized by the time thread_init's first call
-// arrives. Boot is single-CPU; the lock is uncontended there. SMP arrives
-// later with thread_init_per_cpu_idle, by which point the lock is fully
-// live.
-static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
-    irq_state_t s = proc_table_lock_acquire();
+// The thread list and its counts live under the Proc's own threads_lock
+// (thread-model C3, ARCH 7.3.1). 9a audit F1 first put link/unlink under a lock
+// (g_proc_table_lock then) so a walker on a weakly ordered CPU never sees the
+// head published before the new head's next link; every walker holds the same
+// lock, so (head, links, thread_count, live_threads) is one linearizable
+// observation. kproc is allocated by proc_init before thread_init's first link,
+// and KP_ZERO leaves its lock unlocked.
+void thread_link_into_proc_locked(struct Thread *t, struct Proc *p) {
+    ASSERT_TL_HELD(p);
+    if (t->state == THREAD_EXITING) extinction("thread_link: linking an EXITING thread");
     t->prev_in_proc = NULL;
     t->next_in_proc = p->threads;
     if (p->threads) p->threads->prev_in_proc = t;
     p->threads = t;
     // #65 audit F6: atomic to match the sibling page_count/child_count counters
     // so the LOCKLESS cross-Proc /proc reader (devproc, which holds no lock) gets
-    // a coherent snapshot. The write stays under g_proc_table_lock; the atomic
-    // only adds the release the lockless reader's acquire pairs with. Under-lock
-    // readers (the exit/reap logic) stay plain -- the lock serializes them.
+    // a coherent snapshot. The write stays under the lock; the atomic only adds
+    // the release the lockless reader's acquire pairs with. Under-lock readers
+    // stay plain -- the lock serializes them.
     __atomic_fetch_add(&p->thread_count, 1, __ATOMIC_RELEASE);
-    proc_table_lock_release(s);
+    p->live_threads++;
 }
 
-// The caller holds g_proc_table_lock. Split out so proc_reap_exited_threads can
-// find an exited peer and unlink it in ONE hold: the unlink is the claim, so no
-// second reaper of the same Proc can find it afterwards. (extinction takes no
-// proc-table lock, so extincting while holding it is safe.)
+static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
+    irq_state_t s = proc_threads_lock(p);
+    thread_link_into_proc_locked(t, p);
+    proc_threads_unlock(p, s);
+}
+
+// The caller holds t->proc->threads_lock. Split out so proc_reap_exited_threads
+// can find an exited peer and unlink it in ONE hold: the unlink is the claim, so
+// no second reaper of the same Proc can find it afterwards.
 void thread_unlink_from_proc_locked(struct Thread *t) {
     struct Proc *p = t->proc;
+    ASSERT_TL_HELD(p);
     if (t->prev_in_proc) {
         t->prev_in_proc->next_in_proc = t->next_in_proc;
     } else {
@@ -153,12 +149,46 @@ void thread_unlink_from_proc_locked(struct Thread *t) {
     t->next_in_proc = NULL;
     t->prev_in_proc = NULL;
     __atomic_fetch_sub(&p->thread_count, 1, __ATOMIC_RELEASE);   // #65 audit F6
+    // A thread freed without ever exiting (a create its caller abandoned, a
+    // test's never-readied thread) still counted as live.
+    if (t->state != THREAD_EXITING) {
+        if (p->live_threads <= 0) extinction("thread_unlink: live_threads underflow");
+        p->live_threads--;
+    }
 }
 
 static void thread_unlink_from_proc(struct Thread *t) {
-    irq_state_t s = proc_table_lock_acquire();
+    struct Proc *p = t->proc;
+    irq_state_t s = proc_threads_lock(p);
     thread_unlink_from_proc_locked(t);
-    proc_table_lock_release(s);
+    proc_threads_unlock(p, s);
+}
+
+// The one writer of THREAD_EXITING (ARCH 7.3.1). Under the Proc's
+// threads_lock, so live_threads and every walk agree on which threads are live:
+// a walk that finds t RUNNING under the lock knows t has not committed.
+void thread_commit_exiting_locked(struct Thread *t) {
+    struct Proc *p = t->proc;
+    ASSERT_TL_HELD(p);
+    if (t->state == THREAD_EXITING) extinction("thread_commit_exiting: already EXITING");
+    if (p->live_threads <= 0)       extinction("thread_commit_exiting: live_threads underflow");
+    t->state = THREAD_EXITING;
+    p->live_threads--;
+#ifdef KERNEL_TESTS
+    if (proc_count_live_peers_locked(p, NULL) != p->live_threads)
+        extinction("thread_commit_exiting: live_threads disagrees with the thread list");
+#endif
+}
+
+// A kernel thread's terminal commit: the caller masks IRQs across this, its
+// exited-flag RELEASE and its final sched(), so its joiner never finds it
+// EXITING and still preemptible.
+void thread_kthread_retire(void) {
+    struct Thread *self = current_thread();
+    if (!self || !self->proc) extinction("thread_kthread_retire with no current thread");
+    irq_state_t s = proc_threads_lock(self->proc);
+    thread_commit_exiting_locked(self);
+    proc_threads_unlock(self->proc, s);
 }
 
 // The kernel-stack watermark (ARCH 8.12). See thread.h for why it exists.
@@ -601,15 +631,15 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
 // by the context-switch pre-hook before the first switch. A userspace Proc
 // always has pgtable_root != 0 post-exec_setup; the syscall handler rejects
 // thread_spawn from threads not on a userspace Proc upstream.
-struct Thread *thread_create_user(struct Proc *proc,
-                                  u64 user_entry_va,
-                                  u64 user_sp_va,
-                                  u64 user_arg,
-                                  u64 user_tls_va) {
-    if (!g_thread_cache) extinction("thread_create_user before thread_init");
-    if (!proc)           extinction("thread_create_user with NULL proc");
+struct Thread *thread_alloc_user(struct Proc *proc,
+                                 u64 user_entry_va,
+                                 u64 user_sp_va,
+                                 u64 user_arg,
+                                 u64 user_tls_va) {
+    if (!g_thread_cache) extinction("thread_alloc_user before thread_init");
+    if (!proc)           extinction("thread_alloc_user with NULL proc");
     if (proc->magic != PROC_MAGIC)
-        extinction("thread_create_user with corrupted proc");
+        extinction("thread_alloc_user with corrupted proc");
 
     // The tid first: a spent tid space refuses before anything is allocated
     // (one a later failure burns is skipped, never reused).
@@ -646,8 +676,18 @@ struct Thread *thread_create_user(struct Proc *proc,
     // user value before the first switch. See thread_create_internal.
     t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
 
-    thread_link_into_proc(t, proc);
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
+    return t;
+}
+
+struct Thread *thread_create_user(struct Proc *proc,
+                                  u64 user_entry_va,
+                                  u64 user_sp_va,
+                                  u64 user_arg,
+                                  u64 user_tls_va) {
+    struct Thread *t = thread_alloc_user(proc, user_entry_va, user_sp_va,
+                                         user_arg, user_tls_va);
+    if (t) thread_link_into_proc(t, proc);
     return t;
 }
 
@@ -673,15 +713,15 @@ void fork_frame_init(struct exception_context *dst,
     dst->sp      = child_sp;
 }
 
-struct Thread *thread_create_forked(struct Proc *proc,
-                                    const struct exception_context *frame,
-                                    u64 child_sp,
-                                    u64 child_tls) {
-    if (!g_thread_cache) extinction("thread_create_forked before thread_init");
-    if (!proc)           extinction("thread_create_forked with NULL proc");
+struct Thread *thread_alloc_forked(struct Proc *proc,
+                                   const struct exception_context *frame,
+                                   u64 child_sp,
+                                   u64 child_tls) {
+    if (!g_thread_cache) extinction("thread_alloc_forked before thread_init");
+    if (!proc)           extinction("thread_alloc_forked with NULL proc");
     if (proc->magic != PROC_MAGIC)
-        extinction("thread_create_forked with corrupted proc");
-    if (!frame)          extinction("thread_create_forked with NULL frame");
+        extinction("thread_alloc_forked with corrupted proc");
+    if (!frame)          extinction("thread_alloc_forked with NULL frame");
 
     // The tid first: a spent tid space refuses before anything is allocated
     // (one a later failure burns is skipped, never reused).
@@ -751,8 +791,16 @@ struct Thread *thread_create_forked(struct Proc *proc,
     // alignment requirement.
     fp_save_area(&t->ctx.fp_v[0]);
 
-    thread_link_into_proc(t, proc);
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
+    return t;
+}
+
+struct Thread *thread_create_forked(struct Proc *proc,
+                                    const struct exception_context *frame,
+                                    u64 child_sp,
+                                    u64 child_tls) {
+    struct Thread *t = thread_alloc_forked(proc, frame, child_sp, child_tls);
+    if (t) thread_link_into_proc(t, proc);
     return t;
 }
 
@@ -762,8 +810,9 @@ void thread_free(struct Thread *t) {
     thread_release(t, true);
 }
 
-// For a Thread its caller already unlinked under g_proc_table_lock (the in-Proc
-// reap). It is off every list, so nothing can find it; the gates below still run.
+// For a Thread that is on no list: one its caller unlinked under the Proc's
+// threads_lock (the in-Proc reap), or one allocated and never admitted. Nothing
+// can find it; the gates below still run.
 void thread_free_unlinked(struct Thread *t) {
     if (t && (t->next_in_proc || t->prev_in_proc || (t->proc && t->proc->threads == t)))
         extinction("thread_free_unlinked of a Thread still on its Proc's list");

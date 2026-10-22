@@ -561,6 +561,13 @@ static enum fault_result demand_page_locked(struct Proc *p,
             file_charge = true;         // the mapping is this space's (audit F8)
             break;                      // -> step-5 PTE install (R+X for text)
         }
+        // A miss sleeps (the read, and the pin's last unref), and nothing past
+        // the EXITING commit may sleep (ARCH 7.3.1, seam-exiting-tails-never-
+        // sleep): the exit's clear-child-tid store runs after the commit, so a
+        // fault it takes here fails the store clean, as an unmapped tidptr
+        // does. Refused before the pin, so nothing is left to unref.
+        struct Thread *ft = current_thread();
+        if (ft && ft->state != THREAD_RUNNING) return FAULT_UNHANDLED_USER;
         // Miss: pin the Burrow across the lockless read (so freq->burrow cannot
         // be freed/ABA'd while we sleep -- the VMA holds a mapping ref so the
         // Burrow is alive NOW, making burrow_ref safe). file_demand_page_slow

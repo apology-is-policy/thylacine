@@ -1741,6 +1741,17 @@ void test_proc_wait_pid_syscall_packed_flag(void) {
 // PTY-1f: the job-control stop -- the second stop owner (specs/pty_stop.tla)
 // =============================================================================
 
+// The sole thread of a live, single-threaded child that only the calling test
+// reaps. Read under the child's threads_lock; kept past it because nothing
+// frees that thread before the caller's wait_pid (a single thread has no peer
+// to reap it).
+static struct Thread *js_sole_thread(struct Proc *c) {
+    irq_state_t s = proc_threads_lock(c);
+    struct Thread *t = c->threads;
+    proc_threads_unlock(c, s);
+    return t;
+}
+
 // Count queued notes named `name` in p's queue (under q->lock).
 static u32 js_note_count(struct Proc *p, const char *name) {
     struct NoteQueue *q = p->notes;
@@ -1867,10 +1878,9 @@ void test_proc_job_stop_park_report_cont_live(void) {
     TEST_EXPECT_EQ((int)c->job_stop_req, 1, "the child is job-stopped");
 
     // The child's (only) thread must land parked on its OWN debug_rendez --
-    // the sleep-detour park driven by the job owner. Bounded poll; the head
-    // pointer is stable for an ALIVE unreaped child (only the reap mutates
-    // the thread list), and rendez_blocked_on is read under its wait_lock.
-    struct Thread *th = c->threads;
+    // the sleep-detour park driven by the job owner. Bounded poll;
+    // rendez_blocked_on is read under its wait_lock.
+    struct Thread *th = js_sole_thread(c);
     TEST_ASSERT(th != NULL, "the child has a thread");
     bool parked = false;
     for (int i = 0; i < 2000000 && !parked; i++) {
@@ -1922,7 +1932,7 @@ void test_proc_job_stop_recycle(void) {
     TEST_YIELD_UNTIL((c = __atomic_load_n(&g_js_sleeper_proc,
                                           __ATOMIC_ACQUIRE)) != NULL);
 
-    struct Thread *th = c->threads;
+    struct Thread *th = js_sole_thread(c);
     TEST_ASSERT(th != NULL, "the child has a thread");
     int st = -42;
 
@@ -2012,7 +2022,7 @@ void test_proc_job_stop_preserves_torpor_wait(void) {
     struct Proc *c;
     TEST_YIELD_UNTIL((c = __atomic_load_n(&g_tsp_proc,
                                           __ATOMIC_ACQUIRE)) != NULL);
-    struct Thread *th = c->threads;
+    struct Thread *th = js_sole_thread(c);
     TEST_ASSERT(th != NULL, "the child has a thread");
 
     // Stop: the fan wakes the torpor waiter (non-completing) -> the tsleep

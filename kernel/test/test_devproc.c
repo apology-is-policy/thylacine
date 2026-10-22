@@ -2232,7 +2232,7 @@ void test_devproc_debug_stop_start_resume(void) {
     fhth.state = THREAD_RUNNABLE;  fmth.state = THREAD_RUNNABLE;
     fhth.next_in_proc = &fmth;  fmth.next_in_proc = NULL;
     struct Thread *sel[8];
-    irq_state_t fs = proc_table_lock_acquire();
+    irq_state_t fs = proc_threads_lock(ft);
     struct Thread *ft_saved = ft->threads;   // NULL for a fresh proc_alloc
     ft->threads = &fhth;                       // head = fhth (newest), tail = fmth (main)
     ft->debug_focus_thread = NULL;   sel[0] = devproc_focus_thread(ft);
@@ -2247,7 +2247,7 @@ void test_devproc_debug_stop_start_resume(void) {
     fhth.state = THREAD_EXITING;     sel[7] = devproc_focus_thread(ft);
     ft->threads = ft_saved;        // unlink the stack Threads before free
     ft->debug_focus_thread = NULL;
-    proc_table_lock_release(fs);
+    proc_threads_unlock(ft, fs);
     ft->state = PROC_STATE_ZOMBIE;
     proc_free(ft);
     TEST_ASSERT(sel[0] == &fmth, "focus NULL -> main (the oldest thread), not the head");
@@ -2642,10 +2642,10 @@ void test_devproc_debug_regs(void) {
     ex.magic = THREAD_MAGIC;
     ex.state = THREAD_EXITING;
     tgt->debug_stop_req = 1;
-    irq_state_t xs = proc_table_lock_acquire();
+    irq_state_t xs = proc_threads_lock(tgt);
     ex.next_in_proc = &th;
     tgt->threads    = &ex;
-    proc_table_lock_release(xs);
+    proc_threads_unlock(tgt, xs);
     u64 f4_main_pc = tf->elr;
     struct Spoor *regs5 = open_pidfile_for(tgt->pid, "regs", 2);
     ur.pc = 0;
@@ -2660,9 +2660,9 @@ void test_devproc_debug_regs(void) {
     u64  f4_focus_pc = ur.pc;
     __atomic_store_n(&tgt->debug_focus_thread, NULL, __ATOMIC_RELEASE);
     if (regs5) spoor_clunk(regs5);
-    xs = proc_table_lock_acquire();
+    xs = proc_threads_lock(tgt);
     tgt->threads = &th;
-    proc_table_lock_release(xs);
+    proc_threads_unlock(tgt, xs);
 
     // The dump seal refuses regs/fpregs READS (extraction) and neither WRITE
     // (control, NOTRACE's). LAST, because the bit is one-way and every leg above
@@ -4110,10 +4110,14 @@ void test_devproc_park_state_settled(void) {
     pt->threads = &pth;
 
     pth.state = THREAD_SLEEPING;
-    TEST_ASSERT(devproc_all_threads_parked(pt),
-                "the walk reports a SLEEPING registered peer as parked");
+    irq_state_t pts = proc_threads_lock(pt);
+    bool parked_sleeping = devproc_all_threads_parked(pt);
     pth.state = THREAD_RUNNABLE;
-    TEST_ASSERT(!devproc_all_threads_parked(pt),
+    bool parked_woken = devproc_all_threads_parked(pt);
+    proc_threads_unlock(pt, pts);
+    TEST_ASSERT(parked_sleeping,
+                "the walk reports a SLEEPING registered peer as parked");
+    TEST_ASSERT(!parked_woken,
                 "the walk reports a WOKEN registered peer as NOT parked -- this is "
                 "the wiring, and the pure assertions above cannot see it");
 

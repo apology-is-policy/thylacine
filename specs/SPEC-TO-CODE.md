@@ -1488,8 +1488,8 @@ reclamation row lands with it).
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
-| `Admit(s, t)` (one `threads_lock` hold: claim + cap checked, then linked, `live++`; `s` a RUNNING thread of the Proc) | `kernel/proc.c::proc_thread_admit` from both user spawn arms (`kernel/syscall.c::sys_thread_spawn_handler` + the attr arm), after an unlinked `thread_alloc_*` | `NoAdmitAfterClaim` (C0's refusal, now exact), `CapExact` (`PROC_THREAD_MAX` exact, no longer a TOCTOU floor), `LiveMatches` |
-| `AdmitCheck` / `AdmitLink` (`BUGGY_ADMIT_SPLIT`) | (none -- today's shape: the lockless claim pre-check, then `proc_thread_cap_ok`, then `thread_create_user`'s link, three holds) | `thread_reap_buggy_admit_claim` violates `NoAdmitAfterClaim`; `thread_reap_buggy_admit_cap` violates `CapExact` |
+| `Admit(s, t)` (one `threads_lock` hold: claim + cap checked, then linked, `live++`; `s` a RUNNING thread of the Proc) | `kernel/proc.c::proc_thread_admit` from both user spawn arms (`kernel/syscall.c::sys_thread_spawn_handler` + `viv_clone_thread`), after an unlinked `thread_alloc_*` | `NoAdmitAfterClaim` (C0's refusal, now exact), `CapExact` (`PROC_THREAD_MAX` exact, no longer a TOCTOU floor), `LiveMatches` |
+| `AdmitCheck` / `AdmitLink` (`BUGGY_ADMIT_SPLIT`) | (none -- the pre-C3 shape: the lockless claim pre-check, then `proc_thread_cap_ok`, then `thread_create_user`'s link, three holds; both checks survive as lockless pre-checks, decided again inside the admit) | `thread_reap_buggy_admit_claim` violates `NoAdmitAfterClaim`; `thread_reap_buggy_admit_cap` violates `CapExact` |
 | `AdmitFree(t)` (`BUGGY_SPAWNER_FREE`) | (none -- a creation path that is not a RUNNING thread of the Proc; the code asserts the spawner is) | `thread_reap_buggy_spawner` violates `CloseStable` |
 | `Claim` (under `g_proc_table_lock` AND `threads_lock`) | `kernel/proc.c::group_terminate` -- the set-once `group_exit_msg` CAS + code/sig/close flags inside the Proc's thread lock, callers holding `g_proc_table_lock` | a reader under either lock reads the claim exactly |
 | `ExitDecide(t)` (one `threads_lock` hold: another live -> commit EXITING + `live--`; else the last out -> "closing") | `kernel/proc.c::thread_exit_self` / `exits_term`, via `thread_commit_exiting_locked` (the only writer of `THREAD_EXITING`) | `OneLastOut`, `NoOrphanedProc`, `LiveMatches` |
@@ -1501,7 +1501,9 @@ reclamation row lands with it).
 What the model does not see, so the green reads no larger: two Procs (the
 one-thread-lock-per-CPU rule, which the kernel asserts under KERNEL_TESTS), the
 death-wake walk itself (`death_wake.tla`), the reap of exited peers and the free
-(C1), and the clear-child-tid store's position (a kernel test pins it).
+(C1), and the clear-child-tid store, which follows the commit and must not sleep
+(`demand_page_locked` refuses the file page-in to a thread that is not RUNNING;
+a kernel test pins it).
 
 Pre-commit gate: `specs/check-thread-reap.sh` -- the clean cfg green at its pinned
 state count and every buggy cfg violating the named invariant -- on any change to

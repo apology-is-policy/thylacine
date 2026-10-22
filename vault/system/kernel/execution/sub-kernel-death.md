@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -209,8 +209,8 @@ Witnesses: `proc.wait_packed_signalled`, `proc.group_claim_decides_signal`,
 **A late `exits()` leaves as a peer (I-24).** The group's status is decided
 once, by the first claim. A thread that reaches `exits_code` after
 `group_exit_msg` is set -- an `exit_group` or kill it had not yet seen, or a
-fault it took while the group was dying -- finds the claim under
-`g_proc_table_lock` and leaves through `thread_exit_self`, as a peer does, so
+fault it took while the group was dying -- finds the claim under the Proc's
+thread lock and leaves through `thread_exit_self`, as a peer does, so
 the last thread out reaps with the claimed `exit_status`. `exits_code`'s own
 last-thread path used to record its code and msg over the claim. B-2c's
 `ls-jsc` showed the trigger (a JIT thread's page-in abandoned by jsc's own clean
@@ -222,7 +222,7 @@ same hold as the `PROC_FLAG_EXIT_CLOSING` mark, so a kill lands either before it
 (it forces the close, and the exit keeps its own status, Linux's `PF_EXITING`
 shape). `thread_exit_self`'s last-out follows the same rule
 ([[dec-2026-10-13-exit-wins-final-close]]): it reads the claim when it decides
-it is the last thread, under `g_proc_table_lock`, and publishes
+it is the last thread, under the Proc's thread lock, and publishes
 `PROC_FLAG_EXIT_CLOSING` in the same hold before it unlocks for the close; with
 no claim, the `SYS_THREAD_EXIT` convention (status 0, "ok") stands, and a later
 kill only forces the close. It used to read the claim after the close, so a kill
@@ -271,7 +271,7 @@ keep the string wrapper -- runs the same core as every termination, and when
 its CAS on `group_exit_msg` loses (the group is already terminating), or the
 Proc carries `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`, so
 an `exits()` close, which sets no group exit message, counts as terminating;
-`exits()` publishes it first, under `g_proc_table_lock` before it drops the
+`exits()` publishes it first, under the thread lock (inside `g_proc_table_lock`) before it drops the
 lock for the close, so no kill falls between the exit's commitment and the
 mark -- witness `p9_closer.first_kill_forces_exits_close`),
 it ORs `PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the
@@ -442,8 +442,17 @@ each thread on its own single-waiter rendez.
 ## Concurrency
 
 Lock order, exhaustively:
-`g_proc_table_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
-plus the torpor leg `g_proc_table_lock → torpor_lock → g_timerwait → r->lock`.
+`g_proc_table_lock → p->threads_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
+plus the torpor leg `p->threads_lock → torpor_lock → g_timerwait → r->lock`
+([[lock-proc-threads]], thread-model C3). The exit decision is one hold of the
+thread lock: a non-last thread commits there and takes nothing else; the last
+thread reads the claim, marks the close, drops every lock for the handle close,
+then commits under the thread lock nested in `g_proc_table_lock` and publishes
+ZOMBIE in that same global hold, so `wait_pid_for` never sees a ZOMBIE with a
+thread still live (`thread_reap.tla` `ZombieImpliesAllExiting`). The
+clear-child-tid store follows the commit and cannot sleep: the FILE page-in
+refuses a thread that is not RUNNING ([[sub-kernel-fault]],
+[[seam-exiting-tails-never-sleep]]).
 `torpor_lock` and `wait_lock` never nest (torpor drops its lock before
 `tsleep`). `smp_resched_others` and the IPI handler take no locks. No ABBA.
 

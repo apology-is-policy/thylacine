@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -286,7 +286,8 @@ slot, one object's table reference leaked, then a double release at close.
 
 `handle_table_free` deliberately takes **no** lock, and the justification is
 narrow enough that the code marks it a FOOTGUN: it runs only where exactly
-one live thread remains, and no production path ever touches a *foreign*
+one live thread remains (the last-out decision reads `live_threads == 1` under
+the Proc's thread lock, [[lock-proc-threads]]), and no production path ever touches a *foreign*
 ALIVE Proc's table, because every handle op derives its Proc from
 `current_thread()->proc`. A cross-Proc accessor — a `/proc/<pid>/fd` surface
 inspecting a live peer — breaks that premise. That is precisely why `#66c`

@@ -559,7 +559,7 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
 // EXITING, whose residual execution never touches the table, and no new
 // peer can spawn without a RUNNING thread); at proc_free all threads are
 // reaped; at exec the caller is the Proc's one live thread (proc_exec_alone,
-// re-checked under g_proc_table_lock at the swap). Returns the device count
+// re-checked under p->threads_lock at the swap). Returns the device count
 // for the regression tests.
 //
 // RESIDUAL (round-3 F1, trust-envelope): a driver that FULLY releases its
@@ -752,6 +752,7 @@ void proc_free(struct Proc *p) {
     if (p == g_kproc)             extinction("proc_free attempted on kproc");
     if (p->thread_count)          extinction("proc_free with live threads (caller must drain)");
     if (p->threads)               extinction("proc_free with non-NULL threads list");
+    if (p->live_threads)          extinction("proc_free with live_threads != 0");
     if (p->children)              extinction("proc_free with live children (caller must reap or re-parent)");
     // P2-D: state must be ZOMBIE (came through exits) — no other path
     // legitimately reaches proc_free in the lifecycle. ALIVE means we
@@ -1289,40 +1290,70 @@ void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
     addrspace_uncharge_shared_map(p->as, npages);
 }
 
+// SQPOLL kthreads share the budget (fid-lift audit F1): the Proc's workers,
+// whether they run under it or under kproc on its behalf.
+static bool proc_thread_room_locked(struct Proc *p) {
+    ASSERT_TL_HELD(p);
+    return proc_resource_exempt(p) ||
+           p->thread_count + p->loom_sqpoll_count < PROC_THREAD_MAX;
+}
+
 bool proc_thread_cap_ok(struct Proc *p) {
     if (!p) return false;
-    if (proc_resource_exempt(p)) return true;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    // SQPOLL kthreads share the budget (fid-lift audit F1): the Proc's
-    // workers, whether they run under it or under kproc on its behalf.
-    bool ok = p->thread_count + p->loom_sqpoll_count < PROC_THREAD_MAX;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    irq_state_t s = proc_threads_lock(p);
+    bool ok = proc_thread_room_locked(p);
+    proc_threads_unlock(p, s);
+    return ok;
+}
+
+#ifdef KERNEL_TESTS
+// A test runs a function at the top of the admits made by the thread that set
+// it, so a claim lands between a spawn arm's lockless pre-checks and its admit
+// (NULL clears). Compiled out of production.
+static void (*g_admit_test_hook)(struct Proc *);
+static struct Thread *g_admit_test_owner;
+
+void proc_thread_admit_test_set_hook(void (*fn)(struct Proc *)) {
+    __atomic_store_n(&g_admit_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_admit_test_hook, fn, __ATOMIC_RELEASE);
+}
+#endif
+
+bool proc_thread_admit(struct Proc *p, struct Thread *nt) {
+    if (!p || !nt || nt->proc != p) extinction("proc_thread_admit: thread not built for this Proc");
+#ifdef KERNEL_TESTS
+    void (*hook)(struct Proc *) = __atomic_load_n(&g_admit_test_hook, __ATOMIC_ACQUIRE);
+    if (hook && __atomic_load_n(&g_admit_test_owner, __ATOMIC_RELAXED) == current_thread())
+        hook(p);
+#endif
+    irq_state_t s = proc_threads_lock(p);
+    // The claim is written under this lock (group_terminate), so the read is
+    // exact: a thread linked now is one the death-wake walk will find.
+    bool ok = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&
+              proc_thread_room_locked(p);
+    if (ok) thread_link_into_proc_locked(nt, p);
+    proc_threads_unlock(p, s);
     return ok;
 }
 
 // Charge one SQPOLL kthread against the creating Proc's thread budget.
-// Check-and-increment under one lock hold (unlike the thread path's
-// check-then-create, a Loom setup has no other serialization point).
-// Always counts -- exempt Procs skip only the CAP, so the uncharge is
+// Check-and-increment under one lock hold, as proc_thread_admit does for a
+// thread. Always counts -- exempt Procs skip only the CAP, so the uncharge is
 // unconditional.
 bool proc_sqpoll_charge(struct Proc *p) {
     if (!p) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    if (!proc_resource_exempt(p) &&
-        p->thread_count + p->loom_sqpoll_count >= PROC_THREAD_MAX) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
-        return false;
-    }
-    p->loom_sqpoll_count++;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
-    return true;
+    irq_state_t s = proc_threads_lock(p);
+    bool ok = proc_thread_room_locked(p);
+    if (ok) p->loom_sqpoll_count++;
+    proc_threads_unlock(p, s);
+    return ok;
 }
 
 void proc_sqpoll_uncharge(struct Proc *p) {
     if (!p) return;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_threads_lock(p);
     if (p->loom_sqpoll_count > 0) p->loom_sqpoll_count--;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_threads_unlock(p, s);
 }
 
 bool proc_child_cap_ok(struct Proc *p) {
@@ -1350,31 +1381,32 @@ void proc_set_name(struct Proc *p, const char *path, size_t len) {
 }
 
 // prowl-1 (PROWL-DESIGN.md section 3.1): the per-Proc cumulative on-CPU time =
-// sum of run_ns over the threads. PRECONDITION: caller holds g_proc_table_lock
-// (the threads-list mutation domain -- the formatters call this from inside
-// proc_for_each). Each run_ns is a single-writer field read __atomic for a
-// coherent cross-CPU snapshot (the page_count reader pattern).
-u64 proc_cpu_ns(const struct Proc *p) {
+// sum of run_ns over the threads, walked under p->threads_lock (the list's
+// mutation domain); the caller pins p. Each run_ns is a single-writer field read
+// __atomic for a coherent cross-CPU snapshot (the page_count reader pattern).
+u64 proc_cpu_ns(struct Proc *p) {
     if (!p) return 0;
+    irq_state_t s = proc_threads_lock(p);
     u64 total = p->reaped_run_ns;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc)
         total += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+    proc_threads_unlock(p, s);
     return total;
 }
 
 // proc_kstack_peak -- the deepest kernel stack any of this Proc's threads has
 // EVER reached, and the tid that reached it (ARCH 8.12). Mirrors proc_cpu_ns
-// exactly, including its safety argument: the p->threads walk is sound because
-// every caller holds g_proc_table_lock (the #95 walk-safety), so no peer can
-// thread_free out from under it.
+// exactly, including its safety argument: the walk holds p->threads_lock, under
+// which every unlink runs, so no peer can be freed out from under it.
 //
 // Scanning a thread that is RUNNING right now is deliberate and its answer is
 // honest: a running thread only ever pushes the frontier LOWER, so a
 // concurrent write makes the reported depth deeper, never shallower. The
 // number is a floor, which is the direction a stack-headroom question wants.
-u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
+u32 proc_kstack_peak(struct Proc *p, int *tid_out, u32 *budget_words) {
     if (tid_out) *tid_out = 0;
     if (!p) return 0;
+    irq_state_t s = proc_threads_lock(p);
     u32 peak = p->reaped_kstack_peak;
     if (peak && tid_out) *tid_out = p->reaped_kstack_tid;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc) {
@@ -1384,6 +1416,7 @@ u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
             if (tid_out) *tid_out = t->tid;
         }
     }
+    proc_threads_unlock(p, s);
     return peak;
 }
 
@@ -1392,17 +1425,18 @@ u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
 // exiting tail never sleeps -- so no CPU will run it or switch out of it again.
 // That is the predicate wait_pid's zombie loop frees on, applied one thread at a
 // time while the Proc lives. Each pass finds a dead peer and unlinks it in one
-// g_proc_table_lock hold: the unlink is the claim (a concurrent reaper of the
+// p->threads_lock hold: the unlink is the claim (a concurrent reaper of the
 // same Proc no longer finds it), and every walker that can reach a Thread holds
 // that lock, so none is mid-walk over it when it is freed. The kstack scan runs
 // under the lock on purpose -- folding after the unlink would let /ctl/kstack
-// see the thread in neither place -- and is bounded by one stack.
+// see the thread in neither place -- and one hold per peer keeps the IRQ-off
+// time to one stack.
 void proc_reap_exited_threads(void) {
     struct Thread *self = current_thread();
     struct Proc   *p    = self ? self->proc : NULL;
     if (!p || p == g_kproc) return;
     for (;;) {
-        irq_state_t s = proc_table_lock_acquire();
+        irq_state_t s = proc_threads_lock(p);
         struct Thread *dead = NULL;
         for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
             if (t != self && t->state == THREAD_EXITING &&
@@ -1412,7 +1446,7 @@ void proc_reap_exited_threads(void) {
             }
         }
         if (!dead) {
-            proc_table_lock_release(s);
+            proc_threads_unlock(p, s);
             return;
         }
         p->reaped_run_ns += __atomic_load_n(&dead->run_ns, __ATOMIC_RELAXED);
@@ -1426,7 +1460,7 @@ void proc_reap_exited_threads(void) {
         if (__atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == dead)
             __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
         thread_unlink_from_proc_locked(dead);
-        proc_table_lock_release(s);
+        proc_threads_unlock(p, s);
         thread_free_unlinked(dead);
     }
 }
@@ -3344,6 +3378,7 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
     if (p == g_kproc) return;            // belt: the arm never latches kproc
     if (p->state != PROC_STATE_ALIVE) return;
     if (!proc_intr_terminate_pending(p)) return;
+    irq_state_t s = proc_threads_lock(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -3351,10 +3386,11 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
         spin_unlock_irqrestore(&peer->wait_lock, ws);
         sched_kick_thread(peer);
     }
+    proc_threads_unlock(p, s);
 }
 
 // item 11 (ARCH 8.8.3): the CAUGHT-note twin of proc_interrupt_terminate_wake,
-// on the same lock contract (CALLER HOLDS g_proc_table_lock; see the proc.h
+// on the same lock contract (it takes p->threads_lock; see the proc.h
 // contract), gated on the caught-note sub-field instead of the terminate latch.
 // Interrupt-posting sites call it right after proc_interrupt_terminate_wake: for
 // a given post exactly one of the two latches is armed (uncaught -> terminate;
@@ -3369,7 +3405,7 @@ void proc_caught_note_wake(struct Proc *p) {
 
 // ARCH 8.8.3, "Which thread takes a caught note" (operator votes 2026-10-12;
 // specs/caught_target.tla). A candidate for family `fam` is not exiting (read
-// under g_proc_table_lock, which every walk holds), has the family unmasked,
+// under p->threads_lock, which every walk holds), has the family unmasked,
 // runs no handler, and is not in a wait that holds. The mask and the handler
 // flag are the thread's own, written without a lock, so they read exactly only
 // while it is blocked (it wrote them before it published its wait under
@@ -3396,6 +3432,7 @@ static bool caught_waits(const struct Thread *x, u8 kind) {
 // signal, waking it from an interruptible sleep even while a worker runs.
 static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster,
                                   struct Thread *skip) {
+    ASSERT_TL_HELD(p);
     struct Thread *main_t = proc_main_thread_locked(p);
     if (main_t == skip) main_t = NULL;
     if (poster && poster != skip && caught_candidate(poster, fam)) return poster;
@@ -3486,6 +3523,7 @@ static int caught_designate(struct Proc *p, struct Thread *x, u32 fam) {
 // Wake every thread blocked in an unwinding wait with `fam` unmasked: they race
 // for the claim, and one unwinds. The fallback when the picks keep going stale.
 static void caught_wake_unwinders(struct Proc *p, u32 fam) {
+    ASSERT_TL_HELD(p);
     for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
         struct Rendez *r = x->rendez_blocked_on;
@@ -3499,6 +3537,15 @@ static void caught_wake_unwinders(struct Proc *p, u32 fam) {
 void proc_caught_note_walk(struct Proc *p, struct Thread *skip) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;            // belt: the arm never latches kproc
+    irq_state_t s = proc_threads_lock(p);
+    proc_caught_note_walk_locked(p, skip);
+    proc_threads_unlock(p, s);
+}
+
+void proc_caught_note_walk_locked(struct Proc *p, struct Thread *skip) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (p == g_kproc) return;            // belt: the arm never latches kproc
+    ASSERT_TL_HELD(p);
     if (p->state != PROC_STATE_ALIVE) return;
     if (!proc_caught_note_pending(p)) return;
     const bool     pheno  = proc_caught_note_eintr_ready(p);
@@ -3892,6 +3939,63 @@ void proc_table_lock_release(irq_state_t s) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
+#ifdef KERNEL_TESTS
+// The one-threads_lock-per-CPU rule (ARCH 7.3.1), made checkable: the slot names
+// the Proc whose lock this CPU holds. Only the holding CPU touches its slot, and
+// only with IRQs masked, so the CPU cannot change under it.
+static const struct Proc *g_tl_held[DTB_MAX_CPUS];
+
+static unsigned tl_cpu(void) {
+    unsigned c = smp_cpu_idx_self();
+    if (c >= DTB_MAX_CPUS) extinction("threads_lock: cpu index out of range");
+    return c;
+}
+
+// Stable after the unmask: a holder runs IRQ-masked, so if this thread holds no
+// thread lock, no holder can be on the CPU it reads.
+static const struct Proc *tl_held_here(void) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    const struct Proc *h = g_tl_held[tl_cpu()];
+    spin_unlock_irqrestore(NULL, s);
+    return h;
+}
+
+void proc_threads_assert_held(const struct Proc *p, const char *who) {
+    (void)who;
+    if (tl_held_here() != p)
+        extinction("threads_lock: a _locked thread-list walker without its Proc's lock");
+}
+
+const struct Proc *proc_threads_held_here_for_test(void) {
+    return tl_held_here();
+}
+#endif
+
+irq_state_t proc_threads_lock(struct Proc *p) {
+    // IRQs first: the held-slot check below must run on the CPU that takes the
+    // lock, and a second acquire of the same Proc's lock would spin forever
+    // before any check after it could fire.
+    irq_state_t s = spin_lock_irqsave(NULL);
+#ifdef KERNEL_TESTS
+    unsigned c = tl_cpu();
+    if (g_tl_held[c])
+        extinction("threads_lock: a second Proc's thread lock on one CPU");
+    g_tl_held[c] = p;
+#endif
+    spin_lock(&p->threads_lock);
+    return s;
+}
+
+void proc_threads_unlock(struct Proc *p, irq_state_t s) {
+#ifdef KERNEL_TESTS
+    unsigned c = tl_cpu();
+    if (g_tl_held[c] != p)
+        extinction("threads_lock: released by a CPU that does not hold it");
+    g_tl_held[c] = NULL;
+#endif
+    spin_unlock_irqrestore(&p->threads_lock, s);
+}
+
 // P6-pouch-threads (sub-chunk 9): the clear-child-tid handoff shared by
 // exits() and thread_exit_self(). On thread exit, if this Thread has a
 // non-zero `clear_child_tid` (set via SYS_SET_TID_ADDRESS), atomically
@@ -4080,7 +4184,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
 // write_eof was never delivered (kernel/pipe.c).
 //
 // CALLED FROM two places, both BEFORE the ZOMBIE transition and both gated
-// on live_peers == 0 under g_proc_table_lock (round-2 F2 retired the old
+// on live_threads == 1 under p->threads_lock (round-2 F2 retired the old
 // thread_count==1 gate -- thread_count counts unreaped EXITING peers):
 //   (1) exits() (the voluntary-exit last live thread -- single-thread
 //       Procs AND joined-then-exits native multi-thread Procs);
@@ -4100,7 +4204,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
 //     mid-close (a UAF). The reaper only ever touches ZOMBIE Procs.
 //   - The table has exactly ONE potential toucher: at site (1)
 //     thread_count == 1 (no peers exist); at site (2) every peer has
-//     committed THREAD_EXITING under g_proc_table_lock, and an EXITING
+//     committed THREAD_EXITING under p->threads_lock, and an EXITING
 //     peer's remaining execution (clear-child-tid handoff + sched()) never
 //     touches the handle table, while no new peer can appear (spawning
 //     requires a RUNNING thread in this Proc and the closer is the only
@@ -4248,18 +4352,20 @@ static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
 
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
 // (i.e. still live — RUNNING / RUNNABLE / SLEEPING / etc.) AND are not
-// `self`. MUST be called UNDER g_proc_table_lock.
+// `self`. MUST be called UNDER p->threads_lock. The decisions read
+// p->live_threads; this walk is thread_commit_exiting_locked's KERNEL_TESTS
+// cross-check of it.
 //
 // What the lock buys: synchronization with the THREAD_EXITING write
-// path — exits() and thread_exit_self() both write `t->state =
-// THREAD_EXITING` under this lock. Holding the lock here means the
+// path — thread_commit_exiting_locked, its one writer, runs under this
+// lock. Holding the lock here means the
 // `state != THREAD_EXITING` check is sound: an EXITING peer was
 // committed before any reader holding the lock could observe it as
 // non-EXITING.
 //
 // What the lock does NOT buy: synchronization with RUNNING ↔ RUNNABLE
 // ↔ SLEEPING transitions, which run under per-CPU sched cs->lock
-// (sched.c) NOT under g_proc_table_lock. The plain reads here can
+// (sched.c) NOT under threads_lock. The plain reads here can
 // observe stale RUNNING/RUNNABLE/SLEEPING values — and that's fine,
 // because all three compare-equal as "live" (!= THREAD_EXITING) and
 // the check doesn't distinguish them. F5 audit close: any future
@@ -4268,6 +4374,7 @@ static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
 // that. Also: the link/unlink of p->threads itself runs under this
 // lock (F1 audit close), so the list walk is coherent.
 int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
+    ASSERT_TL_HELD(p);
     int n = 0;
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         if (peer == self) continue;
@@ -4278,9 +4385,11 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
 
 // p->threads is head-inserted (thread_link_into_proc), so the oldest thread not
 // exiting is the last one on the list. The plain state reads are sound for the
-// reason above: a user Proc's thread is marked EXITING under g_proc_table_lock.
-// (kproc's kthreads mark themselves without it; no caller passes kproc.)
+// reason above: every thread is marked EXITING under its Proc's threads_lock.
+// It walks rather than trusting live_threads because the test fixtures splice
+// threads in without the link that counts them.
 struct Thread *proc_main_thread_locked(struct Proc *p) {
+    ASSERT_TL_HELD(p);
     struct Thread *main_t = NULL;
     for (struct Thread *x = p->threads; x; x = x->next_in_proc)
         if (x->state != THREAD_EXITING) main_t = x;
@@ -4453,15 +4562,6 @@ static void exits_term(int code, int sig, const char *msg) {
     if (p == g_kproc)        extinction("exits from kproc (boot thread)");
     if (p->state != PROC_STATE_ALIVE)
                              extinction("exits from non-ALIVE proc (double exits?)");
-    // v1.0 P6-pouch-threads (sub-chunk 9): multi-thread Procs are now
-    // allowed via SYS_THREAD_SPAWN. exits() declares program-wide
-    // termination, which v1.0 REQUIRES all peer Threads to have already
-    // EXITED — the pthread_join contract guarantees this when the
-    // program is well-formed. A peer in RUNNING / RUNNABLE / SLEEPING
-    // state at this point indicates an un-joined Thread (programmer
-    // error). Cross-thread shootdown (Linux's CLONE_THREAD-style
-    // exit_group) is a v1.x extension.
-
     // P5-corvus-srv-impl-a2: tombstone any /srv service this Proc posted
     // (specs/corvus.tla ServiceTombstone). Done here — p still ALIVE,
     // still this thread's own valid Proc — and BEFORE the g_proc_table_-
@@ -4504,8 +4604,9 @@ static void exits_term(int code, int sig, const char *msg) {
     // and touches NO lineage state, so the old r->lock → proc_table_lock
     // inversion candidate (wait_pid_cond) no longer exists.
     //
-    // t->state = THREAD_EXITING also under lock so wait_pid's reap-path
-    // observes consistent (p->state == ZOMBIE AND ct->state == EXITING).
+    // The EXITING commit runs under p->threads_lock nested in this hold, and
+    // the ZOMBIE publish follows it in the same hold, so wait_pid's reap path
+    // observes a consistent (p->state == ZOMBIE AND every thread EXITING).
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
 
     // A-4a (I-25) legate-root scope teardown is NOT inline here: it fires in
@@ -4514,6 +4615,10 @@ static void exits_term(int code, int sig, const char *msg) {
     // has live peers; or a kill / SYS_EXIT_GROUP) sweeps its scope too -- not
     // only the clean single-thread exit. A-4a audit F1.
 
+    // The decision reads the claim and the live count in one threads_lock
+    // hold: both are written under it (the claim under g_proc_table_lock too).
+    irq_state_t ts = proc_threads_lock(p);
+
     // I-24: a group's termination status is decided once, by the first claim.
     // A thread that reaches exits() after the claim -- an exit_group or a kill
     // it did not see, or a fault taken while the group was dying -- leaves as a
@@ -4521,25 +4626,24 @@ static void exits_term(int code, int sig, const char *msg) {
     // last-thread path below would record this call's status over it. A claim
     // made after this check finds this exit already decided.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        proc_threads_unlock(p, ts);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned in a dying group");
     }
 
-    // Peer-Thread check (multi-thread Proc gate): every peer Thread MUST
-    // be in THREAD_EXITING state already. wait_pid's reap loop later
-    // walks p->threads and frees each, so the count itself is not
-    // restricted — only that none is live.
-    int live_peers = proc_count_live_peers_locked(p, t);
-    if (live_peers != 0) {
+    // live_threads counts t: any other live thread means peers to shoot down.
+    if (p->live_threads != 1) {
         // #811 (ARCH §8.8.1, closes #809-audit F4): a whole-Proc exits() with
         // live peers is no longer a kernel extinction. Route through the SAME
         // universal cascade as exit_group -- flag + wake every sleeping peer +
-        // IPI-kick running peers (under the lock proc_group_terminate now
-        // requires) -- then self-exit. Each peer dies at its EL0-return
-        // die-check; the last Thread out reaps the Proc with this msg's status
-        // (thread_exit_self reads the recorded group_exit_msg). A well-formed
-        // multi-thread program joins its peers first and never reaches here.
+        // IPI-kick running peers (group_terminate takes threads_lock itself,
+        // under the g_proc_table_lock it requires) -- then self-exit. Each peer
+        // dies at its EL0-return die-check; the last Thread out reaps the Proc
+        // with this msg's status (thread_exit_self reads the recorded
+        // group_exit_msg). A well-formed multi-thread program joins its peers
+        // first and never reaches here.
+        proc_threads_unlock(p, ts);
         group_terminate(p, code, sig, msg, false);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
@@ -4550,12 +4654,11 @@ static void exits_term(int code, int sig, const char *msg) {
     // handles HERE, in the same RUNNING+ALIVE window thread_exit_self uses --
     // so inherited pipe write ends deliver EOF at process TERMINATION, not at
     // reap (a shell draining `$(cmd)` sees EOF immediately). The gate is the
-    // live_peers determination, NOT thread_count: thread_count counts
-    // EXITING peers until they are freed (at the Proc's next thread create,
-    // or at reap), so a well-formed
-    // native multi-thread program that joins its workers then calls exits()
-    // arrives with thread_count > 1 and live_peers == 0 -- the old
-    // thread_count==1 gate skipped its close entirely and the #926
+    // live count, NOT thread_count: thread_count counts EXITING peers until
+    // they are freed (at the Proc's next thread create, or at reap), so a
+    // well-formed native multi-thread program that joins its workers then
+    // calls exits() arrives with thread_count > 1 and live_threads == 1 -- the
+    // old thread_count==1 gate skipped its close entirely and the #926
     // drain-before-reap deadlock survived on that path. Window soundness is
     // the thread_exit_self argument verbatim: every peer has committed
     // EXITING (whose residual execution never touches the handle table), no
@@ -4567,47 +4670,46 @@ static void exits_term(int code, int sig, const char *msg) {
     // deliberately left queued -- and a racing cross-Proc kill can set
     // group_exit_msg mid-close; either would short-circuit the write-behind
     // flush + Tclunk without the flag).
-    if (p->handles) {
-        // The final-close mark, published under the lock a kill decides
-        // under: a kill that takes it after this point finds the close under
-        // way and forces it (ARCH 7.9.1 part B). Set inside the close too.
+    //
+    // The final-close mark is published in the decision's threads_lock hold,
+    // which a kill's claim also takes: a kill after this point finds the close
+    // under way and forces it (ARCH 7.9.1 part B). Set inside the close too.
+    bool close = p->handles != NULL;
+    if (close)
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
+    proc_threads_unlock(p, ts);
+    if (close) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         exit_close_test_window();
         proc_close_handles_at_exit(p);
         s = spin_lock_irqsave(&g_proc_table_lock);
-        if (proc_count_live_peers_locked(p, t) != 0)
-            extinction("exits: peer appeared during handle close");
     }
 
     // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit, not
     // reap, so a zombie stops pinning its inherited per-user home 9P mount.
     // Same last-live-thread window as the handle close (drops + retakes the
-    // lock to sleep in territory_unref); the peer-appeared re-check mirrors it.
+    // lock to sleep in territory_unref).
     proc_release_territory_at_exit(p, &s);
-    if (proc_count_live_peers_locked(p, t) != 0)
-        extinction("exits: peer appeared during territory release");
+
+    // The commit, re-checking that the window stayed closed, then the ZOMBIE
+    // publish: proc_become_zombie_locked runs under g_proc_table_lock alone,
+    // since it reaches other Procs' thread locks.
+    ts = proc_threads_lock(p);
+    if (p->live_threads != 1)
+        extinction("exits: a peer appeared during the last-out close");
+    thread_commit_exiting_locked(t);
+    proc_threads_unlock(p, ts);
 
     proc_become_zombie_locked(p, code, sig, msg);
 
-    // Mark the executing thread EXITING so sched() leaves it out of the
-    // run tree (it will be reaped by the parent's wait_pid).
-    t->state = THREAD_EXITING;
-
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-    // F3 audit close: clear-child-tid handoff runs AFTER the EXITING
-    // commit (and the Proc-zombie transition above) so any joiner woken
-    // by the torpor_wake observes a consistent state — the EXITING write
-    // is visible via the spin_unlock_irqrestore's release pairing with
-    // the joiner's subsequent acquire of any synchronizing lock. Without
-    // this order, a joiner could resume, return from pthread_join, call
-    // exits(), and trip the "exits with live peer threads" extinction
-    // against our still-RUNNING worker self. uaccess_store_u32 may
-    // demand-page (vma_lock + buddy); torpor_wake takes torpor_lock —
-    // both compose with proc_table_lock (no path takes proc_table_lock
-    // while holding either), so doing them AFTER the lock release keeps
-    // the original lock-order discipline.
+    // F3 audit close: the clear-child-tid handoff runs AFTER the EXITING
+    // commit (and the ZOMBIE transition) so any joiner woken by the
+    // torpor_wake observes a consistent state -- the EXITING write is visible
+    // through the unlock's release, paired with the joiner's acquire of any
+    // synchronizing lock. It runs with no lock held (torpor_wake takes
+    // torpor_lock); its store may fault but never sleeps (demand_page_locked).
     thread_clear_child_tid_handoff(t, p);
 
     // Yield. Will not return — we're EXITING, sched() doesn't re-insert,
@@ -4642,29 +4744,30 @@ void thread_exit_self(void) {
     if (t->state != THREAD_RUNNING)
                              extinction("thread_exit from non-RUNNING thread (defensive — kernel state corruption?)");
 
-    // F3 audit close: do NOT run the clear-child-tid handoff yet. The
-    // EXITING transition must commit FIRST so that a joiner woken by
-    // the torpor_wake observes a state-consistent producer (running
-    // → EXITING) before it can resume + call exits(); see the F3
-    // prosecution chain in `memory/audit_p6_pouch_threads_9a_closed_-
-    // list.md`. The handoff happens below, AFTER the spin_unlock.
-
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-
-    int live_peers = proc_count_live_peers_locked(p, t);
-    bool become_zombie = (live_peers == 0);
+    // ARCH 7.3.1: the decision is one p->threads_lock hold. live_threads counts
+    // t, so the last live thread reads 1. A non-last exit takes nothing else.
+    irq_state_t s = proc_threads_lock(p);
+    bool become_zombie = (p->live_threads == 1);
+    if (!become_zombie) {
+        thread_commit_exiting_locked(t);
+        // ARCH 8.8.3: a designation ends at the exit commit; a family whose note
+        // is still queued goes to another thread (caught_target.tla
+        // BUGGY_EXIT_KEEPS).
+        notes_exit_drop_locked(t);
+        proc_threads_unlock(p, s);
+    }
 
     // I-24 + ARCH 7.9.1 part B (dec-2026-10-13-exit-wins-final-close): the last
-    // thread out reads the group claim HERE, under the lock a kill decides
-    // under, and marks its final close in the same hold, as exits() does. A
-    // claim already made decides the status (an exit_group, a kill, a fault in
-    // the dying group); with none, the SYS_THREAD_EXIT convention, status 0 /
-    // "ok", stands, and a kill that lands later only forces the close. Read
-    // after the close, such a kill reaped as SIGKILL; marked only inside the
-    // close, a kill between this unlock and that store claimed first and forced
-    // nothing, so a wedged server held the dying Proc until a second kill.
-    // group_exit_code and group_term_sig are written by the claim's winner under
-    // this lock, so the three fields are one claim's.
+    // thread out reads the group claim HERE, under the lock a kill's claim is
+    // written under, and marks its final close in the same hold, as exits()
+    // does. A claim already made decides the status (an exit_group, a kill, a
+    // fault in the dying group); with none, the SYS_THREAD_EXIT convention,
+    // status 0 / "ok", stands, and a kill that lands later only forces the
+    // close. Read after the close, such a kill reaped as SIGKILL; marked only
+    // inside the close, a kill between this unlock and that store claimed first
+    // and forced nothing, so a wedged server held the dying Proc until a second
+    // kill. group_exit_code and group_term_sig are written by the claim's winner
+    // under this lock, so the three fields are one claim's.
     const char *zmsg  = "ok";
     int         zcode = 0;
     int         zsig  = 0;
@@ -4677,93 +4780,89 @@ void thread_exit_self(void) {
         }
         if (p->handles)
             __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
-    }
+        proc_threads_unlock(p, s);
 
-    // #68 (completes the #926 multi-thread seam): the LAST Thread out closes
-    // the Proc's handles HERE, in a deliberately-opened RUNNING+ALIVE window
-    // BEFORE the ZOMBIE transition -- so inherited pipe write ends deliver
-    // EOF at process termination, not at reap. Pre-#68 a multi-thread Proc
-    // (every Go binary) kept its fds until proc_free, so a parent draining
-    // the child's stdout to EOF BEFORE reaping deadlocked: EOF needed the
-    // reap, the reap needed the parent's wait, the wait waited on EOF (the
-    // nora gofmt-on-save hang; ut's `$(go ...)` substitution wedge).
-    //
-    // Why the window is sound (the same three properties as exits()'s
-    // single-thread close, re-derived for the last-out):
-    //   - t is still RUNNING (EXITING is written below, after re-taking the
-    //     lock), so a sleep-capable close hook is legal.
-    //   - p is still ALIVE (the ZOMBIE transition is below), so wait_pid
-    //     cannot reap + thread_free us mid-close.
-    //   - live_peers == 0 means every peer has committed THREAD_EXITING
-    //     (under this lock) -- an EXITING peer executes only its own
-    //     thread_exit_self tail (clear-child-tid handoff + sched()), which
-    //     never touches the handle table; and no new peer can appear because
-    //     SYS_THREAD_SPAWN requires a RUNNING thread in this Proc and t --
-    //     here -- is the only one. The determination is therefore STABLE
-    //     across the unlock; the recount below is a structural assert, not a
-    //     retry.
-    //
-    // The close runs under exit_close_active (set INSIDE
-    // proc_close_handles_at_exit -- round-2 F1 hoisted it so exits()'s site
-    // is covered too): group_exit_msg is set on EVERY SYS_EXIT_GROUP -- a
-    // clean exit_group(0) included -- and without the flag
-    // thread_die_pending() reads true for the closer, so every
-    // sleep-capable close hook short-circuited (SLEEP_INTR / the 9P
-    // client_self_dying send refusal): the dev9p write-behind close-flush
-    // silently DROPPED its staged bytes (data loss for a file left open at
-    // a multi-thread exit -- accepted write()s must survive exit, the page
-    // cache contract) and the close-time Tclunk was never sent (a
-    // server-side fid leak per open dev9p fd). Pre-#68 both ran on the
-    // REAPER's (non-dying) thread and worked; the flag restores exactly
-    // that behavior inside the new window. The re-admitted wedged-server
-    // strand is RELOCATED from the parent (where it hung the shell's
-    // wait_pid) onto the already-dying Proc, where a kill breaks it: a
-    // kill that finds the Proc terminating lifts the flag's hold
-    // (proc_group_kill), the close's waits unwind as a death, and what it
-    // cannot finish goes to the closer (ARCH 7.9.1 parts B and C). proc_free's
-    // handle_table_free remains the fallback for orphan/rollback paths
-    // (idempotent: p->handles is NULLed by the close).
-    if (become_zombie && p->handles) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
-        exit_close_test_window();
-        proc_close_handles_at_exit(p);
-        s = spin_lock_irqsave(&g_proc_table_lock);
-        if (proc_count_live_peers_locked(p, t) != 0)
-            extinction("thread_exit: peer appeared during last-out handle close");
-    }
+        // #68 (completes the #926 multi-thread seam): the LAST Thread out closes
+        // the Proc's handles HERE, in a deliberately-opened RUNNING+ALIVE window
+        // BEFORE the ZOMBIE transition -- so inherited pipe write ends deliver
+        // EOF at process termination, not at reap. Pre-#68 a multi-thread Proc
+        // (every Go binary) kept its fds until proc_free, so a parent draining
+        // the child's stdout to EOF BEFORE reaping deadlocked: EOF needed the
+        // reap, the reap needed the parent's wait, the wait waited on EOF (the
+        // nora gofmt-on-save hang; ut's `$(go ...)` substitution wedge).
+        //
+        // Why the window is sound with no lock held (specs/thread_reap.tla
+        // CloseStable):
+        //   - t is still RUNNING (EXITING is committed below), so a
+        //     sleep-capable close hook is legal.
+        //   - p is still ALIVE (the ZOMBIE transition is below), so wait_pid
+        //     cannot reap + thread_free us mid-close.
+        //   - live_threads == 1 means every peer has committed THREAD_EXITING
+        //     under threads_lock -- an EXITING peer executes only its own
+        //     tail (clear-child-tid handoff + sched()), which never touches the
+        //     handle table; and no new peer can appear, because admission
+        //     (proc_thread_admit) needs a RUNNING thread of this Proc to spawn
+        //     and t -- here -- is the only one. The decision is therefore STABLE
+        //     across the unlock; the recount below is a structural assert, not a
+        //     retry.
+        //
+        // The close runs under exit_close_active (set INSIDE
+        // proc_close_handles_at_exit -- round-2 F1 hoisted it so exits()'s site
+        // is covered too): group_exit_msg is set on EVERY SYS_EXIT_GROUP -- a
+        // clean exit_group(0) included -- and without the flag
+        // thread_die_pending() reads true for the closer, so every
+        // sleep-capable close hook short-circuited (SLEEP_INTR / the 9P
+        // client_self_dying send refusal): the dev9p write-behind close-flush
+        // silently DROPPED its staged bytes (data loss for a file left open at
+        // a multi-thread exit -- accepted write()s must survive exit, the page
+        // cache contract) and the close-time Tclunk was never sent (a
+        // server-side fid leak per open dev9p fd). Pre-#68 both ran on the
+        // REAPER's (non-dying) thread and worked; the flag restores exactly
+        // that behavior inside the new window. The re-admitted wedged-server
+        // strand is RELOCATED from the parent (where it hung the shell's
+        // wait_pid) onto the already-dying Proc, where a kill breaks it: a
+        // kill that finds the Proc terminating lifts the flag's hold
+        // (proc_group_kill), the close's waits unwind as a death, and what it
+        // cannot finish goes to the closer (ARCH 7.9.1 parts B and C). proc_free's
+        // handle_table_free remains the fallback for orphan/rollback paths
+        // (idempotent: p->handles is NULLed by the close).
+        if (p->handles) {
+            exit_close_test_window();
+            proc_close_handles_at_exit(p);
+        }
 
-    if (become_zombie) {
+        irq_state_t g = spin_lock_irqsave(&g_proc_table_lock);
         // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit
         // (detach-under-lock + unref-outside) BEFORE the zombie transition, so a
         // zombie stops pinning its inherited per-user home 9P mount. Same
-        // last-live-thread window as the handle close above; the peer re-check
-        // mirrors it (no RUNNING peer exists to spawn one during the unref).
-        proc_release_territory_at_exit(p, &s);
-        if (proc_count_live_peers_locked(p, t) != 0)
-            extinction("thread_exit: peer appeared during territory release");
-        // This Thread is the last live one. Proc transitions to ZOMBIE with the
-        // status read at the commit above (#91: a group claim carries the REAL
-        // exit byte, so a phenotype exit_group(N) reaches the parent's wait as
-        // WEXITSTATUS == N; gcpark-b: and the claim's signal).
+        // last-live-thread window as the handle close above.
+        proc_release_territory_at_exit(p, &g);
+        // The commit and the ZOMBIE publish share this g_proc_table_lock hold,
+        // so wait_pid_for (which checks under it) never sees a ZOMBIE whose last
+        // thread has not committed (thread_reap.tla ZombieImpliesAllExiting).
+        // The commit is under threads_lock, which proc_become_zombie_locked must
+        // not run under: it reaches the parent's and other Procs' thread locks.
+        s = proc_threads_lock(p);
+        if (p->live_threads != 1)
+            extinction("thread_exit: a peer appeared during the last-out close");
+        thread_commit_exiting_locked(t);
+        notes_exit_drop_locked(t);
+        proc_threads_unlock(p, s);
+        // The status read at the decision above (#91: a group claim carries the
+        // REAL exit byte, so a phenotype exit_group(N) reaches the parent's wait
+        // as WEXITSTATUS == N; gcpark-b: and the claim's signal).
         proc_become_zombie_locked(p, zcode, zsig, zmsg);
+        spin_unlock_irqrestore(&g_proc_table_lock, g);
     }
-
-    t->state = THREAD_EXITING;
-    // ARCH 8.8.3: a designation ends at the exit commit; a family whose note is
-    // still queued goes to another thread (caught_target.tla BUGGY_EXIT_KEEPS).
-    notes_exit_drop_locked(t);
-
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
 
     exit_tail_test_hook();
 
-    // F3 audit close: clear-child-tid handoff runs HERE — after the
-    // EXITING commit so a joiner waking from the torpor_wake never
-    // observes us as RUNNING in any subsequent peer-state walk. The
-    // handoff still runs OUTSIDE proc_table_lock to preserve the
-    // existing lock-order discipline (uaccess_store_u32 may
-    // demand-page → vma_lock + buddy; torpor_wake → torpor_lock —
-    // neither composes with proc_table_lock).
+    // F3 audit close: the clear-child-tid handoff runs HERE, after the EXITING
+    // commit, so a joiner that reads the zeroed word finds us EXITING -- exec's
+    // alone gate (proc_exec_alone) and every live-peer decision rely on it --
+    // and with no lock held (torpor_wake takes torpor_lock). The store may
+    // fault but never sleeps: demand_page_locked refuses a thread that is not
+    // RUNNING the one page-in that would.
     thread_clear_child_tid_handoff(t, p);
 
     // If we became zombie, also do the srv / cap notifies (the leaf-lock
@@ -4796,10 +4895,10 @@ void thread_exit_self(void) {
 // force-torn-down from outside; the IPI is a latency accelerant, not a
 // synchronous stop. See proc.h for the contract + ARCH §7.9.1 for the design.
 //
-// CONTRACT: the caller MUST hold g_proc_table_lock. The universal death-wake
-// (#811, ARCH §8.8.1) walks p->threads, and that list is mutated (peers
-// self-remove on exit) only under g_proc_table_lock -- a lockless walk would
-// race a concurrent thread_free into a use-after-free. All callers comply: the
+// CONTRACT: the caller MUST hold g_proc_table_lock and no threads_lock; the
+// body takes p->threads_lock (ARCH 7.3.1) for the claim and the universal
+// death-wake (#811, ARCH §8.8.1), whose walk of p->threads would otherwise race
+// a concurrent thread_free into a use-after-free. All callers comply: the
 // kill walk_cb runs under proc_for_each's lock; sys_exit_group_handler and
 // exits() acquire it around this call. Holding it also serializes every
 // group-termination, so the CAS below only guards idempotency for a serialized
@@ -4843,9 +4942,9 @@ bool proc_exec_alone(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return false;
     struct Thread *self = current_thread();
     if (!self || self->proc != p)     return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    bool alone = (proc_count_live_peers_locked(p, self) == 0);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    irq_state_t s = proc_threads_lock(p);
+    bool alone = (p->live_threads == 1);   // counts self
+    proc_threads_unlock(p, s);
     return alone;
 }
 
@@ -5027,30 +5126,29 @@ u64 proc_exec_peer_oncpu_waits_for_test(void) {
 // translation (thread_clear_child_tid_handoff): into a page addrspace_destroy
 // frees, by a stale TLB entry, or, by a fault that demand-pages through p->as,
 // into the NEW image once it is installed. So the swap waits for every peer's
-// last switch-out. The spin runs outside the lock, as wait_pid's does, since
-// a tail may take it. A peer seen under the lock stays allocated across the
-// spin: while p is ALIVE only a RUNNING thread of p frees a peer
-// (proc_reap_exited_threads), and the execing thread is the only one. The
-// spin ends because a tail runs straight to its own sched(): sleep extincts on
-// a thread that is not RUNNING (seam-exiting-tails-never-sleep), and
-// preempt_check_irq does not switch one out.
+// last switch-out. The wait re-resolves the peers under p->threads_lock each
+// round and keeps no Thread * across the unlock (ARCH 7.3.1: a pointer read
+// from p->threads is valid only under the lock), so it does not depend on who
+// may free a peer meanwhile. It ends because a tail runs straight to its own
+// sched(): sleep extincts on a thread that is not RUNNING
+// (seam-exiting-tails-never-sleep), and preempt_check_irq does not switch one
+// out.
 static void proc_exec_wait_peers_off_cpu(struct Proc *p, struct Thread *self) {
     for (;;) {
-        struct Thread *busy = NULL;
-        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        bool busy = false;
+        irq_state_t s = proc_threads_lock(p);
         for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
             if (t != self && __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-                busy = t;
+                busy = true;
                 break;
             }
         }
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_threads_unlock(p, s);
         if (!busy) return;
 #ifdef KERNEL_TESTS
         __atomic_fetch_add(&g_exec_peer_oncpu_waits, 1u, __ATOMIC_RELEASE);
 #endif
-        while (__atomic_load_n(&busy->on_cpu, __ATOMIC_ACQUIRE))
-            __asm__ __volatile__("yield" ::: "memory");
+        __asm__ __volatile__("yield" ::: "memory");
     }
 }
 
@@ -5077,7 +5175,10 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         // needs a running thread of this Proc and we are the only one -- but
         // proving that from the code, at the moment it matters, is cheaper than
         // asking a future reader to reconstruct it.
-        if (proc_count_live_peers_locked(p, self) != 0) {
+        irq_state_t ts = proc_threads_lock(p);
+        bool alone = (p->live_threads == 1);
+        proc_threads_unlock(p, ts);
+        if (!alone) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);
             extinction("proc_exec_replace: a live peer thread appeared");
         }
@@ -5266,6 +5367,13 @@ static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
     // near-leaf), so g_proc_table_lock -> al->lock is the new, acyclic edge.
     proc_revoke_allowance(p);
 
+    // ARCH 7.3.1: the claim is written under p->threads_lock as well as the
+    // caller's g_proc_table_lock, so a reader holding either reads it exactly
+    // -- the spawn admit and the exit decision hold only the former, rfork's
+    // refusal and the orphan rule only the latter. The death-wake walk below
+    // needs the same lock.
+    irq_state_t ts = proc_threads_lock(p);
+
     // Flag the Proc for group termination. Set-once via CAS: the first
     // caller's msg wins; a racing second group-terminate (two threads both
     // exit_group, or exit_group racing a kill) is a no-op for the flag but
@@ -5277,10 +5385,9 @@ static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
                                     false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
         // #91: record the companion exit code EXACTLY ONCE, in the set-once
         // winner branch, so group_exit_code always corresponds to the winning
-        // group_exit_msg. A plain store: this Proc's g_proc_table_lock (the
-        // caller's #811 precondition, held for the p->threads walk below) is the
-        // sole ordering vs thread_exit_self's read, which holds the same lock. A
-        // racing loser (a second exit_group, or a kill racing the exit) writes
+        // group_exit_msg. A plain store: threads_lock, held here, is the
+        // ordering vs thread_exit_self's read, which holds it too. A racing
+        // loser (a second exit_group, or a kill racing the exit) writes
         // NEITHER field, so no torn (msg, code) pair can be observed.
         // gcpark-b: the signal is the same claim's third field.
         p->group_exit_code = code;
@@ -5300,8 +5407,8 @@ static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
     // its EL0-return die-check. MUST run AFTER the flag set: a peer that
     // registers in torpor_wait after this walk re-observes the now-set flag in
     // torpor_wait's post-register check (register-then-observe; I-9). The
-    // torpor lock-order (torpor_lock) is strictly below g_proc_table_lock, so
-    // this composes under the lock the contract now requires.
+    // torpor lock-order (torpor_lock) is strictly below threads_lock, so this
+    // composes under the locks held here.
     torpor_wake_all_for_proc(p);
 
     // Universal death-wake (#811, ARCH §8.8.1): wake EVERY peer blocked in a
@@ -5321,8 +5428,8 @@ static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
     // wait_lock); a RUNNING peer reads NULL and is skipped (it reaches its own
     // die-check). wakeup() re-validates r->waiter under r->lock, so a peer
     // already woken on its normal path (or by torpor_wake_all above) is a safe
-    // no-op. Lock order: g_proc_table_lock -> wait_lock -> (wakeup:
-    // g_timerwait.lock -> r->lock); acyclic (only the owner WRITES
+    // no-op. Lock order: g_proc_table_lock -> threads_lock -> wait_lock ->
+    // (wakeup: g_timerwait.lock -> r->lock); acyclic (only the owner WRITES
     // rendez_blocked_on; the cascade only READS it, under wait_lock).
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
@@ -5330,6 +5437,7 @@ static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
         if (r) wakeup(r);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
+    proc_threads_unlock(p, ts);
 
     // Kick any peer RUNNING in userspace on another CPU so it traps + hits its
     // IRQ-from-EL0 die-check without waiting for a timer tick (Linux
@@ -5674,13 +5782,14 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // skip describes (proc_interrupt_terminate_wake). wakeup() re-validates
 // r->waiter under r->lock, so a peer already woken (or by torpor_wake_all) is
 // a safe no-op; wait_lock held across wakeup pins a torpor waiter's stack
-// rendez. LOCK CONTRACT: caller holds g_proc_table_lock
-// (pins p->threads); order g_proc_table_lock -> wait_lock -> (wakeup: r->lock);
-// torpor_lock strictly below g_proc_table_lock. The EL0-running-peer IPI kick
+// rendez. LOCK CONTRACT: caller holds p->threads_lock (pins p->threads); order
+// threads_lock -> wait_lock -> (wakeup: r->lock); torpor_lock strictly below
+// threads_lock. The EL0-running-peer IPI kick
 // is SEPARATE (smp_resched_others below) -- it is group-GLOBAL (a broadcast to
 // every online CPU), so a fan-out over N members issues it ONCE after the walk
 // (audit F2), not per-member.
 static void proc_stop_wake_sleepers_locked(struct Proc *p) {
+    ASSERT_TL_HELD(p);
     // PTY-4e (#19): the NON-COMPLETING torpor wake. The death cascade's
     // torpor_wake_all_for_proc fabricates a completed wait (awoken=1) --
     // immaterial for a dying Proc, but a STOPPED one SURVIVES: the fabricated
@@ -5712,25 +5821,27 @@ static void proc_stop_wake_cascade_locked(struct Proc *p) {
     smp_resched_others();
 }
 
-// proc_debug_cancel_steps_locked -- see proc.h. Under g_proc_table_lock, so
+// proc_debug_cancel_steps_locked -- see proc.h. Under p->threads_lock, so
 // p->threads is stable; the RELEASE store pairs with hwdebug_switch_in's and
 // el0_return_stop_check's ACQUIRE reads of debug_ss_armed. (v1.0 arms only the
 // focus thread, so this is usually a one-element clear.)
 void proc_debug_cancel_steps_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
+    ASSERT_TL_HELD(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         __atomic_store_n(&peer->debug_ss_armed, false, __ATOMIC_RELEASE);
         peer->debug_stepover_va = 0;
     }
 }
 
-bool proc_debug_stop_deliver(struct Proc *p) {
-    if (!p || p->magic != PROC_MAGIC) return false;
-    if (p == g_kproc) return false;   // kproc is never debuggable (undebuggable at the gate too)
+// The deliver's body: the caller holds g_proc_table_lock (debug_owner, the
+// birth hold) and p->threads_lock (the walks, and the claim read exactly).
+static bool proc_debug_stop_deliver_locked(struct Proc *p) {
+    ASSERT_TL_HELD(p);
 
     // A dying Proc takes no new stop (DEBUG-FS-DESIGN 5g): death wins, so the
     // flag would serve no park and no report. The terminate's set-once CAS runs
-    // under g_proc_table_lock, which the caller holds, so this read is exact.
+    // under p->threads_lock, which the caller holds, so this read is exact.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) return false;
 
     // Set the stop flag BEFORE the kick (the I-9 shape, mirror of
@@ -5754,6 +5865,15 @@ bool proc_debug_stop_deliver(struct Proc *p) {
     return true;
 }
 
+bool proc_debug_stop_deliver(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return false;
+    if (p == g_kproc) return false;   // kproc is never debuggable (undebuggable at the gate too)
+    irq_state_t ts = proc_threads_lock(p);
+    bool ok = proc_debug_stop_deliver_locked(p);
+    proc_threads_unlock(p, ts);
+    return ok;
+}
+
 // proc_debug_fault_stop -- see proc.h. The EC-path (hardware fire) counterpart
 // of proc_debug_stop_deliver: it takes g_proc_table_lock so it serializes with a
 // concurrent detach / ctl-fd close (devproc_debug_walk_cb / devproc_debug_release
@@ -5770,9 +5890,11 @@ bool proc_debug_stop_deliver(struct Proc *p) {
 // (proc_for_each -> callback -> proc_debug_stop_deliver -> smp_resched_others).
 bool proc_debug_fault_stop(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return false;
+    if (p == g_kproc) return false;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    // proc_debug_stop_deliver's caller (this frame) now holds g_proc_table_lock.
-    bool deliver = (p->debug_owner != NULL) && proc_debug_stop_deliver(p);
+    // The focus is threads_lock state, stored in the deliver's own hold.
+    irq_state_t ts = proc_threads_lock(p);
+    bool deliver = (p->debug_owner != NULL) && proc_debug_stop_deliver_locked(p);
     if (deliver) {
         // 8c-2 #95: the firing M becomes the debug-fs FOCUS, so
         // /proc/<pid>/{regs,kregs,kstack} + step report the M at the stop, not
@@ -5787,6 +5909,7 @@ bool proc_debug_fault_stop(struct Proc *p) {
         if (ct && ct->proc == p)
             __atomic_store_n(&p->debug_focus_thread, ct, __ATOMIC_RELEASE);
     }
+    proc_threads_unlock(p, ts);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return deliver;
 }
@@ -5806,6 +5929,8 @@ void proc_debug_resume(struct Proc *p) {
     // at the tail AFTER this walk re-observes the cleared flag under its wait_lock
     // (via the wait_lock release/acquire sync with this walk) and proceeds without
     // parking; a thread that registered BEFORE the walk is found + woken below.
+    // The focus and the walk are threads_lock state (ARCH 7.3.1).
+    irq_state_t ts = proc_threads_lock(p);
     __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
 
     // 8c-2 #95: the FOCUS is valid only for the stop we are leaving -- clear it so
@@ -5821,14 +5946,16 @@ void proc_debug_resume(struct Proc *p) {
     // &peer->debug_rendez), never a peer legitimately sleeping in a syscall.
     // wait_lock is held across wakeup (Option A, ARCH 8.8.1): it pins the peer so
     // its debug_rendez cannot be resumed + reused under the waker. Lock order
-    // g_proc_table_lock (caller-held) -> wait_lock -> (wakeup) g_timerwait.lock ->
-    // r->lock; acyclic (only the owner WRITES rendez_blocked_on).
+    // g_proc_table_lock (caller-held) -> threads_lock -> wait_lock -> (wakeup)
+    // g_timerwait.lock -> r->lock; acyclic (only the owner WRITES
+    // rendez_blocked_on).
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         if (peer->rendez_blocked_on == &peer->debug_rendez)
             wakeup(&peer->debug_rendez);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
+    proc_threads_unlock(p, ts);
 }
 
 // The birth hold (DEBUG-FS-DESIGN 5f). Once published by rfork_internal, the
@@ -5914,7 +6041,8 @@ void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
 // A dying Proc takes no new stop (DEBUG-FS-DESIGN 5g; pty_stop.tla's StopJob is
 // guarded ~gflag): death wins, and a stop report for a child about to become a
 // zombie would be false. The terminate's set-once CAS runs under
-// g_proc_table_lock, so the check is exact.
+// g_proc_table_lock (and m's threads_lock), so the check is exact. The sleeper
+// walk takes m->threads_lock, one member at a time (ARCH 7.3.1).
 // Returns true iff it stopped `m` (a fresh stop -- the caller issues ONE
 // group-global reschedule IPI after the fan if any member stopped, F2).
 static bool proc_job_stop_one_locked(struct Proc *m) {
@@ -5925,7 +6053,9 @@ static bool proc_job_stop_one_locked(struct Proc *m) {
     __atomic_store_n(&m->job_stop_req, 1u, __ATOMIC_RELEASE);
     m->stop_report_pending = true;
     m->cont_report_pending = false;
+    irq_state_t ts = proc_threads_lock(m);
     proc_stop_wake_sleepers_locked(m);   // the IPI is hoisted to the fan (F2)
+    proc_threads_unlock(m, ts);
     // The PTY-1e WAIT_UNTRACED edge: a parent parked in wait_pid_for
     // re-scans on any child_waiters wake (the latch was set above under the
     // SAME lock its re-scan takes -- register-then-observe holds exactly as
@@ -5959,12 +6089,14 @@ static void proc_job_resume_one_locked(struct Proc *m) {
     __atomic_store_n(&m->job_stop_req, 0u, __ATOMIC_RELEASE);
     m->cont_report_pending = true;
     m->stop_report_pending = false;   // an unreported stop is superseded
+    irq_state_t ts = proc_threads_lock(m);
     for (struct Thread *peer = m->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         if (peer->rendez_blocked_on == &peer->debug_rendez)
             wakeup(&peer->debug_rendez);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
+    proc_threads_unlock(m, ts);
     if (m->parent) poll_waiter_list_wake(&m->parent->child_waiters);
 }
 
@@ -5994,18 +6126,23 @@ static void proc_job_resume_one_locked(struct Proc *m) {
 // registered concurrently with the decision orders before-or-after it,
 // indistinguishable from the signal arriving a moment earlier (the POSIX
 // signal race; the LS-5c latch coherence concern does not apply since no
-// latch is armed here). The thread walk is pinned by the caller's
-// g_proc_table_lock; note_mask is owner-written (SYS_NOTE_MASK), so the
-// cross-thread load is the same benign-race read, made explicit atomic.
+// latch is armed here). The thread walk holds m->threads_lock; note_mask is
+// owner-written (SYS_NOTE_MASK), so the cross-thread load is the same
+// benign-race read, made explicit atomic.
 static bool proc_tty_susp_would_stop_locked(struct Proc *m) {
     if (!notes_proc_default_applies(m, NOTE_NAME_TTY_SUSP)) return false;
     if (proc_is_self_managing_notes(m)) return false;
+    bool any = false;
+    irq_state_t ts = proc_threads_lock(m);
     for (struct Thread *th = m->threads; th; th = th->next_in_proc) {
         if ((__atomic_load_n(&th->note_mask, __ATOMIC_RELAXED) &
-             (1ull << NOTE_BIT_TTY)) == 0)
-            return true;
+             (1ull << NOTE_BIT_TTY)) == 0) {
+            any = true;
+            break;
+        }
     }
-    return false;   // every thread masks the tty family (or no threads)
+    proc_threads_unlock(m, ts);
+    return any;   // false: every thread masks the tty family (or no threads)
 }
 
 // The POSIX orphaned-pgrp predicate: `pgid` is orphaned iff NO ALIVE member
@@ -6552,19 +6689,30 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             // P6-pouch-threads (sub-chunk 9): multi-thread Procs are
             // allowed. Every Thread in zombie->threads must be EXITING
             // (the program-exit gate enforces this — see exits() /
-            // thread_exit_self()). Sanity-check ALL threads INSIDE the
-            // lock; the per-thread state writes happen under the same
-            // lock so the observation is consistent.
+            // thread_exit_self()). Sanity-check ALL threads under the
+            // zombie's threads_lock, nested in this hold: the last commit
+            // and the ZOMBIE publish share one g_proc_table_lock hold, so
+            // the observation is consistent (thread_reap.tla
+            // ZombieImpliesAllExiting).
+            irq_state_t zs = proc_threads_lock(zombie);
             if (!zombie->threads) {
+                proc_threads_unlock(zombie, zs);
                 spin_unlock_irqrestore(&g_proc_table_lock, s);
                 extinction("wait_pid: zombie with no threads");
             }
             for (struct Thread *ct = zombie->threads; ct; ct = ct->next_in_proc) {
                 if (ct->state != THREAD_EXITING) {
+                    proc_threads_unlock(zombie, zs);
                     spin_unlock_irqrestore(&g_proc_table_lock, s);
                     extinction("wait_pid: zombie thread not in EXITING state");
                 }
             }
+            if (zombie->live_threads != 0) {
+                proc_threads_unlock(zombie, zs);
+                spin_unlock_irqrestore(&g_proc_table_lock, s);
+                extinction("wait_pid: zombie with live_threads != 0");
+            }
+            proc_threads_unlock(zombie, zs);
 
             proc_unlink_child(p, zombie);
 
@@ -6586,6 +6734,12 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             // could race with a destination CPU still mid-switch
             // (TPIDR_EL1 briefly points at ct). Mirrors the on_cpu
             // spin in wakeup() (P2-Cf).
+            //
+            // The walk holds no threads_lock, the one exception to ARCH
+            // 7.3.1's rule: the zombie is off the tree (proc_unlink_child,
+            // above, under g_proc_table_lock), so no lookup can reach it, and
+            // it has no live thread to reap a peer, so nothing else mutates
+            // its list. Each thread_free unlinks under the lock regardless.
             //
             // Walk-with-next discipline: thread_free unlinks ct from
             // zombie->threads + decrements thread_count, so capture

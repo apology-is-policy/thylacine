@@ -1504,7 +1504,7 @@ static void lwa_waiter_entry(void) {
     __atomic_store_n(&g_lwa_done, true, __ATOMIC_RELEASE);
     // The terminal EXITING handshake (the loom_sqpoll_main idiom).
     (void)spin_lock_irqsave(NULL);
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&g_lwa_exited, true, __ATOMIC_RELEASE);
     sched();
     extinction("lwa_waiter_entry: returned from terminal sched");

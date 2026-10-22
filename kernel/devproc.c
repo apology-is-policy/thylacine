@@ -227,8 +227,8 @@ static const char *state_name(enum proc_state s) {
 // status: name + pid + state + threads + cpu_ns + ppid + principal/gid +
 // pages/children + exit_status (if zombie). prowl-1 brought this to Plan 9
 // parity (name + CPU time + parent + owner). PRECONDITION: called under
-// g_proc_table_lock (via proc_for_each -> devproc_read_cb) -- proc_cpu_ns walks
-// p->threads, and p->parent is read here, both stable only under that lock.
+// g_proc_table_lock (via proc_for_each -> devproc_read_cb), which keeps p alive
+// and p->parent stable; proc_cpu_ns takes p->threads_lock for its own walk.
 // `caller` is the reading Proc (NULL is no one); cpu_ns is "-" unless it is
 // p's owner or a hostowner.
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
@@ -260,7 +260,7 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
     // accrues it per key); anyone else reads "-".
     n = fmt_str(buf, cap, off, "cpu_ns:  ");      if (!n) return 0; off += n;
     if (devproc_owner_or_hostowner(caller, p)) {
-        u64 cpu_ns = proc_cpu_ns(p);              // caller holds g_proc_table_lock
+        u64 cpu_ns = proc_cpu_ns(p);              // takes p->threads_lock
         n = fmt_udec(buf, cap, off, (unsigned long)cpu_ns); if (!n) return 0; off += n;
     } else {
         n = fmt_str(buf, cap, off, "-");          if (!n) return 0; off += n;
@@ -342,10 +342,9 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
 // deep-internals view: the summary (%cpu / state / mem) stays all-visible via
 // /ctl/procs + /proc/<pid>/status, but this per-thread internal detail is gated
 // at the READ site to owner-or-CAP_HOSTOWNER (devproc_sched_authorized).
-// PRECONDITION: called under g_proc_table_lock (via devproc_read_cb) -- the
-// p->threads walk + the per-thread reads are stable only under that lock
-// (every unlink from p->threads holds it, thread_free's and the in-Proc reap's;
-// the #95 walk-safety proc_cpu_ns relies on the same).
+// PRECONDITION: called under g_proc_table_lock (via devproc_read_cb), which
+// pins p; the p->threads walk holds p->threads_lock (every unlink from
+// p->threads holds it, thread_free's and the in-Proc reap's -- ARCH 7.3.1).
 static const char *sched_band_name(u32 band) {
     switch (band) {
     case SCHED_BAND_INTERACTIVE: return "INTR";
@@ -388,6 +387,7 @@ static size_t format_sched(struct Proc *p, char *buf, size_t cap) {
     // display-column read, but the atomic load documents it + is TSan-clean; the
     // sched_dump_runnable precedent; single-copy-atomic, never torn, a
     // mid-transition snapshot is acceptable for telemetry).
+    irq_state_t ts = proc_threads_lock(p);
     for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
         size_t row = off;
         u64 nsched = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
@@ -418,6 +418,7 @@ static size_t format_sched(struct Proc *p, char *buf, size_t cap) {
         n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
         off = row;   // commit the complete row
     }
+    proc_threads_unlock(p, ts);
     return off;
 }
 
@@ -1075,7 +1076,9 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     p->debug_exitkill = false;                      // the mark dies with the slot
     hwdebug_bp_clear_all(p->debug_hw);              // 8a-2b-1: a dead debugger's breakpoints are disarmed (else the orphaned target re-traps forever)
     hwdebug_wp_clear_all(p->debug_hw);              // 8a-2b-3: likewise its watchpoints (else the orphaned target re-traps on the watched access forever)
+    irq_state_t ts = proc_threads_lock(p);
     proc_debug_cancel_steps_locked(p);              // and its pending step (else the next attacher gets a stop it never asked for)
+    proc_threads_unlock(p, ts);
     if (exitkill && p->state == PROC_STATE_ALIVE) {
         // 5d EXITKILL (I-39 die-with-launcher; DEBUG-FS §5d): a debugger-LAUNCHED
         // target dies with its launcher -- the Plan 9 NoStrand-resume would orphan it
@@ -1108,7 +1111,9 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
         // its wake condition (RELEASE here and in the CAS, ACQUIRE there). Matches
         // proc_debug_resume's clears minus the wake, which the cascade already did.
         __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
+        ts = proc_threads_lock(p);                  // the focus is threads_lock state
         __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
+        proc_threads_unlock(p, ts);
     } else {
         proc_debug_resume(p);                       // 8a-1b-beta: a dead/detached debugger provably resumes an ATTACHED (or already-dying) quarry (ReleaseSlot -> NoStrand)
     }
@@ -1760,7 +1765,7 @@ bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *tar
 // True iff every non-EXITING thread of `target` is parked on its OWN debug_rendez
 // with on_cpu==false -- the "fully stopped" predicate a coherent cross-Proc
 // mem/reg access relies on (specs/debug_stop.tla NoEL0AfterStopped). Caller holds
-// g_proc_table_lock (the p->threads walk is stable under it -- both mutators,
+// target->threads_lock (the p->threads walk is stable under it -- both mutators,
 // thread_free and the in-Proc reap, hold it); reads rendez_blocked_on under each
 // peer's wait_lock (the
 // same lock the park's register-then-observe takes, so it never sees a thread
@@ -1800,6 +1805,7 @@ bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state) {
 }
 
 bool devproc_all_threads_parked(struct Proc *target) {
+    ASSERT_TL_HELD(target);
     for (struct Thread *peer = target->threads; peer; peer = peer->next_in_proc) {
         if (peer->state == THREAD_EXITING) continue;   // dying -- need not park
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
@@ -1820,9 +1826,13 @@ bool devproc_all_threads_parked(struct Proc *target) {
 }
 
 // The mem/reg access gate (I-39 + stopped-only, DEBUG-FS 3): the target is ALIVE,
-// a debugger stop is pending, AND every thread is parked. Caller holds
-// g_proc_table_lock. (A ZOMBIE/dying target is refused -- its pgtable_root may be
-// torn down; its memory is meaningless to inspect.)
+// a debugger stop is pending, AND every thread is parked. The _locked form's
+// caller holds g_proc_table_lock AND target->threads_lock; the plain form takes
+// the latter, for a caller that uses no Thread * afterwards -- what it found
+// stays true while g_proc_table_lock is held, since a resume and a death both
+// need that lock and a parked target has no running thread to spawn or reap.
+// (A ZOMBIE/dying target is refused -- its pgtable_root may be torn down; its
+// memory is meaningless to inspect.)
 //
 // PTY-1f: DELIBERATELY reads debug_stop_req ONLY -- a job-stopped Proc
 // (job_stop_req, the second stop owner) is NOT debugger-stopped: its threads
@@ -1833,7 +1843,8 @@ bool devproc_all_threads_parked(struct Proc *target) {
 // debug_stop_req and finds the threads already parked -> fully-stopped
 // immediately; correct and cheap. Do NOT generalize this read to
 // proc_stop_requested.
-static bool devproc_target_fully_stopped(struct Proc *target) {
+static bool devproc_target_fully_stopped_locked(struct Proc *target) {
+    ASSERT_TL_HELD(target);
     if (target->state != PROC_STATE_ALIVE) return false;
     if (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) == 0) return false;
     // 8a-1c holotype F1: a group-terminating target is DYING, not debug-stopped.
@@ -1843,11 +1854,18 @@ static bool devproc_target_fully_stopped(struct Proc *target) {
     // peers, so without this a dying target reads "fully stopped" and the reg/
     // kstack readers (which read the focus thread's t->ctx) would race the
     // non-settled dying thread (a torn read; bounded to no-UAF only because the
-    // reader holds g_proc_table_lock, pinning the Thread alive). Death wins: a
+    // reader holds threads_lock, pinning the Thread alive). Death wins: a
     // target with a pending group_exit_msg is never fully-stopped. Serialized
-    // with proc_group_terminate's set (both under g_proc_table_lock).
+    // with proc_group_terminate's set (it holds both locks).
     if (__atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) return false;
     return devproc_all_threads_parked(target);
+}
+
+static bool devproc_target_fully_stopped(struct Proc *target) {
+    irq_state_t ts = proc_threads_lock(target);
+    bool stopped = devproc_target_fully_stopped_locked(target);
+    proc_threads_unlock(target, ts);
+    return stopped;
 }
 
 // The g_proc_table_lock hold spans the resolve + gate + walk + copy, so the
@@ -1928,13 +1946,13 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // the step verb report. proc_debug_fault_stop sets p->debug_focus_thread to the
 // bp/step/wp-firing M (a Go breakpoint fires on whichever M runs the migrated
 // goroutine, NOT main); a manual stop / attach leaves it NULL. The
-// pointer is validated against the CURRENT p->threads under g_proc_table_lock
-// (every caller holds it): NO UAF, and the load-bearing reason is the GPTL PIN
-// (#95-audit F1), NOT a stop gate -- every unlink from p->threads holds this
-// lock and comes before the free: wait_pid_for's thread_free loop, run after
-// proc_unlink_child put the target out of proc_for_each's reach, and the in-Proc
-// reap, which clears a focus naming the thread it frees in the same hold. A
-// pointer that matches an
+// pointer is validated against the CURRENT p->threads under p->threads_lock
+// (every caller holds it, across the whole use of the result): NO UAF, and the
+// load-bearing reason is the lock PIN (#95-audit F1; ARCH 7.3.1), NOT a stop
+// gate -- every unlink from p->threads holds this lock and comes before the
+// free: wait_pid_for's thread_free loop, run after proc_unlink_child put the
+// target out of proc_for_each's reach, and the in-Proc reap, which clears a
+// focus naming the thread it frees in the same hold. A pointer that matches an
 // in-list thread is therefore a LIVE struct; this validation loop IS the safety
 // net (do NOT delete it as "redundant" -- the 8b settled kstack drops the
 // fully-stopped gate, so this loop is the only thing turning a stale/foreign focus
@@ -1952,6 +1970,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // downstream. NON-static so the selection is unit-testable (#95-audit F3;
 // the focus-selection leg of devproc.debug_stop_start_resume).
 struct Thread *devproc_focus_thread(struct Proc *target) {
+    ASSERT_TL_HELD(target);
     struct Thread *focus = __atomic_load_n(&target->debug_focus_thread, __ATOMIC_ACQUIRE);
     if (focus)
         for (struct Thread *th = target->threads; th; th = th->next_in_proc)
@@ -1966,17 +1985,18 @@ struct Thread *devproc_focus_thread(struct Proc *target) {
 // kstack_size - EXCEPTION_CTX_SIZE (the outermost EL0->EL1 KERNEL_ENTRY frame;
 // a debug-parked thread always entered from EL0, so it is valid). It is kernel
 // memory (TTBR1) -- a plain deref, no cross-Proc walk. Caller holds
-// g_proc_table_lock + has gated I-39 + fully-stopped (so on_cpu==false: the
-// frame + ctx are settled, not being written by a live cpu_switch_context).
+// g_proc_table_lock + target->threads_lock (the focus pointer's pin) + has gated
+// I-39 + fully-stopped (so on_cpu==false: the frame + ctx are settled, not being
+// written by a live cpu_switch_context).
 // `raw` admits kregs's kernel half (the CAP_DEBUG/CAP_HOSTOWNER tier; see below).
 static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out, bool raw) {
     struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else main)
     // 8a-1c holotype F1 (defense-in-depth): never read an EXITING thread's
     // ctx/trapframe -- it is running its exit path (the final sched() writes
     // t->ctx). devproc_focus_thread never selects one, and a user Proc's thread
-    // is marked EXITING only under the g_proc_table_lock this caller holds, so
-    // the state clause is unreachable and no test can redden it: defense in
-    // depth only. The witnesses are the selector's (devproc.debug_regs leg c).
+    // is marked EXITING only under the threads_lock this caller holds, so the
+    // state clause is unreachable and no test can redden it: defense in depth
+    // only. The witnesses are the selector's (devproc.debug_regs leg c).
     if (!th || th->state == THREAD_EXITING) return 0;
 
     // 8a-1b-gamma-3: kregs reads t->ctx (the saved KERNEL-side callee-saved
@@ -2049,7 +2069,8 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out, bool raw)
 // (SP_EL0), pc (ELR_EL1). pstate (SPSR_EL1) is DELIBERATELY NOT written -- an
 // arbitrary SPSR could eret the target to EL1 (privilege escalation), so the
 // saved SPSR is kept (step-related SPSR.SS is 8a-2). fpregs: all fields (no
-// privilege bits). Caller holds g_proc_table_lock + gated fully-stopped.
+// privilege bits). Caller holds g_proc_table_lock + target->threads_lock + gated
+// fully-stopped.
 static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
     if (kind == PQS_KREGS) return;   // 8a-1b-gamma-3: kregs is RO (no write path routes here; defensive)
     struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: write the M at the stop (else main)
@@ -2088,6 +2109,8 @@ struct devproc_regs_ctx {
     long         result;    // >=0 bytes moved (0 = off past EOF), -T_E_ACCES refused, -1 not-found / not stopped
 };
 
+static long devproc_regs_locked(struct Proc *target, struct devproc_regs_ctx *r);
+
 static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     struct devproc_regs_ctx *r = (struct devproc_regs_ctx *)arg;
     if (target->pid != r->target_pid) return 0;
@@ -2097,7 +2120,20 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     // an EL0 register); writes are control -- NOTRACE's, through the gate above.
     if (!r->is_write
         && devproc_read_sealed(r->caller, target, r->kind)) { r->result = -T_E_ACCES; return 1; }
-    if (!devproc_target_fully_stopped(target))          { r->result = -1; return 1; }  // stopped-only
+    // The focus thread is read and written under target->threads_lock, held
+    // from the gate to the end of the copy (ARCH 7.3.1).
+    irq_state_t ts = proc_threads_lock(target);
+    r->result = devproc_regs_locked(target, r);
+    proc_threads_unlock(target, ts);
+    // Control of a sharer's REGISTERS is control of the shared image: point its
+    // pc at a store and it writes the bytes for you. So a register write taints
+    // exactly as a memory write does (an image stamp: g_proc_table_lock state).
+    if (r->is_write && r->result > 0) proc_mark_debug_tainted_locked(target);
+    return 1;
+}
+
+static long devproc_regs_locked(struct Proc *target, struct devproc_regs_ctx *r) {
+    if (!devproc_target_fully_stopped_locked(target))   return -1;  // stopped-only
 
     // Build the current struct, apply the [off,off+n) slice (write) or copy it
     // out (read). The build-overlay-apply write path makes a PARTIAL write use
@@ -2109,22 +2145,17 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     bool raw = (__atomic_load_n(&r->caller->caps, __ATOMIC_ACQUIRE)
                 & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
     long size = devproc_build_regs(target, r->kind, scratch, raw);
-    if (size == 0)       { r->result = -1; return 1; }   // no live thread / no kstack
-    if (r->off >= size)  { r->result = 0;  return 1; }   // off past EOF -> 0
+    if (size == 0)       return -1;   // no live thread / no kstack
+    if (r->off >= size)  return 0;    // off past EOF -> 0
     long avail = size - (long)r->off;
     long cnt = (r->n < avail) ? r->n : avail;
     if (r->is_write) {
         for (long i = 0; i < cnt; i++) scratch[r->off + i] = ((const u8 *)r->kbuf)[i];
         devproc_apply_regs(target, r->kind, scratch);
-        // Control of a sharer's REGISTERS is control of the shared image: point
-        // its pc at a store and it writes the bytes for you. So a register write
-        // taints exactly as a memory write does.
-        if (cnt > 0) proc_mark_debug_tainted_locked(target);
     } else {
         for (long i = 0; i < cnt; i++) ((u8 *)r->kbuf)[i] = scratch[r->off + i];
     }
-    r->result = cnt;
-    return 1;
+    return cnt;
 }
 
 static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write) {
@@ -2451,7 +2482,9 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         // A pending step dies with the slot, as at a whole-Proc stop: left
         // armed, the focus thread's step trap would stop the target for whoever
         // attached next (a spurious step EC after this is benign).
+        irq_state_t ts = proc_threads_lock(target);
         proc_debug_cancel_steps_locked(target);
+        proc_threads_unlock(target, ts);
         // 5f: an explicit detach is the debugger's choice to run the target, so
         // it releases a birth hold too (before the resume's wake). The IMPLICIT
         // release -- the ctl fd closing without detach -- deliberately does not
@@ -2636,9 +2669,20 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     if (target == kproc())                            { s->result = -T_E_ACCES; return 1; } // undebuggable
     if (!devproc_debug_authorized_locked(s->caller, target)) { s->result = -T_E_ACCES; return 1; } // I-39
     if (target->debug_owner != s->ctl)                { s->result = -1; return 1; } // slot owner
-    if (!devproc_target_fully_stopped(target))        { s->result = -1; return 1; } // stopped-only
+    // The focus pointer is valid only under target->threads_lock: held from the
+    // gate through the step writes, and dropped before the resume, which takes it.
+    irq_state_t ts = proc_threads_lock(target);
+    if (!devproc_target_fully_stopped_locked(target)) {                              // stopped-only
+        proc_threads_unlock(target, ts);
+        s->result = -1;
+        return 1;
+    }
     struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (step targets it), else main
-    if (!th)                                          { s->result = -1; return 1; } // no thread to step
+    if (!th) {                                                                       // no thread to step
+        proc_threads_unlock(target, ts);
+        s->result = -1;
+        return 1;
+    }
 
     // The step-over VA: if the thread's PC (its trapframe's ELR) sits at an armed
     // breakpoint, mark that bp to be skipped during the step (hwdebug_switch_in
@@ -2654,6 +2698,7 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     }
     th->debug_stepover_va = stepover;
     __atomic_store_n(&th->debug_ss_armed, true, __ATOMIC_RELEASE);
+    proc_threads_unlock(target, ts);
 
     // Resume: clear debug_stop_req + wake the parked threads. The focus thread runs one
     // instruction with SS armed (SPSR.SS set by el0_return_stop_check, MDSCR.SS by
@@ -2695,8 +2740,10 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
     // be a job stop or a birth hold, and neither opens the stopped-only surface
     // (devproc_target_fully_stopped reads debug_stop_req for the same reason),
     // so reporting them as stopped hands the debugger a refusal on its next read.
+    irq_state_t ts = proc_threads_lock(target);
     s->state = (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) != 0 &&
                 devproc_all_threads_parked(target)) ? 1 : 0;   // + the gamma-shared "fully parked" predicate
+    proc_threads_unlock(target, ts);
     return 1;
 }
 
@@ -2766,8 +2813,8 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 #define DEBUG_KSTACK_BUF         2048
 
 // Walk + symbolize the focus thread's kernel stack into `buf`; return the byte
-// length (0 if no walkable thread). Runs under g_proc_table_lock in the cb; the
-// walk reads only the target's own USABLE kstack (guard excluded) + the .rodata
+// length (0 if no walkable thread). Runs under the target's threads_lock in the
+// cb (the focus thread's pin); the walk reads only the target's own USABLE kstack (guard excluded) + the .rodata
 // symtab -- no sleep, no alloc. Truncates at a whole-line boundary if `cap` fills
 // (best-effort; the shallow checkpoint stack fits easily -- a deep 8a-2 bp stack
 // past 2 KiB is a v1.x offset-aware multi-read).
@@ -2861,8 +2908,9 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     // 8b: the SETTLED-thread inspect -- NO debug-stop required (unlike mem/regs/
     // kregs/wait, which keep the fully_stopped gate). devproc_format_kstack gates
     // the focus thread on on_cpu==false; the walk is bounded to the thread's own kstack
-    // (memory-safe) + runs under g_proc_table_lock (the Thread lifetime pin). This
-    // is what lets 8b inspect a thread blocked DEEP in a syscall (sleep -> rendez).
+    // (memory-safe) + runs under target->threads_lock (the Thread lifetime pin, ARCH
+    // 7.3.1: a running target's own reap unlinks under it). This is what lets 8b
+    // inspect a thread blocked DEEP in a syscall (sleep -> rendez).
     //
     // I-16 (8b-1d holotype F1): raw slid kernel addresses reveal the KASLR slide, so
     // they go ONLY to the CAP_DEBUG/CAP_HOSTOWNER tier (the /ctl/kernel-base tier);
@@ -2871,7 +2919,9 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     // CAP_HOSTOWNER is console-gated ADMIN_ELEVATE, outside CAP_GRANTABLE_CLEARANCE.)
     bool raw = (__atomic_load_n(&k->caller->caps, __ATOMIC_ACQUIRE)
                 & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
+    irq_state_t ts = proc_threads_lock(target);
     k->total  = devproc_format_kstack(target, k->buf, k->cap, raw);
+    proc_threads_unlock(target, ts);
     k->result = 1;
     return 1;
 }

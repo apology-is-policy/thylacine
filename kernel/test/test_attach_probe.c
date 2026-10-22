@@ -298,7 +298,7 @@ static void responder_thread_entry(void) {
     // park left this thread RUNNABLE forever -- the scheduler ran it on every
     // CPU (work-steal bounced it), pinning all cores at idle.
     (void)spin_lock_irqsave(NULL);
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&g_responder_exited, true, __ATOMIC_RELEASE);
     sched();
     extinction("responder_thread_entry: returned from terminal sched");

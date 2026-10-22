@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -445,6 +445,10 @@ path maximum, a 256-byte binary name, 512 argv entries in 64 KiB of data, 16
 inheritable descriptors.
 
 ## Concurrency
+
+`SYS_THREAD_EXIT` (`thread_exit_self`): the `THREAD_EXITING` commit, under
+the Proc's thread lock, precedes the clear-child-tid store, and the store cannot
+sleep ([[lock-proc-threads]], [[seam-exiting-tails-never-sleep]]).
 
 None owned. These are declarations; the file defines no state and takes no
 locks. Concurrency lives in the handlers.
