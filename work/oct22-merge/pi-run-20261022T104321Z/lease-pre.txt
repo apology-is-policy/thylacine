@@ -1,0 +1,9 @@
+mac   HELD by main for 2m, 2.0h left
+        why: main: Stratum private clone -- acceptwake full ctest x3 (Debug) then dirmtime 30.6 bench (Release, 3 rounds); no QEMU
+        queue 1: astra (50s waiting)
+pi    HELD by you for 14s, 3.0h left
+        why: corona: the main merge's A72/KVM axis -- sync ca8c2c2b9's baked image to ~/projects/thylacine-corona on the pi and boot default-smp4 + ubsan-smp4 x10 each; duration uncertain (vote 16's pi run is the reference)
+        phase: corona main-merge pi axis at ca8c2c2b9: sync + default-smp4 x10 + ubsan-smp4 x10, driver work/oct22-merge/pi-run-20261022T104321Z
+        runner: Mac pid 97446 alive (start Thu Oct 22 12:43:21 2026)
+        pids: [97446] (their registered work -- not a kill list)
+disk: 28.2 GiB available at /Users/northkillpd/projects/thylacine-corona

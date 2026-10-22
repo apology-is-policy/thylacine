@@ -1,0 +1,1 @@
+["/opt/homebrew/opt/llvm/bin/clang", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fsanitize=thread", "/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/magazines-fk6yokmm/alloc-unlocked.c", "-o", "/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/magazines-fk6yokmm/alloc-unlocked", "-isysroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"]

@@ -1,0 +1,4 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-receipts-7v6hbi5i/clean.c:236:5: error: call to undeclared function 'loom_drive_moved_locked'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  236 |     loom_drive_moved_locked(l);
+      |     ^
+1 error generated.

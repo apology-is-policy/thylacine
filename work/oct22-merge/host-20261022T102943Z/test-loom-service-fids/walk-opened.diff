@@ -1,0 +1,11 @@
+--- kernel/loom_service_fids.c
++++ walk-opened.c
+@@ -90,7 +90,7 @@
+     if(n->fid_borrows==UINT32_MAX)return -T_E_NOSPC;
+     if(need && (!(n->fid_flags&LFID_OPEN) || (n->fid_access&need)!=need))return -T_E_ACCES;
+     // walk(5): a fid opened for I/O is no longer a walk source.
+-    if(walk && (n->fid_flags&LFID_OPEN))return -T_E_BADF;
++    (void)walk;
+     int rc=loom_slot_pin(t,source,t->slots[source.slot].kind);
+     if(!rc){++n->fid_borrows;*wire=n->wire_fid;}
+     return rc;

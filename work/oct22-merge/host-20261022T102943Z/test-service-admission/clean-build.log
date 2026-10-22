@@ -1,0 +1,14 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-433j2b94/clean.c:262:34: error: no member named 'poster_principal' in 'struct SrvService'
+  262 |         .poster_principal = svc->poster_principal, .mode = svc->mode,
+      |                             ~~~  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-433j2b94/clean.c:329:42: error: too many arguments to function call, expected 7, have 9
+  326 |     struct SrvConn *cn = srvconn_create_in(view->domain, &err, id->stripes, id->pid,
+      |                          ~~~~~~~~~~~~~~~~~
+  327 |                                          id->access.principal_id,
+  328 |                                          id->console_attached, post.poster_stripes,
+  329 |                                          post.poster_principal, post.msize);
+      |                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-433j2b94/clean.c:211:24: note: 'srvconn_create_in' declared here
+  211 | static struct SrvConn *srvconn_create_in(struct SrvDomain *d,int *err,u64 stripes,int pid,bool console,u64 poster,u32 msize) {
+      |                        ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2 errors generated.

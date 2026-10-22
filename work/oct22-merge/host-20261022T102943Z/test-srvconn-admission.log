@@ -1,0 +1,264 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:213:9: error: no member named 'peer_principal' in 'struct SrvConn'
+  213 |     cn->peer_principal     = peer_principal;
+      |     ~~  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:216:9: error: no member named 'server_principal' in 'struct SrvConn'
+  216 |     cn->server_principal   = server_principal;
+      |     ~~  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:332:88: error: too few arguments to function call, expected 7, have 5
+  332 | static struct SrvConn *make(void) { return srvconn_create(1, 1, false, 2, SRVCONN_MSIZE); }
+      |                                            ~~~~~~~~~~~~~~                              ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:232:17: note: 'srvconn_create' declared here
+  232 | struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
+      |                 ^              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  233 |                                u32 peer_principal, bool peer_console,
+      |                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  234 |                                u64 server_stripes, u32 server_principal,
+      |                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  235 |                                u32 msize) {
+      |                                ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:352:98: error: too few arguments to function call, expected 9, have 7
+  352 |         cs[i] = srvconn_create_in(ds[i / SRV_CREDITS_DOMAIN], &err, 1, 1, false, 2, SRVCONN_MSIZE);
+      |                 ~~~~~~~~~~~~~~~~~                                                                ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:355:80: error: too few arguments to function call, expected 9, have 7
+  355 |             CHECK(!srvconn_create_in(ds[0], &err, 1, 1, false, 2, SRVCONN_MSIZE)
+      |                    ~~~~~~~~~~~~~~~~~                                           ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:358:72: error: too few arguments to function call, expected 9, have 7
+  358 |     CHECK(!srvconn_create_in(ds[3], &err, 1, 1, false, 2, SRVCONN_MSIZE)
+      |            ~~~~~~~~~~~~~~~~~                                           ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:379:72: error: too few arguments to function call, expected 9, have 7
+  379 |         CHECK(!srvconn_create_in(d, &err, 1, 1, false, 2, SRVCONN_MSIZE)
+      |                ~~~~~~~~~~~~~~~~~                                       ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:398:83: error: too few arguments to function call, expected 9, have 7
+  398 |             held[n] = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE);
+      |                       ~~~~~~~~~~~~~~~~~                                           ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:402:81: error: too few arguments to function call, expected 9, have 7
+  402 |         CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE)
+      |                ~~~~~~~~~~~~~~~~~                                                ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:406:97: error: too few arguments to function call, expected 9, have 7
+  406 |         struct SrvConn *bulk = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE);
+      |                                ~~~~~~~~~~~~~~~~~                                                ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:413:76: error: too few arguments to function call, expected 9, have 7
+  413 |         CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE),
+      |                ~~~~~~~~~~~~~~~~~                                           ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:418:85: error: too few arguments to function call, expected 9, have 7
+  418 |             held[n++] = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE);
+      |                         ~~~~~~~~~~~~~~~~~                                           ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:421:76: error: too few arguments to function call, expected 9, have 7
+  421 |         CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE), "bulk returned excess credit");
+      |                ~~~~~~~~~~~~~~~~~                                           ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:426:77: error: too few arguments to function call, expected 9, have 7
+  426 |         CHECK(!srvconn_create_in(d, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE), "bulk allocation failure ignored");
+      |                ~~~~~~~~~~~~~~~~~                                            ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:436:93: error: too few arguments to function call, expected 9, have 7
+  436 |         held[i] = srvconn_create_in(i < 24 ? a : b, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE);
+      |                   ~~~~~~~~~~~~~~~~~                                                         ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:440:68: error: too few arguments to function call, expected 9, have 7
+  440 |     CHECK(!srvconn_create_in(c, &err, 1, 1, false, 2, SRVCONN_MSIZE)
+      |            ~~~~~~~~~~~~~~~~~                                       ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:165:17: note: 'srvconn_create_in' declared here
+  165 | struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+      |                 ^                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  166 |                                   u64 peer_stripes, int peer_pid,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  167 |                                   u32 peer_principal, bool peer_console,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  169 |                                   u32 msize) {
+      |                                   ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:443:68: error: too few arguments to function call, expected 7, have 5
+  443 |         held[i] = srvconn_create(1, 1, false, 2, SRVCONN_BULK_MSIZE);
+      |                   ~~~~~~~~~~~~~~                                   ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:232:17: note: 'srvconn_create' declared here
+  232 | struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
+      |                 ^              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  233 |                                u32 peer_principal, bool peer_console,
+      |                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  234 |                                u64 server_stripes, u32 server_principal,
+      |                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  235 |                                u32 msize) {
+      |                                ~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:456:43: error: too few arguments to function call, expected 7, have 5
+  456 |     CHECK(srvconn_create(1, 1, false, 2, 0) == NULL, "invalid class admitted");
+      |           ~~~~~~~~~~~~~~                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:28:34: note: expanded from macro 'CHECK'
+   28 | #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+      |                                  ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c:232:17: note: 'srvconn_create' declared here
+  232 | struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
+      |                 ^              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  233 |                                u32 peer_principal, bool peer_console,
+      |                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  234 |                                u64 server_stripes, u32 server_principal,
+      |                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  235 |                                u32 msize) {
+      |                                ~~~~~~~~~
+18 errors generated.
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-srvconn-admission.py", line 297, in <module>
+    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    "-Werror", "-Wno-unused-function", str(path / "fixture.c"),
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    "-o", str(path / "fixture")], check=True)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture.c', '-o', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/srvconn-admission-k7fk3dzo/fixture']' returned non-zero exit status 1.

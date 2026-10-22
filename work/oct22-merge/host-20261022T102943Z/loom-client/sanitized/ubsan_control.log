@@ -1,0 +1,2 @@
+work/oct22-merge/host-20261022T102943Z/loom-client/sanitized/ubsan_control.c:3:77: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior work/oct22-merge/host-20261022T102943Z/loom-client/sanitized/ubsan_control.c:3:77 

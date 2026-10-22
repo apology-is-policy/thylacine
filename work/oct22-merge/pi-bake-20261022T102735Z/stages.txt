@@ -1,0 +1,15 @@
+2026-10-22T10:27:35Z  occurs self-check: a true count passes, a false one fails
+2026-10-22T10:27:36Z  HEAD ca8c2c2b91bb150546b6da04b72696b2e8eef12c, clean; expected tests (derived from test.c): 2085; last registered: stalk.open_create_containment_and_denials
+2026-10-22T10:27:36Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla'; no untracked build input
+2026-10-22T10:27:36Z  go fork /Users/northkillpd/projects/go-thylacine-pin-3471e2a at 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean
+2026-10-22T10:29:34Z  snapshot twins equal their sources: build/fixtures/pool.img build/fixtures/system.key
+05f5d4d7c4ba49979fe2d50579e78f6bbe6bb023ced5dd79b1fbeb3e27597b93  build/kernel/thylacine.elf
+df9f6d63496779000ba40629911d68a88321ffece5052a5ecf4dce2001afe3ba  build/kernel/thylacine.bin
+b5b27eb721e2924ade5a43bba74bdfbc33b4df8564d554e621c545f52e720521  build/kernel-undefined/thylacine.elf
+6d656147b0ed2298b43680ed2a7f320de040fd4926571cbc05886ba9e1ef819e  build/kernel-undefined/thylacine.bin
+1ce1376c489d923fd3aec001fd9fe6ee68452bfec0921be9e4eba12cb4b35678  build/ramfs.cpio
+08d8c861a8fc808026a465ff32b70b16ad2a48aee476e0235cc569c57c3ebd97  build/disk.img
+89edd43e9992776cf24ee1fb23884a05559310cb00c140718443d70ab772bd70  build/fixtures/pool.img
+0d0c2a1d522473140a49f0a17fb8b6dc76b74b572543132c32389e7339ddcf44  build/fixtures/system.key
+2026-10-22T10:29:43Z  BAKE DONE: ca8c2c2b91bb150546b6da04b72696b2e8eef12c -> work/oct22-merge/pi-bake-20261022T102735Z. Release the mac now.
+2026-10-22T10:29:43Z  exit 0

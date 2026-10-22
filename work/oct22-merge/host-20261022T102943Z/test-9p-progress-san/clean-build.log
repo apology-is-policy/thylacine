@@ -1,0 +1,6 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/kernel/9p_session.c:49:
+In file included from /Users/northkillpd/projects/thylacine-corona/kernel/../mm/slub.h:28:
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/spinlock.h:25:10: fatal error: 'atomic_lse.h' file not found
+   25 | #include <atomic_lse.h>   // t_atomic_xchg_acq_u32 (W1.5 LSE-patchable test-and-set)
+      |          ^~~~~~~~~~~~~~
+1 error generated.

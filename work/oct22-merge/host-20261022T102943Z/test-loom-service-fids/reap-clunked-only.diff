@@ -1,0 +1,12 @@
+--- kernel/loom_service_fids.c
++++ reap-clunked-only.c
+@@ -207,8 +207,7 @@
+         // Only a RETIRED scope proves the abort quiescence retire_aborted needs.
+         struct loom_service_node *p=fid_exact(t,nodes,n->parent,true);
+         if(!p || p->state!=LOOM_SERVICE_RETIRED || t->slots[source.slot].pins)return -T_E_BUSY;
+-        int rc=loom_fid_retire_aborted(t,nodes,source);
+-        if(rc)return rc;
++        return -T_E_BUSY;
+     }
+     return loom_fid_reap(t,nodes,source);
+ }

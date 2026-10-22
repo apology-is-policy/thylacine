@@ -1,0 +1,11 @@
+=== preconditions ===
+mutate.py --check: every anchor occurs exactly once: R1 R2
+2026-10-22T08:57:54Z  HEAD d645dd0eb4e795d1859ad83b23f2db0c64115576, clean; go fork 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean; anchors + kill messages checked; verdict self-check passes; mutants: R1 R2 
+=== R1 ===
+2026-10-22T08:57:54Z  disk R1: 9232 MiB free (floor 6144)
+2026-10-22T08:57:56Z  R1: BUILD FAILED (proves nothing); tail in work/oct22-merge/mutants-20261022T085753Z/R1-build.log
+=== R2 ===
+2026-10-22T08:57:56Z  disk R2: 9231 MiB free (floor 6144)
+2026-10-22T08:58:20Z  R2: BUILD FAILED (proves nothing); tail in work/oct22-merge/mutants-20261022T085753Z/R2-build.log
+2026-10-22T08:58:20Z  SURVIVORS: R1(build) R2(build)
+2026-10-22T08:58:20Z  exit 1

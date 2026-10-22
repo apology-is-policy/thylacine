@@ -1,0 +1,33 @@
+=== preconditions ===
+2026-10-22T08:57:24Z  occurs self-check: a true count passes, a false one fails
+2026-10-22T08:57:24Z  verdict self-check: PASS, a FAIL's message and an absent test read as such
+2026-10-22T08:57:24Z  probes_hash self-check: equal files agree, a changed byte differs, a missing program refuses
+2026-10-22T08:57:24Z  HEAD d645dd0eb4e795d1859ad83b23f2db0c64115576, clean
+2026-10-22T08:57:26Z  NAMED derived: vote16=12 onesided=260 resolved=568 union=733 registered=2085 resolved_files=14
+2026-10-22T08:57:29Z  expected tests (derived from test.c): 2085; named: 733
+2026-10-22T08:57:29Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla' (self-check: a wrong set refuses); no untracked build input
+2026-10-22T08:57:29Z  go fork /Users/northkillpd/projects/go-thylacine-pin-3471e2a at 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean
+2026-10-22T08:57:29Z  disk pre: 9234 MiB free (floor 8192)
+=== CONTROL ===
+control build failed
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:838:20: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  838 |         roots[i] = sys_srv_registry_new_for_proc(p, fd, NULL, 0, 0);
+      |                  ~ ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:844:21: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  844 |         int fresh = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+      |             ~~~~~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:848:13: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  848 |     int a = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+      |         ~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:849:13: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  849 |     int b = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+      |         ~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:939:19: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  939 |     int view_fd = sys_srv_registry_new_for_proc(factory, source_fd, &cap_route, 1, 0);
+      |         ~~~~~~~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 warning and 5 errors generated.
+gmake[2]: *** [kernel/CMakeFiles/thylacine.elf.dir/build.make:2692: kernel/CMakeFiles/thylacine.elf.dir/test/test_devsrv.c.obj] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:106: kernel/CMakeFiles/thylacine.elf.dir/all] Error 2
+gmake: *** [Makefile:91: all] Error 2
+2026-10-22T08:57:53Z  exit 1

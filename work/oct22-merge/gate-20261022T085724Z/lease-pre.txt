@@ -1,0 +1,4 @@
+mac   HELD by you for 17s, 3.0h left
+        why: corona: the main-merge gate at 0374cf0ba (46 host legs incl cargo host tests + sims mutants, 1 guest mutant, then CI/qual/UBSan/production/SMP 5x10); first build after a 263-commit merge rebuilds widely, duration uncertain
+pi    FREE
+disk: 9.0 GiB available at /Users/northkillpd/projects/thylacine-corona

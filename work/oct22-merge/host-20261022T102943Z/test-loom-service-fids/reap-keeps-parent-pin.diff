@@ -1,0 +1,10 @@
+--- kernel/loom_service_fids.c
++++ reap-keeps-parent-pin.c
+@@ -196,7 +196,6 @@
+     u8 *bytes=(u8 *)n;
+     for(size_t i=0;i<sizeof(*n);++i)bytes[i]=0;
+     (void)loom_slot_reap(t,source);
+-    (void)loom_slot_unpin(t,parent);
+     return 0;
+ }
+ int loom_fid_reap_retired(struct loom_slot_table *t,struct loom_service_node_table *nodes,

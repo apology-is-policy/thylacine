@@ -1,0 +1,21 @@
+warning: unused variable: `tag`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T102943Z/test-clipboard-admission/completion-tag-body.rs:110:32
+    |
+110 |     pub fn complete(&mut self, tag: u64, result: i32, bytes: &[u8]) {
+    |                                ^^^ help: if this is intentional, prefix it with an underscore: `_tag`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `control_id` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/halcyond/src/clipbroker.rs:90:19
+   |
+71 | impl Broker {
+   | ----------- method in this implementation
+...
+90 |     pub(crate) fn control_id(&mut self) -> Result<u64, Failure> {
+   |                   ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 2 warnings emitted
+

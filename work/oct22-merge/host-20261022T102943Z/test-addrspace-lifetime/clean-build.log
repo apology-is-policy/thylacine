@@ -1,0 +1,35 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:122:5: error: unknown type name 'caps_t'
+  122 |     caps_t         caps_ever;
+      |     ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:137:16: error: static assertion failed due to requirement 'sizeof(struct AddrSpace) == 88': AddrSpace is 88 bytes: ref+lock (8) + pgtable_root (8) + context_id (8) + vmas (8) + the three I-32 u32 axes + page_budget + page_peak + pgtable_pages + file_pages + guards_ever (32) + id (8) + caps_ever (8) + owners + private_rings (8). Growth is fine -- this assert is a drift alarm, not an ABI.
+  137 | _Static_assert(sizeof(struct AddrSpace) == 88,
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:137:41: note: expression evaluates to '1 == 88'
+  137 | _Static_assert(sizeof(struct AddrSpace) == 88,
+      |                ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:303:9: error: call to undeclared function 'addrspace_release'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  303 |     if (addrspace_release(as)) addrspace_destroy(as);
+      |         ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:303:9: note: did you mean 'addrspace_ref'?
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:209:6: note: 'addrspace_ref' declared here
+  209 | void addrspace_ref(struct AddrSpace *as) {
+      |      ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:303:32: error: call to undeclared function 'addrspace_destroy'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  303 |     if (addrspace_release(as)) addrspace_destroy(as);
+      |                                ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:306:6: error: conflicting types for 'addrspace_release'
+  306 | bool addrspace_release(struct AddrSpace *as) {
+      |      ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:303:9: note: previous implicit declaration is here
+  303 |     if (addrspace_release(as)) addrspace_destroy(as);
+      |         ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:317:6: error: conflicting types for 'addrspace_destroy'
+  317 | void addrspace_destroy(struct AddrSpace *as) {
+      |      ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:303:32: note: previous implicit declaration is here
+  303 |     if (addrspace_release(as)) addrspace_destroy(as);
+      |                                ^
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-1qgayl7l/clean.c:340:17: error: call to undeclared function 'addrspace_quiesce_mapped_devices'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  340 |     int reset = addrspace_quiesce_mapped_devices(as);
+      |                 ^
+7 errors generated.

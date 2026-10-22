@@ -1,0 +1,7 @@
+PASS clean 89 states
+PASS installer InstallerPinned
+PASS expose NoHalfPublished
+PASS late NoLatePublication
+PASS pin EntryRetainsStorage
+PASS terminal TerminalRetained
+PASS stale NoStaleEntry

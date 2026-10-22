@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-9p-progress.py", line 47, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-9p-progress.py", line 38, in main
+    with (logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+                                                      ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['clang', '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-I', '/Users/northkillpd/projects/thylacine-corona/kernel/include', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/9p-progress-mp05h1oa/clean.c', '/Users/northkillpd/projects/thylacine-corona/kernel/9p_wire.c', '/Users/northkillpd/projects/thylacine-corona/kernel/9p_session.c', '/Users/northkillpd/projects/thylacine-corona/tools/host-tests/9p-progress.c', '-o', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/9p-progress-mp05h1oa/clean', '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']' returned non-zero exit status 1.

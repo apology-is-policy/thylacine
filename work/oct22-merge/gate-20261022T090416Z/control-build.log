@@ -1,0 +1,846 @@
+
+698 hunks checked: 0 error(s), 0 warning(s)
+spawn-args mirror check: kernel 104 B / 20 fields, every u64 classified; 3 in-tree mirrors ok (libt, libthyla-rs, pouch); go fork ok (offsets, sizes, pointer-typed addresses; /Users/northkillpd/projects/go-thylacine-pin-3471e2a/src/syscall/exec_thylacine.go); tails: sys_spawn_ext_cwd ok (libt, libthyla-rs)
+check-flag-words: proc_flags: 21 defines (1 built from members), 20 bits owned, free 13-17,22-28
+check-flag-words: spawn perms: 12 defines (1 built from members), 11 bits owned, free 11-31
+check-flag-words: spawn identity flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn allowance flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn phenotype flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn debug flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn ext flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: walk-create mode word: 7 defines (1 built from members), 14 bits owned, free 9-21,26-30
+check-flag-words: 9P attach flags: 3 defines (0 built from members), 3 bits owned, free 3-31
+check-flag-words: mount flags: 7 defines (0 built from members), 7 bits owned, free 7-31
+check-flag-words: 10 words ok; the self-test caught all 50 mutations
+== VMA_PROT: 5 kernel bit(s) in kernel/include/thylacine/vma.h
+     VMA_PROT_READ     = 0x1
+     VMA_PROT_WRITE    = 0x2
+     VMA_PROT_RW       = 0x3
+     VMA_PROT_EXEC     = 0x4
+     VMA_PROT_RX       = 0x5
+   -- mirror usr/lib/libt/include/thyla/syscall.h (T_PROT_*): 3 bit(s)
+      ok  T_PROT_READ = 0x1
+      ok  T_PROT_WRITE = 0x2
+      ok  T_PROT_EXEC = 0x4
+   -- mirror usr/lib/libthyla-rs/src/lib.rs (T_PROT_*): 3 bit(s)
+      ok  T_PROT_READ = 0x1
+      ok  T_PROT_WRITE = 0x2
+      ok  T_PROT_EXEC = 0x4
+== BURROW_PROT: 4 kernel bit(s) in kernel/include/thylacine/syscall.h
+     BURROW_PROT_NONE     = 0x0
+     BURROW_PROT_READ     = 0x1
+     BURROW_PROT_WRITE    = 0x2
+     BURROW_PROT_EXEC     = 0x4
+   -- mirror usr/lib/libthyla-rs/src/lib.rs (T_BURROW_PROT_*): 3 bit(s)
+      ok  T_BURROW_PROT_NONE = 0x0
+      ok  T_BURROW_PROT_READ = 0x1
+      ok  T_BURROW_PROT_WRITE = 0x2
+
+KERNEL BITS WITH NO MIRROR (not a disagreement -- an ABSENCE, and
+the reason has to be stated somewhere a reader will find it):
+   VMA_PROT_RW = 0x3  absent from usr/lib/libt/include/thyla/syscall.h
+   VMA_PROT_RX = 0x5  absent from usr/lib/libt/include/thyla/syscall.h
+   VMA_PROT_RW = 0x3  absent from usr/lib/libthyla-rs/src/lib.rs
+   VMA_PROT_RX = 0x5  absent from usr/lib/libthyla-rs/src/lib.rs
+   BURROW_PROT_EXEC = 0x4  absent from usr/lib/libthyla-rs/src/lib.rs
+
+check-prot-mirror: 5 unmirrored kernel bit(s)
+check-prot-mirror: PASS -- every shared bit agrees
+==> Building kernel (build_type=Debug, hardening=OFF, kaslr=OFF, sanitize='', tests=ON, dir=/Users/northkillpd/projects/thylacine-corona/build/kernel)
+-- Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/kernel
+[100%] Built target thylacine.elf
+==> HX-2: regenerated in-kernel symbol table (pass 1) -- re-linking
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/generated/halls_symtab.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff   3482856 Oct 22 11:04 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  11777808 Oct 22 11:04 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+-105553110931272 0000000000048104 b pc
+-105553109645648 0000000000065536 b g_argwidth_probe_blob
+-105553111607904 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110093779 0000000000065792 b g_pe_payload
+-105553112457720 0000000000066752 D g_tests
+-105553110014160 0000000000085024 b pti_front_clients
+-105553109743952 0000000000098304 b g_bridge_probe_blob
+-105553110193119 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553112645780 0000000000142502 R halls_symtab_names
+-105553112227840 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf
+==> HX-2: symbol table stable (converged after 1 re-link)
+==> Kernel built: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+==> [build.sh] kernel ELF: BUILT (Debug, hardening=OFF, kaslr=OFF, sanitize='none', tests=ON)
+-rwxr-xr-x@ 1 northkillpd  staff  11777808 Oct 22 11:04 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+==> Generating system recovery phrase header (corvus-mint emit-phrase)
+    Finished `release` profile [optimized] target(s) in 0.30s
+corvus-mint: emitted system recovery phrase header -> /Users/northkillpd/projects/thylacine-corona/build/generated/corvus_system_recovery_phrase.h
+==> [build.sh] system recovery phrase header: GENERATED (/Users/northkillpd/projects/thylacine-corona/build/generated/corvus_system_recovery_phrase.h; seed=corvus-mint default)
+==> Building userspace C (dir=/Users/northkillpd/projects/thylacine-corona/build/usr, boot_probes=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.2s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/usr
+[  2%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/adapter.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  5%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/fatal.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  7%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/native_kernel.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 10%] Linking C static library ../libt.a
+[ 31%] Built target t
+[ 34%] Building C object hello/CMakeFiles/hello.dir/hello.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 36%] Linking C executable hello
+[ 36%] Built target hello
+[ 39%] Building C object joey/CMakeFiles/joey.dir/joey.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 42%] Linking C executable joey
+[ 42%] Built target joey
+[ 44%] Building C object pipe-probe/CMakeFiles/pipe-probe.dir/pipe-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 47%] Linking C executable pipe-probe
+[ 47%] Built target pipe-probe
+[ 50%] Building C object attach-probe/CMakeFiles/attach-probe.dir/attach-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 52%] Linking C executable attach-probe
+[ 52%] Built target attach-probe
+[ 55%] Building C object stratumd-stub/CMakeFiles/stratumd-stub.dir/stratumd-stub.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 57%] Linking C executable stratumd-stub
+[ 57%] Built target stratumd-stub
+[ 60%] Building C object stub-driver/CMakeFiles/stub-driver.dir/stub-driver.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 63%] Linking C executable stub-driver
+[ 63%] Built target stub-driver
+[ 65%] Building C object stub-fs-probe/CMakeFiles/stub-fs-probe.dir/stub-fs-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 68%] Linking C executable stub-fs-probe
+[ 68%] Built target stub-fs-probe
+[ 71%] Building C object stub-walk-probe/CMakeFiles/stub-walk-probe.dir/stub-walk-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/usr/stub-walk-probe/stub-walk-probe.c:45:6: warning: no previous prototype for function '_start' [-Wmissing-prototypes]
+   45 | void _start(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/usr/stub-walk-probe/stub-walk-probe.c:45:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+   45 | void _start(void) {
+      | ^
+      | static 
+1 warning generated.
+[ 73%] Linking C executable stub-walk-probe
+[ 73%] Built target stub-walk-probe
+[ 76%] Building C object thread-probe/CMakeFiles/thread-probe.dir/thread-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 78%] Linking C executable thread-probe
+[ 78%] Built target thread-probe
+[ 81%] Building C object loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/loom-bridge-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 84%] Linking C executable loom-bridge-probe
+[ 84%] Built target loom-bridge-probe
+[ 86%] Building C object loom-c-probe/CMakeFiles/loom-c-probe.dir/loom-c-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 89%] Linking C executable loom-c-probe
+[ 89%] Built target loom-c-probe
+[ 92%] Building C object argwidth-probe/CMakeFiles/argwidth-probe.dir/argwidth-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 94%] Linking C executable argwidth-probe
+[ 94%] Built target argwidth-probe
+[ 97%] Building C object thread-fault-probe/CMakeFiles/thread-fault-probe.dir/thread-fault-probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[100%] Linking C executable thread-fault-probe
+[100%] Built target thread-fault-probe
+==> Userspace C built under /Users/northkillpd/projects/thylacine-corona/build/usr
+==> [build.sh] userspace: BUILT (native libt C binaries + the Rust workspace below; boot_probes=ON)
+-rwxr-xr-x@ 1 northkillpd  staff  14496 Oct 22 11:04 /Users/northkillpd/projects/thylacine-corona/build/usr/hello/hello
+==> Building userspace Rust (target=aarch64-unknown-none, dir=/Users/northkillpd/projects/thylacine-corona/build/usr-rs)
+warning: unstable feature specified for `-Ctarget-feature`: `outline-atomics`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: `loom-client` (lib) generated 1 warning
+warning: `ninep` (lib) generated 1 warning (1 duplicate)
+warning: `beacon` (lib) generated 1 warning (1 duplicate)
+warning: `vt` (lib) generated 1 warning (1 duplicate)
+warning: constant `DAYLIGHT` is never used
+   --> lib/libhalcyon/src/theme.rs:404:18
+    |
+404 | pub(crate) const DAYLIGHT: Theme = DAYLIGHT_THEME;
+    |                  ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `thyla-heap` (lib) generated 1 warning (1 duplicate)
+warning: `libhalcyon` (lib) generated 2 warnings (1 duplicate)
+   Compiling libthyla-rs v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs)
+warning: `fasces` (lib) generated 1 warning (1 duplicate)
+warning: `cornucopia` (lib) generated 1 warning (1 duplicate)
+warning: `inlinewire` (lib) generated 1 warning (1 duplicate)
+warning: `cartoon` (lib) generated 1 warning (1 duplicate)
+warning: `corvus-crypto` (lib) generated 1 warning (1 duplicate)
+warning: `corvus-authority` (lib) generated 1 warning (1 duplicate)
+warning: unnecessary `unsafe` block
+   --> lib/libthyla-rs/src/hardware.rs:453:22
+    |
+453 |         let handle = unsafe { Handle::from_raw(raw as i32, Rights::READ | Rights::WRITE | Rights::SIGNAL) };
+    |                      ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling coreutils v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/coreutils)
+   Compiling libdriver v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/libdriver)
+   Compiling kaua v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/kaua)
+   Compiling libtapestry v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/libtapestry)
+   Compiling libutopia v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/utopia/libutopia)
+   Compiling tls v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/tls)
+   Compiling ptyhold v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/ptyhold)
+warning: `ptyhold` (lib) generated 1 warning (1 duplicate)
+   Compiling parley v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/parley)
+warning: `tls` (lib) generated 1 warning (1 duplicate)
+   Compiling lictor v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lictor)
+warning: `coreutils` (lib) generated 1 warning (1 duplicate)
+   Compiling kaua-term v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/kaua-term)
+warning: `kaua` (lib) generated 1 warning (1 duplicate)
+   Compiling view v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/view)
+warning: `libthyla-rs` (lib) generated 2 warnings (1 duplicate)
+   Compiling manual v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/manual)
+warning: `libtapestry` (lib) generated 1 warning (1 duplicate)
+   Compiling curl v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/curl)
+warning: `kaua-term` (lib) generated 1 warning (1 duplicate)
+   Compiling netdev v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/netdev)
+warning: `libdriver` (lib) generated 1 warning (1 duplicate)
+   Compiling gallery v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/gallery)
+warning: `gallery` (lib) generated 1 warning (1 duplicate)
+   Compiling lantern v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lantern)
+warning: `curl` (lib) generated 1 warning (1 duplicate)
+   Compiling halcyond v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/halcyond)
+warning: `netdev` (lib) generated 1 warning (1 duplicate)
+   Compiling nora v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/nora)
+warning: `parley` (lib) generated 1 warning (1 duplicate)
+   Compiling aurora v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/aurora)
+warning: `lantern` (lib) generated 1 warning (1 duplicate)
+   Compiling haul v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/haul)
+warning: constant `ISR_QUEUE` is never used
+  --> lictor/src/backend/gpu.rs:70:7
+   |
+70 | const ISR_QUEUE: u8 = 1 << 0;
+   |       ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `aurora` (lib) generated 1 warning (1 duplicate)
+   Compiling tapestryd v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/tapestryd)
+warning: `manual` (lib) generated 1 warning (1 duplicate)
+   Compiling halcyon v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/halcyon)
+warning: `haul` (lib) generated 1 warning (1 duplicate)
+warning: `halcyon` (lib) generated 1 warning (1 duplicate)
+warning: `view` (lib) generated 1 warning (1 duplicate)
+warning: `tapestryd` (lib) generated 1 warning (1 duplicate)
+warning: `lictor` (lib) generated 2 warnings (1 duplicate)
+warning: `nora` (lib) generated 1 warning (1 duplicate)
+warning: `haul` (bin "haul") generated 1 warning (1 duplicate)
+warning: unused variable: `nsegs`
+    --> tapestryd/src/server.rs:4376:18
+     |
+4376 |         let (va, nsegs) = match self.map_in_window(fd, size, "conv probe", &mut segs) {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_nsegs`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `nsegs`
+    --> tapestryd/src/server.rs:5660:18
+     |
+5660 |         let (va, nsegs) = match self.map_in_window(handle, size, "screen", &mut segs) {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_nsegs`
+
+warning: unused variable: `nsegs`
+     --> tapestryd/src/server.rs:11226:18
+      |
+11226 |         let (va, nsegs) = match self.map_in_window(fd, size, "warp probe", &mut segs) {
+      |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_nsegs`
+
+warning: unused variable: `pa`
+     --> tapestryd/src/server.rs:12531:13
+      |
+12531 |         let pa = segs[0].pa as i64;
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_pa`
+
+warning: value assigned to `gcrit_end` is never read
+     --> tapestryd/src/server.rs:16821:33
+      |
+16821 |             let mut gcrit_end = s.len();
+      |                                 ^^^^^^^ this value is reassigned later and never used
+...
+16963 |                 gcrit_end = s.len();
+      |                 ------------------- `gcrit_end` is overwritten here before the previous value is read
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `crit_end` is never read
+     --> tapestryd/src/server.rs:17046:40
+      |
+17046 |                     let mut crit_end = 0usize;
+      |                                        ^^^^^^ this value is reassigned later and never used
+...
+17115 |                         crit_end = s.len();
+      |                         ------------------ `crit_end` is overwritten here before the previous value is read
+
+warning: `halcyon` (bin "halcyon") generated 1 warning (1 duplicate)
+   Compiling caps-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/caps-probe)
+warning: `view` (bin "view") generated 1 warning (1 duplicate)
+   Compiling corvus v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/corvus)
+warning: `libutopia` (lib) generated 1 warning (1 duplicate)
+   Compiling u-6-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-6-test)
+warning: `caps-probe` (bin "caps-probe") generated 1 warning (1 duplicate)
+   Compiling u-7-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-7-test)
+warning: `lictor` (bin "lictor") generated 1 warning (1 duplicate)
+   Compiling u-builtin-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-builtin-test)
+warning: `gallery` (bin "gallery") generated 1 warning (1 duplicate)
+   Compiling u-job-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-job-test)
+warning: `nora` (bin "nora") generated 1 warning (1 duplicate)
+   Compiling u-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-test)
+warning: `u-6-test` (bin "u-6-test") generated 1 warning (1 duplicate)
+   Compiling u-redir-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-redir-test)
+warning: `u-builtin-test` (bin "u-builtin-test") generated 1 warning (1 duplicate)
+   Compiling u-subst-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-subst-test)
+warning: `u-7-test` (bin "u-7-test") generated 1 warning (1 duplicate)
+   Compiling u-repl-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-repl-test)
+warning: `halcyond` (lib) generated 1 warning (1 duplicate)
+warning: `u-job-test` (bin "u-job-test") generated 1 warning (1 duplicate)
+   Compiling u-glob-test v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/u-glob-test)
+warning: `corvus` (bin "corvus") generated 1 warning (1 duplicate)
+   Compiling utopia-shell v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/utopia/shell)
+warning: method `dispatch` is never used
+   --> halcyond/src/paneplace.rs:451:8
+    |
+399 | impl Protocol {
+    | ------------- method in this implementation
+...
+451 |     fn dispatch(
+    |        ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `post` is never used
+   --> halcyond/src/paneplace.rs:998:12
+    |
+996 | impl PanePlaceServer {
+    | -------------------- associated function in this implementation
+997 |     /// Media-only native fixtures do not register clipboard authority.
+998 |     pub fn post(user: &str) -> Result<Self, PostError> {
+    |            ^^^^
+
+warning: constant `FIXED_BYTES` is never used
+  --> halcyond/src/session_seat.rs:53:11
+   |
+53 | pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
+   |           ^^^^^^^^^^^
+
+warning: `u-redir-test` (bin "u-redir-test") generated 1 warning (1 duplicate)
+warning: `u-subst-test` (bin "u-subst-test") generated 1 warning (1 duplicate)
+warning: `u-test` (bin "u-test") generated 1 warning (1 duplicate)
+warning: `u-glob-test` (bin "u-glob-test") generated 1 warning (1 duplicate)
+   Compiling parley-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/parley-probe)
+warning: `u-repl-test` (bin "u-repl-test") generated 1 warning (1 duplicate)
+   Compiling lsp-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lsp-probe)
+warning: `manual` (bin "manual") generated 1 warning (1 duplicate)
+   Compiling dap-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/dap-probe)
+warning: `lantern` (bin "lantern") generated 1 warning (1 duplicate)
+   Compiling netdev-driver v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/netdev-driver)
+warning: `parley-probe` (bin "parley-probe") generated 1 warning (1 duplicate)
+   Compiling netd v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/netd)
+warning: `netdev-driver` (bin "netdev-driver") generated 1 warning (1 duplicate)
+warning: `aurora` (bin "aurora") generated 1 warning (1 duplicate)
+warning: `utopia-shell` (bin "ut") generated 1 warning (1 duplicate)
+   Compiling crash-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/crash-probe)
+warning: `dap-probe` (bin "dap-probe") generated 1 warning (1 duplicate)
+   Compiling nocturned v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/nocturned)
+warning: `lsp-probe` (bin "lsp-probe") generated 1 warning (1 duplicate)
+   Compiling warden v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/warden)
+warning: `crash-probe` (bin "crash-probe") generated 1 warning (1 duplicate)
+   Compiling virtio-mmio-source v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/virtio-mmio-source)
+warning: `tapestryd` (bin "tapestryd") generated 7 warnings (1 duplicate) (run `cargo fix --bin "tapestryd" -p tapestryd` to apply 4 suggestions)
+   Compiling menagerie-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/menagerie-probe)
+warning: `menagerie-probe` (bin "menagerie-probe") generated 1 warning (1 duplicate)
+   Compiling kaua-term-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/kaua-term-probe)
+warning: unused macro definition: `say`
+  --> kaua-term-probe/src/main.rs:50:14
+   |
+50 | macro_rules! say {
+   |              ^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:975:11
+    |
+975 |     #[cfg(feature="test-mode")]
+    |           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:993:11
+    |
+993 |     #[cfg(feature="test-mode")]
+    |           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1029:23
+     |
+1029 |                 #[cfg(feature="test-mode")]
+     |                       ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1039:46
+     |
+1039 |             .map(|owner| Self { owner, #[cfg(feature="test-mode")] seen_bindings: 0 })
+     |                                              ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1139:15
+     |
+1139 |         #[cfg(feature="test-mode")]
+     |               ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1266:19
+     |
+1266 |             #[cfg(feature="test-mode")]
+     |                   ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+  --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:37:11
+   |
+37 |     #[cfg(feature="test-mode")]
+   |           ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+   = help: consider adding `test-mode` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:109:11
+    |
+109 |     #[cfg(feature="test-mode")]
+    |           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+  --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:63:19
+   |
+63 |             #[cfg(feature="test-mode")]
+   |                   ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+   = help: consider adding `test-mode` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:177:27
+    |
+177 |                     #[cfg(feature="test-mode")]
+    |                           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: `virtio-mmio-source` (bin "virtio-mmio-source") generated 1 warning (1 duplicate)
+warning: `warden` (bin "warden") generated 1 warning (1 duplicate)
+   Compiling warp-prove v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/warp-prove)
+warning: method `output_reserved` is never used
+  --> kaua-term-probe/src/../../halcyond/src/application.rs:76:12
+   |
+47 | impl Application {
+   | ---------------- method in this implementation
+...
+76 |     pub fn output_reserved(&self) -> usize { 0 } // all reply metadata is inline
+   |            ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `incarnation` is never used
+  --> kaua-term-probe/src/../../halcyond/src/apprecord.rs:21:12
+   |
+20 | impl Ticket {
+   | ----------- method in this implementation
+21 |     pub fn incarnation(self) -> u64 { self.incarnation }
+   |            ^^^^^^^^^^^
+
+warning: method `output_reserved` is never used
+  --> kaua-term-probe/src/../../halcyond/src/apprecord.rs:54:12
+   |
+46 | impl<R: CachedReply> Record<R> {
+   | ------------------------------ method in this implementation
+...
+54 |     pub fn output_reserved(&self) -> usize { self.reply.as_ref().map_or(0, CachedReply::reserved_bytes) }
+   |            ^^^^^^^^^^^^^^^
+
+warning: constant `METADATA_RESERVE` is never used
+  --> kaua-term-probe/src/../../halcyond/src/servicepool.rs:18:11
+   |
+18 | pub const METADATA_RESERVE: usize = 512 * 1024;
+   |           ^^^^^^^^^^^^^^^^
+
+warning: constant `WORKING_RESERVE` is never used
+  --> kaua-term-probe/src/../../halcyond/src/servicepool.rs:19:11
+   |
+19 | pub const WORKING_RESERVE: usize = PAYLOAD_CEILING + METADATA_RESERVE;
+   |           ^^^^^^^^^^^^^^^
+
+warning: method `payload_reservation` is never used
+   --> kaua-term-probe/src/../../halcyond/src/clipboard.rs:122:12
+    |
+ 87 | impl Clipboard {
+    | -------------- method in this implementation
+...
+122 |     pub fn payload_reservation(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `payload_reservation` is never used
+  --> kaua-term-probe/src/../../halcyond/src/clipbroker.rs:84:12
+   |
+71 | impl Broker {
+   | ----------- method in this implementation
+...
+84 |     pub fn payload_reservation(&self) -> usize {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `label` is never used
+  --> kaua-term-probe/src/../../halcyond/src/controllers.rs:49:12
+   |
+48 | impl ModeReport {
+   | --------------- method in this implementation
+49 |     pub fn label(&self) -> &str {
+   |            ^^^^^
+
+warning: method `mode` is never used
+   --> kaua-term-probe/src/../../halcyond/src/controllers.rs:245:12
+    |
+ 72 | impl Controllers {
+    | ---------------- method in this implementation
+...
+245 |     pub fn mode(&self, focused: RouteKey) -> Option<ModeReport> {
+    |            ^^^^
+
+warning: methods `mode`, `generation`, and `payload_reservation` are never used
+   --> kaua-term-probe/src/../../halcyond/src/interaction.rs:334:12
+    |
+ 56 | impl Interaction {
+    | ---------------- methods in this implementation
+...
+334 |     pub fn mode(&self, route: RouteKey) -> Option<ModeReport> {
+    |            ^^^^
+...
+410 |     pub fn generation(&self) -> u64 {
+    |            ^^^^^^^^^^
+...
+413 |     pub fn payload_reservation(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `request` is never used
+   --> kaua-term-probe/src/../../halcyond/src/hostbindings.rs:125:12
+    |
+ 62 | impl Bindings {
+    | ------------- method in this implementation
+...
+125 |     pub fn request(&self) -> Option<Request> { self.flight.map(|f| f.request) }
+    |            ^^^^^^^
+
+warning: constant `FIXED_BYTES` is never used
+  --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:53:11
+   |
+53 | pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
+   |           ^^^^^^^^^^^
+
+warning: method `input_reserved` is never used
+  --> kaua-term-probe/src/../../halcyond/src/servicewire.rs:98:12
+   |
+71 | impl Stream {
+   | ----------- method in this implementation
+...
+98 |     pub fn input_reserved(&self) -> usize { self.input.capacity() }
+   |            ^^^^^^^^^^^^^^
+
+warning: `nocturned` (bin "nocturned") generated 1 warning (1 duplicate)
+   Compiling tapestry-demo v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/tapestry-demo)
+warning: `kaua-term` (bin "kaua-term") generated 1 warning (1 duplicate)
+   Compiling tapestry-battery v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/tapestry-battery)
+warning: `tapestry-demo` (bin "tapestry-demo") generated 1 warning (1 duplicate)
+   Compiling fs-mut-smoke v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/fs-mut-smoke)
+warning: `fs-mut-smoke` (bin "fs-mut-smoke") generated 1 warning (1 duplicate)
+   Compiling debug-child v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/debug-child)
+warning: `debug-child` (bin "debug-child") generated 1 warning (1 duplicate)
+warning: `warp-prove` (bin "warp-prove") generated 1 warning (1 duplicate)
+   Compiling https v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/https)
+warning: `coreutils` (bin "env") generated 1 warning (1 duplicate)
+warning: `netd` (bin "netd") generated 1 warning (1 duplicate)
+   Compiling netperf v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/netperf)
+warning: `coreutils` (bin "tr") generated 1 warning (1 duplicate)
+   Compiling nocturne-tap-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/nocturne-tap-probe)
+warning: `tapestry-battery` (bin "tapestry-battery") generated 1 warning (1 duplicate)
+warning: `nocturne-tap-probe` (bin "nocturne-tap-probe") generated 1 warning (1 duplicate)
+   Compiling jit-prover v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/jit-prover)
+warning: `netperf` (bin "netperf") generated 1 warning (1 duplicate)
+warning: `jit-prover` (bin "jit-prover") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "cp") generated 1 warning (1 duplicate)
+   Compiling debug-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/debug-probe)
+warning: `coreutils` (bin "which") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "stat") generated 1 warning (1 duplicate)
+   Compiling burrow-torture v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/burrow-torture)
+warning: direct cast of function item into an integer
+   --> burrow-torture/src/main.rs:406:39
+    |
+406 |         if thread::spawn_raw(mt_entry as usize as u64, sp, j as u64, 0).is_err() {
+    |                                       ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+406 |         if thread::spawn_raw(mt_entry as *const () as usize as u64, sp, j as u64, 0).is_err() {
+    |                                       ++++++++++++
+
+warning: `debug-probe` (bin "debug-probe") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "wc") generated 1 warning (1 duplicate)
+warning: `burrow-torture` (bin "burrow-torture") generated 2 warnings (1 duplicate) (run `cargo fix --bin "burrow-torture" -p burrow-torture` to apply 1 suggestion)
+   Compiling diorama v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/diorama)
+warning: `coreutils` (bin "uniq") generated 1 warning (1 duplicate)
+   Compiling imperium-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/imperium-probe)
+warning: `coreutils` (bin "grep") generated 1 warning (1 duplicate)
+   Compiling viv-pheno-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/viv-pheno-probe)
+warning: value assigned to `rdset` is never read
+    --> viv-pheno-probe/src/main.rs:2859:5
+     |
+2859 |     rdset = [0; 16];
+     |     ^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2887 |     rdset = [0; 16];
+     |     --------------- `rdset` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `wrset` is never read
+    --> viv-pheno-probe/src/main.rs:2758:5
+     |
+2758 |     wrset = [0; 16];
+     |     ^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2860 |     wrset = [0; 16];
+     |     --------------- `wrset` is overwritten here before the previous value is read
+
+warning: value assigned to `exset` is never read
+    --> viv-pheno-probe/src/main.rs:2719:32
+     |
+2719 |     let mut exset: [u64; 16] = [0; 16];
+     |                                ^^^^^^^ this value is reassigned later and never used
+...
+2759 |     exset = [0; 16];
+     |     --------------- `exset` is overwritten here before the previous value is read
+
+warning: `imperium-probe` (bin "imperium-probe") generated 1 warning (1 duplicate)
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:312:53
+    |
+312 | fn fork_handler_addr() -> u64 { viv_fork_in_handler as usize as u64 }
+    |                                                     ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+312 | fn fork_handler_addr() -> u64 { viv_fork_in_handler as *const () as usize as u64 }
+    |                                                     ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:361:50
+    |
+361 | fn mask_handler_addr() -> u64 { viv_mask_handler as usize as u64 }
+    |                                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+361 | fn mask_handler_addr() -> u64 { viv_mask_handler as *const () as usize as u64 }
+    |                                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:466:51
+    |
+466 | fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
+    |                                                   ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+466 | fn esc_handler_addr() -> u64 { viv_escape_handler as *const () as usize as u64 }
+    |                                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:484:64
+    |
+484 | fn latch_fault_handler_addr() -> u64 { viv_latch_fault_handler as usize as u64 }
+    |                                                                ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+484 | fn latch_fault_handler_addr() -> u64 { viv_latch_fault_handler as *const () as usize as u64 }
+    |                                                                ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:517:44
+    |
+517 | fn handler_addr() -> u64 { viv_sig_handler as usize as u64 }
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+517 | fn handler_addr() -> u64 { viv_sig_handler as *const () as usize as u64 }
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:518:44
+    |
+518 | fn restorer_addr() -> u64 { viv_restore_rt as usize as u64 }
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+518 | fn restorer_addr() -> u64 { viv_restore_rt as *const () as usize as u64 }
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+    --> viv-pheno-probe/src/main.rs:4872:27
+     |
+4872 |     ksa = [nt_sig_handler as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+     |                           ^^^^^^^^
+     |
+help: first cast to a pointer `as *const ()`
+     |
+4872 |     ksa = [nt_sig_handler as *const () as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+     |                           ++++++++++++
+
+warning: `coreutils` (bin "touch") generated 1 warning (1 duplicate)
+   Compiling nettest v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/nettest)
+warning: `diorama` (bin "diorama") generated 1 warning (1 duplicate)
+   Compiling cpubench v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/cpubench)
+warning: `viv-pheno-probe` (bin "viv-pheno-probe") generated 11 warnings (1 duplicate) (run `cargo fix --bin "viv-pheno-probe" -p viv-pheno-probe` to apply 7 suggestions)
+   Compiling argv-smoke v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/argv-smoke)
+warning: `nettest` (bin "nettest") generated 1 warning (1 duplicate)
+   Compiling ptyhost v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/ptyhost)
+warning: `cpubench` (bin "cpubench") generated 1 warning (1 duplicate)
+warning: `argv-smoke` (bin "argv-smoke") generated 1 warning (1 duplicate)
+   Compiling stack-child v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/stack-child)
+warning: `stack-child` (bin "stack-child") generated 1 warning (1 duplicate)
+   Compiling legate-prover v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/legate-prover)
+warning: `ptyhost` (bin "ptyhost") generated 1 warning (1 duplicate)
+   Compiling nocturne-vol v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/nocturne-vol)
+warning: `kaua-term-probe` (bin "kaua-term-probe") generated 25 warnings (1 duplicate)
+   Compiling mmio-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/mmio-probe)
+warning: `mmio-probe` (bin "mmio-probe") generated 1 warning (1 duplicate)
+warning: `nocturne-vol` (bin "nocturne-vol") generated 1 warning (1 duplicate)
+   Compiling coreutil-smoke v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/coreutil-smoke)
+warning: `legate-prover` (bin "legate-prover") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "netstat") generated 1 warning (1 duplicate)
+   Compiling bus-probe-child v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/bus-probe-child)
+warning: `coreutils` (bin "pwd") generated 1 warning (1 duplicate)
+warning: `bus-probe-child` (bin "bus-probe-child") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "tail") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "echo") generated 1 warning (1 duplicate)
+warning: `coreutil-smoke` (bin "coreutil-smoke") generated 1 warning (1 duplicate)
+   Compiling loom-smoke v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/loom-smoke)
+warning: `coreutils` (bin "qid") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "aurora-push") generated 1 warning (1 duplicate)
+warning: `loom-smoke` (bin "loom-smoke") generated 1 warning (1 duplicate)
+   Compiling pipe-sink v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/pipe-sink)
+warning: `coreutils` (bin "ns") generated 1 warning (1 duplicate)
+   Compiling quarry v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/quarry)
+warning: `curl` (bin "wget") generated 1 warning (1 duplicate)
+warning: `pipe-sink` (bin "pipe-sink") generated 1 warning (1 duplicate)
+   Compiling sntp v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/sntp)
+warning: `curl` (bin "curl") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "chmod") generated 1 warning (1 duplicate)
+   Compiling jc-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/jc-probe)
+warning: `coreutils` (bin "clear") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "ipconfig") generated 1 warning (1 duplicate)
+   Compiling loom-native-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/loom-native-probe)
+warning: `coreutils` (bin "mv") generated 1 warning (1 duplicate)
+   Compiling alloc-smoke v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/alloc-smoke)
+warning: `sntp` (bin "sntp") generated 1 warning (1 duplicate)
+warning: `jc-probe` (bin "jc-probe") generated 1 warning (1 duplicate)
+   Compiling httpd v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/httpd)
+warning: `coreutils` (bin "seq") generated 1 warning (1 duplicate)
+   Compiling pty-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/pty-probe)
+warning: `coreutils` (bin "sort") generated 1 warning (1 duplicate)
+warning: `quarry` (bin "quarry") generated 1 warning (1 duplicate)
+   Compiling irq-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/irq-probe)
+warning: `pty-probe` (bin "pty-probe") generated 1 warning (1 duplicate)
+warning: `alloc-smoke` (bin "alloc-smoke") generated 1 warning (1 duplicate)
+warning: `httpd` (bin "httpd") generated 1 warning (1 duplicate)
+   Compiling loom-bench v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/loom-bench)
+warning: `irq-probe` (bin "irq-probe") generated 1 warning (1 duplicate)
+warning: `loom-bench` (bin "loom-bench") generated 1 warning (1 duplicate)
+   Compiling net-echo v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/net-echo)
+warning: `coreutils` (bin "ps") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "dirname") generated 1 warning (1 duplicate)
+   Compiling heap-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/heap-probe)
+warning: `coreutils` (bin "realm") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "hexdump") generated 1 warning (1 duplicate)
+warning: `loom-native-probe` (bin "loom-native-probe") generated 1 warning (1 duplicate)
+   Compiling ptyfs v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/ptyfs)
+error[E0425]: cannot find value `MAX_PENDING` in this scope
+    --> ptyfs/src/server.rs:1614:52
+     |
+1614 |                     if self.pending_reads.len() >= MAX_PENDING {
+     |                                                    ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `MAX_PENDING` in this scope
+    --> ptyfs/src/server.rs:1656:48
+     |
+1656 |                 if self.pending_reads.len() >= MAX_PENDING {
+     |                                                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `MAX_PENDING` in this scope
+    --> ptyfs/src/server.rs:1760:49
+     |
+1760 |                 if self.pending_writes.len() >= MAX_PENDING {
+     |                                                 ^^^^^^^^^^^ not found in this scope
+
+warning: `coreutils` (bin "ls") generated 1 warning (1 duplicate)
+   Compiling diorama-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/diorama-probe)
+For more information about this error, try `rustc --explain E0425`.
+warning: `ptyfs` (bin "ptyfs") generated 1 warning (1 duplicate)
+error: could not compile `ptyfs` (bin "ptyfs") due to 3 previous errors; 1 warning emitted
+warning: build failed, waiting for other jobs to finish...
+warning: `coreutils` (bin "true") generated 1 warning (1 duplicate)
+warning: `heap-probe` (bin "heap-probe") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "realpath") generated 1 warning (1 duplicate)
+warning: `diorama-probe` (bin "diorama-probe") generated 1 warning (1 duplicate)
+warning: `https` (bin "https") generated 1 warning (1 duplicate)
+warning: `halcyond` (bin "halcyond") generated 4 warnings (1 duplicate)
+warning: `net-echo` (bin "net-echo") generated 1 warning (1 duplicate)

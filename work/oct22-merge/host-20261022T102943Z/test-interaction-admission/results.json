@@ -1,0 +1,42 @@
+[
+  {
+    "name": "admission",
+    "exit": 0,
+    "intended_failure": false
+  },
+  {
+    "name": "identity",
+    "exit": 0,
+    "intended_failure": false
+  },
+  {
+    "name": "host",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "focus",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "failed-ack",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "seat",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "surface",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "context",
+    "exit": 101,
+    "intended_failure": true
+  }
+]

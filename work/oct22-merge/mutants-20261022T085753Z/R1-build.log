@@ -1,0 +1,581 @@
+
+698 hunks checked: 0 error(s), 0 warning(s)
+spawn-args mirror check: kernel 104 B / 20 fields, every u64 classified; 3 in-tree mirrors ok (libt, libthyla-rs, pouch); go fork ok (offsets, sizes, pointer-typed addresses; /Users/northkillpd/projects/go-thylacine-pin-3471e2a/src/syscall/exec_thylacine.go); tails: sys_spawn_ext_cwd ok (libt, libthyla-rs)
+check-flag-words: proc_flags: 21 defines (1 built from members), 20 bits owned, free 13-17,22-28
+check-flag-words: spawn perms: 12 defines (1 built from members), 11 bits owned, free 11-31
+check-flag-words: spawn identity flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn allowance flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn phenotype flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn debug flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn ext flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: walk-create mode word: 7 defines (1 built from members), 14 bits owned, free 9-21,26-30
+check-flag-words: 9P attach flags: 3 defines (0 built from members), 3 bits owned, free 3-31
+check-flag-words: mount flags: 7 defines (0 built from members), 7 bits owned, free 7-31
+check-flag-words: 10 words ok; the self-test caught all 50 mutations
+== VMA_PROT: 5 kernel bit(s) in kernel/include/thylacine/vma.h
+     VMA_PROT_READ     = 0x1
+     VMA_PROT_WRITE    = 0x2
+     VMA_PROT_RW       = 0x3
+     VMA_PROT_EXEC     = 0x4
+     VMA_PROT_RX       = 0x5
+   -- mirror usr/lib/libt/include/thyla/syscall.h (T_PROT_*): 3 bit(s)
+      ok  T_PROT_READ = 0x1
+      ok  T_PROT_WRITE = 0x2
+      ok  T_PROT_EXEC = 0x4
+   -- mirror usr/lib/libthyla-rs/src/lib.rs (T_PROT_*): 3 bit(s)
+      ok  T_PROT_READ = 0x1
+      ok  T_PROT_WRITE = 0x2
+      ok  T_PROT_EXEC = 0x4
+== BURROW_PROT: 4 kernel bit(s) in kernel/include/thylacine/syscall.h
+     BURROW_PROT_NONE     = 0x0
+     BURROW_PROT_READ     = 0x1
+     BURROW_PROT_WRITE    = 0x2
+     BURROW_PROT_EXEC     = 0x4
+   -- mirror usr/lib/libthyla-rs/src/lib.rs (T_BURROW_PROT_*): 3 bit(s)
+      ok  T_BURROW_PROT_NONE = 0x0
+      ok  T_BURROW_PROT_READ = 0x1
+      ok  T_BURROW_PROT_WRITE = 0x2
+
+KERNEL BITS WITH NO MIRROR (not a disagreement -- an ABSENCE, and
+the reason has to be stated somewhere a reader will find it):
+   VMA_PROT_RW = 0x3  absent from usr/lib/libt/include/thyla/syscall.h
+   VMA_PROT_RX = 0x5  absent from usr/lib/libt/include/thyla/syscall.h
+   VMA_PROT_RW = 0x3  absent from usr/lib/libthyla-rs/src/lib.rs
+   VMA_PROT_RX = 0x5  absent from usr/lib/libthyla-rs/src/lib.rs
+   BURROW_PROT_EXEC = 0x4  absent from usr/lib/libthyla-rs/src/lib.rs
+
+check-prot-mirror: 5 unmirrored kernel bit(s)
+check-prot-mirror: PASS -- every shared bit agrees
+==> Building kernel (build_type=Debug, hardening=OFF, kaslr=OFF, sanitize='', tests=ON, dir=/Users/northkillpd/projects/thylacine-corona/build/kernel)
+-- Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/kernel
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/syscall.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:835:5: warning: no previous prototype for function 'hostmem_refcount_query' [-Wmissing-prototypes]
+  835 | s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:835:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  835 | s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1044:5: warning: no previous prototype for function 'sys_dma_segments_handler' [-Wmissing-prototypes]
+ 1044 | s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1044:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1044 | s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1112:5: warning: no previous prototype for function 'sys_pci_claim_handler' [-Wmissing-prototypes]
+ 1112 | s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1112:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1112 | s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1255:5: warning: no previous prototype for function 'sys_pci_map_bar_handler' [-Wmissing-prototypes]
+ 1255 | s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1255:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1255 | s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1297:5: warning: no previous prototype for function 'sys_pci_info_handler' [-Wmissing-prototypes]
+ 1297 | s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1297:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1297 | s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1503:5: warning: no previous prototype for function 'sys_pipe_for_proc' [-Wmissing-prototypes]
+ 1503 | int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1503:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1503 | int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1708:5: warning: no previous prototype for function 'sys_write_for_proc' [-Wmissing-prototypes]
+ 1708 | s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1708:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1708 | s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1714:5: warning: no previous prototype for function 'sys_pwrite_for_proc' [-Wmissing-prototypes]
+ 1714 | s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1714:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1714 | s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1770:5: warning: no previous prototype for function 'sys_read_for_proc' [-Wmissing-prototypes]
+ 1770 | s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1770:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1770 | s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1776:5: warning: no previous prototype for function 'sys_pread_for_proc' [-Wmissing-prototypes]
+ 1776 | s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1776:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1776 | s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2320:5: warning: no previous prototype for function 'sys_stat_for_proc' [-Wmissing-prototypes]
+ 2320 | s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2320:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2320 | s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2768:5: warning: no previous prototype for function 'sys_srv_registry_new_for_proc' [-Wmissing-prototypes]
+ 2768 | s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2768:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2768 | s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3409:5: warning: no previous prototype for function 'sys_dir_landed_name' [-Wmissing-prototypes]
+ 3409 | s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3409:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3409 | s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3565:5: warning: no previous prototype for function 'spoor_devclass' [-Wmissing-prototypes]
+ 3565 | int spoor_devclass(struct Spoor *c) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3565:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3565 | int spoor_devclass(struct Spoor *c) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3598:5: warning: no previous prototype for function 'sys_getpid_handler' [-Wmissing-prototypes]
+ 3598 | s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3598:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3598 | s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3605:5: warning: no previous prototype for function 'sys_getuid_handler' [-Wmissing-prototypes]
+ 3605 | s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3605:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3605 | s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3612:5: warning: no previous prototype for function 'sys_getgid_handler' [-Wmissing-prototypes]
+ 3612 | s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3612:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3612 | s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3628:5: warning: no previous prototype for function 'sys_setsid_handler' [-Wmissing-prototypes]
+ 3628 | s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3628:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3628 | s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3635:5: warning: no previous prototype for function 'sys_setpgid_handler' [-Wmissing-prototypes]
+ 3635 | s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3635:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3635 | s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3644:5: warning: no previous prototype for function 'sys_getpgid_handler' [-Wmissing-prototypes]
+ 3644 | s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3644:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3644 | s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3653:5: warning: no previous prototype for function 'sys_getsid_handler' [-Wmissing-prototypes]
+ 3653 | s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3653:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3653 | s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3676:5: warning: no previous prototype for function 'sys_pty_register_for_proc' [-Wmissing-prototypes]
+ 3676 | s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3676:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3676 | s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3791:5: warning: no previous prototype for function 'sys_tty_signal_for_proc' [-Wmissing-prototypes]
+ 3791 | s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3791:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3791 | s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3797:5: warning: no previous prototype for function 'sys_tty_fd_op_for_proc' [-Wmissing-prototypes]
+ 3797 | s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3797:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3797 | s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3868:5: warning: no previous prototype for function 'sys_clock_gettime_handler' [-Wmissing-prototypes]
+ 3868 | s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3868:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3868 | s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3907:5: warning: no previous prototype for function 'sys_clock_settime_handler' [-Wmissing-prototypes]
+ 3907 | s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3907:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3907 | s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4601:5: warning: no previous prototype for function 'sys_open_create_kpath_for_proc' [-Wmissing-prototypes]
+ 4601 | s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4601:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4601 | s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4805:5: warning: no previous prototype for function 'union_readdir_run' [-Wmissing-prototypes]
+ 4805 | s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4805:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4805 | s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:5273:5: warning: no previous prototype for function 'sys_wstat_for_proc' [-Wmissing-prototypes]
+ 5273 | s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:5273:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 5273 | s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6302:5: warning: no previous prototype for function 'sys_burrow_attach_for_proc' [-Wmissing-prototypes]
+ 6302 | s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6302:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6302 | s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6492:5: warning: no previous prototype for function 'sys_munmap_range_for_proc' [-Wmissing-prototypes]
+ 6492 | s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6492:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6492 | s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6528:5: warning: no previous prototype for function 'sys_burrow_attach_lazy_for_proc' [-Wmissing-prototypes]
+ 6528 | s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6528:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6528 | s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6637:5: warning: no previous prototype for function 'sys_mmap_file_for_proc' [-Wmissing-prototypes]
+ 6637 | s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6637:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6637 | s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6889:5: warning: no previous prototype for function 'sys_mmap_fixed_file_for_proc' [-Wmissing-prototypes]
+ 6889 | s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6889:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6889 | s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6984:5: warning: no previous prototype for function 'sys_mmap_fixed_anon_for_proc' [-Wmissing-prototypes]
+ 6984 | s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6984:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6984 | s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7022:5: warning: no previous prototype for function 'burrow_lazy_len_from_args' [-Wmissing-prototypes]
+ 7022 | u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7022:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7022 | u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7051:5: warning: no previous prototype for function 'sys_burrow_decommit_core' [-Wmissing-prototypes]
+ 7051 | s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7051:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7051 | s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7075:5: warning: no previous prototype for function 'sys_burrow_decommit_for_proc' [-Wmissing-prototypes]
+ 7075 | s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7075:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7075 | s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7111:5: warning: no previous prototype for function 'sys_burrow_reserve_for_proc' [-Wmissing-prototypes]
+ 7111 | s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7111:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7111 | s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7160:5: warning: no previous prototype for function 'sys_burrow_protect_for_proc' [-Wmissing-prototypes]
+ 7160 | s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7160:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7160 | s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7199:5: warning: no previous prototype for function 'sys_burrow_map_file_for_proc' [-Wmissing-prototypes]
+ 7199 | s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7199:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7199 | s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7363:5: warning: no previous prototype for function 'sys_jit_create_region' [-Wmissing-prototypes]
+ 7363 | s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7363:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7363 | s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7447:5: warning: no previous prototype for function 'sys_jit_create_for_proc' [-Wmissing-prototypes]
+ 7447 | s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7447:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7447 | s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7501:5: warning: no previous prototype for function 'sys_jit_create_sealed_region' [-Wmissing-prototypes]
+ 7501 | s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7501:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7501 | s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7584:5: warning: no previous prototype for function 'sys_jit_create_sealed_for_proc' [-Wmissing-prototypes]
+ 7584 | s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7584:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7584 | s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7735:5: warning: no previous prototype for function 'sys_icache_sync_for_proc' [-Wmissing-prototypes]
+ 7735 | s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7735:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7735 | s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7832:5: warning: no previous prototype for function 'sys_weft_share_for_proc' [-Wmissing-prototypes]
+ 7832 | s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7832:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7832 | s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8017:5: warning: no previous prototype for function 'sys_weft_map_for_proc' [-Wmissing-prototypes]
+ 8017 | s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8017:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8017 | s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8055:5: warning: no previous prototype for function 'sys_weft_unshare_for_proc' [-Wmissing-prototypes]
+ 8055 | s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8055:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8055 | s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8595:5: warning: no previous prototype for function 'sys_mount_for_proc' [-Wmissing-prototypes]
+ 8595 | int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8595:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8595 | int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8643:5: warning: no previous prototype for function 'sys_unmount_for_proc' [-Wmissing-prototypes]
+ 8643 | int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8643:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8643 | int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8733:5: warning: no previous prototype for function 'sys_mlockall_for_proc' [-Wmissing-prototypes]
+ 8733 | int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8733:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8733 | int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8757:5: warning: no previous prototype for function 'sys_set_dumpable_for_proc' [-Wmissing-prototypes]
+ 8757 | int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8757:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8757 | int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8783:5: warning: no previous prototype for function 'sys_set_traceable_for_proc' [-Wmissing-prototypes]
+ 8783 | int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8783:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8783 | int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9085:5: warning: no previous prototype for function 'sys_spawn_for_proc' [-Wmissing-prototypes]
+ 9085 | int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9085:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9085 | int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9269:5: warning: no previous prototype for function 'sys_spawn_with_fds_for_proc' [-Wmissing-prototypes]
+ 9269 | int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9269:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9269 | int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9339:5: warning: no previous prototype for function 'sys_spawn_with_caps_for_proc' [-Wmissing-prototypes]
+ 9339 | int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9339:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9339 | int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9489:5: warning: no previous prototype for function 'sys_spawn_full_for_proc' [-Wmissing-prototypes]
+ 9489 | int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9489:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9489 | int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9513:5: warning: no previous prototype for function 'spawn_perm_grant_check' [-Wmissing-prototypes]
+ 9513 | int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9513:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9513 | int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9622:5: warning: no previous prototype for function 'sys_spawn_with_perms_for_proc' [-Wmissing-prototypes]
+ 9622 | int sys_spawn_with_perms_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9622:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9622 | int sys_spawn_with_perms_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10267:5: warning: no previous prototype for function 'sys_spawn_full_argv_cwd_for_proc' [-Wmissing-prototypes]
+ 10267 | int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10267:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10267 | int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10359:5: warning: no previous prototype for function 'sys_spawn_full_argv_debug_for_proc' [-Wmissing-prototypes]
+ 10359 | int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10359:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10359 | int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10379:5: warning: no previous prototype for function 'sys_spawn_full_argv_budget_for_proc' [-Wmissing-prototypes]
+ 10379 | int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10379:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10379 | int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10401:5: warning: no previous prototype for function 'sys_spawn_full_argv_identity_for_proc' [-Wmissing-prototypes]
+ 10401 | int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10401:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10401 | int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10422:5: warning: no previous prototype for function 'sys_spawn_full_argv_for_proc' [-Wmissing-prototypes]
+ 10422 | int sys_spawn_full_argv_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10422:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10422 | int sys_spawn_full_argv_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10464:5: warning: no previous prototype for function 'sys_spawn_full_argv_validate_req' [-Wmissing-prototypes]
+ 10464 | int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10464:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10464 | int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11186:5: warning: no previous prototype for function 'sys_rfork_handler' [-Wmissing-prototypes]
+ 11186 | s64 sys_rfork_handler(struct exception_context *ctx) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11186:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11186 | s64 sys_rfork_handler(struct exception_context *ctx) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11286:5: warning: no previous prototype for function 'sys_srv_accept_for_proc' [-Wmissing-prototypes]
+ 11286 | int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11286:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11286 | int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11368:5: warning: no previous prototype for function 'sys_srv_peer_for_proc' [-Wmissing-prototypes]
+ 11368 | int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11368:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11368 | int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11747:8: warning: no previous prototype for function 'sys_console_open_for_proc' [-Wmissing-prototypes]
+ 11747 | hidx_t sys_console_open_for_proc(struct Proc *p) {
+       |        ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11747:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11747 | hidx_t sys_console_open_for_proc(struct Proc *p) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:14126:5: warning: no previous prototype for function 'viv_dirent64_encode_run' [-Wmissing-prototypes]
+ 14126 | u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:14126:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 14126 | u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+       | ^
+       | static 
+71 warnings generated.
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_devsrv.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:324:6: warning: no previous prototype for function 'test_devsrv_registry_full_tombstone_rebinds' [-Wmissing-prototypes]
+  324 | void test_devsrv_registry_full_tombstone_rebinds(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:324:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  324 | void test_devsrv_registry_full_tombstone_rebinds(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:838:20: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  838 |         roots[i] = sys_srv_registry_new_for_proc(p, fd, NULL, 0, 0);
+      |                  ~ ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:844:21: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  844 |         int fresh = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+      |             ~~~~~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:848:13: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  848 |     int a = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+      |         ~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:849:13: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  849 |     int b = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+      |         ~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:939:19: error: implicit conversion loses integer precision: 's64' (aka 'long') to 'int' [-Werror,-Wshorten-64-to-32]
+  939 |     int view_fd = sys_srv_registry_new_for_proc(factory, source_fd, &cap_route, 1, 0);
+      |         ~~~~~~~   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 warning and 5 errors generated.
+gmake[2]: *** [kernel/CMakeFiles/thylacine.elf.dir/build.make:2692: kernel/CMakeFiles/thylacine.elf.dir/test/test_devsrv.c.obj] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:106: kernel/CMakeFiles/thylacine.elf.dir/all] Error 2
+gmake: *** [Makefile:91: all] Error 2

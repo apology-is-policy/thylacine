@@ -1,0 +1,20 @@
+
+running 1 test
+test admission::tests::delayed_partial_and_duplicate_completions ... FAILED
+
+failures:
+
+---- admission::tests::delayed_partial_and_duplicate_completions stdout ----
+
+thread 'admission::tests::delayed_partial_and_duplicate_completions' (67227000) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T102943Z/test-clipboard-admission/request-reuse-body.rs:319:9:
+assertion `left == right` failed
+  left: Ok([72, 73, 65, 49, 1, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+ right: Err(Invalid)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    admission::tests::delayed_partial_and_duplicate_completions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+

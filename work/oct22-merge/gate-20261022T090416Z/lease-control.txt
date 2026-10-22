@@ -1,0 +1,6 @@
+mac   HELD by you for 7m, 2.9h left
+        why: corona: the main-merge gate at 0374cf0ba (46 host legs incl cargo host tests + sims mutants, 1 guest mutant, then CI/qual/UBSan/production/SMP 5x10); first build after a 263-commit merge rebuilds widely, duration uncertain
+        phase: corona: the merge does not compile (test_devsrv.c int <- s64, a semantic merge conflict); driver stopped; fixing then re-running the same lease plan. Cores idle meanwhile.
+        queue 1: aux (4m waiting)
+pi    FREE
+disk: 9.0 GiB available at /Users/northkillpd/projects/thylacine-corona

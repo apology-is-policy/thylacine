@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ omit-unpin.c
+@@ -108,7 +108,7 @@
+     *r = (struct loom_service_request){0};
+     --t->occupied;
+     if (phase == LREQ_DELIVERED) --t->delivered;
+-    (void)loom_slot_unpin(s,scope);
++    (void)scope;
+     return 0;
+ }
+ int loom_request_rollback(struct loom_request_table *t, struct loom_slot_table *s,

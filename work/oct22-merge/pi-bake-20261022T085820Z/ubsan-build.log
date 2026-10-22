@@ -1,0 +1,965 @@
+
+698 hunks checked: 0 error(s), 0 warning(s)
+spawn-args mirror check: kernel 104 B / 20 fields, every u64 classified; 3 in-tree mirrors ok (libt, libthyla-rs, pouch); go fork ok (offsets, sizes, pointer-typed addresses; /Users/northkillpd/projects/go-thylacine-pin-3471e2a/src/syscall/exec_thylacine.go); tails: sys_spawn_ext_cwd ok (libt, libthyla-rs)
+check-flag-words: proc_flags: 21 defines (1 built from members), 20 bits owned, free 13-17,22-28
+check-flag-words: spawn perms: 12 defines (1 built from members), 11 bits owned, free 11-31
+check-flag-words: spawn identity flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn allowance flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn phenotype flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn debug flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn ext flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: walk-create mode word: 7 defines (1 built from members), 14 bits owned, free 9-21,26-30
+check-flag-words: 9P attach flags: 3 defines (0 built from members), 3 bits owned, free 3-31
+check-flag-words: mount flags: 7 defines (0 built from members), 7 bits owned, free 7-31
+check-flag-words: 10 words ok; the self-test caught all 50 mutations
+== VMA_PROT: 5 kernel bit(s) in kernel/include/thylacine/vma.h
+     VMA_PROT_READ     = 0x1
+     VMA_PROT_WRITE    = 0x2
+     VMA_PROT_RW       = 0x3
+     VMA_PROT_EXEC     = 0x4
+     VMA_PROT_RX       = 0x5
+   -- mirror usr/lib/libt/include/thyla/syscall.h (T_PROT_*): 3 bit(s)
+      ok  T_PROT_READ = 0x1
+      ok  T_PROT_WRITE = 0x2
+      ok  T_PROT_EXEC = 0x4
+   -- mirror usr/lib/libthyla-rs/src/lib.rs (T_PROT_*): 3 bit(s)
+      ok  T_PROT_READ = 0x1
+      ok  T_PROT_WRITE = 0x2
+      ok  T_PROT_EXEC = 0x4
+== BURROW_PROT: 4 kernel bit(s) in kernel/include/thylacine/syscall.h
+     BURROW_PROT_NONE     = 0x0
+     BURROW_PROT_READ     = 0x1
+     BURROW_PROT_WRITE    = 0x2
+     BURROW_PROT_EXEC     = 0x4
+   -- mirror usr/lib/libthyla-rs/src/lib.rs (T_BURROW_PROT_*): 3 bit(s)
+      ok  T_BURROW_PROT_NONE = 0x0
+      ok  T_BURROW_PROT_READ = 0x1
+      ok  T_BURROW_PROT_WRITE = 0x2
+
+KERNEL BITS WITH NO MIRROR (not a disagreement -- an ABSENCE, and
+the reason has to be stated somewhere a reader will find it):
+   VMA_PROT_RW = 0x3  absent from usr/lib/libt/include/thyla/syscall.h
+   VMA_PROT_RX = 0x5  absent from usr/lib/libt/include/thyla/syscall.h
+   VMA_PROT_RW = 0x3  absent from usr/lib/libthyla-rs/src/lib.rs
+   VMA_PROT_RX = 0x5  absent from usr/lib/libthyla-rs/src/lib.rs
+   BURROW_PROT_EXEC = 0x4  absent from usr/lib/libthyla-rs/src/lib.rs
+
+check-prot-mirror: 5 unmirrored kernel bit(s)
+check-prot-mirror: PASS -- every shared bit agrees
+==> Building kernel (build_type=Debug, hardening=OFF, kaslr=OFF, sanitize='undefined', tests=ON, dir=/Users/northkillpd/projects/thylacine-corona/build/kernel-undefined)
+-- Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/kernel-undefined
+[  0%] Building C object kernel/CMakeFiles/thylacine.elf.dir/main.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  0%] Building C object kernel/CMakeFiles/thylacine.elf.dir/extinction.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/canary.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/canary.c:109:6: warning: no previous prototype for function '__stack_chk_fail' [-Wmissing-prototypes]
+  109 | void __stack_chk_fail(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/canary.c:109:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  109 | void __stack_chk_fail(void) {
+      | ^
+      | static 
+1 warning generated.
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/fault_test.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/proc.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:3202:14: warning: no previous prototype for function 'proc_test_console_owner' [-Wmissing-prototypes]
+ 3202 | struct Proc *proc_test_console_owner(void) {
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:3202:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3202 | struct Proc *proc_test_console_owner(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6818:6: warning: no previous prototype for function 'proc_test_link' [-Wmissing-prototypes]
+ 6818 | void proc_test_link(struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6818:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6818 | void proc_test_link(struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6834:6: warning: no previous prototype for function 'proc_test_link_child' [-Wmissing-prototypes]
+ 6834 | void proc_test_link_child(struct Proc *parent, struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6834:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6834 | void proc_test_link_child(struct Proc *parent, struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6846:6: warning: no previous prototype for function 'proc_test_orphan_rule' [-Wmissing-prototypes]
+ 6846 | void proc_test_orphan_rule(struct Proc *dying) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6846:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6846 | void proc_test_orphan_rule(struct Proc *dying) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6856:6: warning: no previous prototype for function 'proc_test_set_init' [-Wmissing-prototypes]
+ 6856 | void proc_test_set_init(struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6856:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6856 | void proc_test_set_init(struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6866:6: warning: no previous prototype for function 'proc_test_unlink' [-Wmissing-prototypes]
+ 6866 | void proc_test_unlink(struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6866:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6866 | void proc_test_unlink(struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6925:6: warning: no previous prototype for function 'proc_test_legate_teardown' [-Wmissing-prototypes]
+ 6925 | void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6925:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6925 | void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
+      | ^
+      | static 
+7 warnings generated.
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/addrspace.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/cow.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  3%] Building C object kernel/CMakeFiles/thylacine.elf.dir/perm.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  3%] Building C object kernel/CMakeFiles/thylacine.elf.dir/vivarium.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:261:52: warning: missing field 's32_words' initializer [-Wmissing-field-initializers]
+  261 |     { VIV_LINUX_READ,       SYS_READ,       3, 0x1 },
+      |                                                    ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:262:52: warning: missing field 's32_words' initializer [-Wmissing-field-initializers]
+  262 |     { VIV_LINUX_WRITE,      SYS_WRITE,      3, 0x1 },
+      |                                                    ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:263:52: warning: missing field 's32_words' initializer [-Wmissing-field-initializers]
+  263 |     { VIV_LINUX_CLOSE,      SYS_CLOSE,      1, 0x1 },
+      |                                                    ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:264:52: warning: missing field 's32_words' initializer [-Wmissing-field-initializers]
+  264 |     { VIV_LINUX_LSEEK,      SYS_LSEEK,      3, 0x5 },
+      |                                                    ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:272:52: warning: missing field 's32_words' initializer [-Wmissing-field-initializers]
+  272 |     { VIV_LINUX_PREAD64,    SYS_PREAD,      4, 0x1 },
+      |                                                    ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:273:52: warning: missing field 's32_words' initializer [-Wmissing-field-initializers]
+  273 |     { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4, 0x1 },
+      |                                                    ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:296:48: warning: missing field 'u32_words' initializer [-Wmissing-field-initializers]
+  296 |     { VIV_LINUX_EXIT,       SYS_THREAD_EXIT, 0 },
+      |                                                ^
+/Users/northkillpd/projects/thylacine-corona/kernel/vivarium.c:310:47: warning: missing field 'u32_words' initializer [-Wmissing-field-initializers]
+  310 |     { VIV_LINUX_GETPID,     SYS_GETPID,     0 },
+      |                                               ^
+8 warnings generated.
+[  3%] Building C object kernel/CMakeFiles/thylacine.elf.dir/allowance.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/thread.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/sched.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/smp.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  5%] Building ASM object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/start.S.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  5%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/uart.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  6%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/mmu.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  6%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/kaslr.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  6%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/exception.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  7%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/fault.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  7%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/halls.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  7%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/uaccess.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  8%] Building ASM object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/uaccess.S.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  8%] Building ASM object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/vectors.S.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  9%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/gic.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  9%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/gic_msi.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  9%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/gic_its.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 10%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/timer.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 10%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/rtc.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 10%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/hwfeat.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 11%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/hwdebug.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 11%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/alternatives.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 12%] Building ASM object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/context.S.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 12%] Building ASM object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/userland.S.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 12%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/psci.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 13%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/arch/arm64/asid.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 13%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/lib/dtb.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 13%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/mm/buddy.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 14%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/mm/magazines.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/mm/magazines.c:29:27: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   29 |     for (int cpu = 0; cpu < NCPUS; cpu++) {
+      |                       ~~~ ^ ~~~~~
+/Users/northkillpd/projects/thylacine-corona/mm/magazines.c:164:27: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  164 |     for (int cpu = 0; cpu < NCPUS; cpu++) {
+      |                       ~~~ ^ ~~~~~
+2 warnings generated.
+[ 14%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/mm/phys.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/mm/slub.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/territory.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 16%] Building C object kernel/CMakeFiles/thylacine.elf.dir/burrow.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 16%] Building C object kernel/CMakeFiles/thylacine.elf.dir/pagemap.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 16%] Building C object kernel/CMakeFiles/thylacine.elf.dir/image.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 17%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 17%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_pool.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 18%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_pool_table.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 18%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_slots.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 18%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_fids.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 19%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_nodes.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 19%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_requests.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 20%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_operation.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 20%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_wire.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 20%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_program.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 21%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_rpc.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 21%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_admission.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 21%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_io.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 22%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_provided.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 22%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_retirement.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 23%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_ready.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 23%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_action.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 23%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_frontend.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 24%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_syscall.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 24%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_reply.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 24%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_decode.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 25%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_protocol.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 25%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_control.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 26%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_close_queue.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 26%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_engine.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 26%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_connect.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 27%] Building C object kernel/CMakeFiles/thylacine.elf.dir/weft.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/weft.c:552:21: warning: comparison of integers of different signs: 'int' and 'u32' (aka 'unsigned int') [-Wsign-compare]
+  552 |     if (closer->pid != wb->map_pid)  return -1;       // not the mapping Proc
+      |         ~~~~~~~~~~~ ^  ~~~~~~~~~~~
+1 warning generated.
+[ 27%] Building C object kernel/CMakeFiles/thylacine.elf.dir/vma.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 27%] Building C object kernel/CMakeFiles/thylacine.elf.dir/elf.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 28%] Building C object kernel/CMakeFiles/thylacine.elf.dir/exec.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 28%] Building C object kernel/CMakeFiles/thylacine.elf.dir/vdso.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 29%] Building C object kernel/CMakeFiles/thylacine.elf.dir/syscall.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:835:5: warning: no previous prototype for function 'hostmem_refcount_query' [-Wmissing-prototypes]
+  835 | s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:835:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  835 | s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1044:5: warning: no previous prototype for function 'sys_dma_segments_handler' [-Wmissing-prototypes]
+ 1044 | s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1044:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1044 | s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1112:5: warning: no previous prototype for function 'sys_pci_claim_handler' [-Wmissing-prototypes]
+ 1112 | s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1112:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1112 | s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1255:5: warning: no previous prototype for function 'sys_pci_map_bar_handler' [-Wmissing-prototypes]
+ 1255 | s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1255:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1255 | s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1297:5: warning: no previous prototype for function 'sys_pci_info_handler' [-Wmissing-prototypes]
+ 1297 | s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1297:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1297 | s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1503:5: warning: no previous prototype for function 'sys_pipe_for_proc' [-Wmissing-prototypes]
+ 1503 | int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1503:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1503 | int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1708:5: warning: no previous prototype for function 'sys_write_for_proc' [-Wmissing-prototypes]
+ 1708 | s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1708:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1708 | s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1714:5: warning: no previous prototype for function 'sys_pwrite_for_proc' [-Wmissing-prototypes]
+ 1714 | s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1714:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1714 | s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1770:5: warning: no previous prototype for function 'sys_read_for_proc' [-Wmissing-prototypes]
+ 1770 | s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1770:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1770 | s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1776:5: warning: no previous prototype for function 'sys_pread_for_proc' [-Wmissing-prototypes]
+ 1776 | s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1776:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1776 | s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2320:5: warning: no previous prototype for function 'sys_stat_for_proc' [-Wmissing-prototypes]
+ 2320 | s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2320:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2320 | s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2768:5: warning: no previous prototype for function 'sys_srv_registry_new_for_proc' [-Wmissing-prototypes]
+ 2768 | s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2768:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2768 | s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3409:5: warning: no previous prototype for function 'sys_dir_landed_name' [-Wmissing-prototypes]
+ 3409 | s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3409:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3409 | s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3565:5: warning: no previous prototype for function 'spoor_devclass' [-Wmissing-prototypes]
+ 3565 | int spoor_devclass(struct Spoor *c) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3565:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3565 | int spoor_devclass(struct Spoor *c) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3598:5: warning: no previous prototype for function 'sys_getpid_handler' [-Wmissing-prototypes]
+ 3598 | s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3598:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3598 | s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3605:5: warning: no previous prototype for function 'sys_getuid_handler' [-Wmissing-prototypes]
+ 3605 | s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3605:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3605 | s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3612:5: warning: no previous prototype for function 'sys_getgid_handler' [-Wmissing-prototypes]
+ 3612 | s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3612:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3612 | s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3628:5: warning: no previous prototype for function 'sys_setsid_handler' [-Wmissing-prototypes]
+ 3628 | s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3628:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3628 | s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3635:5: warning: no previous prototype for function 'sys_setpgid_handler' [-Wmissing-prototypes]
+ 3635 | s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3635:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3635 | s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3644:5: warning: no previous prototype for function 'sys_getpgid_handler' [-Wmissing-prototypes]
+ 3644 | s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3644:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3644 | s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3653:5: warning: no previous prototype for function 'sys_getsid_handler' [-Wmissing-prototypes]
+ 3653 | s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3653:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3653 | s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3676:5: warning: no previous prototype for function 'sys_pty_register_for_proc' [-Wmissing-prototypes]
+ 3676 | s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3676:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3676 | s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3791:5: warning: no previous prototype for function 'sys_tty_signal_for_proc' [-Wmissing-prototypes]
+ 3791 | s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3791:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3791 | s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3797:5: warning: no previous prototype for function 'sys_tty_fd_op_for_proc' [-Wmissing-prototypes]
+ 3797 | s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3797:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3797 | s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3868:5: warning: no previous prototype for function 'sys_clock_gettime_handler' [-Wmissing-prototypes]
+ 3868 | s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3868:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3868 | s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3907:5: warning: no previous prototype for function 'sys_clock_settime_handler' [-Wmissing-prototypes]
+ 3907 | s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3907:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3907 | s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4601:5: warning: no previous prototype for function 'sys_open_create_kpath_for_proc' [-Wmissing-prototypes]
+ 4601 | s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4601:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4601 | s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4805:5: warning: no previous prototype for function 'union_readdir_run' [-Wmissing-prototypes]
+ 4805 | s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4805:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4805 | s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:5273:5: warning: no previous prototype for function 'sys_wstat_for_proc' [-Wmissing-prototypes]
+ 5273 | s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:5273:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 5273 | s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6302:5: warning: no previous prototype for function 'sys_burrow_attach_for_proc' [-Wmissing-prototypes]
+ 6302 | s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6302:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6302 | s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6492:5: warning: no previous prototype for function 'sys_munmap_range_for_proc' [-Wmissing-prototypes]
+ 6492 | s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6492:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6492 | s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6528:5: warning: no previous prototype for function 'sys_burrow_attach_lazy_for_proc' [-Wmissing-prototypes]
+ 6528 | s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6528:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6528 | s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6637:5: warning: no previous prototype for function 'sys_mmap_file_for_proc' [-Wmissing-prototypes]
+ 6637 | s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6637:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6637 | s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6889:5: warning: no previous prototype for function 'sys_mmap_fixed_file_for_proc' [-Wmissing-prototypes]
+ 6889 | s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6889:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6889 | s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6984:5: warning: no previous prototype for function 'sys_mmap_fixed_anon_for_proc' [-Wmissing-prototypes]
+ 6984 | s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6984:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6984 | s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7022:5: warning: no previous prototype for function 'burrow_lazy_len_from_args' [-Wmissing-prototypes]
+ 7022 | u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7022:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7022 | u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7051:5: warning: no previous prototype for function 'sys_burrow_decommit_core' [-Wmissing-prototypes]
+ 7051 | s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7051:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7051 | s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7075:5: warning: no previous prototype for function 'sys_burrow_decommit_for_proc' [-Wmissing-prototypes]
+ 7075 | s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7075:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7075 | s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7111:5: warning: no previous prototype for function 'sys_burrow_reserve_for_proc' [-Wmissing-prototypes]
+ 7111 | s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7111:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7111 | s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7160:5: warning: no previous prototype for function 'sys_burrow_protect_for_proc' [-Wmissing-prototypes]
+ 7160 | s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7160:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7160 | s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7199:5: warning: no previous prototype for function 'sys_burrow_map_file_for_proc' [-Wmissing-prototypes]
+ 7199 | s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7199:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7199 | s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7363:5: warning: no previous prototype for function 'sys_jit_create_region' [-Wmissing-prototypes]
+ 7363 | s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7363:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7363 | s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7447:5: warning: no previous prototype for function 'sys_jit_create_for_proc' [-Wmissing-prototypes]
+ 7447 | s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7447:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7447 | s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7501:5: warning: no previous prototype for function 'sys_jit_create_sealed_region' [-Wmissing-prototypes]
+ 7501 | s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7501:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7501 | s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7584:5: warning: no previous prototype for function 'sys_jit_create_sealed_for_proc' [-Wmissing-prototypes]
+ 7584 | s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7584:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7584 | s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7735:5: warning: no previous prototype for function 'sys_icache_sync_for_proc' [-Wmissing-prototypes]
+ 7735 | s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7735:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7735 | s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7832:5: warning: no previous prototype for function 'sys_weft_share_for_proc' [-Wmissing-prototypes]
+ 7832 | s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7832:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7832 | s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8017:5: warning: no previous prototype for function 'sys_weft_map_for_proc' [-Wmissing-prototypes]
+ 8017 | s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8017:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8017 | s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8055:5: warning: no previous prototype for function 'sys_weft_unshare_for_proc' [-Wmissing-prototypes]
+ 8055 | s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8055:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8055 | s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8596:5: warning: no previous prototype for function 'sys_mount_for_proc' [-Wmissing-prototypes]
+ 8596 | int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8596:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8596 | int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8644:5: warning: no previous prototype for function 'sys_unmount_for_proc' [-Wmissing-prototypes]
+ 8644 | int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8644:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8644 | int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8734:5: warning: no previous prototype for function 'sys_mlockall_for_proc' [-Wmissing-prototypes]
+ 8734 | int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8734:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8734 | int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8758:5: warning: no previous prototype for function 'sys_set_dumpable_for_proc' [-Wmissing-prototypes]
+ 8758 | int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8758:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8758 | int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8784:5: warning: no previous prototype for function 'sys_set_traceable_for_proc' [-Wmissing-prototypes]
+ 8784 | int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8784:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8784 | int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9086:5: warning: no previous prototype for function 'sys_spawn_for_proc' [-Wmissing-prototypes]
+ 9086 | int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9086:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9086 | int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9270:5: warning: no previous prototype for function 'sys_spawn_with_fds_for_proc' [-Wmissing-prototypes]
+ 9270 | int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9270:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9270 | int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9340:5: warning: no previous prototype for function 'sys_spawn_with_caps_for_proc' [-Wmissing-prototypes]
+ 9340 | int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9340:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9340 | int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9490:5: warning: no previous prototype for function 'sys_spawn_full_for_proc' [-Wmissing-prototypes]
+ 9490 | int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9490:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9490 | int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9514:5: warning: no previous prototype for function 'spawn_perm_grant_check' [-Wmissing-prototypes]
+ 9514 | int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9514:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9514 | int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9623:5: warning: no previous prototype for function 'sys_spawn_with_perms_for_proc' [-Wmissing-prototypes]
+ 9623 | int sys_spawn_with_perms_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9623:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9623 | int sys_spawn_with_perms_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10268:5: warning: no previous prototype for function 'sys_spawn_full_argv_cwd_for_proc' [-Wmissing-prototypes]
+ 10268 | int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10268:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10268 | int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10360:5: warning: no previous prototype for function 'sys_spawn_full_argv_debug_for_proc' [-Wmissing-prototypes]
+ 10360 | int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10360:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10360 | int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10380:5: warning: no previous prototype for function 'sys_spawn_full_argv_budget_for_proc' [-Wmissing-prototypes]
+ 10380 | int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10380:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10380 | int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10402:5: warning: no previous prototype for function 'sys_spawn_full_argv_identity_for_proc' [-Wmissing-prototypes]
+ 10402 | int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10402:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10402 | int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10423:5: warning: no previous prototype for function 'sys_spawn_full_argv_for_proc' [-Wmissing-prototypes]
+ 10423 | int sys_spawn_full_argv_for_proc(struct Proc *p,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10423:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10423 | int sys_spawn_full_argv_for_proc(struct Proc *p,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10465:5: warning: no previous prototype for function 'sys_spawn_full_argv_validate_req' [-Wmissing-prototypes]
+ 10465 | int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10465:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10465 | int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11187:5: warning: no previous prototype for function 'sys_rfork_handler' [-Wmissing-prototypes]
+ 11187 | s64 sys_rfork_handler(struct exception_context *ctx) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11187:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11187 | s64 sys_rfork_handler(struct exception_context *ctx) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11287:5: warning: no previous prototype for function 'sys_srv_accept_for_proc' [-Wmissing-prototypes]
+ 11287 | int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11287:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11287 | int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11369:5: warning: no previous prototype for function 'sys_srv_peer_for_proc' [-Wmissing-prototypes]
+ 11369 | int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11369:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11369 | int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11748:8: warning: no previous prototype for function 'sys_console_open_for_proc' [-Wmissing-prototypes]
+ 11748 | hidx_t sys_console_open_for_proc(struct Proc *p) {
+       |        ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11748:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11748 | hidx_t sys_console_open_for_proc(struct Proc *p) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:14127:5: warning: no previous prototype for function 'viv_dirent64_encode_run' [-Wmissing-prototypes]
+ 14127 | u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:14127:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 14127 | u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+       | ^
+       | static 
+71 warnings generated.
+[ 29%] Building C object kernel/CMakeFiles/thylacine.elf.dir/joey.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 29%] Building C object kernel/CMakeFiles/thylacine.elf.dir/spoor.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 30%] Building C object kernel/CMakeFiles/thylacine.elf.dir/path.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 30%] Building C object kernel/CMakeFiles/thylacine.elf.dir/pts.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 30%] Building C object kernel/CMakeFiles/thylacine.elf.dir/stalk.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 31%] Building C object kernel/CMakeFiles/thylacine.elf.dir/dev.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 31%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devnone.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 32%] Building C object kernel/CMakeFiles/thylacine.elf.dir/cons.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 32%] Building C object kernel/CMakeFiles/thylacine.elf.dir/null.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 32%] Building C object kernel/CMakeFiles/thylacine.elf.dir/zero.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 33%] Building C object kernel/CMakeFiles/thylacine.elf.dir/full.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 33%] Building C object kernel/CMakeFiles/thylacine.elf.dir/random.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 33%] Building C object kernel/CMakeFiles/thylacine.elf.dir/chacha20.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 34%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devproc.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1444:6: warning: no previous prototype for function 'devproc_kill_authorized' [-Wmissing-prototypes]
+ 1444 | bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1444:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1444 | bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
+      | ^
+      | static 
+/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h:24:14: note: expanded from macro 'bool'
+   24 | #define bool _Bool
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1730:6: warning: no previous prototype for function 'devproc_debug_authorized' [-Wmissing-prototypes]
+ 1730 | bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1730:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1730 | bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
+      | ^
+      | static 
+/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h:24:14: note: expanded from macro 'bool'
+   24 | #define bool _Bool
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1749:6: warning: no previous prototype for function 'devproc_maps_code_visible' [-Wmissing-prototypes]
+ 1749 | bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1749:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1749 | bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target) {
+      | ^
+      | static 
+/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h:24:14: note: expanded from macro 'bool'
+   24 | #define bool _Bool
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1798:6: warning: no previous prototype for function 'devproc_park_state_is_settled' [-Wmissing-prototypes]
+ 1798 | bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1798:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1798 | bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state) {
+      | ^
+      | static 
+/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h:24:14: note: expanded from macro 'bool'
+   24 | #define bool _Bool
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1802:6: warning: no previous prototype for function 'devproc_all_threads_parked' [-Wmissing-prototypes]
+ 1802 | bool devproc_all_threads_parked(struct Proc *target) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1802:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1802 | bool devproc_all_threads_parked(struct Proc *target) {
+      | ^
+      | static 
+/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h:24:14: note: expanded from macro 'bool'
+   24 | #define bool _Bool
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1954:16: warning: no previous prototype for function 'devproc_focus_thread' [-Wmissing-prototypes]
+ 1954 | struct Thread *devproc_focus_thread(struct Proc *target) {
+      |                ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devproc.c:1954:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1954 | struct Thread *devproc_focus_thread(struct Proc *target) {
+      | ^
+      | static 
+6 warnings generated.
+[ 34%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devctl.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/devctl.c:972:6: warning: no previous prototype for function 'devctl_kernel_base_readable' [-Wmissing-prototypes]
+  972 | bool devctl_kernel_base_readable(const struct Proc *caller) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devctl.c:972:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  972 | bool devctl_kernel_base_readable(const struct Proc *caller) {
+      | ^
+      | static 
+/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h:24:14: note: expanded from macro 'bool'
+   24 | #define bool _Bool
+      |              ^
+1 warning generated.
+[ 35%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devramfs.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 35%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devsrv.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/devsrv.c:706:6: warning: no previous prototype for function 'srv_registry_reset' [-Wmissing-prototypes]
+  706 | void srv_registry_reset(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devsrv.c:706:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  706 | void srv_registry_reset(void) {
+      | ^
+      | static 
+1 warning generated.
+[ 35%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devcap.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 36%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devdev.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 36%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devhw.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 36%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devpci.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 37%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devenv.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 37%] Building C object kernel/CMakeFiles/thylacine.elf.dir/env.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 38%] Building C object kernel/CMakeFiles/thylacine.elf.dir/cpio.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 38%] Building C object kernel/CMakeFiles/thylacine.elf.dir/virtio.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 38%] Building C object kernel/CMakeFiles/thylacine.elf.dir/virtio_pci.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 39%] Building C object kernel/CMakeFiles/thylacine.elf.dir/irqfwd.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 39%] Building C object kernel/CMakeFiles/thylacine.elf.dir/mmio_handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 40%] Building C object kernel/CMakeFiles/thylacine.elf.dir/pci_irq.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 40%] Building C object kernel/CMakeFiles/thylacine.elf.dir/pci_handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 40%] Building C object kernel/CMakeFiles/thylacine.elf.dir/dma_handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 41%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_wire.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 41%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_session.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 41%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_transport.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 42%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_client.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 42%] Building C object kernel/CMakeFiles/thylacine.elf.dir/larder.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 43%] Building C object kernel/CMakeFiles/thylacine.elf.dir/dev9p.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 43%] Building C object kernel/CMakeFiles/thylacine.elf.dir/dev9p_poll.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 43%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_attach.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 44%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_spoor_transport.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 44%] Building C object kernel/CMakeFiles/thylacine.elf.dir/9p_srvconn_transport.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 44%] Building C object kernel/CMakeFiles/thylacine.elf.dir/pipe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 45%] Building C object kernel/CMakeFiles/thylacine.elf.dir/poll.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+gmake[2]: *** [kernel/CMakeFiles/thylacine.elf.dir/build.make:1740: kernel/CMakeFiles/thylacine.elf.dir/poll.c.obj] Terminated: 15
+gmake[1]: *** [CMakeFiles/Makefile2:106: kernel/CMakeFiles/thylacine.elf.dir/all] Terminated: 15
+gmake: *** [Makefile:91: all] Terminated: 15
