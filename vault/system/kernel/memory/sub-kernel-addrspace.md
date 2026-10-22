@@ -11,7 +11,6 @@ locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
 updated: 2026-10-08
-updated: 2026-10-04
 ---
 
 ## Shared retention design review

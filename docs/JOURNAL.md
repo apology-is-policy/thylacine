@@ -182,6 +182,25 @@ needed the operator.
   sending 2.5 GiB twice. The pi was released while I waited for the Mac to
   re-bake.
 
+## 2026-10-21 (aux, Opus 5.5 1M) -- thread-model C7a: a manual debug stop reads main, not the newest thread
+
+**Why now.** The operator said to proceed with the thread overhaul after the regroup ("The thead overhaul is just the right and important arc. You can proceed!"). F-4 is the open P2 that needs no vote: C1 waits on decision 1, C4/C6/C7 on votes 2-6.
+
+**The chunk.** 7df5f6086..f8c3bdb2b on aux-3-c7a, landed as 4e4c686ed (+ f273fe493 for the set_tid_address docs).
+- `devproc_focus_thread` returns a focus only while it is a live in-list thread; otherwise main, the oldest thread not exiting (`proc_main_thread_locked`, the definition `caught_pick` already computed inline and now calls); NULL when every thread is exiting.
+- The plan (SCRATCH c7a/PLAN.md) said "all exiting -> the head; each caller's EXITING gate refuses". Reading the four callers showed that is false: `devproc_apply_regs` and `devproc_step_walk_cb` have no EXITING gate. So the selector itself never returns an exiting thread. The same reading found a second F-4 consequence the review did not name: `step` armed the exiting head and resumed the whole Proc, so the step never fired and the target ran free.
+- Why the head stays exited for a whole stop: `proc_reap_exited_threads` runs only from a live peer's syscalls (proc.c:5061, syscall.c:5340/5473/7945), and in a stopped target no peer runs.
+- The "TID==PID" claim was false in five places; one was the ARCHITECTURE.md `set_tid_address` row, which also said the tid pointer is ignored and the call never fails (P6-pouch-threads changed all three). Corrected in its own commit so the operator can review it apart.
+- Tests: the focus-selection leg (inside `devproc.debug_stop_start_resume`, which the old comment misnamed `devproc.focus_selection`) covers eight arms; `devproc.debug_regs` leg (c) reads, writes and follows an exited focus through `/proc/<pid>/regs`. A second `struct Thread` on that test's frame took it from under 3072 to 4768 bytes (clang -Wframe-larger-than), so the exited thread is static.
+
+**Wrong turns.** I tried to fix template artifacts in the landed C2 change note ("Measured: Measured", doubled full stops); vault-lint refused it: the record plane is append-only (R3). Reverted; the artifacts are cosmetic. The lease driver first treated run-c7a.sh's exit 2-5 as "refused to start", which a test.sh failure code could collide with; refusals now exit 64-68.
+
+**Audit.** Fable 5.1 r1, 0/0/0/3 P3 (memory audit_thread_c7a_closed_list.md). F1 is the one I should have caught: making the selector return NULL made the build_regs/format_kstack EXITING clauses unreachable, so the ARCH 25.4 and AUDIT-TRIGGERS claims that those clauses were "revert-probed" / "load-bearing" became false. I noted it in one test comment and nowhere else. F2: head claims I missed in proc.c, devproc.c and DEBUG-FS-DESIGN. F3: caught_target.tla models caught_pick; re-run.
+
+**Evidence.** Suite (ci image, Mac/HVF, tree f8c3bdb2b): green 2024/2024 (17:05Z); red1 2022/2024 -- `focus NULL -> main (the oldest thread), not the head` and `F-4: regs reads main while the newest thread has exited`; red2 2022/2024 -- `focus on an exited thread -> main, never the exited thread` and `F-4: a focus naming the exited thread falls back to main`; red3 2023/2024 -- `focus NULL -> main` only; regreen 2024/2024, ELF sha256 59ca8a56670a... both times. Specs 17:12-17:22Z: caught_target clean 613245 distinct states, eight buggy cfgs as claimed; debug_stop all as claimed; debug_step 146 / Safety at 33 / EventuallyAllDead. SMP: tools/ci-smp-gate.sh 50/50 PASS, 0 corruption, 17:22-18:14Z.
+
+**Operator decisions.** None needed for C7a. The ARCH row correction is flagged for review.
+
 ## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- thread-model C2: freed kernel stacks keep their guard and are reused; the guard toggles stop flushing every TLB
 
 **Why now.** C2 is the overhaul's second chunk (`docs/thread-model-review.html`) and needs no operator decision. It comes before C1 because C1 frees a thread at its last switch, and that free should be cheap. The Fable review's E-1 named the cost: every thread create and every free ran `tlbi vmalle1is` to toggle the kstack guard, which drops every address space's TLB entries on every CPU, so a pthread storm in one program flushed all the others. E-2: each create wrote 48 KiB, a 32 KiB zero-fill (the guard included, though it is then made unreadable) and the 16 KiB poison.

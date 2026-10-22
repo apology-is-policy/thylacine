@@ -13,7 +13,6 @@ abis: []
 design: [docs/IMPERIUM-DESIGN.md, docs/TRUSTED-PATH.md, "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-09-17
 updated: 2026-10-06
-updated: 2026-09-24
 ---
 
 ## Administrative authority specification

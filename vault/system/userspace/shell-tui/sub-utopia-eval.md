@@ -27,7 +27,6 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
 updated: 2026-10-14
-updated: 2026-10-01
 ---
 ## October 1 spawn and foreground recheck
 

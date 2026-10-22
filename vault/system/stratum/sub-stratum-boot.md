@@ -13,7 +13,6 @@ abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
 updated: 2026-10-14
-updated: 2026-10-01
 ---
 ## Session factory handoff
 

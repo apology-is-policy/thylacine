@@ -50,7 +50,6 @@ design:
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
 updated: 2026-10-14
-updated: 2026-10-12
 ---
 ## Dedicated service owner (October 2)
 

@@ -17,7 +17,6 @@ abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
 updated: 2026-10-08
-updated: 2026-10-07
 ---
 ## Registry creation is a role, not an Imperium capability
 

@@ -74,8 +74,7 @@ code:
   - tools/check-loom-service-abi.py
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i32]
-validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-role, gate-smp]
-validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-service, spec-loom-service-buffers, gate-smp]
+validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-role, gate-smp, spec-loom-service, spec-loom-service-buffers]
 locks: []
 abis: [abi-loom-ring, abi-loom-service]
 design:

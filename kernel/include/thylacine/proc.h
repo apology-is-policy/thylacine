@@ -652,17 +652,17 @@ struct Proc {
 
     // 8c-2 #95 (I-39; DEBUG-FS-DESIGN section 5c): the debugger's FOCUS thread --
     // the M whose frame /proc/<pid>/{regs,fpregs,kregs,kstack} + the step verb
-    // report. NULL = report the head thread (the manual-stop / attach default). A
-    // multi-M Go breakpoint fires on whichever M runs the migrated goroutine, NOT
-    // the head (TID==PID), so without this the debug-fs reports the head M's PC
+    // report. NULL = report main (proc_main_thread_locked; the manual-stop /
+    // attach default). A multi-M Go breakpoint fires on whichever M runs the
+    // migrated goroutine, NOT main, so without this the debug-fs reports main's PC
     // (not the bp) and the debugger cannot attribute the stop -> an auto-resume
     // loop. SET (RELEASE) to current_thread() by proc_debug_fault_stop -- the ONE
     // path every bp/step/wp EC fire routes through, so the firing M becomes the
     // focus uniformly. CLEARED (RELEASE) to NULL by proc_debug_resume (the focus is
     // valid only for the current stop; a manual ctl `stop` follows a resume, so it
-    // reads NULL -> head, preserving the attach/8a-2b single-thread behavior).
+    // reads NULL -> main, preserving the attach/8a-2b single-thread behavior).
     // READ (ACQUIRE) under g_proc_table_lock: devproc_focus_thread validates the
-    // pointer is still a thread of `target` (else head). NO UAF -- and the
+    // pointer is still a live thread of `target` (else main). NO UAF -- and the
     // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): every
     // unlink from p->threads holds g_proc_table_lock and comes before the free --
     // wait_pid_for's thread_free loop, run after proc_unlink_child put the target
@@ -2327,6 +2327,11 @@ void        proc_table_lock_release(irq_state_t s);
 // `self`) whose state is not THREAD_EXITING. PRECONDITION: caller holds
 // g_proc_table_lock. `self` may be NULL to count all live Threads.
 int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
+
+// The Proc's main thread: its oldest thread not exiting -- the debug surface's
+// default thread and the caught-note pick's preference. NULL when every thread
+// is exiting. PRECONDITION: caller holds g_proc_table_lock; `p` is not kproc.
+struct Thread *proc_main_thread_locked(struct Proc *p);
 
 // WAIT_WNOHANG — wait_pid_for flag: do not block; if no matching zombie
 // is ready, return 0 immediately. Mirrors POSIX WNOHANG. Userspace passes

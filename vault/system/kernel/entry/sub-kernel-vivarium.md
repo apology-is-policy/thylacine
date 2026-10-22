@@ -10,7 +10,6 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-14
 updated: 2026-10-19
 ---
 ## Native ceiling 134

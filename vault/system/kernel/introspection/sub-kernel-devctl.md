@@ -14,7 +14,6 @@ abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
 updated: 2026-10-06
-updated: 2026-10-03
 ---
 ## Session transport accounting
 

@@ -22,7 +22,6 @@ abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
 updated: 2026-10-07
-updated: 2026-10-04
 ---
 ## Purpose
 

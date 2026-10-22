@@ -13,7 +13,6 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
-updated: 2026-10-07
 updated: 2026-10-19
 ---
 ## Purpose

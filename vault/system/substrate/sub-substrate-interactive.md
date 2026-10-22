@@ -57,7 +57,6 @@ abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
 updated: 2026-10-06
-updated: 2026-10-04
 ---
 ## Purpose
 

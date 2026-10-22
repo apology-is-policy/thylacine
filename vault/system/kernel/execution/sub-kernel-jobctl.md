@@ -13,7 +13,6 @@ abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
 updated: 2026-10-08
-updated: 2026-10-07
 ---
 ## Purpose
 

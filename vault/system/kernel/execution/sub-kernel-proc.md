@@ -10,8 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-13
-updated: 2026-10-07
+updated: 2026-10-21
 ---
 ## Session posting ownership
 
@@ -689,7 +688,11 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   other was #68 round-2 F2 ([[fnd-68-r2-f2]]), and the other way round it let
   exited peers fill `PROC_THREAD_MAX`, which every doc called a bound on live
   threads, until the in-Proc reap: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19
-  15:03Z). The live count is `proc_count_live_peers_locked`.
+  15:03Z). The live count is `proc_count_live_peers_locked`. Main, the oldest
+  thread not exiting, is `proc_main_thread_locked` -- the last such thread on
+  the head-inserted list, never the head -- shared by the debug surface's
+  default thread ([[sub-kernel-devproc]]) and the caught-note pick
+  ([[sub-kernel-notes]]).
 - **`sizeof(struct Proc)` has been wrong in the reference doc since P2.**
   The absorbed `14-process-model.md` asserted 296.
 - `proc_set_exe_path` takes the table lock — added by V-4c-3 F1 after the
