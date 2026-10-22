@@ -1,0 +1,12 @@
+2026-10-22T06:47:55Z  bake work/oct19-pi/bake-20261022T064530Z: commit 7062e8926c3d8c3fa4edbb66d8c6a00da789803b, expect 1901
+2026-10-22T06:48:04Z  build/ matches the manifest; the default ELF carries 'stalk.open_create_containment_and_denials'
+2026-10-22T06:48:06Z  pi thyla-pi-cf reachable, no qemu running, 17318 MiB free
+2026-10-22T06:51:58Z  synced 7062e8926c3d8c3fa4edbb66d8c6a00da789803b + the manifest's 8 artifacts to thyla-pi-cf:~/projects/thylacine-corona; sha256 verified on the pi
+2026-10-22T06:52:29Z  snapshot twins made on the pi from the verified pool and key; sha256 verified against the manifest
+2026-10-22T06:59:44Z  exit 255
+2026-10-22T07:00:37Z  driver started on the pi (OBSERVED 2026-10-22T07:00:18Z by hand: driver.pid 9662 since 06:52Z, smp-multiboot pi-default-smp4 running); the launching ssh hung and was closed by the remote host at 06:59:44Z before this script recorded the start or wrote LAST-RUN (set by hand to this run)
+2026-10-22T07:44:43Z  the pi reports DONE at 2026-10-22T07:43:57Z
+2026-10-22T07:44:44Z  logs pulled into work/oct19-pi/run-20261022T064755Z
+2026-10-22T07:44:44Z  pi-default-smp4: smp-multiboot rc 0; == pi-default-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+2026-10-22T07:44:44Z  pi-ubsan-smp4: smp-multiboot rc 0; == pi-ubsan-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+2026-10-22T07:44:44Z  PI AXIS GREEN: every boot of every config (default-smp4:4::1500 ubsan-smp4:4:ubsan:2400, N=10) at 1901/1901, D7 once, no extinction

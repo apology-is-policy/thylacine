@@ -1,0 +1,13 @@
+  [pi-default-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [pi-default-smp4 1/10] PASS (146s)
+  [pi-default-smp4 2/10] PASS (144s)
+  [pi-default-smp4 3/10] PASS (140s)
+  [pi-default-smp4 4/10] PASS (142s)
+  [pi-default-smp4 5/10] PASS (153s)
+  [pi-default-smp4 6/10] PASS (151s)
+  [pi-default-smp4 7/10] PASS (144s)
+  [pi-default-smp4 8/10] PASS (142s)
+  [pi-default-smp4 9/10] PASS (144s)
+  [pi-default-smp4 10/10] PASS (145s)
+== pi-default-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== pi-default-smp4: exposure 1451s total, ~145s mean/boot; per-boot: 146 144 140 142 153 151 144 142 144 145 ==
