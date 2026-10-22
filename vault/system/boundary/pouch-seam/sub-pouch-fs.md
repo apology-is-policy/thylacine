@@ -68,7 +68,14 @@ refusal is ownership. `fchmodat`'s open (a component's search denied) and
 musl's `AT_` and `UTIME_` values (Darwin's `UTIME_NOW` is -1, which would hide
 a negative nanosecond). Its 61 checks pin every number to the kernel's header,
 read x6 as the kernel does (a null pointer under a `_SET` bit faults), and run
-at -O0 and -O2 under ASan and UBSan. It refuses 25 mutants. It also derives
+at -O0 and -O2 under ASan and UBSan. It refuses 26 mutants. Because that build
+shims the headers, it cannot see a constant they gate, so the checker also
+compiles the three patched files as musl builds them -- musl's own headers with
+`bits/` generated as its Makefile does, `_XOPEN_SOURCE=700`, the device target
+-- and pins each object's undefined symbols to libc's own and `utimensat`'s
+to a real `svc`. The first 0063 failed it: `fcntl.h` gives `AT_EMPTY_PATH` only
+to a GNU or BSD build, so `utimensat.c` defines `_BSD_SOURCE`, as `fstatat.c`
+does. It also derives
 the seam's `__syscall0..7` shapes from `syscall_arch.h` ([[sub-pouch-seam]]).
 
 On the guest, `/bin/pouch-hello-times` (`POUCH_CENSUS_TIMES`) runs after the

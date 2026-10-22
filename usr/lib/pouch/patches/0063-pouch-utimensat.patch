@@ -22,6 +22,8 @@ O_PATH as fchmodat's does, O_NOFOLLOW under AT_SYMLINK_NOFOLLOW, which sets a
 link's own times. AT_EMPTY_PATH with "" names the descriptor itself, or the
 working directory for AT_FDCWD (Linux's LOOKUP_EMPTY). Any other flag is
 EINVAL, a null path EFAULT, a real dirfd with a name ENOTSUP (P-3).
+utimensat.c defines _BSD_SOURCE, as fstatat.c does, because fcntl.h gives
+AT_EMPTY_PATH only to a GNU or BSD build and musl builds as _XOPEN_SOURCE=700.
 
 The kernel answers EACCES for every refusal, because -EPERM is -1, the flat
 error the seam reads as EIO (0001). Every time request but the touch (both
@@ -167,7 +169,7 @@ lchmod's fstat keep their EACCES.
  }
 --- a/src/stat/utimensat.c
 +++ b/src/stat/utimensat.c
-@@ -1,60 +1,85 @@
+@@ -1,60 +1,86 @@
 +/* pouch boundary-line (G12, operator vote 2026-10-22): utimensat over SYS_WSTAT's
 + * time bits. futimens, futimes, utimes, futimesat, lutimes and utime all arrive
 + * here. Each time is UTIME_OMIT (left alone), UTIME_NOW (the time bit alone: the
@@ -186,6 +188,7 @@ lchmod's fstat keep their EACCES.
 + * EIO. Every request but the touch (both times to the server's clock) is the
 + * owner's alone, so its denial is EPERM, set here as link sets it (0062); the
 + * touch also admits write permission and keeps EACCES, as POSIX has it. */
++#define _BSD_SOURCE
  #include <sys/stat.h>
 -#include <sys/time.h>
  #include <fcntl.h>

@@ -31,7 +31,19 @@ MUTANTS={
  'fchmod-eperm-via-seam':[('fchmod.c','\t\terrno = EPERM;\n\t\treturn -1;\n','\t\treturn __syscall_ret(-EPERM);\n')],
  'fchmodat-no-eperm':[('fchmodat.c','\t\teperm = r == -EACCES;\n','')],
  'fchmodat-fstat-mapped':[('fchmodat.c','\t\tif (fstat((int)pfd, &st)) r = -errno;\n','\t\tif (fstat((int)pfd, &st)) { r = -errno; eperm = r == -EACCES; }\n')],
+ 'no-bsd-source':[('utimensat.c','#define _BSD_SOURCE\n','')],
 }
+# Caught by musl's own compile of the patched files, which the mocked build
+# below cannot be: it shims the headers, so it cannot see a constant they gate.
+ENV_MUTANTS={'no-bsd-source'}
+# Each patched object's undefined symbols, all libc's own: a new one (a codegen
+# libcall, a helper the series does not build) fails here, not on the device.
+UNDEF={'utimensat.c':{'__syscall_ret','___errno_location','strnlen'},'fchmod.c':{'__syscall_ret','___errno_location'},
+       'fchmodat.c':{'__syscall_ret','___errno_location','fstat','strnlen'}}
+MUSL_CFLAGS=['--target=aarch64-thylacine','-std=c99','-nostdinc','-ffreestanding','-fexcess-precision=standard','-frounding-math',
+ '-fno-strict-aliasing','-D_XOPEN_SOURCE=700','-O2','-fomit-frame-pointer','-fno-unwind-tables','-fno-asynchronous-unwind-tables',
+ '-ffunction-sections','-fdata-sections','-Werror=implicit-function-declaration','-Werror=implicit-int','-Werror=pointer-sign',
+ '-Werror=pointer-arith','-Werror=int-conversion','-Werror=incompatible-pointer-types']
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=sorted(MUTANTS));a=p.parse_args();r=Path(__file__).resolve().parent.parent
 a.output.mkdir(parents=True,exist_ok=False);inputs=[Path(__file__),r/'tools/host-tests/pouch-times.c']
 def one(path,pattern,base=10):
@@ -56,15 +68,40 @@ for k in range(8):
  assert t.count('static inline long __syscall%d(long n%s)\n{\n%s\n}\n'%(k,''.join(', long '+c for c in v),'\n'.join(body)))==1,('__syscall%d'%k,'not the derived shape')
 bits=a.musl/'arch/aarch64/bits/syscall.h.in';inputs.append(bits)
 defs.append('-DSYS_close=%d'%one(bits,r'(?m)^#define __NR_close\s+(\d+)$'))
-seen=set()
+seen=set();menv=a.output/'musl-env';(menv/'include/bits').mkdir(parents=True);(menv/'src/internal').mkdir(parents=True)
 for source,dest in [('src/internal/_pouch_fs.h','fs-under-test.h'),('src/stat/utimensat.c','utimensat-under-test.c'),('src/stat/fchmod.c','fchmod-under-test.c'),('src/stat/fchmodat.c','fchmodat-under-test.c')]:
  f=a.musl/source;inputs.append(f);s=f.read_text()
- for h in ['"syscall.h"','"_pouch_fs.h"','<sys/stat.h>','<fcntl.h>']:s=re.sub(r'(?m)^#include '+re.escape(h),'/* host boundary */',s)
  for file,old,new in MUTANTS.get(a.mutant,[]):
   if source.endswith('/'+file) and (file,old) not in seen:
    assert s.count(old)>=1,(a.mutant,old);s=s.replace(old,new);seen.add((file,old))
+ if source.endswith('.c'):(menv/Path(source).name).write_text(s)
+ for h in ['"syscall.h"','"_pouch_fs.h"','<sys/stat.h>','<fcntl.h>']:s=re.sub(r'(?m)^#include '+re.escape(h),'/* host boundary */',s)
  (a.output/dest).write_text(s)
 assert not a.mutant or len(seen)==len({(f,o) for f,o,_ in MUTANTS[a.mutant]}),(a.mutant,'a mutation did not apply')
+# The patched files as musl builds them for the device: its headers (bits/ generated
+# as its Makefile does), its feature-test macros and flags. The behaviour mutants
+# skip it; they are the mocked build's to catch.
+if not a.mutant or a.mutant in ENV_MUTANTS:
+ mk=[a.musl/'tools/mkalltypes.sed',a.musl/'arch/aarch64/bits/alltypes.h.in',a.musl/'include/alltypes.h.in'];inputs+=mk
+ (menv/'include/bits/alltypes.h').write_text(subprocess.run(['sed','-f',*map(str,mk)],capture_output=True,text=True,check=True).stdout)
+ t=bits.read_text();(menv/'include/bits/syscall.h').write_text(t+''.join(l.replace('__NR_','SYS_',1)+'\n' for l in t.splitlines() if '__NR_' in l))
+ (menv/'src/internal/version.h').write_text('#define VERSION "pouch-host-test"\n')
+ inc=[a.musl/'arch/aarch64',a.musl/'arch/generic',menv/'src/internal',a.musl/'src/include',a.musl/'src/internal',menv/'include',a.musl/'include']
+ tool=lambda n:str(Path(a.cc).with_name(n));refused=[]
+ for name,want in UNDEF.items():
+  src=menv/name;obj=src.with_suffix('.o')
+  c=subprocess.run([a.cc,*MUSL_CFLAGS,*['-I'+str(i) for i in inc],'-c',str(src),'-o',str(obj)],capture_output=True,text=True)
+  (menv/(name+'.log')).write_text(c.stdout+c.stderr)
+  if c.returncode:refused.append(name);continue
+  got={l.split()[-1] for l in subprocess.run([tool('llvm-nm'),'-u',str(obj)],capture_output=True,text=True,check=True).stdout.splitlines() if l.strip()}
+  assert got==want,(name,'undefined symbols',sorted(got),'want',sorted(want))
+  # SYS_WSTAT must be a trap: a number the seam retargets to its sentinel folds to -ENOSYS with none.
+  assert name!='utimensat.c' or re.search(r'\bsvc\b',subprocess.run([tool('llvm-objdump'),'-d',str(obj)],capture_output=True,text=True,check=True).stdout),'utimensat issues no svc'
+ if a.mutant:
+  assert refused,(a.mutant,"musl's own compile accepted it")
+  print('musl-env: mutant %s refused by musl\'s own compile (%s)'%(a.mutant,', '.join(refused)));raise SystemExit(0)
+ assert not refused,(refused,"musl's own compile refused the series; see musl-env/*.log")
+ print('musl-env: %d patched files compile as musl builds them; undefined symbols libc\'s own; utimensat traps'%len(UNDEF))
 stage_syscall_ret(a.musl,a.output,a.cc,inputs)
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
