@@ -2386,7 +2386,7 @@ tools/test.sh
 
 A chunk of the thread-model overhaul (`docs/thread-model-review.html`; Fable's E-6). Spec-first by operator vote
 (2026-10-21, decision 1, which named this lock as covered): C3a (`specs/thread_reap.tla` + ARCH 7.3.1) before C3b
-(the code). Squashed from aux-3-c3 as *(pending)*.
+(the code). C3a landed as 58eca366a; C3b squashed from aux-3-c3 as 73ba2d90a.
 
 - **The lock.** `p->threads_lock` (IRQ-off, under `g_proc_table_lock`) guards the thread list, `thread_count`, a new
   `live_threads`, `loom_sqpoll_count`, every `THREAD_EXITING` commit (`thread_commit_exiting_locked`, the only writer),

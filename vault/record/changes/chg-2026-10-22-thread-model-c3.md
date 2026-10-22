@@ -4,7 +4,7 @@ type: chg
 title: "Thread-model C3: each Proc's threads under their own lock"
 date: 2026-10-22
 arc: arc-phase6-pouch
-commits: ["@C3HASH@"]
+commits: ["58eca366a", "73ba2d90a"]
 touched:
   - sub-kernel-proc
   - sub-kernel-thread
