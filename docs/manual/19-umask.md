@@ -49,7 +49,7 @@ mkdir /tmp/private-dir
 
 After `umask 077`, the files and directories that the shell and its commands
 create grant nothing to the group or to other users. `ls -l` shows
-`/tmp/private` as `-rw-------`, because `touch` asks for `0644`, and
+`/tmp/private` as `-rw-------`, because `touch` asks for `0666`, and
 `/tmp/private-dir` as `drwx------`, because `mkdir` asks for `0755`. The mask
 applies to commands the shell starts after the change. Commands that are
 already running, other sessions and existing files are unaffected, and the mask

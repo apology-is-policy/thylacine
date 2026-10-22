@@ -26,8 +26,9 @@ order (EINVAL before EBADF) is unchanged. `sys_wstat_spoor_for_proc` runs the
 same two on a Spoor the kernel resolved for itself, refuses SIZE (no write
 envelope) and leaves the caller's reference alone. The phenotype's utimensat and
 fchmodat use it with `sys_resolve_kpath_for_proc` so they install no descriptor
-a peer thread could close and reuse ([[sub-kernel-vivarium]]).
-`dev9p.wstat_spoor_private` covers it.
+a peer thread could close and reuse ([[sub-kernel-vivarium]]); each folds only
+the wstat's EACCES into Linux's EPERM, never the resolve's (a search denied on
+the way stays EACCES). `dev9p.wstat_spoor_private` covers it.
 
 ## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
 

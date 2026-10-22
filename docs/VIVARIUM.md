@@ -3384,15 +3384,18 @@ votes 17 and 18 of 2026-10-22), and the row is a shell over them.
   transient-descriptor sites are tracked in OPEN-BUGS.
 - **The errno.** The kernel answers EACCES for every refusal. Write permission
   admits only the touch (both times to now), so every other refusal is
-  ownership's and the shell answers Linux's EPERM; the touch keeps EACCES.
+  ownership's and the shell answers Linux's EPERM; the touch keeps EACCES. Only
+  the wstat's EACCES folds: a name whose walk is refused (a component's search
+  denied) asked nothing of ownership and keeps EACCES, as fchmodat's open does.
 - **The collision.** 88 is native `SYS_STAT(path_va, path_len, stat_va)`.
   path_va is byte-aligned, so its low 32 bits can read AT_FDCWD: the argument is
   the damage envelope, not the shape gate (vivarium.h, beside the row).
 
 Kernel tests: `vivarium.utimensat` (the row, the collision, the mask's every
 branch, the decide's every form), `dev9p.wstat_spoor_private` (the private
-Spoor's policy, SIZE refused, the caller's reference untouched). The guest leg
-(busybox `touch` and `cp -p` in a container) is G12-e's.
+Spoor's policy, SIZE refused, the caller's reference untouched). Guest legs in
+`viv-run.exp`: busybox `touch -d`, `cp -p` and a bare touch, read back with
+`stat -c %Y`, and a search-denied component answering "Permission denied".
 
 ## 7. The vivarium — the container runner
 

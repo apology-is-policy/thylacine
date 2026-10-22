@@ -341,8 +341,13 @@ fields, the epoch). A caped session refuses UID/GID before anything else
 with EACCES (the cape, below); cached-open fails LOUD with EOPNOTSUPP
 ([[seam-co-fidless-wstat]]); a failed flush or Tsetattr answers the wire's
 errno through `dev9p_wire_errno` (its EPERM folded to EACCES);
-write-behind: flush first (a truncate must land after the staged bytes)
-then stop staging by clearing the append anchor (`wb_known`; a size change
+write-behind: flush first (a truncate must land after the staged bytes;
+a time must land after the write that would stamp it). The flush is the
+NAMED Spoor's run only: a time set by path, through a fresh O_PATH Spoor,
+while another open of the same file still stages bytes is overwritten when
+that open flushes, so `write; utimensat(path); close` ends at the flush's
+clock where Linux keeps the time set (OPEN-BUGS 2026-10-22, the G12 round's
+F3; `cp -p` sets times on the handle that wrote). It then stops staging by clearing the append anchor (`wb_known`; a size change
 destroys it) -- never the eligibility flag, which gates the read overlay,
 fsync's flush and the write ordering of a run a death kept, and the latch's
 report on every write and fsync, for another Proc sharing the fd too

@@ -24,11 +24,14 @@ under AT_SYMLINK_NOFOLLOW), or a FORWARD for a name under a real dirfd. A name
 resolves to a private Spoor and the wstat runs on it through
 `sys_wstat_spoor_for_proc` ([[sub-kernel-syscall-dispatch]]), so no descriptor
 is installed that a peer thread could close and reuse; fchmodat (53) moves to the
-same core. EACCES becomes EPERM for every request but the touch. Native 88 is
+same core. The wstat's EACCES becomes EPERM for every request but the touch; a
+walk's EACCES (a search denied on the way) stays EACCES, as fchmodat's open's
+does (the G12 round's F1: the first shell folded it too). Native 88 is
 SYS_STAT; its path_va's low 32 bits can read AT_FDCWD, so the collision
 argument is the damage envelope (vivarium.h beside the row, a static assert in
 vivarium.c). `vivarium.utimensat` covers the row, the collision, the mask and the
-decide; the guest leg is G12-e's.
+decide; `viv-run.exp` drives busybox `touch`, `cp -p` and a search-denied name
+in a container.
 
 ## Native ceiling 136 (B-3f', 2026-10-20)
 
@@ -1186,8 +1189,7 @@ errno per refusal instead of a flat -1. The row turns the inner's EACCES,
 the ownership denial, into Linux's -EPERM (a Linux caller reads -1 as
 EPERM; only the Pouch seam reserves it) and passes every other refusal
 as it is, so a server's ENOSPC or EROFS now reaches the program where every
-refusal used to read EPERM. utimensat (88) is not served yet; G12-b serves
-it the same way.
+refusal used to read EPERM. utimensat (88) is served the same way (above).
 
 The pipe2 (59) paragraph in `vivarium.h` proves a mis-declared native
 SYS_WSTAT call cannot pass pipe2's flag check: every legal wstat mask is

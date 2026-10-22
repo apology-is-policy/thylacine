@@ -55,7 +55,7 @@ sleep 1
 lc_run_expect "echo viv-console | tr a-z A-Z" "VIV-CONSOLE"
 
 # --- M8 at the console ut ----------------------------------------------------
-# A native create asks 0644; under 277 it is 0400, which no directory's bound
+# A native touch asks 0666; under 277 it is 0400, which no directory's bound
 # alone gives (a 0700 /tmp leaves 0600, a 0755 one 0644).
 lc_send "umask"
 lc_expect_re {\n0022\r?\n} "a bare umask prints the default mask as four digits"
@@ -111,7 +111,12 @@ if {$have_ash} {
     lc_expect "P=1000000000" "cp -p kept the source's mtime"
     lc_send {a=$(date +%s); touch /tmp/t12; d=$(( $(stat -c %Y /tmp/t12) - a )); [ $d -ge -2 ] && [ $d -le 2 ] && echo touch-now | tr a-z A-Z}
     lc_expect "TOUCH-NOW" "a bare touch took the clock (utimensat with null times)"
-    lc_send {rm /tmp/t12 /tmp/t12p && echo t12-gone | tr a-z A-Z}
+    # A denied search is the walk's refusal, never ownership's: EACCES, which
+    # busybox prints as "Permission denied" ("Operation not permitted" would
+    # be EPERM, the answer for a time only the owner may set).
+    lc_send {mkdir /tmp/sd12 && touch /tmp/sd12/f && chmod 0 /tmp/sd12 && touch -d @5 /tmp/sd12/f 2>&1 | tr a-z A-Z; chmod 755 /tmp/sd12}
+    lc_expect "PERMISSION DENIED" "a search-denied component answers EACCES, not EPERM"
+    lc_send {rm -r /tmp/t12 /tmp/t12p /tmp/sd12 && echo t12-gone | tr a-z A-Z}
     lc_expect "T12-GONE" "the times files are removed"
     # `>/dev/null` inside a container (the curl-demo census item, 2026-08-25:
     # ash's `>` is openat(O_WRONLY|O_CREAT|O_TRUNC); the openat then refused

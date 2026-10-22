@@ -181,7 +181,8 @@ fn touch_one(path: &str, times: FileTimes, no_create: bool) -> bool {
     if !no_create {
         // write + create, NO truncate: create-if-absent, else open the file
         // as it is. The handle then names the file whatever the path does.
-        match OpenOptions::new().write(true).create(true).open(path) {
+        // A new file asks 0666, POSIX touch's mode; the umask takes from it.
+        match OpenOptions::new().write(true).create(true).mode(0o666).open(path) {
             Ok(f) => {
                 return match f.set_times(times) {
                     Ok(()) => true,

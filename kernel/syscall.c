@@ -15707,16 +15707,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         struct Spoor *quarry = NULL;
         rights_t      qr;
         s64           rc;
+        bool          wstat_rc = false;
         switch (vivarium_utimensat_decide(args[0], args[1], args[3], empty)) {
         case VIV_UTIMENS_FD:
             rc = sys_wstat_for_proc(p, (hidx_t)(s32)(u32)args[0], valid,
                                     0, 0, 0, 0, tvp);
+            wstat_rc = true;
             break;
         case VIV_UTIMENS_CWD:
             rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, ".", 1,
                                             SYS_WALK_OPEN_OPATH, &quarry, &qr);
-            if (rc == 0)
+            if (rc == 0) {
                 rc = sys_wstat_spoor_for_proc(p, quarry, valid, 0, 0, 0, tvp);
+                wstat_rc = true;
+            }
             break;
         case VIV_UTIMENS_PATH: {
             char path_scratch[SYS_OPEN_PATH_MAX + 1];
@@ -15729,8 +15733,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
                                             path_scratch, path_len, omode,
                                             &quarry, &qr);
-            if (rc == 0)
+            if (rc == 0) {
                 rc = sys_wstat_spoor_for_proc(p, quarry, valid, 0, 0, 0, tvp);
+                wstat_rc = true;
+            }
             break;
         }
         case VIV_UTIMENS_EINVAL:                     return -(s64)T_E_INVAL;
@@ -15739,10 +15745,13 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         default:                                     return -(s64)T_E_NOSYS;
         }
         if (quarry) spoor_clunk(quarry);
-        // EACCES is the kernel's one refusal. Write permission admits only the
+        // EACCES is the wstat's one refusal. Write permission admits only the
         // touch (both times to now); every other request is ownership's, and
-        // Linux answers that EPERM (only the pouch seam reserves -1).
-        if (rc == -(s64)T_E_ACCES && valid != (T_WSTAT_ATIME | T_WSTAT_MTIME))
+        // Linux answers that EPERM (only the pouch seam reserves -1). A walk's
+        // EACCES (a component's search denied) asked nothing of ownership and
+        // stays EACCES, as fchmodat's open does.
+        if (wstat_rc && rc == -(s64)T_E_ACCES &&
+            valid != (T_WSTAT_ATIME | T_WSTAT_MTIME))
             return -(s64)T_E_PERM;
         return rc;
     }

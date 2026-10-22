@@ -162,7 +162,8 @@ either takes.
 operand sets both times to the file server's clock, the one form write
 permission allows; one time alone (`-a` or `-m`) or a given time (`-r`, `-t`,
 `-d`) needs the owner, as POSIX has it ([[dec-2026-10-22-wstat-times]]). It opens each FILE for writing with
-create and no truncate and sets the times on that handle; a FILE that will not
+create (asking 0666, POSIX touch's mode, under the umask) and no truncate
+and sets the times on that handle; a FILE that will not
 open so (a directory, a read-only file its owner touches) gets them through the
 path, and only if that fails too does the open's error stand. `-t` and `-d` are
 read by `coreutils::stamp`, in UTC. `cp -p` sets, on the destination it just
