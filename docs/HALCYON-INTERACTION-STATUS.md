@@ -63,6 +63,10 @@ The table now budgets six persistent fids per pair plus sixteen root/transient
 entries (112 total), preserving the existing sixteen-pair limit. Deferred-read
 and deferred-write bounds stay at 80 independently; a larger handle table must
 not silently enlarge retained payload queues. No authority or syscall change.
+(Superseded at the main merge, 2026-10-22: the merged code budgets main's seven
+fids per pts -- the hosted kaua program's ready file is the seventh -- for 128
+in all, and the selftest tile is seven; the 80-entry park ceilings stay, as
+`MAX_PENDING`.)
 
 The actual-table selftest exercises sixteen six-fid terminal shapes, headroom,
 refusal, reuse and complete teardown twice. Three actual-dispatch legs each
