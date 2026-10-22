@@ -294,8 +294,10 @@ const (
 // (the kernel's stat carries no nanoseconds). The caller owns the file, so the
 // refusals are the kernel tests' to prove.
 func chtimes() {
+	// okErr fails with the error in the message, so a refusal names its errno.
+	okErr := func(what string, err error) { must(fmt.Sprintf("%s (%v)", what, err), err == nil) }
 	f := root + "/times.txt"
-	must("os.WriteFile(times.txt)", os.WriteFile(f, payload, 0o644) == nil)
+	okErr("os.WriteFile(times.txt)", os.WriteFile(f, payload, 0o644))
 	timesAre := func(what string, at, mt int64) {
 		var st syscall.Stat_t
 		err := syscall.Stat(f, &st)
@@ -303,43 +305,43 @@ func chtimes() {
 			err == nil && int64(st.Atime) == at && int64(st.Mtime) == mt)
 	}
 
-	must("os.Chtimes", os.Chtimes(f, time.Unix(tOld, 5), time.Unix(tNew, 7)) == nil)
+	okErr("os.Chtimes", os.Chtimes(f, time.Unix(tOld, 5), time.Unix(tNew, 7)))
 	timesAre("os.Chtimes read back", tOld, tNew)
 	fi, err := os.Stat(f)
 	must("ModTime after os.Chtimes", err == nil && fi.ModTime().Unix() == tNew)
 
 	// A zero time.Time leaves that time.
-	must("os.Chtimes, zero atime", os.Chtimes(f, time.Time{}, time.Unix(tOld, 0)) == nil)
+	okErr("os.Chtimes, zero atime", os.Chtimes(f, time.Time{}, time.Unix(tOld, 0)))
 	timesAre("a zero atime is left", tOld, tOld)
-	must("os.Chtimes, zero mtime", os.Chtimes(f, time.Unix(tNew, 0), time.Time{}) == nil)
+	okErr("os.Chtimes, zero mtime", os.Chtimes(f, time.Unix(tNew, 0), time.Time{}))
 	timesAre("a zero mtime is left", tNew, tOld)
 
 	err = os.Chtimes(root+"/nosuch", time.Unix(tOld, 0), time.Unix(tOld, 0))
-	must("os.Chtimes of a missing file is ErrNotExist", errors.Is(err, os.ErrNotExist))
+	must(fmt.Sprintf("os.Chtimes of a missing file is ErrNotExist (%v)", err), errors.Is(err, os.ErrNotExist))
 
 	// Linux's UTIME_NOW in both: the file server's clock.
 	const utimeNow = (1 << 30) - 1
 	t0 := time.Now().Unix()
-	must("syscall.UtimesNano(now, now)",
-		syscall.UtimesNano(f, []syscall.Timespec{{Nsec: utimeNow}, {Nsec: utimeNow}}) == nil)
+	okErr("syscall.UtimesNano(now, now)",
+		syscall.UtimesNano(f, []syscall.Timespec{{Nsec: utimeNow}, {Nsec: utimeNow}}))
 	var st syscall.Stat_t
-	must("stat after now", syscall.Stat(f, &st) == nil)
+	okErr("stat after now", syscall.Stat(f, &st))
 	t1 := time.Now().Unix()
 	must(fmt.Sprintf("now is the clock (mtime %d, clock %d..%d)", st.Mtime, t0, t1),
 		int64(st.Mtime) >= t0-2 && int64(st.Mtime) <= t1+2 && int64(st.Atime) >= t0-2 && int64(st.Atime) <= t1+2)
 
 	// The descriptor form, on a read-only file.
 	g, err := os.Open(f)
-	must("os.Open(times.txt)", err == nil)
+	okErr("os.Open(times.txt)", err)
 	err = syscall.Futimes(int(g.Fd()), []syscall.Timeval{{Sec: tNew}, {Sec: tNew}})
 	g.Close()
-	must("syscall.Futimes on a read-only descriptor", err == nil)
+	okErr("syscall.Futimes on a read-only descriptor", err)
 	timesAre("Futimes read back", tNew, tNew)
 
 	// A directory takes times through its path.
-	must("os.Chtimes(dir)", os.Chtimes(root, time.Unix(tOld, 0), time.Unix(tNew, 0)) == nil)
+	okErr("os.Chtimes(dir)", os.Chtimes(root, time.Unix(tOld, 0), time.Unix(tNew, 0)))
 	var dst syscall.Stat_t
 	must("the directory's times", syscall.Stat(root, &dst) == nil && dst.Atime == tOld && dst.Mtime == tNew)
 
-	must("os.Remove(times.txt)", os.Remove(f) == nil)
+	okErr("os.Remove(times.txt)", os.Remove(f))
 }
