@@ -1,0 +1,16 @@
+anchors ok: G2 G1 G3
+2026-10-21T18:16:59Z  HEAD 72298812e3c167fabfce5169a0a43c5ecf811c8c, clean; go fork a6567baeaa716811783031fdf543477fdcd1707d, clean; anchors checked; verdict self-check passes; mutants: G2 G1 G3
+2026-10-21T18:16:59Z  disk G2: 10325 MiB free (floor 6144)
+2026-10-21T18:18:13Z  G2: phys.drain_meets_live_owners -> FAIL: no drain ran beside an owner on another CPU
+2026-10-21T18:18:13Z  G2: tally 1899/1901; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T18:18:13Z  G2: KILLED
+2026-10-21T18:18:13Z  disk G1: 10513 MiB free (floor 6144)
+2026-10-21T18:19:22Z  G1: phys.drain_meets_live_owners -> FAIL: no drain ran beside an owner on another CPU
+2026-10-21T18:19:22Z  G1: tally 1899/1901; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T18:19:22Z  G1: KILLED
+2026-10-21T18:19:22Z  disk G3: 10337 MiB free (floor 6144)
+2026-10-21T18:20:29Z  G3: phys.drain_meets_live_owners -> FAIL: no drain ran beside an owner on another CPU
+2026-10-21T18:20:29Z  G3: tally 1899/1901; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T18:20:29Z  G3: KILLED
+2026-10-21T18:20:29Z  ALL KILLED: G2 G1 G3 (build/ holds the last mutant's kernel -- run gate.sh next)
+2026-10-21T18:20:29Z  exit 0

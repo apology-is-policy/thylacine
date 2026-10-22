@@ -1194,7 +1194,11 @@ fn a_fid_dropped_mid_open_is_clunked_after_its_open() {
     for _ in 0..3 {
         r.turn(Some(r.now() + MS)).unwrap();
     }
-    assert_eq!(sim.s().clunk_sqes, 0, "no CLUNK while the LOPEN claims the fid");
+    assert_eq!(
+        sim.s().clunk_sqes,
+        0,
+        "no CLUNK while the LOPEN claims the fid"
+    );
     // Routed but not yet taken: the caller still holds the LOPEN's terminal.
     sim.s().hold = false;
     for _ in 0..3 {
@@ -1284,7 +1288,11 @@ fn a_clunk_refused_under_an_aborting_scope_is_reaped() {
     }
     assert_eq!(sim.s().clunk_sqes, 1, "the CLUNK was sent");
     assert_eq!(sim.s().clunks, 0, "and refused");
-    assert_eq!(sim.live_slots(), 2, "the fid is reaped once its scope retired");
+    assert_eq!(
+        sim.live_slots(),
+        2,
+        "the fid is reaped once its scope retired"
+    );
     drop(scope);
 }
 
@@ -1409,10 +1417,18 @@ fn an_uncertain_pool_registration_fails_the_ring() {
     let r = ring(&sim, 8, &[4096]);
     drop(r.pool(&[range(0, 0, 64)]).unwrap());
     r.turn(Some(r.now())).unwrap();
-    assert_eq!(sim.s().reaps.len(), 1, "the identity the kernel answers next is stale");
+    assert_eq!(
+        sim.s().reaps.len(),
+        1,
+        "the identity the kernel answers next is stale"
+    );
     sim.s().stale_pool = true;
     assert_eq!(r.pool(&[range(0, 0, 64)]).err(), Some(-5));
-    assert_eq!(sim.s().closed_fds, vec![7], "the core closed the descriptor");
+    assert_eq!(
+        sim.s().closed_fds,
+        vec![7],
+        "the core closed the descriptor"
+    );
     assert_eq!(r.target(5, b"clip").err(), Some(-5));
     assert_eq!(r.turn(None).err(), Some(-5), "and the ring has failed");
     drop(r);
@@ -1480,10 +1496,7 @@ fn a_refused_buffer_registration_closes_the_ring() {
 fn a_misaligned_attach_is_detached() {
     let sim = Sim::new();
     sim.s().attach_misalign_at = Some(2);
-    assert_eq!(
-        Ring::setup(sim.kernel(), 8, &[4096, 4096]).err(),
-        Some(-5)
-    );
+    assert_eq!(Ring::setup(sim.kernel(), 8, &[4096, 4096]).err(), Some(-5));
     assert_eq!(sim.regions(), 0);
     assert!(sim.s().closed_fds.is_empty());
 }

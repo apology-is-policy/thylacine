@@ -1031,7 +1031,11 @@ unsafe impl Kernel for SimKernel {
             });
             return 7;
         }
-        let entries = if s.setup_doubles { entries * 2 } else { entries };
+        let entries = if s.setup_doubles {
+            entries * 2
+        } else {
+            entries
+        };
         let cq = entries * 2;
         let up = |n: u32| (n + 63) & !63;
         let sq_array_off = 64;

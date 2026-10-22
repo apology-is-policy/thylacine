@@ -1,0 +1,16 @@
+anchors ok: G2 G1 G3
+2026-10-21T20:48:57Z  HEAD 01c819efcb023701612a6399d91ea57f665932d9, clean; go fork a6567baeaa716811783031fdf543477fdcd1707d, clean; anchors checked; verdict self-check passes; mutants: G2 G1 G3
+2026-10-21T20:48:57Z  disk G2: 7014 MiB free (floor 6144)
+2026-10-21T20:49:57Z  G2: phys.drain_meets_live_owners -> NONE
+2026-10-21T20:49:57Z  G2: tally ; test.sh exit 1; EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+2026-10-21T20:49:57Z  G2: SURVIVED
+2026-10-21T20:49:57Z  disk G1: 7801 MiB free (floor 6144)
+2026-10-21T20:50:55Z  G1: phys.drain_meets_live_owners -> NONE
+2026-10-21T20:50:55Z  G1: tally ; test.sh exit 1; EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+2026-10-21T20:50:55Z  G1: SURVIVED
+2026-10-21T20:50:55Z  disk G3: 7797 MiB free (floor 6144)
+2026-10-21T20:51:49Z  G3: phys.drain_meets_live_owners -> NONE
+2026-10-21T20:51:49Z  G3: tally ; test.sh exit 1; EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+2026-10-21T20:51:49Z  G3: SURVIVED
+2026-10-21T20:51:49Z  SURVIVORS: G2 G1 G3
+2026-10-21T20:51:49Z  exit 1

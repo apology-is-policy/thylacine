@@ -1,0 +1,105 @@
+==> run-vm: pool /Users/northkillpd/projects/thylacine-corona/build/fixtures/pool.img (2684354560 bytes)
+==> qemu: accel=hvf cpu=host gic=v2 smp=4 its=auto
+Thylacine v0.1.0-dev booting...
+  arch: arm64
+  el-entry: EL1 (direct)
+  cpus: 4 (DTB-reported; secondaries bring up at smp_init)
+  mem:  2048 MiB at 0x0000000040000000
+  dtb:  0x000000004de00000 (parsed)
+  uart: 0xffff800000000000 (DTB-driven)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)
+  features: PAC,LSE,CRC32 (CPU-implemented)
+  canary: initialized (fold 0x0000000000001a37)
+  kernel base: 0xffffa00275880000 (KASLR offset 0x0000000275800000, seed: DTB /chosen/kaslr-seed)
+  ram: 2048 MiB total, 1920 MiB free, 126492 KiB reserved (kernel + struct_page + DTB)
+  directmap: page-mapped to L3 (4096 KiB tables; no runtime BBM -- #808)
+  gic:  v2 dist PA=0x0000000008000000 KVA=0xffff800000001000 cpuif PA=0x0000000008010000 KVA=0xffff800000011000
+  timer: 24000 kHz freq, 1000 Hz tick (virtual timer, PPI 11 / INTID 27)
+kobj_mmio: claims=32 slots
+kobj_dma: max=0x0000000000100000 bytes (order 8 pages)
+  random: chacha20 CSPRNG primed from DTB+cntpct; awaiting virtio-rng reseed
+  ramfs: 237 files, 2 dirs loaded from initrd (97039540 bytes)
+  dev:  16 registered (none, cons, null, zero, full, random, notes, proc, ctl, ramfs, srv, cap, dev, hw, pci, env)
+  virtio: 32 MMIO slots probed (6 with attached devices, 0 skipped due to magic mismatch or cap)
+  random: virtio-rng reseed OK (40 bytes mixed, polled 3 iters)
+irqfwd: reserved kernel INTIDs 0,27,33
+  kobj_mmio: reserved kernel range gic-v2 dist PA=0x0000000008000000 size=0x0000000000010000
+  kobj_mmio: reserved kernel range gic-v2 cpu-iface PA=0x0000000008010000 size=0x0000000000010000
+  kobj_mmio: reserved kernel range GICv2m PA=0x0000000008020000 size=0x0000000000001000
+  kobj_mmio: reserved kernel range arm,pl011 PA=0x0000000009000000 size=0x0000000000001000
+  kobj_mmio: reserved kernel range arm,pl031 PA=0x0000000009010000 size=0x0000000000001000
+  kobj_mmio: reserved kernel range pci-host-ecam-generic PA=0x000000003f000000 size=0x0000000001000000
+  virtio_pci: ECAM at PA 0x000000003f000000 size 0x0000000001000000 (8 VirtIO devices on bus 0, 32 functions probed)
+kobj_pci: claims=8 slots
+gic-msi: v2m first=80 count=64
+  smp:  4/4 cpus online (boot + 3 secondaries via PSCI HVC)
+  exception: uniform EL1h (SPSel=1; exception frames on the per-thread kernel stack)
+  ipi:  GICv2 SGIs live (IPI_RESCHED=SGI 0 via GICD_SGIR; banked SGI/PPI + IRQ unmask on secondaries)
+  kproc:   pid=0 threads=4
+  kthread: tid=0 state=RUNNING (current_thread = kthread)
+  sched:   topology homogeneous caps=[1024 1024 1024 1024] (scale=1024; HMP placement inert when homogeneous)
+  cons:  UART RX live (INTID 33); console_mgr kthread up
+  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=5 (counts console_mgr work; per-CPU idles are BAND_IDLE, excluded)
+  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)
+  tests:
+    [test] kaslr.mix64_avalanche ... PASS
+    [test] dtb.chosen_kaslr_seed_present ... PASS
+    [test] mmio.kernel_reservation_union ... PASS
+    [test] dtb.msi_map_bounds ... PASS
+    [test] dtb.pci_msi_route ... PASS
+    [test] dtb.pci_intx_route ... PASS
+    [test] dtb.pci_intid_is_level ... PASS
+    [test] dtb.pci_mem_window ... PASS
+    [test] dtb.pci_mem_window64 ... PASS
+    [test] phys.alloc_smoke ... PASS
+    [test] phys.leak_10k ... PASS
+    [test] phys.drain_meets_live_owners ... 
+EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS: cpu 3  source EL1 (kernel fault)
+HALLS: ELR  0xffffa002758a9934  link 0xffffa000000a9934  buddy_alloc+0xb4
+HALLS: ESR  0x0000000096000040  FAR  0x0000000000000008  SPSR 0x00000000200003c5
+HALLS: SP   0xffff000041fefe10
+HALLS: LR   0xffffa002758a98b0  link 0xffffa000000a98b0  buddy_alloc+0x30
+HALLS: FP   0xffff000041fefe10
+HALLS:  x0  = 0xffffa00275bd1618  x1  = 0x0000000000000000
+HALLS:  x2  = 0x0000000000000000  x3  = 0x0000a5c400000000
+HALLS:  x4  = 0x0000a5c400000000  x5  = 0x0000000014b88000
+HALLS:  x6  = 0x0000000014b88000  x7  = 0x7100000000000029
+HALLS:  x8  = 0x0000000000000000  x9  = 0x0000000000000000
+HALLS:  x10 = 0xffffa00275bd1630  x11 = 0x0000000000000018
+HALLS:  x12 = 0x0000000000000003  x13 = 0x0200000000000002
+HALLS:  x14 = 0x0200000000000002  x15 = 0xaaaaaaaaaaaaaaab
+HALLS:  x16 = 0x0000000000000001  x17 = 0x0000000000077f1b
+HALLS:  x18 = 0x0000000000077f1a  x19 = 0x0000000000000000
+HALLS:  x20 = 0xffffa00275bd1618  x21 = 0xffff000040659e90
+HALLS:  x22 = 0x00000000000003c0  x23 = 0xffffa00275bd1a60
+HALLS:  x24 = 0xffffa00275bd1db8  x25 = 0xffffa00275bd1dc0
+HALLS:  x26 = 0xffff000041fefec8  x27 = 0xffffa00275bf21bc
+HALLS:  x28 = 0x0000000000000009  x29 = 0xffff000041fefe10
+HALLS: KASLR offset 0x0000000275800000  kbase 0xffffa00275880000
+HALLS: backtrace (fp-chain; link addrs for addr2line):
+HALLS:   #0  0xffffa002758a9934  link 0xffffa000000a9934  buddy_alloc+0xb4
+HALLS:   #1  0xffffa002758a9d44  link 0xffffa000000a9d44  mag_alloc+0xd0
+HALLS:   #2  0xffffa002758aa77c  link 0xffffa000000aa77c  alloc_pages+0x1c
+HALLS:   #3  0xffffa00275937bd0  link 0xffffa00000137bd0  dmo_owner+0xb4
+HALLS:   #4  0xffffa002758a4260  link 0xffffa000000a4260  thread_trampoline+0x14
+HALLS: stack @0xffff000041fefe10 (256 bytes, ascending):
+HALLS:   0xffff000041fefe10: 0xffff000041fefe50 0x59fea002758a9d44
+HALLS:   0xffff000041fefe20: 0xffffa00275bd1db0 0x5354414b57415445
+HALLS:   0xffff000041fefe30: 0x0000000000000340 0xffffa00275bd1618
+HALLS:   0xffff000041fefe40: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffff000041fefe50: 0xffff000041fefea0 0x37a8a002758aa77c
+HALLS:   0xffff000041fefe60: 0x0200000000000100 0x0200000000000000
+HALLS:   0xffff000041fefe70: 0xffffa00275bf21b8 0xaaaaaaaaaaaaaaab
+HALLS:   0xffff000041fefe80: 0xffff000041fefed0 0xffffa00275bd1000
+HALLS:   0xffff000041fefe90: 0x0000000000000000 0x0000000000000000
+HALLS:   0xffff000041fefea0: 0xffff000041feffa0 0x79e5a00275937bd0
+HALLS:   0xffff000041fefeb0: 0x0000000000000001 0x0000000000000004
+HALLS:   0xffff000041fefec0: 0x0200000000000000 0x0000000000000002
+HALLS:   0xffff000041fefed0: 0xffff000040659e90 0xffff000040659e30
+HALLS:   0xffff000041fefee0: 0xffff00004065a730 0xffff00004065a730
+HALLS:   0xffff000041fefef0: 0x5354414b57415445 0x5354414b57415445
+HALLS:   0xffff000041feff00: 0x5354414b57415445 0x5354414b57415445
+HALLS: --- end ---
+  console-ring: held by the dumping cpu (banner serialized against peers)

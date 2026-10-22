@@ -1,0 +1,9 @@
+mac   HELD by you for 2m, 4.0h left
+        why: corona: vote-16 magazine lock -- host TSan witness (clean, 3 mutants, pre-lock source), 3 guest sabotage builds, then the full gate (ci/qual/UBSan/production/SMP matrix) and the pi re-bake. Length uncertain; released the moment the cores free.
+        phase: corona lease driver (work/oct21-lease-*): host TSan magazines -> sims mutants (22) -> loom-client host suite -> 3 guest sabotage builds -> gate (ci/qual/UBSan/production/SMP) -> pi bake if green
+        runner: Mac pid 48171 alive (start Wed Oct 21 20:15:42 2026)
+        runner: Mac pid 48175 alive (start Wed Oct 21 20:15:42 2026)
+        pids: [48171 48175] (their registered work -- not a kill list)
+        queue 1: main (47m waiting)
+pi    FREE
+disk: 10.1 GiB available at /Users/northkillpd/projects/thylacine-corona

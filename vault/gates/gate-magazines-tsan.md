@@ -35,4 +35,9 @@ Its first run (2026-10-21, at 72298812e) passed the clean leg and the three
 lock drops. The pre-lock leg did not build: that body never initialises a
 lock, so the harness's inline `spin_lock_init` went unused, which
 `-Wunused-function` reports and `-Werror` refuses. The shim is now a macro,
-and all five legs' sources pass a syntax-only build.
+and all five legs' sources pass a syntax-only build. Since then it has run
+three times, twice at 01c819efc and once at 7062e8926, and passed all five
+legs each time. The clean leg drew no report and returned 512 of 512 pages
+every time. On the pre-lock bodies TSan reported 11 or 12 races, and the
+zone audit found 23 to 94 pages handed to two owners and 9 to 26 double
+frees. The counts vary from run to run; the race reports do not go away.

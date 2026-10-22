@@ -1,0 +1,11 @@
+== check-production: joey at THYLA_BOOT_PROBES=OFF ==
+  ok -- joey builds lean; #229 tripwire armed (-Werror=unused-function)
+== check-production: joey at BOOT_PROBES=OFF + DEV_ACCOUNTS=ON (lean loginnable) ==
+  ok -- joey builds lean+loginnable; provision_dev_accounts compiled in (90960 -> 106488 B, +15528)
+== check-production: the full lean image build (--config production) ==
+  ok -- lean (release, KASLR, hardened) kernel + userspace + ramfs + fresh loginnable pool
+== check-production: boot the lean image -- assert the spine provisioned + login ==
+  ok -- lean spine provisioned michael+cora at boot; both authenticate (dev-accounts)
+  NOTE: the tree now holds PRODUCTION artifacts. Rebuild the default
+        shape before running tools/test.sh for anything else.
+== check-production: PASS ==
