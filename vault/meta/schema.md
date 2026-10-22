@@ -418,7 +418,9 @@ in this section (the R6 mirror-drift hazard applied to the schema itself),
 and never swap the frontmatter parser for a real YAML library: **the
 restricted subset is schema law** — scalars, single-line `[a, b]` flow
 lists, block `- item` lists, flow maps kept raw (presence-only); a
-multi-line flow list fails loudly rather than parsing.
+multi-line flow list fails loudly rather than parsing, and so does a key
+repeated within one block (a YAML reader keeps one of the values without a
+word, so an older `updated:` could win).
 
 Subcommands: `lint` (below; the hook runs `quaestor lint --staged`),
 `render` (rewrite generated view bodies), `closed <sub-id>` (the

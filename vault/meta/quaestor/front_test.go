@@ -73,6 +73,19 @@ func TestParserBlockList(t *testing.T) {
 	}
 }
 
+func TestParserRepeatedKey(t *testing.T) {
+	// LAW: a key on a second `key:` line overwrites the first (later wins)
+	// and is recorded, so validate can fail it; block-list items extending
+	// one key are not repeats.
+	f, _ := parseOK(t, "---\nk: a\nl:\n  - x\n  - y\nk: b\n---\nx\n")
+	if v, _ := f.Get("k"); v.IsList || v.Str != "b" {
+		t.Fatalf("repeated key: got %+v, want the later scalar b", v)
+	}
+	if r := f.Repeated(); len(r) != 1 || r[0] != "k" {
+		t.Fatalf("repeated keys: got %v, want [k]", r)
+	}
+}
+
 func TestParserFlowMapKeptRaw(t *testing.T) {
 	// LAW: flow maps are presence-only; the raw text is kept as a scalar.
 	f, _ := parseOK(t, "---\ncounts: {p0: 0, p1: 1}\n---\nx\n")
