@@ -91,7 +91,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_MFILE`     | 24    | `EMFILE`     | Too many open files: the phenotype's per-Proc socket table (`VIV_SOCK_MAX`) is full, or no handle slot at or above a `SYS_HANDLE_DUP_LOWEST` floor is free (B-3b; dup, `F_DUPFD`). The kernel's other full-handle-table answer is still `T_E_NOMEM` (#80 seam) |
 | `T_E_NOTTY`     | 25    | `ENOTTY`     | Not a terminal: the phenotype ioctl shell (C2-k1b) answers it for a `TC*`/`TIOC*` request on a non-tty fd and for any request the terminal surface does not serve; `isatty()` reads it as "not a tty" |
 | `T_E_NOSPC`     | 28    | `ENOSPC`     | No space left. Kernel-originated for one cause: a mount into a Territory whose mount table is at its cap (`SYS_MOUNT`, ARCH 9.1). A server's ENOSPC (a full pool) crosses by value, as it always has. Named by the operator's vote of 2026-10-19 (`dec-2026-10-19-mount-errnos`) |
-| `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
+| `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path), and the answer to a syscall number the kernel does not know (operator vote 2026-10-22, `dec-2026-10-22-unknown-syscall-enosys`; kernels before it answered a bare -1, see "Unknown syscall numbers") |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
 | `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. THREE emitters share the code. Two are the resolver's, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead. (3) SYS_MOUNT refuses a mount that would close a cycle in the mount graph, I-3 (operator vote 2026-10-19; "Mount and unmount" below) |
@@ -746,6 +746,16 @@ SYS_UNMOUNT answers -T_E_INVAL when nothing is mounted at the point, as
 Linux's umount2 does. ut's `bind`, `mount` and `unmount` name the errno
 after their message, and libthyla-rs's `mount` and `unmount` return the
 matching `Error`.
+
+### Unknown syscall numbers (operator vote 2026-10-22)
+
+Operator vote 2026-10-22 (`dec-2026-10-22-unknown-syscall-enosys`). A
+syscall number the dispatcher does not know answers `-T_E_NOSYS`, as on
+Linux. Kernels before the vote answered a bare -1, which reads as EPERM,
+so a consumer that must also run on them cannot read -1 as "no such
+call": Pouch maps the legacy -1 to ENOSYS at the boundaries named above,
+and the Go fork decides once, by an lstat of "/", whether the kernel has
+SYS_LSTAT and SYS_READLINK.
 
 ### Native lstat and readlink (operator vote 2026-10-20)
 
