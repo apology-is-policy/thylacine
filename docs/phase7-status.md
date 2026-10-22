@@ -2411,6 +2411,10 @@ A chunk of the thread-model overhaul (`docs/thread-model-review.html`; Fable's E
   terminal masks IRQs; F4 the lost-wake hazard recorded in the seam; F5 the arm-wiring test.
 - **Posture.** ci suite 2027/2027 (cb69dcfb6) and 2028/2028 (b86a0dafa), regreened after every sabotage set;
   SMP matrix 50/50 PASS, 0 corruption (default smp1/4/8 + UBSan smp4/8, N=10, on b86a0dafa, ended 07:43Z 2026-10-22); thread_reap (clean 158 + 5 buggy), death_wake, caught_target, debug_stop and debug_step every cfg as claimed.
-  The `cpubench storm` before/after measurement (four concurrent at -smp 4, and one alone) is owed to the next Mac lease; its numbers land as a docs update.
+  `cpubench storm 16 1000` (16,000 spawn+joins a run; hvf, -smp 4, one boot per image, measured after landing; vault
+  `msr-thread-storm`): one storm alone, median of 3, 61,309 threads/s on the pre-C3 tip a0128885b and 63,334 on C3
+  (inside the spread); four at once in four Procs, median per storm of 12, 96,613 and 146,176 threads/s (1.51x; the
+  ranges do not overlap). A spawn and a non-last exit no longer take the global lock, so separate Procs stop
+  serializing on it; one Proc's threads still share its own thread lock.
 - **Votes.** Operator votes 5 (thread-directed notes, C4) and 6 (`/proc/<pid>/thread/<tid>/`, C7) answered during this
   chunk, both as recommended.
