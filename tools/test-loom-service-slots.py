@@ -8,6 +8,7 @@ require its named assertion, never an arbitrary crash or sanitizer diagnostic.
 import argparse
 import difflib
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,9 @@ import shlex
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location('host_sanitizer_cc', ROOT / 'tools/host-sanitizer-cc.py')
+sanitizer_cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sanitizer_cc)
 MUTANTS = [
     ('stale', ' || s->incarnation != ref.incarnation', '',
      'stale incarnation cannot borrow reused slot'),
@@ -62,6 +66,7 @@ def main():
               'tools/test-loom-service-slots.py')]
     original = inputs[0].read_text()
     hashes = {str(p.relative_to(ROOT)): sha(p) for p in inputs}
+    cc, cc_extra = sanitizer_cc.select(args.logs)
     results = []
     for name, old, new, expected in [('control', None, None, None)] + MUTANTS:
         source = original
@@ -74,11 +79,11 @@ def main():
             original.splitlines(True), source.splitlines(True),
             fromfile='kernel/loom_service_slots.c', tofile=name + '.c')))
         exe = path.with_suffix('')
-        cmd = [os.environ.get('CC', 'clang'), '-std=c11', '-O1', '-Wall',
+        cmd = [cc, '-std=c11', '-O1', '-Wall',
                '-Wextra', '-Werror', '-I', str(ROOT / 'kernel/include'),
                str(path), str(inputs[4]), '-o', str(exe),
                '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
-        cmd += shlex.split(os.environ.get('CFLAGS', ''))
+        cmd += cc_extra + shlex.split(os.environ.get('CFLAGS', ''))
         (args.logs / (name + '-command.json')).write_text(json.dumps(cmd) + '\n')
         with (args.logs / (name + '-build.log')).open('wb') as out:
             subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, check=True)

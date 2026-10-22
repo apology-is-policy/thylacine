@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Actual process-budget source, pthread lifetime lock double, named mutants."""
 from pathlib import Path
-import argparse,os,shlex,subprocess,tempfile
+import argparse,importlib.util,os,shlex,subprocess,tempfile
 ROOT=Path(__file__).resolve().parent.parent
+spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
 MUTANTS=[
  ('image','p->as == c->as &&','true &&','wrong image refused'),
  ('zombie','p->state == PROC_STATE_ALIVE &&','true &&','zombie refused'),
@@ -17,13 +18,14 @@ def main():
  p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
  s=(ROOT/'kernel/proc.c').read_text();body=s[s.index('struct sqpoll_ticket_ctx {'):s.index('bool proc_child_cap_ok(')]
  s=(ROOT/'kernel/include/thylacine/proc.h').read_text();decl=s[s.index('struct ProcSqpollTicket {'):s.index('// proc_child_cap_ok')]
+ cc,cc_extra=sanitizer_cc.select(a.logs)
  fixture=(ROOT/'tools/host-tests/sqpoll-ticket.c').read_text().replace('/* ACTUAL_DECL */',decl).replace('/* ACTUAL_BODY */',body)
  with tempfile.TemporaryDirectory(prefix='sqpoll-ticket-') as tmp:
   for name,old,new,expected in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
    s=fixture
    if old:assert s.count(old)==1,(name,s.count(old));s=s.replace(old,new)
    f=Path(tmp)/(name+'.c');f.write_text(s);exe=f.with_suffix('')
-   cmd=[os.environ.get('CC','clang'),'-std=c11','-Wall','-Wextra','-Werror','-O1','-pthread','-fsanitize=address,undefined','-fno-sanitize-recover=all','-g',str(f),'-o',str(exe)]+shlex.split(os.environ.get('CFLAGS',''))
+   cmd=[cc,'-std=c11','-Wall','-Wextra','-Werror','-O1','-pthread','-fsanitize=address,undefined','-fno-sanitize-recover=all','-g',str(f),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
    with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
    r=subprocess.run([str(exe)],text=True,capture_output=True,timeout=30);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
    # Overflow mutant is stopped by UBSan before the boolean postcondition.

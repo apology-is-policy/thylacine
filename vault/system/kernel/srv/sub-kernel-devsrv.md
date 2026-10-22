@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## D7 implementation (October 1)
 
@@ -625,4 +625,8 @@ publication separately rechecks LIVE/generation under the registry lock. The
 caller serializes publish with cancellation and wakes outside its lock. Admission
 holds the registry until local release; an accepted endpoint holds actual
 connection storage/credits until its final release. Legacy opens use the same
-core and still perform their normal blocking handshake afterward.
+core and still perform their normal blocking handshake afterward. Preparation
+also captures the poster's principal with the post, and the connection is
+stamped with both ends' principals by value; the host fixture
+(`tools/test-service-admission.py`) checks both, and its mutants drop the
+poster's from the capture or stamp the peer's in its place.

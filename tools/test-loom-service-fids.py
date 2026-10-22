@@ -8,17 +8,17 @@ assertion, never an arbitrary crash or sanitizer diagnostic.
 import argparse
 import difflib
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
-# Apple clang's ASan runtime hangs at startup on macOS 26 (before main); the
-# Homebrew LLVM toolchain test-loom-client.sh uses does not.
-LLVM_CC = Path(os.environ.get('LLVM_PREFIX', '/opt/homebrew/opt/llvm')) / 'bin/clang'
+spec = importlib.util.spec_from_file_location('host_sanitizer_cc', ROOT / 'tools/host-sanitizer-cc.py')
+sanitizer_cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sanitizer_cc)
 MUTANTS = [
     ('reap-aborting', 'p->state!=LOOM_SERVICE_RETIRED ||',
      '(p->state!=LOOM_SERVICE_RETIRED && p->state!=LOOM_SERVICE_ABORTING) ||',
@@ -59,6 +59,7 @@ def main():
               'kernel/include/thylacine/loom_service_abi.h')]
     original = inputs[0].read_text()
     hashes = {str(p.relative_to(ROOT)): sha(p) for p in inputs}
+    cc, cc_extra = sanitizer_cc.select(args.logs)
     results = []
     for name, old, new, expected in [('control', None, None, None)] + MUTANTS:
         source = original
@@ -71,17 +72,14 @@ def main():
             original.splitlines(True), source.splitlines(True),
             fromfile='kernel/loom_service_fids.c', tofile=name + '.c')))
         exe = path.with_suffix('')
-        cc = os.environ.get('CC') or (str(LLVM_CC) if LLVM_CC.exists() else 'clang')
         cmd = [cc, '-std=c11', '-O1', '-Wall',
                '-Wextra', '-Werror', '-I', str(ROOT / 'kernel/include'),
                str(path), str(inputs[3]), str(ROOT / 'kernel/loom_service_nodes.c'),
                str(ROOT / 'kernel/loom_service_slots.c'), '-o', str(exe),
                '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
         cmd += shlex.split(os.environ.get('CFLAGS', ''))
-        sdk = subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True, text=True) \
-            if shutil.which('xcrun') else None
-        if sdk and sdk.returncode == 0 and '-isysroot' not in cmd:
-            cmd += ['-isysroot', sdk.stdout.strip()]
+        if '-isysroot' not in cmd:
+            cmd += cc_extra
         (args.logs / (name + '-command.json')).write_text(json.dumps(cmd) + '\n')
         with (args.logs / (name + '-build.log')).open('wb') as out:
             subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, check=True)

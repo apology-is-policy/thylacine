@@ -10,7 +10,7 @@ validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-10-08
+updated: 2026-10-22
 ---
 
 ## Shared retention design review
@@ -616,9 +616,19 @@ The current accounting cap stays in force; this prerequisite is not the approved
 replacement shared-memory account hierarchy. Ownerless legacy counters may retain
 non-admitting residue until final descriptor destruction.
 
-Actual C lifecycle sanitizer/mutations and native process/device/refund tests
-are recorded in ASYNC-SERVICE-SELF-REVIEW.md. Source extraction excludes clone/MMU
-code; existing COW/capacity models do not model this descriptor-pin distinction.
+The host fixture (`tools/test-addrspace-lifetime.py`) compiles the actual
+declaration and lifecycle, the release/destroy pair with it, and the actual
+`addrspace_quiesce_mapped_devices`; allocator, VMA drain, page-table destruction
+and the device resets are host doubles, and its VMA list is real nodes the walk
+can follow. Its mutants carry the last-owner/last-pin counterexamples onto the
+split: a release that drains while another owner remains, a destroy without its
+drain or with its lifetime drop first, a last-owner release that drops the
+lifetime destroy still needs, a release that calls itself last one owner early.
+Two more are the devices': no quiesce, and quiesce after the drain. Each is
+killed by its named assertion, ordinary and under ASan/UBSan. Native
+process/device/refund tests are recorded in ASYNC-SERVICE-SELF-REVIEW.md. Source
+extraction excludes clone/MMU code; existing COW/capacity models do not model
+this descriptor-pin distinction.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

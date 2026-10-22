@@ -3,8 +3,9 @@
 No kernel runtime, caller lock, pin lifetime or wire claims. Mutants stay in temp.
 """
 from pathlib import Path
-import argparse,os,shlex,subprocess,tempfile,json,hashlib
+import argparse,importlib.util,os,shlex,subprocess,tempfile,json,hashlib
 ROOT=Path(__file__).resolve().parent.parent
+spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
 MUTANTS=[
  ('ignore-nonce',' || c->nonce != r->lease','', 'wrong nonce cannot return'),
  ('ignore-generation','a.slot == b.slot && a.incarnation == b.incarnation','a.slot == b.slot','wrong incarnation cannot return'),
@@ -20,14 +21,14 @@ MUTANTS=[
 ]
 def main():
  p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--sanitize',action='store_true');p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
- source=(ROOT/'kernel/loom_service_pool.c').read_text();results=[]
+ source=(ROOT/'kernel/loom_service_pool.c').read_text();results=[];cc,cc_extra=sanitizer_cc.select(a.logs,a.sanitize)
  with tempfile.TemporaryDirectory(prefix='loom-pool-fixture-') as tmp:
   for name,old,new,want in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
    s=source
    if old:
-    assert old in s,name;s=s.replace(old,new)
+    assert s.count(old)==1,(name,s.count(old));s=s.replace(old,new)
    path=Path(tmp)/(name+'.c');path.write_text(s);exe=path.with_suffix('')
-   cmd=[os.environ.get('CC','clang'),'-std=c11','-O1','-Wall','-Wextra','-Werror','-I',str(ROOT/'kernel/include'),str(path),str(ROOT/'tools/host-tests/loom-service-pool.c'),'-o',str(exe)]+shlex.split(os.environ.get('CFLAGS',''))
+   cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-I',str(ROOT/'kernel/include'),str(path),str(ROOT/'tools/host-tests/loom-service-pool.c'),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
    if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
    with (a.logs/(name+'-build.log')).open('wb') as f:subprocess.run(cmd,stdout=f,stderr=subprocess.STDOUT,check=True)
    r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)

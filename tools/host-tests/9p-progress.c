@@ -3,10 +3,15 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/errno.h>
+#include <thylacine/page.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
+// Host doubles of the kernel allocator: the session grows its tag table past
+// its first chunk through kmalloc (KP_ZERO honoured) and frees it at destroy.
+void *kmalloc(size_t n, unsigned flags) { return (flags & KP_ZERO) ? calloc(1, n) : malloc(n); }
+void kfree(void *p) { free(p); }
 struct pipe {
     u8 input[1024], output[1024];
     size_t available, read, wrote, chunk;

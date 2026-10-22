@@ -10,7 +10,7 @@ mirrors:
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libthyla-rs/src/pty_interaction.rs
 created: 2026-09-24
-updated: 2026-09-25
+updated: 2026-10-22
 ---
 ## Layout / semantics
 
@@ -30,7 +30,9 @@ expected epoch/subject stripes (u64 at 8/16). Reserved fields must be zero.
 
 C declarations assert every offset, both sizes and both alignments; the Rust
 repr(C) declarations do likewise. `tools/test-pty-interaction-abi.py` compiles
-both real C headers to AArch64 ELF objects, extracts their relocation-free
+both real C headers to AArch64 ELF objects (on a Darwin host, whose own
+compiler makes Mach-O, with `clang --target=aarch64-none-elf` unless `CC` is
+set), extracts their relocation-free
 constant section, and compares it and the standalone Rust record to the same
 literal 200-byte oracle. This checks constants and compiler layout, not any
 kernel role, readiness or lifecycle behavior.

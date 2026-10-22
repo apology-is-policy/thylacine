@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-14
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -368,8 +368,11 @@ serialization and pinned lifetimes; public private-scope admission is not enable
 
 `tools/test-9p-progress.py` links actual sources and exercises every partial byte
 boundary, malformed/coalesced frames, cancellation, deadlines, captured identity
-and errno limits. It detects12 intended source mutations. --sanitize accepts
-CC/CFLAGS for a working host sanitizer toolchain. The real-channel guest witness
+and errno limits. It detects 13 intended source mutations, each matching one
+site (EAGAIN's send and receive arms are separate mutants). --sanitize accepts
+CC/CFLAGS for a working host sanitizer toolchain. The session's tag table
+allocates through host `kmalloc`/`kfree` doubles, and `mm/slub.h` reaches
+`atomic_lse.h` through the host-env double ([[sub-substrate-gates]]). The real-channel guest witness
 is the expanded srvconn.nonblocking_backpressure test. These are bounded fixture
 claims, blind to future Loom table admission/retirement and full concurrent use.
 See docs/ASYNC-SERVICE-STATUS.md for measured qualification and remaining work.

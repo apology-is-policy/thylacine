@@ -53,8 +53,8 @@ static void spin_unlock_irqrestore(spin_lock_t *l, irq_state_t s) { (void)s; loc
 enum srv_mode { SRV_MODE_9P, SRV_MODE_BYTE };
 struct SrvDomain { int number; };
 struct SrvRegistry;
-struct SrvConn { unsigned ref; bool torn,byte_mode,cape,remote; struct SrvDomain *domain; u64 stripes,poster; int pid; bool console; u32 msize; };
-struct SrvService { struct SrvRegistry *reg; u8 name_len; char name[32]; int state; u64 generation,poster_stripes; enum srv_mode mode; u32 ring_msize; bool cape,remote,cap_posted; unsigned backlog_count; struct SrvConn *backlog[2]; int accept_rendez,poll_list; };
+struct SrvConn { unsigned ref; bool torn,byte_mode,cape,remote; struct SrvDomain *domain; u64 stripes,poster; int pid; bool console; u32 msize,principal,poster_principal; };
+struct SrvService { struct SrvRegistry *reg; u8 name_len; char name[32]; int state; u64 generation,poster_stripes; u32 poster_principal; enum srv_mode mode; u32 ring_msize; bool cape,remote,cap_posted; unsigned backlog_count; struct SrvConn *backlog[2]; int accept_rendez,poll_list; };
 struct SrvRegistry { u64 magic; unsigned refs; spin_lock_t lock; struct SrvRegistry *source; struct SrvDomain *domain; struct SrvService svc[4]; };
 struct Spoor { char dc; void *aux; u32 flag; struct { u8 type; } qid; };
 /* ACTUAL_ADMISSION_DECL */
@@ -68,11 +68,11 @@ static struct SrvService *srv_lookup_in(struct SrvRegistry *r,const char *n,u8 l
 }
 static void srv_registry_ref(struct SrvRegistry *r) { CHECK(r->refs,"retain live registry");r->refs++; }
 static void srv_registry_unref(struct SrvRegistry *r) { CHECK(r->refs,"registry balance");r->refs--; }
-static struct SrvConn *srvconn_create_in(struct SrvDomain *d,int *err,u64 stripes,int pid,bool console,u64 poster,u32 msize) {
+static struct SrvConn *srvconn_create_in(struct SrvDomain *d,int *err,u64 stripes,int pid,u32 principal,bool console,u64 poster,u32 poster_principal,u32 msize) {
     CHECK(!locked,"allocation outside registry lock");
     if(fail_allocate){*err=-T_E_NOMEM;return NULL;}
     struct SrvConn *c=calloc(1,sizeof(*c)); CHECK(c,"fixture alloc"); allocations++;
-    *c=(struct SrvConn){.ref=1,.domain=d,.stripes=stripes,.pid=pid,.console=console,.poster=poster,.msize=msize};return c;
+    *c=(struct SrvConn){.ref=1,.domain=d,.stripes=stripes,.pid=pid,.principal=principal,.console=console,.poster=poster,.poster_principal=poster_principal,.msize=msize};return c;
 }
 static void srvconn_ref(struct SrvConn *c) {CHECK(c->ref,"retain connection");c->ref++;}
 static void srvconn_unref(struct SrvConn *c) {CHECK(c->ref,"connection balance");if(!--c->ref){CHECK(!locked,"free outside lock");frees++;free(c);}}
@@ -90,7 +90,7 @@ static void poll_waiter_list_wake(int *x) {wakeup(x);}
 /* ACTUAL_ADMISSION */
 static void post(struct SrvRegistry *r,unsigned slot,const char *name,u64 gen) {
     struct SrvService *s=&r->svc[slot];CHECK(!s->backlog_count,"fixture empty slot");
-    *s=(struct SrvService){.reg=r,.generation=gen,.poster_stripes=88,.state=SRV_STATE_LIVE,.ring_msize=8192};
+    *s=(struct SrvService){.reg=r,.generation=gen,.poster_stripes=88,.poster_principal=77,.state=SRV_STATE_LIVE,.ring_msize=8192};
     s->name_len=(u8)strlen(name);memcpy(s->name,name,s->name_len);
 }
 static void drain(struct SrvService *s) {while(s->backlog_count)srvconn_unref(s->backlog[--s->backlog_count]);}
@@ -121,7 +121,7 @@ static void admission_cases(void) {
     struct SrvRegistry view={.magic=SRV_REGISTRY_MAGIC,.refs=1,.lock=PTHREAD_MUTEX_INITIALIZER,.source=&provider,.domain=&domain};
     struct Spoor root={.dc='s',.aux=&view,.flag=CWALKONLY,.qid={QTDIR}};
     post(&provider,0,"route",1);post(&view,0,"own",1);
-    struct ProcServiceIdentity id={.stripes=55,.pid=123,.console_attached=true};
+    struct ProcServiceIdentity id={.access={.principal_id=42},.stripes=55,.pid=123,.console_attached=true};
     struct SrvServiceTarget t;struct SrvConnectAdmission a;
     CHECK(!devsrv_service_target_init(&root,"route",5,&t),"routed target capture");
     CHECK(t.view==&view&&t.service==&provider.svc[0],"retained navigation view plus provider slot");
@@ -129,6 +129,7 @@ static void admission_cases(void) {
     CHECK(a.conn->domain==&domain,"route charges consumer view");
     CHECK(!provider.svc[0].backlog_count&&!wakes,"prepare is invisible");
     CHECK(a.conn->stripes==55&&a.conn->pid==123&&a.conn->console&&a.conn->poster==88,"captured provenance stamped");
+    CHECK(a.conn->principal==42&&a.conn->poster_principal==77,"both ends' principals stamped");
     srvconn_ref(a.conn);struct SrvConn *held=a.conn;
     devsrv_connect_release(&a);CHECK(held->torn,"cancel prepare tears local connection");srvconn_unref(held);
     fail_allocate=true;CHECK(devsrv_service_prepare(&t,&id,&a)==-T_E_NOMEM&&!a.conn,"allocation failure rolls back");fail_allocate=false;

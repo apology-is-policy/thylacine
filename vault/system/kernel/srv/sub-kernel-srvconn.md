@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-22
 ---
 ## Admission (October 1, D7)
 
@@ -41,7 +41,9 @@ admission never enters the list or a registry lock.
 
 The actual-source host fixture checks all allocation failures, reentrant
 construction, independent session quotas, aggregate and global saturation,
-rollback and retained teardown. The focused fixture includes weighted mixed-class boundaries and intended
+rollback and retained teardown, and that a connection carries both ends'
+principals (distinct values; a server principal stamped from the peer's is a
+mutant). The focused fixture includes weighted mixed-class boundaries and intended
 mutants for bulk charging and exact final return. Real kernel
 fixtures cover domain retirement and route charging. These are focused
 functional checks, not a new SMP/sanitizer qualification.

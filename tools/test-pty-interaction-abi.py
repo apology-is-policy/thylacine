@@ -71,7 +71,10 @@ def elf_section(path, name):
 
 with tempfile.TemporaryDirectory(prefix='pty-abi-') as directory:
     tmp = Path(directory)
-    cc = shlex.split(os.environ.get('CC', 'cc'))
+    # The oracle is read from an ELF section; a Mach-O host compiler cannot
+    # emit one, so a Darwin host compiles for the kernel's own ELF target.
+    cc = shlex.split(os.environ.get('CC') or
+                     ('clang --target=aarch64-none-elf' if sys.platform == 'darwin' else 'cc'))
     for label, header, prefix, include in [
         ('kernel', 'thylacine/syscall.h', '', 'kernel/include'),
         ('libt', 'thyla/syscall.h', 'T_', 'usr/lib/libt/include'),

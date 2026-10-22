@@ -5,7 +5,7 @@
 #include <pthread.h>
 #include <sched.h>
 #define CHECK(x, why) do { if (!(x)) { fputs(why "\n", stderr); exit(1); } } while (0)
-typedef uint64_t u64, paddr_t;
+typedef uint64_t u64, paddr_t, caps_t;
 typedef uint32_t u32;
 typedef struct { u32 value; } spin_lock_t;
 static unsigned allocations, frees, tables, destroys, drains;
@@ -27,9 +27,26 @@ static void spin_unlock(spin_lock_t *p) { __atomic_store_n(&p->value, 0, __ATOMI
 
 static _Noreturn void extinction(const char *s) { fprintf(stderr, "extinction: %s\n", s); exit(1); }
 
+// Fixture shapes of the mapping list the actual device quiesce walks: the
+// fields it reads. The device resets themselves are hardware, so doubles that
+// record when each ran.
+#define BURROW_TYPE_MMIO 2
+struct KObj_MMIO { u64 pa; size_t size; };
+struct KObj_PCI { u32 hostmem_burrows; unsigned full, dma_only; };
+struct Burrow { int type; struct KObj_MMIO *kobj_mmio; struct KObj_PCI *kobj_pci; };
+struct Vma { struct Vma *next; struct Burrow *burrow; };
+static struct Vma plain_vma;
+static unsigned stamp, resets, last_reset, drained_at;
+static int virtio_mmio_reset_in_range(u64 pa, size_t size) {
+    CHECK(pa == 0x0a000000u && size == 0x200, "mapped device identity");
+    resets++; last_reset = ++stamp; return 1;
+}
+static bool kobj_pci_quiesce(struct KObj_PCI *k) { k->full++; resets++; last_reset = ++stamp; return true; }
+static bool kobj_pci_quiesce_dma_only(struct KObj_PCI *k) { k->dma_only++; resets++; last_reset = ++stamp; return true; }
+
 /* ACTUAL_ADDRSPACE_DECL */
 static void vma_drain_in(struct AddrSpace *as) {
-    drains++;
+    drains++; drained_at = ++stamp;
     pthread_mutex_lock(&mu);
     entered_drain = true;
     pthread_cond_broadcast(&cv);
@@ -37,15 +54,18 @@ static void vma_drain_in(struct AddrSpace *as) {
     as->vmas = NULL;
     pthread_mutex_unlock(&mu);
 }
+/* ACTUAL_QUIESCE */
 
 /* ACTUAL_ADDRSPACE_LIFECYCLE */
 // Actual AddrSpace declaration/lifecycle are inserted before this fixture.
-// Allocation, page-table destruction and mapping drain are controlled doubles.
+// Allocation, page-table destruction, mapping drain and device resets are
+// controlled doubles; the device quiesce walk is actual.
 // This checks C lifetime ordering, not guest MMU/TLB or real device behavior.
 static void *drop_owner(void *p) { addrspace_unref(p); return NULL; }
 static void *drop_pin(void *p) { addrspace_unpin(p); return NULL; }
 static void reset_fixture(void) {
     allocations = frees = tables = destroys = drains = 0;
+    stamp = resets = last_reset = drained_at = 0;
     fail_alloc = fail_table = pause_drain = entered_drain = release_drain = false;
 }
 static void serial_cases(void) {
@@ -58,7 +78,7 @@ static void serial_cases(void) {
     struct AddrSpace *a = addrspace_alloc(32);
     CHECK(a && a->page_budget == 32 && a->id != 0, "fresh account shape");
     CHECK(addrspace_ref_count(a) == 1 && addrspace_owner_count(a) == 1, "fresh owner counts");
-    a->vmas = (void *)1;
+    a->vmas = &plain_vma;
     addrspace_pin(a);
     CHECK(addrspace_ref_count(a) == 2 && addrspace_owner_count(a) == 1, "pin is not an owner");
     addrspace_ref(a);
@@ -74,7 +94,7 @@ static void serial_cases(void) {
     addrspace_unpin(a);
     CHECK(frees == 1 && destroys == 1 && drains == 1, "final pin frees once without another drain");
 
-    reset_fixture(); a = addrspace_alloc(32); a->vmas = (void *)1;
+    reset_fixture(); a = addrspace_alloc(32); a->vmas = &plain_vma;
     addrspace_pin(a); addrspace_unpin(a);
     CHECK(drains == 0 && frees == 0 && addrspace_owner_count(a) == 1, "early pin release preserves owner");
     addrspace_unref(a);
@@ -83,7 +103,7 @@ static void serial_cases(void) {
     CHECK(addrspace_ref_count(NULL) == 0 && addrspace_owner_count(NULL) == 0, "null lifetime helpers");
 }
 static void during_drain(void) {
-    reset_fixture(); struct AddrSpace *a = addrspace_alloc(32); a->vmas = (void *)1;
+    reset_fixture(); struct AddrSpace *a = addrspace_alloc(32); a->vmas = &plain_vma;
     addrspace_pin(a); pause_drain = true;
     pthread_t t;
     CHECK(pthread_create(&t, NULL, drop_owner, a) == 0, "create owner teardown");
@@ -99,7 +119,7 @@ static void during_drain(void) {
 }
 static void simultaneous_drops(void) {
     for (unsigned iteration = 0; iteration < 100; iteration++) {
-        reset_fixture(); struct AddrSpace *a = addrspace_alloc(32); a->vmas = (void *)1;
+        reset_fixture(); struct AddrSpace *a = addrspace_alloc(32); a->vmas = &plain_vma;
         pthread_t t[8];
         for (unsigned i = 0; i < 8; i++) addrspace_pin(a);
         for (unsigned i = 0; i < 8; i++) CHECK(pthread_create(&t[i], NULL, drop_pin, a) == 0, "create pin teardown");
@@ -158,8 +178,26 @@ static void private_vs_share(void) {
         addrspace_unref(a); CHECK(frees == 1 && drains == 1, "race ownership balanced");
     }
 }
+static void mapped_devices(void) {
+    // The last owner stops every device mapped in the space, once, before the
+    // drain frees the buffers they were handed; an owner that leaves while
+    // another remains stops none.
+    reset_fixture();
+    struct KObj_MMIO mmio = {0x0a000000u, 0x200}, bar = {0x10000000u, 0x1000};
+    struct KObj_PCI full = {0, 0, 0}, dma = {1, 0, 0};
+    struct Burrow virtio = {BURROW_TYPE_MMIO, &mmio, NULL}, anon = {0, NULL, NULL};
+    struct Burrow pci_full = {BURROW_TYPE_MMIO, &bar, &full}, pci_dma = {BURROW_TYPE_MMIO, &bar, &dma};
+    struct Vma v[4] = {{&v[1], &virtio}, {&v[2], &anon}, {&v[3], &pci_full}, {NULL, &pci_dma}};
+    struct AddrSpace *a = addrspace_alloc(32); a->vmas = v;
+    addrspace_ref(a); addrspace_unref(a);
+    CHECK(resets == 0 && drains == 0 && a->vmas == v, "nonfinal owner stops no mapped device");
+    addrspace_unref(a);
+    CHECK(resets == 3 && full.full == 1 && !full.dma_only && dma.dma_only == 1 && !dma.full &&
+          drains == 1 && last_reset < drained_at, "last owner stops each mapped device once, before the drain");
+    CHECK(frees == 1 && destroys == 1, "device teardown frees once");
+}
 int main(void) {
-    serial_cases(); during_drain(); simultaneous_drops(); private_guards(); private_vs_share();
-    puts("PASS actual AddrSpace lifecycle: serial, paused drain, concurrent final drops, private/shared exclusion");
+    serial_cases(); during_drain(); simultaneous_drops(); private_guards(); private_vs_share(); mapped_devices();
+    puts("PASS actual AddrSpace lifecycle: serial, paused drain, concurrent final drops, private/shared exclusion, mapped devices");
     return 0;
 }

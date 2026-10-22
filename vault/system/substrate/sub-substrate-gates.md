@@ -11,6 +11,8 @@ code:
   - tools/check-v80-floor.py
   - tools/screendump.sh
   - tools/test-rust.sh
+  - tools/host-sanitizer-cc.py
+  - tools/host-tests/host-env/atomic_lse.h
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp, gate-v80-floor]
@@ -18,7 +20,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -422,6 +424,27 @@ line that named the defect was swallowed. A gate that fails on warnings gets
 bypassed, and one that swallows them hides the warning that matters. The count
 is taken from cargo's per-crate footer, so a dependency's warnings are not
 charged to the crate that happened to rebuild it.
+
+### The sanitized C fixtures' compiler (`host-sanitizer-cc.py`)
+
+The `tools/test-*.py` drivers that build real kernel C on the host under
+ASan/UBSan take their compiler from `host-sanitizer-cc.py`. Apple clang's ASan
+runtime hangs at startup on macOS 26, before `main`, and the hang reads as a
+case timing out. An explicit `CC` always wins. Without one a sanitized fixture
+takes Homebrew LLVM (`LLVM_PREFIX`, default `/opt/homebrew/opt/llvm`); when that
+is absent the driver stops in its own state -- exit 3, `SANITIZER TOOLING: ...`
+-- rather than fall back to the toolchain that hangs. Before any case an empty
+sanitized program must build and exit 0 within 20 s, so a runtime that cannot
+start is reported as tooling, never as a case's result. The compiler's source,
+resolved path, version, sysroot and the probe's outcome go to the run's
+`compiler.txt`.
+
+A fixture compiles the actual body of what it exercises and of every callee
+those bodies reach; only environment primitives -- allocator, panic, hardware,
+scheduler -- are host doubles, named as such. `tools/host-tests/host-env/
+atomic_lse.h` stands in for `arch/arm64/atomic_lse.h` (the same primitives at
+the same orders, on `__atomic` builtins) for kernel sources whose headers reach
+it: `9p_session.c` does, through `mm/slub.h`, since the tag table grew.
 
 ## Data structures
 

@@ -61,7 +61,7 @@ struct SrvConn {
     u64 magic, peer_stripes, server_stripes, client_deadline_ns;
     int ref, lock, state, peer_pid, poll_list;
     bool peer_console, client_timed_out;
-    u32 msize, credit_charge;
+    u32 msize, credit_charge, peer_principal, server_principal;
     struct SrvDomain *domain;
     struct channel c2s, s2c;
 };
@@ -99,7 +99,10 @@ static int t_atomic_fetch_sub_acqrel_int(int *p, int n) { return __atomic_fetch_
 '''
 
 tests = r'''
-static struct SrvConn *make(void) { return srvconn_create(1, 1, false, 2, SRVCONN_MSIZE); }
+// Distinct, so a constructor that stamps one end's principal on the other is seen.
+#define PEER_PRINCIPAL 7u
+#define SERVER_PRINCIPAL 9u
+static struct SrvConn *make(void) { return srvconn_create(1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE); }
 static void expect_full(void) {
     unsigned before = allocations;
     CHECK(make() == NULL, "in-flight or retained storage lost its reservation");
@@ -119,13 +122,13 @@ static void domains_test(void) {
     CHECK(!srv_domain_create(&err) && err == -T_E_NOSPC, "domain bound bypass");
     struct SrvConn *cs[SRV_MAX_CONNS];
     for (unsigned i = 0; i < SRV_CREDITS_SESSIONS; i++) {
-        cs[i] = srvconn_create_in(ds[i / SRV_CREDITS_DOMAIN], &err, 1, 1, false, 2, SRVCONN_MSIZE);
+        cs[i] = srvconn_create_in(ds[i / SRV_CREDITS_DOMAIN], &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE);
         CHECK(cs[i] && !err, "session partition early refusal");
         if (i == SRV_CREDITS_DOMAIN - 1)
-            CHECK(!srvconn_create_in(ds[0], &err, 1, 1, false, 2, SRVCONN_MSIZE)
+            CHECK(!srvconn_create_in(ds[0], &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE)
                   && err == -T_E_NOSPC, "local domain limit bypass");
     }
-    CHECK(!srvconn_create_in(ds[3], &err, 1, 1, false, 2, SRVCONN_MSIZE)
+    CHECK(!srvconn_create_in(ds[3], &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE)
           && err == -T_E_NOSPC, "session combined limit bypass");
     for (unsigned i = SRV_CREDITS_SESSIONS; i < SRV_MAX_CONNS; i++) {
         cs[i] = make(); CHECK(cs[i], "boot margin stolen by sessions");
@@ -146,7 +149,7 @@ static void domains_test(void) {
     struct SrvDomain *d = srv_domain_create(&err); CHECK(d, "rollback domain retry");
     for (unsigned failure = 1; failure <= 3; failure++) {
         fail_at = allocations + failure;
-        CHECK(!srvconn_create_in(d, &err, 1, 1, false, 2, SRVCONN_MSIZE)
+        CHECK(!srvconn_create_in(d, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE)
               && err == -T_E_NOMEM, "session allocation failure");
         CHECK(!d->used && d->ref == 1 && !g_srvconn_session_reserved && !g_srvconn_reserved,
               "session rollback leaked charge");
@@ -165,35 +168,35 @@ static void weighted_test(void) {
         unsigned n = 0;
         // Leave exactly three credits, so even a single remaining bulk fails.
         for (; n < limit - 3; n++) {
-            held[n] = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE);
+            held[n] = srvconn_create_in(owner, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE);
             CHECK(held[n], "weighted default capacity");
         }
         unsigned before = allocations;
-        CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE)
+        CHECK(!srvconn_create_in(owner, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_BULK_MSIZE)
               && err == -T_E_NOSPC && allocations == before, "bulk must cost four credits");
         srvconn_unref(held[--n]); // exactly four credits now free
         if (!owner) allocation_hook = expect_full;
-        struct SrvConn *bulk = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE);
+        struct SrvConn *bulk = srvconn_create_in(owner, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_BULK_MSIZE);
         CHECK(bulk, "bulk exact fit");
         struct srv_admission_snapshot snap;
         srv_domain_snapshot(owner, &snap);
         CHECK(snap.local_count == n + 1 && snap.local_credits == limit,
               "diagnostics conflate credits and counts");
         srvconn_ref(bulk); srvconn_teardown(bulk); srvconn_unref(bulk);
-        CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE),
+        CHECK(!srvconn_create_in(owner, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE),
               "retained bulk returns credit early");
         if (!owner) free_hook = expect_full;
         srvconn_unref(bulk);
         for (unsigned j = 0; j < 4; j++) {
-            held[n++] = srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE);
+            held[n++] = srvconn_create_in(owner, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE);
             CHECK(held[n-1], "bulk final free did not return four credits");
         }
-        CHECK(!srvconn_create_in(owner, &err, 1, 1, false, 2, SRVCONN_MSIZE), "bulk returned excess credit");
+        CHECK(!srvconn_create_in(owner, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE), "bulk returned excess credit");
         for (unsigned j = 0; j < n; j++) srvconn_unref(held[j]);
     }
     for (unsigned failure = 1; failure <= 3; failure++) {
         fail_at = allocations + failure;
-        CHECK(!srvconn_create_in(d, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE), "bulk allocation failure ignored");
+        CHECK(!srvconn_create_in(d, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_BULK_MSIZE), "bulk allocation failure ignored");
         CHECK(!d->used && !d->credits && !g_srvconn_session_credits && !g_srvconn_credits,
               "bulk rollback leaked credits");
         fail_at = 0;
@@ -203,14 +206,14 @@ static void weighted_test(void) {
     struct SrvDomain *c = srv_domain_create(&err);
     CHECK(a && b && c, "combined weighted domains");
     for (unsigned i = 0; i < 48; i++) {
-        held[i] = srvconn_create_in(i < 24 ? a : b, &err, 1, 1, false, 2, SRVCONN_BULK_MSIZE);
+        held[i] = srvconn_create_in(i < 24 ? a : b, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_BULK_MSIZE);
         CHECK(held[i], "combined bulk capacity");
     }
     unsigned before = allocations;
-    CHECK(!srvconn_create_in(c, &err, 1, 1, false, 2, SRVCONN_MSIZE)
+    CHECK(!srvconn_create_in(c, &err, 1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_MSIZE)
           && err == -T_E_NOSPC && before == allocations, "combined bulk charge bypass");
     for (unsigned i = 48; i < 64; i++) {
-        held[i] = srvconn_create(1, 1, false, 2, SRVCONN_BULK_MSIZE);
+        held[i] = srvconn_create(1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, SRVCONN_BULK_MSIZE);
         CHECK(held[i], "bulk boot margin unavailable");
     }
     expect_full();
@@ -223,13 +226,15 @@ static void weighted_test(void) {
     srv_domain_unref(a); srv_domain_unref(b); srv_domain_unref(c); empty();
 }
 int main(void) {
-    CHECK(srvconn_create(1, 1, false, 2, 0) == NULL, "invalid class admitted");
+    CHECK(srvconn_create(1, 1, PEER_PRINCIPAL, false, 2, SERVER_PRINCIPAL, 0) == NULL, "invalid class admitted");
     CHECK(allocations == 0, "invalid class allocated"); empty();
     for (unsigned failure = 1; failure <= 3; failure++) {
         fail_at = allocations + failure;
         CHECK(make() == NULL, "injected allocation failure admitted");
         empty(); fail_at = 0;
         struct SrvConn *retry = make(); CHECK(retry, "rollback lost capacity");
+        CHECK(retry->peer_principal == PEER_PRINCIPAL && retry->server_principal == SERVER_PRINCIPAL,
+              "connection does not carry both ends' principals");
         srvconn_unref(retry); empty();
     }
     struct SrvConn *held[SRV_MAX_CONNS];
@@ -278,6 +283,9 @@ mutants = {
         "srvconn_ctl_unlink(cn);",
         "srvconn_unreserve(cn->domain, cn->credit_charge);\n    srvconn_ctl_unlink(cn);",
         "in-flight or retained storage lost its reservation"),
+    "principals-crossed": (
+        "cn->server_principal   = server_principal;", "cn->server_principal   = peer_principal;",
+        "connection does not carry both ends' principals"),
 }
 
 with tempfile.TemporaryDirectory(prefix="srvconn-admission-") as directory:

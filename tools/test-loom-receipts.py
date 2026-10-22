@@ -6,13 +6,11 @@ observer checks publication state at the release-tail boundary; not an ARM
 memory model.
 """
 from pathlib import Path
-import argparse,json,os,shlex,shutil,subprocess,tempfile,importlib.util
+import argparse,json,os,shlex,subprocess,tempfile,importlib.util
 ROOT=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('progress_fixture',ROOT/'tools/test-9p-client-progress.py');helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
-# Apple clang's ASan runtime hangs at startup on macOS 26 (before main); the
-# Homebrew LLVM toolchain does not (test-loom-service-fids.py, the same choice).
-LLVM_CC=Path(os.environ.get('LLVM_PREFIX','/opt/homebrew/opt/llvm'))/'bin/clang'
-NAMES=['align_up_u32','is_pow2_u32','loom_measure','loom_create_layout','loom_create','loom_create_with_receipts','loom_post_cqe']
+spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
+NAMES=['align_up_u32','is_pow2_u32','loom_measure','loom_create_layout','loom_create','loom_create_with_receipts','loom_drive_moved_locked','loom_post_cqe']
 PROVIDED=['provided_same','provided_pool','provided_cell','loom_provided_deliver']
 LEDGERS=['kernel/loom_service_pool.c','kernel/loom_service_pool_table.c','kernel/loom_service_slots.c','kernel/loom_service_requests.c']
 OBSERVED='publication pairs payload receipt and lease before tail'
@@ -46,15 +44,14 @@ def main():
  provided=(ROOT/'kernel/loom_service_provided.c').read_text()
  actual+='\n\n'+'\n\n'.join(helper.function(provided,n) for n in PROVIDED)
  template=(ROOT/'tools/host-tests/loom-receipts.c').read_text();assert template.count('/* ACTUAL_LOOM */')==1
- cc=os.environ.get('CC') or (str(LLVM_CC) if LLVM_CC.exists() else 'clang')
- sdk=subprocess.run(['xcrun','--show-sdk-path'],capture_output=True,text=True) if shutil.which('xcrun') else None
+ cc,cc_extra=sanitizer_cc.select(a.logs)
  with tempfile.TemporaryDirectory(prefix='loom-receipts-') as tmp:
   for name,old,new,want in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
    s=actual
    if old:assert s.count(old)==1,name;s=s.replace(old,new)
    f=Path(tmp)/(name+'.c');f.write_text(template.replace('/* ACTUAL_LOOM */',s));exe=f.with_suffix('')
    cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer','-g','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel/test'),str(f)]+[str(ROOT/x) for x in LEDGERS]+['-o',str(exe)]+shlex.split(os.environ.get('CFLAGS',''))
-   if sdk and sdk.returncode==0 and '-isysroot' not in cmd:cmd+=['-isysroot',sdk.stdout.strip()]
+   if '-isysroot' not in cmd:cmd+=cc_extra
    (a.logs/(name+'-command.json')).write_text(json.dumps(cmd)+'\n')
    with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
    r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)

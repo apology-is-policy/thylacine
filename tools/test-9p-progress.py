@@ -3,12 +3,14 @@
 Blind to locks, scheduler and SrvConn adapter ownership. No runtime activation.
 """
 from pathlib import Path
-import argparse,os,subprocess,tempfile,shlex
+import argparse,importlib.util,os,subprocess,tempfile,shlex
 ROOT=Path(__file__).resolve().parent.parent
+spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
 MUTANTS=[
  ('send-offset','p->tx + p->tx_sent, left','p->tx, left','send bytes exactly once'),
  ('recv-offset','t->recv_buf + p->rx_have, left','t->recv_buf, left','one frame exact bytes'),
- ('again-terminal','if (n == P9_TRANSPORT_EAGAIN) return 0;','if (n == P9_TRANSPORT_EAGAIN) { p9_transport_progress_abort(p); return -1; }','EAGAIN retains send'),
+ ('again-terminal-send','if (n == P9_TRANSPORT_EAGAIN) return 0;\n    // Even','if (n == P9_TRANSPORT_EAGAIN) { p9_transport_progress_abort(p); return -1; }\n    // Even','EAGAIN retains send'),
+ ('again-terminal-recv','if (n == P9_TRANSPORT_EAGAIN) return 0;\n    if (n <= 0','if (n == P9_TRANSPORT_EAGAIN) { p9_transport_progress_abort(p); return -1; }\n    if (n <= 0','EAGAIN preserves receive cursor'),
  ('abort-repeat','if (!p || p->aborted || !p->transport) return;','if (!p || !p->transport) return;','abort must be exactly once'),
  ('rx-bound','size > p->frame_limit','size > t->recv_cap','reject frame outside negotiated bound'),
  ('coalesced','size_t left = p->rx_goal - p->rx_have;','size_t left = p->frame_limit - p->rx_have;','receive resumes suffix'),
@@ -21,19 +23,20 @@ MUTANTS=[
 ]
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--mutants',action='store_true');parser.add_argument('--sanitize',action='store_true');parser.add_argument('--logs',type=Path);a=parser.parse_args()
-    cc=os.environ.get('CC','clang');source=(ROOT/'kernel/9p_transport.c').read_text()
+    source=(ROOT/'kernel/9p_transport.c').read_text()
     with tempfile.TemporaryDirectory(prefix='9p-progress-') as d:
         d=Path(d);logs=a.logs or d;logs.mkdir(parents=True,exist_ok=True)
+        cc,cc_extra=sanitizer_cc.select(logs,a.sanitize)
         cases=[('clean',None,None,None)]+(MUTANTS if a.mutants else [])
         for name,old,new,want in cases:
             path=d/(name.replace(':','-')+'.c');text=(ROOT/'kernel/9p_session.c').read_text() if name.startswith('version:') else source
             if old:
-                assert old in text,name
+                assert text.count(old)==1,(name,text.count(old))
                 text=text.replace(old,new)
             path.write_text(text)
             exe=d/name
-            cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),str(ROOT/'kernel/9p_transport.c') if name.startswith('version:') else str(path),str(ROOT/'kernel/9p_wire.c'),str(path) if name.startswith('version:') else str(ROOT/'kernel/9p_session.c'),str(ROOT/'tools/host-tests/9p-progress.c'),'-o',str(exe)]
-            cmd += shlex.split(os.environ.get('CFLAGS',''))
+            cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'tools/host-tests/host-env'),str(ROOT/'kernel/9p_transport.c') if name.startswith('version:') else str(path),str(ROOT/'kernel/9p_wire.c'),str(path) if name.startswith('version:') else str(ROOT/'kernel/9p_session.c'),str(ROOT/'tools/host-tests/9p-progress.c'),'-o',str(exe)]
+            cmd += cc_extra+shlex.split(os.environ.get('CFLAGS',''))
             if a.sanitize:cmd += ['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
             with (logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
             r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=10)

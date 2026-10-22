@@ -3928,8 +3928,11 @@ The shared fixture (`kernel/test/loom_receipt_fixture.h`, run by the guest's
 The pool is built through the real slot and pool-table transactions
 (`loom_service_pool_prepare`, `_publish` and `_reap`), in tables the fixture
 owns. They are lent to the rings for the checks and taken back before the free
-path; the host double for `loom_unref` fails if they reach it. The checks, in
-order:
+path; the host double for `loom_unref` fails if they reach it. The host build
+extracts `loom_post_cqe` with its driver-generation bump
+(`loom_drive_moved_locked`), and picks its compiler through the shared selector
+([[sub-substrate-gates]]), as the other sanitized Loom fixtures do. The checks,
+in order:
 - a legacy ring lent a pool table refuses (-EOPNOTSUPP) and writes nothing;
 - a receipt ring with no pool table refuses (-ENOENT);
 - a full CQ keeps the member PENDING and the operation pending (-EAGAIN);

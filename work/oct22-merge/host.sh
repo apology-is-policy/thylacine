@@ -1,8 +1,8 @@
 #!/bin/sh
-# Host legs for the main merge, at MERGE_PIN: every tools/test-*.py, its
-# arguments read from its own argparse (--logs or --out into this run's
-# directory, --mutants when it has one, and a second run with --sanitize when
-# it has that); the loom-client suite; the userspace Rust host tests; corona's
+# Host legs for the main merge, at MERGE_PIN: the userspace Rust host tests;
+# every tools/test-*.py, its arguments read from its own argparse (--logs or
+# --out into this run's directory, --mutants when it has one, and a second run
+# with --sanitize when it has that); the loom-client suite; corona's
 # sims mutants; the burrow spec cfgs; and the Loom service ABI and index
 # checkers and the authority ABI checker, which build.sh does not run. Every
 # leg runs whatever an earlier one did; each exit status is recorded, and any
@@ -43,6 +43,9 @@ leg() { # leg <name> <command...>
   [ "$_rc" = 0 ] || failed="$failed $_n"
 }
 
+# The Rust host tests run first: they build the host rlibs (liblibhalcyon) that
+# test-tapestry-payload-borrow.py links against.
+leg rust-host tools/test-rust.sh
 for f in tools/test-*.py; do
   s=$(basename "$f" .py)
   set -- python3 -I "$f"
@@ -57,7 +60,6 @@ for f in tools/test-*.py; do
   fi
 done
 leg loom-client tools/test-loom-client.sh --out "$OUT/loom-client"
-leg rust-host tools/test-rust.sh
 leg sims-mutants python3 -I work/oct21-sims/mutants.py "$OUT/sims"
 leg burrow-spec sh specs/check-burrow.sh
 leg loom-service-index python3 -I tools/check-loom-service-index.py --logs "$OUT/loom-service-index"

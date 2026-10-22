@@ -21,7 +21,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -792,9 +792,13 @@ the exclusive stream. Whole-ring consumers must detach delivery before discardin
 completions; scope consumers use abort. This helper does not implement Loom's
 completion reservations, slots, deadline scheduling or retirement owner.
 
-Host actual-source ASan/UBSan/eight mutations and the shared native fixture
+Host actual-source ASan/UBSan/fourteen mutations and the shared native fixture
 qualify partial framing, duplex fairness, every byte cancellation, hostile replies
-and callbacks freeing their storage. Fresh CPU1 boot1830/1830 and existing
+and callbacks freeing their storage. With the tag pool the fixture extracts the
+registration helpers (`client_owner`, `client_register`, `client_unregister`),
+`client_apply_reply_locked` and `client_await_tag_locked`; the session's tag
+table allocates through host `kmalloc`/`kfree` doubles that own and leak-check
+it, and the sync tag wait, like `client_run`, fails the run if reached. Fresh CPU1 boot1830/1830 and existing
 9p_client197states/five mutants pass. No new broad/graphics/private ABI activation.
 
 ## Preallocated private transport storage
