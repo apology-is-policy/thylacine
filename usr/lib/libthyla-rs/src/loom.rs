@@ -29,7 +29,6 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::{t_burrow_attach, t_burrow_detach, t_loom_enter, t_loom_register, t_loom_setup};
 
-
 /// An eager, physically-contiguous, page-aligned buffer for Loom buffer
 /// registration (`Ring::register_buffers`).
 ///
@@ -73,23 +72,38 @@ impl RegisteredBuffer {
     /// regions that a separately admitted operation may still own. Raw buffer
     /// registration's caller must still exclude I/O on the requested range.
     pub fn as_slice_range(&self, range: core::ops::Range<usize>) -> Option<&[u8]> {
-        if range.start > range.end || range.end > self.len { return None; }
+        if range.start > range.end || range.end > self.len {
+            return None;
+        }
         // SAFETY: bounds checked against this live allocation; only the selected
         // bytes are referenced. Async exclusion is the raw registration contract.
-        Some(unsafe { core::slice::from_raw_parts(
-            (self.va as *const u8).add(range.start), range.end - range.start) })
+        Some(unsafe {
+            core::slice::from_raw_parts(
+                (self.va as *const u8).add(range.start),
+                range.end - range.start,
+            )
+        })
     }
 
     /// Mutable counterpart to `as_slice_range`; no wider intermediate slice.
     pub fn as_mut_range(&mut self, range: core::ops::Range<usize>) -> Option<&mut [u8]> {
-        if range.start > range.end || range.end > self.len { return None; }
-        Some(unsafe { core::slice::from_raw_parts_mut(
-            (self.va as *mut u8).add(range.start), range.end - range.start) })
+        if range.start > range.end || range.end > self.len {
+            return None;
+        }
+        Some(unsafe {
+            core::slice::from_raw_parts_mut(
+                (self.va as *mut u8).add(range.start),
+                range.end - range.start,
+            )
+        })
     }
 
     /// The `BufReg` descriptor to hand to `Ring::register_buffers`.
     pub fn buf_reg(&self) -> BufReg {
-        BufReg { va: self.va, len: self.len as u64 }
+        BufReg {
+            va: self.va,
+            len: self.len as u64,
+        }
     }
 
     /// The buffer length in bytes.
@@ -113,7 +127,6 @@ impl Drop for RegisteredBuffer {
         }
     }
 }
-
 
 impl Sqe {
     /// An all-zero SQE (opcode NOP, no flags). The base every helper builds on.
@@ -547,7 +560,11 @@ unsafe impl native::Kernel for ThylaKernel {
             revents: 0,
         };
         let rc = unsafe { crate::t_poll(&mut p, 1, timeout_ms) };
-        if rc <= 0 { rc } else { p.revents as i64 }
+        if rc <= 0 {
+            rc
+        } else {
+            p.revents as i64
+        }
     }
     fn close(&self, fd: i32) -> i64 {
         unsafe { crate::t_close(fd as i64) }
