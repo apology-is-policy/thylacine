@@ -4,13 +4,14 @@
 # with the Go fork at 3471e2a: the merged kernel has main's WAIT_PACKED, which
 # that fork's Wait reads, and not b3's SYS_UMASK/SYS_GETPPID, which the shared
 # fork's later f67e51e calls. Derived from work/oct21-mag/gate.sh; the header,
-# OUT, the pins and NAMED differ.
+# OUT, the pins and NAMED differ, and no test of the three suite images may
+# print [skip] (a missing probe binary passes otherwise).
 #   NAMED      derived by work/oct22-merge/named.py, never listed by hand: vote
 #              16's NAMED, every test registered on only one parent, and every
 #              test defined in a test file the merge left unlike both parents.
 #   CONTROL    ci image: the whole suite; NAMED PASS with NA-4d's verdicts
 #              (fixture 76, probes 78/74, no ring, no connection); joey's D7
-#              overlapping login PASS.
+#              overlapping login PASS; no [skip] line.
 #   CONTROL-Q  qualification image: the same, fixture 77, probes 79/75, two
 #              rings and six connections.
 #   UBSAN      the ci image's kernel in UBSan trapping mode: the control's
@@ -122,6 +123,10 @@ image() { # image <label> <boot log> <fixture> <rust> <c> <rings> <connections>
   [ "$suite_rc" = 0 ] || { echo "$1 test.sh exit $suite_rc"; exit 1; }
   all_pass "$1" "$B"
   occurs "$B" 1 "$D7_LINE"
+  # A test whose probe binary is missing from the ramfs prints [skip] and
+  # returns, and the suite counts it as a pass; the gate images carry every
+  # probe (0 such lines in each of vote 16's three gate boots).
+  occurs "$B" 0 "[skip]"
   occurs "$B" 2 "  fixture status $3 expected $3"
   occurs "$B" 1 "  probe status $4 expected $4"
   occurs "$B" 1 "  probe status $5 expected $5"
