@@ -329,7 +329,7 @@ s64 dev9p_open_errno(struct Spoor *c);
 struct poll_snap;
 
 // The Dev `.poll_snapshot` slot (<thylacine/dev.h> documents the contract). For a
-// QTPOLL file on a deadline-capable client it sends the snapshot read (offset =
+// QTPOLL file it sends the snapshot read (offset =
 // the requested events | P9_POLL_SNAPSHOT), which the server answers at once;
 // any other dev9p file is answered here, POSIX always-ready
 // (`events & POLL_REQUESTABLE`).

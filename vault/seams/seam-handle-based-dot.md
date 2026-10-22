@@ -7,7 +7,7 @@ surface: [sub-kernel-territory]
 opened-by: chg-2026-06-09-ls4-cwd
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-22
 ---
 ## Owed
 
@@ -39,8 +39,9 @@ start has no trail above it.
 
 Low, and deliberately so — the string form adds ZERO new [[inv-i28]]
 mechanism, which is exactly why it was the right v1.0 shape for a
-security-critical resolver before symlinks exist. `cwd_lexical_resolve`
-always hands `stalk` an absolute-from-root path, and `stalk` re-clamps
+security-critical resolver before symlinks exist. The string SYS_CHDIR
+stores is the name `stalk` built for where the chdir's walk landed, always
+absolute from the root (STALK-DESIGN 4.3), and `stalk` re-clamps
 `..` at `root_spoor` regardless, so the two containment arguments
 compose rather than substitute. A stale cwd names something wrong; it
 cannot name something OUTSIDE.

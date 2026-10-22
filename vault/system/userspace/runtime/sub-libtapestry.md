@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-10-07
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -293,9 +293,7 @@ SETUP_SQPOLL)` sets up a kthread-driven ring: the kernel poll-thread drives
 the session's reader and posts completions asynchronously, so the ring fd
 (`poll_fd`) becomes pollable and a multiplexing client can wait in one
 `poll(2)` over the ring plus its other streams instead of blocking in `wait`.
-The `/srv/tapestry` srvconn transport is deadline-capable, which the SQPOLL
-reader requires (the kernel loom register gate rejects a non-deadline-capable
-handle on an SQPOLL ring). halcyond's unified poll uses this; aurora's
+Any 9P transport may back an SQPOLL ring (LOOM.md 8.6). halcyond's unified poll uses this; aurora's
 single-surface blocking `wait` does not.
 
 ## Caveats

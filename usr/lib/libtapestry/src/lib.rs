@@ -1113,9 +1113,7 @@ impl EventRing {
     /// this session's reader and posts completions asynchronously, so the
     /// ring fd (`poll_fd`) becomes pollable and a multiplexing client waits
     /// in one `poll(2)` over the ring + its other streams instead of
-    /// blocking in `wait`. The `/srv/tapestry` (srvconn) transport is
-    /// deadline-capable, which the SQPOLL reader requires (the kernel loom
-    /// register gate rejects a non-deadline-capable handle on an SQPOLL ring).
+    /// blocking in `wait`.
     pub fn connect_sqpoll() -> Result<EventRing, TapError> {
         let root = unsafe {
             t_open(
