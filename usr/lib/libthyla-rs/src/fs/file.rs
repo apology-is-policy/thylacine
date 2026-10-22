@@ -177,6 +177,58 @@ impl File {
         super::metadata::fstat_fd(self.handle.raw())
     }
 
+    /// Set the file's access and/or modification times (POSIX futimens). Any
+    /// rights suffice: the authority is the owner, or write permission for the
+    /// both-to-now touch (see `FileTimes`).
+    #[inline]
+    pub fn set_times(&self, times: super::FileTimes) -> Result<()> {
+        super::times::set_times_fd(self.handle.raw(), times)
+    }
+
+    /// Set the file's modification time to `t`, leaving the access time.
+    #[inline]
+    pub fn set_modified(&self, t: crate::time::SystemTime) -> Result<()> {
+        self.set_times(super::FileTimes::new().set_modified(t))
+    }
+
+    /// Set the file's permission bits (POSIX fchmod); `mode` is masked to the
+    /// 9 rwx bits. The owner or `CAP_HOSTOWNER`, through any rights.
+    pub fn chmod(&self, mode: u32) -> Result<()> {
+        // SAFETY: t_wstat is the SYS_WSTAT SVC wrapper on this File's live
+        // handle; uid/gid are ignored when only T_WSTAT_MODE is set.
+        let rc = unsafe {
+            crate::t_wstat(
+                self.handle.raw() as i64,
+                crate::T_WSTAT_MODE,
+                mode & crate::T_WSTAT_MODE_MASK,
+                0,
+                0,
+            )
+        };
+        Error::from_syscall_return(rc).map(|_| ())
+    }
+
+    /// Change the file's owner and/or group (POSIX fchown; `None` leaves that
+    /// one). A new owner needs `CAP_HOSTOWNER`; a new group needs the owner
+    /// in that group, or the capability. Both `None` changes nothing.
+    pub fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
+        let valid = uid.map_or(0, |_| crate::T_WSTAT_UID) | gid.map_or(0, |_| crate::T_WSTAT_GID);
+        if valid == 0 {
+            return Ok(());
+        }
+        // SAFETY: as chmod; mode is ignored when T_WSTAT_MODE is clear.
+        let rc = unsafe {
+            crate::t_wstat(
+                self.handle.raw() as i64,
+                valid,
+                0,
+                uid.unwrap_or(0),
+                gid.unwrap_or(0),
+            )
+        };
+        Error::from_syscall_return(rc).map(|_| ())
+    }
+
     /// Construct a File from an existing Handle. `pub(crate)` so
     /// other libthyla-rs modules (t::process::pipe, t::process's
     /// Stdio::Piped handling) can wrap kernel-returned pipe fds as

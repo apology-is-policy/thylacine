@@ -372,9 +372,15 @@ pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
 
 // SYS_WSTAT valid-mask bits (A-2a). Mirror the kernel T_WSTAT_* / wire
 // P9_SETATTR_* bits. chmod sets T_WSTAT_MODE; chown sets T_WSTAT_UID|GID.
+// A time bit alone sets that time to the file server's clock; with its _SET
+// bit as well, to the value x6 points at (G12). A _SET bit alone is EINVAL.
 pub const T_WSTAT_MODE: u32           = 0x1;
 pub const T_WSTAT_UID: u32            = 0x2;
 pub const T_WSTAT_GID: u32            = 0x4;
+pub const T_WSTAT_ATIME: u32          = 0x10;
+pub const T_WSTAT_MTIME: u32          = 0x20;
+pub const T_WSTAT_ATIME_SET: u32      = 0x80;
+pub const T_WSTAT_MTIME_SET: u32      = 0x100;
 pub const T_WSTAT_MODE_MASK: u32      = 0o777;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
@@ -3370,12 +3376,13 @@ pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
     x0
 }
 
-// t_wstat — chmod/chown an open Spoor `fd` (KOBJ_SPOOR, RIGHT_WRITE) via
+// t_wstat — chmod/chown an open Spoor `fd` (KOBJ_SPOOR, any rights) via
 // Tsetattr. `valid` selects which of (mode, uid, gid) to apply (T_WSTAT_*
-// bits; at least one). `mode` is the 9 rwx bits only (setuid/setgid/sticky
-// rejected). Returns 0 on success, -1 on bad fd / bad mask / out-of-range
-// value / Dev without wstat_native / server error. A-2a (the mechanism;
-// the per-file permission policy is A-2d). Backs t::fs metadata mutation.
+// bits; at least one), and may add T_WSTAT_ATIME / T_WSTAT_MTIME ("now"),
+// never a _SET bit, whose x6 this wrapper does not set. `mode` is the 9 rwx
+// bits only (setuid/setgid/sticky rejected). Returns 0 / -errno (EINVAL,
+// EBADF, EACCES, EOPNOTSUPP, the server's). A-2a (the mechanism; the
+// per-file permission policy is A-2d). Backs t::fs metadata mutation.
 #[inline(always)]
 pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64 {
     let mut x0: i64 = fd;
@@ -3386,6 +3393,31 @@ pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64
         in("x2") mode as u64,
         in("x3") uid as u64,
         in("x4") gid as u64,
+        in("x8") T_SYS_WSTAT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_wstat_times — set `fd`'s atime and/or mtime (G12). `valid` holds only
+// T_WSTAT_ATIME / T_WSTAT_MTIME, each optionally with its _SET bit; `times_va`
+// points at two struct t_timespec (atime, mtime), read only for the entries
+// whose _SET bit is set. Any explicit time needs the owner or CAP_HOSTOWNER;
+// ATIME | MTIME alone (both to the server's clock) also admits write
+// permission. Returns 0 / -errno (EINVAL, EBADF, EFAULT, EACCES, EOPNOTSUPP,
+// the server's). Backs t::fs::FileTimes.
+#[inline(always)]
+pub unsafe fn t_wstat_times(fd: i64, valid: u32, times_va: u64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") valid as u64,
+        in("x2") 0u64,
+        in("x3") 0u64,
+        in("x4") 0u64,
+        in("x5") 0u64,
+        in("x6") times_va,
         in("x8") T_SYS_WSTAT,
         options(nostack)
     );

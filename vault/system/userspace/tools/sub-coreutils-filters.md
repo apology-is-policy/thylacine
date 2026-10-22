@@ -158,6 +158,30 @@ options, so an operand after it may begin with a dash; `tail -n -N` is
 large to hold is refused with `invalid count` and exit one, in every form
 either takes.
 
+**`touch` and `cp -p` set file times** (2026-10-22). `touch` with no time
+operand sets both times to the file server's clock, the one form write
+permission allows; one time alone (`-a` or `-m`) or a given time (`-r`, `-t`,
+`-d`) needs the owner, as POSIX has it ([[dec-2026-10-22-wstat-times]]). It opens each FILE for writing with
+create and no truncate and sets the times on that handle; a FILE that will not
+open so (a directory, a read-only file its owner touches) gets them through the
+path, and only if that fails too does the open's error stand. `-t` and `-d` are
+read by `coreutils::stamp`, in UTC. `cp -p` sets, on the destination it just
+wrote, the source's times, then its owner and group (each separately, and a
+refusal is silent, which POSIX allows), then its mode; a directory gets them
+after its entries, which moved its mtime and which a read-only mode would have
+refused. `-a` is `-R -p -P`.
+
+**`cp` knows a file by identity, not by name** (2026-10-22). It compares the Dev
+instance and qid path from a stat that follows links, as its opens do: a
+destination that IS its source, anywhere in a tree, is refused before the
+truncating open could empty it; a directory met again below itself is a symlink
+cycle and is not descended; and the destination tree met inside the source is
+not copied into itself. The lexical check it used before predated symlinks: a
+link made `cp a b` with `b -> a` truncate `a` and copy nothing, exit zero. The
+lexical into-itself refusal stays, so the plain case is refused before anything
+is created. A created file takes the source's mode under the umask (it took
+0644), and a failed entry no longer stops its siblings.
+
 **Path cleaning and input streaming are the shared behaviour.** `realpath` no
 longer carries its own lexical normaliser; the collapse of `.`, `..` and `//`
 lives in `coreutils::path::normalize`, so a filter and the colour-linking
@@ -198,8 +222,9 @@ user's own files at the invoking user's own authority — which is the
 correct blast radius for `rm`.
 
 The filesystem permission checks that bound them are the kernel's, applied
-at every walk and open. `chmod` is the one that *changes* metadata, and its
-authority is the kernel's identity check, not anything in this file.
+at every walk and open. `chmod`, `touch` and `cp -p` are the ones that *change*
+metadata, and their authority is the kernel's identity check, not anything in
+this file.
 
 ## Error paths
 
@@ -325,6 +350,17 @@ report a symlink as a plain file even where the mode string shows `l`.
   and a leg pins that a bare `env` reaches the utility; while the initrd was
   flat, the same name met the `/env` device and the utility could not be
   reached before the pivot ([[dec-2026-09-25-initrd-bin-directory]]).
+
+- **`cp -P` and `-a` refuse a symlink source.** Copying a link as a link needs
+  a call that creates one, and native code has only the Loom op; until an
+  `fs::symlink` exists, the copy says so and exits one rather than copying the
+  target behind the user's back. A directory `cp` creates without `-p` gets
+  0755 under the umask, not the source's mode as POSIX has it. Both are
+  enqueued (OPEN-BUGS 2026-10-22 09:47Z).
+
+- **Times read back are whole seconds.** `t_stat` carries no nanoseconds, so
+  `touch -r` and `cp -p` copy the seconds a stat shows, and a server's
+  sub-second part is lost.
 
 - **Thirty-six separate flag loops.** Consistency across them is
   maintained by hand. The `--help` and usage-error behaviour *is* shared,

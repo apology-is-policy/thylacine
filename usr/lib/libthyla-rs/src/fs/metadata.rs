@@ -11,10 +11,9 @@
 //   - size, nlink, mode (POSIX-shaped bits per T_S_IF*).
 //   - 9P qid (path / vers / type) — distinguishing identity per Dev,
 //     stable for the file's lifetime.
-//   - atime / mtime / ctime as raw u64 epoch seconds. The kernel
-//     populates 0 at v1.0 (most Devs don't track timestamps); user
-//     code observes 0 there. A future v1.x t::time::SystemTime wraps
-//     these into typed instants.
+//   - atime / mtime / ctime as u64 epoch seconds (the stat carries no
+//     nanoseconds); `accessed()` / `modified()` wrap the first two as
+//     SystemTime. A Dev that keeps no times reports 0.
 //   - blksize + blocks for stat(2)-style I/O sizing.
 //
 // SYMLINKS (DISTRO D-1):
@@ -27,6 +26,7 @@
 //     syscall-ABI change is not something this mirror may make unilaterally.
 
 use crate::err::{Error, Result};
+use crate::time::SystemTime;
 use crate::{
     t_fstat, T_S_IFCHR, T_S_IFDIR, T_S_IFLNK, T_S_IFMT, T_S_IFREG,
 };
@@ -138,22 +138,35 @@ impl Metadata {
         self.nlink
     }
 
-    /// Access time (epoch seconds). `0` at v1.0 (most Devs don't
-    /// populate); a v1.x kernel may surface real timestamps.
+    /// Access time (epoch seconds). `0` on a Dev that keeps no times.
     #[inline]
     #[must_use]
     pub const fn atime_sec(&self) -> u64 {
         self.atime_sec
     }
 
-    /// Modification time (epoch seconds). `0` at v1.0.
+    /// Modification time (epoch seconds). `0` on a Dev that keeps no times.
     #[inline]
     #[must_use]
     pub const fn mtime_sec(&self) -> u64 {
         self.mtime_sec
     }
 
-    /// Metadata-change time (epoch seconds). `0` at v1.0.
+    /// The access time as a `SystemTime` (whole seconds). Always `Ok`; the
+    /// `Result` is std's shape.
+    #[inline]
+    pub fn accessed(&self) -> Result<SystemTime> {
+        Ok(SystemTime::from_unix(self.atime_sec, 0))
+    }
+
+    /// The modification time as a `SystemTime` (whole seconds). Always `Ok`;
+    /// the `Result` is std's shape.
+    #[inline]
+    pub fn modified(&self) -> Result<SystemTime> {
+        Ok(SystemTime::from_unix(self.mtime_sec, 0))
+    }
+
+    /// Metadata-change time (epoch seconds). `0` on a Dev that keeps no times.
     #[inline]
     #[must_use]
     pub const fn ctime_sec(&self) -> u64 {

@@ -7,6 +7,7 @@ code:
   - usr/coreutils/src/lib.rs
   - usr/coreutils/src/path.rs
   - usr/coreutils/src/size.rs
+  - usr/coreutils/src/stamp.rs
   - usr/coreutils/src/stream.rs
   - usr/coreutils/src/find.rs
   - usr/coreutils/src/nsmount.rs
@@ -51,9 +52,9 @@ here at one chokepoint, `beacon_gate`.
 
 ## Contract
 
-Six modules are pure and ungated -- `path`, `size`, `stream`, `find`,
-`select` and `nsmount` -- with no syscall and no runtime dependency, so they
-compile and test on the host; a seventh, `counting`, exists only in the host
+Seven modules are pure and ungated -- `path`, `size`, `stamp`, `stream`,
+`find`, `select` and `nsmount` -- with no syscall and no runtime dependency, so
+they compile and test on the host; a seventh, `counting`, exists only in the host
 tests. Five are
 backend-gated behind a Cargo feature because they touch the runtime:
 `beacon_gate`, `meta`, `ui`, `usage`, `netpump`.
@@ -64,6 +65,18 @@ single-formatting-path shape or the box-width-on-plain-text rule finds them
 there now; this crate only consumes them.
 
 ## Mechanism
+
+**`stamp` reads `touch`'s time operands** (2026-10-22): POSIX `-t
+CCYYMMDDhhmm[.SS]`, the century or the whole year optional, and `-d
+YYYY-MM-DDThh:mm:SS[.frac][Z]`, to seconds and
+nanoseconds since the epoch. There is no timezone database, so POSIX's local
+time is UTC, the zone `date` prints. A two-digit year pivots at 69, a missing
+one is the current year (the caller passes it), a seconds field of 60 names the
+second after :59, and a fraction past nanoseconds is truncated, never rounded
+into the next second. A time before the epoch or past signed 64-bit seconds is
+refused, since the kernel's `tv_sec` is signed and the 9P wire's is unsigned.
+`days_from_civil` and `year_of` are Hinnant's algorithms; the host tests check
+them against dates computed independently.
 
 **`beacon_gate` is the crate's new centre** (BEACON.md 12.4). One call --
 `resolve(flag)` -- composes the three inputs the emission gate needs: the

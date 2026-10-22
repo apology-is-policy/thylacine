@@ -1,8 +1,18 @@
-// cp [-rRvnf] SRC... DST -- copy files (and, with -r, directory trees).
+// cp [-aLPpRrvnf] SRC... DST -- copy files (and, with -r, directory trees).
 //
 // Forms: `cp SRC DST` (DST a file or existing dir) and `cp SRC... DIR`.
 // -r / -R: recursively copy a directory. Recursion skips "." / ".." (fs::read_dir
-// yields them). A file copy is open(SRC) + create(DST,trunc) + io::copy.
+// yields them). A file copy is open(SRC) + create(DST, trunc, SRC's mode under
+// the umask) + io::copy.
+//
+// File identity is (dev, qid path) from a stat that follows links, as the
+// opens do. A destination that IS its source is refused before the truncating
+// open could empty it, wherever in a tree it occurs; a directory met again
+// below itself (a symlink cycle), or the destination tree met inside the
+// source, is not descended. -p keeps the source's times, owner and mode (an
+// owner or group the caller may not give is left, as POSIX allows); -a is
+// -R -p -P. -P would copy a symlink as a symlink, which needs a creation call
+// native code does not have yet, so a symlink source under -P is refused.
 
 #![no_std]
 #![no_main]
@@ -17,14 +27,30 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use coreutils::usage;
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::err::{Error, Result};
-use libthyla_rs::fs::{self, File, Path};
+use libthyla_rs::err::Error;
+use libthyla_rs::fs::{self, File, FileTimes, Metadata, OpenOptions, Path};
 use libthyla_rs::{eprintln, io, println};
 
 /// Behavior flags threaded through the copy.
 struct Opts {
     verbose: bool,
     no_clobber: bool,
+    preserve: bool,
+    no_deref: bool,
+}
+
+/// A file's identity: its Dev instance and the server's qid path.
+type Id = (u64, u64);
+
+fn id_of(m: &Metadata) -> Id {
+    (m.dev(), m.qid_path())
+}
+
+/// One top-level source's traversal: the directories on the current path, and
+/// the destination directory it creates or fills.
+struct Walk {
+    ancestors: Vec<Id>,
+    dest_root: Option<Id>,
 }
 
 #[no_mangle]
@@ -33,9 +59,13 @@ pub extern "C" fn rs_main() -> i64 {
 }
 
 const USAGE: &str = "\
-usage: cp [-rRvnf] SRC... DST
+usage: cp [-aLPpRrvnf] SRC... DST
   Copy files (and, with -r, directory trees).
   -r, -R  copy directories recursively
+  -p      keep each source's times, owner and mode
+  -a      archive: -R -p -P
+  -P, -d  copy a symbolic link as a link (not supported yet: refused)
+  -L      follow symbolic links in the source (the default)
   -v      verbose: print each copy
   -n      no-clobber: never overwrite an existing file
   -f      force (accepted; cp always overwrites and never prompts)
@@ -44,6 +74,7 @@ usage: cp [-rRvnf] SRC... DST
 Examples:
   cp a b                # copy a file
   cp -r dir copy        # copy a directory tree
+  cp -p a b             # copy a file, keeping its times
   cp -v *.txt dest/     # report each copy
 ";
 
@@ -56,6 +87,8 @@ fn run(args: Args) -> i64 {
     let mut recursive = false;
     let mut verbose = false;
     let mut no_clobber = false;
+    let mut preserve = false;
+    let mut no_deref = false;
     while let Some(a) = args.get_str(idx) {
         if a == "--" {
             idx += 1;
@@ -67,6 +100,14 @@ fn run(args: Args) -> i64 {
                     'r' | 'R' => recursive = true,
                     'v' => verbose = true,
                     'n' => no_clobber = true,
+                    'p' => preserve = true,
+                    'a' => {
+                        recursive = true;
+                        preserve = true;
+                        no_deref = true;
+                    }
+                    'P' | 'd' => no_deref = true,
+                    'L' => no_deref = false,
                     'f' => {} // force: a no-op (cp always overwrites, never prompts)
                     _ => return usage::die("cp", &format!("invalid option -- '{}'", ch)),
                 }
@@ -76,7 +117,7 @@ fn run(args: Args) -> i64 {
             break;
         }
     }
-    let opts = Opts { verbose, no_clobber };
+    let opts = Opts { verbose, no_clobber, preserve, no_deref };
 
     let mut ops: Vec<&str> = Vec::new();
     let mut i = idx;
@@ -115,19 +156,11 @@ fn run(args: Args) -> i64 {
         } else {
             String::from(dest)
         };
-        // Refuse a copy whose source and destination resolve to the same file
-        // (`cp f f` / `cp f .` would otherwise open-then-truncate the source to
-        // 0 bytes -- silent data loss, exit 0). No symlinks at v1 (G11), so
-        // lexical canonicalization is true file identity. With -r, additionally
-        // refuse a destination inside the source tree (a runaway self-copy).
-        if let (Some(cs), Some(ct)) = (canon(src), canon(target.as_str())) {
-            if cs == ct {
-                eprintln!("cp: '{}' and '{}' are the same file", src, target);
-                status = 1;
-                continue;
-            }
-            if recursive && fs::is_dir(src) {
-                let mut prefix = cs;
+        // Refuse the plain into-itself copy (`cp -r d d/sub`) before anything
+        // is created. Lexical, so a symlink can hide it: the walk's dest_root
+        // guard catches that case, after the fact.
+        if recursive && fs::is_dir(src) {
+            if let (Some(mut prefix), Some(ct)) = (canon(src), canon(target.as_str())) {
                 if !prefix.ends_with('/') {
                     prefix.push('/');
                 }
@@ -138,60 +171,203 @@ fn run(args: Args) -> i64 {
                 }
             }
         }
-        if let Err(e) = cp_one(src, target.as_str(), &opts) {
-            eprintln!("cp: {} -> {}: {}", src, target, e);
+        let mut walk = Walk { ancestors: Vec::new(), dest_root: None };
+        if !cp_one(src, target.as_str(), &opts, &mut walk) {
             status = 1;
         }
     }
     status
 }
 
-// Copy `src` to `dst`. A directory here always means recursive mode (the top
-// level gated the dir-without-r case), so recurse into it.
-fn cp_one(src: &str, dst: &str, o: &Opts) -> Result<()> {
-    match fs::metadata(src) {
-        Ok(m) if m.is_dir() => {
-            let created = match fs::create_dir(dst) {
-                Ok(()) => true,
-                Err(Error::Exists) => false,
-                Err(e) => return Err(e),
-            };
-            if o.verbose && created {
-                println!("'{}' -> '{}'", src, dst);
+// Copy `src` to `dst`, printing a diagnostic for each failure; false if any.
+// A directory here always means recursive mode (the top level gated the
+// dir-without-r case). A failed entry does not stop its siblings.
+fn cp_one(src: &str, dst: &str, o: &Opts, w: &mut Walk) -> bool {
+    if o.no_deref {
+        match File::open_link(src).and_then(|f| f.metadata()) {
+            Ok(m) if m.is_symlink() => {
+                eprintln!("cp: cannot copy symbolic link '{}': creating a link is not supported", src);
+                return false;
             }
-            for ent in fs::read_dir(src)? {
-                let e = ent?;
-                let name = e.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                cp_one(&join(src, name), &join(dst, name), o)?;
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("cp: cannot stat '{}': {}", src, e);
+                return false;
             }
-            Ok(())
         }
-        Ok(_) => copy_file(src, dst, o),
-        Err(e) => Err(e),
+    }
+    match fs::metadata(src) {
+        Ok(m) if m.is_dir() => copy_dir(src, dst, &m, o, w),
+        Ok(m) => copy_file(src, dst, &m, o),
+        Err(e) => {
+            eprintln!("cp: cannot stat '{}': {}", src, e);
+            false
+        }
     }
 }
 
-fn copy_file(src: &str, dst: &str, o: &Opts) -> Result<()> {
-    // -n: never overwrite an existing destination (skip silently).
-    if o.no_clobber && fs::metadata(dst).is_ok() {
-        return Ok(());
+fn copy_dir(src: &str, dst: &str, m: &Metadata, o: &Opts, w: &mut Walk) -> bool {
+    let id = id_of(m);
+    if w.ancestors.contains(&id) {
+        eprintln!("cp: '{}': a directory that contains itself (a symlink cycle); not copied", src);
+        return false;
     }
-    let mut r = File::open(src)?;
-    let mut w = File::create(dst)?;
-    io::copy(&mut r, &mut w)?;
+    if w.dest_root == Some(id) {
+        eprintln!("cp: cannot copy a directory, '{}', into itself, '{}'", src, dst);
+        return false;
+    }
+    let created = match fs::create_dir(dst) {
+        Ok(()) => true,
+        Err(Error::Exists) => false,
+        Err(e) => {
+            eprintln!("cp: cannot create directory '{}': {}", dst, e);
+            return false;
+        }
+    };
+    let dm = match fs::metadata(dst) {
+        Ok(dm) => dm,
+        Err(e) => {
+            eprintln!("cp: cannot stat '{}': {}", dst, e);
+            return false;
+        }
+    };
+    if !dm.is_dir() {
+        eprintln!("cp: cannot overwrite non-directory '{}' with directory '{}'", dst, src);
+        return false;
+    }
+    if id_of(&dm) == id {
+        eprintln!("cp: '{}' and '{}' are the same file", src, dst);
+        return false;
+    }
+    if w.ancestors.is_empty() {
+        w.dest_root = Some(id_of(&dm));
+    }
+    if o.verbose && created {
+        println!("'{}' -> '{}'", src, dst);
+    }
+
+    w.ancestors.push(id);
+    let mut ok = true;
+    match fs::read_dir(src) {
+        Ok(entries) => {
+            for ent in entries {
+                match ent {
+                    Ok(e) => {
+                        let name = e.file_name();
+                        if name == "." || name == ".." {
+                            continue;
+                        }
+                        if !cp_one(&join(src, name), &join(dst, name), o, w) {
+                            ok = false;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("cp: reading directory '{}': {}", src, e);
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("cp: cannot read directory '{}': {}", src, e);
+            ok = false;
+        }
+    }
+    w.ancestors.pop();
+
+    // After the entries: creating them moved the directory's mtime, and a
+    // read-only mode would have refused them.
+    if o.preserve {
+        match File::open_with_opath(dst) {
+            Ok(f) => ok &= preserve(&f, dst, m),
+            Err(e) => {
+                eprintln!("cp: cannot open '{}' to preserve its attributes: {}", dst, e);
+                ok = false;
+            }
+        }
+    }
+    ok
+}
+
+fn copy_file(src: &str, dst: &str, m: &Metadata, o: &Opts) -> bool {
+    if let Ok(dm) = fs::metadata(dst) {
+        // -n: never overwrite an existing destination (skip silently).
+        if o.no_clobber {
+            return true;
+        }
+        if id_of(&dm) == id_of(m) {
+            eprintln!("cp: '{}' and '{}' are the same file", src, dst);
+            return false;
+        }
+    }
+    let mut r = match File::open(src) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cp: cannot open '{}' for reading: {}", src, e);
+            return false;
+        }
+    };
+    // The source's mode for a file this creates (the umask applies); an
+    // existing destination keeps its own unless -p.
+    let mut wr = match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(m.permissions() & 0o777)
+        .open(dst)
+    {
+        Ok(wr) => wr,
+        Err(e) => {
+            eprintln!("cp: cannot create regular file '{}': {}", dst, e);
+            return false;
+        }
+    };
+    if let Err(e) = io::copy(&mut r, &mut wr) {
+        eprintln!("cp: error copying '{}' to '{}': {}", src, dst, e);
+        return false;
+    }
+    if o.preserve && !preserve(&wr, dst, m) {
+        return false;
+    }
     if o.verbose {
         println!("'{}' -> '{}'", src, dst);
     }
-    Ok(())
+    true
+}
+
+// -p on the open destination: times first (the owner may set them, and the
+// handle that wrote flushes before they apply), then owner and group, then
+// the mode.
+fn preserve(f: &File, dst: &str, m: &Metadata) -> bool {
+    let times = FileTimes::new()
+        .set_accessed(libthyla_rs::time::SystemTime::from_unix(m.atime_sec(), 0))
+        .set_modified(libthyla_rs::time::SystemTime::from_unix(m.mtime_sec(), 0));
+    if let Err(e) = f.set_times(times) {
+        eprintln!("cp: preserving times for '{}': {}", dst, e);
+        return false;
+    }
+    // Each separately, so a refused owner does not cost the group. A refusal
+    // leaves the destination's own, which POSIX permits without a diagnostic.
+    if let Ok(cur) = f.metadata() {
+        if cur.uid() != m.uid() {
+            let _ = f.chown(Some(m.uid()), None);
+        }
+        if cur.gid() != m.gid() {
+            let _ = f.chown(None, Some(m.gid()));
+        }
+    }
+    if let Err(e) = f.chmod(m.permissions()) {
+        eprintln!("cp: preserving permissions for '{}': {}", dst, e);
+        return false;
+    }
+    true
 }
 
 // Canonicalize lexically: anchor a relative path against the per-Proc cwd
 // (LS-4), collapse `.`/`..`/`//`. None only if the cwd is unreadable for a
-// relative input. Mirrors the realpath coreutil; sound as file identity
-// because v1 has no symlinks (G11).
+// relative input. Mirrors the realpath coreutil. Not file identity -- it cannot
+// see through a symlink -- so it serves only the early into-itself refusal.
 fn canon(path: &str) -> Option<String> {
     let abs = if path.starts_with('/') {
         String::from(path)

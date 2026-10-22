@@ -1164,6 +1164,9 @@ now answers its errno, never EPERM (the -1 alias); the list is in the
 `docs/ERRORS.md` ER-2. Old callers keep working: a mask without time bits
 reads no x6, and a native caller testing `r < 0` sees the same sign. The
 mechanism is [[sub-kernel-syscall-dispatch]]'s; the policy
-[[sub-kernel-perm]]'s. The Pouch, vivarium, libthyla-rs and go-thylacine
-front ends follow in G12's later steps; until then a Pouch chmod by a
-non-owner reads EACCES where it read EIO.
+[[sub-kernel-perm]]'s. The C mirror (`usr/lib/libt/include/thyla/syscall.h`)
+carries the bits and a `t_wstat` without x6; the Rust mirror
+(`usr/lib/libthyla-rs/src/lib.rs`) carries the bits, the same `t_wstat` and
+`t_wstat_times`, which sets x6 ([[sub-libthyla-rs]]). Pouch's front end is patch
+0063 and the vivarium's is Linux `utimensat` (88); go-thylacine follows in
+G12-d.

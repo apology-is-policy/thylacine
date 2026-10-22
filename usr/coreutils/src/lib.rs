@@ -31,6 +31,7 @@ pub mod nsmount;
 pub mod path;
 pub mod select;
 pub mod size;
+pub mod stamp;
 pub mod stream;
 
 #[cfg(test)]

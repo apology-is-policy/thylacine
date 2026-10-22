@@ -102,11 +102,14 @@ fn _force_error_in_scope(_e: Error) {}
 // ---------------------------------------------------------------------------
 
 // Mirror of the kernel's `struct t_timespec` (syscall.h): 16 bytes, two i64.
+// Also the record SYS_WSTAT's times pointer names (fs::FileTimes).
 #[repr(C)]
-struct TimeSpec {
-    tv_sec: i64,
-    tv_nsec: i64,
+#[derive(Copy, Clone)]
+pub(crate) struct TimeSpec {
+    pub(crate) tv_sec: i64,
+    pub(crate) tv_nsec: i64,
 }
+const _: () = assert!(core::mem::size_of::<TimeSpec>() == 16);
 
 // Read a clock into a Duration. Fast-path: the #343 vDSO page (CNTVCT_EL0 + the
 // kernel timekeeping page, no syscall) when present. Fallback: SYS_CLOCK_GETTIME
