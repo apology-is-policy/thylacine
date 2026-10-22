@@ -90,10 +90,9 @@ void test_virtio_pci_find_unknown_returns_null(void) {
 
 void test_virtio_pci_cfg_read_bounds(void) {
     struct virtio_pci_dev *d = virtio_pci_dev_get(0);
-    if (!d) {
-        // Empty enum (no PCI devices) — not our concern here.
+    if (!test_requires(d != NULL, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates"))
         return;
-    }
     // Out-of-range offset: 4096 is exactly 1 past the function's cfg space.
     u32 ov = virtio_pci_cfg_read32(d, 4096);
     TEST_EXPECT_EQ((u64)ov, (u64)0xFFFFFFFFu,
@@ -119,9 +118,9 @@ void test_virtio_pci_cfg_read_bounds(void) {
 // mask), the standard PCI protocol QEMU implements.
 void test_virtio_pci_cfg_write_bounds(void) {
     struct virtio_pci_dev *d = virtio_pci_dev_get(0);
-    if (!d) {
-        return;     // no PCI device — covered by count_within_bound
-    }
+    if (!test_requires(d != NULL, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates"))
+        return;
     u16 vendor_before = virtio_pci_cfg_read16(d, PCI_CFG_VENDOR_ID);
     TEST_EXPECT_EQ((u64)vendor_before, (u64)VIRTIO_PCI_VENDOR_ID,
                    "virtio-pci vendor should be 0x1AF4 before writes");

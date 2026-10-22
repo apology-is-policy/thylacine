@@ -430,12 +430,13 @@ void test_pci_walk_caps_shm(void) {
 // A device-id that is never present on the v1.0 VirtIO device set.
 #define PCI_TEST_ABSENT_DEVICE_ID  0xFFFEu
 
-// True if the idle virtio-rng-pci is present (the claim target). Tests skip
-// gracefully on a config without it (the cfg_read_bounds test sets the
-// precedent); tools/run-vm.sh always attaches it, so the claim path runs in the
-// integration boot.
+// True if the idle virtio-rng-pci is present (the claim target).
+// tools/run-vm.sh always attaches and declares it, so its absence FAILS the
+// test; a launcher that did not declare it makes the test a counted skip.
 static bool rng_pci_present(void) {
-    return virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0) != NULL;
+    return test_requires(virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0) != NULL,
+                         "thylacine.virtio-pci-rng", 0, true,
+                         "no PCI function carries its DeviceID");
 }
 
 // Claim the idle rng-pci, validate the assigned BARs + the resolved COMMON_CFG
@@ -656,8 +657,10 @@ void test_pci_claim_nth(void) {
 
     // The two-instance leg: distinct functions for nth 0 vs nth 1.
     u8 b0, d0, f0, b1, d1, f1;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 1, &b1, &d1, &f1) != 0)
-        return;  // SKIP: fewer than two input functions in this config
+    if (!test_requires(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 1, &b1, &d1, &f1) == 0,
+                       "thylacine.virtio-pci-input", 1, true,
+                       "no second PCI input function resolves"))
+        return;
     TEST_ASSERT(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 0, &b0, &d0, &f0) == 0,
         "nth 1 resolved but nth 0 did not (enumeration walk broken)");
     TEST_ASSERT(b0 != b1 || d0 != d1 || f0 != f1,

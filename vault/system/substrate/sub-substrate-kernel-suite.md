@@ -168,8 +168,8 @@ wrongly here at least once:
   and present on red legs too.
 - Does the gate read the ` (K skipped)` count, or the `[skip]` lines, and treat
   a skip as NOT coverage? `tools/test.sh` does: it refuses a skip of any shape
-  but the two gated ones, and any skip at all when its full device set was
-  attached ([[sub-substrate-gates]]).
+  but the two gated ones, and a skip its own configuration does not explain
+  ([[sub-substrate-gates]]).
 
 ## Seams
 
@@ -186,23 +186,42 @@ before it is made.
 **A skip is counted and gated; it is never a pass (2026-10-22).** Until then a
 test that printed `[skip]` and returned was counted as a pass, so a renamed or
 unstaged binary, or a device the boot did not attach, turned a real test into a
-green no-op the tally could not show. Now a test can skip only through one of
-two helpers, each of which first proves the configuration permits the absence,
-and there is deliberately no bare skip call:
-- `test_probe_lookup` finds a probe binary in the ramfs. A miss FAILS when the
-  ramfs carries `bin/joey` -- an image with userspace and without the probe is
-  stale -- and skips only when the image has no userspace at all. Such an
-  image fails the suite anyway (`devramfs.live_bin_holds_the_programs` asserts
-  `bin/joey`), so this skip never appears in a passing boot; it keeps that one
-  cause from reading as a failure per probe. A binary too large for its buffer
-  fails in every image.
-- `test_virtio_device` finds a virtio-mmio device. QEMU always has thirty-two
-  slots and an empty one reads DeviceID 0, so only the launcher knows what it
-  attached: `tools/run-vm.sh` declares each MMIO device as a bootargs token
-  derived from its own arguments ([[sub-substrate-machine]]). A declared
-  device that no slot carries FAILS; an undeclared one is a counted skip
-  (vote 17). The probe each such test spawns runs only once the device is
-  found, so its own missed scan is a FAIL too ([[sub-virtio-probes]]).
+green no-op the tally could not show. Now a test can skip only through a
+helper that first proves the configuration permits the absence, and there is
+deliberately no bare skip call:
+- `test_image_lookup` finds a file in the ramfs that ships whenever a
+  companion does. A miss FAILS when the image carries the companion -- the
+  ramfs is stale -- and skips only when it carries neither.
+  `test_probe_lookup` is its form for probe binaries, keyed on `bin/joey`; an
+  image without userspace fails the suite anyway
+  (`devramfs.live_bin_holds_the_programs`), so that skip never appears in a
+  passing boot. The dlopen prover is keyed on `lib/libc.so`: an image built
+  without the LLVM fork has neither. A binary too large for its buffer fails
+  in every image.
+- `test_requires(present, token, nth, exact, absent)` names what a test needs
+  from the machine by the bootargs word the launcher adds once per instance it
+  attached ([[sub-substrate-machine]]): `thylacine.virtio-<kind>` per
+  virtio-mmio device, `thylacine.virtio-pci-<kind>` per virtio PCI function,
+  `thylacine.smp` for a second CPU, `thylacine.msi` for an MSI controller the
+  launcher knows of. Absent and declared FAILS; absent and undeclared is a
+  counted skip (vote 17); present and undeclared FAILS when `exact`, since the
+  launcher attached what it did not declare -- so every green boot checks the
+  declaration channel too. `msi` passes `exact` false: under KVM or hvf with
+  GICv3 the launcher cannot know. `test_virtio_device` is its form for a
+  virtio-mmio device. The probe each such test spawns runs only once the
+  device is found, so its own missed scan is a FAIL too ([[sub-virtio-probes]]).
+
+The first census counted only the tests that printed `[skip]`. Audit round 1
+cited twenty-five sites that returned silently instead, and a census of every
+early return in `kernel/test` found eight more. Those that a configuration can
+lack go through `test_requires` now: the virtio rng (three tests), a PCI
+function (nine: seven on the rng function, two on any), a second PCI input
+function, the MSI route (three), a CSPRNG no strong source seeded (two, and a
+third test that had accepted it as a pass), a second CPU (eight -- the
+`default-smp1` rows' green no-ops), and the dlopen prover through
+`test_image_lookup`. The guards that could never fire (a virtio-mmio slot
+count, twice; an all-empty slot page, four times) are assertions. A skip line
+is composed whole and printed by one `uart_puts`.
 
 The initrd guards that returned silently (`devramfs_entry_count() < 1`, a
 `welcome` file that would not open) are assertions now: the suite already

@@ -168,6 +168,12 @@ harness_result_token() {
     # runs AFTER test.sh has already printed '==> PASS: boot banner observed',
     # so a missing arm here does not degrade to 'unknown' -- it degrades to
     # 'pass', which is worse, and would have labelled the capture OTHER-pass.
+    elif grep -aqF '==> FAIL: netd '                                    "$hlog"; then echo netd
+    elif grep -aqF '==> FAIL: a readiness snapshot fail-safe fired'     "$hlog"; then echo poll-failsafe
+    elif grep -aqF '==> FAIL: a clunk was refused on a live session'    "$hlog"; then echo 9p-clunk
+    elif grep -aqF '==> FAIL: a last close lost its staged bytes'       "$hlog"; then echo 9p-flush
+    elif grep -aqF '==> FAIL: a kernel test skipped without a gated helper' "$hlog"; then echo skip-ungated
+    elif grep -aqF '==> FAIL: kernel tests skipped what this configuration attaches' "$hlog"; then echo skip-undeclared
     elif grep -aqF '==> FAIL: arc/clade gate verdict'                   "$hlog"; then echo arc-gates
     elif grep -aqF '==> PASS'                                           "$hlog"; then echo pass
     else echo unknown

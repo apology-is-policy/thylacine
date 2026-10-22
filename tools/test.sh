@@ -461,26 +461,63 @@ case "$result" in
             exit 1
         fi
         # The kernel suite's skips (vote 17). A test skips only through a helper
-        # that proves the configuration permits it: a virtio device run-vm.sh
-        # did not declare, or a probe binary in an image without userspace
-        # (which fails the suite anyway). A [skip] of any other shape is an
-        # ungated skip, and a boot with this script's full device set has
-        # nothing it may skip. Any skip is reported, and reported as NOT
-        # coverage.
+        # that proves the configuration permits it: something tools/run-vm.sh
+        # did not declare (a thylacine.<kind> bootargs word), or a ramfs file
+        # whose companion the image lacks too. A [skip] of any other shape is
+        # an ungated skip. A skip of something this script's own configuration
+        # attaches means the launcher dropped it without declaring the drop.
+        # Any skip is reported, and reported as NOT coverage.
         skip_lines="$(grep -ao '\[skip\] .*' "$LOG_FILE" | tr -d '\r' || true)"
         if [[ -n "$skip_lines" ]]; then
-            gated_skip='^\[skip\] (thylacine\.virtio-(net|blk|input|gpu): not attached \(the launcher did not declare it\)|/[^ ]+ not in ramfs, and the image carries no userspace .*)$'
+            gated_skip='^\[skip\] (thylacine\.[a-z0-9-]+( x[0-9]+)?: the launcher did not declare it|/[^ ]+ not in ramfs, and neither is /[^ ]+)$'
             if grep -vqE "$gated_skip" <<<"$skip_lines"; then
-                echo "==> FAIL: a kernel test skipped without a gated helper (test_probe_lookup / test_virtio_device):" >&2
+                echo "==> FAIL: a kernel test skipped without a gated helper (test_requires / test_image_lookup):" >&2
                 grep -vE "$gated_skip" <<<"$skip_lines" >&2 || true
                 exit 1
             fi
-            if [[ "${THYLACINE_NO_NET:-0}" != "1" && "${THYLACINE_NO_INPUT:-0}" != "1" \
-                  && "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" == "none" \
-                  && -f "${THYLACINE_DISK_IMG:-$REPO_ROOT/build/disk.img}" \
-                  && -f "${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}" ]]; then
-                echo "==> FAIL: the full device set was attached, yet kernel tests skipped:" >&2
-                echo "$skip_lines" >&2
+            # run-vm.sh's own line names the machine it built; without it the
+            # CPU and MSI skips cannot be explained, so they fail.
+            qemu_line="$(grep -a -m1 '^==> qemu: accel=' "$LOG_FILE" | tr -d '\r' || true)"
+            skip_explained() { # skip_explained <what>: this configuration does not attach it
+                local q_accel="" q_gic="" q_smp="" q_its=""
+                [[ "$qemu_line" =~ accel=([^ ]+) ]] && q_accel="${BASH_REMATCH[1]}"
+                [[ "$qemu_line" =~ gic=v([^ ]+) ]] && q_gic="${BASH_REMATCH[1]}"
+                [[ "$qemu_line" =~ smp=([0-9]+) ]] && q_smp="${BASH_REMATCH[1]}"
+                [[ "$qemu_line" =~ its=([^ ]+) ]] && q_its="${BASH_REMATCH[1]}"
+                case "$1" in
+                    thylacine.virtio-net) [[ "${THYLACINE_NO_NET:-0}" == "1" ]] ;;
+                    thylacine.virtio-input|thylacine.virtio-pci-input*) [[ "${THYLACINE_NO_INPUT:-0}" == "1" ]] ;;
+                    thylacine.virtio-gpu)
+                        [[ "${THYLACINE_NO_GPU:-0}" == "1" ]] && return 0
+                        case "${THYLACINE_DISPLAY:-none}" in
+                            console|vnc:*|vnc-unix|egl-headless|dbus-gl|gpu) return 0 ;;
+                        esac
+                        return 1 ;;
+                    thylacine.virtio-blk)
+                        [[ ! -f "${THYLACINE_DISK_IMG:-$REPO_ROOT/build/disk.img}" \
+                           && ! -f "${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}" ]] ;;
+                    thylacine.smp) [[ -n "$q_smp" ]] && (( q_smp < 2 )) ;;
+                    thylacine.msi)
+                        [[ -n "$q_gic" && -n "$q_its" && -n "$q_accel" ]] || return 1
+                        case "$q_gic:$q_its:$q_accel" in
+                            2:*|*:on:*|3:auto:tcg) return 1 ;;
+                        esac
+                        return 0 ;;
+                    /lib/libc.so) [[ ! -f "$REPO_ROOT/build/sysroot/lib/libc.so" ]] ;;
+                    *) return 1 ;;
+                esac
+            }
+            unexplained=""
+            while IFS= read -r skip_line; do
+                case "$skip_line" in
+                    "[skip] thylacine."*) what="${skip_line#\[skip\] }"; what="${what%%:*}"; what="${what%% *}" ;;
+                    *) what="${skip_line##*, and neither is }" ;;
+                esac
+                skip_explained "$what" || unexplained+="$skip_line"$'\n'
+            done <<<"$skip_lines"
+            if [[ -n "$unexplained" ]]; then
+                echo "==> FAIL: kernel tests skipped what this configuration attaches (the launcher dropped it undeclared):" >&2
+                printf '%s' "$unexplained" >&2
                 exit 1
             fi
             echo "==> kernel suite: $(grep -c . <<<"$skip_lines") skip line(s) -- NOT coverage:"

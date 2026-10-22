@@ -1295,13 +1295,14 @@ bool dtb_node_parent(u32 node_off, u32 *out_parent_off) {
     return false;
 }
 
-bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token) {
-    if (!args || !token) return false;
+u32 dtb_bootargs_scan_count(const u8 *args, u32 len, const char *token) {
+    if (!args || !token) return 0;
     size_t toklen = k_strlen(token);
-    if (toklen == 0) return false;
+    if (toklen == 0) return 0;
     // A complete whitespace-delimited word, never a substring: serial-sak=10
     // and another parameter's value must not answer serial-sak=1. A NUL ends
     // the string, whatever the property length says.
+    u32 count = 0;
     for (u32 at = 0; at < len && args[at]; ) {
         while (at < len && (args[at] == ' ' || args[at] == '\t')) at++;
         u32 start = at;
@@ -1309,13 +1310,17 @@ bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token) {
         if ((size_t)(at - start) == toklen) {
             size_t i = 0;
             while (i < toklen && args[start + i] == (u8)token[i]) i++;
-            if (i == toklen) return true;
+            if (i == toklen) count++;
         }
     }
-    return false;
+    return count;
 }
 
-bool dtb_bootargs_has_token(const char *token) {
+bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token) {
+    return dtb_bootargs_scan_count(args, len, token) > 0;
+}
+
+u32 dtb_bootargs_count(const char *token) {
     static const char chosen[] = "chosen", bootargs[] = "bootargs";
     struct dtb_node_entry node, prop;
     u32 root_cursor = 0;
@@ -1326,10 +1331,14 @@ bool dtb_bootargs_has_token(const char *token) {
         while (dtb_node_iter(node.off, &cursor, &prop)) {
             if (prop.is_node || prop.namelen != sizeof(bootargs) - 1 || !k_streq(prop.name, bootargs))
                 continue;
-            return dtb_bootargs_scan(prop.data, prop.datalen, token);
+            return dtb_bootargs_scan_count(prop.data, prop.datalen, token);
         }
     }
-    return false;
+    return 0;
+}
+
+bool dtb_bootargs_has_token(const char *token) {
+    return dtb_bootargs_count(token) > 0;
 }
 
 // =============================================================================

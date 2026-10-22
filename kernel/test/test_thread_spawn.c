@@ -1076,10 +1076,8 @@ void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void) {
     unsigned cpu  = DTB_MAX_CPUS;
     for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS; c++)
         if (c != self && g_cpu_alive[c]) { cpu = c; break; }
-    if (cpu == DTB_MAX_CPUS) {
-        uart_puts("  proc.exec_waits_for_exiting_peer_on_another_cpu: one CPU, so it did not run\n");
+    if (!test_requires(cpu != DTB_MAX_CPUS, "thylacine.smp", 0, true, "no peer CPU is alive"))
         return;
-    }
     g_ewr_proc   = NULL;
     g_ewr_old    = NULL;
     g_ewr_waits0 = 0;

@@ -894,13 +894,14 @@ void test_devramfs_load_complete(void) {
     TEST_ASSERT(!devramfs_truncated(), "the boot archive fits the entry table");
 }
 
-// An image that ships the dlopen prover was built with libc.so, so its lib/
-// must be served; only an image built without the LLVM fork has neither. The
-// Dev's own path: attach, walk, readdir, stat, `..`.
+// An image built with the LLVM fork ships libc.so, the dlopen prover and its
+// plugin together, and its lib/ must be served; one built without the fork
+// ships none of them (a counted skip). The Dev's own path: attach, walk,
+// readdir, stat, `..`.
 void test_devramfs_live_lib_when_prover_ships(void) {
     const void *d;
     size_t n;
-    if (devramfs_lookup("bin/pouch-hello-dlopen", &d, &n) != 0) return;   // no LLVM fork
+    if (test_image_lookup("bin/pouch-hello-dlopen", "lib/libc.so", &d, &n) != 0) return;
     TEST_ASSERT(devramfs_lookup("lib/libc.so", &d, &n) == 0 && n > 0,
                 "the prover ships, so lib/libc.so must");
     TEST_ASSERT(devramfs_lookup("lib/libdlprobe.so", &d, &n) == 0, "and its plugin");

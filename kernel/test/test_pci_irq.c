@@ -100,7 +100,9 @@ void test_pci_irq_shared_tickets(void) {
 void test_pci_msi_allocator(void);
 void test_pci_msi_allocator(void) {
     struct dtb_pci_msi dt;
-    if (!dtb_pci_msi_route(8, &dt)) return;
+    if (!test_requires(dtb_pci_msi_route(8, &dt), "thylacine.msi", 0, false,
+                       "the DTB routes no PCI MSI"))
+        return;
     struct gic_msi_route a, b;
     TEST_ASSERT(gic_msi_alloc(8, 0, &a), "firmware-selected MSI allocation");
     TEST_ASSERT(gic_msi_reserved(a.intid), "allocated SPI is reserved");
@@ -169,7 +171,9 @@ static bool rng_used(volatile u16 *used, u16 expected) {
 void test_pci_msix_rng(void);
 void test_pci_msix_rng(void) {
     struct dtb_pci_msi route;
-    if (!dtb_pci_msi_route(8, &route)) return;
+    if (!test_requires(dtb_pci_msi_route(8, &route), "thylacine.msi", 0, false,
+                       "the DTB routes no PCI MSI"))
+        return;
     struct KObj_PCI *pci = kobj_pci_claim(4, 0);
     struct KObj_IRQ *irq = NULL;
     struct KObj_DMA *dma = NULL;
@@ -288,7 +292,9 @@ static bool fault_wait_parked(struct Thread *thread) {
 void test_pci_msix_failures(void);
 void test_pci_msix_failures(void) {
     struct dtb_pci_msi route;
-    if (!dtb_pci_msi_route(8, &route)) return;
+    if (!test_requires(dtb_pci_msi_route(8, &route), "thylacine.msi", 0, false,
+                       "the DTB routes no PCI MSI"))
+        return;
     u32 baseline = gic_msi_live_count();
     struct KObj_PCI *pci = kobj_pci_claim(4, 0);
     struct KObj_IRQ *a = NULL, *b = NULL;

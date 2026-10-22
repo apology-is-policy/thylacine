@@ -114,10 +114,13 @@ are length-bounded, so a forged or stale offset from userspace is rejected rathe
 than followed.
 
 **The launcher's declarations are read through the tree-walk API.**
-`dtb_bootargs_has_token` finds the root's `chosen` node and its first `bootargs`
-property, and answers whether a token is there as a complete word;
-`dtb_bootargs_scan` is that word test alone, over bytes, so the kernel suite can
-prove it on strings it controls (`dtb.bootargs_whole_words`). A word is
+`dtb_bootargs_count` finds the root's `chosen` node and its first `bootargs`
+property, and counts the complete words equal to a token -- the launcher adds
+one per device instance -- and `dtb_bootargs_has_token` asks whether there is
+one. `dtb_bootargs_scan_count` and `dtb_bootargs_scan` are that word test
+alone, over bytes, so the kernel suite can prove it on strings it controls
+(`dtb.bootargs_whole_words`, which counts two instances, a longer word and an
+absent one). A word is
 delimited by spaces or tabs and never matched as a substring --
 `serial-sak=10` does not answer `serial-sak=1` -- and a NUL inside the property
 ends the string. Two readers rely on it: the serial SAK posture

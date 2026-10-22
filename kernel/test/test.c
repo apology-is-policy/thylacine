@@ -5151,47 +5151,85 @@ void test_soft_warn(const char *msg) {
 }
 
 // fail_msg is a borrowed pointer the runner prints as soon as the test
-// returns, so one buffer serves every composed failure.
-static char g_composed_fail_msg[128];
+// returns, so one buffer serves every composed failure. A skip line is
+// composed whole and emitted by one uart_puts, so tools/test.sh reads it as
+// one line; it has a buffer of its own.
+static char g_composed_fail_msg[160];
+static char g_skip_line[160];
+static bool g_test_skipped;     // the running test's configuration lacks what it needs
 
-static void test_fail_composed(const char *a, const char *b, const char *c) {
-    const char *parts[3] = { a, b, c };
-    size_t n = 0;
-    for (int p = 0; p < 3; p++)
-        for (size_t i = 0; parts[p] && parts[p][i] && n < sizeof(g_composed_fail_msg) - 1; i++)
-            g_composed_fail_msg[n++] = parts[p][i];
-    g_composed_fail_msg[n] = '\0';
-    test_fail(g_composed_fail_msg);
+struct composer { char *buf; u32 cap, len; };
+
+static void compose(struct composer *c, const char *s) {
+    while (s && *s && c->len + 1 < c->cap) c->buf[c->len++] = *s++;
+    c->buf[c->len] = '\0';
+}
+
+// " x<n>" for a test that needs the n-th instance of a kind, n > 1.
+static void compose_instances(struct composer *c, u32 nth) {
+    if (nth == 0) return;
+    char digits[11];
+    u32 n = nth + 1, d = 0;
+    while (n && d < sizeof(digits)) { digits[d++] = (char)('0' + n % 10); n /= 10; }
+    compose(c, " x");
+    while (d) { char one[2] = { digits[--d], '\0' }; compose(c, one); }
+}
+
+static void skip_with(const char *a, const char *b, const char *c3, const char *d) {
+    struct composer c = { g_skip_line, sizeof(g_skip_line), 0 };
+    compose(&c, "    [skip] ");
+    compose(&c, a); compose(&c, b); compose(&c, c3); compose(&c, d);
+    compose(&c, "\n");
+    g_test_skipped = true;
+    uart_puts(g_skip_line);
+}
+
+int test_image_lookup(const char *path, const char *key, const void **blob, size_t *size) {
+    if (devramfs_lookup(path, blob, size) == 0) return 0;
+    const void *key_blob = NULL;
+    size_t key_size = 0;
+    if (devramfs_lookup(key, &key_blob, &key_size) == 0) {
+        struct composer c = { g_composed_fail_msg, sizeof(g_composed_fail_msg), 0 };
+        compose(&c, "an image that carries /"); compose(&c, key);
+        compose(&c, " carries /"); compose(&c, path);
+        test_fail(g_composed_fail_msg);
+        return -1;
+    }
+    skip_with("/", path, " not in ramfs, and neither is /", key);
+    return -1;
 }
 
 int test_probe_lookup(const char *path, const void **blob, size_t *size) {
-    if (devramfs_lookup(path, blob, size) == 0) return 0;
-    const void *init_blob = NULL;
-    size_t init_size = 0;
-    if (devramfs_lookup("bin/joey", &init_blob, &init_size) == 0) {
-        test_fail_composed("an image that carries userspace carries /", path, NULL);
-        return -1;
+    return test_image_lookup(path, "bin/joey", blob, size);
+}
+
+bool test_requires(bool present, const char *token, u32 nth, bool exact, const char *absent) {
+    u32 declared = dtb_bootargs_count(token);
+    struct composer c = { g_composed_fail_msg, sizeof(g_composed_fail_msg), 0 };
+    if (present) {
+        if (!exact || declared > nth) return true;
+        compose(&c, token); compose_instances(&c, nth);
+        compose(&c, " is attached, but the launcher did not declare it");
+        test_fail(g_composed_fail_msg);
+        return false;
     }
-    if (current_test) current_test->skipped = true;
-    uart_puts("    [skip] /");
-    uart_puts(path);
-    uart_puts(" not in ramfs, and the image carries no userspace (build with: tools/build.sh all)\n");
-    return -1;
+    if (declared > nth) {
+        compose(&c, "the launcher declared "); compose(&c, token); compose_instances(&c, nth);
+        compose(&c, " but "); compose(&c, absent);
+        test_fail(g_composed_fail_msg);
+        return false;
+    }
+    char instances[16];
+    struct composer t = { instances, sizeof(instances), 0 };
+    compose_instances(&t, nth);
+    skip_with(token, instances, ": the launcher did not declare it", NULL);
+    return false;
 }
 
 struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token) {
     struct virtio_mmio_dev *dev = virtio_mmio_find_by_device_id(device_id);
-    if (dev) return dev;
-    if (dtb_bootargs_has_token(token)) {
-        test_fail_composed("the launcher declared ", token,
-                           " but no virtio-mmio slot carries its DeviceID");
-        return NULL;
-    }
-    if (current_test) current_test->skipped = true;
-    uart_puts("    [skip] ");
-    uart_puts(token);
-    uart_puts(": not attached (the launcher did not declare it)\n");
-    return NULL;
+    return test_requires(dev != NULL, token, 0, true,
+                         "no virtio-mmio slot carries its DeviceID") ? dev : NULL;
 }
 
 int proc_test_serial_sak(int posture);
@@ -5213,7 +5251,7 @@ void test_run_all(void) {
         current_test = &g_tests[i];
         current_test->failed = false;
         current_test->fail_msg = NULL;
-        current_test->skipped = false;
+        g_test_skipped = false;
         total_count++;
 
         uart_puts("    [test] ");
@@ -5374,7 +5412,7 @@ void test_run_all(void) {
             uart_puts(current_test->fail_msg ? current_test->fail_msg : "(no message)");
             uart_puts("\n");
             failed_count++;
-        } else if (current_test->skipped) {
+        } else if (g_test_skipped) {
             uart_puts("SKIP\n");
             skipped_count++;
         } else {

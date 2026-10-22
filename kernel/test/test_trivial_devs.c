@@ -246,11 +246,15 @@ void test_random_rndr_available(void) {
     u8 buf[8];
     long got = devrandom.read(c, buf, 8, 0);
 
-    // Either RNDR is available (got > 0) or absent (got == -1). Both
-    // are valid. The exit criterion only applies when RNDR is up.
-    TEST_ASSERT(got == 8 || got == -1,
-                "devrandom.read on RNDR-capable CPU returns 8; on "
-                "non-RNDR CPU returns -1");
+    // -1 means no strong source (RNDR, virtio-rng) ever seeded the pool. The
+    // launcher attaches a virtio-rng and declares it, so that is a FAIL; a
+    // launcher without one leaves the test a counted skip.
+    if (got == -1) {
+        spoor_clunk(c);
+        test_requires(false, "thylacine.virtio-rng", 0, true, "no strong source seeded the pool");
+        return;
+    }
+    TEST_ASSERT(got == 8, "devrandom.read returns the 8 bytes asked for");
 
     spoor_clunk(c);
 }
@@ -267,9 +271,8 @@ void test_random_read_produces_nonzero_bytes(void) {
 
     long got = devrandom.read(c, buf, 16, 0);
     if (got == -1) {
-        // RNDR unavailable — exit criterion is conditional on FEAT_RNG.
-        // Skip with a soft note; this is observable in the boot banner.
         spoor_clunk(c);
+        test_requires(false, "thylacine.virtio-rng", 0, true, "no strong source seeded the pool");
         return;
     }
 
@@ -296,7 +299,8 @@ void test_random_read_varies_across_calls(void) {
 
     if (ga == -1 || gb == -1) {
         spoor_clunk(c);
-        return;             // RNDR unavailable; skip
+        test_requires(false, "thylacine.virtio-rng", 0, true, "no strong source seeded the pool");
+        return;
     }
 
     TEST_ASSERT(ga == 16 && gb == 16, "two 16-byte reads succeed");

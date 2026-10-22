@@ -244,6 +244,15 @@ void test_dtb_bootargs_whole_words(void) {
     TEST_ASSERT(!scan(net, sizeof(net) - 2, net), "a word cut by the length is not the word");
     TEST_ASSERT(scan(net, sizeof(net) - 1, net), "the whole length holds the word");
 
+    // One word per device instance: the count is every whole-word occurrence.
+    static const char twice[] = "thylacine.virtio-blk x thylacine.virtio-blk thylacine.virtio-blkx";
+    TEST_EXPECT_EQ(dtb_bootargs_scan_count((const u8 *)twice, sizeof(twice) - 1, "thylacine.virtio-blk"), 2u,
+                   "two instances count two, and a longer word counts none");
+    TEST_EXPECT_EQ(dtb_bootargs_scan_count((const u8 *)twice, sizeof(twice) - 1, "x"), 1u,
+                   "a one-byte word between two others counts once");
+    TEST_EXPECT_EQ(dtb_bootargs_scan_count((const u8 *)line, n, "thylacine.virtio-blk"), 0u,
+                   "an absent word counts none");
+
     TEST_ASSERT(!scan(line, n, ""), "an empty token matches nothing");
     TEST_ASSERT(!scan(NULL, 4, net) && !scan(line, n, NULL), "absent arguments match nothing");
     TEST_ASSERT(!scan("   \t ", 5, net) && !scan(line, 0, "a"), "blank or empty bootargs match nothing");

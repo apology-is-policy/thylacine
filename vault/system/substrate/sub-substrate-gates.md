@@ -355,18 +355,30 @@ A skipped test once counted as a pass, so a renamed probe or an unattached
 device turned a real test into a green no-op. The kernel now counts skips
 apart from passes ([[sub-substrate-kernel-suite]]), and after the banner
 `test.sh` reads every `[skip]` line. A line that is not one of the two gated
-shapes -- `thylacine.virtio-<kind>: not attached (the launcher did not
-declare it)`, or a probe `not in ramfs, and the image carries no userspace`
--- is an ungated skip, and the verdict fails on it. When this script's own
-full device set was attached (no `THYLACINE_NO_NET` / `_NO_INPUT` /
-`_NO_GPU`, the default display, `disk.img` and `pool.img` present), any skip
-at all fails. Otherwise the skips are printed as NOT coverage, in the #212
-arc-gate discipline. The full-set test reads this script's environment, a
-second route to the device set beside the launcher's own declaration
-([[sub-substrate-machine]]). A broken scan alone already fails in the kernel
-(declared, not found), and a broken declaration alone still finds the device;
-a skip with the full set attached means both broke at once, the one case that
-each route alone would pass.
+shapes -- `thylacine.<kind>[ xN]: the launcher did not declare it`, or
+`/<file> not in ramfs, and neither is /<companion>` -- is an ungated skip, and
+the verdict fails on it. Each gated skip must then be explained by this
+script's own configuration, kind by kind: `virtio-net` by `THYLACINE_NO_NET=1`;
+`virtio-input` and `virtio-pci-input` by `THYLACINE_NO_INPUT=1`; `virtio-gpu`
+by `THYLACINE_NO_GPU=1` or a display that drops the MMIO GPU (console, vnc,
+egl-headless, dbus-gl, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
+`smp` and `msi` by run-vm.sh's own `==> qemu:` line (one CPU; a GICv3 machine
+whose MSI controller the launcher cannot know); the dlopen prover by a sysroot
+without `libc.so`. `virtio-rng`, `virtio-pci-rng`, a probe in an image with
+`/bin/joey`, and any kind the mirror does not name are never explained. An
+unexplained skip fails: the launcher dropped what this configuration attaches
+without declaring the drop. The rest are printed as NOT coverage, in the #212
+arc-gate discipline. The mirror is a second route to the machine beside the
+launcher's declaration ([[sub-substrate-machine]]), so it is checked against
+it: `tools/test-skip-verdict.py` runs the real `run-vm.sh` under a stand-in
+QEMU that records its argv, for twelve configurations, and requires the two to
+agree on every kind; then it drives the block's refusals (ungated, torn, the
+old shape, an unknown kind, a missing machine line), each with its acceptance
+one variable away. `smp-multiboot.sh` labels both new verdicts, and every
+post-banner verdict now has its arm (netd's three, the poll fail-safe, the
+refused clunk and the lost flush were labelled `pass` before);
+`test-smp-classify.sh` generates one fixture per arm from the classifier
+itself and requires each to beat the PASS line.
 
 **A fixture Proc a failing test left linked is released (2026-09-30).** A
 test that links a fabricated Proc under kproc and fails before its unlink

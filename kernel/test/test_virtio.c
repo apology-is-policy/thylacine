@@ -47,7 +47,7 @@ void test_virtio_mmio_probe(void) {
 }
 
 void test_virtio_magic_value(void) {
-    if (virtio_mmio_dev_count() < 1) return;
+    TEST_ASSERT(virtio_mmio_dev_count() >= 1, "virtio_init discovered a slot");
 
     struct virtio_mmio_dev *d = virtio_mmio_dev_get(0);
     TEST_ASSERT(d != NULL, "first slot present");
@@ -57,7 +57,7 @@ void test_virtio_magic_value(void) {
 }
 
 void test_virtio_version_modern(void) {
-    if (virtio_mmio_dev_count() < 1) return;
+    TEST_ASSERT(virtio_mmio_dev_count() >= 1, "virtio_init discovered a slot");
 
     // Version field per-slot. QEMU virt's slots may report version 1
     // (legacy) or version 2 (modern) depending on QEMU build defaults
@@ -77,11 +77,9 @@ void test_virtio_version_modern(void) {
 void test_virtio_rng_present(void) {
     // Tests run with `-device virtio-rng-device,id=rng0` in the QEMU
     // command line (per tools/run-vm.sh). Look for a slot with
-    // DeviceID = 4 (RNG). If absent, skip — environments without the
-    // -device flag (a hypothetical bare-board boot) keep the rest of
-    // the test suite valid.
+    // DeviceID = 4 (RNG): tools/run-vm.sh always attaches and declares it.
     struct virtio_mmio_dev *rng =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_RNG);
+        test_virtio_device(VIRTIO_DEVICE_ID_RNG, "thylacine.virtio-rng");
     if (!rng) return;
 
     TEST_EXPECT_EQ(rng->device_id, (u32)VIRTIO_DEVICE_ID_RNG,
@@ -91,7 +89,7 @@ void test_virtio_rng_present(void) {
 
 void test_virtio_negotiate_features_smoke(void) {
     struct virtio_mmio_dev *rng =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_RNG);
+        test_virtio_device(VIRTIO_DEVICE_ID_RNG, "thylacine.virtio-rng");
     if (!rng) return;
 
     // virtio-rng has no required features at v1.0 — passing 0 selects
@@ -116,7 +114,7 @@ void test_virtio_negotiate_features_smoke(void) {
 
 void test_virtio_virtqueue_alloc_destroy(void) {
     struct virtio_mmio_dev *rng =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_RNG);
+        test_virtio_device(VIRTIO_DEVICE_ID_RNG, "thylacine.virtio-rng");
     if (!rng) return;
 
     // Renegotiate features fresh — virtqueue_create requires the
@@ -198,7 +196,7 @@ void test_virtio_vq_size_for(void) {
 // Find a probed virtio-mmio page whose every slot is empty (device_id==0) --
 // safe to reset in a test without disturbing the live virtio-rng (no driver,
 // no random.c interaction behind an empty slot). Sets *page + *count; returns
-// false when no all-empty page exists (the test then skips).
+// false when no all-empty page exists, which the tests assert never happens.
 static bool find_empty_virtio_page(u64 *page_out, int *count_out) {
     int n = virtio_mmio_dev_count();
     for (int i = 0; i < n; i++) {
@@ -230,7 +228,8 @@ void test_virtio_proc_death_quiesces_device(void) {
     // device stayed armed across the KObj_DMA free.
     u64 page = 0;
     int expected = 0;
-    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+    TEST_ASSERT(find_empty_virtio_page(&page, &expected),
+                "an all-empty virtio-mmio page (QEMU fills the slots from 31 down)");
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -262,7 +261,8 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
     // VMA walk. (The covered fd-open path is test_virtio_proc_death_quiesces_device.)
     u64 page = 0;
     int expected = 0;
-    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+    TEST_ASSERT(find_empty_virtio_page(&page, &expected),
+                "an all-empty virtio-mmio page (QEMU fills the slots from 31 down)");
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -373,7 +373,8 @@ static void exec_quiesce_thunk(void *arg) {
 void test_virtio_exec_quiesces_devices(void) {
     u64 page = 0;
     int expected = 0;
-    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+    TEST_ASSERT(find_empty_virtio_page(&page, &expected),
+                "an all-empty virtio-mmio page (QEMU fills the slots from 31 down)");
 
     g_exec_quiesce.page = page;
     g_exec_quiesce.sharer = NULL;
@@ -415,7 +416,8 @@ void test_virtio_exec_quiesces_devices(void) {
 void test_virtio_last_unref_quiesces_mapped_device(void) {
     u64 page = 0;
     int expected = 0;
-    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+    TEST_ASSERT(find_empty_virtio_page(&page, &expected),
+                "an all-empty virtio-mmio page (QEMU fills the slots from 31 down)");
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");

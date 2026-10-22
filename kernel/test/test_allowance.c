@@ -289,12 +289,14 @@ void test_allowance_pci_claim_handler_gate(void) {
     // Proc -- the wiring (resolve -> allowance_permits(HW_RES_PCI) -> claim/deny)
     // the pci_membership unit test (predicate + resolve in isolation) leaves
     // uncovered. A refactor that dropped the gate call at syscall.c would pass
-    // the predicate test but FAIL here. Guarded on the live rng-pci (no PCIe root
-    // -> SKIP). Drives it on kproc (CAP_ALL, so the CAP_HW_CREATE gate passes),
+    // the predicate test but FAIL here. Needs the live rng-pci (test_requires). Drives it on kproc (CAP_ALL, so the CAP_HW_CREATE gate passes),
     // temporarily narrowed + restored to broad before return (the
     // narrowed_proc_cannot_spawn discipline; single-threaded test window).
     u8 rb, rd, rf;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) != 0) return;  // SKIP
+    if (!test_requires(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) == 0,
+                       "thylacine.virtio-pci-rng", 0, true,
+                       "no PCI function carries its DeviceID"))
+        return;
 
     struct Proc *me = kproc();
     TEST_ASSERT(me != NULL && me->allowance == NULL, "kproc broad");

@@ -33,7 +33,6 @@ struct test_case {
     void (*fn)(void);       // test body; calls TEST_ASSERT / TEST_FAIL
     bool failed;            // set by the harness if the test fails
     const char *fail_msg;
-    bool skipped;           // the configuration lacks what it needs; it did not run
 };
 
 // Sentinel-terminated array of all tests. Defined in kernel/test/test.c.
@@ -76,26 +75,41 @@ unsigned test_soft_warns(void);
 // A skipped test is neither passed nor failed: it logs a [skip] line and the
 // boot summary counts it. There is deliberately no bare skip call -- a test
 // skips only through a helper that first proves the configuration permits the
-// absence (test_probe_lookup, test_virtio_device), and tools/test.sh refuses a
-// [skip] line of any other shape.
+// absence (test_requires and its wrappers, test_image_lookup), and
+// tools/test.sh refuses a [skip] line of any other shape, and a skip of
+// anything its own configuration attaches. A test must never return early on
+// a configuration it does not have without one of these.
 
 // Count of tests skipped during the last test_run_all.
 unsigned test_skipped(void);
 
-// Look up a probe binary in the boot ramfs. Returns 0 with the blob. A miss
-// returns -1 after FAILING the test when the image carries userspace
-// (bin/joey) -- a stale ramfs would otherwise pass by skipping -- and after
-// skipping it when the image carries none. A userspace-less image fails the
-// suite anyway (test_devramfs_live_bin_holds_the_programs); the skip keeps
-// that one cause from reading as a failure per probe.
+// Look up a file in the boot ramfs that ships whenever `key` does. Returns 0
+// with the blob. A miss returns -1 after FAILING the test when the image
+// carries `key` -- a stale ramfs would otherwise pass by skipping -- and after
+// skipping it when the image carries neither.
+int test_image_lookup(const char *path, const char *key, const void **blob, size_t *size);
+
+// A probe binary: ships whenever the image carries userspace (bin/joey). A
+// userspace-less image fails the suite anyway
+// (test_devramfs_live_bin_holds_the_programs); the skip keeps that one cause
+// from reading as a failure per probe.
 int test_probe_lookup(const char *path, const void **blob, size_t *size);
 
-// The virtio-mmio device a test drives. QEMU's virt machine always has 32
-// slots and an empty one reads DeviceID 0, so only the launcher knows what it
-// attached: tools/run-vm.sh declares each MMIO device as a bootargs token
-// (thylacine.virtio-net / -blk / -input / -gpu). Returns the device, or NULL
-// after FAILING the test (declared, yet no slot carries it) or skipping it
-// (not declared: this configuration lacks it).
+// What a test needs from the machine, named by the bootargs word the launcher
+// (tools/run-vm.sh) adds once per instance it attached: thylacine.virtio-<kind>
+// per virtio-mmio device, thylacine.virtio-pci-<kind> per virtio PCI function,
+// thylacine.smp for more than one CPU, thylacine.msi for an MSI controller it
+// knows the machine has. `nth` is the instance the test needs (0 = the first).
+// Returns true when that instance is present. Absent and declared: FAILS the
+// test. Absent and undeclared: a counted skip, since this configuration lacks
+// it. Present and undeclared: FAILS the test when `exact` (the launcher
+// declares every instance of that kind, so it attached what it did not
+// declare); a kind the launcher can leave undeclared passes exact = false.
+bool test_requires(bool present, const char *token, u32 nth, bool exact, const char *absent);
+
+// The virtio-mmio device a test drives (test_requires, exact). QEMU's virt
+// machine always has 32 slots and an empty one reads DeviceID 0, so only the
+// launcher knows what it attached. Returns the device, or NULL.
 struct virtio_mmio_dev;
 struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token);
 

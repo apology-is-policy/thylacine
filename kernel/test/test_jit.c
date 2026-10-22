@@ -1193,10 +1193,8 @@ void test_jit_space_sync_targets(void) {
     unsigned np = 0;
     for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS && np < SS_LEGS; c++)
         if (c != self && g_cpu_alive[c]) cpu[np++] = c;
-    if (np == 0) {
-        uart_puts("  jit.space_sync_targets: one CPU, so no leg ran\n");
+    if (!test_requires(np > 0, "thylacine.smp", 0, true, "no peer CPU is alive"))
         return;
-    }
 
     __atomic_store_n(&g_ss_stop, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_ss_hold_req, 0u, __ATOMIC_RELEASE);

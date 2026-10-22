@@ -801,30 +801,44 @@ if [[ -n "${THYLACINE_QEMU_EXTRA:-}" ]]; then
     extra_qemu_args+=("${_env_extra[@]}")
 fi
 
-# The virtio-mmio devices this boot attaches, declared to the kernel as
-# bootargs tokens (vote 17). QEMU's virt machine always has 32 virtio-mmio
-# slots and an empty one reads DeviceID 0, so only the launcher knows what it
-# attached: a kernel test whose device is declared FAILS when it cannot find
-# it, and one whose device is not declared is a counted skip. Derived from the
-# final device arguments, extras included, so it cannot drift from what QEMU
-# is given; PCI functions are not virtio-mmio slots and declare nothing.
+# What this boot attached, declared to the kernel as bootargs words, one per
+# instance (vote 17). QEMU's virt machine always has 32 virtio-mmio slots and an
+# empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device the
+# same way, so only the launcher knows what it asked for: a kernel test FAILS
+# when what it needs was declared and is absent, or is present undeclared, and
+# skips (counted) when it was not declared. Derived from the final -device
+# arguments, extras included, so it cannot drift from what QEMU is given:
+# thylacine.virtio-<kind> per virtio-mmio device and thylacine.virtio-pci-<kind>
+# per virtio PCI function (keyboard, mouse and tablet are kind input).
+rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)
+_prev=
 for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]}"} \
             ${net_flags[@]+"${net_flags[@]}"} ${input_flags[@]+"${input_flags[@]}"} \
-            ${gpu_flags[@]+"${gpu_flags[@]}"} ${audio_flags[@]+"${audio_flags[@]}"} \
+            ${gpu_flags[@]+"${gpu_flags[@]}"} "${rng_flags[@]}" ${audio_flags[@]+"${audio_flags[@]}"} \
             ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
             ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
-    case "$_arg" in
-        virtio-blk-device|virtio-blk-device,*) _virtio_kind=blk ;;
-        virtio-net-device|virtio-net-device,*) _virtio_kind=net ;;
-        virtio-keyboard-device|virtio-keyboard-device,*|virtio-mouse-device|virtio-mouse-device,*|virtio-tablet-device|virtio-tablet-device,*) _virtio_kind=input ;;
-        virtio-gpu-device|virtio-gpu-device,*) _virtio_kind=gpu ;;
-        *) continue ;;
-    esac
-    case " ${append_tokens[*]+${append_tokens[*]}} " in
-        *" thylacine.virtio-$_virtio_kind "*) ;;
-        *) append_tokens+=("thylacine.virtio-$_virtio_kind") ;;
-    esac
+    if [[ "$_prev" == -device ]]; then
+        _spec=${_arg%%,*}
+        case "$_spec" in
+            virtio-*-device) _bus=; _kind=${_spec#virtio-}; _kind=${_kind%-device} ;;
+            virtio-*-pci)    _bus=pci-; _kind=${_spec#virtio-}; _kind=${_kind%-pci} ;;
+            *)               _kind= ;;
+        esac
+        case "$_kind" in keyboard|mouse|tablet) _kind=input ;; esac
+        [[ -z "$_kind" ]] || append_tokens+=("thylacine.virtio-$_bus$_kind")
+    fi
+    _prev=$_arg
 done
+if [[ "$cpus" =~ ^[0-9]+$ ]] && (( cpus >= 2 )); then
+    append_tokens+=("thylacine.smp")
+fi
+# An MSI controller, when the launcher can know the machine has one: GICv2
+# always carries a v2m frame, GICv3 an ITS when asked for, and under TCG by
+# QEMU's default. KVM or hvf with GICv3 and its=auto leave it to the host, so
+# nothing is declared and the MSI tests do not require it.
+case "$gicv:${THYLACINE_ITS:-auto}:$accel" in
+    2:*|*:on:*|3:auto:tcg) append_tokens+=("thylacine.msi") ;;
+esac
 append_flags=()
 if (( ${#append_tokens[@]} > 0 )); then
     append_flags=(-append "${append_tokens[*]}")
@@ -853,8 +867,7 @@ exec qemu-system-aarch64 \
     ${net_flags[@]+"${net_flags[@]}"} \
     ${input_flags[@]+"${input_flags[@]}"} \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
-    -device virtio-rng-device,id=rng0 \
-    -device virtio-rng-pci,id=rng_pci0 \
+    "${rng_flags[@]}" \
     ${audio_flags[@]+"${audio_flags[@]}"} \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \

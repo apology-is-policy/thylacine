@@ -3024,10 +3024,8 @@ void test_cons_tx_unit_smp_no_tear(void) {
     TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
     TEST_ASSERT(2u * TUS_UNITS * TUS_UNIT < cap, "the two producers must fit the ring together");
     unsigned cpus = smp_cpu_count();
-    if (cpus < 2) {
-        uart_puts(" (SKIP: one CPU -- two pushers cannot interleave) ");
+    if (!test_requires(cpus >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
-    }
 
     g_tus_a_done = g_tus_b_done = 0;
     g_tus_a_busy = g_tus_b_busy = false;

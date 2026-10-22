@@ -167,21 +167,28 @@ so the documented way to turn the feature off would have been inert on arrival.
 it — the VNC client must land on `gpu0`'s head. `cocoa` keeps the canonical
 device set because its View menu switches consoles interactively.
 
-**The launcher declares the virtio-mmio devices it attached (vote 17,
-2026-10-22).** QEMU's virt machine always has thirty-two virtio-mmio slots, and
-an empty one reads DeviceID 0, so the guest cannot tell a device that was never
-attached from one its scan failed to see -- only the launcher knows. Just before
-`exec`, the script walks every device argument it is about to pass (the extra
-arguments included) and appends one token per MMIO class found:
-`thylacine.virtio-blk`, `-net`, `-input` (a keyboard, mouse or tablet MMIO
-device) or `-gpu`, each once. PCI functions are not virtio-mmio slots and
-declare nothing. The list is derived from the arguments, not written beside
-them, so dropping a device -- `THYLACINE_NO_NET=1`, a missing `disk.img`, the
-vnc display's dropped MMIO GPU -- drops its token with it. The kernel tests that
-drive a device FAIL when it is declared and absent, and count a skip when it is
-undeclared ([[sub-substrate-kernel-suite]]). The append-flags array is now built
-after that walk, at the end of the script, rather than straight after the
-other tokens.
+**The launcher declares what it attached, one word per instance (vote 17,
+2026-10-22).** QEMU's virt machine always has thirty-two virtio-mmio slots and
+an empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device
+the same way, so the guest cannot tell a device that was never attached from
+one it failed to see -- only the launcher knows. Just before `exec`, the script
+walks every `-device` it is about to pass (the extra arguments and the two rng
+devices included) and appends one bootargs word per device:
+`thylacine.virtio-<kind>` for a virtio-mmio device and
+`thylacine.virtio-pci-<kind>` for a virtio PCI function, the kind read from
+the device name (keyboard, mouse and tablet are `input`). Then `thylacine.smp`
+for more than one CPU, and `thylacine.msi` when the launcher knows the machine
+has an MSI controller: GICv2 always carries a v2m frame, GICv3 an ITS when
+asked for and under TCG by QEMU's default; KVM or hvf with GICv3 and
+`its=auto` declare nothing. The words are derived from the arguments, not
+written beside them, so dropping a device -- `THYLACINE_NO_NET=1`, a missing
+`disk.img`, the vnc display's dropped MMIO GPU -- drops its word with it. The
+kernel tests FAIL on what is declared and absent, and on what is present and
+undeclared, and count a skip on what is undeclared and absent
+([[sub-substrate-kernel-suite]]); `tools/test.sh` mirrors the same rules from
+its own environment ([[sub-substrate-gates]]). Every other token is appended
+before the walk, so a userspace reader with a short buffer (aurora and
+debug-probe read 256 bytes) still finds its own word where it was.
 
 ## Data structures
 
