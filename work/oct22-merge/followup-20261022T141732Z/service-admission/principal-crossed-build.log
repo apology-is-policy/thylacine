@@ -1,0 +1,3 @@
+argv: clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/principal-crossed.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/principal-crossed -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 38460d0f60b798093debd87c2ec92c3eedcabccfa226eb23378fff489dff37da  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/principal-crossed.c

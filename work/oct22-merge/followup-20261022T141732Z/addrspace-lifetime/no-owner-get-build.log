@@ -1,0 +1,3 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/no-owner-get.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/no-owner-get -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 8f1b02763d38bcff9cdff393d8a86eccc29b360dc78c1e673b17d548b14ab80e  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/no-owner-get.c

@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-3g6imvpk/drain-every-owner.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-3g6imvpk/drain-every-owner -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g
+env: {}
+sha256: 3e6dc9403e0ddf01b40a685c5488cd9f866264d2369c7f5dcae650deae12a75f  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-3g6imvpk/drain-every-owner.c

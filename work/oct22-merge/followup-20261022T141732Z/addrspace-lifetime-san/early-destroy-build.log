@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-3g6imvpk/early-destroy.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-3g6imvpk/early-destroy -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g
+env: {}
+sha256: 4adf27fdbbe26e9a97f1ca7533260f6f719a5516bd2d94522a5ea78073248a2c  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-3g6imvpk/early-destroy.c

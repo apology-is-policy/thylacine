@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/poster-principal-uncaptured.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/poster-principal-uncaptured -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g
+env: {}
+sha256: 4b072fa93ae0d6a101dc04bbe19405772a15bf091338b7bf3b2d82542bad8aa8  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/poster-principal-uncaptured.c

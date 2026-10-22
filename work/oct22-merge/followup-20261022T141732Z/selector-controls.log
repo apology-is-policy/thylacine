@@ -1,0 +1,9 @@
+2026-10-22T14:19:49Z  HEAD 5b09462a5069aafd9592012e3d74454826f297f1, tracked changes: 0
+2026-10-22T14:19:49Z  START missing: env -u CC LLVM_PREFIX=/nonexistent python3 -I tools/test-sqpoll-ticket.py --logs work/oct22-merge/selector-20261022T141949Z/missing
+2026-10-22T14:19:49Z  END missing rc=3 as expected (SANITIZER TOOLING: no CC and no LLVM clang at /nonexistent/bin/clang)
+2026-10-22T14:19:49Z  START apple-clang: env CC=/usr/bin/clang python3 -I tools/test-sqpoll-ticket.py --logs work/oct22-merge/selector-20261022T141949Z/apple-clang
+2026-10-22T14:20:10Z  END apple-clang rc=3 as expected (SANITIZER TOOLING: /usr/bin/clang: an empty sanitized program)
+2026-10-22T14:20:10Z  START explicit-llvm: env CC=/opt/homebrew/opt/llvm/bin/clang python3 -I tools/test-sqpoll-ticket.py --mutants --logs work/oct22-merge/selector-20261022T141949Z/explicit-llvm
+2026-10-22T14:20:16Z  END explicit-llvm rc=0 as expected (PASS overflow)
+2026-10-22T14:20:16Z  explicit-llvm compiler.txt records source: CC=/opt/homebrew/opt/llvm/bin/clang
+2026-10-22T14:20:16Z  SELECTOR CONTROLS PASS

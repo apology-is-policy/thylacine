@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/drop-groups.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/drop-groups -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g
+env: {}
+sha256: 71bcc7580dae371cc7a5092afd241c7811a98cd5bb69005d2cf8fcca9b89b4b1  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/drop-groups.c

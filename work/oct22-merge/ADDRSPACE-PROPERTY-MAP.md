@@ -87,4 +87,14 @@ kernel's external linkage so `skip-drain` compiles and meets its assertion.
 host-20261022T131737Z at b07adeb81: `test-addrspace-lifetime.log` (clean +
 15/15, unsanitized) and `test-addrspace-lifetime-san.log` (clean + 15/15,
 Homebrew LLVM ASan/UBSan); each driver run requires rc 1 and the wanted text
-for every mutant.
+for every mutant. That record predates C1's case and is kept unchanged.
+
+followup-20261022T141732Z at 5b09462a5 (Astra's review): `addrspace-lifetime.log`
+(unsanitized) and `addrspace-lifetime-san.log` (Homebrew LLVM ASan/UBSan with
+`-fno-sanitize-recover=all`) each pass `clean`, `clean@split` and 18/18
+mutants, every one killed by its named assertion. The verdict refuses any
+sanitizer report, so a mutant killed by a report instead of its assertion
+would count as a survivor. Each case's build log in `addrspace-lifetime*/`
+opens with its argv, environment and the sha256 of the source it compiled;
+`checker.log` is the verdict's own five controls on real reports (three
+refused with the report seen, two accepted).

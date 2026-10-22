@@ -1,0 +1,20 @@
+PASS clean: actual-source lifetime
+PASS clean@split: actual-source lifetime
+PASS private-sharing: private guard refuses sharing
+PASS already-shared: shared image refuses private guard
+PASS guard-no-pin: guard pins lifetime without adding owner
+PASS guard-leak: final guard releases pin and exclusion
+PASS pin-as-owner: pin is not an owner
+PASS no-owner-get: owner increments both counts
+PASS skip-drain: last owner drains before last pin
+PASS drain-every-owner: nonfinal owner preserves mappings
+PASS pin-leak: final pin frees once without another drain
+PASS drop-before-drain: extinction: AddrSpace final lifetime drop before mapping drain
+PASS early-destroy: extinction: AddrSpace final lifetime drop with live owners
+PASS release-drops-lifetime: last owner drains before last pin
+PASS release-early-last: extinction: addrspace_destroy of an AddrSpace still owned
+PASS no-quiesce: last owner stops each mapped device once, before the drain
+PASS quiesce-after-drain: last owner stops each mapped device once, before the drain
+PASS release-drops-lifetime@split: between release and destroy the last owner's lifetime is held
+PASS teardown-in-release: release tears nothing down before destroy
+PASS early-destroy@split: extinction: AddrSpace final lifetime drop before mapping drain

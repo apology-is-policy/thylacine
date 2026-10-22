@@ -1,0 +1,3 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/release-drops-lifetime.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/release-drops-lifetime -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: f429aa73c6dea211d0a2007f4f2fc11ed967a95a99ced5a5370878a0ba51153c  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/release-drops-lifetime.c

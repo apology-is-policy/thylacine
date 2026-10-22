@@ -1,0 +1,3 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/no-quiesce.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/no-quiesce -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 53e9e5fa1b5f7149e7d096115714528e08817351d1eaf098a4f5f43e0e8e85e1  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/no-quiesce.c

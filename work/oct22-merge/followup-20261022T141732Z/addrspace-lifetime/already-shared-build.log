@@ -1,0 +1,3 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/already-shared.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/already-shared -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 3ffac6d57b041846a0854aa18ea547e7b517f4d64e405d7174f8d10752529f18  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/already-shared.c

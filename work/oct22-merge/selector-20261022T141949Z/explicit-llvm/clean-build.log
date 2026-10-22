@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -Wall -Wextra -Werror -O1 -pthread -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sqpoll-ticket-2_sbz77f/clean.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sqpoll-ticket-2_sbz77f/clean -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {"CC": "/opt/homebrew/opt/llvm/bin/clang"}
+sha256: 5dca7481a1a62026b7960ad770adf4f762343c4e68a6b35af49a63311c76f2b4  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sqpoll-ticket-2_sbz77f/clean.c

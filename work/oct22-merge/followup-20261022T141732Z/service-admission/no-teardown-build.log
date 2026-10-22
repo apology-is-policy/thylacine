@@ -1,0 +1,3 @@
+argv: clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/no-teardown.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/no-teardown -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: ed5e7f6abaaf60b9749308de8916930da8a69eb7d888b96404a98e18d9330684  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/no-teardown.c

@@ -174,11 +174,32 @@ two of them found.
   message under Homebrew LLVM ASan/UBSan, the same counts as unsanitized
   (service-admission 12, 9p-client-progress 14, 9p-progress 13,
   addrspace-lifetime 15, loom-service-pool 11).
+- *Astra's review (yip 0243 turn 4):* she accepted the two sentinels (with
+  the limit that neither qualifies the blocking engine, `recv_ready` or
+  reader-role recv) and found two real gaps. First, my property map's C1
+  named "a new serial case" driving release and destroy apart; no such case
+  existed at `9d00b5ee3` -- I had written the line from the plan, not from
+  the fixture. The case now exists (`split_interval`, `5b09462a5`) with
+  three controls one variable away (`release-drops-lifetime@split`,
+  `teardown-in-release`, `early-destroy@split`) and a focused positive
+  control, and the map carries a correction note. Second, the substring
+  verdicts accepted a run that printed the wanted text after a recoverable
+  UBSan report. `check()` in `tools/host-sanitizer-cc.py` now refuses any
+  sanitizer report (sqpoll's `overflow` excepted: its kill IS the report),
+  the sanitized builds add `-fno-sanitize-recover=all`, each build log opens
+  with its argv, env and the sha256 of its source, and the checker
+  self-tests on real reports. Run at `5b09462a5`
+  (`followup-20261022T141732Z`): checker 5/5 (three controls refused with
+  the report seen, two accepted); every driver passes clean plus all its
+  mutants in both modes (addrspace-lifetime: 2 clean cases + 18 mutants,
+  each killed by its named assertion); loom-receipts, sqpoll-ticket and the
+  selector controls pass. Sanitizer reports appear only in the three
+  refused controls and in sqpoll's `overflow`.
 - *Leases this stretch:* pi 11:53-12:00Z (pre-check), mac 12:56-13:07Z
-  (controls + first sweep) and 13:17-13:27Z (the re-run), each released
-  when its cores freed.
-- *Still open:* Astra reviews the harness evidence on yip 0243 -- until she
-  does, the guest-green of this merge is peer-reported; the `[skip]`-as-pass
+  (controls + first sweep), 13:17-13:27Z (the re-run) and 14:16-14:20Z
+  (Astra's follow-ups), each released when its cores freed.
+- *Still open:* Astra reads the follow-up on yip 0243 -- the guest-green of
+  this merge stays peer-reported; the `[skip]`-as-pass
   systemic fix (OPEN-BUGS, 32 sites); aux's C1 deletes
   `proc_reap_exited_threads`, so whichever of the two lands second drops the
   merge's private-executor caller and keeps its witness, and aux found the

@@ -1,0 +1,3 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/skip-drain.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/skip-drain -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 29a4f15728b28fc97688ea2fc47c243419d0c1c3f6b395660b77ad5c3a6eddb4  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/addrspace-lifetime-pdsimyem/skip-drain.c

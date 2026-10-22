@@ -1,0 +1,4 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -I /Users/northkillpd/projects/thylacine-corona/kernel/include /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-pool-fixture-dlcr9i98/reuse-held.c /Users/northkillpd/projects/thylacine-corona/tools/host-tests/loom-service-pool.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-pool-fixture-dlcr9i98/reuse-held -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 35456a93dc6fb6208c4ca69b8b5c196038727d58d185cc6ecd382ff34606dd55  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-pool-fixture-dlcr9i98/reuse-held.c
+sha256: 438910fe10ada265771db9d33152a72df96e6264005098dc6f7cc2db781572ae  /Users/northkillpd/projects/thylacine-corona/tools/host-tests/loom-service-pool.c

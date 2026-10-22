@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -O0 /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sanitizer-check-4qec4ld1/assertion-only.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sanitizer-check-4qec4ld1/assertion-only -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 9bd16e329d4d7fdc0e93f315ba8da2f10891b48b5c962c23ecfdaaeef595d41d  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sanitizer-check-4qec4ld1/assertion-only.c

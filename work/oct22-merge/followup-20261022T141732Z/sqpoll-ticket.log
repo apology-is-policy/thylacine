@@ -1,0 +1,9 @@
+PASS clean
+PASS image: wrong image refused
+PASS zombie: zombie refused
+PASS terminating: terminating refused
+PASS cap: shared cap enforced
+PASS occupied: occupied ticket refused
+PASS consume: refund survives exec
+PASS identity: missing creator refused
+PASS overflow: signed integer overflow
