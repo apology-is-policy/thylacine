@@ -2448,6 +2448,15 @@ aux-3-c1). Replaces the 2026-10-20 interim fix above, in which an exited thread 
   `proc.sqpoll_charge_after_finished_workers` (was `reap_before_sqpoll_charge`), `scheduler.run_counts_match_trees`;
   `proc.reap_keeps_thread_cap_open` and both exec-wait tests kept. The old `proc.reap_exited_threads_frees_peers` is
   gone with its function.
-- **Audit.** *(pending: Fable r1 running)*
+- **Audit.** Round 1, holotype-reviewer on Fable 5.1 reviewing Opus 5.5 (MODEL start == end): 0 P0, 0 P1, 1 P2,
+  2 P3, no production defect. F1 [P2]: test fixtures read user-Proc Threads after the reaper freed them -> every
+  readied fixture thread is read by tid under its Proc's threads_lock (`test_thread_view`, `test_thread_sleeping`,
+  `test_thread_wake`), and what a thread sees after its own sleep is snapshotted by its entry. F2 [P3]: two
+  AUDIT-TRIGGERS rows named the deleted functions -> fixed, and the C1 row added. F3 [P3]: the fold test checked
+  only > 0 -> each worker records its run time and stack depth before it exits, and the test asserts the fold
+  covers them. Self-found, same rigor: the joey thread prover asserted the interim timing; three more fixture
+  reads of a freed thread (exit-close's debug_rendez wake, the dying-group workers' poll of main, the closer's
+  exit-close probe); a release check and a kstack read off a freed thread. The round missed the userspace
+  prover and the test release paths; the sweep's missed pattern was a thread publishing its own pointer.
 - **Posture.** *(pending: the Mac lease -- ci suite, sabotage of each new test, SMP matrix, UBSan, the boot stack
   watermark, 100,000 create+join with kstack pages flat, the storm row)*
