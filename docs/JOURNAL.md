@@ -124,6 +124,16 @@ needed the operator.
   configurations x 10 boots with 0 corruption. The SMP gate keeps logs only
   on failure, so the twin's PASS is shown per boot for the three gate legs,
   not for the 50 SMP boots. Pi bake `work/oct19-pi/bake-20261022T064530Z`.
+- *The A72/KVM axis* (thyla-pi, 4x Cortex-A72 under KVM,
+  `work/oct19-pi/run-20261022T064755Z`): PI AXIS GREEN. default-smp4 and
+  ubsan-smp4 ran 10 boots each, every one at 1901/1901 with D7 once and no
+  extinction, and the twin PASS in all 20 boot logs. The launching ssh hung
+  and the remote host closed it at 06:59:44Z, but the driver was already
+  running detached. I confirmed that on the pi by hand, recorded it in the
+  run's stages, and re-attached with `wait`. The run of 10-21 16:41Z
+  (`run-20261021T164129Z`, at `293cdbabe`) had been refused before boot 1,
+  because the pi had no pool snapshot twin; the run phase now makes and
+  verifies the twins on the pi.
 - *Decisions the operator made:* vote 16 (the per-CPU magazine lock, over
   stop-the-world draining), and two deletions to get back over the disk
   floor: my AS-R9 run binaries, and the build/ of the landed

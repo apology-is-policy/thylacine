@@ -186,6 +186,14 @@ func TestUnterminatedFlowListFails(t *testing.T) {
 	wantFailContaining(t, fails, "unterminated flow list")
 }
 
+func TestRepeatedFrontKeyFails(t *testing.T) {
+	root := fixture(t)
+	mutate(t, root, "vault/system/t/sub-t-x.md",
+		"audit: light\n", "audit: light\nvalidated-by: [gate-t]\n")
+	fails, _ := runLint(root, false)
+	wantFailContaining(t, fails, "frontmatter key 'validated-by' repeated")
+}
+
 func TestUpdatedForbiddenOnRecord(t *testing.T) {
 	root := fixture(t)
 	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",

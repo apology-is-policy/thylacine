@@ -55,6 +55,8 @@ func valueEqual(a, b Value) bool {
 type Front struct {
 	m    map[string]Value
 	keys []string
+	// Keys that appeared on more than one `key:` line; the later value won.
+	repeated []string
 }
 
 func newFront() *Front { return &Front{m: map[string]Value{}} }
@@ -69,6 +71,7 @@ func (f *Front) Set(k string, v Value) {
 func (f *Front) Get(k string) (Value, bool) { v, ok := f.m[k]; return v, ok }
 func (f *Front) Has(k string) bool          { _, ok := f.m[k]; return ok }
 func (f *Front) Keys() []string             { return f.keys }
+func (f *Front) Repeated() []string         { return f.repeated }
 func (f *Front) Len() int                   { return len(f.m) }
 
 // Str returns the scalar value, or "" when absent or a list.
@@ -178,6 +181,9 @@ func parseFront(text string) (*Front, string, bool) {
 		m := kvRe.FindStringSubmatch(raw)
 		if m == nil {
 			continue
+		}
+		if front.Has(m[1]) {
+			front.repeated = append(front.repeated, m[1])
 		}
 		key = m[1]
 		haveKey = true
