@@ -43,7 +43,6 @@
 #include <thylacine/devsrv.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
 #include <thylacine/thread.h>   // ARCH 8.12: THREAD_KSTACK_* (/ctl/kstack)
-#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count (/proc/stat intr)

@@ -13,6 +13,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/thread.h>
 #include <thylacine/vma.h>
 
 _Static_assert(LOOM_REGISTER_SERVICE_TARGET == 2u && LOOM_REGISTER_QUERY_SERVICE_POOL == 9u,
@@ -113,6 +114,10 @@ int loom_private_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
         mapped = true;
     }
     spin_unlock(&as->lock);
+    // thread_count counts the Proc's exited peers until they are freed, so free
+    // them before the executor's charge, as the public SQPOLL setup and both
+    // thread-create arms do. Only a thread of p may.
+    if (!rc && p == current_thread()->proc) proc_reap_exited_threads();
     if (!rc) rc = loom_private_start_executor(l);
 
     // Everything the caller learns is read before the handle exists: once it is

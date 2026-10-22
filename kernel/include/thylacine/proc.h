@@ -1677,6 +1677,9 @@ void proc_sqpoll_uncharge(struct Proc *p);
 // is zero-initialized, noncopyable kernel-owned storage, retained through actual
 // worker retirement. Both operations serialize its contents under the process
 // table lock; never call while holding that lock or a Loom/protocol lock.
+// A caller in the charged Proc frees its exited peers first
+// (proc_reap_exited_threads): thread_count counts them, and this walk, under
+// the table lock, cannot.
 // Caller retains the original AddrSpace descriptor across admission. Admission
 // requires that live original image; refund matches only stripes so
 // exec cannot strand a charge in the surviving Proc. A reaped creator needs no

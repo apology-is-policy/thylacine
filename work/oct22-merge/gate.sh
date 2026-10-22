@@ -20,8 +20,9 @@
 #              ubsan-smp4/8) at N=10, with its disk floor at build.sh's 6 GiB.
 #   HOST       not run here: work/oct22-merge/host.sh (every tools/test-*.py,
 #              the loom-client suite, the Rust host tests, the sims mutants,
-#              the burrow spec cfgs) runs before this, and mutants.sh (the
-#              restored ref-rollback witness) too.
+#              the burrow spec cfgs) runs before this, and mutants.sh too (R1:
+#              the restored ref-rollback witness; R2: audit F1's reap before
+#              the private executor's charge, in the qualification image).
 #   Not proven here: the A72/KVM axis.
 # DRYRUN=1 stops after the preconditions (no lease needed, nothing built).
 # Run from the checkout root (no cd): MERGE_PIN=<full sha> sh work/oct22-merge/gate.sh

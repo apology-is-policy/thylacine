@@ -1499,8 +1499,9 @@ enum {
     //                       cannot arrive). The wait is death-interruptible (#811).
     //   x3 = flags        : LOOM_ENTER_* (LOOM_ENTER_GETEVENTS / _NONBLOCK).
     // Returns the number of SQEs consumed (>= 0), -T_E_BADF when loom_fd names
-    // no ring, or -1 on bad args. Every argument is read as a 32-bit value:
-    // its high word is ignored. Per-op
+    // no ring (a descriptor wider than an index names none), or -T_E_INVAL
+    // for an unknown flag; to_submit, min_complete and flags are refused
+    // (-T_E_INVAL), never truncated, when they do not fit 32 bits. Per-op
     // failures (bad opcode / handle / rights) surface as an error CQE (result <
     // 0), NOT a syscall error -- the SQE was still consumed. v1.0 dispatches the
     // no-payload opcodes (NOP / FSYNC); the payload opcodes (READ/WRITE/GETATTR/

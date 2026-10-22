@@ -34,6 +34,11 @@
 //                                            the Proc lives, and the Proc keeps
 //                                            their run time + kstack watermark;
 //                                            a debug focus naming one clears.
+//   proc.reap_before_private_executor_charge -- the private ring's executor
+//                                            charge frees exited peers first,
+//                                            as the public SQPOLL setup does
+//                                            (qualification image; the default
+//                                            refuses the setup untouched).
 //   proc.reap_keeps_thread_cap_open       -- 300 workers started and finished
 //                                            one after another under a
 //                                            non-exempt principal: the cap
@@ -75,6 +80,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
+#include <thylacine/loom_service_syscall.h>
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -750,6 +756,76 @@ void test_proc_reap_before_sqpoll_charge(void) {
     TEST_EXPECT_EQ(g_rsq_sqpoll_after, 1, "the poller took its charge");
     TEST_EXPECT_EQ(g_rsq_close_rc, 0, "close the SQPOLL ring");
     TEST_EXPECT_EQ(g_rsq_sqpoll_closed, 0, "the charge settled on close");
+}
+
+// The private ring's executor is charged to the same budget, so its setup frees
+// the exited peers first too. Only the qualification image routes a private
+// setup; the default one refuses it before anything is charged or freed.
+static volatile int  g_rpx_count_before, g_rpx_count_after, g_rpx_setup_rc;
+static volatile int  g_rpx_charged_after, g_rpx_close_rc;
+static volatile bool g_rpx_exempt;
+
+static void rpx_entry(void *arg) {
+    (void)arg;
+    struct Proc   *p    = current_thread()->proc;
+    struct Thread *self = current_thread();
+    proc_apply_identity(p, 1000u, 1000u, NULL, 0);
+    g_rpx_exempt   = proc_resource_exempt(p);
+    g_rpx_setup_rc = g_rpx_close_rc = -1;
+    for (int i = 0; i < PROC_THREAD_MAX - 1; i++) {
+        struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
+        if (!w) extinction("rpx_entry: thread_create_with_arg failed");
+        ready(w);
+    }
+    TEST_YIELD_UNTIL_PROC(rsq_peers_dead(p, self));
+
+    irq_state_t s = proc_table_lock_acquire();
+    g_rpx_count_before = p->thread_count;
+    proc_table_lock_release(s);
+    struct loom_params kp;
+    hidx_t fd = -1;
+    g_rpx_setup_rc = loom_private_setup_for_proc(p, 8, LOOM_SETUP_PRIVATE_SERVICE, &kp, &fd);
+    s = proc_table_lock_acquire();
+    g_rpx_count_after   = p->thread_count;
+    g_rpx_charged_after = p->loom_sqpoll_count;
+    proc_table_lock_release(s);
+    if (g_rpx_setup_rc == 0) g_rpx_close_rc = handle_close(p, fd);
+    exits("ok");
+}
+
+void test_proc_reap_before_private_executor_charge(void);
+void test_proc_reap_before_private_executor_charge(void) {
+    u64 made0 = loom_private_created(), gone0 = loom_private_retired();
+    int child_pid = rfork(RFPROC, rpx_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    // The retirer is its own thread; both counts are monotonic, so wait until
+    // every ring this test made has gone before the next test reads a gauge.
+    u64 deadline = timer_now_ns() + 5000000000ull;
+    while (loom_private_retired() - gone0 < loom_private_created() - made0 &&
+           timer_now_ns() < deadline)
+        sched();
+    u64 made = loom_private_created() - made0, gone = loom_private_retired() - gone0;
+
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_ASSERT(!g_rpx_exempt, "the child runs as a user, so the cap applies");
+    TEST_EXPECT_EQ(g_rpx_count_before, PROC_THREAD_MAX,
+        "255 finished workers and the caller fill the thread budget");
+    TEST_EXPECT_EQ(gone, made, "every private ring made here retired");
+#ifdef LOOM_PRIVATE_QUALIFICATION
+    TEST_EXPECT_EQ(g_rpx_setup_rc, 0,
+        "a private setup frees the exited workers first and fits");
+    TEST_EXPECT_EQ(g_rpx_count_after, 1, "only the caller is left counted");
+    TEST_EXPECT_EQ(g_rpx_charged_after, 1, "the executor took its charge");
+    TEST_EXPECT_EQ(g_rpx_close_rc, 0, "close the private ring");
+    TEST_EXPECT_EQ(made, 1ull, "the setup made one private ring");
+#else
+    TEST_EXPECT_EQ(g_rpx_setup_rc, -T_E_OPNOTSUPP,
+        "the default image routes no private setup");
+    TEST_EXPECT_EQ(g_rpx_count_after, PROC_THREAD_MAX, "a refused setup frees nothing");
+    TEST_EXPECT_EQ(made, 0ull, "a refused setup made no ring");
+#endif
 }
 
 // ---------------------------------------------------------------------------

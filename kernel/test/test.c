@@ -949,6 +949,7 @@ void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
 void test_proc_reap_exited_threads_frees_peers(void);
 void test_proc_reap_keeps_thread_cap_open(void);
 void test_proc_reap_before_sqpoll_charge(void);
+void test_proc_reap_before_private_executor_charge(void);
 void test_proc_exit_tail_runs_to_its_end(void);
 void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
@@ -3282,6 +3283,7 @@ struct test_case g_tests[] = {
     { "proc.reap_exited_threads_frees_peers",   test_proc_reap_exited_threads_frees_peers,   false, NULL },
     { "proc.reap_keeps_thread_cap_open",        test_proc_reap_keeps_thread_cap_open,        false, NULL },
     { "proc.reap_before_sqpoll_charge",         test_proc_reap_before_sqpoll_charge,         false, NULL },
+    { "proc.reap_before_private_executor_charge", test_proc_reap_before_private_executor_charge, false, NULL },
     { "proc.exit_tail_runs_to_its_end",         test_proc_exit_tail_runs_to_its_end,         false, NULL },
     { "proc.exec_waits_for_exiting_peer",       test_proc_exec_waits_for_exiting_peer,       false, NULL },
     { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },

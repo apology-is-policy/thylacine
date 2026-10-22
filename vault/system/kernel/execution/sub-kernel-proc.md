@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Session posting ownership
 
@@ -771,7 +771,11 @@ alone do not block sharing. Private setup is still inactive.
 
 `proc_sqpoll_ticket_charge` resolves permanent creator stripes and the retained
 original address space under `g_proc_table_lock`, refuses dead/terminating images,
-and atomically checks/counts the ordinary shared thread limit. Its eight-byte
+and atomically checks/counts the ordinary shared thread limit. That limit reads
+`thread_count`, which counts exited peers until they are freed, and the walk
+holds the table lock, so it cannot free them: a caller in the charged Proc
+reaps first (`proc_reap_exited_threads`), as the public SQPOLL charge's caller
+does ([[sub-kernel-loom-bridge]]). Its eight-byte
 kernel-owned ticket starts empty and cannot be copied or overwritten while held.
 `proc_sqpoll_ticket_release` consumes it under the same lock, matching stripes
 without requiring the old image: exec does not reset the Proc's counter. Reaping
