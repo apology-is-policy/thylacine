@@ -1,0 +1,11 @@
+pin 7062e8926c3d8c3fa4edbb66d8c6a00da789803b stamp 20261022T055049Z
+2026-10-22T05:50:49Z START host-magazines
+2026-10-22T05:51:04Z END host-magazines rc=0
+sims-mutants + loom-client-suite SKIPPED: green at 72298812e3c167fabfce5169a0a43c5ecf811c8c; since then only kernel/test/test_phys.c tools/host-tests/magazines.c vault/gates/gate-magazines-tsan.md vault/system/kernel/memory/sub-kernel-mm-phys.md work/oct21-mag/mutants.sh 
+2026-10-22T05:51:04Z START guest-mutants
+2026-10-22T05:53:52Z END guest-mutants rc=0
+2026-10-22T05:53:52Z START gate
+2026-10-22T06:45:30Z END gate rc=0
+2026-10-22T06:45:30Z START pi-bake
+2026-10-22T06:47:24Z END pi-bake rc=0
+2026-10-22T06:47:24Z DONE

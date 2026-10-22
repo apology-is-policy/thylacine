@@ -1,6 +1,113 @@
 # The autonomous-run journal
 
 
+## 2026-10-21/22 -- vote 16's magazine lock qualified; the sims admit in the kernel's order (corona)
+
+- *Vote 16: each CPU's magazine set gets its own lock* (`a951f7c74`).
+  `magazines_drain_all` walked every CPU's sets while their owners allocated
+  and freed with only IRQs masked, which excludes nothing on a peer CPU. So
+  a page could go to two owners, and the suite's free-page gauges sampled a
+  moving count. The operator chose the per-CPU lock (illumos `cc_lock`;
+  Linux has had `pcp->lock` since 2022) over stop-the-world draining. The
+  order is IRQ mask, then magazine lock, then zone lock, and no path holds
+  two magazine locks. The witness is the actual bodies under TSan
+  (`tools/test-magazines.py`).
+- *The round* (Fable 5.1 on Opus 5.5, start == end): 0/0/1/5, all fixed in
+  `d69c148e9`. F5 is the one to remember: the witness had never run, nothing
+  invoked it, and its positive control (that the old code races) was a
+  `--source` flag a person had to remember. `--mutants` now runs five legs:
+  clean, three one-sided lock drops, and the pre-lock source read from
+  `b057de8eb` with git, so the control cannot drift onto a file somebody
+  edited. F6: ARCH 6.3 counted magazine stealing, which is not built, as a
+  user of the lock. It is now a seam: a steal must either stage pages
+  through the zone or define an order between two magazine locks. The other
+  four were wording. I added a guest twin the round had not seen
+  (`phys.drain_meets_live_owners`: three kthread owners stamp their pages
+  while the test drains). Nobody but me has reviewed it, so its mutants
+  (`work/oct21-mag/mutants.sh`: the pre-lock pair, drain unlocked, alloc
+  unlocked) are what earn it.
+- *Still open:* the lock closes the double allocation, not the gauges'
+  quiescence. A peer may still refill its set between a test's drain and its
+  sample (OPEN-BUGS, the magazines entry's RESIDUAL).
+- *The sims admitted in the wrong order* (OPEN-BUGS L70, `7bbc30f02`). Both
+  native-adapter sims checked the fid before the payload; the kernel
+  PREPAREs the scope and the payload and borrows or claims the fid only at
+  PUBLISH (`frontend_dispatch`, `loom_service_frontend.c:11`). Reading the
+  kernel for the fix found five missing pieces of state or refusal. An
+  admitted CLUNK retires its fid at once. An admitted WALK claims its
+  destination. Another scope's destination is ECANCELED, and one not
+  RESERVED is EBUSY. A CLUNK of a SCOPE is ENOENT. A pooled READ longer than
+  a member is EINVAL. A sim that admits what the kernel refuses hides exactly
+  the adapter bug (a double clunk, a double walk) that would send it. The
+  witness `admission_follows_the_kernels_order` exists in both languages;
+  `work/oct21-sims/mutants.py` undoes each fix in each sim and requires the
+  failure at the assertion that pins it, by file:line.
+- *The sims' round* (Fable 5.1 on Opus 5.5, start == end, on `7bbc30f02`):
+  0/0/1/5, all fixed in `72298812e`. F1 is the lesson: my L70 fix had
+  REVERSED a correct answer. A RETIRED SCOPE as the source answered ENOENT,
+  but a scope's slot stays `LSLOT_LIVE` until REAP whatever its node state,
+  so the kernel reaches the READY check and answers ECANCELED. The sims now
+  ask the scope pass about a FID only (`fid_retiring` / `State::retiring`:
+  a FID whose CLUNK was admitted, or ABORTING, or RETIRED). The others: an
+  ABORTING fid, and QUERY of a clunking fid, answer ENOENT (the slot is
+  already retiring); a cancelled CLUNK still retires its fid
+  (`loom_fid_finish_clunk`); the pooled length bound (`len > INT32_MAX`,
+  EINVAL) is modelled; caveat 5 lists what is still not. `mutants.py` grew
+  from 12 to 22. Run on the lease: 22/22 killed, each at its own assertion;
+  the loom-client host suite green (78 C scenarios x2 builds, 213 Rust x2).
+- *The first lease run found my own witnesses broken* (18:14Z, at
+  `72298812e`, `work/oct21-lease-20261021T181542Z`). The guest twin never
+  raced: all three guest mutants "died" at its PREMISE, `no drain ran beside
+  an owner on another CPU`, not at a stamp. `mutants.sh` counted any FAIL as
+  a kill, so its own summary read ALL KILLED. That is the trap the memory
+  already names (an arm that refuses at an earlier gate covers nothing past
+  it: assert WHICH gate fired), and I had written the premise check myself
+  and still let the verdict ignore it. I stopped the gate before its CONTROL,
+  because a clean tree would have failed the same way. The cause, read in
+  `sched.c` before touching the test: in-kernel tests send no idle-peer IPIs,
+  and `sched()` steals from a peer only when its own tree is empty, so the
+  three `ready()`d owners ran on the drainer's CPU while the secondaries sat
+  in WFI. The same boots failed `slub.kmem_smoke` too: the twin left pages in
+  the magazines, and that test takes its baseline without draining. Fixed in
+  `01c819efc`. Each owner goes to a peer with `ready_on`, and that peer is
+  woken with `IPI_RESCHED`. The twin drains after its joins and asserts its
+  premise before the stamps. `mutants.sh` kills only on a stamp message or on
+  a magazine count guard firing inside the twin. The host harness's pre-lock
+  leg had not built either (an unused inline `spin_lock_init` under
+  `-Werror`); the shim is a macro now. Host TSan at `01c819efc`: 5/5. The
+  pre-lock bodies drew 12 race reports and 94 aliased pages.
+- *Disk:* the shared volume fell under the 6 GiB floor while main baked. I
+  asked before deleting 2.2 GB of my own AS-R9 run binaries, and the answer
+  came at 20:48Z, about two hours later, so the Mac sat released in between.
+  Main's bake had been refused at the same floor. The 1844 MiB freed put both
+  of us back over it (yip 0238).
+- *The twin raced, and the mutants died somewhere I had not predicted*
+  (second lease, 10-21 20:48Z, at `01c819efc`). With the owners on peer
+  CPUs, all three sabotaged trees extincted inside the twin with the same
+  data abort (ESR 0x96000040, FAR 0x8 or 0x0) at `buddy_alloc+0xb0/0xb4`,
+  under `mag_alloc`'s refill, under `dmo_owner`. That is `list_remove` on a
+  page whose links are NULL. A page freed into the buddy twice is still
+  linked after its first pop clears its links, so the next pop writes
+  through NULL. The stamp checks never ran, so the new criterion scored all
+  three as survivors. I widened it (`7062e8926`): a fault counts when the
+  first crash dump's backtrace has both an owner frame and an allocator
+  frame. The self-check refuses three near-misses, and the widened rule is
+  replayed on the real logs. Because I widened it after seeing the result,
+  it is worth something only next to a CONTROL that passes. The gate had
+  refused at its 8192 MiB disk floor, so that waited for disk.
+- *Third lease* (10-22 05:50Z, at `7062e8926`,
+  `work/oct21-lease-20261022T055049Z`). Host TSan 5/5. G2, G1 and G3 KILLED,
+  each at the same allocator fault under an owner. The gate was ALL GREEN:
+  CONTROL, CONTROL-Q and UBSan 1901/1901 with the twin PASS in each (so its
+  premise held, since the twin asserts it), PRODUCTION, and SMP five
+  configurations x 10 boots with 0 corruption. The SMP gate keeps logs only
+  on failure, so the twin's PASS is shown per boot for the three gate legs,
+  not for the 50 SMP boots. Pi bake `work/oct19-pi/bake-20261022T064530Z`.
+- *Decisions the operator made:* vote 16 (the per-CPU magazine lock, over
+  stop-the-world draining), and two deletions to get back over the disk
+  floor: my AS-R9 run binaries, and the build/ of the landed
+  `thylacine-asr9` worktree.
+
 ## 2026-10-21 -- the dead publication helper deleted; its harness follows the live path (corona)
 
 - *AS-R9 is closed on main.* main ff'd to the vote-15 docs twins `cba52ec9f`

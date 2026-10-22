@@ -1,0 +1,4 @@
+anchors ok: G2 G1 G3
+2026-10-21T18:33:10Z  HEAD 01c819efcb023701612a6399d91ea57f665932d9, clean; go fork a6567baeaa716811783031fdf543477fdcd1707d, clean; anchors checked; verdict self-check passes; mutants: G2 G1 G3
+2026-10-21T18:33:10Z  DRYRUN: the preconditions hold; stopping before any build
+2026-10-21T18:33:10Z  exit 0

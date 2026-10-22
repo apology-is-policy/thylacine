@@ -1,0 +1,5 @@
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS:   #0  0x1  link 0x1  memset+0x4
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS:   #0  0x1  link 0x1  buddy_alloc+0xb4
+HALLS:   #3  0x1  link 0x1  dmo_owner+0xb4

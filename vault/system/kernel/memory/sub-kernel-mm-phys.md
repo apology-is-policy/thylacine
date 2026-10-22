@@ -475,6 +475,16 @@ CPU, which the test asserts before the stamps. It drains once more after
 joining the owners, because the next test's gauge reads the buddy without
 draining.
 
+On each of the three sabotaged trees (the pre-lock bodies, the drain
+unlocked, the alloc unlocked) the twin dies before any stamp is checked: a
+page freed into the buddy twice is still linked after its first pop clears
+its links, so a later refill's pop in `buddy_alloc`, under an owner's
+`mag_alloc`, writes through NULL. On the locked tree it passes in every gate
+leg (2026-10-22, at 7062e8926: CONTROL, CONTROL-Q and UBSan 1901/1901; SMP
+five configurations of ten boots each). The kill is evidence only beside that
+pass, since the criterion admitting a fault was widened after the first run
+that showed one.
+
 The drain is now safe, not a measurement: the Loom private fixture's
 unpinned-reap release witness stays removed, because it needs a stable
 global count, which a production counter would give and a drain cannot.

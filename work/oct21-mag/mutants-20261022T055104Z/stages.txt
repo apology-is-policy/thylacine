@@ -1,0 +1,19 @@
+anchors ok: G2 G1 G3
+2026-10-22T05:51:04Z  HEAD 7062e8926c3d8c3fa4edbb66d8c6a00da789803b, clean; go fork a6567baeaa716811783031fdf543477fdcd1707d, clean; anchors checked; verdict self-check passes; mutants: G2 G1 G3
+2026-10-22T05:51:04Z  disk G2: 10082 MiB free (floor 6144)
+2026-10-22T05:52:01Z  G2: phys.drain_meets_live_owners -> NONE
+2026-10-22T05:52:01Z  G2: phys.drain_meets_live_owners extincted in the allocator under an owner: EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040; HALLS: ESR  0x0000000096000040  FAR  0x0000000000000008  SPSR 0x00000000200003c5
+2026-10-22T05:52:01Z  G2: tally ; test.sh exit 1; EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+2026-10-22T05:52:01Z  G2: KILLED
+2026-10-22T05:52:01Z  disk G1: 10098 MiB free (floor 6144)
+2026-10-22T05:52:57Z  G1: phys.drain_meets_live_owners -> NONE
+2026-10-22T05:52:57Z  G1: phys.drain_meets_live_owners extincted in the allocator under an owner: EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040; HALLS: ESR  0x0000000096000040  FAR  0x0000000000000008  SPSR 0x00000000200003c5
+2026-10-22T05:52:57Z  G1: tally ; test.sh exit 1; EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+2026-10-22T05:52:57Z  G1: KILLED
+2026-10-22T05:52:57Z  disk G3: 10247 MiB free (floor 6144)
+2026-10-22T05:53:51Z  G3: phys.drain_meets_live_owners -> NONE
+2026-10-22T05:53:51Z  G3: phys.drain_meets_live_owners extincted in the allocator under an owner: EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040; HALLS: ESR  0x0000000096000040  FAR  0x0000000000000000  SPSR 0x00000000200003c5
+2026-10-22T05:53:52Z  G3: tally ; test.sh exit 1; EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+2026-10-22T05:53:52Z  G3: KILLED
+2026-10-22T05:53:52Z  ALL KILLED: G2 G1 G3 (build/ holds the last mutant's kernel -- run gate.sh next)
+2026-10-22T05:53:52Z  exit 0

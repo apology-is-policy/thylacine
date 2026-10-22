@@ -1,0 +1,8 @@
+mac   HELD by you for 2m, 4.0h left
+        why: corona: vote-16 re-run at 01c819efc -- 3 guest sabotage builds+boots (ci image), full gate (ci/qual/UBSan/production/SMP), then pi bake. Host TSan already green (18:38Z). Length uncertain; released as soon as the cores free.
+        phase: corona: lease driver at 01c819efc (work/oct21-lease-20261021T204841Z): host TSan -> guest mutants G2/G1/G3 -> gate -> pi bake
+        runner: Mac pid 88180 alive (start Wed Oct 21 22:48:41 2026)
+        pids: [88180] (their registered work -- not a kill list)
+        queue 1: main (2m waiting)
+pi    FREE
+disk: 7.6 GiB available at /Users/northkillpd/projects/thylacine-corona

@@ -1,0 +1,15 @@
+PASS clean: no race; summary iters=4000 alias=0 double_free=0 guard=0 zone=512/512 dup=0
+PASS drain-unlocked: 11 race report(s); summary iters=4000 alias=40 double_free=15 guard=0 zone=474/512 dup=0
+PASS alloc-unlocked: 10 race report(s); summary iters=4000 alias=635 double_free=164 guard=0 zone=393/512 dup=0
+PASS free-unlocked: 9 race report(s); summary iters=4000 alias=17 double_free=16 guard=0 zone=382/512 dup=0
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-magazines.py", line 83, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-magazines.py", line 69, in main
+    with (a.logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+                                                        ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/opt/homebrew/opt/llvm/bin/clang', '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fsanitize=thread', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/magazines-b8kzx7di/pre-lock-b057de8eb.c', '-o', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/magazines-b8kzx7di/pre-lock-b057de8eb', '-isysroot', '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk']' returned non-zero exit status 1.

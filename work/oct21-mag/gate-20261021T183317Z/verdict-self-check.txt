@@ -1,0 +1,5 @@
+[test] a.x ... PASS
+[test] a.y ... 
+  noise
+FAIL: the y message
+[test] a.z ... PASS
