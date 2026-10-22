@@ -49,7 +49,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-25
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -182,6 +182,23 @@ link made `cp a b` with `b -> a` truncate `a` and copy nothing, exit zero. The
 lexical into-itself refusal stays, so the plain case is refused before anything
 is created. A created file takes the source's mode under the umask (it took
 0644), and a failed entry no longer stops its siblings.
+
+**`env` changes its own environment and execs the command in place.** The
+environment is the per-Proc `/env` device: a variable is the file `/env/NAME`, a
+spawned child receives a copy, and the copy survives exec. So `env -i` removes
+every entry of its own `/env`, each `NAME=VALUE` writes `/env/NAME`, and the
+command replaces `env`'s image through `SYS_EXECVE`, whose projection of `/env`
+into the new image's envp is what a Pouch program's `getenv` reads. The command
+keeps `env`'s pid and descriptors, its status is `env`'s, and the caller's
+environment is untouched. A bare name is searched on `$PATH` after the
+assignments, on `/bin` when there is none. With no command, `env` prints its own
+`/proc/<pid>/environ`, the kernel's `NAME=VALUE` rendering of `/env`, one variable
+to a line, so it lists what a command it started would receive. The operand
+grammar (`-i` and `-`, `--`, assignments until the first operand without `=`)
+is `coreutils::envcmd`, host-tested ([[sub-coreutils-lib]]). A redirect into
+`/env/NAME` from `ut` cannot do what `env` does: `ut` opens the file in its own
+environment and the writing child's write lands in the child's copy (OPEN-BUGS,
+bind-at-open).
 
 **Path cleaning and input streaming are the shared behaviour.** `realpath` no
 longer carries its own lexical normaliser; the collapse of `.`, `..` and `//`
@@ -342,15 +359,15 @@ report a symlink as a plain file even where the mode string shows `l`.
   in each (`cmp` wants two on a failed write), a sweep owed after B-1c, with
   the network presenters' ([[sub-coreutils-presenters]]).
 
-- **`env` reports an empty environment that is not empty.** `env` prints
-  nothing and refuses every `NAME=VALUE` and `COMMAND` form with status 125.
-  Its header says Thylacine gives a native program no environment and no
-  accessor for one; the per-Proc `/env` device and `libthyla_rs::env::vars`
-  have made that untrue, so the tool is behind the system it reports on
-  (enqueued). `coreutil-smoke` runs before the pivot in the initrd's `bin/`,
-  and a leg pins that a bare `env` reaches the utility; while the initrd was
-  flat, the same name met the `/env` device and the utility could not be
-  reached before the pivot ([[dec-2026-09-25-initrd-bin-directory]]).
+- **`env` runs only a program the kernel loads.** The kernel execs a static
+  ELF and nothing else; `ut` reads a script's `#!` line itself, but `env` does
+  not, so `env NAME=VALUE script` exits 126. A variable whose value holds a NUL,
+  or whose name holds `=`, stays in `/env` but is left out of the printed list,
+  as the kernel leaves it out of every envp. `coreutil-smoke` runs before the
+  pivot in the initrd's `bin/`, and a leg pins that a bare `env` reaches the
+  utility; while the initrd was flat, the same name met the `/env` device and
+  the utility could not be reached before the pivot
+  ([[dec-2026-09-25-initrd-bin-directory]]).
 
 - **`cp -P` and `-a` refuse a symlink source.** Copying a link as a link needs
   a call that creates one, and native code has only the Loom op; until an

@@ -26,6 +26,7 @@ extern crate alloc;
 // unchanged; behavior is byte-identical (the modules moved verbatim, their
 // unit tests with them).
 pub use beacon::{boxd, color, palette};
+pub mod envcmd;
 pub mod find;
 pub mod nsmount;
 pub mod path;

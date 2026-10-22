@@ -192,8 +192,8 @@ most of #925. Split:
 - **LS-3c — misc [done]**: `sleep` (rides `libthyla-rs::time::sleep` ->
   `SYS_TORPOR_WAIT`; magnitude-guarded so a pathological operand can't overflow
   `Duration::from_secs_f64`), `hexdump` (`hexdump -C`-style), `cmp` (byte
-  compare), `yes`, `realpath`, `which`, `env` (degenerate, no envp -- G15),
-  `uname` (static -- G16). Adopted from the aux branch onto the libthyla-rs
+  compare), `yes`, `realpath`, `which`, `env` (degenerate, no envp -- G15;
+  since 2026-10-22 it sets variables and execs the command, B-3g), `uname` (static -- G16). Adopted from the aux branch onto the libthyla-rs
   surface (the LS-3a/3b pattern: `aux-rt` -> `env::args` + `io::` + the print
   macros). Two now-satisfied dependencies were folded in (LS-4 cwd):
   **realpath** anchors a relative input against `env::current_dir()` instead of

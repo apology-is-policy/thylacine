@@ -5,6 +5,7 @@ title: "coreutils' shared library -- the bins' side of the Beacon gate, after th
 parent: moc-userspace-tools
 code:
   - usr/coreutils/src/lib.rs
+  - usr/coreutils/src/envcmd.rs
   - usr/coreutils/src/path.rs
   - usr/coreutils/src/size.rs
   - usr/coreutils/src/stamp.rs
@@ -27,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-29
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -52,10 +53,10 @@ here at one chokepoint, `beacon_gate`.
 
 ## Contract
 
-Seven modules are pure and ungated -- `path`, `size`, `stamp`, `stream`,
-`find`, `select` and `nsmount` -- with no syscall and no runtime dependency, so
-they compile and test on the host; a seventh, `counting`, exists only in the host
-tests. Five are
+Eight modules are pure and ungated -- `envcmd`, `path`, `size`, `stamp`,
+`stream`, `find`, `select` and `nsmount` -- with no syscall and no runtime
+dependency, so they compile and test on the host; a ninth, `counting`, exists
+only in the host tests. Five are
 backend-gated behind a Cargo feature because they touch the runtime:
 `beacon_gate`, `meta`, `ui`, `usage`, `netpump`.
 
@@ -65,6 +66,13 @@ single-formatting-path shape or the box-width-on-plain-text rule finds them
 there now; this crate only consumes them.
 
 ## Mechanism
+
+**`envcmd` reads `env`'s operands** (2026-10-22), POSIX's grammar: `-i` (and
+its obsolescent spelling `-`) and `--` first; then every operand holding `=`
+assigns the name before its first `=`, which must be non-empty and free of `/`
+because it names a file under `/env`; the first operand without `=` is the
+command, and `--help` there or after it is the command's. Seven host tests;
+each of six mutants of the grammar turns one of them red.
 
 **`stamp` reads `touch`'s time operands** (2026-10-22): POSIX `-t
 CCYYMMDDhhmm[.SS]`, the century or the whole year optional, and `-d

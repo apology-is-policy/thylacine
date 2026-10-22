@@ -201,9 +201,11 @@ foreach lib {libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz fontconfig} 
 
 # fontconfig on the device's own config and faces (the header). The muster
 # tests above have already written a cache as this user, so the leg removes
-# it first. FC_DEBUG reaches fc-list through /env, which every child copies
-# at spawn (ut passes no envp): 128 prints each directory scanned, 16 each
-# cache's validity check.
+# it first. `env FC_DEBUG=144` sets the variable in env's own /env, which the
+# exec into fc-list keeps (a `> /env/FC_DEBUG` redirect from ut sets nothing: ut
+# opens the file in its own environment and echo writes into echo's copy, which
+# dies with it). 128 prints each directory scanned, 16 each cache's validity
+# check.
 set ::lc_cmd_timeout 300
 set timeout 300
 # One value a device command prints, read through a tag of its own and
@@ -234,7 +236,7 @@ proc lib_check {what got want} {
     }
 }
 proc lib_fc_list {tag log} {
-    lc_send "echo 144 > /env/FC_DEBUG; /usr/bin/fc-list > $log; echo $tag-\$status | tr a-z A-Z; rm /env/FC_DEBUG"
+    lc_send "env FC_DEBUG=144 /usr/bin/fc-list > $log; echo $tag-\$status | tr a-z A-Z"
     expect {
         -ex "[string toupper $tag]- 0\r"     { lc_step "saw: fc-list exited 0 ($tag)" }
         -re "[string toupper $tag]- \[1-9\]" { lappend ::lib_red "fontconfig: fc-list ($tag) exited non-zero" }
