@@ -194,7 +194,12 @@ two of them found.
   mutants in both modes (addrspace-lifetime: 2 clean cases + 18 mutants,
   each killed by its named assertion); loom-receipts, sqpoll-ticket and the
   selector controls pass. Sanitizer reports appear only in the three
-  refused controls and in sqpoll's `overflow`.
+  refused controls and in sqpoll's `overflow`. Astra closed both findings
+  (0243 turn 6) and corrected a count of mine: the run holds 102 sanitized
+  build receipts, all with `-fno-sanitize-recover=all` -- 74 in the `-san`
+  legs, 19 in loom-receipts, 9 in sqpoll-ticket. The evidence commit
+  (`f685697ef`) says 74 because I globbed only the `-san` directories: a
+  count over a set I had not enumerated.
 - *Leases this stretch:* pi 11:53-12:00Z (pre-check), mac 12:56-13:07Z
   (controls + first sweep), 13:17-13:27Z (the re-run) and 14:16-14:20Z
   (Astra's follow-ups), each released when its cores freed.
