@@ -331,6 +331,7 @@ void test_torpor_wait_wake_handoff(void) {
     struct Thread *consumer = thread_create(g_torpor_proc,
                                             torpor_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
 
     // Consumer: runs, increments to 1, takes torpor_lock, loads (0 == 0
@@ -338,12 +339,11 @@ void test_torpor_wait_wake_handoff(void) {
     // SLEEPING. SMP (#20): it may run on a peer CPU — yield until it is
     // observably SLEEPING (registration precedes the SLEEPING
     // transition, so SLEEPING implies registered).
-    TEST_YIELD_UNTIL(__atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE)
-                         == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(test_thread_sleeping(g_torpor_proc, ctid));
 
     TEST_EXPECT_EQ(g_torpor_done, 1u,
         "consumer must have run once before sleeping");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+    TEST_ASSERT(test_thread_sleeping(g_torpor_proc, ctid),
         "consumer must be SLEEPING inside torpor_wait");
 
     // WAKE: walks the bucket, finds the consumer's waiter, sets
@@ -426,6 +426,7 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     struct Thread *ca = thread_create(g_torpor_proc, torpor_consumer_a_entry);
     struct Thread *cb = thread_create(g_torpor_proc, torpor_consumer_b_entry);
     TEST_ASSERT(ca != NULL && cb != NULL, "thread_create failed");
+    int atid = ca->tid, btid = cb->tid;
     ready(ca);
     ready(cb);
 
@@ -437,10 +438,8 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     // until both are observably SLEEPING — registration precedes the
     // SLEEPING transition, so this also guarantees both are in the
     // bucket before the first WAKE (wake1 == 1 stays deterministic).
-    TEST_YIELD_UNTIL(__atomic_load_n(&ca->state, __ATOMIC_ACQUIRE)
-                         == THREAD_SLEEPING &&
-                     __atomic_load_n(&cb->state, __ATOMIC_ACQUIRE)
-                         == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(test_thread_sleeping(g_torpor_proc, atid) &&
+                     test_thread_sleeping(g_torpor_proc, btid));
 
     TEST_EXPECT_EQ(g_torpor_done_a, 1u, "consumer A reached pre-wait");
     TEST_EXPECT_EQ(g_torpor_done_b, 1u, "consumer B reached pre-wait");

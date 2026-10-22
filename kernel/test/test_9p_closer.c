@@ -1266,12 +1266,12 @@ static void self_pump_body(void) {
 
 void test_p9_closer_clunk_killed_while_self_pumping(void) {
     g_sp_a = NULL;
-    g_sp_dying.t = NULL;
+    g_sp_dying.proc = NULL;
     self_pump_body();
     // After a failed assertion the sender may still wait in A's recv: let it
     // go and reap it before its session goes. No assertion here (see above).
     if (g_stall.inited) stall_release(&g_stall);
-    if (g_sp_dying.t) {
+    if (g_sp_dying.proc) {
         test_dying_kill(&g_sp_dying);
         u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (!__atomic_load_n(&g_sp_dying.exited, __ATOMIC_ACQUIRE) &&

@@ -90,6 +90,47 @@ bool test_proc_threads_freed(struct Proc *p) {
     return n == 0;
 }
 
+struct Thread *test_thread_by_tid_locked(struct Proc *p, int tid) {
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->tid == tid) return x;
+    return NULL;
+}
+
+struct test_thread_view test_thread_view(struct Proc *p, int tid) {
+    struct test_thread_view v = { 0 };
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *x = test_thread_by_tid_locked(p, tid);
+    if (x) {
+        v.present         = true;
+        v.state           = (int)__atomic_load_n(&x->state, __ATOMIC_ACQUIRE);
+        v.blocked_on      = __atomic_load_n(&x->rendez_blocked_on, __ATOMIC_ACQUIRE);
+        v.on_debug_rendez = v.blocked_on == &x->debug_rendez;
+        v.switched_in_at  = __atomic_load_n(&x->switched_in_at, __ATOMIC_RELAXED);
+        v.nsched          = __atomic_load_n(&x->nsched, __ATOMIC_RELAXED);
+    }
+    proc_threads_unlock(p, s);
+    return v;
+}
+
+void test_thread_wake(struct Proc *p, int tid, bool debug) {
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *x = test_thread_by_tid_locked(p, tid);
+    if (x && debug) {
+        (void)wakeup(&x->debug_rendez);
+    } else if (x) {
+        irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+        struct Rendez *r = x->rendez_blocked_on;
+        if (r) (void)wakeup(r);
+        spin_unlock_irqrestore(&x->wait_lock, ws);
+    }
+    proc_threads_unlock(p, s);
+}
+
+bool test_thread_sleeping(struct Proc *p, int tid) {
+    struct test_thread_view v = test_thread_view(p, tid);
+    return v.present && v.state == THREAD_SLEEPING;
+}
+
 // Bounded like the kernel-thread join: on expiry TEST_ASSERT returns and the
 // caller must not free the Proc.
 void test_thread_join_reaped(struct Proc *p, int tid, volatile bool *exited) {
@@ -119,6 +160,7 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
 static void test_dying_entry(void *arg) {
     struct test_dying *d = (struct test_dying *)arg;
     d->fn(d->arg);
+    d->kstack = thread_kstack_used(current_thread(), NULL);
     __atomic_store_n(&d->done, true, __ATOMIC_RELEASE);
     test_thread_park_terminal(&d->exited);
 }
@@ -129,26 +171,26 @@ bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
     d->arg    = arg;
     d->done   = false;
     d->exited = false;
-    d->t      = NULL;
+    d->kstack = 0;
     d->tid    = 0;
     d->proc   = proc_alloc();
     if (!d->proc) return false;
     if (dead_now)
         __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
-    d->t = thread_create_with_arg(d->proc, test_dying_entry, d);
-    if (!d->t) {
+    struct Thread *t = thread_create_with_arg(d->proc, test_dying_entry, d);
+    if (!t) {
         d->proc->state = PROC_STATE_ZOMBIE;
         proc_free(d->proc);
         d->proc = NULL;
         return false;
     }
-    d->tid = d->t->tid;
-    ready(d->t);
+    d->tid = t->tid;
+    ready(t);
     return true;
 }
 
 bool test_dying_parked(const struct test_dying *d) {
-    return __atomic_load_n(&d->t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+    return test_thread_sleeping(d->proc, d->tid);
 }
 
 bool test_dying_done(const struct test_dying *d) {
@@ -157,14 +199,12 @@ bool test_dying_done(const struct test_dying *d) {
 
 void test_dying_kill(struct test_dying *d) {
     __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
-    irq_state_t ws = spin_lock_irqsave(&d->t->wait_lock);
-    struct Rendez *r = d->t->rendez_blocked_on;
-    if (r) (void)wakeup(r);
-    spin_unlock_irqrestore(&d->t->wait_lock, ws);
+    test_thread_wake(d->proc, d->tid, false);
 }
 
+// On expiry TEST_ASSERT returns with d->proc still set: the thread may still be
+// running, so nothing it uses may be freed.
 void test_dying_reap(struct test_dying *d) {
-    d->t = NULL;
     test_thread_join_reaped(d->proc, d->tid, &d->exited);
     TEST_YIELD_UNTIL(test_proc_threads_freed(d->proc));
     d->proc->state = PROC_STATE_ZOMBIE;         // proc_free precondition
@@ -230,21 +270,20 @@ static bool test_caught_returned(void) {
     return __atomic_load_n(&g_tc_run, __ATOMIC_ACQUIRE) >= 2u;
 }
 
-static bool test_caught_blocked(struct Thread *t) {
+static bool test_caught_blocked(struct Proc *p, int tid) {
     return __atomic_load_n(&g_tc_run, __ATOMIC_ACQUIRE) == 1u &&
-           __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+           test_thread_sleeping(p, tid);
 }
 
 // Yield until the call returns or the thread sleeps -- with `seen` not 0, a
 // sleep after a switch-in later than `seen`: the thread ran, and rode out what
 // woke it. switched_in_at is stamped at every switch-in, so that is a positive
 // signal, not a quiet interval. Bounded; true iff it slept.
-static bool test_caught_settle(struct Thread *t, u64 seen) {
+static bool test_caught_settle(struct Proc *p, int tid, u64 seen) {
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
     while (!test_caught_returned() && timer_now_ns() < dl) {
-        if (test_caught_blocked(t) &&
-            (seen == 0 ||
-             __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED) != seen))
+        if (test_caught_blocked(p, tid) &&
+            (seen == 0 || test_thread_view(p, tid).switched_in_at != seen))
             return true;
         sched();
     }
@@ -257,13 +296,18 @@ static bool test_caught_settle(struct Thread *t, u64 seen) {
 // might bring -- data, a timer, a spurious wake -- and the leg still shows the
 // wait re-reading the pending note and riding it out. A wait that unwinds is
 // left to the walk: waking it here would hide a walk that failed to.
-static void test_caught_wake_holder(struct Thread *t) {
-    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
-    struct Rendez *r = t->rendez_blocked_on;
-    if (r && r != &t->debug_rendez &&
-        __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
-        wakeup(r);
-    spin_unlock_irqrestore(&t->wait_lock, ws);
+static void test_caught_wake_holder(struct Proc *p, int tid) {
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *t = test_thread_by_tid_locked(p, tid);
+    if (t) {
+        irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
+        struct Rendez *r = t->rendez_blocked_on;
+        if (r && r != &t->debug_rendez &&
+            __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
+            wakeup(r);
+        spin_unlock_irqrestore(&t->wait_lock, ws);
+    }
+    proc_threads_unlock(p, s);
 }
 
 struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
@@ -280,17 +324,17 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
     if (!t) return leg;
     int tid = t->tid;
     ready(t);
-    leg.parked = test_caught_settle(t, 0);
+    leg.parked = test_caught_settle(p, tid, 0);
     if (pre_post) {
         leg.prepped  = true;
         leg.rode_out = leg.parked;
     } else if (leg.parked) {
-        leg.prepped = !prep || (prep(arg) && test_caught_settle(t, 0));
+        leg.prepped = !prep || (prep(arg) && test_caught_settle(p, tid, 0));
         if (leg.prepped) {
-            u64 seen     = __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED);
+            u64 seen     = test_thread_view(p, tid).switched_in_at;
             leg.posted   = test_caught_post(p);
-            test_caught_wake_holder(t);
-            leg.rode_out = test_caught_settle(t, seen);
+            test_caught_wake_holder(p, tid);
+            leg.rode_out = test_caught_settle(p, tid, seen);
         }
     }
     leg.on_post = test_caught_returned();

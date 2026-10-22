@@ -1386,27 +1386,29 @@ static void pn_poll_entry(void) {
     test_thread_park_terminal(&g_pn_exited);
 }
 
-// Start a poll(-1) on the busy Dev from a thread of a fresh Proc. NULL on any
-// failure (nothing started).
-static struct Thread *pn_start(void) {
+// Start a poll(-1) on the busy Dev from a thread of a fresh Proc, and return its
+// tid: the thread is freed at its last switch-out, so it is named, never kept.
+// 0 on any failure (nothing started).
+static int pn_start(void) {
     g_pn_proc = proc_alloc();
-    if (!g_pn_proc) return NULL;
+    if (!g_pn_proc) return 0;
     g_pn_fd = install_spoor(g_pn_proc, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
-    if (g_pn_fd < 0) return NULL;
+    if (g_pn_fd < 0) return 0;
     busy_reset();
     g_pn_result = -999; g_pn_revents = 0; g_pn_return_ns = 0; g_pn_exited = false;
     struct Thread *poller = thread_create(g_pn_proc, pn_poll_entry);
-    if (!poller) return NULL;
+    if (!poller) return 0;
+    int tid = poller->tid;
     ready(poller);
-    return poller;
+    return tid;
 }
 
 // Ends a poll the test could not end (a kernel without the fix): stop the
 // noise, report POLLIN, walk the list; then reap. Safe on every path.
-static void pn_finish(struct Thread *poller) {
+static void pn_finish(int poller) {
     if (poller) {
         __atomic_store_n(&g_pn_proc->debug_stop_req, 0u, __ATOMIC_RELEASE);
-        (void)wakeup(&poller->debug_rendez);
+        test_thread_wake(g_pn_proc, poller, true);
         g_busy_ready = true;
         poll_waiter_list_wake(&g_busy_list);
         TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
@@ -1420,8 +1422,14 @@ static void pn_finish(struct Thread *poller) {
     busy_reset();
 }
 
+// Parked for the stop: asleep on its own debug_rendez.
+static bool pn_stop_parked(int tid) {
+    struct test_thread_view v = test_thread_view(g_pn_proc, tid);
+    return v.present && v.state == THREAD_SLEEPING && v.on_debug_rendez;
+}
+
 void test_poll_death_ends_a_noise_driven_poll(void) {
-    struct Thread *poller = pn_start();
+    int poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
         TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
@@ -1442,7 +1450,7 @@ void test_poll_death_ends_a_noise_driven_poll(void) {
 }
 
 void test_poll_stop_parks_a_noise_driven_poll(void) {
-    struct Thread *poller = pn_start();
+    int poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
         TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
@@ -1451,11 +1459,9 @@ void test_poll_stop_parks_a_noise_driven_poll(void) {
     if (!err) {
         u64 stopped = timer_now_ns();
         __atomic_store_n(&g_pn_proc->debug_stop_req, 1u, __ATOMIC_RELEASE);
-        TEST_YIELD_UNTIL_SOFT((poller->state == THREAD_SLEEPING &&
-                               poller->rendez_blocked_on == &poller->debug_rendez) ||
+        TEST_YIELD_UNTIL_SOFT(pn_stop_parked(poller) ||
                               timer_now_ns() - stopped >= BUSY_LATE_NS);
-        if (!(poller->state == THREAD_SLEEPING &&
-              poller->rendez_blocked_on == &poller->debug_rendez))
+        if (!pn_stop_parked(poller))
             err = "the stop parked the poller on its debug_rendez before the producer went quiet";
         else if (!poll_waiter_list_empty(&g_busy_list))
             err = "the loop parks with its hook OFF the list";
@@ -1472,7 +1478,7 @@ void test_poll_stop_parks_a_noise_driven_poll(void) {
         // with readiness waiting: the resumed pass re-registers and returns it.
         g_busy_ready = true;
         __atomic_store_n(&g_pn_proc->debug_stop_req, 0u, __ATOMIC_RELEASE);
-        (void)wakeup(&poller->debug_rendez);
+        test_thread_wake(g_pn_proc, poller, true);
         TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
         if (g_pn_result != 1)               err = "the resumed poll returns the readiness";
         else if (g_pn_revents != POLLIN)    err = "revents = POLLIN";
@@ -1500,7 +1506,7 @@ void test_poll_stop_parks_a_noise_driven_poll(void) {
 #define POINT_WATCH_NS (100ull * 1000ull * 1000ull)
 
 void test_poll_noise_keeps_it_looping(void) {
-    struct Thread *poller = pn_start();
+    int poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
         TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);

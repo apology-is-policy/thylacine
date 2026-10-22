@@ -196,6 +196,7 @@ static volatile int   g_death_sleep_rc;
 static struct Rendez  g_death_rendez;
 static struct Proc   *g_death_proc;
 static volatile bool  g_death_exited;   // #109: terminal-park reap handshake
+static volatile bool  g_death_unhooked; // its own backref was clear after the sleep
 
 static int death_cond_false(void *arg) {
     (void)arg;
@@ -209,6 +210,7 @@ static void death_consumer_entry(void) {
     // universal cascade wakes us; sleep's resume-path group_exit_msg check
     // returns SLEEP_INTR (do NOT loop on a false cond -- that is the point).
     g_death_sleep_rc = sleep(&g_death_rendez, death_cond_false, NULL);
+    g_death_unhooked = current_thread()->rendez_blocked_on == NULL;
     g_death_run_cnt++;                           // → 2: post-INTR run
     // #109: terminal EXITING park (was a RUNNABLE for(;;)sched()); the joiner
     // reaps via test_thread_join_last.
@@ -219,6 +221,7 @@ void test_rendez_death_interrupts_sleep(void) {
     g_death_run_cnt  = 0;
     g_death_sleep_rc = 0x7fffffff;               // sentinel: sleep never returned
     g_death_exited   = false;
+    g_death_unhooked = false;
     rendez_init(&g_death_rendez);
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
@@ -233,16 +236,18 @@ void test_rendez_death_interrupts_sleep(void) {
 
     struct Thread *consumer = thread_create(g_death_proc, death_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
 
     // Yield: consumer runs, increments to 1, parks SLEEPING on g_death_rendez
     // (its register-then-observe sees group_exit_msg == NULL, so it sleeps).
-    TEST_YIELD_UNTIL(g_death_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_death_run_cnt >= 1u && test_thread_sleeping(g_death_proc, ctid));
 
+    struct test_thread_view v = test_thread_view(g_death_proc, ctid);
     TEST_EXPECT_EQ(g_death_run_cnt, 1u, "consumer ran once before sleeping");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+    TEST_EXPECT_EQ(v.state, THREAD_SLEEPING,
         "consumer must be SLEEPING (parked on the never-woken rendez)");
-    TEST_EXPECT_EQ(consumer->rendez_blocked_on, &g_death_rendez,
+    TEST_EXPECT_EQ(v.blocked_on, &g_death_rendez,
         "consumer's backref points at the never-woken rendez");
 
     // Reproduce the #811 cascade's per-sleeper effect WITHOUT the machine-wide
@@ -263,7 +268,7 @@ void test_rendez_death_interrupts_sleep(void) {
     // #811 close is that on resume it observes group_exit_msg and returns
     // SLEEP_INTR instead (asserted after the yield below): run_cnt reaches 2.
     TEST_EXPECT_EQ(woke, 1, "the per-sleeper wake reports exactly one waiter");
-    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+    TEST_ASSERT(!test_thread_sleeping(g_death_proc, ctid),
         "sleeper readied by the cascade-equivalent wake");
 
     // Yield: consumer resumes inside sleep; the resume-path group_exit_msg
@@ -273,7 +278,7 @@ void test_rendez_death_interrupts_sleep(void) {
     TEST_EXPECT_EQ(g_death_run_cnt, 2u, "consumer resumed after the death-wake");
     TEST_EXPECT_EQ(g_death_sleep_rc, SLEEP_INTR,
         "sleep returned SLEEP_INTR for the group-terminating Proc (#811)");
-    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+    TEST_ASSERT(g_death_unhooked,
         "consumer cleared its backref on the death-interrupted resume");
 
     test_thread_join_last(g_death_proc, &g_death_exited);
@@ -319,10 +324,12 @@ static volatile int   g_intr_sleep_rc;
 static struct Rendez  g_intr_rendez;
 static struct Proc   *g_intr_proc;
 static volatile bool  g_intr_exited;    // #109: terminal-park handshake (shared by the intr_* consumers)
+static volatile bool  g_intr_unhooked;  // its own backref was clear after the sleep
 
 static void intr_consumer_entry(void) {
     g_intr_run_cnt++;                            // -> 1: pre-sleep run
     g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
+    g_intr_unhooked = current_thread()->rendez_blocked_on == NULL;
     g_intr_run_cnt++;                            // -> 2: post-INTR run
     test_thread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
@@ -335,6 +342,7 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
@@ -345,11 +353,12 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
 
     struct Thread *consumer = thread_create(g_intr_proc, intr_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
-    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && test_thread_sleeping(g_intr_proc, ctid));
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 1u, "consumer ran once before sleeping");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+    TEST_ASSERT(test_thread_sleeping(g_intr_proc, ctid),
         "consumer must be SLEEPING (parked on the never-woken rendez)");
 
     // The REAL production sequence: post (arms the latch under q->lock),
@@ -363,14 +372,14 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
     proc_interrupt_terminate_wake(g_intr_proc);
     proc_table_lock_release(s);
 
-    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+    TEST_ASSERT(!test_thread_sleeping(g_intr_proc, ctid),
         "sleeper readied by the terminate wake");
     TEST_YIELD_UNTIL(g_intr_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "consumer resumed after the wake");
     TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
         "sleep returned SLEEP_INTR for the terminate-pending Proc (LS-5c)");
-    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+    TEST_ASSERT(g_intr_unhooked,
         "consumer cleared its backref on the interrupted resume");
 
     test_thread_join_last(g_intr_proc, &g_intr_exited);
@@ -389,6 +398,7 @@ void test_rendez_intr_terminate_register_observe(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -436,6 +446,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -444,10 +455,11 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     struct Thread *consumer =
         thread_create(g_intr_proc, intr_masked_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
-    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(test_thread_sleeping(g_intr_proc, ctid));
 
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "masked consumer parked");
+    TEST_ASSERT(test_thread_sleeping(g_intr_proc, ctid), "masked consumer parked");
 
     // Arm + wake. The walk wakes the masked sleeper (benign spurious wake);
     // its own-mask predicate keeps it alive: it re-registers and re-sleeps.
@@ -458,13 +470,14 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     irq_state_t s = proc_table_lock_acquire();
     proc_interrupt_terminate_wake(g_intr_proc);
     proc_table_lock_release(s);
-    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && test_thread_sleeping(g_intr_proc, ctid));
 
+    struct test_thread_view v = test_thread_view(g_intr_proc, ctid);
     TEST_EXPECT_EQ(g_intr_run_cnt, 1u,
         "masked consumer absorbed the wake and re-slept (no INTR)");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+    TEST_EXPECT_EQ(v.state, THREAD_SLEEPING,
         "masked consumer is SLEEPING again");
-    TEST_ASSERT(consumer->rendez_blocked_on == &g_intr_rendez,
+    TEST_ASSERT(v.blocked_on == &g_intr_rendez,
         "masked consumer re-registered on the rendez");
     TEST_EXPECT_EQ(g_intr_sleep_rc, 0x7fffffff,
         "sleep has not returned for the masked consumer");
@@ -494,6 +507,7 @@ static void intr_tsleep_consumer_entry(void) {
     g_intr_run_cnt++;                            // -> 1: pre-sleep run
     g_intr_sleep_rc = tsleep(&g_intr_rendez, death_cond_false, NULL,
                              timer_now_ns() + 60ull * 1000000000ull);
+    g_intr_unhooked = current_thread()->rendez_blocked_on == NULL;
     g_intr_run_cnt++;                            // -> 2: post-INTR run
     test_thread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
@@ -502,6 +516,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -510,11 +525,12 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     struct Thread *consumer =
         thread_create(g_intr_proc, intr_tsleep_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
-    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && test_thread_sleeping(g_intr_proc, ctid));
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 1u, "consumer ran once before tsleeping");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+    TEST_ASSERT(test_thread_sleeping(g_intr_proc, ctid),
         "consumer parked on the far-deadline tsleep");
 
     TEST_EXPECT_EQ(notes_post(g_intr_proc, "interrupt", 0u, NULL, true), 0,
@@ -527,7 +543,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "consumer resumed after the wake");
     TEST_EXPECT_EQ(g_intr_sleep_rc, TSLEEP_INTR,
         "tsleep returned TSLEEP_INTR for the terminate-pending Proc (LS-5c)");
-    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+    TEST_ASSERT(g_intr_unhooked,
         "consumer cleared its backref on the interrupted resume");
 
     test_thread_join_last(g_intr_proc, &g_intr_exited);
@@ -558,16 +574,15 @@ static void death_only_consumer_entry(void) {
 // Group death, hand-rolled as the death test does it (proc_group_terminate
 // would broadcast an IPI and wake the idle secondaries): publish the message,
 // then wake whatever rendez the thread sleeps on.
-static void intr_publish_death_and_wake(struct Thread *t) {
+// The threads of these tests are named by tid in g_intr_proc: each is freed at
+// its last switch-out, so no pointer to one is kept past its ready().
+static void intr_publish_death_and_wake(int tid) {
     __atomic_store_n(&g_intr_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
-    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
-    struct Rendez *r = t->rendez_blocked_on;
-    if (r) (void)wakeup(r);
-    spin_unlock_irqrestore(&t->wait_lock, ws);
+    test_thread_wake(g_intr_proc, tid, false);
 }
 
-static void intr_consumer_kill_reap(struct Thread *consumer) {
-    intr_publish_death_and_wake(consumer);
+static void intr_consumer_kill_reap(int tid) {
+    intr_publish_death_and_wake(tid);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
     test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
@@ -575,15 +590,23 @@ static void intr_consumer_kill_reap(struct Thread *consumer) {
     g_intr_proc = NULL;
 }
 
-static bool intr_consumer_parked_on(struct Thread *consumer, struct Rendez *r) {
-    return __atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
-           consumer->rendez_blocked_on == r;
+static bool intr_consumer_parked_on(int tid, struct Rendez *r) {
+    struct test_thread_view v = test_thread_view(g_intr_proc, tid);
+    return v.present && v.state == THREAD_SLEEPING && v.blocked_on == r;
+}
+
+// Parked for a stop: asleep on its own debug_rendez.
+static bool intr_consumer_stop_parked(int tid) {
+    struct test_thread_view v = test_thread_view(g_intr_proc, tid);
+    return v.present && v.state == THREAD_SLEEPING && v.on_debug_rendez;
 }
 
 // The thread's dispatch count: stored atomically at every switch-in for
-// cross-thread readers (thread.h nsched), so it moves exactly when it runs.
-static u64 intr_stamp(struct Thread *t) {
-    return __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+// cross-thread readers (thread.h nsched), so it moves exactly when it runs. A
+// thread already freed ran past its sleep, so it reads as moved.
+static u64 intr_stamp(int tid) {
+    struct test_thread_view v = test_thread_view(g_intr_proc, tid);
+    return v.present ? v.nsched : ~0ull;
 }
 
 // Yield for a window in which a thread readied onto this CPU would be run: the
@@ -603,6 +626,7 @@ void test_rendez_death_only_absorbs_latch(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
@@ -611,11 +635,12 @@ void test_rendez_death_only_absorbs_latch(void) {
     TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
     struct Thread *consumer = thread_create(g_intr_proc, death_only_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
-                          intr_consumer_parked_on(consumer, &g_intr_rendez));
-    bool slept = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
-    u64 since = intr_stamp(consumer);
+                          intr_consumer_parked_on(ctid, &g_intr_rendez));
+    bool slept = g_intr_run_cnt == 1u && intr_consumer_parked_on(ctid, &g_intr_rendez);
+    u64 since = intr_stamp(ctid);
 
     bool latched = notes_post(g_intr_proc, "interrupt", 0u, NULL, true) == 0 &&
                    proc_intr_terminate_pending(g_intr_proc);
@@ -623,14 +648,14 @@ void test_rendez_death_only_absorbs_latch(void) {
     proc_interrupt_terminate_wake(g_intr_proc);
     proc_table_lock_release(s);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
-                          (intr_stamp(consumer) != since &&
-                           intr_consumer_parked_on(consumer, &g_intr_rendez)));
-    bool woken   = intr_stamp(consumer) != since;
+                          (intr_stamp(ctid) != since &&
+                           intr_consumer_parked_on(ctid, &g_intr_rendez)));
+    bool woken   = intr_stamp(ctid) != since;
     bool reslept = g_intr_run_cnt == 1u &&
-                   intr_consumer_parked_on(consumer, &g_intr_rendez);
+                   intr_consumer_parked_on(ctid, &g_intr_rendez);
     int rc_latched = g_intr_sleep_rc;
 
-    intr_consumer_kill_reap(consumer);
+    intr_consumer_kill_reap(ctid);
     int rc_death = g_intr_sleep_rc;
 
     TEST_ASSERT(slept, "premise: the consumer slept in sleep_death_only");
@@ -650,6 +675,7 @@ void test_rendez_death_only_sleeps_past_latch(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -658,13 +684,14 @@ void test_rendez_death_only_sleeps_past_latch(void) {
                    proc_intr_terminate_pending(g_intr_proc);
     struct Thread *consumer = thread_create(g_intr_proc, death_only_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
-                          intr_consumer_parked_on(consumer, &g_intr_rendez));
+                          intr_consumer_parked_on(ctid, &g_intr_rendez));
     bool parked = g_intr_run_cnt == 1u &&
-                  intr_consumer_parked_on(consumer, &g_intr_rendez);
+                  intr_consumer_parked_on(ctid, &g_intr_rendez);
 
-    intr_consumer_kill_reap(consumer);
+    intr_consumer_kill_reap(ctid);
     int rc_death = g_intr_sleep_rc;
 
     TEST_ASSERT(latched, "premise: the latch was armed before the thread slept");
@@ -696,21 +723,23 @@ void test_rendez_stopped_sleeper_holds_latch(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
     TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
     struct Thread *consumer = thread_create(g_intr_proc, stop_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
-                          intr_consumer_parked_on(consumer, &g_intr_rendez));
-    bool slept = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
+                          intr_consumer_parked_on(ctid, &g_intr_rendez));
+    bool slept = g_intr_run_cnt == 1u && intr_consumer_parked_on(ctid, &g_intr_rendez);
 
     intr_job_stop_sleeper(&g_intr_rendez);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
-                          intr_consumer_parked_on(consumer, &consumer->debug_rendez));
-    bool stop_parked = intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+                          intr_consumer_stop_parked(ctid));
+    bool stop_parked = intr_consumer_stop_parked(ctid);
 
     bool latched = notes_post(g_intr_proc, "interrupt", 0u, NULL, true) == 0 &&
                    proc_intr_terminate_pending(g_intr_proc);
@@ -719,15 +748,15 @@ void test_rendez_stopped_sleeper_holds_latch(void) {
     proc_table_lock_release(s);
     intr_yield_window();
     bool held = g_intr_run_cnt == 1u &&
-                intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+                intr_consumer_stop_parked(ctid);
 
     __atomic_store_n(&g_intr_proc->job_stop_req, 0, __ATOMIC_RELEASE);
-    (void)wakeup(&consumer->debug_rendez);
+    test_thread_wake(g_intr_proc, ctid, true);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
     u32 run_cleared = g_intr_run_cnt;
     int rc_cleared  = g_intr_sleep_rc;
 
-    intr_consumer_kill_reap(consumer);
+    intr_consumer_kill_reap(ctid);
 
     TEST_ASSERT(slept, "premise: the consumer slept in an ordinary sleep");
     TEST_ASSERT(stop_parked, "premise: the stop parked the sleeper on its debug_rendez");
@@ -781,6 +810,7 @@ static void skip_stop_park_run(bool (*walk)(void), const char *armed_msg) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     rendez_init(&g_intr_rendez);
     g_skip_run_cnt  = 0;
     g_skip_sleep_rc = 0x7fffffff;
@@ -793,33 +823,34 @@ static void skip_stop_park_run(bool (*walk)(void), const char *armed_msg) {
     TEST_ASSERT(stopped != NULL, "thread_create(stopped) failed");
     struct Thread *control = thread_create(g_intr_proc, skip_control_entry);
     TEST_ASSERT(control != NULL, "thread_create(control) failed");
+    int stid = stopped->tid, ktid = control->tid;
     ready(stopped);
     ready(control);
-    TEST_YIELD_UNTIL_SOFT(intr_consumer_parked_on(stopped, &g_intr_rendez) &&
-                          intr_consumer_parked_on(control, &g_skip_rendez));
+    TEST_YIELD_UNTIL_SOFT(intr_consumer_parked_on(stid, &g_intr_rendez) &&
+                          intr_consumer_parked_on(ktid, &g_skip_rendez));
     bool slept = g_intr_run_cnt == 1u && g_skip_run_cnt == 1u &&
-                 intr_consumer_parked_on(stopped, &g_intr_rendez) &&
-                 intr_consumer_parked_on(control, &g_skip_rendez);
+                 intr_consumer_parked_on(stid, &g_intr_rendez) &&
+                 intr_consumer_parked_on(ktid, &g_skip_rendez);
 
     intr_job_stop_sleeper(&g_intr_rendez);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
-                          intr_consumer_parked_on(stopped, &stopped->debug_rendez));
-    bool stop_parked = intr_consumer_parked_on(stopped, &stopped->debug_rendez);
-    u64 stopped_since = intr_stamp(stopped);
-    u64 control_since = intr_stamp(control);
+                          intr_consumer_stop_parked(stid));
+    bool stop_parked = intr_consumer_stop_parked(stid);
+    u64 stopped_since = intr_stamp(stid);
+    u64 control_since = intr_stamp(ktid);
 
     bool armed = walk();
     TEST_YIELD_UNTIL_SOFT(g_skip_run_cnt >= 2u ||
-                          (intr_stamp(control) != control_since &&
-                           intr_consumer_parked_on(control, &control->debug_rendez)));
+                          (intr_stamp(ktid) != control_since &&
+                           intr_consumer_stop_parked(ktid)));
     intr_yield_window();
-    bool reached = g_skip_run_cnt == 1u && intr_stamp(control) != control_since &&
-                   intr_consumer_parked_on(control, &control->debug_rendez);
-    bool passed = g_intr_run_cnt == 1u && intr_stamp(stopped) == stopped_since &&
-                  intr_consumer_parked_on(stopped, &stopped->debug_rendez);
+    bool reached = g_skip_run_cnt == 1u && intr_stamp(ktid) != control_since &&
+                   intr_consumer_stop_parked(ktid);
+    bool passed = g_intr_run_cnt == 1u && intr_stamp(stid) == stopped_since &&
+                  intr_consumer_stop_parked(stid);
 
-    intr_publish_death_and_wake(stopped);
-    intr_publish_death_and_wake(control);
+    intr_publish_death_and_wake(stid);
+    intr_publish_death_and_wake(ktid);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u && g_skip_run_cnt >= 2u);
     int rc_stopped = g_intr_sleep_rc;
     int rc_control = g_skip_sleep_rc;
@@ -880,10 +911,10 @@ static void exit_close_consumer_entry(void) {
 
 // Whatever the run saw, end the closer's sleep and reap it: the close's
 // condition turns true, the stop clears, and both rendez are woken.
-static void exit_close_consumer_reap(struct Thread *consumer) {
+static void exit_close_consumer_reap(int tid) {
     __atomic_store_n(&g_ec_done, true, __ATOMIC_RELEASE);
     __atomic_store_n(&g_intr_proc->job_stop_req, 0, __ATOMIC_RELEASE);
-    (void)wakeup(&consumer->debug_rendez);
+    test_thread_wake(g_intr_proc, tid, true);
     (void)wakeup(&g_intr_rendez);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
     test_thread_join_last(g_intr_proc, &g_intr_exited);
@@ -896,6 +927,7 @@ static void exit_close_setup(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
     g_intr_exited   = false;
+    g_intr_unhooked = false;
     g_ec_done       = false;
     rendez_init(&g_intr_rendez);
 }
@@ -910,12 +942,13 @@ void test_rendez_exit_close_ignores_stop(void) {
     __atomic_store_n(&g_intr_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
     struct Thread *consumer = thread_create(g_intr_proc, exit_close_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
-                          (intr_consumer_parked_on(consumer, &g_intr_rendez) ||
-                           intr_consumer_parked_on(consumer, &consumer->debug_rendez)));
-    bool in_close = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
-    bool parked   = intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+                          (intr_consumer_parked_on(ctid, &g_intr_rendez) ||
+                           intr_consumer_stop_parked(ctid)));
+    bool in_close = g_intr_run_cnt == 1u && intr_consumer_parked_on(ctid, &g_intr_rendez);
+    bool parked   = intr_consumer_stop_parked(ctid);
 
     u32 run_woken = 0;
     int rc_woken  = 0x7fffffff;
@@ -927,7 +960,7 @@ void test_rendez_exit_close_ignores_stop(void) {
         rc_woken  = g_intr_sleep_rc;
     }
 
-    exit_close_consumer_reap(consumer);
+    exit_close_consumer_reap(ctid);
 
     TEST_ASSERT(in_close || parked, "premise: the closer ran and slept");
     TEST_ASSERT(!parked, "the stop did not park the dying Proc's closer");
@@ -945,25 +978,26 @@ void test_rendez_exit_close_park_ends_on_death(void) {
     __atomic_store_n(&g_intr_proc->job_stop_req, 1, __ATOMIC_RELEASE);
     struct Thread *consumer = thread_create(g_intr_proc, exit_close_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
-                          intr_consumer_parked_on(consumer, &consumer->debug_rendez));
+                          intr_consumer_stop_parked(ctid));
     bool parked = g_intr_run_cnt == 1u &&
-                  intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+                  intr_consumer_stop_parked(ctid);
 
     bool left = false;
     u32 run_woken = 0;
     int rc_woken  = 0x7fffffff;
     if (parked) {
-        u64 since = intr_stamp(consumer);
-        intr_publish_death_and_wake(consumer);
+        u64 since = intr_stamp(ctid);
+        intr_publish_death_and_wake(ctid);
         // The woken closer runs, so its stamp moves, and sleeps again: in its
         // close, or back in the park.
         TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
-                              (intr_stamp(consumer) != since &&
-                               (intr_consumer_parked_on(consumer, &g_intr_rendez) ||
-                                intr_consumer_parked_on(consumer, &consumer->debug_rendez))));
-        left = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
+                              (intr_stamp(ctid) != since &&
+                               (intr_consumer_parked_on(ctid, &g_intr_rendez) ||
+                                intr_consumer_stop_parked(ctid))));
+        left = g_intr_run_cnt == 1u && intr_consumer_parked_on(ctid, &g_intr_rendez);
     }
     if (left) {
         __atomic_store_n(&g_ec_done, true, __ATOMIC_RELEASE);
@@ -973,7 +1007,7 @@ void test_rendez_exit_close_park_ends_on_death(void) {
         rc_woken  = g_intr_sleep_rc;
     }
 
-    exit_close_consumer_reap(consumer);
+    exit_close_consumer_reap(ctid);
 
     TEST_ASSERT(parked, "premise: the live group's closer parked for the stop");
     TEST_ASSERT(left,
@@ -1002,6 +1036,7 @@ static volatile int  g_rf_run_cnt;
 static volatile int  g_rf_sleep_rc;
 static volatile int  g_rf_cond;
 static volatile bool g_rf_exited;
+static volatile bool g_rf_unhooked;   // its own backref was clear after the sleep
 static struct Rendez g_rf_rendez;
 static struct Proc  *g_rf_proc;
 
@@ -1020,6 +1055,7 @@ static void rf_tsleep_entry(void) {
     g_rf_run_cnt++;                              // -> 1: pre-tsleep
     g_rf_sleep_rc = tsleep(&g_rf_rendez, rf_cond, NULL,
                            timer_now_ns() + 10ull * 1000000ull);   // +10 ms
+    g_rf_unhooked = current_thread()->rendez_blocked_on == NULL;
     rf_reader_latches(false);
     g_rf_run_cnt++;                              // -> 2: post-tsleep
     test_thread_park_terminal(&g_rf_exited);
@@ -1030,6 +1066,7 @@ void test_rendez_reader_recv_unwinds_death(void) {
     g_rf_sleep_rc = 0x7fffffff;
     g_rf_cond     = 0;
     g_rf_exited   = false;
+    g_rf_unhooked = false;
     rendez_init(&g_rf_rendez);
 
     g_rf_proc = proc_alloc();
@@ -1044,7 +1081,7 @@ void test_rendez_reader_recv_unwinds_death(void) {
     TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
     bool joinable  = g_rf_run_cnt >= 2u;
     int  rc        = g_rf_sleep_rc;
-    bool backref   = reader->rendez_blocked_on == NULL;
+    bool backref   = g_rf_unhooked;
     bool no_waiter = g_rf_rendez.waiter == NULL;
     if (joinable) {
         test_thread_join_last(g_rf_proc, &g_rf_exited);
@@ -1080,15 +1117,18 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
     g_rf_sleep_rc = 0x7fffffff;
     g_rf_cond     = 0;
     g_rf_exited   = false;
+    g_rf_unhooked = false;
     rendez_init(&g_rf_rendez);
 
     g_rf_proc = proc_alloc();
     TEST_ASSERT(g_rf_proc != NULL, "proc_alloc failed");
     struct Thread *reader = thread_create(g_rf_proc, rf_sleep_entry);
     TEST_ASSERT(reader != NULL, "thread_create(reader) failed");
+    int rtid = reader->tid;
     ready(reader);
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1u && reader->state == THREAD_SLEEPING);
-    bool slept = g_rf_run_cnt == 1u && reader->state == THREAD_SLEEPING &&
+    // reader is compared as a value only, while it sleeps (it cannot be freed).
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1u && test_thread_sleeping(g_rf_proc, rtid));
+    bool slept = g_rf_run_cnt == 1u && test_thread_sleeping(g_rf_proc, rtid) &&
                  g_rf_rendez.waiter == reader;
 
     // The death, as the group-termination cascade delivers it to a sleeper.
@@ -1160,14 +1200,15 @@ static struct cw_leg cw_run_leg(struct Proc *p, void (*post)(void *), void *arg)
     rendez_init(&g_cw_rendez);
     struct Thread *t = thread_create(p, cw_sleeper_entry);
     if (!t) return r;
+    int tid = t->tid;
     ready(t);
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-    while (!(g_cw_run >= 1u && t->state == THREAD_SLEEPING) && timer_now_ns() < dl)
+    while (!(g_cw_run >= 1u && test_thread_sleeping(p, tid)) && timer_now_ns() < dl)
         sched();
-    r.parked = g_cw_run == 1u && t->state == THREAD_SLEEPING;
+    r.parked = g_cw_run == 1u && test_thread_sleeping(p, tid);
     if (r.parked) {
         post(arg);
-        r.woke = t->state != THREAD_SLEEPING;   // the post's own wake readied it
+        r.woke = !test_thread_sleeping(p, tid);   // the post's own wake readied it
     }
     // A sleeper the post did not wake is released through its cond, which it
     // reads before the caught arm -- so a released sleep ends SLEEP_OK and only
@@ -1293,11 +1334,12 @@ static struct rcn_leg rcn_run_leg(bool reader) {
     struct Thread *t = viv_sigtab_set(par->sigtab, VIV_SIGNOTE_CHILD_EXIT, &g_cw_hand)
                            ? thread_create(par, rcn_sleeper_entry) : NULL;
     if (t) {
+        int tid = t->tid;
         ready(t);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        while (!(g_rcn_run >= 1u && t->state == THREAD_SLEEPING) && timer_now_ns() < dl)
+        while (!(g_rcn_run >= 1u && test_thread_sleeping(par, tid)) && timer_now_ns() < dl)
             sched();
-        r.parked = g_rcn_run == 1u && t->state == THREAD_SLEEPING;
+        r.parked = g_rcn_run == 1u && test_thread_sleeping(par, tid);
         if (r.parked) {
             cw_post_child_exit(kid);
             dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
@@ -1496,8 +1538,8 @@ static void c2_sleep(u32 i) {
 static void c2_entry0(void) { c2_sleep(0); }
 static void c2_entry1(void) { c2_sleep(1); }
 
-static bool c2_asleep(struct Thread *const t[2], u32 i) {
-    return g_c2_run[i] == 1u && t[i]->state == THREAD_SLEEPING;
+static bool c2_asleep(struct Proc *p, const int tid[2], u32 i) {
+    return g_c2_run[i] == 1u && test_thread_sleeping(p, tid[i]);
 }
 static u32 c2_unwound(void) { return (g_c2_run[0] >= 2u) + (g_c2_run[1] >= 2u); }
 
@@ -1534,7 +1576,7 @@ void test_rendez_caught_note_one_unwind(void) {
         ready(t[0]);
         ready(t[1]);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        while (!(parked = c2_asleep(t, 0) && c2_asleep(t, 1)) && timer_now_ns() < dl)
+        while (!(parked = c2_asleep(par, tid, 0) && c2_asleep(par, tid, 1)) && timer_now_ns() < dl)
             sched();
     }
 
@@ -1545,12 +1587,12 @@ void test_rendez_caught_note_one_unwind(void) {
     if (parked) {
         u32 ev1 = g_c2_evals[1];
         cw_post_child_exit(kid);
-        main_woke = t[0]->state != THREAD_SLEEPING;
-        peer_woke = t[1]->state != THREAD_SLEEPING;
+        main_woke = !test_thread_sleeping(par, tid[0]);
+        peer_woke = !test_thread_sleeping(par, tid[1]);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (g_c2_run[0] < 2u && timer_now_ns() < dl) sched();
         unwound    = c2_unwound();
-        peer_still = c2_asleep(t, 1) && g_c2_evals[1] == ev1;
+        peer_still = c2_asleep(par, tid, 1) && g_c2_evals[1] == ev1;
     }
     int rc_first = g_c2_rc[0];
 
@@ -1662,9 +1704,10 @@ void test_rendez_caught_note_tail_discards_and_releases(void) {
 
     bool parked = false;
     if (t) {
+        int tid = t->tid;
         ready(t);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        while (!(parked = g_c3_run == 1u && t->state == THREAD_SLEEPING) &&
+        while (!(parked = g_c3_run == 1u && test_thread_sleeping(par, tid)) &&
                timer_now_ns() < dl)
             sched();
     }
@@ -1760,11 +1803,13 @@ static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *j
     struct Thread *t = posted ? thread_create(m, d_entry) : NULL;
     bool parked = false;
     if (t) {
+        int tid = t->tid;
         ready(t);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (!g_d_returned && timer_now_ns() < dl) {
-            if (g_d_run == 1u && t->state == THREAD_SLEEPING &&
-                t->rendez_blocked_on == &t->debug_rendez) {
+            struct test_thread_view v = test_thread_view(m, tid);
+            if (g_d_run == 1u && v.present && v.state == THREAD_SLEEPING &&
+                v.on_debug_rendez) {
                 parked = true;
                 break;
             }
@@ -1850,8 +1895,8 @@ static void c4_sleep(u32 i) {
 static void c4_entry0(void) { c4_sleep(0); }
 static void c4_entry1(void) { c4_sleep(1); }
 
-static bool c4_asleep(struct Thread *const t[2], u32 i) {
-    return g_c4_run[i] == 1u && t[i]->state == THREAD_SLEEPING;
+static bool c4_asleep(struct Proc *p, const int tid[2], u32 i) {
+    return g_c4_run[i] == 1u && test_thread_sleeping(p, tid[i]);
 }
 
 void test_rendez_caught_note_release_wakes_peer(void) {
@@ -1880,7 +1925,7 @@ void test_rendez_caught_note_release_wakes_peer(void) {
         ready(t[0]);
         ready(t[1]);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        while (!(parked = c4_asleep(t, 0) && c4_asleep(t, 1)) && timer_now_ns() < dl)
+        while (!(parked = c4_asleep(par, tid, 0) && c4_asleep(par, tid, 1)) && timer_now_ns() < dl)
             sched();
     }
 
@@ -1897,7 +1942,7 @@ void test_rendez_caught_note_release_wakes_peer(void) {
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (g_c4_run[0] < 2u && timer_now_ns() < dl) sched();
         unwound    = (g_c4_run[0] >= 2u) + (g_c4_run[1] >= 2u);
-        peer_still = c4_asleep(t, 1) && g_c4_evals[1] == ev1;
+        peer_still = c4_asleep(par, tid, 1) && g_c4_evals[1] == ev1;
     }
     // Now main's tail: it cannot deliver, so its release must reach the peer.
     g_c4_go = true;
@@ -2057,7 +2102,9 @@ static u8 nt_claim(const struct Thread *t) {
 }
 
 // A fresh Proc (Linux: it catches interrupt with a handler; native: it reads
-// its own notes) with two threads spinning between steps.
+// its own notes) with two threads spinning between steps. A thread here leaves
+// only through an NT_EXIT or park step, after which nt_teardown names it by tid,
+// so the pointers stay valid wherever a test reads them.
 static bool nt_setup(bool linux_pheno, struct Thread *t[2]) {
     for (u32 i = 0; i < 2u; i++) {
         struct nt_slot *n = &g_nt[i];

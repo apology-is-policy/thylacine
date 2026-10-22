@@ -133,6 +133,28 @@ void test_thread_join_last(struct Proc *p, volatile bool *exited);
 bool test_proc_holds_tid(struct Proc *p, int tid);
 bool test_proc_threads_freed(struct Proc *p);
 
+// A user-Proc fixture thread is freed at its last switch-out (ARCH 7.3.2), so
+// once readied it is read by tid under its Proc's threads_lock, never through
+// the pointer its create returned. present is false once it has been freed.
+struct Rendez;
+struct Thread;
+struct test_thread_view {
+    bool           present;
+    int            state;            // enum thread_state
+    struct Rendez *blocked_on;
+    bool           on_debug_rendez;  // blocked_on is its own debug_rendez
+    u64            switched_in_at;
+    u64            nsched;           // dispatch count: moves when it runs
+};
+struct test_thread_view test_thread_view(struct Proc *p, int tid);
+bool test_thread_sleeping(struct Proc *p, int tid);   // present and SLEEPING
+// The caller holds p->threads_lock: p's thread tid, or NULL once it is freed.
+struct Thread *test_thread_by_tid_locked(struct Proc *p, int tid);
+// Wake what tid sleeps on -- its rendez_blocked_on, read under its wait_lock
+// inside p->threads_lock (the death cascade's order) -- or, with `debug`, its
+// own debug_rendez. A freed thread has nothing to wake.
+void test_thread_wake(struct Proc *p, int tid, bool debug);
+
 // A thread of a fresh Proc -- not kproc, which never dies -- for tests of what
 // a dying thread does. test_dying_kill kills it the way the group-terminate
 // cascade kills each peer (group_exit_msg, then a wake of the Rendez it sleeps
@@ -141,13 +163,13 @@ bool test_proc_threads_freed(struct Proc *p);
 // reap that times out frees nothing: the thread may still be running.
 // Bodies in kernel/test/test.c.
 struct test_dying {
-    struct Proc   *proc;
-    struct Thread *t;          // valid until the thread parks (it is then freed)
-    int            tid;
+    struct Proc   *proc;       // NULL until started, and again once reaped
+    int            tid;        // the thread, read by tid (test_thread_view)
     void         (*fn)(void *arg);
     void          *arg;
     volatile bool  done;       // fn returned (RELEASE)
     volatile bool  exited;     // parked terminally (RELEASE)
+    u32            kstack;     // its kernel-stack depth when fn returned
 };
 bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
                       bool dead_now);

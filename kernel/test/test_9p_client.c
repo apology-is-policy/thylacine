@@ -5624,8 +5624,8 @@ static void dy_resume(struct test_dying *d, bool job) {
 
 // Parked for a stop: asleep on its own debug_rendez.
 static bool dy_stop_parked(const struct test_dying *d) {
-    return test_dying_parked(d) &&
-           __atomic_load_n(&d->t->rendez_blocked_on, __ATOMIC_ACQUIRE) == &d->t->debug_rendez;
+    struct test_thread_view v = test_thread_view(d->proc, d->tid);
+    return v.present && v.state == THREAD_SLEEPING && v.on_debug_rendez;
 }
 
 // A stop that clears and comes back before its thread runs leaves only the
@@ -6021,7 +6021,7 @@ static void two_client_leg(u32 cap, struct two_client_out *o) {
     o->started = test_dying_start(&g_dle2, dle2_run, NULL, /*dead_now=*/false);
     TEST_YIELD_UNTIL_SOFT(!o->started || test_dying_done(&g_dle2));
     o->returned  = o->started && test_dying_done(&g_dle2);
-    o->kstack    = o->returned ? thread_kstack_used(g_dle2.t, NULL) : 0u;
+    o->kstack    = o->returned ? g_dle2.kstack : 0u;
     o->cq_first  = l->cq_tail;
     o->ud_first  = cqes[0].user_data;
     o->res_first = (s64)cqes[0].result;
@@ -6342,11 +6342,11 @@ bool test_9p_client_release(void) {
     bool left = false;
     for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         struct test_dying *d = ops[i];
-        if (!d->t) continue;
+        if (!d->proc) continue;
         left = true;
         if (!test_dying_done(d)) test_dying_kill(d);
         test_dying_reap(d);
-        if (d->t) return true;          // it never exited: leave what it sleeps in
+        if (d->proc) return true;       // it never exited: leave what it sleeps in
     }
     if (g_client.magic == P9_CLIENT_MAGIC) {
         left = true;
