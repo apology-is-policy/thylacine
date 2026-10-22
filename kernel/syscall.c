@@ -5292,14 +5292,13 @@ static bool wstat_time_ok(const struct t_timespec *ts) {
     return ts->tv_sec >= 0 && ts->tv_nsec >= 0 && ts->tv_nsec <= 999999999;
 }
 
-// Inner — testable without a live EL0 thread. `times` is a KERNEL copy of
-// {atime, mtime}, read only for a _SET bit (NULL when none is set). The
-// handler thins to current_thread() + the x6 copy-in + this.
-s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                       u32 uid, u32 gid, u64 size,
-                       const struct t_timespec *times) {
-    if (!p)                                          return -1;
-
+// The value checks every SYS_WSTAT runs before it names a file. A field whose
+// bit is clear is zeroed; `tv` receives only the times whose _SET bit is set,
+// and *tvp is NULL when none is. 0, or -T_E_INVAL.
+static s64 wstat_prepare(u32 valid, u32 *mode, u32 *uid, u32 *gid, u64 *size,
+                         const struct t_timespec *times,
+                         struct t_timespec tv[2],
+                         const struct t_timespec **tvp) {
     // Mask sanity: at least one known bit, no reserved bit (so a future
     // T_WSTAT_* extension cannot be silently dropped -- same discipline as
     // SYS_UNLINK's flags / SYS_WALK_CREATE's perm). A _SET bit modifies its
@@ -5315,34 +5314,33 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     // to 0 before the Dev call (the server ignores it -- its valid bit is
     // clear -- but a defined 0 avoids passing a caller-controlled stale value).
     if (valid & T_WSTAT_MODE) {
-        if (mode & ~(u32)T_WSTAT_MODE_MASK)          return -(s64)T_E_INVAL;  // setuid/sgid/sticky + stray bits
+        if (*mode & ~(u32)T_WSTAT_MODE_MASK)         return -(s64)T_E_INVAL;  // setuid/sgid/sticky + stray bits
     } else {
-        mode = 0;
+        *mode = 0;
     }
     if (valid & T_WSTAT_UID) {
-        if (uid == PRINCIPAL_INVALID)                return -(s64)T_E_INVAL;
+        if (*uid == PRINCIPAL_INVALID)               return -(s64)T_E_INVAL;
     } else {
-        uid = 0;
+        *uid = 0;
     }
     if (valid & T_WSTAT_GID) {
-        if (gid == GID_INVALID)                      return -(s64)T_E_INVAL;
+        if (*gid == GID_INVALID)                     return -(s64)T_E_INVAL;
     } else {
-        gid = 0;
+        *gid = 0;
     }
     if (valid & T_WSTAT_SIZE) {
         // The s64 offset domain (the SYS_LSEEK/SYS_PREAD bound): a length
         // whose sign bit is set cannot be represented by the size_t/off_t
         // plumbing below and is rejected up front.
-        if (size > 0x7FFFFFFFFFFFFFFFull)            return -(s64)T_E_INVAL;
+        if (*size > 0x7FFFFFFFFFFFFFFFull)           return -(s64)T_E_INVAL;
     } else {
-        size = 0;
+        *size = 0;
     }
     // The times reach the Dev through a local copy holding only the entries
     // whose _SET bit is set (the rest stay 0), so nothing the caller left in
     // the other slot travels.
-    struct t_timespec tv[2];
-    for (size_t i = 0; i < sizeof(tv); i++) ((u8 *)tv)[i] = 0;
-    const struct t_timespec *tvp = NULL;
+    for (size_t i = 0; i < 2 * sizeof(tv[0]); i++) ((u8 *)tv)[i] = 0;
+    *tvp = NULL;
     if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
         if (!times)                                  return -(s64)T_E_INVAL;
         if (valid & T_WSTAT_ATIME_SET) {
@@ -5353,8 +5351,58 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
             if (!wstat_time_ok(&times[1]))           return -(s64)T_E_INVAL;
             tv[1] = times[1];
         }
-        tvp = tv;
+        *tvp = tv;
     }
+    return 0;
+}
+
+// The rest of SYS_WSTAT, on a REF-HELD Spoor already admitted by kind: the
+// O_PATH size refusal, the A-2d policy, the Dev. The caller clunks `c`.
+static s64 wstat_apply(struct Proc *p, struct Spoor *c, u32 valid, u32 mode,
+                       u32 uid, u32 gid, u64 size,
+                       const struct t_timespec *tvp) {
+    // #81 class, extended to the size axis: an O_PATH (CWALKONLY) handle is
+    // born RIGHT_WRITE but is perm_check-EXEMPT at open (it needs only path
+    // X-search, not W) -- so its RIGHT_WRITE is hollow. The metadata axes are
+    // safe (perm_wstat_check below is their real authority, applied regardless
+    // of the handle rights), but T_WSTAT_SIZE deliberately relies on
+    // RIGHT_WRITE as its sole gate, so a truncate through an O_PATH fd would
+    // mutate a file the caller has no W permission on. Reject it -- a
+    // navigation handle is not a byte-I/O channel, and truncate IS byte I/O.
+    if ((valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY))
+        return -(s64)T_E_BADF;
+
+    // A-2d: the metadata policy (IDENTITY-DESIGN.md 3.7.1 + perm.c). Gated on
+    // perm_enforced (dev9p live since A-3; devramfs .wstat_native is NULL so
+    // SYS_WSTAT on it answers EOPNOTSUPP below regardless). Reads the file's
+    // CURRENT stat, then applies the policy -- for the METADATA axes and the
+    // times: since #47 this identity check is the ONLY write-authority gate on
+    // the mode/uid/gid/times path -- do not weaken it. A size-only call skips
+    // it (its identity check was the open-time perm_check, above). Its denial
+    // is EACCES, never EPERM (-EPERM is the -1 the pouch seam reads as EIO).
+    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_TIMES)) &&
+        c->dev && c->dev->perm_enforced) {
+        struct t_stat cur;
+        int sr = spoor_stat_native(c, &cur);
+        if (sr != 0)                                 return wstat_dev_errno(sr);
+        if (perm_wstat_check(p, &cur, valid, gid) != 0)
+            return -(s64)T_E_ACCES;
+    }
+    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size, tvp);
+    return rc == 0 ? 0 : wstat_dev_errno(rc);
+}
+
+// Inner — testable without a live EL0 thread. `times` is a KERNEL copy of
+// {atime, mtime}, read only for a _SET bit (NULL when none is set). The
+// handler thins to current_thread() + the x6 copy-in + this.
+s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                       u32 uid, u32 gid, u64 size,
+                       const struct t_timespec *times) {
+    if (!p)                                          return -1;
+    struct t_timespec tv[2];
+    const struct t_timespec *tvp;
+    s64 e = wstat_prepare(valid, &mode, &uid, &gid, &size, times, tv, &tvp);
+    if (e != 0)                                      return e;
 
     // #47 (the #46 sibling): kind-gate only -- KOBJ_SPOOR, ANY rights (rights
     // mask 0, the SYS_FSTAT/#46 + SYS_LSEEK posture); rejects KOBJ_SRV. POSIX
@@ -5379,41 +5427,27 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     u32 want_rights = (valid & T_WSTAT_SIZE) ? RIGHT_WRITE : 0;
     struct Spoor *c = sys_lookup_rw_handle(p, h, want_rights);
     if (!c)                                          return -(s64)T_E_BADF;
-
-    // #81 class, extended to the size axis: an O_PATH (CWALKONLY) handle is
-    // born RIGHT_WRITE but is perm_check-EXEMPT at open (it needs only path
-    // X-search, not W) -- so its RIGHT_WRITE is hollow. The metadata axes are
-    // safe (perm_wstat_check below is their real authority, applied regardless
-    // of the handle rights), but T_WSTAT_SIZE deliberately relies on
-    // RIGHT_WRITE as its sole gate, so a truncate through an O_PATH fd would
-    // mutate a file the caller has no W permission on. Reject it -- a
-    // navigation handle is not a byte-I/O channel, and truncate IS byte I/O.
-    if ((valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY)) {
-        spoor_clunk(c);
-        return -(s64)T_E_BADF;
-    }
-
-    // A-2d: the metadata policy (IDENTITY-DESIGN.md 3.7.1 + perm.c). Gated on
-    // perm_enforced (dev9p live since A-3; devramfs .wstat_native is NULL so
-    // SYS_WSTAT on it answers EOPNOTSUPP below regardless). Reads the file's
-    // CURRENT stat, then applies the policy -- for the METADATA axes and the
-    // times: since #47 this identity check is the ONLY write-authority gate on
-    // the mode/uid/gid/times path -- do not weaken it. A size-only call skips
-    // it (its identity check was the open-time perm_check, above). Its denial
-    // is EACCES, never EPERM (-EPERM is the -1 the pouch seam reads as EIO).
-    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_TIMES)) &&
-        c->dev && c->dev->perm_enforced) {
-        struct t_stat cur;
-        int sr = spoor_stat_native(c, &cur);
-        if (sr != 0)                                 { spoor_clunk(c); return wstat_dev_errno(sr); }
-        if (perm_wstat_check(p, &cur, valid, gid) != 0) {
-            spoor_clunk(c);
-            return -(s64)T_E_ACCES;
-        }
-    }
-    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size, tvp);
+    s64 rc = wstat_apply(p, c, valid, mode, uid, gid, size, tvp);
     spoor_clunk(c);
-    return rc == 0 ? 0 : wstat_dev_errno(rc);
+    return rc;
+}
+
+// SYS_WSTAT's checks and policy on a Spoor the kernel resolved for itself, with
+// no descriptor behind it (the phenotype's path forms: a descriptor installed
+// for the call would be visible to the caller's peer threads, which could close
+// it and reuse its index). `c` stays the caller's reference. SIZE is refused:
+// it is byte I/O, and a resolved Spoor carries no write envelope to gate it.
+s64 sys_wstat_spoor_for_proc(struct Proc *p, struct Spoor *c,
+                             u32 valid, u32 mode, u32 uid, u32 gid,
+                             const struct t_timespec *times) {
+    if (!p || !c)                                    return -1;
+    if (valid & T_WSTAT_SIZE)                        return -(s64)T_E_INVAL;
+    u64 size = 0;
+    struct t_timespec tv[2];
+    const struct t_timespec *tvp;
+    s64 e = wstat_prepare(valid, &mode, &uid, &gid, &size, times, tv, &tvp);
+    if (e != 0)                                      return e;
+    return wstat_apply(p, c, valid, mode, uid, gid, size, tvp);
 }
 
 static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
@@ -11945,6 +11979,24 @@ static s64 viv_measure_user_path(u64 path_va, u32 *len_out) {
     return -(s64)T_E_INVAL;
 }
 
+// A guest path into kernel memory: measured, then read once more under fault
+// fixup. A NUL inside the measured span means a peer thread rewrote it
+// between the two reads: EINVAL.
+static s64 viv_copy_user_path(u64 path_va, char *buf, u32 *len_out) {
+    u32 n = 0;
+    s64 m = viv_measure_user_path(path_va, &n);
+    if (m != 0)                                      return m;
+    for (u32 i = 0; i < n; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0')                               return -(s64)T_E_INVAL;
+        buf[i] = (char)b;
+    }
+    buf[n] = '\0';
+    *len_out = n;
+    return 0;
+}
+
 // Convert a kernel `t_stat` into the 128-byte Linux layout and copy it out.
 // The conversion itself is vivarium_stat_to_linux (pure, I-13-zeroed); this
 // shell only moves bytes. Per-byte store, the sys_fstat_handler shape.
@@ -15566,29 +15618,36 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // never carry them).
         u32 mode = (u32)args[2] & T_WSTAT_MODE_MASK;
 
-        u32 path_len = 0;
-        s64 mrc = viv_measure_user_path(args[1], &path_len);
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        u32  path_len = 0;
+        s64  mrc = viv_copy_user_path(args[1], path_scratch, &path_len);
         if (mrc != 0)                                return mrc;
 
-        // Open O_PATH: chmod requires OWNERSHIP, never read, so the
-        // perm_check-EXEMPT navigation handle is the correct base (an O_RDONLY
+        // Resolve O_PATH: chmod requires OWNERSHIP, never read, so the
+        // perm_check-EXEMPT navigation open is the correct base (an O_RDONLY
         // open would wrongly fail for an owner who lacks read). FROM_ROOT is
         // cwd-aware for a relative path (the openat AT_FDCWD correspondence).
-        // sys_open_handler returns the real errno (ER-1 rollout: ENOENT /
-        // ENOTDIR / EACCES from the walk), which IS the fchmodat answer.
-        s64 fd = sys_open_handler(SYS_WALK_OPEN_FROM_ROOT, args[1],
-                                  (u64)path_len, (u64)SYS_WALK_OPEN_OPATH);
-        if (fd < 0)                                  return fd;
+        // The resolve returns the real errno (ER-1 rollout: ENOENT / ENOTDIR /
+        // EACCES from the walk), which IS the fchmodat answer. The Spoor is
+        // private: a descriptor installed for the call would be visible to the
+        // caller's peer threads, which could close it and reuse its index
+        // before the shell closed it (it would then close theirs).
+        struct Spoor *quarry;
+        rights_t      qr;
+        s64 orc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             path_scratch, path_len,
+                                             SYS_WALK_OPEN_OPATH, &quarry, &qr);
+        if (orc < 0)                                 return orc;
 
-        // The mode change runs through the audited sys_wstat_for_proc, whose
+        // The mode change runs through the audited wstat core, whose
         // perm_wstat_check is the POSIX owner-or-CAP authority (the #47 note:
         // the metadata axis is kind-gated, works on any-rights incl. O_PATH).
         // Its EACCES is chmod's EPERM: only ownership refuses a chmod, and a
         // Linux caller reads -EPERM as EPERM (only the pouch seam reserves
         // -1). Every other refusal crosses as it is.
-        s64 rc = sys_wstat_for_proc(p, (hidx_t)fd, T_WSTAT_MODE, mode, 0, 0, 0,
-                                    NULL);
-        (void)handle_close(p, (hidx_t)fd);
+        s64 rc = sys_wstat_spoor_for_proc(p, quarry, T_WSTAT_MODE, mode, 0, 0,
+                                          NULL);
+        spoor_clunk(quarry);
         if (rc == -(s64)T_E_ACCES)                   return -(s64)T_E_PERM;
         return rc;
     }
@@ -15613,6 +15672,79 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         path_scratch[path_len] = '\0';
         return sys_readlink_for_proc(p, path_scratch, path_len,
                                      args[2], args[3]);
+    }
+
+    case VIV_LINUX_UTIMENSAT: {
+        // utimensat(dirfd, path, times, flags): x0..x3. The native-88
+        // (SYS_STAT) collision argument is beside the row in vivarium.h.
+        //
+        // The times first, as Linux reads them, in ONE copy: the mask and the
+        // values the wstat applies are the same bytes, so a peer thread that
+        // rewrites them mid-call cannot split the two.
+        struct t_timespec tv[2];
+        const struct t_timespec *tvp = NULL;
+        if (args[2]) {
+            if (!sys_validate_user_buf(args[2], sizeof(tv)) ||
+                uaccess_copy_in(tv, args[2], sizeof(tv)) != 0)
+                return -(s64)T_E_FAULT;
+            tvp = tv;
+        }
+        u32 valid = 0;
+        s64 mk = vivarium_utimens_mask(tvp, &valid);
+        if (mk < 0)                                  return mk;
+        if (mk > 0)                                  return 0;   // both UTIME_OMIT
+
+        bool empty = false;
+        if (args[1] && ((u32)args[3] & VIV_AT_EMPTY_PATH)) {
+            u8 b = 0;
+            if (!sys_validate_user_buf(args[1], 1) ||
+                uaccess_load_u8(args[1], &b) != 0)   return -(s64)T_E_FAULT;
+            empty = (b == '\0');
+        }
+
+        // A name resolves to a private Spoor, as fchmodat's does: no
+        // descriptor a peer thread could close and reuse.
+        struct Spoor *quarry = NULL;
+        rights_t      qr;
+        s64           rc;
+        switch (vivarium_utimensat_decide(args[0], args[1], args[3], empty)) {
+        case VIV_UTIMENS_FD:
+            rc = sys_wstat_for_proc(p, (hidx_t)(s32)(u32)args[0], valid,
+                                    0, 0, 0, 0, tvp);
+            break;
+        case VIV_UTIMENS_CWD:
+            rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, ".", 1,
+                                            SYS_WALK_OPEN_OPATH, &quarry, &qr);
+            if (rc == 0)
+                rc = sys_wstat_spoor_for_proc(p, quarry, valid, 0, 0, 0, tvp);
+            break;
+        case VIV_UTIMENS_PATH: {
+            char path_scratch[SYS_OPEN_PATH_MAX + 1];
+            u32  path_len = 0;
+            rc = viv_copy_user_path(args[1], path_scratch, &path_len);
+            if (rc != 0)                             return rc;
+            u64 omode = SYS_WALK_OPEN_OPATH;
+            if ((u32)args[3] & VIV_AT_SYMLINK_NOFOLLOW)
+                omode |= SYS_WALK_OPEN_NOFOLLOW;
+            rc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            path_scratch, path_len, omode,
+                                            &quarry, &qr);
+            if (rc == 0)
+                rc = sys_wstat_spoor_for_proc(p, quarry, valid, 0, 0, 0, tvp);
+            break;
+        }
+        case VIV_UTIMENS_EINVAL:                     return -(s64)T_E_INVAL;
+        case VIV_UTIMENS_EFAULT:                     return -(s64)T_E_FAULT;
+        case VIV_UTIMENS_FORWARD:
+        default:                                     return -(s64)T_E_NOSYS;
+        }
+        if (quarry) spoor_clunk(quarry);
+        // EACCES is the kernel's one refusal. Write permission admits only the
+        // touch (both times to now); every other request is ownership's, and
+        // Linux answers that EPERM (only the pouch seam reserves -1).
+        if (rc == -(s64)T_E_ACCES && valid != (T_WSTAT_ATIME | T_WSTAT_MTIME))
+            return -(s64)T_E_PERM;
+        return rc;
     }
 
     case VIV_LINUX_GETRANDOM: {

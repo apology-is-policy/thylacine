@@ -60,6 +60,12 @@ _Static_assert(VIV_LINUX_RT_SIGTIMEDWAIT > VIV_NATIVE_CEILING,
 // writes only the caller's own mask and memory; its lstat arrives as
 // rt_sigpending, which is ENOSYS. A change of either row to TRANSLATED must
 // re-argue this.
+// Linux utimensat (88) collides with SYS_STAT (G12). Its row is VIV_TIER2 and
+// viv_linux_dispatch answers it in its own shell, so a Linux Proc never
+// reaches the native stat; a native program mis-declared as Linux loses it to
+// the damage-envelope argument beside VIV_LINUX_UTIMENSAT in vivarium.h.
+_Static_assert(VIV_LINUX_UTIMENSAT == SYS_STAT,
+               "revisit utimensat / STAT collision on renumber");
 _Static_assert(VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK,
                "revisit rt_sigprocmask / READLINK collision on renumber");
 _Static_assert(VIV_LINUX_RT_SIGPENDING == SYS_LSTAT,
@@ -603,6 +609,8 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_CHDIR,           VIV_TIER2 },  // measure len -> SYS_CHDIR
     { VIV_LINUX_FCHMODAT,        VIV_TIER2 },  // open O_PATH -> wstat(MODE)
     { VIV_LINUX_READLINKAT,      VIV_TIER2 },  // NOFOLLOW stalk -> .readlink
+    // G12 (VIVARIUM.md section 6.30): the time setter.
+    { VIV_LINUX_UTIMENSAT,       VIV_TIER2 },  // time mask -> the wstat core
     { VIV_LINUX_GETEUID,         VIV_TIER2 },  // == getuid (one principal)
     { VIV_LINUX_GETEGID,         VIV_TIER2 },  // == getgid (one principal)
     { VIV_LINUX_GETRANDOM,       VIV_TIER2 },  // -> SYS_GETRANDOM (CAP-gated)
@@ -1350,6 +1358,51 @@ enum viv_verdict vivarium_faccessat_decide(u64 dirfd) {
     // spells out: an `int` -100 arrives sign-extended and must compare equal.
     return ((s32)(u32)dirfd == VIV_AT_FDCWD) ? VIV_TRANSLATED : VIV_FORWARD;
 }
+
+// utimensat's mask. Linux's own split: UTIME_OMIT drops a time, UTIME_NOW is
+// the server's clock, anything else must be a real nanosecond. Linux's
+// timespec on aarch64 is {s64, s64}, byte-identical to t_timespec, so the
+// shell's copy is read in place.
+s64 vivarium_utimens_mask(const struct t_timespec *times, u32 *valid_out) {
+    if (!valid_out)                                  return -(s64)T_E_INVAL;
+    if (!times) {
+        *valid_out = T_WSTAT_ATIME | T_WSTAT_MTIME;
+        return 0;
+    }
+    u32 valid = 0;
+    for (int i = 0; i < 2; i++) {
+        u32 bit = i ? T_WSTAT_MTIME     : T_WSTAT_ATIME;
+        u32 set = i ? T_WSTAT_MTIME_SET : T_WSTAT_ATIME_SET;
+        s64 ns  = times[i].tv_nsec;
+        if (ns == VIV_UTIME_OMIT)                    continue;
+        if (ns == VIV_UTIME_NOW)                     { valid |= bit; continue; }
+        if (ns < 0 || ns > 999999999L)               return -(s64)T_E_INVAL;
+        valid |= bit | set;
+    }
+    if (!valid)                                      return 1;
+    *valid_out = valid;
+    return 0;
+}
+
+enum viv_utimens_form vivarium_utimensat_decide(u64 dirfd, u64 path_va,
+                                                u64 flags, bool path_empty) {
+    // Signed, for the AT_FDCWD sign-extension reason vivarium_openat_decide
+    // spells out.
+    bool cwd = (s32)(u32)dirfd == VIV_AT_FDCWD;
+    u32  fl  = (u32)flags;
+    if (!path_va && !cwd)
+        return fl ? VIV_UTIMENS_EINVAL : VIV_UTIMENS_FD;
+    if (fl & ~(u32)(VIV_AT_SYMLINK_NOFOLLOW | VIV_AT_EMPTY_PATH))
+        return VIV_UTIMENS_EINVAL;
+    if (!path_va)                                    return VIV_UTIMENS_EFAULT;
+    if ((fl & VIV_AT_EMPTY_PATH) && path_empty)
+        return cwd ? VIV_UTIMENS_CWD : VIV_UTIMENS_FD;
+    return cwd ? VIV_UTIMENS_PATH : VIV_UTIMENS_FORWARD;
+}
+
+_Static_assert(sizeof(struct t_timespec) == 16 &&
+               __builtin_offsetof(struct t_timespec, tv_nsec) == 8,
+               "Linux aarch64's struct timespec is t_timespec's layout");
 
 // =============================================================================
 // TIER 2 — mmap (V-2d). See <thylacine/vivarium.h> and VIVARIUM.md §6.21.

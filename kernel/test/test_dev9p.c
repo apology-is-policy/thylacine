@@ -69,6 +69,7 @@ void test_dev9p_wstat_size(void);
 void test_dev9p_wstat_times_wire(void);
 void test_dev9p_wstat_times_einval(void);
 void test_dev9p_wstat_times_permission(void);
+void test_dev9p_wstat_spoor_private(void);
 void test_dev9p_wstat_errnos(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
@@ -2818,6 +2819,74 @@ void test_dev9p_wstat_times_permission(void) {
     proc_free(o);
     q->state = PROC_STATE_ZOMBIE;
     proc_free(q);
+    teardown(root);
+}
+
+// The phenotype's path forms apply SYS_WSTAT to a Spoor the kernel resolved for
+// itself, with no descriptor behind it: the handle path's checks and policy,
+// SIZE refused (no write envelope), and the caller's reference left untouched.
+extern s64 sys_wstat_spoor_for_proc(struct Proc *p, struct Spoor *c,
+                                    u32 valid, u32 mode, u32 uid, u32 gid,
+                                    const struct t_timespec *times);
+void test_dev9p_wstat_spoor_private(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    const char *name = "file";
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+    nc->flag |= CWALKONLY;                    // as an O_PATH resolve leaves it
+    struct Proc *o = proc_alloc();
+    TEST_ASSERT(o != NULL, "proc_alloc owner");
+    o->principal_id = 0x1234u; o->primary_gid = 0x9999u; o->caps = 0;
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc stranger");
+    q->principal_id = 0x9999u; q->primary_gid = 0x9999u; q->caps = 0;
+    int ref0 = nc->ref;
+    struct t_timespec tv[2] = { { 100, 5 }, { 200, 6 } };
+    const u32 now = T_WSTAT_ATIME | T_WSTAT_MTIME;
+    const u32 both_set = now | T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET;
+
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(o, nc, both_set, 0, 0, 0, tv), 0L,
+                   "owner sets both times on a private Spoor");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)both_set, "...the four bits on the wire");
+    TEST_EXPECT_EQ(g_setattr_mtime_sec, 200ull, "...with the caller's mtime");
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(o, nc, T_WSTAT_MODE, 0640u, 0, 0, NULL), 0L,
+                   "owner chmod on a private Spoor");
+    TEST_EXPECT_EQ(nc->ref, ref0, "the caller's reference is still the caller's");
+
+    g_ga_mode = 0100646u;                     // other W
+    larder_attr_invalidate(&g_client.larder, 0x33u);
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(q, nc, now, 0, 0, 0, NULL), 0L,
+                   "stranger with other-W: the touch");
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(q, nc, both_set, 0, 0, 0, tv),
+                   -(s64)T_E_ACCES, "stranger with other-W: explicit times denied");
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(q, nc, T_WSTAT_MTIME, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "stranger with other-W: now-mtime alone denied");
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(q, nc, T_WSTAT_MODE, 0666u, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "stranger chmod denied");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no denial reached the wire");
+    g_ga_mode = 0100644u;
+    larder_attr_invalidate(&g_client.larder, 0x33u);
+
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(o, nc, T_WSTAT_SIZE, 0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "SIZE refused: a resolved Spoor has no write envelope");
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(o, nc, T_WSTAT_MTIME | T_WSTAT_MTIME_SET,
+                                            0, 0, 0, NULL),
+                   -(s64)T_E_INVAL, "the value checks run: a _SET bit with no times");
+    TEST_EXPECT_EQ(sys_wstat_spoor_for_proc(o, NULL, now, 0, 0, 0, NULL), -1L,
+                   "a null Spoor");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no refusal reached the wire");
+    TEST_EXPECT_EQ(nc->ref, ref0, "...and no refusal dropped the reference");
+
+    spoor_clunk(nc);
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+    o->state = PROC_STATE_ZOMBIE;
+    proc_free(o);
     teardown(root);
 }
 

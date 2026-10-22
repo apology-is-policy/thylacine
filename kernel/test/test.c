@@ -1195,6 +1195,7 @@ void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_git_chunk_rows(void);
 void test_vivarium_faccessat_gate(void);
+void test_vivarium_utimensat(void);
 void test_vivarium_fails_closed(void);
 void test_vivarium_no_wide_alias(void);
 void test_vivarium_openat_domain(void);                  // VIVARIUM V-2b
@@ -2010,6 +2011,7 @@ void test_dev9p_wstat_size(void);
 void test_dev9p_wstat_times_wire(void);
 void test_dev9p_wstat_times_einval(void);
 void test_dev9p_wstat_times_permission(void);
+void test_dev9p_wstat_spoor_private(void);
 void test_dev9p_wstat_errnos(void);
 void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
@@ -3545,6 +3547,7 @@ struct test_case g_tests[] = {
     { "vivarium.unknown_forwards",       test_vivarium_unknown_forwards,       false, NULL },
     { "vivarium.git_chunk_rows",         test_vivarium_git_chunk_rows,         false, NULL },
     { "vivarium.faccessat_gate",         test_vivarium_faccessat_gate,         false, NULL },
+    { "vivarium.utimensat",              test_vivarium_utimensat,              false, NULL },
     { "vivarium.fails_closed",           test_vivarium_fails_closed,           false, NULL },
     { "vivarium.no_wide_alias",          test_vivarium_no_wide_alias,          false, NULL },
     { "vivarium.openat_domain",          test_vivarium_openat_domain,          false, NULL },
@@ -4522,6 +4525,7 @@ struct test_case g_tests[] = {
     { "dev9p.wstat_times_wire",        test_dev9p_wstat_times_wire,           false, NULL },
     { "dev9p.wstat_times_einval",      test_dev9p_wstat_times_einval,         false, NULL },
     { "dev9p.wstat_times_permission",  test_dev9p_wstat_times_permission,     false, NULL },
+    { "dev9p.wstat_spoor_private",     test_dev9p_wstat_spoor_private,        false, NULL },
     { "dev9p.wstat_errnos",            test_dev9p_wstat_errnos,               false, NULL },
     { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
     { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },

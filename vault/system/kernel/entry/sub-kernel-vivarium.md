@@ -3,7 +3,7 @@ id: sub-kernel-vivarium
 type: sub
 title: "The Linux phenotype: the syscall translation table"
 parent: moc-kernel-entry
-code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c"]
+code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c", "kernel/test/test_vivarium.c"]
 audit: hard
 guarded-by: [inv-i43]
 validated-by: [prose, gate-smp]
@@ -12,6 +12,24 @@ design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
 updated: 2026-10-22
 ---
+## utimensat (88), the time setter (G12, 2026-10-22)
+
+The row is VIV_TIER2 over SYS_WSTAT's time bits ([[dec-2026-10-22-wstat-times]];
+VIVARIUM 6.30). The shell copies the times in once, `vivarium_utimens_mask`
+derives the mask (UTIME_OMIT out, UTIME_NOW the bit alone, a value the bit and
+its _SET bit; both OMIT answers 0), and `vivarium_utimensat_decide` picks the
+object in Linux's do_utimes order: the descriptor form (no flag), AT_EMPTY_PATH
+with "" (the descriptor, or the cwd), a name under AT_FDCWD (resolved, O_NOFOLLOW
+under AT_SYMLINK_NOFOLLOW), or a FORWARD for a name under a real dirfd. A name
+resolves to a private Spoor and the wstat runs on it through
+`sys_wstat_spoor_for_proc` ([[sub-kernel-syscall-dispatch]]), so no descriptor
+is installed that a peer thread could close and reuse; fchmodat (53) moves to the
+same core. EACCES becomes EPERM for every request but the touch. Native 88 is
+SYS_STAT; its path_va's low 32 bits can read AT_FDCWD, so the collision
+argument is the damage envelope (vivarium.h beside the row, a static assert in
+vivarium.c). `vivarium.utimensat` covers the row, the collision, the mask and the
+decide; the guest leg is G12-e's.
+
 ## Native ceiling 136 (B-3f', 2026-10-20)
 
 `SYS_READLINK` lands at 135 and `SYS_LSTAT` at 136

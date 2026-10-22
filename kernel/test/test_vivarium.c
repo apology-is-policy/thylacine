@@ -353,6 +353,96 @@ void test_vivarium_faccessat_gate(void) {
                    (int)VIV_FORWARD, "-1 (the FROM_ROOT sentinel) is not AT_FDCWD -> forward");
 }
 
+// G12: utimensat (88). The row translates, its native collision is pinned, the
+// mask is Linux's split of the two sentinels, and the decide is do_utimes'
+// order: the descriptor form first (no flag allowed), then the flags, the
+// null path, AT_EMPTY_PATH, and the AT_FDCWD gate a real dirfd with a name
+// forwards on.
+void test_vivarium_utimensat(void) {
+    u64 args[VIV_NARGS];
+    struct viv_call out;
+    viv_fill_args(args);
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UTIMENSAT, args, &out),
+                   (int)VIV_TIER2, "utimensat is T2 (time mask -> the wstat core)");
+    TEST_ASSERT(VIV_LINUX_UTIMENSAT == SYS_STAT,
+                "utimensat(88) collides with SYS_STAT -- the damage-envelope bound");
+
+    const u32 A = T_WSTAT_ATIME, M = T_WSTAT_MTIME;
+    const u32 AS = T_WSTAT_ATIME_SET, MS = T_WSTAT_MTIME_SET;
+    u32 v = 0xdeadbeefu;
+    struct t_timespec tv[2];
+    TEST_EXPECT_EQ(vivarium_utimens_mask(NULL, &v), 0L, "null times: accepted");
+    TEST_EXPECT_EQ((u64)v, (u64)(A | M), "...as the touch (both bits, no _SET)");
+    tv[0] = (struct t_timespec){ 9, VIV_UTIME_NOW };
+    tv[1] = (struct t_timespec){ 9, VIV_UTIME_NOW };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "both UTIME_NOW");
+    TEST_EXPECT_EQ((u64)v, (u64)(A | M), "...is the touch too");
+    tv[0] = (struct t_timespec){ 1, 2 };
+    tv[1] = (struct t_timespec){ 3, 999999999 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "two values");
+    TEST_EXPECT_EQ((u64)v, (u64)(A | AS | M | MS), "...each bit with its _SET bit");
+    tv[0] = (struct t_timespec){ 1, VIV_UTIME_OMIT };
+    tv[1] = (struct t_timespec){ 3, 0 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "omit atime, set mtime");
+    TEST_EXPECT_EQ((u64)v, (u64)(M | MS), "...atime out of the mask");
+    tv[1] = (struct t_timespec){ 3, VIV_UTIME_NOW };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 0L, "omit atime, now mtime");
+    TEST_EXPECT_EQ((u64)v, (u64)M, "...the mtime bit alone");
+    v = 0xdeadbeefu;
+    tv[1] = (struct t_timespec){ 3, VIV_UTIME_OMIT };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), 1L, "both UTIME_OMIT: nothing to do");
+    TEST_EXPECT_EQ((u64)v, 0xdeadbeefull, "...and no mask written");
+    tv[0] = (struct t_timespec){ 1, -1 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL, "nsec -1");
+    tv[0] = (struct t_timespec){ 1, 1000000000L };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL, "nsec 1e9");
+    tv[0] = (struct t_timespec){ 1, VIV_UTIME_OMIT - 1 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL,
+                   "a nanosecond just below the sentinels");
+    tv[0] = (struct t_timespec){ 1, VIV_UTIME_NOW + 1 };
+    TEST_EXPECT_EQ(vivarium_utimens_mask(tv, &v), -(s64)T_E_INVAL,
+                   "a nanosecond just above them");
+    TEST_EXPECT_EQ(vivarium_utimens_mask(NULL, NULL), -(s64)T_E_INVAL, "no out-param");
+
+    const u64 cwd = (u64)(s64)VIV_AT_FDCWD;
+    const u64 nf = VIV_AT_SYMLINK_NOFOLLOW, ep = VIV_AT_EMPTY_PATH;
+    const u64 path = 0x400000ull;
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, 0, 0, false),
+                   (int)VIV_UTIMENS_FD, "null path, real fd: the descriptor form");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide((u64)-1, 0, 0, false),
+                   (int)VIV_UTIMENS_FD, "...for any fd but AT_FDCWD (the wstat judges it)");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, 0, nf, false),
+                   (int)VIV_UTIMENS_EINVAL, "the descriptor form takes no flag");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, 0, ep, false),
+                   (int)VIV_UTIMENS_EINVAL, "...not even AT_EMPTY_PATH");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, 0, 0, false),
+                   (int)VIV_UTIMENS_EFAULT, "AT_FDCWD with a null path: EFAULT");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, 0, 0x40000u, false),
+                   (int)VIV_UTIMENS_EINVAL, "...but a bad flag first");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, 0, false),
+                   (int)VIV_UTIMENS_PATH, "a name under AT_FDCWD");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide((u64)(u32)(s32)VIV_AT_FDCWD, path, nf, false),
+                   (int)VIV_UTIMENS_PATH, "...AT_FDCWD zero-extended, NOFOLLOW");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(0xABCD0000FFFFFF9Cull, path, 0, false),
+                   (int)VIV_UTIMENS_PATH, "...only dirfd's low 32 bits count");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, 0x100000000ull, false),
+                   (int)VIV_UTIMENS_PATH, "...and only flags' low 32 bits");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, VIV_AT_REMOVEDIR, false),
+                   (int)VIV_UTIMENS_EINVAL, "a flag Linux refuses here");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, path, 0, false),
+                   (int)VIV_UTIMENS_FORWARD, "a name under a real dirfd forwards");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, path, ep, true),
+                   (int)VIV_UTIMENS_FD, "AT_EMPTY_PATH with \"\": the descriptor itself");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, ep | nf, true),
+                   (int)VIV_UTIMENS_CWD, "...or the working directory under AT_FDCWD");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, ep, false),
+                   (int)VIV_UTIMENS_PATH, "AT_EMPTY_PATH with a name changes nothing");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(5, path, ep, false),
+                   (int)VIV_UTIMENS_FORWARD, "...under a real dirfd either");
+    TEST_EXPECT_EQ((int)vivarium_utimensat_decide(cwd, path, 0, true),
+                   (int)VIV_UTIMENS_PATH, "\"\" without AT_EMPTY_PATH is a name (ENOENT later)");
+}
+
 void test_vivarium_fails_closed(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;

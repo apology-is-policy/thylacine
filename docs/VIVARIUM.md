@@ -3353,6 +3353,47 @@ ENOSYS.
 
 ---
 
+### 6.30 Tier 2 — `utimensat` (88): the time setter (G12, as-built 2026-10-22)
+
+busybox `touch` cannot make a file without `utimensat`, and `cp -p` and `tar` set
+times through it. G12 gives `SYS_WSTAT` four time bits that mirror 9P's (operator
+votes 17 and 18 of 2026-10-22), and the row is a shell over them.
+
+- **The times first, in one copy.** The 32 bytes at x2 are copied into the
+  kernel before anything else, as Linux reads them; the mask and the values the
+  wstat applies are those bytes, so a peer thread cannot split them.
+  `vivarium_utimens_mask` (pure) is Linux's split: `UTIME_OMIT` leaves a time
+  out, `UTIME_NOW` is its bit alone (the file server's clock), a value is its bit
+  and its `_SET` bit. Both `UTIME_OMIT` answers 0 and looks at nothing else. A
+  nanosecond outside 0..999999999 that is neither sentinel is EINVAL here,
+  before the path; Linux 6 resolves the path first, so a call both malformed and
+  misdirected reads EINVAL here and ENOENT there.
+- **The object** (`vivarium_utimensat_decide`, pure, Linux's `do_utimes`
+  order). A null path with a real dirfd is the descriptor form, which takes no
+  flag; otherwise a flag outside `AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH` is EINVAL
+  and a null path EFAULT. `AT_EMPTY_PATH` with `""` names the descriptor, or the
+  working directory under AT_FDCWD. A name under AT_FDCWD is resolved (O_PATH,
+  O_NOFOLLOW under `AT_SYMLINK_NOFOLLOW`); a name under a real dirfd FORWARDs to
+  ENOSYS, as everywhere in this family.
+- **No borrowed descriptor.** A name resolves to a private Spoor
+  (`sys_resolve_kpath_for_proc`, the `viv_kpath_read` precedent) and the wstat
+  runs on it (`sys_wstat_spoor_for_proc`: SYS_WSTAT's own checks and policy). A
+  descriptor installed for the call would be visible to the caller's peer
+  threads, which could close it and reuse its index before the shell closed it.
+  `fchmodat` (53) moves to the same core in the same change; the other
+  transient-descriptor sites are tracked in OPEN-BUGS.
+- **The errno.** The kernel answers EACCES for every refusal. Write permission
+  admits only the touch (both times to now), so every other refusal is
+  ownership's and the shell answers Linux's EPERM; the touch keeps EACCES.
+- **The collision.** 88 is native `SYS_STAT(path_va, path_len, stat_va)`.
+  path_va is byte-aligned, so its low 32 bits can read AT_FDCWD: the argument is
+  the damage envelope, not the shape gate (vivarium.h, beside the row).
+
+Kernel tests: `vivarium.utimensat` (the row, the collision, the mask's every
+branch, the decide's every form), `dev9p.wstat_spoor_private` (the private
+Spoor's policy, SIZE refused, the caller's reference untouched). The guest leg
+(busybox `touch` and `cp -p` in a container) is G12-e's.
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel

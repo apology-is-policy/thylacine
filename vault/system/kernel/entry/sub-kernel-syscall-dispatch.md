@@ -17,6 +17,18 @@ design:
 created: 2026-08-03
 updated: 2026-10-22
 ---
+## SYS_WSTAT on a resolved Spoor (2026-10-22, G12)
+
+`sys_wstat_for_proc` splits into `wstat_prepare` (the mask sanity, the per-field
+bounds, the times copied by their _SET bits) and `wstat_apply` (the O_PATH size
+refusal, perm_wstat_check, the Dev), with the handle lookup between them, so its
+order (EINVAL before EBADF) is unchanged. `sys_wstat_spoor_for_proc` runs the
+same two on a Spoor the kernel resolved for itself, refuses SIZE (no write
+envelope) and leaves the caller's reference alone. The phenotype's utimensat and
+fchmodat use it with `sys_resolve_kpath_for_proc` so they install no descriptor
+a peer thread could close and reuse ([[sub-kernel-vivarium]]).
+`dev9p.wstat_spoor_private` covers it.
+
 ## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
 
 `sys_fstat_for_proc(p, hraw, out_k)` is the core that `sys_fstat_handler` (50)
