@@ -21,7 +21,7 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="thread_reap:4512"
+CLEAN="thread_reap:5894"
 
 # buggy: cfg, invariant that must be the one reported ("~Name" = a temporal
 # property, which TLC reports in its own words)
@@ -35,7 +35,9 @@ thread_reap_buggy_two_reapers:ExactlyOnce
 thread_reap_buggy_exec_early:NoSwapWhileOnCpu
 thread_reap_buggy_waitpid_unlocked:ProcFreedLast
 thread_reap_buggy_reap_at_spawn:~ExitedThreadsFreed
-thread_reap_buggy_cap_counts_exited:ExitedNotCharged"
+thread_reap_buggy_cap_counts_exited:ExitedNotCharged
+thread_reap_buggy_exec_perthread:DoomedNeverLast
+thread_reap_buggy_doom_missed:~ExecResolves"
 
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"
