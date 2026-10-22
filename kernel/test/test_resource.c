@@ -330,23 +330,30 @@ void test_resource_measured_compile_needs_raise(void) {
     res_drop(p); res_drop(sys);
 }
 
+// The cap reads the live count (ARCH 7.3.2, vote 7); the counts are set at the
+// boundary without that many real threads, and both are zeroed for proc_free.
 void test_resource_thread_cap_ok(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
 
-    p->thread_count = PROC_THREAD_MAX - 1;
+    p->thread_count = p->live_threads = PROC_THREAD_MAX - 1;
     TEST_ASSERT(proc_thread_cap_ok(p), "below the thread cap -> ok");
-    p->thread_count = PROC_THREAD_MAX;
+    p->thread_count = p->live_threads = PROC_THREAD_MAX;
     TEST_ASSERT(!proc_thread_cap_ok(p), "at the thread cap -> refused");
-    p->thread_count = PROC_THREAD_MAX + 5;
+    p->thread_count = p->live_threads = PROC_THREAD_MAX + 5;
     TEST_ASSERT(!proc_thread_cap_ok(p), "over the thread cap -> refused");
+    // Exited threads awaiting their reapers stay on the list but do not count.
+    p->thread_count = PROC_THREAD_MAX + 3;
+    p->live_threads = PROC_THREAD_MAX - 1;
+    TEST_ASSERT(proc_thread_cap_ok(p), "exited threads not yet freed are not charged");
 
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
-    sys->thread_count = PROC_THREAD_MAX + 100;
+    sys->thread_count = sys->live_threads = PROC_THREAD_MAX + 100;
     TEST_ASSERT(proc_thread_cap_ok(sys), "exempt is unbounded by the thread cap");
 
     TEST_ASSERT(!proc_thread_cap_ok(NULL), "NULL -> refused (fail-closed)");
 
-    p->thread_count = 0; sys->thread_count = 0;   // reset for proc_free's gate
+    p->thread_count = p->live_threads = 0;
+    sys->thread_count = sys->live_threads = 0;
     res_drop(p); res_drop(sys);
 }
 
@@ -363,8 +370,9 @@ static void res_admit_free(struct Thread *t, bool admitted) {
 void test_resource_thread_admit_exact(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
 
-    // Cap: A and B both pre-check at cap-1; B is admitted, A is refused.
-    p->thread_count = PROC_THREAD_MAX - 1;
+    // Cap: A and B both pre-check at cap-1; B is admitted, A is refused. The
+    // cap reads the live count, set at the boundary without 255 real threads.
+    p->thread_count = p->live_threads = PROC_THREAD_MAX - 1;
     struct Thread *a = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
     struct Thread *b = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
     TEST_ASSERT(a && b, "two unlinked threads built for p");
@@ -377,7 +385,7 @@ void test_resource_thread_admit_exact(void) {
     res_admit_free(b, adm_b);
 
     // Claim: A pre-checks no claim, a kill claims, A's admit is refused.
-    p->thread_count = 0;
+    p->thread_count = p->live_threads = 0;
     struct Thread *c = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
     TEST_ASSERT(c != NULL, "an unlinked thread built for p");
     bool pre_c = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL;
@@ -392,13 +400,13 @@ void test_resource_thread_admit_exact(void) {
     TEST_ASSERT(adm_b, "control: the first admit at cap-1 links");
     TEST_ASSERT(!adm_a, "the second admit at the cap is refused, whatever its pre-check said");
     TEST_EXPECT_EQ(cap_count, PROC_THREAD_MAX, "exactly the cap is linked");
-    TEST_EXPECT_EQ(cap_live, 1, "one thread counted live");
+    TEST_EXPECT_EQ(cap_live, PROC_THREAD_MAX, "exactly the cap is counted live");
     TEST_ASSERT(pre_c, "premise: the pre-check read no claim");
     TEST_ASSERT(!adm_c, "an admit after the claim is refused, whatever its pre-check said");
     TEST_EXPECT_EQ(claim_count, 0, "nothing linked into the claimed Proc");
     TEST_EXPECT_EQ(claim_live, 0, "nothing counted live in the claimed Proc");
 
-    p->thread_count = 0;   // reset for proc_free's gate
+    p->thread_count = p->live_threads = 0;   // reset for proc_free's gate
     res_drop(p);
 }
 

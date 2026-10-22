@@ -428,14 +428,19 @@ NoAdmitAfterClaim == ~late
 (* The cap is never exceeded (exact, not a floor).                          *)
 CapExact == CapCount <= Cap
 
-(* What the cap counts is exactly the threads that have not committed      *)
-(* EXITING. A joiner is woken after the commit (the clear-child-tid wake),  *)
-(* so a Proc that has joined a thread can admit another at once.            *)
-ExitedNotCharged == CapCount = Cardinality({s \in linked : pc[s] \notin Exited})
+(* An exited thread not yet freed never refuses a create: wherever a        *)
+(* RUNNING spawner, an unborn thread, no claim and room by the live count   *)
+(* coexist, the cap's guard admits. A joiner is woken after its peer's      *)
+(* EXITING commit (the clear-child-tid wake), so this is a join followed by *)
+(* a create while the joined thread still awaits its reaper.                *)
+ExitedNotCharged ==
+    \A s \in Running, t \in Threads :
+        (pc[t] = "unborn" /\ ~gflag /\ ~tlheld /\ live < Cap) => CapCount < Cap
 
 (* The list exceeds the cap only by threads still on their CPU or in the   *)
-(* hand of the resume path that switched them out -- one per CPU (ARCH     *)
-(* 7.3.2's bound).                                                          *)
+(* hand of the resume path that switched them out. That this is at most    *)
+(* one per CPU is the kernel's KERNEL_TESTS assert in                      *)
+(* thread_commit_exiting_locked; the model has no CPUs.                    *)
 ListBound == Cardinality(linked) <= Cap + Cardinality(oncpu \cup inhand)
 
 (* At most one thread ever decides it is the last out.                     *)

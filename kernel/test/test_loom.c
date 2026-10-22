@@ -1231,7 +1231,8 @@ void test_loom_sqpoll_charges_thread_budget(void) {
     p->principal_id = 1000u;                  // a real user -- NOT I-32 exempt
     u64 destroyed0 = loom_total_destroyed();
 
-    p->thread_count = PROC_THREAD_MAX - 1;    // boundary without 255 real threads
+    // The boundary without 255 real threads; the cap reads the live count.
+    p->thread_count = p->live_threads = PROC_THREAD_MAX - 1;
 
     // At cap-1: one SQPOLL setup fits and takes the charge.
     struct loom_params kp;
@@ -1266,7 +1267,7 @@ void test_loom_sqpoll_charges_thread_budget(void) {
     TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd4), 0,
                    "SQPOLL setup fits again after the close (uncharge proof)");
 
-    p->thread_count = 0;                      // reset for proc_free's gate
+    p->thread_count = p->live_threads = 0;    // reset for proc_free's gate
     test_proc_drop(p);
 }
 

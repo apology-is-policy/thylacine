@@ -2450,8 +2450,8 @@ aux-3-c1). Replaces the 2026-10-20 interim fix above, in which an exited thread 
   gone with its function.
 - **The cap counts live threads** (operator vote 7, raised by corona on yip 0245). Both exit paths wake a joiner
   right after the EXITING commit, before the resume path frees the thread, so a cap on `thread_count` refused a
-  process at 256 that had just joined a thread. `proc_thread_room_locked` (admission, the SQPOLL charge, the
-  private executor's charge) now reads `live_threads + loom_sqpoll_count`; spec first: `thread_reap.tla`'s
+  process at 256 that had just joined a thread. `proc_thread_room_locked` (admission and the SQPOLL charge; the
+  private executor's charge on corona's branch uses it too) now reads `live_threads + loom_sqpoll_count`; spec first: `thread_reap.tla`'s
   `ExitedNotCharged` and `ListBound`, and `thread_reap_buggy_cap_counts_exited` red on the old count. Witness
   `proc.cap_counts_live_threads`: a fabricated peer committed EXITING with `on_cpu` raised, at the cap, then the
   pre-check, the charge and a real admit all succeed (the control: every slot live, refused). The I-32 dossier
