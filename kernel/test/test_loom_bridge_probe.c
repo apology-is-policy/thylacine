@@ -7,7 +7,6 @@
 // routes when it should refuse (or the reverse) fails here. The probe must make
 // exactly the expected number of private rings, and every one must retire.
 #include "test.h"
-#include <thylacine/devramfs.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/loom.h>
@@ -55,16 +54,7 @@ static void bridge_probe_exec_thunk(void *arg) {
 void test_loom_bridge_probe(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
-    if (devramfs_lookup("bin/loom-bridge-probe", &cpio_blob, &size) != 0) {
-        // Only a kernel booted without userspace may skip; a ramfs that has init
-        // but not the probe is stale, and skipping would pass it.
-        const void *init_blob = NULL;
-        size_t init_size = 0;
-        TEST_ASSERT(devramfs_lookup("bin/joey", &init_blob, &init_size) != 0,
-                    "an image that carries userspace carries /bin/loom-bridge-probe");
-        uart_puts("    [skip] /bin/loom-bridge-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    if (test_probe_lookup("bin/loom-bridge-probe", &cpio_blob, &size) != 0) return;
     TEST_ASSERT(size <= BRIDGE_PROBE_BLOB_MAX, "loom-bridge-probe too large for its buffer");
     // cpio is 4-aligned; the ELF header cast needs 8.
     const u8 *src = (const u8 *)cpio_blob;

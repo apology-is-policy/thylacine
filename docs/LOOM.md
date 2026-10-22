@@ -612,7 +612,11 @@ sleep with nothing left to wake it. A sibling thread's submit can likewise put
 an op on a client the waiter collected before it, between the waiter's client
 hooks and its CQ hook. Each ring keeps a generation, `drive_gen`, bumped under
 `l->lock` by the CQE post, by the completion's state update, and by every op
-that goes in flight (a submit's link, a re-arm claimed). The `ENTER`'s sleep and the kthread's in-flight park sample it at the
+that goes in flight (a submit's link, a re-arm claimed). Two CQE posters skip
+it, both private-ring only (`loom_private_post_terminal`,
+`loom_provided_deliver`): no `drive_gen` waiter runs on a private ring, whose
+`ENTER` is `loom_private_enter` and whose kthread parks on its own engine
+wait. The `ENTER`'s sleep and the kthread's in-flight park sample it at the
 loop top and sleep only if it has not moved, re-reading it under `l->lock`
 after the CQ hook is filed: a completion after that read flags the hook. The
 completion half predates the fan-in (OPEN-BUGS 2026-10-06 16:20Z); its window

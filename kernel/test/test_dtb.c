@@ -213,3 +213,38 @@ void test_dtb_pci_msi_route(void) {
         TEST_EXPECT_EQ(other.device_id, 0x30u, "distinct ITS requester identity");
     } else TEST_EXPECT_EQ(first.kind, DTB_MSI_V2M, "supported controller kind");
 }
+
+// The launcher's bootargs declarations (the serial SAK posture, the virtio
+// devices the kernel tests expect) are answered word by word. Each refusal has
+// its acceptance one variable away, so a scan that matched nothing would fail.
+static bool scan(const char *args, u32 len, const char *token) {
+    return dtb_bootargs_scan((const u8 *)args, len, token);
+}
+
+void test_dtb_bootargs_whole_words(void) {
+    static const char sak[] = "thylacine.serial-sak=1";
+    static const char net[] = "thylacine.virtio-net";
+    static const char line[] = "a thylacine.serial-sak=1\tthylacine.virtio-net b";
+    const u32 n = sizeof(line) - 1;
+    TEST_ASSERT(scan(line, n, sak), "a word between a space and a tab");
+    TEST_ASSERT(scan(line, n, net), "a word between a tab and a space");
+    TEST_ASSERT(scan(line, n, "a") && scan(line, n, "b"), "the first and the last word");
+
+    static const char longer[] = "thylacine.serial-sak=10 thylacine.virtio-netx";
+    TEST_ASSERT(!scan(longer, sizeof(longer) - 1, sak), "serial-sak=10 is not serial-sak=1");
+    TEST_ASSERT(!scan(longer, sizeof(longer) - 1, net), "virtio-netx is not virtio-net");
+    TEST_ASSERT(!scan(line, n, "thylacine.virtio-ne"), "a prefix of a word is not the word");
+    static const char inside[] = "x=thylacine.serial-sak=1";
+    TEST_ASSERT(!scan(inside, sizeof(inside) - 1, sak), "a word inside another parameter's value");
+    TEST_ASSERT(scan(inside + 2, sizeof(inside) - 3, sak), "the same bytes as their own word");
+
+    static const char nul[] = "a\0thylacine.virtio-net";
+    TEST_ASSERT(!scan(nul, sizeof(nul) - 1, net), "a NUL ends the string within the length");
+    TEST_ASSERT(scan(nul + 2, sizeof(nul) - 3, net), "the same word before any NUL");
+    TEST_ASSERT(!scan(net, sizeof(net) - 2, net), "a word cut by the length is not the word");
+    TEST_ASSERT(scan(net, sizeof(net) - 1, net), "the whole length holds the word");
+
+    TEST_ASSERT(!scan(line, n, ""), "an empty token matches nothing");
+    TEST_ASSERT(!scan(NULL, 4, net) && !scan(line, n, NULL), "absent arguments match nothing");
+    TEST_ASSERT(!scan("   \t ", 5, net) && !scan(line, 0, "a"), "blank or empty bootargs match nothing");
+}

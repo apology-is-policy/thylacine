@@ -9,16 +9,16 @@
 //   tools/mkcpio.py           → build/ramfs.cpio
 //   tools/run-vm.sh           → QEMU -initrd
 //   kernel boot               → devramfs parses cpio → g_ramfs_files
-//   this test                 → devramfs_lookup("bin/hello", ...) → rfork →
+//   this test                 → test_probe_lookup("bin/hello", ...) → rfork →
 //                               exec_setup → userland_enter → /hello main →
 //                               t_putstr → SYS_PUTS → t_exits(0) →
 //                               SYS_EXITS → wait_pid reaps
 //
 // If build/usr/hello/hello wasn't built (user invoked tools/build.sh
 // kernel directly without going through tools/build.sh all and userspace
-// hasn't been built yet — possible in fresh checkouts), devramfs_lookup
-// returns -1; the test prints a skip notice and returns PASS. This keeps
-// the kernel test suite green for the bootstrap-only configuration.
+// hasn't been built yet — possible in fresh checkouts), the image carries
+// no userspace and the test is a counted SKIP. An image that carries
+// /bin/joey but not the binary is stale, and the test FAILS.
 //
 // Production / CI flow always goes through tools/build.sh all (or
 // build_kernel which itself invokes build_userspace), so the binary
@@ -26,7 +26,6 @@
 
 #include "test.h"
 
-#include <thylacine/devramfs.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
@@ -79,19 +78,13 @@ static void ramfs_exec_thunk(void *arg) {
 }
 
 // Shared body: load `name` from devramfs, exec it, verify clean exit.
-// Returns 0 on success, -1 on TEST_ASSERT/EXPECT failure (caller has
-// already called test_fail via the macros), 1 on "not in ramfs" (skip).
+// Returns 0 on success, -1 after failing or skipping the test.
 static int run_ramfs_binary(const char *name) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup(name, &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /");
-        uart_puts(name);
-        uart_puts(" not in ramfs (build with: tools/build.sh all)\n");
-        return 1;
-    }
+    int rc = test_probe_lookup(name, &cpio_blob, &size);
+    if (rc != 0) return -1;
 
     if (size > RAMFS_EXEC_BLOB_MAX) {
         test_fail("ramfs binary too large for static buffer");

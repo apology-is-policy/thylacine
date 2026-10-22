@@ -640,8 +640,10 @@ pub extern "C" fn rs_main() -> i64 {
     let (slot, slot_va) = match find_input_slot(mmio_base) {
         Some(found) => found,
         None => {
-            log("virtio-input: SKIP — no virtio-mmio slot has DeviceID=18 (no -device virtio-keyboard-device wired in QEMU?)\n");
-            return 0;
+            // The kernel test spawns this probe only after finding the device,
+            // so a scan that misses it is a probe or transport defect, not a skip.
+            log("virtio-input: FAIL — no virtio-mmio slot has DeviceID=18, though the kernel found one\n");
+            unsafe { t_exits(1) };
         }
     };
 

@@ -338,4 +338,16 @@ bool dtb_prop_at(u32 prop_off, const char **out_name,
 // path (stalk pops the trail) so this is a robustness / direct-call fallback.
 bool dtb_node_parent(u32 node_off, u32 *out_parent_off);
 
+// True when the root /chosen node's bootargs holds `token` as a complete
+// whitespace-delimited word. Only the first /chosen and its first bootargs
+// are read. The launcher's boot-time declarations arrive here (QEMU turns
+// -append into /chosen/bootargs); the DTB is the trusted bootloader's and
+// nothing at runtime alters it.
+bool dtb_bootargs_has_token(const char *token);
+
+// The word test dtb_bootargs_has_token applies, over `len` bytes of a
+// bootargs string: never a substring (serial-sak=10 does not answer
+// serial-sak=1), and a NUL ends the string within `len`.
+bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token);
+
 #endif // THYLACINE_DTB_H

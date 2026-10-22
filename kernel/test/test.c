@@ -20,6 +20,9 @@
 
 #include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
 #include <thylacine/dev9p.h>        // the poll collector's test mode, released per test
+#include <thylacine/devramfs.h>     // test_probe_lookup: the probe and bin/joey
+#include <thylacine/dtb.h>          // test_virtio_device: the launcher's declaration
+#include <thylacine/virtio.h>       // test_virtio_device: the slot lookup
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
@@ -278,6 +281,7 @@ void test_dtb_pci_msi_route(void);
 void test_dtb_pci_intid_is_level(void);
 void test_dtb_pci_mem_window(void);
 void test_dtb_pci_mem_window64(void);
+void test_dtb_bootargs_whole_words(void);
 void test_phys_alloc_smoke(void);
 void test_phys_leak_10k(void);
 void test_phys_drain_meets_live_owners(void);
@@ -2391,6 +2395,7 @@ struct test_case g_tests[] = {
     { "dtb.pci_intid_is_level",        test_dtb_pci_intid_is_level,        false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
     { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
+    { "dtb.bootargs_whole_words",      test_dtb_bootargs_whole_words,      false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
     { "phys.leak_10k",                 test_phys_leak_10k,                 false, NULL },
     { "phys.drain_meets_live_owners",  test_phys_drain_meets_live_owners,  false, NULL },
@@ -5120,7 +5125,7 @@ struct test_case g_tests[] = {
 // ---------------------------------------------------------------------------
 
 static struct test_case *current_test;
-static unsigned passed_count, failed_count, total_count, soft_warn_count;
+static unsigned passed_count, failed_count, total_count, soft_warn_count, skipped_count;
 
 // #134: child-Proc wait expiries observed across the whole run. Deliberately
 // NOT attributed to a test (see the runner loop); it fails the suite instead.
@@ -5145,6 +5150,50 @@ void test_soft_warn(const char *msg) {
     uart_puts("\n");
 }
 
+// fail_msg is a borrowed pointer the runner prints as soon as the test
+// returns, so one buffer serves every composed failure.
+static char g_composed_fail_msg[128];
+
+static void test_fail_composed(const char *a, const char *b, const char *c) {
+    const char *parts[3] = { a, b, c };
+    size_t n = 0;
+    for (int p = 0; p < 3; p++)
+        for (size_t i = 0; parts[p] && parts[p][i] && n < sizeof(g_composed_fail_msg) - 1; i++)
+            g_composed_fail_msg[n++] = parts[p][i];
+    g_composed_fail_msg[n] = '\0';
+    test_fail(g_composed_fail_msg);
+}
+
+int test_probe_lookup(const char *path, const void **blob, size_t *size) {
+    if (devramfs_lookup(path, blob, size) == 0) return 0;
+    const void *init_blob = NULL;
+    size_t init_size = 0;
+    if (devramfs_lookup("bin/joey", &init_blob, &init_size) == 0) {
+        test_fail_composed("an image that carries userspace carries /", path, NULL);
+        return -1;
+    }
+    if (current_test) current_test->skipped = true;
+    uart_puts("    [skip] /");
+    uart_puts(path);
+    uart_puts(" not in ramfs, and the image carries no userspace (build with: tools/build.sh all)\n");
+    return -1;
+}
+
+struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token) {
+    struct virtio_mmio_dev *dev = virtio_mmio_find_by_device_id(device_id);
+    if (dev) return dev;
+    if (dtb_bootargs_has_token(token)) {
+        test_fail_composed("the launcher declared ", token,
+                           " but no virtio-mmio slot carries its DeviceID");
+        return NULL;
+    }
+    if (current_test) current_test->skipped = true;
+    uart_puts("    [skip] ");
+    uart_puts(token);
+    uart_puts(": not attached (the launcher did not declare it)\n");
+    return NULL;
+}
+
 int proc_test_serial_sak(int posture);
 u32 proc_test_release_leaked(int *pids, u32 max);
 void test_run_all(void) {
@@ -5156,6 +5205,7 @@ void test_run_all(void) {
     failed_count = 0;
     total_count  = 0;
     soft_warn_count = 0;
+    skipped_count = 0;
     proc_wait_timeout_total = 0;
     __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
 
@@ -5163,6 +5213,7 @@ void test_run_all(void) {
         current_test = &g_tests[i];
         current_test->failed = false;
         current_test->fail_msg = NULL;
+        current_test->skipped = false;
         total_count++;
 
         uart_puts("    [test] ");
@@ -5323,6 +5374,9 @@ void test_run_all(void) {
             uart_puts(current_test->fail_msg ? current_test->fail_msg : "(no message)");
             uart_puts("\n");
             failed_count++;
+        } else if (current_test->skipped) {
+            uart_puts("SKIP\n");
+            skipped_count++;
         } else {
             uart_puts("PASS\n");
             passed_count++;
@@ -5367,3 +5421,4 @@ unsigned test_total(void)  { return total_count; }
 unsigned test_passed(void) { return passed_count; }
 unsigned test_failed(void) { return failed_count; }
 unsigned test_soft_warns(void) { return soft_warn_count; }
+unsigned test_skipped(void) { return skipped_count; }

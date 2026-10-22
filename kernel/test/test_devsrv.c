@@ -40,6 +40,8 @@
 
 #include "test.h"
 
+#include <limits.h>
+
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>
 #include <thylacine/srvconn.h>
@@ -789,11 +791,12 @@ extern int spawn_perm_grant_check(struct Proc *, u32);
 
 // The constructor answers a descriptor or a refusal as s64. Anything that is
 // not a descriptor reads as -1, so it fails the caller's >= 0 check rather
-// than narrowing into a plausible index.
+// than narrowing into a plausible index; the range is checked before the
+// narrowing, which never sees a value hidx_t cannot hold.
 static hidx_t registry_new_fd(struct Proc *p, u64 source_fd, const struct srv_route *routes,
                               u64 count, u64 flags) {
     s64 rc = sys_srv_registry_new_for_proc(p, source_fd, routes, count, flags);
-    return rc >= 0 && (s64)(hidx_t)rc == rc ? (hidx_t)rc : -1;
+    return rc >= 0 && rc <= INT_MAX ? (hidx_t)rc : -1;
 }
 
 static struct Spoor *session_leaf(struct Spoor *root, const char *name) {

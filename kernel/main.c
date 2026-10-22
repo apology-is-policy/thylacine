@@ -886,6 +886,14 @@ void boot_main(void) {
             uart_putdec(test_soft_warns());
             uart_puts(" soft-warn)");
         }
+        if (test_skipped() > 0) {
+            // Tests this configuration could not run (a virtio device the
+            // launcher did not declare): not passes, and never silent.
+            // Appended last, so every `tests: N/M PASS` reader still matches.
+            uart_puts(" (");
+            uart_putdec(test_skipped());
+            uart_puts(" skipped)");
+        }
         uart_puts("\n");
     } else {
         uart_puts(" FAIL\n");

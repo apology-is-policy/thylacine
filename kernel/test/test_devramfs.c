@@ -121,8 +121,8 @@ void test_devramfs_initialized_with_files(void) {
     TEST_ASSERT(devramfs_initialized(),
                 "devramfs init must have run during dev_init");
     // QEMU -initrd path: tools/build.sh writes 2 files (welcome,
-    // version). On a guest without -initrd, the count is 0 and the
-    // remaining tests skip.
+    // version). On a guest without -initrd the count is 0: this test
+    // fails, and so does every test that reads the initrd.
     int n = devramfs_entry_count();
     TEST_ASSERT(n >= 2,
                 "expected at least 2 files from initrd (welcome + version)");
@@ -137,7 +137,7 @@ void test_devramfs_attach_returns_dir(void) {
 }
 
 void test_devramfs_walk_to_welcome(void) {
-    if (devramfs_entry_count() < 1) return;       // initrd absent
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
 
     struct Spoor *root = devramfs.attach("");
     struct Spoor *welcome = walk_bin(root, "welcome");
@@ -159,7 +159,7 @@ void test_devramfs_walk_unknown_misses(void) {
 }
 
 void test_devramfs_read_welcome(void) {
-    if (devramfs_entry_count() < 1) return;
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -176,7 +176,7 @@ void test_devramfs_read_welcome(void) {
 }
 
 void test_devramfs_read_version(void) {
-    if (devramfs_entry_count() < 2) return;
+    TEST_ASSERT(devramfs_entry_count() >= 2, "the boot initrd carries welcome + version");
 
     struct Spoor *c = open_ramfs_file("version");
     TEST_ASSERT(c != NULL, "open version");
@@ -193,7 +193,7 @@ void test_devramfs_read_version(void) {
 }
 
 void test_devramfs_read_partial_offset(void) {
-    if (devramfs_entry_count() < 1) return;
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -229,7 +229,7 @@ void test_devramfs_read_dir_returns_neg1(void) {
 }
 
 void test_devramfs_write_rejected(void) {
-    if (devramfs_entry_count() < 1) return;
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -257,16 +257,15 @@ void test_devramfs_stat_native_system_owned(void) {
     TEST_EXPECT_EQ((u64)st.gid, (u64)GID_SYSTEM,       "root gid = SYSTEM");
     TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFDIR,     "root is a directory");
 
-    if (devramfs_entry_count() >= 1) {
-        struct Spoor *f = walk_bin(root, "welcome");
-        TEST_ASSERT(f != NULL, "walk bin/welcome");
-        TEST_EXPECT_EQ((u64)devramfs.stat_native(f, &st), (u64)0,
-                        "file stat_native -> 0");
-        TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "file uid = SYSTEM");
-        TEST_EXPECT_EQ((u64)st.gid, (u64)GID_SYSTEM,       "file gid = SYSTEM");
-        TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFREG,     "file is regular");
-        spoor_unref(f);
-    }
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
+    struct Spoor *f = walk_bin(root, "welcome");
+    TEST_ASSERT(f != NULL, "walk bin/welcome");
+    TEST_EXPECT_EQ((u64)devramfs.stat_native(f, &st), (u64)0,
+                    "file stat_native -> 0");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "file uid = SYSTEM");
+    TEST_EXPECT_EQ((u64)st.gid, (u64)GID_SYSTEM,       "file gid = SYSTEM");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFREG,     "file is regular");
+    spoor_unref(f);
 
     spoor_unref(root);
 }
@@ -378,7 +377,7 @@ static bool ramfs_dir_has(struct Spoor *dir, const char *want, u8 *out_qtype) {
 }
 
 void test_devramfs_readdir_enumerates_root(void) {
-    if (devramfs_entry_count() < 2) return;       // initrd absent
+    TEST_ASSERT(devramfs_entry_count() >= 2, "the boot initrd carries welcome + version");
 
     struct Spoor *root = devramfs.attach("");
     TEST_ASSERT(root != NULL, "attach root");
@@ -416,7 +415,7 @@ void test_devramfs_readdir_enumerates_root(void) {
 }
 
 void test_devramfs_readdir_file_returns_neg1(void) {
-    if (devramfs_entry_count() < 1) return;
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
 
     struct Spoor *c = open_ramfs_file("welcome");
     TEST_ASSERT(c != NULL, "open welcome");
@@ -472,7 +471,7 @@ void test_devramfs_readdir_synth_dir_empty(void) {
 // on (it stores the last entry's cookie into c->offset for the next call). Here
 // we emulate that round-trip with a buffer sized for only 1-2 short entries.
 void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
-    if (devramfs_entry_count() < 2) return;
+    TEST_ASSERT(devramfs_entry_count() >= 2, "the boot initrd carries welcome + version");
 
     struct Spoor *root = devramfs.attach("");
     TEST_ASSERT(root != NULL, "attach root");
@@ -890,7 +889,7 @@ void test_devramfs_tree_truncates_at_cap(void) {
 // The boot archive itself must load whole: a skipped or truncated entry is a
 // missing file on the device, found here rather than by what later fails.
 void test_devramfs_load_complete(void) {
-    if (devramfs_entry_count() < 1) return;   // no initrd
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
     TEST_EXPECT_EQ(devramfs_skipped_count(), 0, "no boot archive entry skipped");
     TEST_ASSERT(!devramfs_truncated(), "the boot archive fits the entry table");
 }
@@ -935,7 +934,7 @@ void test_devramfs_live_lib_when_prover_ships(void) {
 // The kernel loads joey from bin/ and starts the boot namespace there. The
 // Dev's own path: walk, `..`, stat, and a root that holds no program.
 void test_devramfs_live_bin_holds_the_programs(void) {
-    if (devramfs_entry_count() < 1) return;   // no initrd
+    TEST_ASSERT(devramfs_entry_count() >= 1, "the boot initrd is bound");
     const void *d;
     size_t n;
     TEST_ASSERT(devramfs_lookup("bin/joey", &d, &n) == 0 && n > 0, "bin/joey is archived");

@@ -132,24 +132,16 @@ void test_virtio_blk_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
-    // Verify the kernel-side virtio_init at boot saw a block device.
-    // Without `-device virtio-blk-device,drive=disk0` in tools/run-vm.sh,
-    // QEMU exposes no virtio-mmio slot with DeviceID=2; the probe
-    // would scan 32 slots, find none, exit cleanly with status 0
-    // (its own SKIP path). We short-circuit that here so the kernel
-    // test runner sees a clean SKIP without spawning a child.
+    // Verify the kernel-side virtio_init at boot saw a block device. A boot
+    // whose launcher declared none (no disk.img and no pool.img) skips; one
+    // that declared it and has no DeviceID=2 slot fails. The probe is spawned
+    // only once the device is found, so its own missed scan is a FAIL too.
     struct virtio_mmio_dev *blk_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_BLOCK);
-    if (!blk_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=2 (run-vm.sh missing -device virtio-blk-device?)\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_BLOCK, "thylacine.virtio-blk");
+    if (!blk_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_BLK_PROBE_BLOB_MAX,
                 "virtio-blk-probe binary too large for static buffer");

@@ -350,6 +350,24 @@ test, which prints `POLL-KNOB(...)` and fails a passing test that left one set
 (the POOL-PARKED pattern: a knob restored on a test's last line is restored
 only by a test that passes).
 
+**A kernel test's skip is gated, counted and reported (2026-10-22, vote 17).**
+A skipped test once counted as a pass, so a renamed probe or an unattached
+device turned a real test into a green no-op. The kernel now counts skips
+apart from passes ([[sub-substrate-kernel-suite]]), and after the banner
+`test.sh` reads every `[skip]` line. A line that is not one of the two gated
+shapes -- `thylacine.virtio-<kind>: not attached (the launcher did not
+declare it)`, or a probe `not in ramfs, and the image carries no userspace`
+-- is an ungated skip, and the verdict fails on it. When this script's own
+full device set was attached (no `THYLACINE_NO_NET` / `_NO_INPUT` /
+`_NO_GPU`, the default display, `disk.img` and `pool.img` present), any skip
+at all fails. Otherwise the skips are printed as NOT coverage, in the #212
+arc-gate discipline. The full-set test reads this script's environment, a
+second route to the device set beside the launcher's own declaration
+([[sub-substrate-machine]]). A broken scan alone already fails in the kernel
+(declared, not found), and a broken declaration alone still finds the device;
+a skip with the full set attached means both broke at once, the one case that
+each route alone would pass.
+
 **A fixture Proc a failing test left linked is released (2026-09-30).** A
 test that links a fabricated Proc under kproc and fails before its unlink
 leaves it in the table, and the next `while (wait_pid(&st) > 0)` drain of

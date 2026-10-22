@@ -33,6 +33,7 @@ struct test_case {
     void (*fn)(void);       // test body; calls TEST_ASSERT / TEST_FAIL
     bool failed;            // set by the harness if the test fails
     const char *fail_msg;
+    bool skipped;           // the configuration lacks what it needs; it did not run
 };
 
 // Sentinel-terminated array of all tests. Defined in kernel/test/test.c.
@@ -71,6 +72,32 @@ void test_soft_warn(const char *msg);
 // Count of soft-warns recorded during the last test_run_all. Surfaced
 // in the boot summary so host throttling is visible without failing CI.
 unsigned test_soft_warns(void);
+
+// A skipped test is neither passed nor failed: it logs a [skip] line and the
+// boot summary counts it. There is deliberately no bare skip call -- a test
+// skips only through a helper that first proves the configuration permits the
+// absence (test_probe_lookup, test_virtio_device), and tools/test.sh refuses a
+// [skip] line of any other shape.
+
+// Count of tests skipped during the last test_run_all.
+unsigned test_skipped(void);
+
+// Look up a probe binary in the boot ramfs. Returns 0 with the blob. A miss
+// returns -1 after FAILING the test when the image carries userspace
+// (bin/joey) -- a stale ramfs would otherwise pass by skipping -- and after
+// skipping it when the image carries none. A userspace-less image fails the
+// suite anyway (test_devramfs_live_bin_holds_the_programs); the skip keeps
+// that one cause from reading as a failure per probe.
+int test_probe_lookup(const char *path, const void **blob, size_t *size);
+
+// The virtio-mmio device a test drives. QEMU's virt machine always has 32
+// slots and an empty one reads DeviceID 0, so only the launcher knows what it
+// attached: tools/run-vm.sh declares each MMIO device as a bootargs token
+// (thylacine.virtio-net / -blk / -input / -gpu). Returns the device, or NULL
+// after FAILING the test (declared, yet no slot carries it) or skipping it
+// (not declared: this configuration lacks it).
+struct virtio_mmio_dev;
+struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token);
 
 // Convenience macros. TEST_ASSERT short-circuits the current test on
 // failure (returns from the test_case's fn). TEST_EXPECT_EQ is a

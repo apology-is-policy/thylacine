@@ -747,10 +747,6 @@ fi
 if [[ -n "$scale_decl" ]]; then
     append_tokens+=("thylacine.scale=${scale_decl}")
 fi
-append_flags=()
-if (( ${#append_tokens[@]} > 0 )); then
-    append_flags=(-append "${append_tokens[*]}")
-fi
 
 # Nocturne N-1 (docs/NOCTURNE.md section 4.3): the virtio-sound function
 # (virtio device id 25 -> the warden's `virtio-pci:25` bind -> nocturned).
@@ -803,6 +799,35 @@ fi
 if [[ -n "${THYLACINE_QEMU_EXTRA:-}" ]]; then
     read -r -a _env_extra <<< "$THYLACINE_QEMU_EXTRA"
     extra_qemu_args+=("${_env_extra[@]}")
+fi
+
+# The virtio-mmio devices this boot attaches, declared to the kernel as
+# bootargs tokens (vote 17). QEMU's virt machine always has 32 virtio-mmio
+# slots and an empty one reads DeviceID 0, so only the launcher knows what it
+# attached: a kernel test whose device is declared FAILS when it cannot find
+# it, and one whose device is not declared is a counted skip. Derived from the
+# final device arguments, extras included, so it cannot drift from what QEMU
+# is given; PCI functions are not virtio-mmio slots and declare nothing.
+for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]}"} \
+            ${net_flags[@]+"${net_flags[@]}"} ${input_flags[@]+"${input_flags[@]}"} \
+            ${gpu_flags[@]+"${gpu_flags[@]}"} ${audio_flags[@]+"${audio_flags[@]}"} \
+            ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
+            ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
+    case "$_arg" in
+        virtio-blk-device|virtio-blk-device,*) _virtio_kind=blk ;;
+        virtio-net-device|virtio-net-device,*) _virtio_kind=net ;;
+        virtio-keyboard-device|virtio-keyboard-device,*|virtio-mouse-device|virtio-mouse-device,*|virtio-tablet-device|virtio-tablet-device,*) _virtio_kind=input ;;
+        virtio-gpu-device|virtio-gpu-device,*) _virtio_kind=gpu ;;
+        *) continue ;;
+    esac
+    case " ${append_tokens[*]+${append_tokens[*]}} " in
+        *" thylacine.virtio-$_virtio_kind "*) ;;
+        *) append_tokens+=("thylacine.virtio-$_virtio_kind") ;;
+    esac
+done
+append_flags=()
+if (( ${#append_tokens[@]} > 0 )); then
+    append_flags=(-append "${append_tokens[*]}")
 fi
 
 # Canonical QEMU flags per TOOLING.md §3.

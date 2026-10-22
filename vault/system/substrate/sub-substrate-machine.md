@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -166,6 +166,22 @@ so the documented way to turn the feature off would have been inert on arrival.
 0, and `gpu-mmio0` (probe-only, driverless in a resident boot) would squat
 it — the VNC client must land on `gpu0`'s head. `cocoa` keeps the canonical
 device set because its View menu switches consoles interactively.
+
+**The launcher declares the virtio-mmio devices it attached (vote 17,
+2026-10-22).** QEMU's virt machine always has thirty-two virtio-mmio slots, and
+an empty one reads DeviceID 0, so the guest cannot tell a device that was never
+attached from one its scan failed to see -- only the launcher knows. Just before
+`exec`, the script walks every device argument it is about to pass (the extra
+arguments included) and appends one token per MMIO class found:
+`thylacine.virtio-blk`, `-net`, `-input` (a keyboard, mouse or tablet MMIO
+device) or `-gpu`, each once. PCI functions are not virtio-mmio slots and
+declare nothing. The list is derived from the arguments, not written beside
+them, so dropping a device -- `THYLACINE_NO_NET=1`, a missing `disk.img`, the
+vnc display's dropped MMIO GPU -- drops its token with it. The kernel tests that
+drive a device FAIL when it is declared and absent, and count a skip when it is
+undeclared ([[sub-substrate-kernel-suite]]). The append-flags array is now built
+after that walk, at the end of the script, rather than straight after the
+other tokens.
 
 ## Data structures
 

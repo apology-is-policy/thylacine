@@ -147,13 +147,17 @@ static void stub_exec_thunk(void *arg) {
     userland_enter(entry, sp);
 }
 
+// Returns -1 after failing or skipping the test; a binary too large for its
+// buffer is a FAIL in every image, never a skip.
 static int load_binary(const char *name, u8 *dst, size_t dst_cap, size_t *out_size) {
     const void *cpio_blob = NULL;
     size_t      size = 0;
 
-    int rc = devramfs_lookup(name, &cpio_blob, &size);
-    if (rc != 0)              return -1;
-    if (size > dst_cap)       return -2;
+    if (test_probe_lookup(name, &cpio_blob, &size) != 0) return -1;
+    if (size > dst_cap) {
+        test_fail("ramfs binary too large for its static buffer");
+        return -1;
+    }
 
     const u8 *src = (const u8 *)cpio_blob;
     for (size_t i = 0; i < size; i++) dst[i] = src[i];
@@ -174,17 +178,9 @@ void test_stratumd_stub_round_trip(void) {
     int rc;
 
     rc = load_binary("bin/stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/stratumd-stub not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    if (rc != 0) return;
     rc = load_binary("bin/attach-probe", g_client_blob, STUB_BLOB_MAX, &client_size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/attach-probe not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    if (rc != 0) return;
 
     uart_puts("    /stratumd-stub size=");
     uart_putdec((u64)stub_size);
@@ -278,17 +274,9 @@ void test_stratumd_stub_fs_round_trip(void) {
     int rc;
 
     rc = load_binary("bin/stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/stratumd-stub not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    if (rc != 0) return;
     rc = load_binary("bin/stub-fs-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/stub-fs-probe not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    if (rc != 0) return;
 
     uart_puts("    /stratumd-stub size=");
     uart_putdec((u64)stub_size);
@@ -365,17 +353,9 @@ void test_stratumd_stub_walk_round_trip(void) {
     int rc;
 
     rc = load_binary("bin/stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/stratumd-stub not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    if (rc != 0) return;
     rc = load_binary("bin/stub-walk-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/stub-walk-probe not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    if (rc != 0) return;
 
     uart_puts("    /stratumd-stub size=");
     uart_putdec((u64)stub_size);

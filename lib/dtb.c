@@ -1295,6 +1295,43 @@ bool dtb_node_parent(u32 node_off, u32 *out_parent_off) {
     return false;
 }
 
+bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token) {
+    if (!args || !token) return false;
+    size_t toklen = k_strlen(token);
+    if (toklen == 0) return false;
+    // A complete whitespace-delimited word, never a substring: serial-sak=10
+    // and another parameter's value must not answer serial-sak=1. A NUL ends
+    // the string, whatever the property length says.
+    for (u32 at = 0; at < len && args[at]; ) {
+        while (at < len && (args[at] == ' ' || args[at] == '\t')) at++;
+        u32 start = at;
+        while (at < len && args[at] && args[at] != ' ' && args[at] != '\t') at++;
+        if ((size_t)(at - start) == toklen) {
+            size_t i = 0;
+            while (i < toklen && args[start + i] == (u8)token[i]) i++;
+            if (i == toklen) return true;
+        }
+    }
+    return false;
+}
+
+bool dtb_bootargs_has_token(const char *token) {
+    static const char chosen[] = "chosen", bootargs[] = "bootargs";
+    struct dtb_node_entry node, prop;
+    u32 root_cursor = 0;
+    while (dtb_node_iter(DTB_NODE_ROOT, &root_cursor, &node)) {
+        if (!node.is_node || node.namelen != sizeof(chosen) - 1 || !k_streq(node.name, chosen))
+            continue;
+        u32 cursor = 0;
+        while (dtb_node_iter(node.off, &cursor, &prop)) {
+            if (prop.is_node || prop.namelen != sizeof(bootargs) - 1 || !k_streq(prop.name, bootargs))
+                continue;
+            return dtb_bootargs_scan(prop.data, prop.datalen, token);
+        }
+    }
+    return false;
+}
+
 // =============================================================================
 // PCI MSI relationships. These readers do not change the immutable boot DTB.
 // All arithmetic uses wide intermediates; malformed/ambiguous firmware fails

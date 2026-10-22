@@ -64,11 +64,8 @@ void test_pipe_probe_round_trip(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/pipe-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/pipe-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/pipe-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
     TEST_ASSERT(size <= PIPE_PROBE_BLOB_MAX,
                 "pipe-probe binary too large for static buffer");

@@ -460,6 +460,34 @@ case "$result" in
             grep -a '9p: close: flush of fid' "$LOG_FILE" >&2 || true
             exit 1
         fi
+        # The kernel suite's skips (vote 17). A test skips only through a helper
+        # that proves the configuration permits it: a virtio device run-vm.sh
+        # did not declare, or a probe binary in an image without userspace
+        # (which fails the suite anyway). A [skip] of any other shape is an
+        # ungated skip, and a boot with this script's full device set has
+        # nothing it may skip. Any skip is reported, and reported as NOT
+        # coverage.
+        skip_lines="$(grep -ao '\[skip\] .*' "$LOG_FILE" | tr -d '\r' || true)"
+        if [[ -n "$skip_lines" ]]; then
+            gated_skip='^\[skip\] (thylacine\.virtio-(net|blk|input|gpu): not attached \(the launcher did not declare it\)|/[^ ]+ not in ramfs, and the image carries no userspace .*)$'
+            if grep -vqE "$gated_skip" <<<"$skip_lines"; then
+                echo "==> FAIL: a kernel test skipped without a gated helper (test_probe_lookup / test_virtio_device):" >&2
+                grep -vE "$gated_skip" <<<"$skip_lines" >&2 || true
+                exit 1
+            fi
+            if [[ "${THYLACINE_NO_NET:-0}" != "1" && "${THYLACINE_NO_INPUT:-0}" != "1" \
+                  && "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" == "none" \
+                  && -f "${THYLACINE_DISK_IMG:-$REPO_ROOT/build/disk.img}" \
+                  && -f "${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}" ]]; then
+                echo "==> FAIL: the full device set was attached, yet kernel tests skipped:" >&2
+                echo "$skip_lines" >&2
+                exit 1
+            fi
+            echo "==> kernel suite: $(grep -c . <<<"$skip_lines") skip line(s) -- NOT coverage:"
+            while IFS= read -r skip_line; do
+                echo "==>   $skip_line"
+            done <<<"$skip_lines"
+        fi
         # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
         # verdict. Both soft-skip when their external Alpine bundle is absent,
         # which is right, but nothing carried the skip into the exit status --

@@ -1763,8 +1763,11 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     return 0;
 }
 
-// Something a ring's driver must act on moved: a CQE, a completion's re-arm or
-// chain result, an op gone in flight. Under l->lock (struct Loom, drive_gen).
+// Something a public ring's driver must act on moved: a CQE, a completion's
+// re-arm or chain result, an op gone in flight. Under l->lock (struct Loom,
+// drive_gen). Two CQE posters skip it, both private-ring only
+// (loom_private_post_terminal, loom_provided_deliver): no drive_gen waiter
+// runs on a private ring.
 static void loom_drive_moved_locked(struct Loom *l) {
     __atomic_store_n(&l->drive_gen, l->drive_gen + 1u, __ATOMIC_RELEASE);
 }

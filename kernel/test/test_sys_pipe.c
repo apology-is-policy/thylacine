@@ -561,7 +561,7 @@ void test_sys_pread_devramfs_offset_and_cursor(void) {
     // /welcome content is pinned by tools/build.sh: "Welcome to Thylacine
     // ramfs.\n" (28 bytes). Offsets are asserted against it.
     struct Spoor *f = prw_open_ramfs("welcome");
-    if (!f) return;   // initrd without the smoke files (never in CI)
+    TEST_ASSERT(f != NULL, "open welcome");
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);   // adopts the ref
@@ -604,7 +604,11 @@ void test_sys_prw_rights_and_walkonly(void) {
     // A WRITE-only handle cannot pread (the RIGHT_READ gate) -- the
     // omode-derived-rights shape (#46 family) applied to the positioned ops.
     struct Spoor *fw = prw_open_ramfs("welcome");
-    if (!fw) { drop_test_proc(p); return; }
+    if (!fw) {
+        drop_test_proc(p);
+        test_fail("open welcome (w)");
+        return;
+    }
     hidx_t fdw = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, fw);
     TEST_ASSERT(fdw >= 0, "handle_alloc W-only");
     u8 buf[8];

@@ -16,7 +16,7 @@ abis: []
 design:
   - "docs/ARCHITECTURE.md section 5"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -113,6 +113,21 @@ bounds-checked against the block size before a pointer is formed, and name scans
 are length-bounded, so a forged or stale offset from userspace is rejected rather
 than followed.
 
+**The launcher's declarations are read through the tree-walk API.**
+`dtb_bootargs_has_token` finds the root's `chosen` node and its first `bootargs`
+property, and answers whether a token is there as a complete word;
+`dtb_bootargs_scan` is that word test alone, over bytes, so the kernel suite can
+prove it on strings it controls (`dtb.bootargs_whole_words`). A word is
+delimited by spaces or tabs and never matched as a substring --
+`serial-sak=10` does not answer `serial-sak=1` -- and a NUL inside the property
+ends the string. Two readers rely on it: the serial SAK posture
+(`thylacine.serial-sak=1`, [[sub-kernel-cons]]) and the kernel tests that need a
+virtio device, which ask whether the launcher declared it
+(`thylacine.virtio-net` and the rest, [[sub-substrate-kernel-suite]]). Unlike
+the boot accessors' `chosen` walk, which takes a node of that name at any depth,
+this reads only the root's child: the serial SAK reader had that rule before it
+moved here, and an authorization token must not be satisfiable by a nested node.
+
 ## Data structures
 
 One file-scope record: readiness, the original base, the block offsets and sizes
@@ -202,7 +217,9 @@ because the blob is firmware-supplied; it is the concrete shape of
 
 Read from `lib/dtb.c` (1205 lines) in full, 2026-08-02, during the boot sweep.
 Three registered tests: the presence of a chosen-node seed, PCI interrupt
-routing, and the PCI memory window. The parser's structural behaviours — property
+routing, and the PCI memory window. The bootargs word test
+(`dtb.bootargs_whole_words`, 2026-10-22) proves the word rule on synthetic
+strings, each refusal beside an acceptance one variable away. The parser's structural behaviours — property
 ordering, the depth cap, relocation — have no direct test and are covered by the
 boot, which consults this file for every hardware fact it prints.
 

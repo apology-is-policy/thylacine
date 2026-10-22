@@ -98,18 +98,12 @@ void test_virtio_input_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-input", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-input not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-input", &cpio_blob, &size);
+    if (rc != 0) return;
 
     struct virtio_mmio_dev *input_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_INPUT);
-    if (!input_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=18 (run-vm.sh missing -device virtio-keyboard-device, or THYLACINE_NO_INPUT=1?)\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_INPUT, "thylacine.virtio-input");
+    if (!input_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_INPUT_PROBE_BLOB_MAX,
                 "virtio-input binary too large for static buffer");

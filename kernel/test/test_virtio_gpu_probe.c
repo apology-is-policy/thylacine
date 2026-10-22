@@ -110,18 +110,12 @@ void test_virtio_gpu_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-gpu", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-gpu not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-gpu", &cpio_blob, &size);
+    if (rc != 0) return;
 
     struct virtio_mmio_dev *gpu_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_GPU);
-    if (!gpu_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=16 (run-vm.sh missing -device virtio-gpu-device, or THYLACINE_NO_GPU=1?)\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_GPU, "thylacine.virtio-gpu");
+    if (!gpu_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_GPU_PROBE_BLOB_MAX,
                 "virtio-gpu binary too large for static buffer");

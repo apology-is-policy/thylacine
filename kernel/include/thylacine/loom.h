@@ -479,7 +479,8 @@ struct Loom {
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
     // from the shared header (which userspace can corrupt -> an OOB kernel write).
     u32 cq_tail;
-    // Bumped under `lock` (loom_drive_moved_locked) by every CQE post, every
+    // Bumped under `lock` (loom_drive_moved_locked) by every CQE post on a
+    // public ring (a private ring has no drive_gen waiter), every
     // completion's state update (a re-arm flagged, a chain result, an op
     // terminal) and every op that goes in flight (a submit's link, a re-arm
     // claimed). A waiter that read it before driving the ring and finds it

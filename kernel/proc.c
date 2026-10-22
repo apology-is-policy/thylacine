@@ -2721,37 +2721,7 @@ static bool serial_sak_configured(void) {
     int fixture = __atomic_load_n(&g_test_serial_sak, __ATOMIC_ACQUIRE);
     if (fixture >= 0) return fixture != 0;
 #endif
-    struct dtb_node_entry node, prop;
-    u32 root_cursor = 0;
-    const char chosen[] = "chosen", bootargs[] = "bootargs";
-    const char token[] = "thylacine.serial-sak=1";
-    while (dtb_node_iter(DTB_NODE_ROOT, &root_cursor, &node)) {
-        if (!node.is_node || node.namelen != sizeof(chosen) - 1) continue;
-        u32 i = 0;
-        while (i < node.namelen && node.name[i] == chosen[i]) i++;
-        if (i != node.namelen) continue;
-        u32 cursor = 0;
-        while (dtb_node_iter(node.off, &cursor, &prop)) {
-            if (prop.is_node || prop.namelen != sizeof(bootargs) - 1) continue;
-            i = 0;
-            while (i < prop.namelen && prop.name[i] == bootargs[i]) i++;
-            if (i != prop.namelen) continue;
-            // Require a complete whitespace-delimited token, not a substring
-            // such as serial-sak=10 or another parameter's value.
-            for (u32 at = 0; at < prop.datalen && prop.data[at]; ) {
-                while (at < prop.datalen && (prop.data[at] == ' ' || prop.data[at] == '\t')) at++;
-                u32 start = at;
-                while (at < prop.datalen && prop.data[at] && prop.data[at] != ' ' && prop.data[at] != '\t') at++;
-                if (at - start == sizeof(token) - 1) {
-                    i = 0;
-                    while (i < sizeof(token) - 1 && prop.data[start + i] == (u8)token[i]) i++;
-                    if (i == sizeof(token) - 1) return true;
-                }
-            }
-            return false;
-        }
-    }
-    return false;
+    return dtb_bootargs_has_token("thylacine.serial-sak=1");
 }
 
 bool proc_console_sak(void) {

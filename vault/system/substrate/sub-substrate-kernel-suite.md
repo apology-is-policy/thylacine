@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-12
+updated: 2026-10-22
 ---
 
 ## Purpose
@@ -32,18 +32,21 @@ What a reader of the boot log is entitled to assume:
 
 - The number of tests is derivable from the source without booting: it is the
   number of registration rows before the table's sentinel.
-- Every test that runs produces exactly one verdict -- `PASS`, or `FAIL: ` with
-  a message -- AFTER the line that announces its name.
+- Every test that runs produces exactly one verdict -- `PASS`, `FAIL: ` with a
+  message, or `SKIP` -- AFTER the line that announces its name. A `SKIP` follows
+  a `[skip]` line saying what the configuration lacked.
 - A verdict belongs to the most recently announced name, not to the line it sits
   on.
 - The suite prints a summary tally with its own verdict word, whether it passed
-  or failed.
+  or failed. A pass reads `tests: P/T PASS`, then ` (N soft-warn)` and
+  ` (K skipped)` when either is nonzero, in that order. P counts passes only, so
+  on a pass P + K = T.
 - Every kernel-printed line ends CRLF.
 
 What a reader is NOT entitled to assume: that a name and its verdict share a
-line; that a failing suite is cut short before its tally; that an absent
-`[skip]` line means the probe set was present; that the first `  tests:` match
-in the log carries numbers.
+line; that a failing suite is cut short before its tally; that the absence of
+a `[skip]` line means anything in a boot that did not pass; that the first
+`  tests:` match in the log carries numbers.
 
 ## Mechanism
 
@@ -163,8 +166,10 @@ wrongly here at least once:
   failure, not an absent test.
 - Does the reader cross-check the kernel's own tally? It is free, independent,
   and present on red legs too.
-- Does the gate assert zero `[skip]` lines? If not, a missing image file turns
-  a real test into a green no-op.
+- Does the gate read the ` (K skipped)` count, or the `[skip]` lines, and treat
+  a skip as NOT coverage? `tools/test.sh` does: it refuses a skip of any shape
+  but the two gated ones, and any skip at all when its full device set was
+  attached ([[sub-substrate-gates]]).
 
 ## Seams
 
@@ -178,16 +183,31 @@ before it is made.
 
 ## Caveats
 
-**A skip is a pass, and it is a live trap, not a documented convenience.**
-Sixteen test files print an indented `[skip]` line and return when a file they
-need is absent from the ramfs. A test that returns without failing is counted as
-a pass, so a renamed or unstaged binary converts a real test into a green no-op
-and the suite's own tally cannot tell you. The skip exists for a fresh checkout
-without userspace; a gate image always carries the probe set. A gate that cares
-therefore asserts ZERO `[skip]` lines against a baseline that had none -- a
-property of the IMAGE, which must be stated as such. Tracked as an open defect.
-`loom.bridge_probe` is the first test to fail instead: it skips only when the
-ramfs lacks `bin/joey` as well. The same key would close the trap for the rest.
+**A skip is counted and gated; it is never a pass (2026-10-22).** Until then a
+test that printed `[skip]` and returned was counted as a pass, so a renamed or
+unstaged binary, or a device the boot did not attach, turned a real test into a
+green no-op the tally could not show. Now a test can skip only through one of
+two helpers, each of which first proves the configuration permits the absence,
+and there is deliberately no bare skip call:
+- `test_probe_lookup` finds a probe binary in the ramfs. A miss FAILS when the
+  ramfs carries `bin/joey` -- an image with userspace and without the probe is
+  stale -- and skips only when the image has no userspace at all. Such an
+  image fails the suite anyway (`devramfs.live_bin_holds_the_programs` asserts
+  `bin/joey`), so this skip never appears in a passing boot; it keeps that one
+  cause from reading as a failure per probe. A binary too large for its buffer
+  fails in every image.
+- `test_virtio_device` finds a virtio-mmio device. QEMU always has thirty-two
+  slots and an empty one reads DeviceID 0, so only the launcher knows what it
+  attached: `tools/run-vm.sh` declares each MMIO device as a bootargs token
+  derived from its own arguments ([[sub-substrate-machine]]). A declared
+  device that no slot carries FAILS; an undeclared one is a counted skip
+  (vote 17). The probe each such test spawns runs only once the device is
+  found, so its own missed scan is a FAIL too ([[sub-virtio-probes]]).
+
+The initrd guards that returned silently (`devramfs_entry_count() < 1`, a
+`welcome` file that would not open) are assertions now: the suite already
+fails a boot without an initrd (`devramfs.initialized_with_files`), so they
+were dead, and their comments said otherwise.
 
 **This dossier covers the harness, not the tests.** `test.c` and `test.h` are
 the harness. The individual test files are a separate and much larger surface --
@@ -1272,9 +1292,9 @@ implies: 70 without it, 71 with it ([[sub-kernel-loom-bridge]]). So the same
 registration passes on both images for different reasons, and a PASS line alone
 does not say which kernel booted.
 
-Unlike the other probe-spawning tests, it fails rather than skips when its
-binary is absent from a ramfs that carries `bin/joey`. Only a kernel booted
-without userspace may skip it. The guest runner also requires:
+It was the first probe-spawning test to fail rather than skip when its binary
+is absent from a ramfs that carries `bin/joey`; since 2026-10-22 every one does,
+through `test_probe_lookup`. The guest runner also requires:
 - the probe's own verdict line, the status line
   `loom-bridge-probe status=N expected=N`, and the ring line
   `loom-bridge-probe rings made=N retired=N expected=N`, each exactly once;
@@ -1282,3 +1302,5 @@ without userspace may skip it. The guest runner also requires:
 
 **Append (2026-10-14).** New tests: `extinction.tx_gate_admits_only_the_owner_once_claimed`,
 `extinction.tx_wait_waits_out_a_peer_byte`, `vivarium.t1_keeps_guest_registers`.
+
+**Append (2026-10-22).** New test: `dtb.bootargs_whole_words` ([[sub-kernel-dtb]]).

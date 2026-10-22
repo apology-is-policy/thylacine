@@ -139,16 +139,7 @@ static void np_say(const char *what, u64 got, u64 want) {
 static void np_run(const char *path, const char *label, int want) {
     const void *probe_blob = NULL;
     size_t probe_size = 0;
-    if (devramfs_lookup(path, &probe_blob, &probe_size) != 0) {
-        // Only a kernel booted without userspace may skip; a ramfs that has init
-        // but not the probe is stale, and skipping would pass it.
-        const void *init_blob = NULL;
-        size_t init_size = 0;
-        TEST_ASSERT(devramfs_lookup("bin/joey", &init_blob, &init_size) != 0,
-                    "an image that carries userspace carries the native probes");
-        uart_puts("    [skip] the native probes are not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    if (test_probe_lookup(path, &probe_blob, &probe_size) != 0) return;
 
     const char *error = NULL;
     struct np_blob fixture = {0}, probe = {0};
