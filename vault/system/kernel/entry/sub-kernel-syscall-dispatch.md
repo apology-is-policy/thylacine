@@ -792,7 +792,11 @@ size, times)` — the handler/inner split that makes the gate testable without a
 live EL0 thread (the #37 pattern). The handler's one piece of work is the x6
 copy-in: the two `struct t_timespec` (atime, mtime) are read from the caller only
 when `ATIME_SET` or `MTIME_SET` is in the mask, so the residue a chmod or a "now"
-leaves in x6 is never touched; an unreadable pointer is EFAULT. The inner takes a
+leaves in x6 is never touched; an unreadable pointer is EFAULT. The mask's shape
+(`wstat_mask_check`: a known bit, no reserved one, no `_SET` without its time)
+is checked before the copy, so a malformed mask is EINVAL whatever x6 holds; with
+the copy first, joey's `_SET`-alone leg answered EFAULT on its first device run
+(lease 5), an errno that depended on register residue. The inner takes a
 kernel copy. It validates structurally first, each refusal EINVAL: at least one
 known `valid` bit and no reserved one (so a future `T_WSTAT_*` cannot be silently
 dropped), no `_SET` bit without its time bit, the mode masked to the rwx nine

@@ -1158,7 +1158,8 @@ so. The mechanism is [[sub-kernel-syscall-dispatch]]'s.
 / `T_WSTAT_MTIME_SET` (bits 7/8, the caller's values), equal to 9P's
 `P9_SETATTR_*`. Its argument record grows by one register: x6 points at a
 `struct t_timespec[2]` (atime, mtime; the SYS_CLOCK_GETTIME record, 16 bytes
-each), read only when a `_SET` bit asks. Bit 6 stays reserved. Every refusal
+each), read only when a `_SET` bit asks in an otherwise well-formed mask (a
+malformed mask is EINVAL before x6 is read). Bit 6 stays reserved. Every refusal
 now answers its errno, never EPERM (the -1 alias); the list is in the
 `SYS_WSTAT` comment in `kernel/include/thylacine/syscall.h` and in
 `docs/ERRORS.md` ER-2. Old callers keep working: a mask without time bits

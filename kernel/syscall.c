@@ -5292,6 +5292,20 @@ static bool wstat_time_ok(const struct t_timespec *ts) {
     return ts->tv_sec >= 0 && ts->tv_nsec >= 0 && ts->tv_nsec <= 999999999;
 }
 
+// Mask sanity: at least one known bit, no reserved bit (so a future
+// T_WSTAT_* extension cannot be silently dropped -- same discipline as
+// SYS_UNLINK's flags / SYS_WALK_CREATE's perm). A _SET bit modifies its time
+// bit and means nothing alone. 0, or -T_E_INVAL.
+static s64 wstat_mask_check(u32 valid) {
+    if (valid == 0)                                  return -(s64)T_E_INVAL;
+    if (valid & ~(u32)T_WSTAT_VALID)                 return -(s64)T_E_INVAL;
+    if ((valid & T_WSTAT_ATIME_SET) && !(valid & T_WSTAT_ATIME))
+        return -(s64)T_E_INVAL;
+    if ((valid & T_WSTAT_MTIME_SET) && !(valid & T_WSTAT_MTIME))
+        return -(s64)T_E_INVAL;
+    return 0;
+}
+
 // The value checks every SYS_WSTAT runs before it names a file. A field whose
 // bit is clear is zeroed; `tv` receives only the times whose _SET bit is set,
 // and *tvp is NULL when none is. 0, or -T_E_INVAL.
@@ -5299,16 +5313,8 @@ static s64 wstat_prepare(u32 valid, u32 *mode, u32 *uid, u32 *gid, u64 *size,
                          const struct t_timespec *times,
                          struct t_timespec tv[2],
                          const struct t_timespec **tvp) {
-    // Mask sanity: at least one known bit, no reserved bit (so a future
-    // T_WSTAT_* extension cannot be silently dropped -- same discipline as
-    // SYS_UNLINK's flags / SYS_WALK_CREATE's perm). A _SET bit modifies its
-    // time bit and means nothing alone.
-    if (valid == 0)                                  return -(s64)T_E_INVAL;
-    if (valid & ~(u32)T_WSTAT_VALID)                 return -(s64)T_E_INVAL;
-    if ((valid & T_WSTAT_ATIME_SET) && !(valid & T_WSTAT_ATIME))
-        return -(s64)T_E_INVAL;
-    if ((valid & T_WSTAT_MTIME_SET) && !(valid & T_WSTAT_MTIME))
-        return -(s64)T_E_INVAL;
+    s64 me = wstat_mask_check(valid);
+    if (me != 0)                                     return me;
 
     // Per-field structural bounds. A field whose valid bit is clear is forced
     // to 0 before the Dev call (the server ignores it -- its valid bit is
@@ -5457,9 +5463,13 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    // x6 is read only when a _SET bit asks for it: a caller setting mode, or
-    // "now", leaves x6 as register residue, and that is never touched.
+    // x6 is read only when a well-formed mask has a _SET bit: a caller setting
+    // mode, or "now", leaves x6 as register residue, and that is never
+    // touched. A malformed mask is refused first, so its EINVAL cannot turn
+    // into EFAULT on whatever x6 happens to hold.
     u32 valid = (u32)valid_raw;
+    s64 me = wstat_mask_check(valid);
+    if (me != 0)                                     return me;
     struct t_timespec tv[2];
     const struct t_timespec *tvp = NULL;
     if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {

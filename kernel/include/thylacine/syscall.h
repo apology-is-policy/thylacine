@@ -1375,7 +1375,9 @@ enum {
     //                zero-fills (Tsetattr semantics, Stratum-side).)
     //   x6 = times  (user pointer to struct t_timespec[2], atime then mtime,
     //                read ONLY when T_WSTAT_ATIME_SET or T_WSTAT_MTIME_SET is
-    //                set, and only the entry whose _SET bit is set. tv_sec < 0,
+    //                set in an otherwise well-formed mask (a malformed one is
+    //                EINVAL before x6 is read), and only the entry whose _SET
+    //                bit is set. tv_sec < 0,
     //                or tv_nsec outside [0, 999999999] -> EINVAL; an unreadable
     //                pointer -> EFAULT. T_WSTAT_ATIME / T_WSTAT_MTIME alone set
     //                that time to the file server's clock and read nothing.)
@@ -1388,7 +1390,7 @@ enum {
     //     EINVAL      the mask or a value above is out of its domain;
     //     EBADF       fd is not a KOBJ_SPOOR handle; T_WSTAT_SIZE on a handle
     //                 without RIGHT_WRITE or on an O_PATH handle;
-    //     EFAULT      x6 unreadable while a _SET bit is set;
+    //     EFAULT      x6 unreadable while a well-formed mask has a _SET bit;
     //     EACCES      perm_wstat_check denial (perm-enforced Dev; caller neither
     //                 owner nor CAP-holder, or for the touch without write
     //                 permission); a caped session refusing chown/chgrp. Never
