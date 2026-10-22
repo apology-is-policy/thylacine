@@ -1,0 +1,8 @@
+PASS control PASS joint pool table: 7176 bytes
+PASS prepare-leak failed member prepare leaves no hidden slot or output
+PASS early-visible provisional hidden but excludes extent
+PASS rollback-members rollback releases both exclusions
+PASS borrow-reap borrow refusal preserves both ledgers
+PASS busy-reap stream refusal preserves slot
+PASS reap-slot exact return permits both ledgers to reap
+PASS late-publish close rejects joint publication without half commit

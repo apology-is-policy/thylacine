@@ -1,0 +1,10 @@
+--- kernel/loom_service_slots.c
++++ rollback-generation.c
+@@ -50,6 +50,7 @@
+     struct loom_service_slot *s = slot_exact(t, ref);
+     if (!s) return -T_E_NOENT;
+     if (s->phase != LSLOT_PROVISIONAL || s->pins) return -T_E_BUSY;
++    --t->next_incarnation;
+     *s = (struct loom_service_slot){0};
+     return 0;
+ }

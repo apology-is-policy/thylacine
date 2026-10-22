@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ reuse-identity.c
+@@ -49,7 +49,7 @@
+         if (r->phase != LREQ_FREE) continue;
+         int rc = loom_slot_pin(s,scope,LOOM_SERVICE_SCOPE);
+         if (rc) return rc;
+-        *r = (struct loom_service_request){ .scope=scope, .identity=++t->next_identity,
++        *r = (struct loom_service_request){ .scope=scope, .identity=t->next_identity=1,
+             .user_data=user_data, .deadline=deadline, .phase=LREQ_PREPARED };
+         ++t->occupied;
+         *out = (struct loom_request_ref){ .index=i, .identity=r->identity };

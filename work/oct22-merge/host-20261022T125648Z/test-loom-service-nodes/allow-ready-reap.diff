@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ allow-ready-reap.c
+@@ -80,7 +80,7 @@
+     struct loom_service_node *n = node_exact(t, nodes, ref,
+                                     rollback ? LSLOT_PROVISIONAL : LSLOT_LIVE);
+     if (!n) return -T_E_NOENT;
+-    if (n->state != LOOM_SERVICE_RESERVED || t->slots[ref.slot].pins) return -T_E_BUSY;
++    if (t->slots[ref.slot].pins) return -T_E_BUSY;
+     bool child = t->slots[ref.slot].kind == LOOM_SERVICE_FID;
+     struct loom_service_ref parent = n->parent;
+     if (child ? !node_parent_held(t, parent) : !node_zero_ref(parent)) return -T_E_INVAL;

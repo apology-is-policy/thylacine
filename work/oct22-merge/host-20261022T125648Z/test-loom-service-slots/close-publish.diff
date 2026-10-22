@@ -1,0 +1,10 @@
+--- kernel/loom_service_slots.c
++++ close-publish.c
+@@ -41,7 +41,6 @@
+ int loom_slot_publish(struct loom_slot_table *t, struct loom_service_ref ref) {
+     struct loom_service_slot *s = slot_exact(t, ref);
+     if (!s) return -T_E_NOENT;
+-    if (t->closing) return -T_E_CANCELED;
+     if (s->phase != LSLOT_PROVISIONAL) return -T_E_BUSY;
+     s->phase = LSLOT_LIVE;
+     return 0;

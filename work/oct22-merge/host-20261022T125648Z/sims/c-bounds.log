@@ -1,0 +1,2 @@
+running admission_follows_the_kernels_order
+Assertion failed: (sim_admit(s, &q) == SIM_EINVAL), function admission_follows_the_kernels_order, file test_adapter.c, line 1828.

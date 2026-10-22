@@ -1,0 +1,52 @@
+
+running 38 tests
+test clipboard::tests::idle_total_and_regressing_clock_expire_without_publication ... ok
+test clipboard::tests::deadlines_and_rejected_reads_release_their_slots ... ok
+test clipboard::tests::commit_serialization_and_generation_conflict_never_overwrite_newer_copy ... ok
+test clipboard::tests::monotonic_identifiers_refuse_exhaustion_without_wrap_or_mutation ... ok
+test clipboard::tests::publication_is_atomic_and_pins_before_admission ... ok
+test clipboard::tests::owner_connection_epoch_and_session_are_not_interchangeable ... ok
+test clipboard::tests::incomplete_invalid_and_denied_copy_preserve_the_current_value ... ok
+test clipboard::tests::stale_admission_cannot_resurrect_cancelled_work_or_cross_trusted_takeover ... ok
+test clipbroker::tests::admitted_reads_finish_after_focus_but_not_controller_loss ... ok
+test clipbroker::tests::allocation_validation_and_conflict_precede_check ... ok
+test clipbroker::tests::begin_is_not_resurrected_and_existing_staging_dies_on_focus_loss ... ok
+test clipbroker::tests::deadline_regression_and_identifier_exhaustion_release_reservations ... ok
+test clipbroker::tests::delayed_mismatched_duplicate_and_reused_fid_replies ... ok
+test clipbroker::tests::focus_loss_after_admission_preserves_commit_but_cannot_admit_after_return ... ok
+test clipbroker::tests::receipt_must_match_operation_foreground_and_seat ... ok
+test clipbroker::tests::wrong_session_connection_and_uninitialized_seat_cannot_queue ... ok
+test controllers::tests::disconnect_cancels_pending_and_active_without_touching_other_peer ... ok
+test controllers::tests::failed_publication_and_old_request_cannot_reuse_a_generation ... ok
+test controllers::tests::exact_principal_connection_stripes_and_scope_are_required ... ok
+test clipbroker::tests::revocation_before_receipt_cancels_even_an_admitted_commit ... ok
+test controllers::tests::pending_is_not_a_controller_and_receipt_is_single_use ... ok
+test controllers::tests::mode_reports_are_ordered_bounded_and_selected_by_exact_route ... ok
+test controllers::tests::quotas_duplicates_and_counters_fail_without_evicting_live_entries ... ok
+test controllers::tests::receipt_checks_every_authorizing_field_and_fresh_peer ... ok
+test controllers::tests::replacement_and_foreground_round_trip_never_revive_an_owner ... ok
+test controllers::tests::same_epoch_changed_or_missing_nomination_retires_the_controller ... ok
+test controllers::tests::seat_restoration_requires_new_publication ... ok
+test controllers::tests::retirement_callback_cancels_real_broker_work ... ok
+test interaction_body::tests::refuses_reserved_bits_bad_text_zero_id_and_overflow_before_allocation ... ok
+test interaction_control::tests::exact_control_shape_and_reserved_bits ... ok
+test interaction_wire::tests::bounds_and_unknown_envelope_fields_refuse ... ok
+test interaction_wire::tests::fixed_fixture_and_exact_extent ... ok
+test interaction_body::tests::every_body_roundtrips_and_refuses_truncation_trailing_or_wrong_direction ... ok
+test interaction_body::tests::independent_c_rust_wire_fixtures ... ok
+test interaction_body::tests::borrowed_response_ranges_match_wire_fixture_without_copying_payload ... ok
+test interaction_body::tests::successful_responses_are_bound_to_the_exact_operation_and_request ... ok
+test interaction_wire::tests::clipboard_is_canonical_text_without_terminal_controls ... ok
+test clipboard::tests::five_payload_slots_are_the_complete_storage_ceiling ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+pending-authority: intended assertion failure at pending_is_not_a_controller_and_receipt_is_single_use
+wrong-peer: intended assertion failure at exact_principal_connection_stripes_and_scope_are_required
+wrong-seat: intended assertion failure at receipt_checks_every_authorizing_field_and_fresh_peer
+stale-mode: intended assertion failure at mode_reports_are_ordered_bounded_and_selected_by_exact_route
+leaf-only-retirement: intended assertion failure at replacement_and_foreground_round_trip_never_revive_an_owner
+missing-subject-retirement: intended assertion failure at same_epoch_changed_or_missing_nomination_retires_the_controller
+reused-generation: intended assertion failure at failed_publication_and_old_request_cannot_reuse_a_generation
+no-retirement-callback: intended assertion failure at retirement_callback_cancels_real_broker_work

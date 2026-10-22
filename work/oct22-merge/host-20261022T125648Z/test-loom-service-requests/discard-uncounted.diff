@@ -1,0 +1,10 @@
+--- kernel/loom_service_requests.c
++++ discard-uncounted.c
+@@ -177,7 +177,6 @@
+     if (!r) return -T_E_NOENT;
+     if (!t->detached || r->phase != LREQ_TERMINAL || r->borrows) return -T_E_BUSY;
+     r->phase = LREQ_DELIVERED;
+-    ++t->delivered;
+     return 0;
+ }
+ int loom_request_reap(struct loom_request_table *t, struct loom_slot_table *s,

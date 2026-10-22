@@ -1,0 +1,65 @@
+{
+  "inputs": {
+    "specs/loom_service_index.tla": "13070710113ecdafc5cae6fe11118bcc70240f0b2c0198cccb01ba2e6f44711e",
+    "tools/check-loom-service-index.py": "2492ffa232f6fdb246cf880b5a9ec9e97158f2719acabc6608cec8c375fd093c",
+    "specs/loom_service_index.cfg": "db97f6275292136da00d6040ac9b4c9baa64c6d278fc51928a26dfdcad8d7d8e",
+    "specs/loom_service_index_buggy_expose.cfg": "4f457d0de3ff6ec234227ef9134973bb379f4a625996bd403f75aa3c717216b5",
+    "specs/loom_service_index_buggy_installer.cfg": "ff169b90085b7ae4fdbbfe98b0bd6bf1f7f7b954f227ce7f231d27ce9d79251b",
+    "specs/loom_service_index_buggy_late.cfg": "dcf14a8e072755a4c36cab30ec1825f3c2ccc0913f0eee849a5af380b4c081ac",
+    "specs/loom_service_index_buggy_pin.cfg": "d244613ffb7c9e00c39410042f4ae325e8a52b8dca7b52e3de204f6cdc0e9177",
+    "specs/loom_service_index_buggy_stale.cfg": "552784c2b4a71de70084c8c26581530775174bf4e050f72d0e57858696c3aa35",
+    "specs/loom_service_index_buggy_terminal.cfg": "e066d4c3995f91178e9f4b5ab96193bee88747ca7c8e1939df7344fa7c276989"
+  },
+  "results": [
+    {
+      "case": "clean",
+      "expected": null,
+      "rc": 0,
+      "states": 89,
+      "log_sha256": "777e45cc13e485c58cf9ef7ba5faab6bad7760fefa2c106e69e0fc9fca47563e"
+    },
+    {
+      "case": "installer",
+      "expected": "InstallerPinned",
+      "rc": 12,
+      "states": 3,
+      "log_sha256": "3b81bdcdb8773286d196530b421bc0bfe1e2427651e4b634e51629a4acf069d8"
+    },
+    {
+      "case": "expose",
+      "expected": "NoHalfPublished",
+      "rc": 12,
+      "states": 6,
+      "log_sha256": "374fb9f3b605ad383fe27b6bedc838b2b708ccc33f8b7a4f2b4b0507e0960722"
+    },
+    {
+      "case": "late",
+      "expected": "NoLatePublication",
+      "rc": 12,
+      "states": 6,
+      "log_sha256": "40dcfe242ab6803a191fedb4e3d327ba7b2f65d0f10663aed7ec1bfe1f6cdade"
+    },
+    {
+      "case": "pin",
+      "expected": "EntryRetainsStorage",
+      "rc": 12,
+      "states": 34,
+      "log_sha256": "ee885bfea588a2806086fdef4ac07f1833d79fa7c73b4fbbd424a4b95ba92ace"
+    },
+    {
+      "case": "terminal",
+      "expected": "TerminalRetained",
+      "rc": 12,
+      "states": 17,
+      "log_sha256": "43edffb084503f6dd344bea36879eefd2fd8710caa8c2f02ebb109e708b9c615"
+    },
+    {
+      "case": "stale",
+      "expected": "NoStaleEntry",
+      "rc": 12,
+      "states": 55,
+      "log_sha256": "19b315783f8367ae90bc942b3270682cb2042436689eb44ea1b6ee6822499807"
+    }
+  ],
+  "limits": "finite lifetime/publication model, not actual C/wire/host memory model or fairness proof"
+}

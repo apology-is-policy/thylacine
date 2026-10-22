@@ -1,0 +1,37 @@
+
+running 19 tests
+test hostbindings::tests::exact_completion_and_unrelated_retirement ... ok
+test hostbindings::tests::failed_bind_discards_observation_and_success_requires_a_snapshot ... ok
+test hostbindings::tests::late_success_keeps_cleanup_and_replacement_cannot_bypass_it ... ok
+test hostbindings::tests::ordered_foreground_before_bind_is_provisional_and_exact ... ok
+test hostbindings::tests::refusal_is_bounded_and_suspend_keeps_remote_observer ... ok
+test hostbindings::tests::retirement_before_success_cannot_revive_or_rebind ... ok
+test interaction_control::tests::exact_control_shape_and_reserved_bits ... ok
+test paneroute::tests::a_repeated_diagnostic_is_written_at_powers_of_two ... ok
+test paneroute::tests::coalesced_replacement_retires_even_identical_names ... ok
+test hostbindings::tests::exact_host_metadata_and_removal_at_capacity ... ok
+test paneroute::tests::hex32_round_trips ... ok
+test paneroute::tests::live_route_cannot_be_retargeted ... ok
+test paneroute::tests::full_table_and_exhaustion_still_allow_removal ... ok
+test paneroute::tests::parse_hex32_is_canonical_only ... ok
+test paneroute::tests::place_tail_matches_the_walk ... ok
+test paneroute::tests::stale_fids_cannot_walk_clone_or_escape ... ok
+test paneroute::tests::walk_dot_and_dotdot ... ok
+test paneroute::tests::walk_resolves_only_live_tokens ... ok
+test hostbindings::tests::full_remote_table_drains_without_losing_replacement_snapshot ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+pending-observation: intended assertion failure at ordered_foreground_before_bind_is_provisional_and_exact
+removed-observation: intended assertion failure at ordered_foreground_before_bind_is_provisional_and_exact
+late-terminal-revival: intended assertion failure at ordered_foreground_before_bind_is_provisional_and_exact
+failed-snapshot-reuse: intended assertion failure at failed_bind_discards_observation_and_success_requires_a_snapshot
+lost-remote-cleanup: intended assertion failure at late_success_keeps_cleanup_and_replacement_cannot_bypass_it
+retirement-revival: intended assertion failure at retirement_before_success_cannot_revive_or_rebind
+refusal-spin: intended assertion failure at refusal_is_bounded_and_suspend_keeps_remote_observer
+permission-as-absence: intended assertion failure at late_success_keeps_cleanup_and_replacement_cannot_bypass_it
+id-only-completion: intended assertion failure at exact_completion_and_unrelated_retirement
+leaf-only-retirement: intended assertion failure at exact_completion_and_unrelated_retirement
+skip-incarnation: intended assertion failure at exact_host_metadata_and_removal_at_capacity
+overwrite-live-host: intended assertion failure at exact_host_metadata_and_removal_at_capacity

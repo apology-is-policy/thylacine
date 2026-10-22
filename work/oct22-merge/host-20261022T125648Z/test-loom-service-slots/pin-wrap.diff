@@ -1,0 +1,11 @@
+--- kernel/loom_service_slots.c
++++ pin-wrap.c
+@@ -58,7 +58,7 @@
+     if (!s) return -T_E_NOENT;
+     if (t->closing) return -T_E_CANCELED;
+     if (s->phase != LSLOT_LIVE || s->kind != kind) return -T_E_NOENT;
+-    if (s->pins == UINT32_MAX) return -T_E_NOSPC;
++    
+     ++s->pins;
+     return 0;
+ }

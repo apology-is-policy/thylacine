@@ -1,0 +1,11 @@
+--- kernel/loom_service_slots.c
++++ capacity.c
+@@ -28,7 +28,7 @@
+     if (!t || !out || !slot_kind(kind)) return -T_E_INVAL;
+     if (t->closing) return -T_E_CANCELED;
+     if (t->next_incarnation == UINT64_MAX) return -T_E_NOSPC;
+-    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
++    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT - 1; ++i) {
+         struct loom_service_slot *s = &t->slots[i];
+         if (s->phase != LSLOT_FREE) continue;
+         *s = (struct loom_service_slot){ .incarnation = ++t->next_incarnation,
