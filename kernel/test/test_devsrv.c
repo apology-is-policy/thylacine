@@ -787,6 +787,15 @@ void test_devsrv_service_keys_distinct(void) {
 extern s64 sys_srv_registry_new_for_proc(struct Proc *, u64, const struct srv_route *, u64, u64);
 extern int spawn_perm_grant_check(struct Proc *, u32);
 
+// The constructor answers a descriptor or a refusal as s64. Anything that is
+// not a descriptor reads as -1, so it fails the caller's >= 0 check rather
+// than narrowing into a plausible index.
+static hidx_t registry_new_fd(struct Proc *p, u64 source_fd, const struct srv_route *routes,
+                              u64 count, u64 flags) {
+    s64 rc = sys_srv_registry_new_for_proc(p, source_fd, routes, count, flags);
+    return rc >= 0 && (s64)(hidx_t)rc == rc ? (hidx_t)rc : -1;
+}
+
 static struct Spoor *session_leaf(struct Spoor *root, const char *name) {
     struct Spoor *c = spoor_clone(root);
     if (!c) return NULL;
@@ -835,18 +844,18 @@ static void test_session_registry(void) {
     // beyond that bound. Retired domains must actually return their tickets.
     int roots[SRV_MAX_DOMAINS];
     for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) {
-        roots[i] = sys_srv_registry_new_for_proc(p, fd, NULL, 0, 0);
+        roots[i] = registry_new_fd(p, fd, NULL, 0, 0);
         TEST_ASSERT(roots[i] >= 0, "empty manifest root");
     }
     TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, NULL, 0, 0), -T_E_NOSPC, "retained root bound");
     for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) handle_close(p, roots[i]);
     for (u32 i = 0; i < 40; i++) {
-        int fresh = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+        int fresh = registry_new_fd(p, fd, &r, 1, 0);
         TEST_ASSERT(fresh >= 0, "retired domains do not accumulate");
         handle_close(p, fresh);
     }
-    int a = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
-    int b = sys_srv_registry_new_for_proc(p, fd, &r, 1, 0);
+    int a = registry_new_fd(p, fd, &r, 1, 0);
+    int b = registry_new_fd(p, fd, &r, 1, 0);
     TEST_ASSERT(a >= 0 && b >= 0, "two private views");
     TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, a, &r, 1, 0), -T_E_ACCES,
         "private root cannot create nested quota domains");
@@ -936,7 +945,7 @@ static void test_session_registry(void) {
     source->flag |= CWALKONLY;
     source_fd = handle_alloc(factory, KOBJ_SPOOR, RIGHT_READ, source);
     struct srv_route cap_route = {.name_len = 8, .name = "userboot"};
-    int view_fd = sys_srv_registry_new_for_proc(factory, source_fd, &cap_route, 1, 0);
+    int view_fd = registry_new_fd(factory, source_fd, &cap_route, 1, 0);
     TEST_ASSERT(view_fd >= 0, "view with capability-posted source name");
     struct Handle view_h;
     TEST_ASSERT(handle_get(factory, view_fd, &view_h) == 0, "retain route view");
