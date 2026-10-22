@@ -250,6 +250,7 @@ void test_loom_private_node_owner(void) {
 
 #include "loom_pool_table_fixture.h"
 
+void test_loom_service_pool_table(void);
 void test_loom_service_pool_table(void) {
     const char *error = loom_pool_table_fixture();
     TEST_ASSERT(error == NULL, error);
@@ -392,6 +393,7 @@ done:
 #undef SO_CHECK
     return error;
 }
+void test_loom_private_slot_owner(void);
 void test_loom_private_slot_owner(void) {
     const char *error = loom_slot_owner_fixture();
     TEST_ASSERT(error == NULL, error);
@@ -705,21 +707,25 @@ done:
 #undef FX_CHECK
     return error;
 }
+void test_loom_private_fixed(void);
 void test_loom_private_fixed(void) {
     const char *error=loom_private_fixed_fixture();
     TEST_ASSERT(error==NULL,error);
 }
 
+void test_loom_private_pool_pins(void);
 void test_loom_private_pool_pins(void) {
     const char *error = loom_private_pool_pins_fixture();
     TEST_ASSERT(error == NULL, error);
 }
 
+void test_loom_private_buffers(void);
 void test_loom_private_buffers(void) {
     const char *error = loom_private_buffers_fixture();
     TEST_ASSERT(error == NULL, error);
 }
 
+void test_loom_service_slots(void);
 void test_loom_service_slots(void) {
     const char *slot_error = loom_slots_fixture();
     TEST_ASSERT(slot_error == NULL, slot_error);
@@ -728,6 +734,7 @@ void test_loom_service_slots(void) {
 // Its own test rather than a passenger on the geometry fixture: this one
 // asserts the whole private-owner admission/retirement lifecycle, and a failure
 // should name that instead of a ring-layout check.
+void test_loom_private_owner_lifecycle(void);
 void test_loom_private_owner_lifecycle(void) {
     const char *owner_error = loom_private_fixture();
     TEST_ASSERT(owner_error == NULL, owner_error);
@@ -937,6 +944,16 @@ void test_loom_register_handles(void) {
     test_proc_drop(p);
 }
 
+// Spoor.ref behind descriptor fd, or -1 when fd names no handle. The reading
+// includes the one ref its own handle_get holds.
+static int spoor_ref_of(struct Proc *p, hidx_t fd) {
+    struct Handle h;
+    if (handle_get(p, fd, &h) != 0) return -1;
+    int ref = __atomic_load_n(&((struct Spoor *)h.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&h);
+    return ref;
+}
+
 void test_loom_register_rejects(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc returned NULL");
@@ -961,8 +978,12 @@ void test_loom_register_rejects(void) {
     // nothing, answers -EBADF.
     hidx_t bad[1] = { loom_fd };
     int listed_kind = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1);
+    // The first entry is resolved before the second fails, so its ref must be
+    // rolled back: the Spoor's count is what it was.
     hidx_t dead[2] = { rd, (hidx_t)999 };
+    int ref_before = spoor_ref_of(p, rd);
     int listed_dead = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, dead, 2);
+    int ref_after = spoor_ref_of(p, rd);
     int enter_flag = sys_loom_enter_for_proc(p, loom_fd, 0, 0, 0x80000000u);
     // A bogus loom_fd is rejected.
     int ring_dead = sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1);
@@ -980,6 +1001,8 @@ void test_loom_register_rejects(void) {
     TEST_EXPECT_EQ(over_cap, -T_E_INVAL, "nargs over cap answers -EINVAL");
     TEST_EXPECT_EQ(listed_kind, -T_E_BADF, "a listed non-Spoor answers -EBADF");
     TEST_EXPECT_EQ(listed_dead, -T_E_BADF, "a listed descriptor naming nothing answers -EBADF");
+    TEST_ASSERT(ref_before > 0, "the pipe's read end names a Spoor before the register");
+    TEST_EXPECT_EQ(ref_after, ref_before, "and the resolved fd's ref was rolled back");
     TEST_EXPECT_EQ(enter_flag, -T_E_INVAL, "ENTER with an unknown flag bit answers -EINVAL");
     TEST_EXPECT_EQ(ring_dead, -T_E_BADF, "bad loom_fd answers -EBADF");
     TEST_EXPECT_EQ(ring_kind, -T_E_BADF, "non-Loom loom_fd answers -EBADF");
@@ -2036,6 +2059,7 @@ void test_loom_sqpoll_parks_on_cq_full(void) {
 // the boundary (the test_resource.c idiom) so only two real kthreads spawn:
 // refusal at the cap, no over-settle by the refused ring's free, plain rings
 // uncharged, and the close -> uncharge -> fits-again round trip.
+void test_loom_sqpoll_charges_thread_budget(void);
 void test_loom_sqpoll_charges_thread_budget(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc");

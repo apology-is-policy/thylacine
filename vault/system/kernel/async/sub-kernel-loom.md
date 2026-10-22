@@ -81,7 +81,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 
 ## Approved private service lifecycle
@@ -736,12 +736,14 @@ flags or a corrupt ring object, and an argument above its declared width is
 refused (vote 8). Everything about an individual operation is reported through
 its completion. The kernel tests `loom.register_rejects` and
 `loom.register_buffers_rejects` pin each descriptor check against a dead slot
-and a pipe, and each argument refusal's errno; `loom.setup_rejects`,
-`loom.setup_resource_refusals` (-ENOMEM at the page cap, -EMFILE for a full
-handle table) and `loom.sqpoll_charges_thread_budget` (-EAGAIN) pin SETUP's;
-`9p_client.loom_sqpoll_refuses_undeadlined` pins REGISTER's -EOPNOTSUPP for a
-9P handle whose transport cannot time out a receive on an SQPOLL ring;
-`loom-bridge-probe` pins ENTER and REGISTER on a closed ring's number, the
+and a pipe, and each argument refusal's errno; `loom.register_rejects` also
+pins that a refused REGISTER releases the descriptors it had already resolved
+(the first Spoor's count is unchanged after the second entry fails);
+`loom.setup_rejects`, `loom.setup_resource_refusals` (-ENOMEM at the page cap,
+-EMFILE for a full handle table) and `loom.sqpoll_charges_thread_budget`
+(-EAGAIN) pin SETUP's. REGISTER no longer refuses a 9P handle on an SQPOLL
+ring: the ring's reader waits only over a ready stream, so any transport can
+back one (LOOM.md 8.6, superseded 2026-10-06). `loom-bridge-probe` pins ENTER and REGISTER on a closed ring's number, the
 unknown op, one representative of each argument-refusal errno (-EINVAL,
 -EFAULT, -EBADF) and every too-wide argument, from EL0 in both images; the
 other argument conditions and the resource refusals have kernel pins only. The native operations test holds the peer at TCLUNK and pins
