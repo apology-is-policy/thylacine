@@ -970,8 +970,8 @@ build_ambush() {
 # ships in the default image (GO-PORT-PLAN "BY DEFAULT"), retiring the
 # every-invocation THYLACINE_BAKE_GOROOT=1 recipe and its forgot-the-flag
 # footgun (a pool without /goroot broke every go probe). Set
-# THYLACINE_BAKE_GOROOT=0 to opt out for a fast iteration loop (64 MiB pool, no
-# cross-build/populate); an absent fork skips gracefully either way. When
+# THYLACINE_BAKE_GOROOT=0 to opt out for a fast iteration loop (a pool sized for
+# the staged data alone, no cross-build/populate); an absent fork skips gracefully either way. When
 # staged, build_stratum_pool_fixture grows pool.img and populate_stratum_pool
 # `stratum-fs put`s this tree at /goroot. The `go` driver shells out to
 # $GOROOT/pkg/tool/thylacine_arm64/{compile,link,asm,...} and compiles a
@@ -3495,6 +3495,27 @@ build_stratum_host_tools() {
 # Backward-compat alias: any caller using the old name still works.
 build_stratum_mkfs_host() { build_stratum_host_tools "$@"; }
 
+# The stage directory populate_stratum_pool bakes for data chunk NAME, printed
+# only when it will be baked. The pool's size and the populate blocks both ask
+# it, so the size counts every data stage the populate puts.
+pool_data_stage() {
+    local d
+    case "$1" in
+        quake)      d="$BUILD_DIR/quake/stage"
+                    [[ -f "$d/id1/pak0.pak" ]] ;;
+        duke3d)     d="$BUILD_DIR/duke3d/stage"
+                    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$d/DUKE3D.GRP" ]] ;;
+        tombraider) d="$BUILD_DIR/tombraider/stage"
+                    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$d/TOMB.EXE" ]] ;;
+        webkit)     d="$BUILD_DIR/webkit/stage"
+                    [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$d/jsc" ]] ;;
+        vivarium)   d="$BUILD_DIR/vivarium"
+                    [[ -d "$d/probe/rootfs" ]] ;;
+        *)          echo "pool_data_stage: unknown chunk $1" >&2; return 2 ;;
+    esac && echo "$d"
+}
+POOL_DATA_CHUNKS="quake duke3d tombraider webkit vivarium"
+
 build_stratum_pool_fixture() {
     # Phase 6 (Pouch) sub-chunk 16b-beta. Generates the boot system pool
     # fixture that QEMU mounts as a second virtio-blk-device at boot. The
@@ -3579,7 +3600,17 @@ build_stratum_pool_fixture() {
     # filled mid-build, truncating the last _pkg_.a -> the linker's `not package
     # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
     # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
-    local pool_size="64M"
+    # The data stages ride every flavour: 64M of bootstrap headroom plus each
+    # staged chunk at four times its size (the measured ~3.3x bake amplification,
+    # rounded up). Before this the 64M base counted none of them and only the
+    # GOROOT bake's 2560M covered them, so a THYLACINE_BAKE_GOROOT=0 bake with
+    # the viv bundles staged failed `put /vivarium` with ENOSPC.
+    local data_kb=0 chunk stage
+    for chunk in $POOL_DATA_CHUNKS; do
+        stage="$(pool_data_stage "$chunk")" || continue
+        data_kb=$(( data_kb + $(du -sk "$stage" | cut -f1) ))
+    done
+    local pool_size="$(( 64 + data_kb * 4 / 1024 ))M"
     # CL-4b: the device toolchain (/clade) is ~375M staged (CL-5 made it THREE
     # multicall copies -- clang++/ld.lld/clang -- plus resource headers and the
     # sysroot); at ~3.3x bake amplification that is ~1.25 GiB before a single
@@ -3610,11 +3641,13 @@ build_stratum_pool_fixture() {
         # commit sweeps). 2560M = bake + boot-at-6x + margin. The REAL fix is
         # commit-on-allocation-pressure (task #39, the P1.2 write-amp lever);
         # this is capacity so the gate boot isn't hostage to it.
-        pool_size="2560M"
+        (( ${pool_size%M} >= 2560 )) || pool_size="2560M"
     fi
     if [[ "$bake_clade" == "1" ]]; then
         # clade-only -> 3072M; stacked with GOROOT (2560M) -> 5120M.
-        if [[ "$pool_size" == "2560M" ]]; then pool_size="5120M"; else pool_size="3072M"; fi
+        local clade_mb=3072
+        [[ "$bake_goroot" == "1" ]] && clade_mb=5120
+        (( ${pool_size%M} >= clade_mb )) || pool_size="${clade_mb}M"
     fi
     # B-3: the library tests stage ~200 MiB (~660 MiB at the 3.3x bake
     # amplification above) and write their own scratch files when they run.
@@ -3919,7 +3952,7 @@ populate_stratum_pool() {
     # compiled into tyr-quake). Staged by build_tyrquake; skipped
     # gracefully when the stage is absent (a THYLACINE-minimal build). ---
     local quake_stage="$BUILD_DIR/quake/stage"
-    if [[ -f "$quake_stage/id1/pak0.pak" ]]; then
+    if pool_data_stage quake > /dev/null; then
         # The game dirs are SYSTEM's read-only masters, like the pak files.
         # With HOME set, as login sets it, Quake writes its config and demos
         # under $HOME/.tyrquake/id1 (common.c's last COM_AddGameDirectory),
@@ -3944,7 +3977,7 @@ populate_stratum_pool() {
     # ls-gfx-dosbox-duke3d gate) copies /duke3d into a writable home and runs
     # from there (the quake per-user game-dir shape). ---
     local duke3d_stage="$BUILD_DIR/duke3d/stage"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" && -f "$duke3d_stage/DUKE3D.GRP" ]]; then
+    if pool_data_stage duke3d > /dev/null; then
         echo "==> populate pool: baking Duke3D shareware data ($duke3d_stage -> /duke3d, $(du -sh "$duke3d_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$duke3d_stage" /duke3d \
             || { echo "==> populate pool: put /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3960,7 +3993,7 @@ populate_stratum_pool() {
     # (voodoo_card=software; C_OPENGL off). Read-only SYSTEM master; the gate
     # copies it to a writable home (the quake shape). ---
     local tombraider_stage="$BUILD_DIR/tombraider/stage"
-    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_TOMBRAIDER:-1}" == "1" && -f "$tombraider_stage/TOMB.EXE" ]]; then
+    if pool_data_stage tombraider > /dev/null; then
         echo "==> populate pool: baking Tomb Raider 3dfx demo ($tombraider_stage -> /tombraider, $(du -sh "$tombraider_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$tombraider_stage" /tombraider \
             || { echo "==> populate pool: put /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3973,7 +4006,7 @@ populate_stratum_pool() {
     # on the flag AND the staged binary, so a stale stage never bakes past an
     # opt-out. Read-only SYSTEM master, run in place (it writes nothing). ---
     local webkit_stage="$BUILD_DIR/webkit/stage"
-    if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$webkit_stage/jsc" ]]; then
+    if pool_data_stage webkit > /dev/null; then
         echo "==> populate pool: baking JavaScriptCore ($webkit_stage -> /webkit, $(du -sh "$webkit_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$webkit_stage" /webkit \
             || { echo "==> populate pool: put /webkit FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3988,7 +4021,7 @@ populate_stratum_pool() {
     # boot-fatally -- so a preserved pool missing it is STALE: re-run once
     # with THYLACINE_MKFS_PRESERVE=0. ---
     local viv_stage="$BUILD_DIR/vivarium"
-    if [[ -d "$viv_stage/probe/rootfs" ]]; then
+    if pool_data_stage vivarium > /dev/null; then
         echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
             || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }

@@ -23,7 +23,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -176,6 +176,18 @@ lib/libc.so --require lib/libdlprobe.so --require bin/pouch-hello-dlopen`:
 archive and fails the build, so no stale `ramfs.cpio` survives for `test.sh` to
 boot. `bin/` and `lib/` are chmod 0755 whatever the host's umask, because every
 principal's path search crosses them.
+
+**The pool is sized from what the bake will put on it (2026-10-22).** One
+helper, `pool_data_stage`, answers for each data chunk (Quake, Duke3D, Tomb
+Raider, JavaScriptCore, the viv bundles) whether `populate_stratum_pool` bakes
+it, and both the populate blocks and the pool's size ask it, so the size counts
+every data stage that is put. The base is 64M plus four times the staged data
+(the measured ~3.3x bake amplification, rounded up); GOROOT raises it to at
+least 2560M, clade to at least 3072M (5120M with GOROOT), and the library tests
+add 1024M. Before this the base was a flat 64M and only GOROOT's 2560M covered
+the data, so a bake without the GOROOT stage, through
+`THYLACINE_BAKE_GOROOT=0` or an absent Go fork, failed `put /vivarium` with
+ENOSPC.
 
 **The snapshot twins are minted at bake time.** `populate_stratum_pool`
 finishes by cloning `pool.img` and `system.key` to `.baked-snapshot`
