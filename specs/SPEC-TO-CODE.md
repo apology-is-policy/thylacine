@@ -1474,6 +1474,42 @@ the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascad
 
 ---
 
+## thread_reap.tla — the thread lifecycle (thread-model C3 first; C1 extends it)
+
+Spec-first RE-ENABLED for the thread lifecycle (operator vote 2026-10-21,
+thread-model decision 1: the Thread reclamation invariant + spec-first, the vote
+naming C3's per-Proc thread lock as covered). Model-first: the spec lands before
+the code (C3a), and C3b's code is written to it. This first part models one Proc's
+thread admission, the EXITING commit, the last thread out (decide, drop every lock,
+close), the group claim and `wait_pid` (ARCH §7.3.1). Every action is ONE critical
+section; each buggy cfg splits one of them in two with the lock free between.
+C1 adds the final switch-out, the reaper and the free (the section-28 Thread
+reclamation row lands with it).
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `Admit(s, t)` (one `threads_lock` hold: claim + cap checked, then linked, `live++`; `s` a RUNNING thread of the Proc) | `kernel/proc.c::proc_thread_admit` from both user spawn arms (`kernel/syscall.c::sys_thread_spawn_handler` + the attr arm), after an unlinked `thread_alloc_*` | `NoAdmitAfterClaim` (C0's refusal, now exact), `CapExact` (`PROC_THREAD_MAX` exact, no longer a TOCTOU floor), `LiveMatches` |
+| `AdmitCheck` / `AdmitLink` (`BUGGY_ADMIT_SPLIT`) | (none -- today's shape: the lockless claim pre-check, then `proc_thread_cap_ok`, then `thread_create_user`'s link, three holds) | `thread_reap_buggy_admit_claim` violates `NoAdmitAfterClaim`; `thread_reap_buggy_admit_cap` violates `CapExact` |
+| `AdmitFree(t)` (`BUGGY_SPAWNER_FREE`) | (none -- a creation path that is not a RUNNING thread of the Proc; the code asserts the spawner is) | `thread_reap_buggy_spawner` violates `CloseStable` |
+| `Claim` (under `g_proc_table_lock` AND `threads_lock`) | `kernel/proc.c::group_terminate` -- the set-once `group_exit_msg` CAS + code/sig/close flags inside the Proc's thread lock, callers holding `g_proc_table_lock` | a reader under either lock reads the claim exactly |
+| `ExitDecide(t)` (one `threads_lock` hold: another live -> commit EXITING + `live--`; else the last out -> "closing") | `kernel/proc.c::thread_exit_self` / `exits_term`, via `thread_commit_exiting_locked` (the only writer of `THREAD_EXITING`) | `OneLastOut`, `NoOrphanedProc`, `LiveMatches` |
+| `ExitRead` / `ExitApply` (`BUGGY_COUNT_SPLIT`) | (none -- the read of the live count and the commit in separate holds) | `thread_reap_buggy_count` violates `NoOrphanedProc` (both see another live, neither is last, nobody publishes ZOMBIE) |
+| `CloseDone(t)` (one `g_proc_table_lock` hold: the commit under the nested `threads_lock`, then ZOMBIE) | the last-out tail of `thread_exit_self` / `exits_term`: `proc_release_territory_at_exit`, the commit, `proc_become_zombie_locked` | `CloseStable` (the drop-and-retake's premise), `ZombieImpliesAllExiting` |
+| `CloseZombie` / `CloseCommit` (`BUGGY_ZOMBIE_BEFORE_COMMIT`) | (none -- ZOMBIE published in a hold before the commit) | `thread_reap_buggy_zombie` violates `ZombieImpliesAllExiting` (`wait_pid_for` extincts on a ZOMBIE with a live thread) |
+| `WaitPid` | `kernel/proc.c::wait_pid_for` (under `g_proc_table_lock`, the zombie's `threads_lock` nested for its list) | `EventuallyReaped` (liveness: once claimed, the Proc reaches ZOMBIE and is reaped) |
+
+What the model does not see, so the green reads no larger: two Procs (the
+one-thread-lock-per-CPU rule, which the kernel asserts under KERNEL_TESTS), the
+death-wake walk itself (`death_wake.tla`), the reap of exited peers and the free
+(C1), and the clear-child-tid store's position (a kernel test pins it).
+
+Pre-commit gate: `specs/check-thread-reap.sh` -- the clean cfg green at its pinned
+state count and every buggy cfg violating the named invariant -- on any change to
+thread admission, the EXITING commit, the last-out close, the group claim or
+`wait_pid_for`'s zombie check.
+
+---
+
 ## pipe.tla — P5-pipe (section added at RW-10; the spec landed P5)
 
 Models the two-direction pipe wait/wake state machine (I-9 specialized):

@@ -740,6 +740,17 @@ struct Thread {
 };
 ```
 
+### 7.3.1 The thread list and its lock (thread-model C3, 2026-10-21)
+
+Each Proc's threads hang on `p->threads`, guarded by that Proc's own `threads_lock`, an IRQ-off spinlock that nests under `g_proc_table_lock`. The global lock keeps the process tree: parentage, process groups and sessions, the ZOMBIE transition and the parent's wake, the debugger's ownership, the birth hold, the job-control stop flags and report latches, the territory, the console, seat and legate state, and the hardware allowance. The thread lock keeps one Proc's threads: the list and its links, `thread_count`, a live count `live_threads`, `loom_sqpoll_count`, every commit of a thread to `THREAD_EXITING`, the debugger's focus thread, and the per-Proc walks (the death wake, the interrupt and caught-note walks, the stop wake, the resume, cancelling single-steps). A `struct Thread *` read from `p->threads` is valid only while that lock is held. This is FreeBSD's split (the tree under `proctree_lock`, the threads under `PROC_LOCK`) and Zircon's (a job lock above each `ProcessDispatcher`'s lock); Plan 9 has no thread list, but its per-Proc locks are the same discipline. Linux takes its global `tasklist_lock` on every clone and exit, which is the cost this design avoids.
+
+- **Order.** `g_proc_table_lock -> p->threads_lock -> t->wait_lock -> g_timerwait.lock -> Rendez.lock -> CpuSched.lock`, and `p->threads_lock -> torpor_lock`. There is no edge from a thread lock to a note queue's `q->lock`. A CPU holds at most one thread lock: work that reaches other Procs (the parent's wake, a session hangup, a legate teardown, the process-group fans, the orphan rule) runs under `g_proc_table_lock` and takes each target's thread lock in turn.
+- **Admission.** A new thread is allocated unlinked, then admitted in one hold of the Proc's thread lock: refused if the group claim (`group_exit_msg`) is set or the Proc is at `PROC_THREAD_MAX`, otherwise linked with `thread_count` and `live_threads` raised. So the cap is exact and no thread is ever linked into a dying Proc. Only a running thread of the Proc spawns into it.
+- **Exit.** A thread that is not the last commits `THREAD_EXITING` and lowers `live_threads` in one hold of the thread lock, with no global lock. The last thread decides it is last in that hold, drops every lock to close the Proc's handles (which sleeps), and then, in one hold of `g_proc_table_lock`, commits `THREAD_EXITING` under the nested thread lock and publishes ZOMBIE. The decision cannot go stale across the drop, because only a running thread of the Proc can admit a thread and the only one left is the exiter. The ZOMBIE publish runs outside the Proc's own thread lock because it reaches other Procs' thread locks. The clear-child-tid store runs before the commit, while the thread is still RUNNING; only its wake follows the commit.
+- **The group claim** (`group_terminate`'s set-once CAS of `group_exit_msg` and its code, signal and close flags) is written holding both locks, so a reader holding either reads it exactly.
+
+Validated by `specs/thread_reap.tla` (spec-first by operator vote, 2026-10-21): admission, the commit, the last thread out, the claim and `wait_pid`, with one buggy cfg per critical section split in two.
+
 ### 7.4 `rfork` — process/thread creation
 
 `rfork(flags)` is the universal primitive. Flags control which resources are shared vs. cloned:
@@ -1402,8 +1413,10 @@ These are familiar to anyone who's read Plan 9 kernel source. Underneath, they m
 
 ```
 sleeper:  wait_lock → g_timerwait.lock → Rendez.lock          (registration)
-waker:    g_proc_table_lock → wait_lock → (wakeup: g_timerwait.lock → Rendez.lock)
+waker:    g_proc_table_lock → p->threads_lock → wait_lock → (wakeup: g_timerwait.lock → Rendez.lock)
 ```
+
+Since thread-model C3 (2026-10-21, §7.3.1) the walk holds the target Proc's `threads_lock`, nested under `g_proc_table_lock`, which every caller of `proc_group_terminate` already holds; no sleeper holds a `threads_lock` either.
 
 Acyclic because (a) only the owning Thread *writes* `rendez_blocked_on`, so the waker→sleeper edge is read-only under `wait_lock`; and (b) no sleeper holds `g_proc_table_lock` *below* `wait_lock` — `wait_pid`, the one sleeper that touches the proc table, drops `g_proc_table_lock` before it sleeps (verified, `kernel/proc.c`). The existing `g_timerwait.lock → Rendez.lock → CpuSched.lock` order (`kernel/sched.c`) is preserved beneath `wait_lock`.
 
