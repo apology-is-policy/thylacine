@@ -452,12 +452,20 @@ void test_proc_wait_pid_concurrent_waiters_both_reap(void) {
 // with 7, not with the late thread's status.
 // ---------------------------------------------------------------------------
 
-static struct Thread *volatile g_dgs_main;
-static volatile bool           g_dgs_fault;
+static volatile int  g_dgs_main_tid;
+static volatile bool g_dgs_fault;
+
+// Main is freed at its last switch-out (ARCH 7.3.2), so the worker names it
+// by the tid it stored before readying the worker.
+static bool dgs_main_exited(void) {
+    struct test_thread_view v = test_thread_view(current_thread()->proc,
+                                                 g_dgs_main_tid);
+    return !v.present || v.state == THREAD_EXITING;
+}
 
 static void dgs_worker_entry(void *arg) {
     (void)arg;
-    while (g_dgs_main->state != THREAD_EXITING)
+    while (!dgs_main_exited())
         sched();
     if (g_dgs_fault)
         proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)0xdead000ul);
@@ -467,7 +475,7 @@ static void dgs_worker_entry(void *arg) {
 static void dgs_main_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
-    g_dgs_main = current_thread();
+    g_dgs_main_tid = current_thread()->tid;
     struct Thread *w = thread_create_with_arg(p, dgs_worker_entry, NULL);
     if (!w) extinction("dgs_main_entry: thread_create_with_arg failed");
     ready(w);
@@ -479,13 +487,13 @@ static void dgs_main_entry(void *arg) {
 
 static void dgs_note_worker_entry(void *arg) {
     (void)arg;
-    while (g_dgs_main->state != THREAD_EXITING)
+    while (!dgs_main_exited())
         sched();
     exits("ok");
 }
 
 static int dgs_run_entry(void (*entry)(void *), bool fault, int flags) {
-    g_dgs_main  = NULL;
+    g_dgs_main_tid = 0;
     g_dgs_fault = fault;
     int child_pid = rfork(RFPROC, entry, NULL);
     if (child_pid <= 0) return -2;
@@ -528,7 +536,7 @@ void test_proc_fault_in_dying_group_reaps_exited_packed(void) {
 static void dgs_note_main_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
-    g_dgs_main = current_thread();
+    g_dgs_main_tid = current_thread()->tid;
     struct Thread *w = thread_create_with_arg(p, dgs_note_worker_entry, NULL);
     if (!w) extinction("dgs_note_main_entry: thread_create_with_arg failed");
     ready(w);
@@ -564,18 +572,45 @@ void test_proc_note_death_with_live_peer_reaps_signalled(void) {
 static volatile u32  g_ret_spin;
 static volatile bool g_ret_go;
 
-static void ret_worker_entry(void *arg) {
-    (void)arg;
+static void ret_spin(void) {
     for (u32 i = 0; i < 20000u; i++)            // some run time to account for
         __atomic_fetch_add(&g_ret_spin, 1u, __ATOMIC_RELAXED);
+}
+
+static void ret_worker_entry(void *arg) {
+    (void)arg;
+    ret_spin();
     thread_exit_self();
+}
+
+static void ret_wait_go(void) {
+    while (!__atomic_load_n(&g_ret_go, __ATOMIC_ACQUIRE))
+        sched();
 }
 
 // Held until the test releases it, so it can be named while it is alive.
 static void ret_gated_entry(void *arg) {
-    while (!__atomic_load_n(&g_ret_go, __ATOMIC_ACQUIRE))
-        sched();
+    ret_wait_go();
     ret_worker_entry(arg);
+}
+
+static volatile u64 g_ret_worker_run[RET_N_WORKERS];
+static volatile u32 g_ret_worker_kstack[RET_N_WORKERS];
+
+// Gated, and records what its reap must fold at least: its run time up to
+// here (the slice in progress counts; masked, so no switch-out lands between
+// the two reads) and its stack depth so far (the poison watermark only
+// deepens).
+static void ret_measured_entry(void *arg) {
+    int i = (int)(uintptr_t)arg;
+    ret_wait_go();
+    ret_spin();
+    const struct Thread *self = current_thread();
+    irq_state_t s = spin_lock_irqsave(NULL);
+    g_ret_worker_run[i] = self->run_ns + (timer_now_ns() - self->switched_in_at);
+    spin_unlock_irqrestore(NULL, s);
+    g_ret_worker_kstack[i] = thread_kstack_used(self, NULL);
+    thread_exit_self();
 }
 
 static bool ret_holds_any(struct Proc *p, const int *tid, int n) {
@@ -598,7 +633,10 @@ static void ret_frees_entry(void *arg) {
     irq_state_t s;
     __atomic_store_n(&g_ret_go, false, __ATOMIC_RELEASE);
     for (int i = 0; i < RET_N_WORKERS; i++) {
-        struct Thread *w = thread_create_with_arg(p, ret_gated_entry, NULL);
+        g_ret_worker_run[i]    = 0;
+        g_ret_worker_kstack[i] = 0;
+        struct Thread *w = thread_create_with_arg(p, ret_measured_entry,
+                                                  (void *)(uintptr_t)i);
         if (!w) extinction("ret_frees_entry: thread_create_with_arg failed");
         tid[i] = w->tid;
         if (i == 0) {
@@ -656,10 +694,19 @@ void test_proc_exited_threads_freed_at_switch(void) {
     TEST_EXPECT_EQ(g_ret_count_after, 1, "only the caller is left counted");
     TEST_EXPECT_EQ(g_ret_live_after, 1, "and it is the one live thread");
     TEST_ASSERT(g_ret_alone, "only the caller is left on p->threads");
-    TEST_ASSERT(g_ret_reaped_run > 0u, "the Proc keeps the freed workers' run time");
+    u64 run_sum  = 0;
+    u32 deepest  = 0;
+    for (int i = 0; i < RET_N_WORKERS; i++) {
+        run_sum += g_ret_worker_run[i];
+        if (g_ret_worker_kstack[i] > deepest) deepest = g_ret_worker_kstack[i];
+    }
+    TEST_ASSERT(run_sum > 0u && deepest > 0u, "every worker measured itself");
+    TEST_ASSERT(g_ret_reaped_run >= run_sum,
+        "the Proc keeps at least the run time the freed workers measured");
     TEST_ASSERT(g_ret_cpu_after >= g_ret_reaped_run,
         "proc_cpu_ns still includes the freed workers' run time");
-    TEST_ASSERT(g_ret_reaped_peak > 0u, "the Proc keeps the freed workers' kstack depth");
+    TEST_ASSERT(g_ret_reaped_peak >= deepest,
+        "the Proc keeps at least the kstack depth the freed workers reached");
     TEST_ASSERT(g_ret_peak_tid_ok, "and names the freed worker that reached it");
     TEST_ASSERT(g_ret_peak_after >= g_ret_reaped_peak,
         "proc_kstack_peak still reports the freed workers' depth");
