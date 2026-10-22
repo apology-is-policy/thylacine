@@ -194,3 +194,5 @@
 0061-pouch-fstat-ebadf.patch
 # 0062 (B-3g, operator vote 2026-10-21): link and linkat answer EPERM without a trap, as Linux on a filesystem without hard links; linkat refuses a flag Linux refuses, EINVAL, first.
 0062-pouch-link-eperm.patch
+# 0063 (B-3g, G12, operator votes 17 and 18 of 2026-10-22): utimensat sets times over SYS_WSTAT's four time bits (x6 carries the values; __syscall7); every time but the touch is the owner's, so its refusal is EPERM, as chmod's is in fchmod and fchmodat.
+0063-pouch-utimensat.patch

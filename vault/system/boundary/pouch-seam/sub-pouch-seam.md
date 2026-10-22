@@ -22,12 +22,29 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-22
 ---
+## 0063: utimensat over SYS_WSTAT, and __syscall7 (2026-10-22, B-3g G12)
+
+The series gains 0063 ([[dec-2026-10-22-wstat-times]]). `SYS_WSTAT` reads a
+time pair from x6, and Linux on aarch64 has no seven-argument call, so the
+seam gains `__syscall7`: the sentinel guard first, then x0..x6 and x8, as the
+six below it are built. musl's own `__SYSCALL_NARGS` already dispatches seven
+arguments, so `__syscall(SYS_thyla_wstat, ...)` with seven reaches it with
+no other change. `_pouch_fs.h` gains `POUCH_WSTAT_ATIME`, `MTIME`, `ATIME_SET`
+and `MTIME_SET` at the kernel's bits. `__NR_utimensat` stays the sentinel in
+`bits/syscall.h`: the new `utimensat.c` calls `SYS_thyla_wstat` and never
+names it ([[sub-pouch-fs]]). `tools/test-pouch-times.py` derives the shape of
+every `__syscallN` from `syscall_arch.h` (the guard first, argument i bound
+to register xi, the operand list x8, x0 and x1..x(N-1)) and requires exactly
+`__syscall0..7`; it refuses the tree if `__syscall7` loses its guard, binds
+x6 to the wrong argument, or drops x6 from its operands.
+
 ## 0062: link and linkat answer EPERM (2026-10-21, B-3g)
 
 The series gains 0062 ([[dec-2026-10-21-pouch-link-eperm]]). `link.c` and
-`linkat.c` return `__syscall_ret(-EPERM)` and no longer call the seam, so a
+`linkat.c` set `errno` to `EPERM` and return -1 themselves (-EPERM is the
+flat -1 that `__syscall_ret` reads as EIO) and no longer call the seam, so a
 call that used to reach the 0xFFFF sentinel and answer `ENOSYS` makes no
 syscall at all; `linkat` answers `EINVAL` first for a flag Linux refuses
 ([[sub-pouch-fs]]). `__NR_linkat` stays the sentinel in `bits/syscall.h`, so
@@ -109,8 +126,9 @@ else in the series is a lower-half file riding this seam.
   file is reproducible after a musl re-vendor by the awk filter recorded
   in the 0001 header (a name→number map; everything unmapped becomes the
   sentinel).
-- **`__syscall0..6`** (`arch/aarch64/syscall_arch.h`) — each begins
+- **`__syscall0..7`** (`arch/aarch64/syscall_arch.h`) — each begins
   `if (n == POUCH_SYSCALL_UNIMPL) return -ENOSYS;` BEFORE issuing `svc`.
+  `__syscall7` is Thylacine's alone (0063): `SYS_WSTAT` reads x6.
 - **`__syscall_cp`** (`src/thread/__syscall_cp.c`) — the same guard, at
   the C chokepoint every *cancellable* call resolves through.
 - **`__syscall_ret`** (`src/internal/syscall_ret.c`) — `r == -1` →

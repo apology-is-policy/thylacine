@@ -18,6 +18,7 @@ code:
   - usr/lib/pouch/patches/0060-pouch-raw-open.patch
   - usr/lib/pouch/patches/0061-pouch-fstat-ebadf.patch
   - usr/lib/pouch/patches/0062-pouch-link-eperm.patch
+  - usr/lib/pouch/patches/0063-pouch-utimensat.patch
   - usr/pouch-hello/pouch-hello-fd.c
   - usr/pouch-hello/pouch-hello-fs.c
   - usr/pouch-hello/pouch-hello-links.c
@@ -29,8 +30,47 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-22
 ---
+## utimensat sets times; chmod's refusal is EPERM (2026-10-22, 0063)
+
+G12 is pulled forward into B-3 ([[dec-2026-10-22-g12-pulled-forward]]), and
+`SYS_WSTAT` carries four time bits that mirror 9P's
+([[dec-2026-10-22-wstat-times]]). `utimensat` now sets times over them, where
+Linux's `SYS_utimensat` reached the 0xFFFF sentinel and answered `ENOSYS`.
+musl routes `futimens`, `futimes`, `utimes`, `futimesat`, `lutimes` and
+`utime` through `utimensat`, so all of them work. Each time is `UTIME_OMIT`
+(left out of the mask), `UTIME_NOW` (its bit alone: the file server's clock)
+or a value (its bit and its `_SET` bit, read by the kernel from the
+`struct timespec[2]` at x6). A nanosecond outside 0..999999999 that is
+neither special is `EINVAL` before anything traps. Null times is both at
+`UTIME_NOW`. Both at `UTIME_OMIT` answers 0 and reads nothing, as Linux does.
+
+A null path with a real descriptor is the descriptor form: one `SYS_WSTAT`
+on it, and any flag is `EINVAL`. Otherwise the path opens `O_PATH` as
+`fchmodat`'s does, with `O_NOFOLLOW` under `AT_SYMLINK_NOFOLLOW`, which sets a
+link's own times. `AT_EMPTY_PATH` with `""` names the descriptor itself, or
+the working directory for `AT_FDCWD`, as Linux's `LOOKUP_EMPTY` does. A null
+path is `EFAULT` and a real dirfd with a name is `ENOTSUP` (P-3).
+
+The kernel answers `EACCES` for every refusal, because -EPERM is the flat -1
+the seam reads as EIO. Only the touch (both times to the server's clock) is
+admitted by write permission ([[sub-kernel-perm]]); every other time request
+is the owner's or `CAP_HOSTOWNER`'s, so `utimensat` answers its refusal as
+POSIX's `EPERM`, setting `errno` itself as `link` does, and keeps `EACCES` for
+the touch. `fchmod` and `fchmodat` do the same for the mode, whose only
+refusal is ownership. `fchmodat`'s open (a component's search denied) and
+`lchmod`'s `fstat` keep their `EACCES`.
+
+`tools/test-pouch-times.py` runs the real `utimensat.c`, `fchmod.c` and
+`fchmodat.c` over a mocked kernel and the series' own `__syscall_ret`, with
+musl's `AT_` and `UTIME_` values (Darwin's `UTIME_NOW` is -1, which would hide
+a negative nanosecond). Its 61 checks pin every number to the kernel's header,
+read x6 as the kernel does (a null pointer under a `_SET` bit faults), and run
+at -O0 and -O2 under ASan and UBSan. It refuses 25 mutants. It also derives
+the seam's `__syscall0..7` shapes from `syscall_arch.h` ([[sub-pouch-seam]]).
+The guest leg is G12-e's.
+
 ## link and linkat answer EPERM (2026-10-21, 0062)
 
 Thylacine makes no hard links ([[dec-2026-10-21-pouch-link-eperm]]). `link`
@@ -197,6 +237,11 @@ the most: `openat.c` alone has three generations.
   `EINVAL`.
 - `link` and `linkat` make no hard link (0062): `EPERM` without a trap, after
   `linkat`'s `EINVAL` for a flag outside `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH`.
+- `utimensat` (and every musl time setter above it) sets times over
+  `SYS_WSTAT`'s time bits (0063): `UTIME_OMIT` leaves a time alone, `UTIME_NOW`
+  takes the server's clock, a value crosses at x6. Its refusal is `EPERM`,
+  except the touch's (both times to "now"), which is `EACCES`; the wstat's
+  refusal in `fchmod` and `fchmodat` is `EPERM`.
 
 ## Mechanism
 
