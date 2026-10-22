@@ -154,7 +154,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-44 | Address-space integrity under sharing + COW -- ENFORCED | `cow.tla` + LINEAGE + audit |
 | I-45 | GPU authority bounded by the context; guest half ENFORCED, host half on virgl/Venus trusted | prose GPU-DESIGN 8 + audits |
 | I-46 | RESERVED: Nocturne audio authority + no-stall cycle | planned `nocturne_cycle.tla` |
-| I-47 | RESERVED: inline media -- decode outside halcyond, bounded place-request | planned prose + audit |
+| I-47 | Inline media: decode outside the compositor, a bounded place request, no authority in an image -- ENFORCED (2026-09-29) | prose HALCYON 14.7 + audits (FABLE-1, I47-CLOSE) |
 | I-48 | Thread reclamation: a thread is freed exactly once, only after its last switch-out, by its reaper (a user thread's: that switch's resume path) or joiner; no address space swapped or freed while a thread of its Proc is on a CPU or unfreed | `thread_reap.tla` |
 
 ---
