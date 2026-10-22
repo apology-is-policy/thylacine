@@ -94,7 +94,8 @@ def boot_log(qemu_line, *skips):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--logs", type=Path, required=True)
+    # Single-quoted: the gate kits find a driver's options by this spelling.
+    p.add_argument('--logs', type=Path, required=True)
     a = p.parse_args()
     a.logs.mkdir(parents=True, exist_ok=True)
     src = (ROOT / "tools/test.sh").read_text()
