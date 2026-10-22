@@ -4,7 +4,7 @@ type: chg
 title: "Thread-model C1: an exited user thread is freed by the resume path of its last switch-out"
 date: 2026-10-22
 arc: arc-phase6-pouch
-commits: ["1f7b2c03d", "71f624fad", "3d1f051e1", "49fdbb134", "*(pending)*"]
+commits: ["1f7b2c03d", "71f624fad", "3d1f051e1", "49fdbb134", "a096bbedb", "6d3ac7ff7", "e119b1cf1", "b312b5bda", "5cf567528", "5be2cb5d0", "8c6f17639", "674704e27", "e4326a488", "a22cbfda7", "d61aed343"]
 touched:
   - sub-kernel-thread
   - sub-kernel-proc

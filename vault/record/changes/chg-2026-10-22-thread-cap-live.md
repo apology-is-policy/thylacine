@@ -4,7 +4,7 @@ type: chg
 title: "The thread cap charges live threads (thread-model C1, vote 7)"
 date: 2026-10-22
 arc: arc-phase6-pouch
-commits: ["*(pending)*"]
+commits: ["f1263820c", "8c6f17639", "674704e27"]
 touched:
   - inv-i32
   - sub-kernel-proc

@@ -2466,5 +2466,17 @@ aux-3-c1). Replaces the 2026-10-20 interim fix above, in which an exited thread 
   reads of a freed thread (exit-close's debug_rendez wake, the dying-group workers' poll of main, the closer's
   exit-close probe); a release check and a kstack read off a freed thread. The round missed the userspace
   prover and the test release paths; the sweep's missed pattern was a thread publishing its own pointer.
-- **Posture.** *(pending: the Mac lease -- ci suite, sabotage of each new test, SMP matrix, UBSan, the boot stack
-  watermark, 100,000 create+join with kstack pages flat, the storm row)*
+- **Posture.** Three Mac leases (10-22 14:00-14:16Z, 14:31-15:42Z, 16:23-16:36Z). TLC: `thread_reap` clean at 4512
+  states (re-pinned after vote 7), all 11 buggy cfgs red as named. Suite 2031/2031 on the ci image at 674704e27 and at
+  a22cbfda7 (the kernel code is final there; later commits touch only `kernel/test`), and on the default-flag kernel at
+  d61aed343; every regreen rebuilt bit-identical. Boot kstack peak 10160 bytes, unchanged from aux-3, so the reap on
+  the resume path adds no depth. SMP gate 50/50, 0 corruption (default at 1, 4 and 8 CPUs, UBSan at 4 and 8, N=10).
+  100,000 create+join twice in one process (`cpubench storm 16 6250`, ci image, -smp 4): 55,259 and 65,939 threads/s;
+  free pages 424,637 -> 424,397 -> 424,389, so the second run moved 8 pages (kstacks flat). Sabotage, each new
+  witness red: the cap on `thread_count` (exactly the two cap tests), queue counts on the wrong band (55 reds,
+  `run_counts_match_trees` among them), exec on the live count (both exec tests; the swap re-check alone: its
+  extinction), and no reap at the switch (the four reclamation tests red, then a hang in exec's wait). The sabotage
+  runs exposed three harness faults, fixed (a counter read before the reaper counts its free; fixture Procs freed
+  after a timed-out join, 14 + 25 sites). Not yet run: joey's exited-freed leg red under the no-reap sabotage (the
+  kernel suite hangs first), the storm row (the run booted a Halcyon ramfs the SMP gate had re-baked), libxml2's
+  thread test (main's b3) and OpenRCT2 for 8 hours (the demo deck).
