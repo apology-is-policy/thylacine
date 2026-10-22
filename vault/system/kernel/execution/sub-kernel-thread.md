@@ -5,9 +5,9 @@ title: "The Thread: context, kstack, and the on_cpu protocol"
 parent: moc-kernel-execution
 code: ["kernel/thread.c", "kernel/include/thylacine/thread.h"]
 audit: hard
-guarded-by: [inv-i21, inv-i31, inv-i44]
-validated-by: [gate-smp]
-locks: [lock-proc-table]
+guarded-by: [inv-i21, inv-i31, inv-i44, inv-i48]
+validated-by: [gate-smp, spec-thread-reap]
+locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
 updated: 2026-10-22
 ---
@@ -33,30 +33,29 @@ default), which several guards rely on.
 | `thread_init` (kthread) / `thread_init_per_cpu_idle` | EL1 | never (born RUNNING) | none — the boot stack |
 | `thread_create_bootcpu_idle` | EL1 | `thread_trampoline` | none — a dedicated BSS stack |
 
-`thread_free(t)` releases the descriptor + kstack; the caller must ensure
-`t` is not current and not in any run tree. `thread_switch(next)` is the
-**test-only** direct-switch primitive — production multitasking is
-`sched()`.
+`thread_free(t)` releases the descriptor + kstack of a kernel thread (by its
+joiner) or of a thread that never ran (by its creator); the caller must ensure
+`t` is not current. An exited user thread is `thread_reap_dead`'s alone, and
+`thread_free` extincts on one. `thread_switch(next)` is the **test-only**
+direct-switch primitive — production multitasking is `sched()`.
 
-**A thread's end of life.** A thread that exits while peers live
-(`thread_exit_self`) commits `THREAD_EXITING` under [[lock-proc-table]] and
-`sched()`s away for good. Its descriptor and kstack stay on `p->threads`,
-counted in `thread_count`, until one of two reapers frees it: the next thread
-create of its Proc (`proc_reap_exited_threads`, which `SYS_THREAD_SPAWN`, the
-vivarium clone and a Loom SQPOLL setup run before they charge the thread
-budget, and exec runs before its swap once every peer is off its CPU), or
-`wait_pid`'s zombie loop once the whole Proc is dead. Both free on one predicate, EXITING with `on_cpu` clear:
-`sched()` never re-inserts an EXITING prev, `ready_on` refuses anything not
-RUNNABLE, an exiting tail never sleeps, and an interrupt return never switches
-out a thread that is not RUNNING ([[sub-kernel-sched]]), so no CPU runs it or
-switches out of it again before its own `sched()`. The in-Proc reap finds and unlinks a dead peer in one lock hold
-(`thread_unlink_from_proc_locked`; the unlink is the claim against a second
-creator in the same Proc), folds its `run_ns` and kstack watermark into the Proc
-so `proc_cpu_ns` and `proc_kstack_peak` never shrink, clears a debug focus that
-names it (the focus is validated by pointer, and a recycled slot would match),
-and frees it after the lock drops (`thread_free_unlinked`, which extincts on a
-thread still linked). Its caller is a running thread of the Proc, and that keeps
-the Proc ALIVE, out of `wait_pid`'s reach.
+**A thread's end of life** (ARCH 7.3.2, [[inv-i48]]). A thread that exits
+(`thread_exit_self`, or `exits` for the last one) commits `THREAD_EXITING`
+under [[lock-proc-threads]] and `sched()`s away for good. For a user thread
+(its Proc is not kproc) the code on the far side of that switch frees it:
+`sched_resume_tail` ([[sub-kernel-sched]]), run by the thread switched to, on
+the same CPU, before anything else runs there. It reads EXITING while `on_cpu`
+still pins the thread, clears `on_cpu`, releases the run-queue lock and then,
+with IRQs still masked, calls `thread_reap_dead`. That scans the dead stack's
+depth before any lock (nothing writes a dead stack), takes the Proc's thread
+lock once to fold `run_ns` and the depth into the Proc (so `proc_cpu_ns` and
+`proc_kstack_peak` never shrink), clear a debug focus that names it (the focus
+is validated by pointer, and a recycled slot would match) and unlink it, drops
+the lock (its last touch of the Proc), and frees the stack and the slot. Each
+thread has exactly one final switch-out and nothing else frees a user thread,
+so no claim is needed. A CPU holds at most one exited thread not yet freed: the
+one running its tail, or the one its resume path is freeing. A kernel thread is
+freed by its joiner; a thread that never ran, by its creator.
 
 `thread_create_user` deliberately does **not** validate its four user-VA
 arguments; the syscall handler owns those bounds. A malformed address faults
@@ -275,8 +274,12 @@ The link counts the thread in `thread_count` and `live_threads`; the unlink
 drops `live_threads` too when the thread never committed. The user spawn arms
 build a thread unlinked (`thread_alloc_user` / `thread_alloc_forked`) and link
 it through `proc_thread_admit`, or free it with `thread_free_unlinked`.
-`thread_commit_exiting_locked` is the only writer of `THREAD_EXITING`; a kernel
-thread's terminal uses `thread_kthread_retire`, under the same lock. Before multi-thread Procs the lock was unnecessary
+`thread_commit_exiting_locked` is the only writer of `THREAD_EXITING`, always
+on the calling thread; a kernel thread's terminal uses `thread_kthread_retire`,
+under the same lock. `thread_reap_dead` unlinks under the same lock, so a
+walker holding it never meets a freed thread; it takes the lock after the
+run-queue lock is released, the only lock its CPU held, and it is the one
+threads_lock that CPU holds. Before multi-thread Procs the lock was unnecessary
 (one writer per Proc, ever); the P6 lift introduced a second writer
 (`SYS_THREAD_SPAWN` from a peer Thread on a peer CPU) and without the lock a
 walker could observe `p->threads = new_head` published before
@@ -318,13 +321,19 @@ restored when `prev` is switched back to.
   however many threads reach it.
 - `cpu_pinned` keeps every boot/idle-stack thread on its own CPU.
 - The kstack guard region enforces stack-overflow detection per thread.
+- [[inv-i48]]'s free half: `thread_reap_dead` is the one free of an exited user
+  thread, run after its last switch-out completes. Under `KERNEL_TESTS`,
+  `thread_commit_exiting_locked` extincts if a Proc's `thread_count` exceeds its
+  `live_threads` by more than the online CPUs.
 
 ## Error paths
 
 Every constructor returns NULL on OOM with internal cleanup (descriptor
 freed; a fresh block whose guard could not be set goes back to the buddy),
 and on a spent tid space. Everything else extincts: `thread_free`
-of a corrupted/already-freed/RUNNING/current/uninitialized Thread;
+of a corrupted/already-freed/RUNNING/current/uninitialized Thread, or of an
+exited user thread (a second reaper); `thread_reap_dead` of a corrupted,
+not-exited or kernel thread;
 `thread_switch` into a corrupted, uninitialized, EXITING, or `on_cpu`
 thread; `thread_unlink` on a list-head mismatch; a stack whose guard cannot
 be restored on its way back to the buddy (`kstack_release`); a spent tid
@@ -343,6 +352,15 @@ switch (the peer always resumes and clears it) and cannot deadlock because
 `thread_free` is always called lock-free;
 `g_thread_free_oncpu_waits` counts how often it actually had to wait, which
 is the running proof that the window is real.
+
+A user thread's free runs on the resume path of its last switch-out, with IRQs
+masked: one unbounded scan of the dead stack, one thread-lock hold, a cache
+push (or a guard restore and buddy free past the bound) and a slab free. It
+adds about 200 B of frames to that path (`thread_reap_dead` 48 B,
+`thread_destroy` 48 B with the stack free inlined, then
+`mmu_restore_normal_range` 48 B or `kmem_cache_free` 64 B and `free_pages`
+32 B, from `-fstack-usage` at C1b), which can be the resume of a thread asleep
+at the bottom of the deepest syscall chain (ARCH 8.12).
 
 ## Prosecution
 
@@ -409,21 +427,10 @@ is the running proof that the window is real.
 - The absorbed `14-process-model.md` documented the thread state machine as
   `thread_block`/`thread_wake` — functions that do not exist; the primitives
   are `sleep`/`wakeup`.
-- **An exited peer stays counted until its Proc's next thread create.** The
-  in-Proc reap runs only at a create, a Loom SQPOLL setup or an exec, so a Proc that
-  starts and joins N workers and then creates nothing keeps N exited threads,
-  each a 32 KiB kstack plus its descriptor, until it exits. The Proc pays: the
-  dead count against its own `PROC_THREAD_MAX`, so a user Proc holds at most 255
-  (about 8 MiB), while a system-principal Proc, which the cap exempts, holds a
-  whole burst. One create frees every exited peer: each stack goes into the
-  stack cache while it has room, and past the bound is released with a guard
-  restore and four by-VA invalidates. A tid-addressed post
-  (`proc_holds_tid_locked`, behind tkill and tgkill) finds an exited worker
-  until a create frees it, and answers ESRCH after. It does not run at exit
-  because kernel tests walk `p->threads` without the lock while peers exit.
-  Freeing at the switch, as Plan 9 and Linux do, belongs to the multi-threading
-  overhaul
-  ([[seam-exited-threads-wait-for-a-create]]).
+- **A tid-addressed post finds an exited worker only until its free.**
+  `proc_holds_tid` (behind tkill and tgkill) walks the list under the lock, so it sees a
+  worker that has committed EXITING and not yet switched out (at most one per
+  CPU) and answers ESRCH once the resume path has freed it.
 
 ## Provenance
 
@@ -438,3 +445,7 @@ size and offset assertions that guard it, both user trampolines' opposite
 register-scrub dispositions, and the floating-point save's source.
 
 [[chg-2026-08-16-thread-fork-restore]].
+
+Thread-model C1 (2026-10-22): an exited user thread is freed by the resume path
+of its last switch-out (`thread_reap_dead`), replacing the free at the next
+create ([[seam-exited-threads-wait-for-a-create]], closed).

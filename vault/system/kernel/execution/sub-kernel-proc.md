@@ -5,7 +5,7 @@ title: "The Proc: table, lineage, creation, and wait"
 parent: moc-kernel-execution
 code: ["kernel/proc.c", "kernel/include/thylacine/proc.h"]
 audit: hard
-guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44]
+guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44, inv-i48]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
@@ -200,8 +200,13 @@ and its zombie reports the death, DEBUG-FS-DESIGN 5g). Precedence is
 exit > continue > stop. Then:
 
 - no match → `-1` (the POSIX `ECHILD` shape);
-- zombie → unlink under the lock, then **outside** it spin each Thread's
-  `on_cpu` and `thread_free` it, then `proc_free`. The status is the raw
+- zombie → unlink under the lock, then **outside** it wait until the zombie's
+  `thread_count`, read under its thread lock, is zero, then `proc_free`. A
+  wait frees no thread: each is freed by the resume path of its last
+  switch-out (ARCH 7.3.2, [[inv-i48]]), and a zero read under the lock means
+  the last of them has dropped the lock, its last touch of the Proc. The wait
+  is bounded by one switch and one free per remaining thread, each on its own
+  CPU; the list may already be empty when the wait finds the zombie. The status is the raw
   `exit_status` unless the caller passed `WAIT_UNTRACED`, `WAIT_CONTINUED` or
   `WAIT_PACKED` (8, gcpark-b): then it is the Linux `wait(2)` word,
   `WAIT_STATUS_SIGNALED(term_sig)` for a death by note and
@@ -341,21 +346,22 @@ governing everything it clears is one sentence: **the image is gone, so anything
 holding an address into it, or a disposition installed by it, is now a pointer
 into someone else's program.**
 
-**Before the swap, exec waits for its peers to leave their CPUs**
-(`proc_exec_wait_peers_off_cpu`), then frees them (`proc_reap_exited_threads`,
-[[sub-kernel-thread]]). Admission counted no live peer, and only a live thread
+**Before the swap, exec waits until it is the only thread on the list**
+(`proc_exec_wait_alone`: `thread_count == 1` under the thread lock), and the
+swap re-checks `live_threads == 1 && thread_count == 1` under the table lock with
+the thread lock nested. Admission counted no live peer, and only a live thread
 creates one, so every peer is EXITING; but one can still be on another CPU between
 its exit commit and its last switch-out, and its tail stores its clear-child-tid
 word through this Proc's translation -- by a stale TLB entry into a page the drain
-below frees, or by a fault that demand-pages through `p->as` into the new image.
-The wait spins outside the lock, as `wait_pid`'s does, and a peer it found stays
-allocated across it: while the Proc lives only a running thread of it frees a
-peer, and the exec'ing thread is the only one. It ends because an EXITING tail
+below frees, or by a fault that demand-pages through `p->as` into the new image. A
+peer leaves the list only when the resume path of its last switch-out frees it
+([[sub-kernel-thread]]), so once the caller is alone none is on a CPU. The wait
+keeps no thread pointer across an unlock. It ends because an EXITING tail
 neither sleeps ([[seam-exiting-tails-never-sleep]]) nor is switched out at an
 interrupt return ([[sub-kernel-sched]]). The new image starts as this thread
 alone, with its whole thread budget, as Linux's `de_thread` leaves it.
-Regressions: `proc.exec_waits_for_exiting_peer` fabricates the peer, so it runs
-at any CPU count; `proc.exec_waits_for_exiting_peer_on_another_cpu` holds a real
+Regressions: `proc.exec_waits_for_exiting_peer` fabricates the peer and frees
+it the way the resume path would, so it runs at any CPU count; `proc.exec_waits_for_exiting_peer_on_another_cpu` holds a real
 peer's exit tail on a second CPU while exec runs on the first.
 
 Three such things are reset, and they are worth reading together because the
@@ -449,7 +455,7 @@ copy-on-write shapes above expressible. That extraction is the **only change in
 the struct's recorded history that ever made it smaller**: 408 → 376 in one
 commit, against a run of appends before and after (it is back to 392 through a
 socket table and a ring-poll field, 408 with IM-2's propagating legate scope,
-and 424 with the in-Proc reap's folds: `reaped_run_ns`, `reaped_kstack_peak`,
+and 424 with the reaper's folds: `reaped_run_ns`, `reaped_kstack_peak`,
 `reaped_kstack_tid`, zeroed at allocation and never inherited by rfork, which
 `proc_cpu_ns` and `proc_kstack_peak` start from). Worth naming because the struct is
 otherwise grown strictly by appending, with **every** load-bearing offset
@@ -673,13 +679,12 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   alone gives the wrong picture of when a Proc's fds shut. See
   [[sub-kernel-death]].
 - **`thread_count` is not "live threads".** It counts threads not yet freed:
-  the live ones plus every peer that exited since the Proc's last thread create
-  (the in-Proc reap, [[sub-kernel-thread]]), so a joined-then-exits multi-thread
-  Proc can show `thread_count > 1` with zero live peers. Mistaking one for the
-  other was #68 round-2 F2 ([[fnd-68-r2-f2]]), and the other way round it let
-  exited peers fill `PROC_THREAD_MAX`, which every doc called a bound on live
-  threads, until the in-Proc reap: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19
-  15:03Z). The live count is `proc_count_live_peers_locked`. Main, the oldest
+  the live ones plus each peer that has exited and whose last switch-out has
+  not yet been completed and freed ([[sub-kernel-thread]]), at most one per CPU
+  ([[inv-i48]]), so a Proc can briefly show `thread_count > 1` with zero live
+  peers. Mistaking one for the other was #68 round-2 F2 ([[fnd-68-r2-f2]]), and
+  the other way round it let exited peers fill `PROC_THREAD_MAX` while they
+  waited for a reaper: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19 15:03Z). The live count is `proc_count_live_peers_locked`. Main, the oldest
   thread not exiting, is `proc_main_thread_locked` -- the last such thread on
   the head-inserted list, never the head -- shared by the debug surface's
   default thread ([[sub-kernel-devproc]]) and the caught-note pick

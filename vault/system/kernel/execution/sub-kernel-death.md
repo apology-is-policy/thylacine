@@ -168,8 +168,8 @@ the last one out (that one additionally zombies the Proc through the chokepoint
 above). An unmapped or unwritable tidptr **silently skips** both the store and the
 wake — via the `uaccess_store_u32` fixup ([[sub-kernel-uaccess]]) — rather than
 extincting: a departing Thread must not be able to crash the box with a bad address
-it registered earlier. The departed Thread itself is freed later, by its Proc's next
-thread create or by `wait_pid` ([[sub-kernel-thread]], a thread's end of life).
+it registered earlier. The departed Thread itself is freed by the resume path of its
+last switch-out ([[sub-kernel-thread]], a thread's end of life; [[inv-i48]]).
 
 **The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
 `exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype
@@ -251,8 +251,9 @@ re-take, assert the determination held. Three properties make it sound:
 - `t` is still RUNNING, so a **sleep-capable** close hook (a 9P clunk's
   Tclunk/Rclunk wait) is legal — sleeping while EXITING trips `sched()`'s
   assert;
-- `p` is still ALIVE, so `wait_pid` cannot reap and `thread_free` the closer
-  mid-close;
+- `t` has not committed, so nothing frees the closer mid-close (only the
+  resume path of its last switch-out frees it), and `p` is still ALIVE, so
+  `wait_pid` cannot free the Proc;
 - `live_peers == 0` means every peer has committed EXITING (whose residual
   execution never touches the handle table) and no new peer can spawn
   without a RUNNING thread.
