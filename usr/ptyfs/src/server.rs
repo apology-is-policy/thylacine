@@ -82,6 +82,12 @@ const MAX_FIDS: usize = PTS_MAX * FIDS_PER_PTS + 16;
 /// kaua program run by another one more. The selftest binds this set.
 const FIDS_PER_PTS: usize = 7;
 
+/// The per-connection ceiling on parked reads and on parked writes, kept apart
+/// from the fid table so the table can grow without growing it. A raw protocol
+/// peer needs this server-side bound; the kernel client's own is its shared
+/// tag pool.
+const MAX_PENDING: usize = 80;
+
 /// Max live pts pairs. A bound, not headroom: an unbounded pts table is a DoS
 /// vector (#65 resource floor), so clone-minting fails (ENFILE) past this.
 const PTS_MAX: usize = 16;

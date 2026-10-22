@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-08
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -187,17 +187,13 @@ pts, and a kaua program polls the always-readable data fd (it says so on
 the diagnostic UART). A shell run from the shell adds two fids, a kaua
 program run by another one.
 
-
-The shared `/dev/pts` mount drives one kernel 9P client across all terminal
-processes. An ordinary ptyhold/ut terminal retains **six** fids: master, three
-separately opened stdio slaves, ctl and readiness. The table therefore covers
-16 pairs times six plus 16 root/transient entries. This repairs the earlier
-four-per-pair undercount: the live witness filled 80 entries with 13 complete
-terminals plus two roots. More independent endpoint opens still consume finite
-entries; the headroom is not a per-process allocation guarantee. Existing pair,
-connection and global deferred-write tag limits remain unchanged. Deferred reads
-and writes retain their separate 80-entry per-connection ceilings (MAX_PENDING),
-including raw protocol peers without the kernel client's 64-tag bound.
+The earlier four-per-pair count filled the old 80-entry table at 13 terminals
+plus two roots. More independent endpoint opens still consume finite entries;
+the headroom is not a per-process allocation guarantee. The park queues keep
+their own per-connection ceiling, 80 parked reads and 80 parked writes
+(`MAX_PENDING`), apart from the fid table, so the table grows without growing
+them. A raw protocol peer meets that bound; the kernel client's own is its
+shared tag pool (below).
 
 ## Concurrency
 
@@ -391,7 +387,7 @@ The global FRAME coalescing that a compositor needs has no analogue here
   op failed `EIO`. Since ARCH 21.11 the tag table grows, an op that finds the
   op share (`P9_OPS_MAX`, 32767) full waits for a tag instead of failing, and
   parked ops are threads waiting, so filling the share takes that many of
-  them. `MAX_FIDS` caps only one `Conn`'s contribution, not the shared pool.
+  them. `MAX_PENDING` caps only one `Conn`'s contribution, not the shared pool.
 
 ## Provenance
 
