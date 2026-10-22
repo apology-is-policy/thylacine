@@ -22,6 +22,18 @@ needed the operator.
 
 
 ---
+## 2026-10-22 (main, Opus 5.5, effort max) -- B-3g: fontconfig's last leg, a shell split, and a directory clock Stratum never moved
+
+**Why now.** Lease 4 (10-21, `d713c22d2`) proved the 0062 fix and vote 16 on the device, but the libraries gate stopped in fontconfig's leg on its first run: one upstream test failed and the gate's own cleanup misfired. Both had to be closed before B-3g could.
+
+**The shell split** (`b3ad61ea8`). The gate named the font cache `$home/.cache/fontconfig`. ut joins a variable to the text after it only through `^` (UTOPIA-SHELL-DESIGN 6.7), so the device ran `rm -rf $home /.cache/fontconfig`: it emptied the test user's home on the throwaway VM and failed on the directory itself ('rm: /home/michael: permission denied'), before any cache check. Now `$home^/.cache/fontconfig`. A host parse of libutopia gives the new form as one word and the old one as four, which is the lease 4 transcript. A census of all 92 gate scripts found no other guest-side split; the regex was checked on both lines.
+
+**The `cp -a` question, and the vote.** `test_bz106632` copies its font with `cp -a`; native cp has no `-a`. Reading the test and fontconfig: `FcConfigUptoDate` stats config files, config directories and font *directories*, never a font file, so what `-a` preserves enters no verdict. And no call on the system can set a time at all (SYS_WSTAT sets mode, owner, group and size; Pouch's utimensat is unimplemented; LIFE-SUPPORT puts the setter, G12, in v1.x). I recommended a port patch turning `cp -a` into `cp`; **the operator chose to pull G12 forward** (vote 17), so the test runs unmodified once the system can set times. The shape and number of the new interface are still to be voted.
+
+**What reading the test turned up.** The test also needs a directory's mtime to move when a file is added or removed. A probe against a scratch Stratum build (Stratum `7dd103d`) measured it: after a 1.1 s pause, rename moved the parent's mtime (the control), and create, unlink, mkdir and rmdir did not. Only rename stamped its parents (R86 P2-2). That breaks fontconfig's cache invalidation itself, not just its test: a font added to a cached Stratum directory is never noticed. The fix stamps the parent's mtime and ctime under the parent's pin at all six entry-changing sites (`abe494a`, on a private clone, because peers bake stratumd from the shared tree). Ten tests, run both ways: 235/235 fixed; at `7dd103d`'s fs.c exactly the eight stamping tests fail; three mutants each fail their own witness. A Fable round on it and the full Stratum ctest are running.
+
+**Open.** The Stratum round and gate; landing `abe494a` in the shared tree as one step; the G12 shape vote; G12 itself (kernel, Pouch, vivarium, libthyla-rs, touch and cp, the Go fork); lease 5 (ls-libs 9/9 with fontconfig 16/16 and the cache checks, red-fc); then the B-3g close.
+
 ## 2026-10-21 (main, Opus 5.5, effort max) -- B-3g, fontconfig: four votes, a link errno, the port, and what reading the Go fork turned up
 
 **Why now.** B-3g is the next Boosty chunk: fontconfig 2.18.3 with libxml2, faces in `/lib/font` (operator vote 2026-10-14). The research of 10-20 (design memory) found one call that would break it: fontconfig takes its cache lock with `link()`, and Pouch's `link` reached the unimplemented-call sentinel and answered ENOSYS, where fontconfig falls back to a directory lock only on EPERM, ENOTSUP or EACCES.
