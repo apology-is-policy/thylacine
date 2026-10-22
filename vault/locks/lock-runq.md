@@ -3,10 +3,10 @@ id: lock-runq
 type: lock
 title: "CpuSched.lock — the per-CPU run-queue lock"
 kind: spin-irqsave (raw in sched(); trylock across CPUs)
-guards: "one CPU's run_tree[3] and vd_counter, the pending_release_lock and prev_to_clear_on_cpu handoff slots, and the wake-preempt decision (which reads current_thread() and cs->idle where they are stable)"
+guards: "one CPU's run_tree[3], nr_queued[3] and vd_counter, the pending_release_lock and prev_to_clear_on_cpu handoff slots, and the wake-preempt decision (which reads current_thread() and cs->idle where they are stable)"
 orders-before: []
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-22
 ---
 ## Discipline
 
@@ -52,6 +52,10 @@ runtime enforcement.
 Never held across a sleep — the thread that yields under it does not
 *return* under it; the lock is handed off.
 
+Released before the resume tail frees an exited user thread
+(`thread_reap_dead`, [[inv-i48]]): the free takes [[lock-proc-threads]],
+which must never nest inside this lock.
+
 ## Prosecution
 
 - **Mask before you name the CPU.** `sched()` and `ready_on` both mask
@@ -61,15 +65,18 @@ Never held across a sleep — the thread that yields under it does not
   CPU spins on it forever. A loud-fail assert compares
   `cs - g_cpu_sched` to `smp_cpu_idx_self()` as the durable regression
   for a race that is otherwise timing-only.
-- **The raw/counted split is exactly one acquire and three releases.**
-  Releasing the raw acquire counted underflows the count (an extinction,
-  and the first cut did it); releasing a counted acquire raw silently
-  poisons the preempt gate.
+- **The raw/counted split is exactly one acquire and two release sites**:
+  the shared resume tail (`sched_resume_tail`, reached from `sched()` and
+  `sched_finish_task_switch`) and `sched()`'s no-switch return. Releasing
+  the raw acquire counted underflows the count (an extinction, and the
+  first cut did it); releasing a counted acquire raw silently poisons the
+  preempt gate.
 - **The resume path must re-read `this_cpu_sched()`.** After
   `cpu_switch_context` the thread may be on a different CPU; the `cs` in
   its own frame names the wrong lock. Both resume sites (the `sched()`
-  tail and `sched_finish_task_switch`) do, and both NULL-guard the slot
-  because the test-only `thread_switch` primitive arms no handoff.
+  tail and `sched_finish_task_switch`) do, and the tail they share
+  NULL-guards the slot because the test-only `thread_switch` primitive arms
+  no handoff.
 - **`ready_on` holds exactly one of these locks and never nests.** That
   is the entire deadlock argument for cross-CPU placement; a change that
   makes it hold two re-derives the argument from scratch.

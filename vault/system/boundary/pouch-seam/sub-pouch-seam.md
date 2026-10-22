@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -493,7 +493,10 @@ per-call errno approximation built on top of it.
   compiled against the old string, joey against the new one.
   `pouch-hello-signals` joined the census at gcpark-b (2026-10-12): its new
   `deaths` leg is the only thing that tells a binary built for the
-  signalled wait from an older one that exits 0 just the same.
+  signalled wait from an older one that exits 0 just the same. A leg
+  replaced changes the marker as surely as one added: the threads census
+  traded `exited-counted` for `held-counted,exited-freed` when exited
+  threads began to be freed at the switch (2026-10-22, [[sub-pouch-thread]]).
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 84
+## Open seams: 83
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -64,7 +64,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
-- [[seam-exited-threads-wait-for-a-create]] (sub-kernel-thread)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
@@ -127,6 +126,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-22 [[chg-2026-10-22-thread-model-c1]] — Thread-model C1: an exited user thread is freed by the resume path of its last switch-out
 - 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
 - 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
@@ -134,5 +134,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-20 [[chg-2026-10-20-thread-model-c2]] — Thread-model C2: the kernel stack cache; the guard toggles invalidate by address
 - 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 - 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
-- 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
 <!-- generated:end -->

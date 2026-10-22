@@ -85,7 +85,7 @@ them. Only then is `x8` read and switched on.
 Most arms then behave as before: read arguments from `x0..x5`, call a handler,
 write the result to `x0`, return. Three arms never return — the two exit calls
 and the thread-exit call, which abandon the frame on the exiting thread's kernel
-stack until the reaper collects it. Three others take **the frame itself** and
+stack until the resume path of its last switch-out frees it ([[inv-i48]]). Three others take **the frame itself** and
 so break the uniform result-write; see below.
 
 An unknown number writes `-1` and returns.
@@ -918,13 +918,16 @@ gates conferring the *authority*; the raise it authorises is still bounded by
 the hard maximum. Both thread-create arms (`sys_thread_spawn_handler` and
 `viv_clone_thread`) first refuse a dying Proc -EAGAIN (`group_exit_msg` set: a
 thread made then would only die at its first die-check, after a kstack
-allocation, and the spawner dies at the call's own return), then free the
-Proc's exited peers
-(`proc_reap_exited_threads`, [[sub-kernel-thread]]), then ask
-`proc_thread_cap_ok`, so the thread cap counts what is alive plus what exited
-since the last create, not every thread the Proc ever ran. A create that then
-fails on a spent tid space answers EAGAIN, a system limit, not ENOMEM. The Loom SQPOLL
-setup, the budget's third consumer, frees them too before `proc_sqpoll_charge`.
+allocation, and the spawner dies at the call's own return), then pre-check
+`proc_thread_cap_ok`; both reads are lockless early refusals, and
+`proc_thread_admit` decides both exactly under [[lock-proc-threads]]. The cap
+counts every thread still on the list, and an exited thread leaves it when the
+resume path of its last switch-out frees it ([[inv-i48]], [[sub-kernel-thread]]),
+so at most one exited thread per CPU counts and a Proc that starts and joins
+workers never fills the cap with the dead. A create that then fails on a spent
+tid space answers EAGAIN, a system limit, not ENOMEM. The Loom SQPOLL setup, the
+budget's third consumer, charges through `proc_sqpoll_charge` against the same
+count.
 
 **[[inv-i34]]** — the three hardware-mint handlers carry the CreateBegin /
 CreateCommit pair described above. The allowance is what bounds them; this file
@@ -1207,6 +1210,10 @@ two inners (the section above).
 
 2026-09-24 (B): `SYS_ATTACH_9P_SRV` refuses the cape flag; the `/srv` cape is
 the poster's mark alone (the section above).
+
+[[chg-2026-10-22-thread-model-c1]]: the thread-create arms and the SQPOLL
+charge no longer free exited peers; the resume path of each one's last
+switch-out does.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

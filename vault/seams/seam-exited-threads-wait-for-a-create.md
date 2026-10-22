@@ -2,13 +2,21 @@
 id: seam-exited-threads-wait-for-a-create
 type: seam
 title: "An exited thread is freed at its Proc's next thread create, not when it leaves its CPU"
-status: open
+status: closed
 surface: [sub-kernel-thread]
 opened-by: chg-2026-10-20-in-proc-reap
 tracker: "OPEN-BUGS 2026-10-20 (the multi-threading overhaul, chunk C1)"
 created: 2026-10-20
-updated: 2026-10-20
+updated: 2026-10-22
+closed-by: chg-2026-10-22-thread-model-c1
 ---
+## Closed
+
+Closed 2026-10-22 by thread-model C1: the resume path of an exited user
+thread's last switch-out frees it ([[inv-i48]]), so no exited thread waits for
+a create, an exec or a wait, and at most one per CPU is ever counted. The text
+below is the seam as it stood while open.
+
 ## Owed
 
 A thread that exits while its peers live is freed by its Proc's next thread

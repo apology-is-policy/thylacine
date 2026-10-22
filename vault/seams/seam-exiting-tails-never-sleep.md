@@ -7,7 +7,7 @@ surface: [sub-kernel-death]
 opened-by: chg-2026-07-14-68-last-thread-out-close
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-22
 ---
 ## Owed
 
@@ -47,10 +47,13 @@ a last thread out lost its srv, cap and weft notifies. `preempt_check_irq` now
 returns without switching for a thread that is not RUNNING ([[sub-kernel-sched]];
 regression `proc.exit_tail_runs_to_its_end`). The sleep half stays owed.
 
-A new dependent: exec waits for every peer to leave its CPU before it swaps the
-address space ([[sub-kernel-proc]]). A tail that slept would leave its CPU as
-SLEEPING, not EXITING, so exec's reap would not free it and the swap's live-peer
-re-check would extinct.
+Two dependents since 2026-10-22: exec waits until every peer has been freed
+before it swaps the address space, and `wait_pid` waits until the zombie's last
+thread has been freed before it frees the Proc ([[sub-kernel-proc]]). Each
+thread is freed by the resume path of its last switch-out ([[inv-i48]]), which
+frees only a thread it switched away from EXITING. A tail that slept would
+leave its CPU SLEEPING and never be freed: exec would wait forever, and
+`wait_pid`'s check that every remaining thread is EXITING would extinct.
 
 ## The sleep half (refused at the one sleeping arm, 2026-10-21)
 

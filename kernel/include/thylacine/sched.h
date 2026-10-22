@@ -398,8 +398,7 @@ u64 sched_cpu_ctxt(unsigned cpu);
 // True iff any non-idle band on any CPU's run tree is non-empty (queued
 // runnable work exists somewhere). Reads ONLY the per-band head pointers
 // (never dereferences a Thread), so it is safe to call lock-free from the hot
-// idle-park path without risking a dangling runnable_next walk -- unlike
-// sched_runnable_count(), which follows the chains and is for the cold callers.
+// idle-park path.
 bool sched_has_runnable_work(void);
 
 // SYS_YIELD (#33): voluntary yield. If another non-idle thread is queued

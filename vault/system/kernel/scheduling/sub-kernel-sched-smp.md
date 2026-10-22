@@ -5,11 +5,11 @@ parent: moc-kernel-scheduling
 title: "The SMP protocol — on_cpu, work-stealing, the idle, and the tickless park"
 code: ["kernel/sched.c", "kernel/smp.c", "arch/arm64/context.S"]
 audit: hard
-guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9]
-validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, gate-smp]
+guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9, inv-i48]
+validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-08-14
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -56,12 +56,22 @@ between two steps of a sequence that reads, in source, like a single act.
    `sched()`, or a fresh thread arriving at `thread_trampoline` and
    calling `sched_finish_task_switch` — reads *that CPU's* two handoff
    slots, RELEASE-clears `prev->on_cpu`, and releases the lock.
+5. If `prev` was an exited user thread, that same resume path frees it
+   (`sched_resume_tail`, [[inv-i48]]), still with interrupts masked.
 
 Step 4 is the subtle one. The resuming thread re-reads `this_cpu_sched()`
 rather than using the `cs` in its own stack frame, because after
 `cpu_switch_context` it may be on a **different CPU** than when it
 entered — work-stealing moved it. The handoff is keyed to the CPU, so
 whoever lands here finds the right `prev` and the right lock.
+
+Step 5 decides before step 4 clears. Whether `prev` is `THREAD_EXITING` in a
+user Proc is read while `on_cpu` still pins it: once `on_cpu` is false a
+sleeping `prev` may be woken and stolen, and could exit and be freed on
+another CPU before this one looks. An exited thread is never woken (nothing
+wakes a thread past its commit), so a `prev` read as exited stays this
+CPU's to free. The free takes [[lock-proc-threads]] only after the run-queue
+lock is released ([[sub-kernel-sched]]).
 
 **Work-stealing.** `try_steal` (wrapped as `balance_pull`, a shape that
 can later host a push path) runs with this CPU's lock **held** and
@@ -316,6 +326,9 @@ re-entrancy guard is recorded here and nowhere in a Mechanism section
   push placement, the busy-side kick, and the backstop between them.
 - **[[inv-i9]]** — the idle arm-race: no work-arrival is lost between
   announcing idle and parking.
+- **[[inv-i48]]** — thread reclamation. A user thread is freed by the
+  resume half of its own last switch-out, after its context is saved and
+  its `on_cpu` cleared, and by nothing else.
 
 ## Error paths
 
@@ -354,6 +367,9 @@ a half-initialized CPU that reaches the idle loop is worse than no CPU.
   directly.
 - **`on_cpu == true` is never trusted for safety.** Any new reader that
   branches on true must wait for false instead.
+- **The exited read precedes the `on_cpu` clear.** Moving the
+  `THREAD_EXITING` test in `sched_resume_tail` after the RELEASE store lets
+  two CPUs free one thread.
 - **`idle_in_wfi` is maintained at BOTH sites.** The idle loop's explicit
   set and `sched()`'s `(next == cs->idle)` cover disjoint cases; dropping
   either re-opens a stale-idle advertisement.
@@ -415,4 +431,5 @@ idle and the work-conservation response are [[arc-tickless-idle]]
 [[chg-2026-06-22-ti4-work-conservation]]).
 
 Absorbed `docs/reference/17-smp-bringup.md` and the SMP half of
-`docs/reference/15-scheduler.md` at [[chg-2026-08-01-sched-sweep]].
+`docs/reference/15-scheduler.md` at [[chg-2026-08-01-sched-sweep]]. Step 5
+is [[chg-2026-10-22-thread-model-c1]].

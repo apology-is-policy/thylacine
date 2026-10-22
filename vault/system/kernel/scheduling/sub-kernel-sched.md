@@ -5,11 +5,11 @@ parent: moc-kernel-scheduling
 title: "Dispatch — per-CPU run trees, the bands, and preemption"
 code: ["kernel/sched.c", "kernel/include/thylacine/sched.h"]
 audit: hard
-guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
-validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
+guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44, inv-i48]
+validated-by: [spec-scheduler, spec-sched-alpha, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -276,6 +276,7 @@ by `smp_cpu_idx_self()` (MPIDR.Aff0).
 |---|---|
 | `lock` | this CPU's run-tree lock — [[lock-runq]] |
 | `run_tree[3]` | per-band head pointer, min-`vd_t` first |
+| `nr_queued[3]` | per-band queued count, written under `lock` by `insert_sorted` and `unlink`; read RELAXED and lock-free by the run counts |
 | `vd_counter` | this CPU's independent virtual clock; starts at 1 |
 | `initialized` | one-shot; a second `sched_init` for the same CPU extincts |
 | `idle` | this CPU's idle Thread (cpu0's is overridden post-`sched_init`) |
@@ -322,9 +323,9 @@ the one cross-thread lock handoff in the kernel: `prev` acquires it, and
 the *resuming* thread (or a fresh thread's trampoline) releases it via
 `pending_release_lock`. A per-thread count cannot balance that. It is
 sound only because the hold is IRQ-masked end to end, so it is
-non-preemptible by masking rather than by counting. Three raw releases
-pair the one raw acquire; the first cut released one of them counted, and
-the underflow probe caught it.
+non-preemptible by masking rather than by counting. Two raw release sites
+pair the one raw acquire: the resume tail and the no-switch return. The
+first cut released one counted, and the underflow probe caught it.
 
 **Lock order.** [[lock-runq]] is the innermost of the wait chain
 ([[lock-wait]] → [[lock-timerwait]] → [[lock-rendez]] → [[lock-runq]]).
@@ -333,6 +334,20 @@ cannot cycle with `try_steal` (which trylocks peers while holding its
 own) or with `sched_remove_if_runnable` (which takes one at a time).
 `g_cpu_sched` and its lock are file-private to `kernel/sched.c`, so no
 external caller can arrive already holding one.
+
+**The resume tail frees an exited user thread** ([[inv-i48]], ARCH 7.3.2).
+`sched_resume_tail` is the one resume half: `sched()` calls it after
+`cpu_switch_context` and `sched_finish_task_switch` calls it for the
+trampolines and `thread_switch`. It reads whether `prev` is `THREAD_EXITING`
+in a user Proc while `on_cpu` still pins it, RELEASE-clears `on_cpu`, releases
+the handed-off run-queue lock, and only then calls `thread_reap_dead`
+([[sub-kernel-thread]]), with interrupts still masked. The order is the
+proof. Read after the clear, a sleeping `prev` could be woken, run, exit and
+be freed on another CPU first. Freed before the lock is released, the
+reaper's [[lock-proc-threads]] would nest inside [[lock-runq]]. With
+interrupts unmasked, the incoming thread could be preempted before `prev` is
+freed, and the exited thread would wait for a later run. Kernel threads are
+not freed here; their joiners free them.
 
 ## Invariants enforced
 
@@ -389,8 +404,12 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
 - `sched_runnable_count` deliberately **excludes** `BAND_IDLE`. Counting
   the in-tree idles reported a phantom backlog on an idle multi-CPU
   system and made the `runnable_count == 0` quiescence assertions race a
-  benign idle thread. That was #857 — presented as an "smp8 cons.* flake",
-  actually a measurement bug, and never a kernel fault at all.
+  benign idle thread. That was #857 — presented as an "smp8 cons.*"
+  failure, actually a measurement bug, and never a kernel fault at all.
+- The run counts (`sched_runnable_count`, `sched_runnable_count_band`) sum
+  `nr_queued[]` and walk nothing. They walked the trees without the lock
+  until 2026-10-22, following a `runnable_next` a peer could be unlinking,
+  and, once user threads were freed at the switch, freeing.
 
 ## Prosecution
 
@@ -473,9 +492,11 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
   and the whole capacity path short-circuits before reading a capacity.
   Its findings were therefore reachable only by reasoning, never by the
   runtime matrix.
-- **`sched_dump_runnable` walks lock-free on purpose.** It is called from
-  the test-fail path, where seeing the thread matters more than a
-  consistent count. It is the instrument that cracked #857.
+- **`sched_dump_runnable` prints at most 16 threads per CPU.** It copies
+  each CPU's trees under that CPU's lock and prints after the unlock (the
+  UART never runs under a run-queue lock), so a longer queue ends in a
+  `+N more` line. It is the instrument that cracked #857; it walked
+  lock-free until 2026-10-22.
 
 ## Provenance
 
@@ -494,4 +515,6 @@ are [[chg-2026-07-05-33-sys-yield]].
 Absorbed `docs/reference/15-scheduler.md` at
 [[chg-2026-08-01-sched-sweep]]. The LINEAGE address-space extraction and
 the execve immediate-install, plus the #214 F1 depth reset, are
-[[chg-2026-08-16-sched-addrspace-install]].
+[[chg-2026-08-16-sched-addrspace-install]]. The resume tail's free of an
+exited user thread, and the per-band counts, are
+[[chg-2026-10-22-thread-model-c1]].

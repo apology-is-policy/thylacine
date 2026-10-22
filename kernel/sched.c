@@ -1649,12 +1649,14 @@ unsigned sched_runnable_count(void) {
     // retired), so the band filter uniformly excludes them all. Counting the
     // in-tree idles made this report a phantom backlog on an idle multi-CPU
     // system, and made the `sched_runnable_count()==0` quiescence assertions
-    // race an idle thread that, under host load, is in-tree (rather than the
-    // running thread) at the check instant -- the #857 "smp8 cons.* flake",
+    // race an idle thread that is in-tree (rather than the running thread) at
+    // the check instant -- the #857 "smp8 cons.*" failure,
     // which was never console_mgr and never a kernel fault, just a benign idle
     // thread miscounted as work. Real runnable work (BAND_INTERACTIVE /
     // BAND_NORMAL) is still counted, so a genuinely stranded work thread is
-    // never masked.
+    // never masked. Each band's count is kept under its CPU's lock by
+    // insert_sorted and unlink, so nothing here follows a runnable_next that a
+    // peer may be freeing.
     unsigned n = 0;
     for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
         if (b != SCHED_BAND_IDLE) n += sched_runnable_count_band(b);

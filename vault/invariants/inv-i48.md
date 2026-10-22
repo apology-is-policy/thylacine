@@ -28,11 +28,11 @@ next spawn (`seam-exited-threads-wait-for-a-create`).
 
 ## Enforcement
 
-- Both `sched()` resume tails: `sched()` after `cpu_switch_context`, and
-  `sched_finish_task_switch` for the trampolines. Each decides (EXITING, not
-  `g_kproc`) BEFORE the RELEASE clear of `on_cpu`, then calls
-  `thread_reap_dead` after the run-queue lock is released, with interrupts
-  still masked.
+- `sched_resume_tail`, the one resume half, called by `sched()` after
+  `cpu_switch_context` and by `sched_finish_task_switch` for the trampolines
+  and `thread_switch`. It decides (EXITING, not kproc) BEFORE the RELEASE
+  clear of `on_cpu`, then calls `thread_reap_dead` after the run-queue lock is
+  released, with interrupts still masked.
 - `thread_reap_dead`: in one `threads_lock` hold it folds the run time and
   stack depth, clears the debug focus and unlinks the thread; it unlocks, then
   frees the stack and the slot.
@@ -40,7 +40,9 @@ next spawn (`seam-exited-threads-wait-for-a-create`).
   before `proc_free`. `proc_exec_replace` waits for `thread_count == 1` and
   re-checks it at the swap. `proc_free` keeps its drain checks.
 - `thread_free`'s magic, state and `on_cpu` gates guard the joiner and creator
-  paths.
+  paths, and it extincts on an exited user thread, whose resume path frees it.
+- Under KERNEL_TESTS every commit checks the bound: a user Proc's
+  `thread_count - live_threads` never exceeds the online CPUs.
 
 ## Validation
 
@@ -49,7 +51,14 @@ next spawn (`seam-exited-threads-wait-for-a-create`).
 liveness property `ExitedThreadsFreed`. Five buggy cfgs each fail as named:
 a free on EXITING alone, a second reaper, exec once the caller is the only live
 thread, `wait_pid` reading the count without the lock, and the interim fix's
-spawn-time sweep. Kernel tests and the SMP gate land with C1b.
+spawn-time sweep. Kernel tests: `proc.exited_threads_freed_at_switch` (the
+run time, the stack watermark and the debug focus survive the free, with no
+spawn, exec or wait), `proc.exited_threads_bounded_by_cpus` (a burst of 64,
+sampled), `proc.reap_keeps_thread_cap_open`,
+`proc.sqpoll_charge_after_finished_workers`, and exec's wait for a fabricated
+exited peer. The guest witness is `/pouch-hello-threads`'s exited-freed leg:
+joined workers leave the `threads:` count with nothing created since. Plus the
+SMP gate.
 **blind-to:** the model has one Proc and no CPUs. That the reaper runs before
 its CPU runs anything else, and that interrupts stay masked across it, is the
 resume path's code, not a modelled action. Kernel threads and their joiners

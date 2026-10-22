@@ -4610,9 +4610,9 @@ static void exits_term(int code, int sig, const char *msg) {
     // so inherited pipe write ends deliver EOF at process TERMINATION, not at
     // reap (a shell draining `$(cmd)` sees EOF immediately). The gate is the
     // live count, NOT thread_count: thread_count counts EXITING peers until
-    // they are freed (at the Proc's next thread create, or at reap), so a
-    // well-formed native multi-thread program that joins its workers then
-    // calls exits() arrives with thread_count > 1 and live_threads == 1 -- the
+    // the resume path of each one's last switch-out frees it (ARCH 7.3.2), so
+    // a well-formed native multi-thread program that joins its workers then
+    // calls exits() can arrive with thread_count > 1 and live_threads == 1 -- the
     // old thread_count==1 gate skipped its close entirely and the #926
     // drain-before-reap deadlock survived on that path. Window soundness is
     // the thread_exit_self argument verbatim: every peer has committed

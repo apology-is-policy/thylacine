@@ -15,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -232,15 +232,18 @@ the caller's Proc).
 - The sched-failure early-exit branch is unexercised by
   `/pouch-hello-threads`.
 - `/pouch-hello-threads` reads the kernel's `threads:` line of
-  `/proc/<pid>/status` in two legs. exited-counted runs before any other thread
-  exists: four workers held behind a mutex cannot finish during a create, so
-  once joined all four are still counted (5 with main), the positive control
-  that the reading sees exited threads at all. join-churn then starts and joins
-  300 workers one after another, past `PROC_THREAD_MAX`, and requires 2..ncpu+1
-  counted afterwards: main, the last worker, and one worker per other CPU still
-  finishing when the last create ran. joey runs it as the system principal,
-  which the cap exempts, so only the count shows a leak there; with the in-Proc
-  reap disabled the leg read 310 (2026-10-20).
+  `/proc/<pid>/status` in three legs. The kernel frees an exited thread when
+  its CPU switches away from it ([[inv-i48]]), so a joined thread is counted
+  only while it finishes on its CPU. held-counted runs before any other thread
+  exists: four workers held behind a mutex are counted (5 with main), the
+  positive control that the reading sees the workers at all. exited-freed joins
+  them and, creating nothing, waits up to 5 s for the count to read 1; a kernel
+  that freed exited threads only at a create would leave all five. join-churn
+  starts and joins 300 workers one after another, past `PROC_THREAD_MAX`, and
+  requires 1..ncpu counted afterwards: main and at most one worker per other
+  CPU still finishing. joey runs it as the system principal, which the cap
+  exempts, so only the count shows a leak there; with no reap at all the leg
+  read 310 (2026-10-20).
 - C11 `thrd_create` (the `start_c11` path) is patched but untested.
 
 ## Provenance
@@ -248,4 +251,6 @@ the caller's Proc).
 [[chg-2026-05-23-p6-threads-b]] (0004 + [[adt-threads9b-r1]], 2 P1) →
 #111 / #112 (the tid ordering, kernel-side; see
 [[sub-kernel-thread]]) → [[chg-2026-07-20-g7a-sdl-seam]] (0022,
-`nanosleep` onto torpor for the SDL frame pacers).
+`nanosleep` onto torpor for the SDL frame pacers) →
+[[chg-2026-10-22-thread-model-c1]] (the `threads:` legs follow the free at the
+switch).

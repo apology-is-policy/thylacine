@@ -49,14 +49,17 @@
 // exactly its guardsize immediately below its own stack -- the guard VMA exists,
 // the positive control beside /pouch-hello-guard, which proves that it faults.
 //
-// Two legs read the kernel's `threads:` count in /proc/<pid>/status, which counts
-// a joined thread until the kernel frees it at the Proc's next thread create.
-// exited-counted runs first, before any other thread exists: workers held behind
-// a mutex cannot finish during a create, so once joined all of them are counted
-// -- the reading sees exited threads at all. join-churn then starts and joins
-// more workers than the kernel's per-Proc thread cap, one after another: a joined
-// thread that stayed counted refuses a user's create at the cap, and joey's run
-// (the system principal, which the cap exempts) sees it only in the count.
+// Three legs read the kernel's `threads:` count in /proc/<pid>/status. The kernel
+// frees an exited thread when its CPU switches away from it (ARCH 7.3.2), so a
+// joined thread is counted only while it finishes on its CPU. held-counted runs
+// first, before any other thread exists: workers held behind a mutex are all
+// counted -- the reading sees the workers at all. exited-freed then joins them
+// and, creating nothing, waits for the count to fall back to main alone; a
+// kernel that freed exited threads only at a create would leave all of them
+// counted. join-churn starts and joins more workers than the kernel's per-Proc
+// thread cap, one after another: a joined thread that stayed counted refuses a
+// user's create at the cap, and joey's run (the system principal, which the cap
+// exempts) sees it only in the count.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -73,6 +76,7 @@
 #define ITER_PER_THREAD  1000u
 #define HELD_THREADS     4u
 #define CHURN_THREADS    300u    // past PROC_THREAD_MAX (256)
+#define FREED_WAIT_MS    5000u
 
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_hold = PTHREAD_MUTEX_INITIALIZER;
@@ -204,24 +208,39 @@ int main(void) {
                 return 13;
             }
         }
+        long counted = status_threads();
+        if (counted != (long)HELD_THREADS + 1) {
+            printf("pouch-hello-threads: held-counted: %ld threads counted with %u workers held, want %u (FAILED)\n",
+                   counted, HELD_THREADS, HELD_THREADS + 1u);
+            fflush(stdout);
+            return 15;
+        }
+        printf("pouch-hello-threads: held-counted: %u held workers counted OK\n",
+               HELD_THREADS);
         pthread_mutex_unlock(&g_hold);
         for (unsigned i = 0; i < HELD_THREADS; i++) {
             int rc = pthread_join(held[i], NULL);
             if (rc != 0) {
-                printf("pouch-hello-threads: exited-counted: pthread_join[%u] failed: %d\n",
+                printf("pouch-hello-threads: exited-freed: pthread_join[%u] failed: %d\n",
                        i, rc);
                 fflush(stdout);
                 return 14;
             }
         }
-        long counted = status_threads();
-        if (counted != (long)HELD_THREADS + 1) {
-            printf("pouch-hello-threads: exited-counted: %ld threads counted with %u joined and no create since, want %u (FAILED)\n",
-                   counted, HELD_THREADS, HELD_THREADS + 1u);
-            fflush(stdout);
-            return 15;
+        unsigned waited_ms = 0;
+        for (;;) {
+            counted = status_threads();
+            if (counted == 1 || waited_ms >= FREED_WAIT_MS) break;
+            usleep(1000);
+            waited_ms++;
         }
-        printf("pouch-hello-threads: exited-counted: %u joined workers still counted until the next create OK\n",
+        if (counted != 1) {
+            printf("pouch-hello-threads: exited-freed: %ld threads counted %u ms after %u were joined and none created, want 1 (FAILED)\n",
+                   counted, waited_ms, HELD_THREADS);
+            fflush(stdout);
+            return 20;
+        }
+        printf("pouch-hello-threads: exited-freed: %u joined workers freed with no create since OK\n",
                HELD_THREADS);
         fflush(stdout);
     }
@@ -321,9 +340,9 @@ int main(void) {
            NTHREADS, NTHREADS, (int)getpid());
     fflush(stdout);
 
-    // A joined worker can still be finishing on its CPU when the next create
-    // frees the dead ones, so besides main and the last worker at most one per
-    // other CPU can be left counted.
+    // A joined worker can still be finishing on its CPU. Each one counted
+    // besides main is on another CPU, or in the switch that frees it there, so
+    // at most one per other CPU is left counted.
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpu < 1) {
         printf("pouch-hello-threads: join-churn: sysconf(_SC_NPROCESSORS_ONLN) = %ld FAILED\n",
@@ -349,14 +368,14 @@ int main(void) {
         }
     }
     long left = status_threads();
-    if (left < 2 || left > ncpu + 1) {
-        printf("pouch-hello-threads: join-churn: %ld threads counted after %u were joined, want 2..%ld (FAILED)\n",
-               left, CHURN_THREADS, ncpu + 1);
+    if (left < 1 || left > ncpu) {
+        printf("pouch-hello-threads: join-churn: %ld threads counted after %u were joined, want 1..%ld (FAILED)\n",
+               left, CHURN_THREADS, ncpu);
         fflush(stdout);
         return 19;
     }
-    printf("pouch-hello-threads: join-churn: %u workers started and joined one after another, %ld still counted (2..%ld) OK\n",
-           CHURN_THREADS, left, ncpu + 1);
+    printf("pouch-hello-threads: join-churn: %u workers started and joined one after another, %ld still counted (1..%ld) OK\n",
+           CHURN_THREADS, left, ncpu);
     printf("pouch-hello-threads: ok (%u workers, mutex-protected counter, joined)\n",
            NTHREADS);
     /* The census is what joey matches: a stale binary prints the old marker. */

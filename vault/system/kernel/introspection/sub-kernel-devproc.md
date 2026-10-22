@@ -274,7 +274,9 @@ The dispatch above says *how* a field is served; several fields also pin *what
 the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
 
 - **`cpu_ns` is cumulative and monotonic** — the sum of every thread's `run_ns`
-  (`proc_cpu_ns`, walked under the table lock), so a monitor derives %CPU by
+  plus what the Proc's freed threads left (`proc_cpu_ns`, under
+  [[lock-proc-threads]]; `thread_reap_dead` folds a thread's time in the same
+  hold that unlinks it), so a monitor derives %CPU by
   diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel
   keeps no instantaneous-rate state. It deliberately excludes the running
   thread's in-flight slice since its last switch-in (under one slice, negligible
@@ -657,7 +659,11 @@ convenience of a cached pointer.
 The debug callbacks take the target's [[lock-proc-threads]] after the pid
 match and hold it from the fully-stopped check through every use of the
 focus `Thread *` (regs, kregs, the step arm, the kstack walk, `sched`); the
-step releases it before `proc_debug_resume`, which takes it itself.
+step releases it before `proc_debug_resume`, which takes it itself. The focus
+is validated by pointer against the thread list under that lock.
+`thread_reap_dead`, which frees an exited thread at its last switch-out
+([[inv-i48]]), clears a focus naming that thread in the same hold, so a freed
+slot recycled into a new thread of the same Proc never matches a stale focus.
 
 Lock order, all nested *under* `g_proc_table_lock` and all acyclic on the same
 ground (each is a leaf; nothing held under it takes the global lock):

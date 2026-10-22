@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -323,6 +323,13 @@ state has been corrupted by someone else.
   see two threads on one Rendez needs a `poll_waiter_list`, not a second
   sleeper — the extinction is an unprivileged panic if it is reachable
   from EL0.
+- **The waker's `on_cpu` spin never meets a freed thread.** Since
+  2026-10-22 the resume half of a switch frees the user thread it switched
+  away from when that thread had exited ([[inv-i48]], [[sub-kernel-sched]]).
+  A waiter is SLEEPING, never EXITING, and the tail decides before it clears
+  `on_cpu`, so the thread a waker spins on is not the one being freed. A
+  change that lets an exited thread sit on a Rendez, or a timer list, breaks
+  this.
 
 ## Seams
 

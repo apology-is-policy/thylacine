@@ -10,7 +10,7 @@ validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-10-08
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -152,8 +152,8 @@ reset itself.
 so a stale entry is reachable only under this address space's own ASID,
 and the rollover's per-CPU flush runs before that value can go live again
 ([[sub-kernel-asid]]). Each caller separately owes only "no CPU translates
-under this ASID *now*" — `proc_free` by having reaped and `on_cpu`-spun
-every thread, `proc_exec_replace` by writing the new TTBR0 (a *different*
+under this ASID *now*" — `proc_free` by running only after every thread has
+switched out for the last time and been freed ([[inv-i48]]), `proc_exec_replace` by writing the new TTBR0 (a *different*
 ASID) and `isb`-ing first. `vma_drain` issues **no TLBI at all**, measured
 at L-2; an earlier claim that it did was fiction.
 

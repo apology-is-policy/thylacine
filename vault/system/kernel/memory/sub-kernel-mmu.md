@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -191,8 +191,8 @@ exists. Full masking rather than interrupt-only is deliberate: it also closes
 the window between asking the hardware for a translation and reading the result.
 
 Per-Proc table *teardown at death* is safe against a concurrent walk because
-the Proc is provably not running anywhere by then — its last thread has exited
-and the reaper spun until it was off-CPU — and its leaf mappings were already
+the Proc is provably not running anywhere by then — its last thread has exited,
+switched out for the last time and been freed ([[inv-i48]]) — and its leaf mappings were already
 invalidated. The freed tables can therefore be recycled immediately. A table
 reclaimed while the space is LIVE (B-1a' audit F1, below) has no such argument
 available -- a sibling thread may be running on another CPU -- so it is a
