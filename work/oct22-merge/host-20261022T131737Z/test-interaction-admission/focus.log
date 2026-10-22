@@ -1,0 +1,18 @@
+
+running 1 test
+test background_and_wrong_context_never_reach_kernel_check ... FAILED
+
+failures:
+
+---- background_and_wrong_context_never_reach_kernel_check stdout ----
+
+thread 'background_and_wrong_context_never_reach_kernel_check' (68293431) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T131737Z/test-interaction-admission/focus.rs:348:5:
+assertion failed: !check(&mut c, p)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    background_and_wrong_context_never_reach_kernel_check
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+

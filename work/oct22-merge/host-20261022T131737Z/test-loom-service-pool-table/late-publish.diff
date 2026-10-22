@@ -1,0 +1,11 @@
+--- kernel/loom_service_pool_table.c
++++ late-publish.c
+@@ -50,7 +50,7 @@
+     struct loom_pool *p = pool_record(t, pools, ref, LSLOT_PROVISIONAL);
+     if (!p) return -T_E_NOENT;
+     int rc = loom_slot_publish(t, ref);
+-    if (rc) return rc;
++    (void)rc;
+     return loom_pool_publish(p);
+ }
+ 

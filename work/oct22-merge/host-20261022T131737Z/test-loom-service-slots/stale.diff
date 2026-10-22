@@ -1,0 +1,11 @@
+--- kernel/loom_service_slots.c
++++ stale.c
+@@ -21,7 +21,7 @@
+     if (!t || ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
+         return NULL;
+     struct loom_service_slot *s = &t->slots[ref.slot];
+-    if (s->phase == LSLOT_FREE || s->incarnation != ref.incarnation) return NULL;
++    if (s->phase == LSLOT_FREE) return NULL;
+     return s;
+ }
+ int loom_slot_reserve(struct loom_slot_table *t, u32 kind, struct loom_service_ref *out) {

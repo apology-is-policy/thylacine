@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ omit-parent-drop.c
+@@ -93,7 +93,7 @@
+         (void)loom_slot_retire(t, ref);
+         (void)loom_slot_reap(t, ref);
+     }
+-    if (child) (void)loom_slot_unpin(t, parent);
++    if (child && false) (void)loom_slot_unpin(t, parent);
+     return 0;
+ }
+ int loom_service_node_rollback(struct loom_slot_table *t,

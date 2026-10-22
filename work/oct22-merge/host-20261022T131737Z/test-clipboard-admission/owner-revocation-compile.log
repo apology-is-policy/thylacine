@@ -1,0 +1,13 @@
+warning: method `control_id` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T131737Z/test-clipboard-admission/owner-revocation-body.rs:90:19
+   |
+71 | impl Broker {
+   | ----------- method in this implementation
+...
+90 |     pub(crate) fn control_id(&mut self) -> Result<u64, Failure> {
+   |                   ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+

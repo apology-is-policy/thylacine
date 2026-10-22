@@ -22,6 +22,168 @@ needed the operator.
 
 
 ---
+## 2026-10-22 -- main merged into corona: what the textual merge lost, and the gate that reads it (corona)
+
+*What this run was for:* to qualify corona/merge-main (main a0128885b into
+corona 23b0b0e5c) for landing on corona/async-memory: a merge gate rooted in
+corona's checkout, an audit round on the merge's own code, and whatever the
+two of them found.
+
+- *Corona's tip merged in* (`1a760dccb`): no conflict; the JOURNAL pi bullet
+  and the schema sentence auto-merged and were read for placement. The new
+  repeated-key lint (0f5afeae3), run on real data, reports exactly 21 repeated
+  keys on c59c2a6fb's vault, the commit that made them, and none on the merge.
+- *A registration census* across base 8746a8a24 (1816), corona (1901), main
+  (2024), union 2101 and merge 2084: 17 dropped, none invented. Main removed 16,
+  each with a replacement in the same commit (`pump_deadline_*` ->
+  `pump_ready_*`, `reader_frame_*` -> `reader_recv_unwinds_*`,
+  `queue_full_returns_minus1` -> `returns_eagain` + `postnote_errnos`, ...);
+  the 17th is corona's SQPOLL refusal test, dropped with the gate it pinned.
+  *Wrong turn:* the first census sorted with `LC_ALL=C` and compared with
+  `comm` under the default locale, and reported nine `proc_identity` tests as
+  removed by corona. A spot check found them in corona's list; the census was
+  redone in Python with set arithmetic and a control name, and the nine were
+  an artifact.
+- *What the textual merge lost:* c59c2a6fb took corona's restructured
+  `loom.register_rejects` whole and dropped main's ref-rollback check (a
+  REGISTER refused on its second entry must release the Spoor it resolved
+  first); aux's demo merge had lost it too. The include the merge kept for it
+  still said "Spoor.ref -- the register rollback observation". Restored in
+  `0374cf0ba` in corona's read-then-assert shape. *Wrong turn:* the first
+  extraction of the function anchored on its prototype and diffed 3848-line
+  spans; anchoring on the opening brace gave the 42-line bodies.
+- *Present-tense text about removed things:* corona's REGISTER comment in
+  syscall.c and a sub-kernel-loom sentence still described the SQPOLL register
+  refusal main removed on 10-06; fixed. Main's own text with the same
+  staleness (ARCHITECTURE, DEBUG-FS-DESIGN, AUDIT-TRIGGERS, two vault notes,
+  libtapestry, dev9p.h) is enqueued (OPEN-BUGS 08:10Z) and main has it (yip
+  0240).
+- *The Go fork* is derived, not recalled: the merged kernel has main's
+  WAIT_PACKED and not b3's SYS_UMASK/SYS_GETPPID, so 3471e2a; main confirmed
+  (yip 0240: f67e51e is the only fork commit past it, and b3's alone).
+- *The gate kit* (`work/oct22-merge/`): NAMED derived by named.py (727: vote
+  16's 12, 260 one-sided, 550 in the 13 test files the merge left unlike both
+  parents); gate.sh = vote 16's gate with that NAMED and the 3471e2a pin; one
+  guest mutant (R1, the rollback's release removed); host.sh = 46 legs, every
+  `tools/test-*.py` with arguments read statically from its argparse. *Wrong
+  turn:* the first attempt read each driver's options by running it with
+  `--help` under `timeout`, which macOS lacks (every result came back empty)
+  -- and a driver without argparse would have run its whole test, building
+  without the lease. The options are now read from the source. *Also caught
+  before commit:* a full SHA typed into named.py by hand; it is now the one
+  `git rev-parse` printed.
+- *Where it runs:* corona's own checkout, switched to corona/merge-main, so
+  its build/ is rebuilt in place; a clone would grow by every rebuilt object
+  against a 9.5 GiB disk and an 8 GiB floor.
+- *Self-audit while the round ran:* syscall numbers agree across kernel
+  (127), libt (95), libthyla-rs (121) and the Go fork (45), errnos across
+  kernel, Rust and Go, with no value reused; the merged AddrSpace (corona's
+  owners/lifetime levels carrying main's release/destroy split) keeps
+  ref >= owners, so the final put cannot run under a live owner.
+- *Audit round* (Fable 5.1 against an Opus implementer, on the 61 code files
+  the merge left unlike both parents): 0/0/0/3, all fixed in `a6669b706`.
+  The one with behaviour, F1: main's in-Proc reap round had made the public
+  SQPOLL setup free exited peers before its thread charge; corona's private
+  ring charges the same budget and did not, so a Proc that had joined its
+  workers was refused on one route and admitted on the other. That fix was
+  made before the private route existed in main's tree, so only the merge
+  could carry it to the twin. Witness
+  `proc.reap_before_private_executor_charge` (qualification image) and
+  mutant R2. F2 was ENTER's header
+  contract (it still said high words are ignored); F3 a duplicate include.
+- *The pi axis* (`019ebefc5`): vote 16's pi driver copied with the merge's
+  fork pin and its own evidence paths; its unchanged judge re-ran 9/9 through
+  the oct19 self-test; its mac bake rides the merge's lease.
+- *A gate hole closed before the lease* (`d645dd0eb`): a kernel test whose
+  probe binary is missing from the ramfs prints `[skip]` and passes, and
+  the merge combined two parents' ramfs contents; the gate now requires 0
+  `[skip]` lines per suite image, run both ways on vote 16's real boots (0
+  each; one appended line fails). The census for the systemic fix (32 sites,
+  18 still silent) went to OPEN-BUGS.
+- *Wrong turn: the merge did not compile.* Every kit dry run was clean, and
+  none compiled anything; the lease's first build stopped in 24 s
+  (`lease-20261022T085724Z`) on five `-Werror=shorten-64-to-32` errors in
+  test_devsrv.c. Main had made the narrowing an error on 10-08 (30f807e0a);
+  corona's vote 13 tests read an s64 descriptor into int without it. Each
+  parent builds alone: a semantic conflict no textual merge shows. Main's own
+  census tool, with the two qualification variants only corona's tree has,
+  read the 5 sites and nothing else over 14 variants, and 0 after
+  `a8d960cb3` (a helper that returns -1 for anything not a descriptor, so a
+  bad value fails the >= 0 check instead of truncating). The lesson's index
+  line said to compile before a lease; it now names the merge case.
+- *Second break, userspace:* ptyfs lost `MAX_PENDING`. The merge took main's
+  fid-constant block whole, and corona's constant sat inside it; the park
+  checks, resolved elsewhere, kept corona's name. Base 80 on MAX_FIDS;
+  corona split the park ceiling off at 80 when it grew the table; main grew
+  the table to 128 and raised the park ceiling with it unmentioned. The
+  merged dossier already said 80 (MAX_PENDING), so 80 returned in
+  `ca8c2c2b9`, with the concatenated six-vs-seven prose reconciled to the
+  merged code. A keep-going `cargo check` (238 crates, 0 errors) stood in
+  for one-error-per-gate-restart, and the lease driver now stops after a
+  red gate instead of building mutants on a broken tree. Round 2 (Fable) on
+  both fixes asks whether 80 refuses what main's 128 admitted.
+- *Lease (third run, `ca8c2c2b9`):* gate ALL GREEN 10:25Z (2085 x3, NAMED
+  748 = 733 + the 15 devsrv tests whose file the fix made unlike both parents,
+  SMP 5x10); mutants R1 and R2 killed by their own messages; the pi bake done.
+  The host sweep went red on 17 of 46 legs: seven are Astra's harnesses whose
+  extractions the merge outdated (main's shapes: the tag pool, the AddrSpace
+  split, srvconn principals, `loom_drive_moved_locked`), five the known
+  Apple-clang ASan hang, one my own leg order, one a host that is not ELF.
+  A hypothesis the classification raised -- private CQEs never move main's
+  `drive_gen` -- was refuted by path: no public waiter ever waits on a
+  private ring.
+- *The pi axis* (`pi-run-20261022T104321Z`): GREEN, default-smp4 and
+  ubsan-smp4 ten boots each at 2085/2085, D7 once, no extinction. Its launch
+  ssh hung again, the second time: the remote shell backgrounded the whole
+  `cd && nohup ...` list, so a subshell holding ssh's output went to the
+  background with the driver. Run both ways with `sleep 15` in the driver's
+  place, the old form held ssh 16 s and `cd || exit 9; nohup ... &` 0 s
+  (`0252ae47c`).
+- *Astra's harnesses* (her permission and conditions, yip 0243): repaired on
+  corona/merge-main under her rules -- production bodies and every assertion
+  kept, a missing callee extracted rather than stubbed, host doubles only for
+  the environment (kmalloc/kfree, `atomic_lse.h`), every mutant matching one
+  site and killed by its own message. The AddrSpace mutants moved only after
+  an old->new property map (corona's last-owner/last-pin counterexamples
+  against main's release/destroy split, three contract changes named). One
+  compiler rule for every sanitized fixture (`tools/host-sanitizer-cc.py`):
+  an explicit CC wins, otherwise Homebrew LLVM, otherwise exit 3 in its own
+  state, and a probe proves the runtime starts before any case. Committed
+  WIP `d7d77ebed` unrun while the mac was queued. *Caught before the lease:*
+  the pi was free, so a gcc pre-check ran every driver there first
+  (`pi-precheck-20261022T115421Z`) and found four defects d7d77ebed carried
+  (`5138d780c`): two mutants that died at compile (survivors by her rule:
+  a static drain double orphaned by `skip-drain`, an unused
+  `server_principal` in `principals-crossed`); 9p-progress's clean case red
+  at run time, because main's 2faa703ed made `recv_ready`/`recv_now`
+  mandatory and the fixture's backend had neither -- the Mac sweep never
+  reached it, its build stopping first; and the `version:` mutants compiling
+  a copy of `9p_session.c` whose `../mm/slub.h` cannot resolve from a temp
+  dir. On the pi the sanitized legs stopped at rc 3: gcc's ASan dies at
+  startup on that kernel, and the selector said so instead of failing a
+  case. On the Mac (`b07adeb81` records both): the selector's three
+  controls behaved as built (no tooling -> rc 3; Apple clang -> rc 3, its
+  probe not finishing in 20 s, no case run; an explicit LLVM CC honoured
+  and recorded), and the sweep at `5138d780c` passed all 46 legs, the
+  Darwin pty-abi path included. *Wrong turn caught by counting:* green
+  was not the claim -- the five `-san` legs showed one PASS each, because
+  my kit ran the sanitized pass without `--mutants`, so her negative
+  controls had never run under the sanitizer. Fixed in the kit
+  (`1f87dee46`) and re-run at `b07adeb81` (`host-20261022T131737Z`): all
+  46 legs pass, and the sanitized legs now kill every mutant by its own
+  message under Homebrew LLVM ASan/UBSan, the same counts as unsanitized
+  (service-admission 12, 9p-client-progress 14, 9p-progress 13,
+  addrspace-lifetime 15, loom-service-pool 11).
+- *Leases this stretch:* pi 11:53-12:00Z (pre-check), mac 12:56-13:07Z
+  (controls + first sweep) and 13:17-13:27Z (the re-run), each released
+  when its cores freed.
+- *Still open:* Astra reviews the harness evidence on yip 0243 -- until she
+  does, the guest-green of this merge is peer-reported; the `[skip]`-as-pass
+  systemic fix (OPEN-BUGS, 32 sites); aux's C1 deletes
+  `proc_reap_exited_threads`, so whichever of the two lands second drops the
+  merge's private-executor caller and keeps its witness, and aux found the
+  join-before-free window in C1 that this raised (OPEN-BUGS 13:00Z, aux's).
+
 ## 2026-10-21/22 -- vote 16's magazine lock qualified; the sims admit in the kernel's order (corona)
 
 - *Vote 16: each CPU's magazine set gets its own lock* (`a951f7c74`).

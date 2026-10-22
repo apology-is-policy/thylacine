@@ -1,0 +1,10 @@
+--- kernel/loom_service_slots.c
++++ close-reserve.c
+@@ -26,7 +26,6 @@
+ }
+ int loom_slot_reserve(struct loom_slot_table *t, u32 kind, struct loom_service_ref *out) {
+     if (!t || !out || !slot_kind(kind)) return -T_E_INVAL;
+-    if (t->closing) return -T_E_CANCELED;
+     if (t->next_incarnation == UINT64_MAX) return -T_E_NOSPC;
+     for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+         struct loom_service_slot *s = &t->slots[i];

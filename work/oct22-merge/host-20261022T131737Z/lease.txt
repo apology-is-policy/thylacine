@@ -1,0 +1,4 @@
+mac   HELD by you for 11s, 2.0h left
+        why: corona: re-run the 46 host legs at 1f87dee46 -- the sanitized legs now run their mutants (Astra 0243 conditions); ~11 min last time, no QEMU; uncertainty is whether any mutant meets a sanitizer report before its own assertion
+pi    FREE
+disk: 20.9 GiB available at /Users/northkillpd/projects/thylacine-corona

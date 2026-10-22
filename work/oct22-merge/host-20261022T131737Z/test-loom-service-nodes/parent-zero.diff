@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ parent-zero.c
+@@ -43,7 +43,7 @@
+                               struct loom_service_ref *out) {
+     if (!t || !nodes || !out ||
+         (kind != LOOM_SERVICE_SCOPE && kind != LOOM_SERVICE_FID)) return -T_E_INVAL;
+-    if (kind == LOOM_SERVICE_SCOPE && !node_zero_ref(parent)) return -T_E_INVAL;
++    if (kind == LOOM_SERVICE_SCOPE && !node_zero_ref(parent) && false) return -T_E_INVAL;
+     if (t->closing) return -T_E_CANCELED;
+     if (kind == LOOM_SERVICE_FID) {
+         if (!node_parent_ready(t, nodes, parent)) return -T_E_NOENT;

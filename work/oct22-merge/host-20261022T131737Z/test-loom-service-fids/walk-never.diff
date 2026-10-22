@@ -1,0 +1,11 @@
+--- kernel/loom_service_fids.c
++++ walk-never.c
+@@ -101,7 +101,7 @@
+ }
+ int loom_fid_borrow_walk(struct loom_slot_table *t,struct loom_service_node_table *nodes,
+     struct loom_service_ref source,struct loom_service_ref scope,u32 *wire) {
+-    return fid_borrow(t,nodes,source,scope,0,true,wire);
++    (void)source;(void)scope;(void)wire;(void)t;(void)nodes;return -T_E_BADF;
+ }
+ int loom_fid_commit_open(struct loom_slot_table *t,struct loom_service_node_table *nodes,
+     struct loom_service_ref source,struct loom_service_ref scope,u64 id,u32 mode) {

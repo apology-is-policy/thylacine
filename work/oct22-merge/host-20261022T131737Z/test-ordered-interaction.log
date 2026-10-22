@@ -1,0 +1,41 @@
+
+running 19 tests
+test admission::tests::delayed_partial_and_duplicate_completions ... ok
+test admission::tests::denial_is_not_an_empty_success_and_can_be_followed_by_new_request ... ok
+test admission::tests::payload_borrow_requires_matching_read_completion ... ok
+test admission::tests::refused_enqueue_and_tag_exhaustion_never_reuse ... ok
+test admission::tests::truncation_eof_overrun_and_mismatched_receipts_poison ... ok
+test interaction_control::tests::exact_control_shape_and_reserved_bits ... ok
+test interaction_events::tests::duplicate_gap_wrong_ready_and_exhaustion_poison ... ok
+test interaction_events::tests::every_body_roundtrips_and_reserved_fields_stay_zero ... ok
+test interaction_events::tests::independent_little_endian_fixture_and_malformed_records ... ok
+test interaction_events::tests::initial_normal_seat_generation_zero_is_valid ... ok
+test ordered::tests::failed_write_discards_early_decision ... ok
+test interaction_events::tests::overflow_discards_history_and_never_recovers_in_place ... ok
+test ordered::tests::local_rearm_and_retained_records_do_not_need_an_unrelated_wakeup ... ok
+test ordered::tests::parked_read_does_not_block_write_and_cqe_order_cannot_release_early ... ok
+test ordered::tests::queued_notifications_precede_decision_and_duplicate_cqe_cannot_advance ... ok
+test ordered::tests::refused_enqueue_uses_new_tags_and_exhaustion_never_wraps ... ok
+test ordered::tests::simultaneous_write_does_not_borrow_pending_read ... ok
+test ordered::tests::short_eof_transport_and_wrong_decision_poison ... ok
+test interaction_events::tests::ordered_round_trips_survive_ring_wrap_without_coalescing ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+lost-local-rearm: intended assertion failure at ordered::tests::local_rearm_and_retained_records_do_not_need_an_unrelated_wakeup
+blocked-decision-spins: intended assertion failure at ordered::tests::local_rearm_and_retained_records_do_not_need_an_unrelated_wakeup
+reject-initial-seat: intended assertion failure at interaction_events::tests::initial_normal_seat_generation_zero_is_valid
+overflow-overwrite: intended assertion failure at interaction_events::tests::overflow_discards_history_and_never_recovers_in_place
+sequence-gap: intended assertion failure at interaction_events::tests::duplicate_gap_wrong_ready_and_exhaustion_poison
+receiver-recovers: intended assertion failure at interaction_events::tests::duplicate_gap_wrong_ready_and_exhaustion_poison
+reserved-data: intended assertion failure at interaction_events::tests::independent_little_endian_fixture_and_malformed_records
+early-decision: intended assertion failure at ordered::tests::parked_read_does_not_block_write_and_cqe_order_cannot_release_early
+unsolicited-decision: intended assertion failure at ordered::tests::short_eof_transport_and_wrong_decision_poison
+transport-recovers: intended assertion failure at ordered::tests::short_eof_transport_and_wrong_decision_poison
+
+running 1 test
+test declared_session_is_not_console_renderer_and_rejects_identity_changes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

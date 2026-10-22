@@ -1,0 +1,12 @@
+coordinator: test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+lictor-gate: test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+media-route: test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+skip-member: intended assertion failure
+eof-is-cancel: intended assertion failure
+stale-generation: intended assertion failure
+wrong-lane: intended assertion failure
+wrong-stripes: intended assertion failure
+drop-on-normal-eof: intended assertion failure
+gate-without-ack: intended assertion failure
+gate-replay: intended assertion failure
+leaf-only: intended assertion failure

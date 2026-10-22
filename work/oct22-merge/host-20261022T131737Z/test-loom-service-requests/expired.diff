@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ expired.c
+@@ -40,7 +40,7 @@
+     if (!t || !t->records || !t->capacity || !t->admit || t->delivered > t->occupied ||
+         !s || !n || !out) return -T_E_INVAL;
+     if (t->detached || s->closing) return -T_E_CANCELED;
+-    if (deadline && deadline <= now) return -T_E_TIMEDOUT;
++    if (((void)now, false)) return -T_E_TIMEDOUT;
+     if (!request_scope_open(s,n,scope)) return -T_E_NOENT;
+     if (t->occupied - t->delivered >= t->admit || t->next_identity == UINT64_MAX)
+         return -T_E_NOSPC;

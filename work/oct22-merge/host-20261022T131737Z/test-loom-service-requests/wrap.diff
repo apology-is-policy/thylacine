@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ wrap.c
+@@ -42,7 +42,7 @@
+     if (t->detached || s->closing) return -T_E_CANCELED;
+     if (deadline && deadline <= now) return -T_E_TIMEDOUT;
+     if (!request_scope_open(s,n,scope)) return -T_E_NOENT;
+-    if (t->occupied - t->delivered >= t->admit || t->next_identity == UINT64_MAX)
++    if (t->occupied - t->delivered >= t->admit)
+         return -T_E_NOSPC;
+     for (u32 i=0;i<t->capacity;++i) {
+         struct loom_service_request *r = &t->records[i];

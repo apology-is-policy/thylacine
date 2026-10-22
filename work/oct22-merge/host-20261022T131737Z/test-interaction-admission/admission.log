@@ -1,0 +1,29 @@
+
+running 24 tests
+test failed_replacement_revokes_old_context ... ok
+test background_and_wrong_context_never_reach_kernel_check ... ok
+test foreground_a_b_a_cannot_reuse_controller ... ok
+test interaction_control::tests::exact_control_shape_and_reserved_bits ... ok
+test interaction_events::tests::duplicate_gap_wrong_ready_and_exhaustion_poison ... ok
+test interaction_events::tests::every_body_roundtrips_and_reserved_fields_stay_zero ... ok
+test fresh_state_detects_handover_without_poll_delivery ... ok
+test hup_and_eof_retire_but_wouldblock_does_not ... ok
+test interaction_events::tests::independent_little_endian_fixture_and_malformed_records ... ok
+test interaction_events::tests::initial_normal_seat_generation_zero_is_valid ... ok
+test only_declared_exact_surface_and_real_host ... ok
+test interaction_events::tests::overflow_discards_history_and_never_recovers_in_place ... ok
+test ordered_initial_seat_zero_publishes_without_poison ... ok
+test ordered_same_epoch_subject_and_surface_retirement_arrive_before_decision ... ok
+test ordered_producer_replays_decision_without_repeating_kernel_authority ... ok
+test publish_generation_and_context_replay_refused ... ok
+test reusable_fid_exact_replay_and_decode_gate ... ok
+test sak_and_exhausted_focus_fail_closed ... ok
+test ordered_overflow_retires_context_and_reopen_cannot_revive_it ... ok
+test seat_generation_change_between_loop_and_request_revokes_context ... ok
+test successful_admission_carries_fresh_focus_and_seat ... ok
+test surface_reuse_retires_watch_and_binding ... ok
+test watcher_allocation_failure_leaves_no_half_binding ... ok
+test interaction_events::tests::ordered_round_trips_survive_ring_wrap_without_coalescing ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

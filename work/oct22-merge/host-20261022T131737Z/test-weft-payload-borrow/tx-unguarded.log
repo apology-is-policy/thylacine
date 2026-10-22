@@ -1,0 +1,4 @@
+
+thread 'main' (68310296) panicked at /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/weft-borrow-yxghs4xy/tx-unguarded.rs:58:3:
+pending write borrow rejected
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ abort-publish.c
+@@ -72,7 +72,7 @@
+     struct loom_service_node *n = node_exact(t, nodes, ref, LSLOT_PROVISIONAL);
+     if (!n || n->state != LOOM_SERVICE_RESERVED) return -T_E_NOENT;
+     if (t->slots[ref.slot].kind == LOOM_SERVICE_FID &&
+-        !node_parent_ready(t, nodes, n->parent)) return -T_E_CANCELED;
++        !node_parent_ready(t, nodes, n->parent) && false) return -T_E_CANCELED;
+     return loom_slot_publish(t, ref);
+ }
+ static int node_remove(struct loom_slot_table *t, struct loom_service_node_table *nodes,

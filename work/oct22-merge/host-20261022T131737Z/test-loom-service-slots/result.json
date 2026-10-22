@@ -1,0 +1,111 @@
+{
+  "inputs": {
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_slots_fixture.h": "3e74967a473d63fd14bf3795bf40f7e9fd1610a27c8d0ae7cdb9760785f70749",
+    "tools/host-tests/loom-service-slots.c": "c7b04c356d5d81b74b932dad59cfabc1c95b080f324a6304dbe6cca82c869bc2",
+    "tools/test-loom-service-slots.py": "593574cdc73aeb41cf47ecbcbfc566d59b4619ca1dda9eea7994253f1c599d9c"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+      "binary_sha256": "f276931b041a5739641e36688a309575b435793f15a1b8ace9ccf4358e3a3900"
+    },
+    {
+      "case": "stale",
+      "expected": "stale incarnation cannot borrow reused slot",
+      "rc": 1,
+      "generated_sha256": "9ac33f8471efa00d6416d5563cfc3d48f5b055979c27366b7e4894d080cf10b4",
+      "binary_sha256": "5ff9456f22c99bfce67447d6f6ea4f1f8766aba7c3af186054a4f48d53569f66"
+    },
+    {
+      "case": "reserved",
+      "expected": "reserved reference refused",
+      "rc": 1,
+      "generated_sha256": "829b0d9bffbc45e8c0dded22f4e09d34ff9cb19e54be086fb141edf2141b27c3",
+      "binary_sha256": "eb9aee545590743213866a7f483f2e9f9ed18de09cbdc8ddd470026021ec40e1"
+    },
+    {
+      "case": "provisional",
+      "expected": "provisional target is not usable",
+      "rc": 1,
+      "generated_sha256": "d1b8ccb6e0ad3c47537f5da28ea1c53cd087ad87fb31ec72135947cea0f2a7d8",
+      "binary_sha256": "615e9771007e673d78d575550519b6a3d9cae30caa2712b0bc465b30cc83dc87"
+    },
+    {
+      "case": "wrong-kind",
+      "expected": "wrong kind cannot borrow",
+      "rc": 1,
+      "generated_sha256": "e74ad00f5efe891078c6c5a8fa7bf0136bc751a20931a474b7244b2d509f58ff",
+      "binary_sha256": "642199b5cea9801c9f8f81a57c12c90eb93f3e92e791358e870226af62cc6a57"
+    },
+    {
+      "case": "rollback-generation",
+      "expected": "rollback identity never repeats",
+      "rc": 1,
+      "generated_sha256": "deda8102208ac63e3e023667177334e796ebf8ed40dfc48ab6cc9f4013e821f3",
+      "binary_sha256": "2088745b8492b33bbf734219ebbcd7186524cf8f1a4de1459e950160df87c8e6"
+    },
+    {
+      "case": "early-reap",
+      "expected": "borrow prevents early reuse",
+      "rc": 1,
+      "generated_sha256": "e7f26263826338de7cafcc9237f4b0b529d96bc945eaeeefdeba44c7c28ba49c",
+      "binary_sha256": "1556d5542758bce62cabaccd5027eb5354add98e347140639da248215f1fd963"
+    },
+    {
+      "case": "live-reap",
+      "expected": "live slot cannot be reaped",
+      "rc": 1,
+      "generated_sha256": "e244c1903c92368872fdba41c704429803dddc2162638ab31825844ef5573558",
+      "binary_sha256": "cb9284ddfa33272a12025a7ecba9a010dda34426ebabe7e08f29c9a4652a4c6e"
+    },
+    {
+      "case": "capacity",
+      "expected": "mixed table reservation",
+      "rc": 1,
+      "generated_sha256": "6e2d08e1cf0e868849b5642f39344f84bf08744f65c0bc0f625a61da9f8fc26e",
+      "binary_sha256": "d351f6cd13b9f3fd65e5d6afe9f06c870690bc16df31c64ad43816f6971ac3db"
+    },
+    {
+      "case": "wrap",
+      "expected": "incarnation exhaustion never wraps",
+      "rc": 1,
+      "generated_sha256": "06c20f5810b76a4626db9258a364a441e66f196c9751f1cf9baf6c6aa25a4590",
+      "binary_sha256": "2fc864e773e7eec3a357b7ec51c2812778b8cf63cb48fbe2963b386af06815e0"
+    },
+    {
+      "case": "pin-wrap",
+      "expected": "borrow saturation never wraps",
+      "rc": 1,
+      "generated_sha256": "46e1ce284b9ac0cf4b269dfa063d92dd2340220f5f54f4e3ec1f4c36132eb1fd",
+      "binary_sha256": "8aadbdbad56283b39d3e4f56e79f5b4d3536ffbe1f844cea0ba06005e6050c67"
+    },
+    {
+      "case": "close-reserve",
+      "expected": "close freezes reservations",
+      "rc": 1,
+      "generated_sha256": "2c0ca2fe8790143f10dfc25fe8a1f0dcbba9f69514ddba70925235b68306fc5d",
+      "binary_sha256": "986b48a1d0840061cb090e628631e5dd513abd1c4000a19b567578d7417311ca"
+    },
+    {
+      "case": "close-publish",
+      "expected": "close wins against output publication",
+      "rc": 1,
+      "generated_sha256": "bd747d8d941d6a6d6138b6b8e5b55f12b08a6f46b2c076429b3e45e78e4c1227",
+      "binary_sha256": "b4e74c1c13596f3c50ef2151b5cd849c023df4fd38052530605e8dc28d1bfd10"
+    },
+    {
+      "case": "close-pin",
+      "expected": "close freezes borrows",
+      "rc": 1,
+      "generated_sha256": "e128d0167567c661d3845212e45972905843ad5da00ce7ba3461dee0b8788bd5",
+      "binary_sha256": "e6e2ed91029350bb07af8b6051d493a457357f18481f498d628a94becd969c3f"
+    }
+  ]
+}

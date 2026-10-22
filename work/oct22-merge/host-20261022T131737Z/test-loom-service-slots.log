@@ -1,0 +1,14 @@
+PASS control PASS actual slot ledger: table=1552 slot=24
+PASS stale stale incarnation cannot borrow reused slot
+PASS reserved reserved reference refused
+PASS provisional provisional target is not usable
+PASS wrong-kind wrong kind cannot borrow
+PASS rollback-generation rollback identity never repeats
+PASS early-reap borrow prevents early reuse
+PASS live-reap live slot cannot be reaped
+PASS capacity mixed table reservation
+PASS wrap incarnation exhaustion never wraps
+PASS pin-wrap borrow saturation never wraps
+PASS close-reserve close freezes reservations
+PASS close-publish close wins against output publication
+PASS close-pin close freezes borrows

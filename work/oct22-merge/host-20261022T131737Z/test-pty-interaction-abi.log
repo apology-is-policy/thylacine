@@ -1,0 +1,4 @@
+kernel: constants, all offsets/alignment and 200-byte fixture PASS
+libt: constants, all offsets/alignment and 200-byte fixture PASS
+Rust: constants, all offsets/alignment and 200-byte fixture PASS
+Layout only: no kernel authority, poll/lifetime or guest behavior tested.
