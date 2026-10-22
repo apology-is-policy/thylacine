@@ -3,7 +3,10 @@
 
 tools/run-vm.sh runs to its exec under a stand-in qemu-system-aarch64 that
 records its argv, once per launcher configuration: the bootargs it declares
-must be exactly the instances that configuration attaches. tools/test.sh's
+must be exactly the instances that configuration attaches. It runs as a
+byte-identical copy inside a scratch tree, so the sockets and directories the
+launcher clears or makes under its own root never touch this checkout's,
+where a boot may be running. tools/test.sh's
 skip block, cut from the script, then reads one synthetic skip per kind under
 the same configuration: a skip must pass (as NOT coverage) exactly when
 run-vm.sh did not declare that kind, so the launcher's derivation and
@@ -15,6 +18,7 @@ from pathlib import Path
 import argparse
 import collections
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -22,7 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BLOCK_START = "        # The kernel suite's skips (vote 17). A test skips only through a helper\n"
 BLOCK_END = "        # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the\n"
 KINDS = ["virtio-blk", "virtio-net", "virtio-input", "virtio-gpu", "virtio-rng",
-         "virtio-pci-rng", "virtio-pci-input", "virtio-pci-net", "virtio-pci-gpu", "smp", "msi"]
+         "virtio-pci-rng", "virtio-pci-input", "virtio-pci-net", "virtio-pci-gpu", "virtio-pci-9p",
+         "smp", "msi"]
 # The kinds test.sh's mirror explains; the others no kernel test needs.
 MIRRORED = ["virtio-blk", "virtio-net", "virtio-input", "virtio-gpu", "virtio-rng",
             "virtio-pci-rng", "virtio-pci-input", "smp", "msi"]
@@ -51,6 +56,9 @@ def configs(disk, pool):
                                  THYLACINE_POOL_IMG="/nonexistent/pool.img"), 4, drop(gic2, "virtio-blk")),
         ("disk-only", dict(base, THYLACINE_POOL_IMG="/nonexistent/pool.img"), 4, dict(gic2, **{"virtio-blk": 1})),
         ("hvf-gic3-auto", dict(base, THYLACINE_GIC="3"), 4, dict(FULL)),
+        ("hvf-gic3-its-on", dict(base, THYLACINE_GIC="3", THYLACINE_ITS="on"), 4, dict(FULL)),
+        ("gpu-gl-model", dict(base, THYLACINE_GPU_DEV="virtio-gpu-gl-pci"), 4, gic2),
+        ("share", dict(base, SHARE="1"), 4, dict(gic2, **{"virtio-pci-9p": 1})),
         ("tcg-gic3-auto", dict(base, THYLACINE_ACCEL="tcg"), 4, dict(FULL, msi=1)),
         ("tcg-its-off", dict(base, THYLACINE_ACCEL="tcg", THYLACINE_ITS="off"), 4, dict(FULL)),
         ("tcg-its-on", dict(base, THYLACINE_ACCEL="tcg", THYLACINE_ITS="on"), 4, dict(FULL, msi=1)),
@@ -60,11 +68,21 @@ def configs(disk, pool):
 def launch(work, env, cpus):
     """run-vm.sh's -append words and its '==> qemu:' line under this env."""
     argv = work / "argv.txt"
+    env = dict(env)
+    share = env.pop("SHARE", None) == "1"
     full = {"PATH": f"{work / 'bin'}:{os.environ['PATH']}", "HOME": os.environ["HOME"],
             "FAKEQ_OUT": str(argv), "THYLACINE_BUILD_DIR": str(work / "kernel"), **env}
-    r = subprocess.run([str(ROOT / "tools/run-vm.sh"), "--no-share", "--cpus", str(cpus)],
+    # The launcher clears its QMP sockets under its own root on every run: a
+    # sentinel at each sandbox path must be gone afterwards, or the clear
+    # landed somewhere else.
+    sockets = [work / "build/qmp.sock", work / "build/qmp-gate.sock"]
+    for sock in sockets:
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        sock.write_text("sentinel")
+    r = subprocess.run([str(work / "tools/run-vm.sh")] + ([] if share else ["--no-share"]) + ["--cpus", str(cpus)],
                        env=full, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
+    assert not any(sock.exists() for sock in sockets), "run-vm.sh's copy cleared no socket in its own root"
     args = argv.read_text().split("\n")
     words = args[args.index("-append") + 1].split() if "-append" in args else []
     qemu = [l for l in (r.stdout + r.stderr).split("\n") if l.startswith("==> qemu: accel=")]
@@ -85,10 +103,15 @@ def skip_line(kind, nth=0):
     return f"[skip] thylacine.{kind}{f' x{nth + 1}' if nth else ''}: the launcher did not declare it"
 
 
-def boot_log(qemu_line, *skips):
+def boot_log(qemu_line, *skips, counted=None):
+    """A boot log; the suite's summary counts the skips unless told otherwise
+    (None: as many as given; -1: no summary line at all)."""
     lines = [qemu_line] if qemu_line else []
     for i, s in enumerate(skips):
         lines += [f"    [test] t.{i} ...     {s}", "SKIP"]
+    k = len(skips) if counted is None else counted
+    if k >= 0:
+        lines.append(f"  tests: {100 - k}/100 PASS" + (f" ({k} skipped)" if k else ""))
     return "".join(l + "\r\n" for l in lines)
 
 
@@ -101,9 +124,12 @@ def main():
     src = (ROOT / "tools/test.sh").read_text()
     assert src.count(BLOCK_START) == 1 and src.count(BLOCK_END) == 1
     cut = src[src.index(BLOCK_START):src.index(BLOCK_END)]
-    assert "skip_explained" in cut and cut.count("exit 1") == 2, "the cut is not the skip block"
+    assert "skip_explained" in cut and cut.count("exit 1") == 3, "the cut is not the skip block"
     with tempfile.TemporaryDirectory(prefix="skip-verdict-") as tmp:
         work = Path(tmp)
+        (work / "tools").mkdir()
+        shutil.copy2(ROOT / "tools/run-vm.sh", work / "tools/run-vm.sh")
+        assert (work / "tools/run-vm.sh").read_bytes() == (ROOT / "tools/run-vm.sh").read_bytes()
         (work / "bin").mkdir()
         fake = work / "bin/qemu-system-aarch64"
         # Answers -accel help as a host with both accelerators would, so
@@ -162,6 +188,14 @@ def main():
              "NOT coverage"),
             ("probe, image with joey", boot_log(qemu, "[skip] /bin/pipe-probe not in ramfs, and neither is /bin/joey"),
              {}, 1, "dropped it undeclared"),
+            ("tally agrees", boot_log(qemu, skip_line("virtio-net"), counted=1), env, 0, "NOT coverage"),
+            ("tally counts more", boot_log(qemu, skip_line("virtio-net"), counted=2), env, 1,
+             "counted 2 skip(s), but 1 [skip] line(s)"),
+            ("marker torn", boot_log(qemu, "[sk", counted=1).replace("[sk\r\n", "[skcpu1 ip] thylacine.virtio-net: "
+                                                                    "the launcher did not declare it\r\n"),
+             env, 1, "counted 1 skip(s), but 0 [skip] line(s)"),
+            ("no summary line", boot_log(qemu, skip_line("virtio-net"), counted=-1), env, 1,
+             "counted 0 skip(s), but 1 [skip] line(s)"),
         ]
         for label, log, env, want_rc, want in cases:
             rc, out = run_block(block, log, env, ROOT)

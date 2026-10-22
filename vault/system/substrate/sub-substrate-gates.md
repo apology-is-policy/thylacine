@@ -298,7 +298,11 @@ thing a gate looks for, since that absence is also what the corresponding
 regression looks like. The G-4 gate also moved to a SECOND QMP monitor
 (`THYLACINE_QMP_SOCK2`, #230): one chardev serves one client and the key-injector
 holds the first for the whole boot whenever its sentinel never arrives, so a
-shared socket made the two consumers ordering-dependent.
+shared socket made the two consumers ordering-dependent. When the gate applies
+(a passing boot, no `THYLACINE_NO_GPU`, `THYLACINE_NO_QMP` or
+`THYLACINE_GPU_GATE=0`) but cannot run -- no python3, no gate socket, QEMU
+gone -- the boot FAILS with "G-4 console gate could not run"; it used to pass
+unread, and a deleted socket looked exactly like that.
 
 **The DISTRO / CLADE arc gates are propagated into the exit status (#212/#232).**
 `check-arc-gates.sh` answers for the D-5 / L-6c arc chain and the three clade
@@ -363,22 +367,29 @@ script's own configuration, kind by kind: `virtio-net` by `THYLACINE_NO_NET=1`;
 by `THYLACINE_NO_GPU=1` or a display that drops the MMIO GPU (console, vnc,
 egl-headless, dbus-gl, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
 `smp` and `msi` by run-vm.sh's own `==> qemu:` line (one CPU; a GICv3 machine
-whose MSI controller the launcher cannot know); the dlopen prover by a sysroot
-without `libc.so`. `virtio-rng`, `virtio-pci-rng`, a probe in an image with
+with `its=off`, or under KVM or hvf, where the launcher cannot know the ITS);
+the dlopen prover by a sysroot without `libc.so`. `virtio-rng`, `virtio-pci-rng`, a probe in an image with
 `/bin/joey`, and any kind the mirror does not name are never explained. An
 unexplained skip fails: the launcher dropped what this configuration attaches
 without declaring the drop. The rest are printed as NOT coverage, in the #212
-arc-gate discipline. The mirror is a second route to the machine beside the
+arc-gate discipline. Before the mirror runs, the count of readable skip lines
+must equal the suite's own "(K skipped)": a skip whose `[skip]` marker another
+CPU's output tore apart is still counted there, and a mismatch fails ("the
+kernel suite counted"). The mirror is a second route to the machine beside the
 launcher's declaration ([[sub-substrate-machine]]), so it is checked against
 it: `tools/test-skip-verdict.py` runs the real `run-vm.sh` under a stand-in
-QEMU that records its argv, for twelve configurations, and requires the two to
-agree on every kind; then it drives the block's refusals (ungated, torn, the
-old shape, an unknown kind, a missing machine line), each with its acceptance
-one variable away. `smp-multiboot.sh` labels both new verdicts, and every
-post-banner verdict now has its arm (netd's three, the poll fail-safe, the
-refused clunk and the lost flush were labelled `pass` before);
-`test-smp-classify.sh` generates one fixture per arm from the classifier
-itself and requires each to beat the PASS line.
+QEMU that records its argv, for fifteen configurations, and requires the two
+to agree on every kind; then it drives the block's refusals (ungated, torn, the
+old shape, an unknown kind, a missing machine line, a tally that disagrees),
+each with its acceptance one variable away. It runs a byte-identical copy of
+the launcher inside a scratch tree, because the launcher clears its QMP
+sockets under its own root and a boot in this checkout may be using them.
+`smp-multiboot.sh` labels the three new verdicts, and every post-banner verdict
+now has its arm (netd's three, the poll fail-safe, the refused clunk and the
+lost flush were labelled `pass` before); `test-smp-classify.sh` generates one
+fixture per fixed-string arm from the classifier itself and requires each to
+beat the PASS line, and builds the one regex arm's (`hwwatch`) from test.sh's
+own echo.
 
 **A fixture Proc a failing test left linked is released (2026-09-30).** A
 test that links a fabricated Proc under kproc and fails before its unlink

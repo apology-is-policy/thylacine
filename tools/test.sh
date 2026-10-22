@@ -275,9 +275,10 @@ while [[ $(date +%s) -lt $deadline ]]; do
         # the login prompt's arrival is a second independent driver) --
         # identical-forever dumps = a dead present loop. The bounded retry
         # absorbs aurora's connect + first-present + login's prompt timing; a
-        # persistent miss is a FAIL (tapestryd or aurora down/blank). Skipped
-        # when the device/socket is absent (THYLACINE_NO_GPU=1 /
-        # THYLACINE_NO_QMP=1), THYLACINE_GPU_GATE=0, or python3 is missing.
+        # persistent miss is a FAIL (tapestryd or aurora down/blank). Off under
+        # THYLACINE_NO_GPU=1, THYLACINE_NO_QMP=1 or THYLACINE_GPU_GATE=0; when
+        # it applies but cannot run (no python3, no gate socket, QEMU gone),
+        # the boot FAILS rather than passing unread.
         # The build shape, from joey's own report (#212's line, which prints
         # before the banner and so is already in the log). Used below to skip
         # gates that are structurally inapplicable to the lean image -- keyed on
@@ -292,11 +293,24 @@ while [[ $(date +%s) -lt $deadline ]]; do
         # check below stays skipped, because debug-probe really is a probe.
         lean_shape=0
         grep -aq "ARC-GATES not-built" "$LOG_FILE" 2>/dev/null && lean_shape=1
+        # When the gate applies, a reason it cannot run is a failure: a missing
+        # socket is what a deleted socket or a dead monitor looks like.
+        gpu_gate_unrun=""
         if [[ "$result" == "pass" \
               && "${THYLACINE_NO_GPU:-0}" != "1" \
-              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]] \
-           && [[ -S "$QMP_GATE_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
-           && kill -0 "$QEMU_PID" 2>/dev/null; then
+              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]]; then
+            if ! command -v python3 >/dev/null 2>&1; then
+                gpu_gate_unrun="python3 is not on PATH"
+            elif [[ ! -S "$QMP_GATE_SOCK" ]]; then
+                gpu_gate_unrun="its QMP socket $QMP_GATE_SOCK is not a socket"
+            elif ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                gpu_gate_unrun="QEMU exited before the console could be read"
+            fi
+            [[ -z "$gpu_gate_unrun" ]] || result="gpu-gate-unrun"
+        fi
+        if [[ "$result" == "pass" \
+              && "${THYLACINE_NO_GPU:-0}" != "1" \
+              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]]; then
             # Keep the LAST attempt's output: screendump -c prints the actual
             # numbers ("bg 12.3%, exact-fg 41, edges ...") and names which
             # threshold missed. Discarding it left this gate's FAIL arm
@@ -468,13 +482,24 @@ case "$result" in
         # attaches means the launcher dropped it without declaring the drop.
         # Any skip is reported, and reported as NOT coverage.
         skip_lines="$(grep -ao '\[skip\] .*' "$LOG_FILE" | tr -d '\r' || true)"
+        skip_count=0
+        [[ -z "$skip_lines" ]] || skip_count="$(grep -c . <<<"$skip_lines")"
+        gated_skip='^\[skip\] (thylacine\.[a-z0-9-]+( x[0-9]+)?: the launcher did not declare it|/[^ ]+ not in ramfs, and neither is /[^ ]+)$'
+        if [[ -n "$skip_lines" ]] && grep -vqE "$gated_skip" <<<"$skip_lines"; then
+            echo "==> FAIL: a kernel test skipped without a gated helper (test_requires / test_image_lookup):" >&2
+            grep -vE "$gated_skip" <<<"$skip_lines" >&2 || true
+            exit 1
+        fi
+        # The suite's summary counts its skips whatever the console did to their
+        # lines; a skip read here must be a skip counted there, and the reverse.
+        tally_line="$(grep -a '  tests: [0-9]*/[0-9]* ' "$LOG_FILE" | tail -1 | tr -d '\r' || true)"
+        tally_skipped="$(sed -nE 's/.* \(([0-9]+) skipped\)$/\1/p' <<<"$tally_line")"
+        if [[ "${tally_skipped:-0}" != "$skip_count" ]]; then
+            echo "==> FAIL: the kernel suite counted ${tally_skipped:-0} skip(s), but $skip_count [skip] line(s) are readable:" >&2
+            echo "    ${tally_line:-(no tests: summary line)}" >&2
+            exit 1
+        fi
         if [[ -n "$skip_lines" ]]; then
-            gated_skip='^\[skip\] (thylacine\.[a-z0-9-]+( x[0-9]+)?: the launcher did not declare it|/[^ ]+ not in ramfs, and neither is /[^ ]+)$'
-            if grep -vqE "$gated_skip" <<<"$skip_lines"; then
-                echo "==> FAIL: a kernel test skipped without a gated helper (test_requires / test_image_lookup):" >&2
-                grep -vE "$gated_skip" <<<"$skip_lines" >&2 || true
-                exit 1
-            fi
             # run-vm.sh's own line names the machine it built; without it the
             # CPU and MSI skips cannot be explained, so they fail.
             qemu_line="$(grep -a -m1 '^==> qemu: accel=' "$LOG_FILE" | tr -d '\r' || true)"
@@ -500,7 +525,7 @@ case "$result" in
                     thylacine.msi)
                         [[ -n "$q_gic" && -n "$q_its" && -n "$q_accel" ]] || return 1
                         case "$q_gic:$q_its:$q_accel" in
-                            2:*|*:on:*|3:auto:tcg) return 1 ;;
+                            2:*|3:on:tcg|3:auto:tcg) return 1 ;;
                         esac
                         return 0 ;;
                     /lib/libc.so) [[ ! -f "$REPO_ROOT/build/sysroot/lib/libc.so" ]] ;;
@@ -559,6 +584,10 @@ case "$result" in
         tail -20 "$LOG_FILE"
         echo "----------------"
         exit 0
+        ;;
+    gpu-gate-unrun)
+        echo "==> FAIL: G-4 console gate could not run: $gpu_gate_unrun." >&2
+        exit 1
         ;;
     gpu-gate)
         echo "==> FAIL: G-4 console gate -- the Aurora scanout did not verify." >&2

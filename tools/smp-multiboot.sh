@@ -173,6 +173,7 @@ harness_result_token() {
     elif grep -aqF '==> FAIL: a clunk was refused on a live session'    "$hlog"; then echo 9p-clunk
     elif grep -aqF '==> FAIL: a last close lost its staged bytes'       "$hlog"; then echo 9p-flush
     elif grep -aqF '==> FAIL: a kernel test skipped without a gated helper' "$hlog"; then echo skip-ungated
+    elif grep -aqF '==> FAIL: the kernel suite counted '                "$hlog"; then echo skip-tally
     elif grep -aqF '==> FAIL: kernel tests skipped what this configuration attaches' "$hlog"; then echo skip-undeclared
     elif grep -aqF '==> FAIL: arc/clade gate verdict'                   "$hlog"; then echo arc-gates
     elif grep -aqF '==> PASS'                                           "$hlog"; then echo pass

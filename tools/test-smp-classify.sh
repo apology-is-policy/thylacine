@@ -210,6 +210,12 @@ expect_token "unrecognised verdict"           unknown   "$TMP/harn-empty.log"
 # 'arc-gates' here is what proves the arm beats that fallback rather than
 # merely existing above it.
 expect_token "arc-gate failure beats the PASS line" arc-gates "$TMP/harn-arcgates.log"
+# The one -aqE arm has no generated fixture below: its line is test.sh's own
+# echo with the accelerator filled in, so a reworded echo reddens here.
+sed -n 's/.*echo "\(==> FAIL: accel=\)\$boot_accel\( delivers EL0 watchpoints[^"]*\)".*/\1hvf\2/p' \
+    "$REPO_ROOT/tools/test.sh" | head -1 \
+    | { printf '==> harness: qemu_alive_at_teardown=1\n==> PASS: boot banner observed.\n'; cat; } > "$TMP/harn-hwwatch.log"
+expect_token "hwwatch beats the PASS line (test.sh's echo)" hwwatch "$TMP/harn-hwwatch.log"
 
 # Every post-banner gate runs after test.sh printed its PASS line, so EVERY
 # -aqF arm must beat that line. The fixtures are generated from the classifier's

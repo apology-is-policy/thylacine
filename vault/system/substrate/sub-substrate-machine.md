@@ -172,15 +172,20 @@ device set because its View menu switches consoles interactively.
 an empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device
 the same way, so the guest cannot tell a device that was never attached from
 one it failed to see -- only the launcher knows. Just before `exec`, the script
-walks every `-device` it is about to pass (the extra arguments and the two rng
-devices included) and appends one bootargs word per device:
-`thylacine.virtio-<kind>` for a virtio-mmio device and
-`thylacine.virtio-pci-<kind>` for a virtio PCI function, the kind read from
-the device name (keyboard, mouse and tablet are `input`). Then `thylacine.smp`
-for more than one CPU, and `thylacine.msi` when the launcher knows the machine
-has an MSI controller: GICv2 always carries a v2m frame, GICv3 an ITS when
-asked for and under TCG by QEMU's default; KVM or hvf with GICv3 and
-`its=auto` declare nothing. The words are derived from the arguments, not
+walks every device argument it is about to pass (the extra arguments, the two
+rng devices and the host share included) and appends one bootargs word per
+device: `thylacine.virtio-<kind>` for a virtio-mmio device and
+`thylacine.virtio-pci-<kind>` for a virtio PCI function, the kind naming the
+virtio DeviceID rather than the model (keyboard, mouse, tablet, multitouch and
+input-host are `input`; gpu-gl and gpu-rutabaga are `gpu`; a `-transitional`
+suffix is dropped), and `thylacine.virtio-pci-9p` for the `-virtfs` share.
+Then `thylacine.smp` for more than one CPU, and `thylacine.msi` when the
+launcher knows the machine has an MSI controller: GICv2 always carries a v2m
+frame, and GICv3 under TCG an ITS unless `its=off`; under KVM or hvf a GICv3
+ITS depends on the host, which the launcher cannot see even with `its=on`, so
+nothing is declared. `--no-share` now drops the share: it used to empty an
+array the default then refilled, so every boot that passed it, `tools/test.sh`'s
+included, carried the 9P function anyway. The words are derived from the arguments, not
 written beside them, so dropping a device -- `THYLACINE_NO_NET=1`, a missing
 `disk.img`, the vnc display's dropped MMIO GPU -- drops its word with it. The
 kernel tests FAIL on what is declared and absent, and on what is present and

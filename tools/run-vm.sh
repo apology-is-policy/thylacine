@@ -38,6 +38,7 @@ cpus=4
 mem_mib="${THYLACINE_MEM_MIB:-2048}"
 gdb_flags=()
 share_flags=()
+no_share=0
 snapshot=""
 extra_qemu_args=()
 
@@ -59,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --no-share)
-            share_flags=()
+            no_share=1
             shift
             ;;
         --snapshot)
@@ -468,7 +469,7 @@ fi
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
-if [[ ${#share_flags[@]} -eq 0 ]] && [[ "${THYLACINE_NO_SHARE:-0}" != "1" ]]; then
+if [[ "$no_share" != 1 && "${THYLACINE_NO_SHARE:-0}" != "1" ]]; then
     mkdir -p "$REPO_ROOT/share"
     share_flags=(
         -virtfs "local,path=$REPO_ROOT/share,mount_tag=host0,security_model=none,id=host0"
@@ -806,26 +807,35 @@ fi
 # empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device the
 # same way, so only the launcher knows what it asked for: a kernel test FAILS
 # when what it needs was declared and is absent, or is present undeclared, and
-# skips (counted) when it was not declared. Derived from the final -device
-# arguments, extras included, so it cannot drift from what QEMU is given:
+# skips (counted) when it was not declared. Derived from every device argument
+# QEMU is given, extras included, so it cannot drift from them:
 # thylacine.virtio-<kind> per virtio-mmio device and thylacine.virtio-pci-<kind>
-# per virtio PCI function (keyboard, mouse and tablet are kind input).
+# per virtio PCI function, where the kind names the virtio DeviceID, not the
+# model (keyboard, mouse, tablet, multitouch and input-host are input; gpu-gl
+# and gpu-rutabaga are gpu), and -virtfs is the virtio-9p PCI function it makes.
 rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)
 _prev=
 for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]}"} \
             ${net_flags[@]+"${net_flags[@]}"} ${input_flags[@]+"${input_flags[@]}"} \
             ${gpu_flags[@]+"${gpu_flags[@]}"} "${rng_flags[@]}" ${audio_flags[@]+"${audio_flags[@]}"} \
             ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
-            ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
+            ${share_flags[@]+"${share_flags[@]}"} ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
     if [[ "$_prev" == -device ]]; then
         _spec=${_arg%%,*}
+        _spec=${_spec%-non-transitional}
+        _spec=${_spec%-transitional}
         case "$_spec" in
             virtio-*-device) _bus=; _kind=${_spec#virtio-}; _kind=${_kind%-device} ;;
             virtio-*-pci)    _bus=pci-; _kind=${_spec#virtio-}; _kind=${_kind%-pci} ;;
             *)               _kind= ;;
         esac
-        case "$_kind" in keyboard|mouse|tablet) _kind=input ;; esac
+        case "$_kind" in
+            keyboard|mouse|tablet|multitouch|input-host) _kind=input ;;
+            gpu-gl|gpu-rutabaga) _kind=gpu ;;
+        esac
         [[ -z "$_kind" ]] || append_tokens+=("thylacine.virtio-$_bus$_kind")
+    elif [[ "$_prev" == -virtfs ]]; then
+        append_tokens+=("thylacine.virtio-pci-9p")
     fi
     _prev=$_arg
 done
@@ -833,11 +843,12 @@ if [[ "$cpus" =~ ^[0-9]+$ ]] && (( cpus >= 2 )); then
     append_tokens+=("thylacine.smp")
 fi
 # An MSI controller, when the launcher can know the machine has one: GICv2
-# always carries a v2m frame, GICv3 an ITS when asked for, and under TCG by
-# QEMU's default. KVM or hvf with GICv3 and its=auto leave it to the host, so
-# nothing is declared and the MSI tests do not require it.
+# always carries a v2m frame, and GICv3 under TCG an ITS unless its=off. Under
+# KVM or hvf a GICv3 ITS depends on what the host supports, which the launcher
+# cannot see even with its=on, so nothing is declared and the MSI tests do not
+# require it.
 case "$gicv:${THYLACINE_ITS:-auto}:$accel" in
-    2:*|*:on:*|3:auto:tcg) append_tokens+=("thylacine.msi") ;;
+    2:*|3:on:tcg|3:auto:tcg) append_tokens+=("thylacine.msi") ;;
 esac
 append_flags=()
 if (( ${#append_tokens[@]} > 0 )); then
