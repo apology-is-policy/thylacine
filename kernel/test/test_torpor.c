@@ -215,8 +215,7 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
 
     s64 r = sys_burrow_attach_for_proc(g_torpor_proc, PAGE_SIZE);
     if (r <= 0) {
-        g_torpor_proc->state = 2;            // ZOMBIE
-        proc_free(g_torpor_proc);
+        test_proc_free_drained(g_torpor_proc);
         g_torpor_proc = NULL;
         return -1;
     }

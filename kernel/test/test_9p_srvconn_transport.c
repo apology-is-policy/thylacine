@@ -104,8 +104,7 @@ static struct Proc *make_test_proc(void) {
 
 static void drop_test_proc(struct Proc *p) {
     if (!p) return;
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 // Post a byte-mode service (create=post) + open one connection (open=connect)
@@ -1152,8 +1151,7 @@ static void mf_teardown(struct mf_rig *r) {
     }
     if (r->reader) return;   // wedged: leak rather than free under it
     if (g_mf_proc) {
-        g_mf_proc->state = PROC_STATE_ZOMBIE;
-        proc_free(g_mf_proc);
+        test_proc_free_drained(g_mf_proc);
         g_mf_proc = NULL;
     }
     if (!r->cn) return;

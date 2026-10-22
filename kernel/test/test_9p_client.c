@@ -2752,8 +2752,7 @@ static struct Proc *loom_test_ident(struct Loom *l, u32 principal, u32 gid,
 }
 static void loom_test_ident_drop(struct Proc *p) {
     if (!p) return;
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 // The gid a create T-message carries, or 0xDEADBEEF when the frame is short.
 // Layouts: Tmkdir dfid name mode gid; Tsymlink fid name symtgt gid; Tmknod dfid
@@ -3300,8 +3299,7 @@ void test_9p_client_loom_dirmut_sqpoll(void) {
 
     handle_put(&hh);
     burrow_unref(b);
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);                                    // last handle -> loom_free joins
+    test_proc_free_drained(p);                                    // last handle -> loom_free joins
     spoor_clunk(root);
     loom_ga_reset();
     p9_client_destroy(&g_client);
@@ -4935,8 +4933,7 @@ static void dy_post_child_exit(struct Proc *par) {
     proc_exit_notify_parent_locked(kid);
     proc_table_lock_release(s);
     kid->parent = NULL;
-    kid->state  = PROC_STATE_ZOMBIE;
-    proc_free(kid);
+    test_proc_free_drained(kid);
 }
 
 // Park the noted op behind the held reader, post the caught note, and report
@@ -6310,8 +6307,7 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
     }
     if (got) handle_put(&hh);
     if (p) {
-        p->state = PROC_STATE_ZOMBIE;
-        proc_free(p);                     // the last handle: loom_free joins the kthread
+        test_proc_free_drained(p);                     // the last handle: loom_free joins the kthread
     }
     if (sp) spoor_clunk(sp);
     dy_client_close();

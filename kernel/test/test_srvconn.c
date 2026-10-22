@@ -78,8 +78,7 @@ static bool check_pattern(const u8 *buf, long n, u8 seed) {
 
 static void drop_test_proc(struct Proc *p) {
     if (!p) return;
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 // ---------------------------------------------------------------------------

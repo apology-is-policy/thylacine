@@ -102,8 +102,7 @@ static struct Proc *jit_make_proc(bool with_cap) {
 
 static void jit_drop_proc(struct Proc *p) {
     if (!p) return;
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 static u64 jit_walk_l3(paddr_t pgtable_root, u64 vaddr) {

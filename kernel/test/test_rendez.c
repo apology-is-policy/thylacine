@@ -1224,7 +1224,7 @@ static struct Proc *cw_linux_proc(void) {
     struct Proc *p = proc_alloc();
     if (!p) return NULL;
     p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
-    if (!p->sigtab) { p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL; }
+    if (!p->sigtab) { test_proc_free_drained(p); return NULL; }
     p->state     = PROC_STATE_ALIVE;
     p->phenotype = PHENO_LINUX;
     return p;
@@ -1256,10 +1256,8 @@ void test_rendez_caught_wake_child_exit(void) {
     if (set) leg = cw_run_leg(par, cw_post_child_exit, kid);
 
     kid->parent = NULL;
-    kid->state  = PROC_STATE_ZOMBIE;
-    proc_free(kid);
-    par->state  = PROC_STATE_ZOMBIE;
-    proc_free(par);
+    test_proc_free_drained(kid);
+    test_proc_free_drained(par);
 
     TEST_ASSERT(ctl.parked && ctl.joined, "control: the sleeper parked and was released");
     TEST_ASSERT(!ctl.woke, "control: an UNCAUGHT child_exit leaves the sleeper asleep");
@@ -1314,7 +1312,7 @@ static struct rcn_leg rcn_run_leg(bool reader) {
     struct Proc *par = cw_linux_proc();
     struct Proc *kid = par ? proc_alloc() : NULL;
     if (!kid) {
-        if (par) { par->state = PROC_STATE_ZOMBIE; proc_free(par); }
+        if (par) { test_proc_free_drained(par); }
         return r;
     }
     kid->parent = par;
@@ -1352,10 +1350,9 @@ static struct rcn_leg rcn_run_leg(bool reader) {
         }
     }
     kid->parent = NULL;
-    kid->state  = PROC_STATE_ZOMBIE;
-    proc_free(kid);
+    test_proc_free_drained(kid);
     // Never free a Proc whose thread is still asleep (a wedged leg).
-    if (!t || r.joined) { par->state = PROC_STATE_ZOMBIE; proc_free(par); }
+    if (!t || r.joined) { test_proc_free_drained(par); }
     return r;
 }
 
@@ -1399,8 +1396,7 @@ void test_rendez_caught_wake_tty_susp(void) {
     u32 stopped = __atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE);
 
     proc_test_unlink(m);
-    m->state = PROC_STATE_ZOMBIE;
-    proc_free(m);
+    test_proc_free_drained(m);
 
     TEST_ASSERT(ign && set, "the SIGTSTP rows were written");
     TEST_ASSERT(ctl.parked && ctl.joined, "control: the sleeper parked and was released");
@@ -1427,8 +1423,7 @@ void test_rendez_caught_wake_tty_cont(void) {
     if (set) leg = cw_run_leg(m, cw_post_cont, m);
 
     proc_test_unlink(m);
-    m->state = PROC_STATE_ZOMBIE;
-    proc_free(m);
+    test_proc_free_drained(m);
 
     TEST_ASSERT(ctl.parked && ctl.joined, "control: the sleeper parked and was released");
     TEST_ASSERT(!ctl.woke, "control: an UNCAUGHT tty:cont leaves the sleeper asleep");
@@ -1477,14 +1472,11 @@ void test_rendez_caught_wake_orphan_hup_cont(void) {
     u32 still_leg = __atomic_load_n(&stopped->job_stop_req, __ATOMIC_ACQUIRE);
 
     proc_test_unlink(stopped);
-    stopped->state = PROC_STATE_ZOMBIE;
-    proc_free(stopped);
+    test_proc_free_drained(stopped);
     proc_test_unlink(m);
-    m->state = PROC_STATE_ZOMBIE;
-    proc_free(m);
+    test_proc_free_drained(m);
     proc_test_unlink(dying);
-    dying->state = PROC_STATE_ZOMBIE;
-    proc_free(dying);
+    test_proc_free_drained(dying);
 
     TEST_ASSERT(ign && set, "the SIGHUP/SIGCONT rows were written");
     TEST_ASSERT(ctl.parked && ctl.joined, "control: the sleeper parked and was released");
@@ -1540,7 +1532,7 @@ void test_rendez_caught_note_one_unwind(void) {
     par->sid  = 0x5F34u;   // a fabricated session: the cont fan reaches only par
     par->pgid = (u32)par->pid;
     struct Proc *kid = proc_alloc();
-    if (!kid) { par->state = PROC_STATE_ZOMBIE; proc_free(par); }
+    if (!kid) { test_proc_free_drained(par); }
     TEST_ASSERT(kid != NULL, "child alloc");
     proc_test_link(par);
     kid->parent = par;
@@ -1607,12 +1599,10 @@ void test_rendez_caught_note_one_unwind(void) {
         if (test_proc_holds_tid(par, tid[i])) joined = false;
     }
     kid->parent = NULL;
-    kid->state  = PROC_STATE_ZOMBIE;
-    proc_free(kid);
+    test_proc_free_drained(kid);
     TEST_ASSERT(!made || joined, "both sleepers returned and were joined");
     proc_test_unlink(par);
-    par->state = PROC_STATE_ZOMBIE;
-    proc_free(par);
+    test_proc_free_drained(par);
 
     TEST_ASSERT(set, "the SIGCHLD and SIGCONT handler rows were written");
     TEST_ASSERT(made, "both sleepers created");
@@ -1728,8 +1718,7 @@ void test_rendez_caught_note_tail_discards_and_releases(void) {
         }
     }
     TEST_ASSERT(joined, "the sleeper returned and was joined");
-    par->state = PROC_STATE_ZOMBIE;
-    proc_free(par);
+    test_proc_free_drained(par);
 
     TEST_ASSERT(set, "the SIGINT handler row was written");
     TEST_ASSERT(parked, "the sleeper parked in an interruptible wait");
@@ -1780,7 +1769,7 @@ static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *j
     struct Proc *m = leader ? proc_alloc() : NULL;
     *returned_early = false; *stopped = false; *joined = false;
     if (!leader || !m) {
-        if (leader) { leader->state = PROC_STATE_ZOMBIE; proc_free(leader); }
+        if (leader) { test_proc_free_drained(leader); }
         return false;
     }
     proc_test_link(leader);
@@ -1821,11 +1810,9 @@ static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *j
     // extinct the suite here, before the asserts could name the failure.
     if (t && !*joined) return parked;
     proc_test_unlink(m);
-    m->state = PROC_STATE_ZOMBIE;
-    proc_free(m);
+    test_proc_free_drained(m);
     proc_test_unlink(leader);
-    leader->state = PROC_STATE_ZOMBIE;
-    proc_free(leader);
+    test_proc_free_drained(leader);
     return parked;
 }
 
@@ -1952,8 +1939,7 @@ void test_rendez_caught_note_release_wakes_peer(void) {
         if (test_proc_holds_tid(par, tid[i])) joined = false;
     }
     TEST_ASSERT(!made || joined, "both sleepers returned and were joined");
-    par->state = PROC_STATE_ZOMBIE;
-    proc_free(par);
+    test_proc_free_drained(par);
 
     TEST_ASSERT(set, "the SIGINT handler row was written");
     TEST_ASSERT(made, "both sleepers created");
@@ -2110,8 +2096,7 @@ static bool nt_setup(bool linux_pheno, struct Thread *t[2]) {
     if (t[0] && !t[1]) { thread_free(t[0]); t[0] = NULL; }
     if (t[1]) { g_nt_tid[0] = t[0]->tid; g_nt_tid[1] = t[1]->tid; }
     if (!t[0]) {
-        g_nt_proc->state = PROC_STATE_ZOMBIE;
-        proc_free(g_nt_proc);
+        test_proc_free_drained(g_nt_proc);
         g_nt_proc = NULL;
         return false;
     }
@@ -2146,8 +2131,7 @@ static bool nt_teardown(struct Thread *t[2]) {
         if (test_proc_holds_tid(g_nt_proc, g_nt_tid[i])) ok = false;
     }
     if (!ok) return false;
-    g_nt_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_nt_proc);
+    test_proc_free_drained(g_nt_proc);
     g_nt_proc = NULL;
     return true;
 }
@@ -2530,8 +2514,7 @@ static struct test_caught_leg cwt_leg(bool linux_pheno, bool *kid_kept) {
     if (leg.stranded) return leg;
     if (g_cwt_kid) {
         if (!g_cwt_unlinked) proc_test_unlink(g_cwt_kid);
-        g_cwt_kid->state = PROC_STATE_ZOMBIE;
-        proc_free(g_cwt_kid);
+        test_proc_free_drained(g_cwt_kid);
     }
     test_caught_proc_free(g_cwt_par, &leg);
     return leg;
