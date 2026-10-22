@@ -43,7 +43,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -677,6 +677,12 @@ absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
 base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
 `read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
 `assert(isv)` (#890, the kernel-worked-userspace-tripped signature).
+
+2026-10-22: `Error::Unsupported` (95), "operation not supported". G12 made
+`SYS_WSTAT` answer `T_E_OPNOTSUPP` for a Dev with no metadata slot (every Dev
+but dev9p, so `/dev/null`) and for dev9p's fidless cached open, which reached
+native `chmod` and `touch` as `Other(95)`, "kernel error (errno 95)". The
+Operator's Manual (File Times) quotes the new text.
 
 2026-09-24: `Error::ConnectionRefused` (111). A refused dial used to surface as
 `Other(111)`, "kernel error (errno 111)". Added `Dialing` as above (haul's slow

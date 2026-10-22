@@ -105,23 +105,28 @@ The three ranges a return value can fall in, as the seam reads them:
 ## Where the registry is mirrored, and where it has drifted
 
 **`usr/lib/libthyla-rs/src/err.rs`** is the only value-by-value mirror. It
-enumerates **19** of the 35 non-zero values (`as_errno`): 1, 2, 5, 9, 11, 12,
-13, 14, 16, 17, 20, 21, 22, 32, 34, 38, 40, 110, 111. Missing — **16** — is
-dominated by the V-5 socket family: `SRCH` (3), `INTR` (4), `2BIG` (7),
+enumerates **22** of the 36 non-zero values (`as_errno`): 1, 2, 3, 5, 9, 11,
+12, 13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 38, 40, 95, 110, 111. Missing —
+**14** — is dominated by the V-5 socket family: `INTR` (4), `2BIG` (7),
 `CHILD` (10), `NODEV` (19), `MFILE` (24), `NOTTY` (25), `NOTSOCK` (88),
-`PROTONOSUPPORT` (93), `OPNOTSUPP` (95), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
+`PROTONOSUPPORT` (93), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
 `CONNABORTED` (103), `ISCONN` (106), `NOTCONN` (107), `CANCELED` (125).
 `CONNREFUSED` (111) joined on 2026-09-24 as `ConnectionRefused`, because haul
-now branches on it, per this page's own rule (last Prosecution bullet). The gap grew, not shrank, since this section last read
+now branches on it, per this page's own rule (last Prosecution bullet), and
+`OPNOTSUPP` (95) on 2026-10-22 as `Unsupported`, once `SYS_WSTAT` answered it
+to native `chmod` and `touch` (G12) and would otherwise have read "kernel error
+(errno 95)". `SRCH` (3, `NoSuchProcess`) and `NOSPC` (28, `NoSpace`) had
+joined earlier, unrecorded here until this count was re-derived from
+`errno.h` and `as_errno`. The gap grew, not shrank, since this section last read
 "missing four": the mirror gained `NotADirectory` (20), `IsADirectory` (21)
 and `SymlinkLoop` (40), but the whole socket family plus INTR/2BIG/CHILD/NOTTY
 appended past it.
 
 This does not lose information: `Other(i32)` carries any unenumerated errno
 through, deliberately, so unknown kernel errors stay observable. The cost is
-that a native program cannot name them. `setpgid` on a stranger's pid and a
-cancelled Loom chain op surface as `Error::Other(3)` / `Other(125)`, displaying
-as `kernel error (errno N)` and matchable only against a magic number.
+that a native program cannot name them. A cancelled Loom chain op surfaces as
+`Error::Other(125)`, displaying as `kernel error (errno 125)` and matchable only
+against a magic number.
 
 The asymmetry runs the other way once, too: `err.rs` names
 `DirectoryNotEmpty` → **39** (`ENOTEMPTY`), a server-originated value (#80)

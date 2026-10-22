@@ -173,6 +173,11 @@ pub enum Error {
     /// Maps `T_E_LOOP` = 40 (POSIX `ELOOP`).
     SymlinkLoop,
 
+    /// The object's service has no such operation: a metadata change on a
+    /// file whose service keeps no metadata (a kernel device such as `/dev/null`).
+    /// Maps `T_E_OPNOTSUPP` = 95 (POSIX `EOPNOTSUPP`).
+    Unsupported,
+
     /// Pass-through for errno values not enumerated above. The carried
     /// integer is the positive errno reported by the kernel (i.e.,
     /// `-rc` where `rc` was the syscall return). Lets unknown errors
@@ -223,6 +228,7 @@ impl Error {
             Error::NotImplemented   => 38,
             Error::DirectoryNotEmpty => 39,
             Error::SymlinkLoop      => 40,
+            Error::Unsupported      => 95,
             Error::TimedOut         => 110,
             Error::ConnectionRefused => 111,
             Error::Other(e)         => e,
@@ -308,6 +314,7 @@ impl From<i32> for Error {
             38  => Error::NotImplemented,
             39  => Error::DirectoryNotEmpty,
             40  => Error::SymlinkLoop,
+            95  => Error::Unsupported,
             110 => Error::TimedOut,
             111 => Error::ConnectionRefused,
             n   => Error::Other(n),
@@ -338,6 +345,7 @@ impl fmt::Display for Error {
             Error::NotImplemented   => "function not implemented",
             Error::DirectoryNotEmpty => "directory not empty",
             Error::SymlinkLoop      => "too many levels of symbolic links",
+            Error::Unsupported      => "operation not supported",
             Error::TimedOut         => "operation timed out",
             Error::ConnectionRefused => "connection refused",
             Error::Other(_)         => "kernel error",
