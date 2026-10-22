@@ -487,6 +487,13 @@ CPU, then frees them (`proc_exec_wait_peers_off_cpu`,
 `proc_reap_exited_threads`). The step stays infallible: the wait is bounded by
 a tail that neither sleeps nor is switched out at an interrupt return.
 
+**Amended at thread-model C1 (2026-10-22).** Exec frees no peer itself. Each
+peer is freed by the resume path of its own last switch-out (ARCH 7.3.2), so
+the commit waits until the caller is the only thread on the list
+(`proc_exec_wait_alone`, `thread_count == 1` under the Proc's thread lock) and
+re-checks that, with the live count, at the swap. The bound is the same: one
+switch and one free per remaining peer, each on its own CPU.
+
 #### As built at L-6a — the split, and what envp measured
 
 The phenotype cannot hand `SYS_EXECVE` a user VA: Linux passes a

@@ -1451,7 +1451,10 @@ the fallback is main, never the head.** `p->threads` is head-inserted, so the he
 is the *newest* thread, not the oldest, and its tid is not the pid (tids come from
 one kernel-wide counter). A thread that has exited stays at the head, EXITING,
 until a live peer reaps it (`proc_reap_exited_threads`) -- in a stopped target,
-for the whole stop, and `devproc_all_threads_parked` skips it. Taking the head
+for the whole stop, and `devproc_all_threads_parked` skips it. (Since
+thread-model C1, 2026-10-22, the resume path of its last switch-out frees it,
+so it stays at the head only while it finishes on its CPU; the rule below
+covers that window.) Taking the head
 made a manual stop of a Go target whose newest M had exited read `regs` /
 `fpregs` / `kregs` as -1, and made `step` arm the dying thread: the step never
 fired and the resume let the target run free. So `devproc_focus_thread` now

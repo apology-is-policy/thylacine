@@ -2418,3 +2418,36 @@ A chunk of the thread-model overhaul (`docs/thread-model-review.html`; Fable's E
   serializing on it; one Proc's threads still share its own thread lock.
 - **Votes.** Operator votes 5 (thread-directed notes, C4) and 6 (`/proc/<pid>/thread/<tid>/`, C7) answered during this
   chunk, both as recommended.
+
+## Thread-model C1: an exited thread is freed at its last switch-out — 2026-10-22
+
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`, C1). Spec-first by operator vote (2026-10-21,
+decision 1): C1a (`specs/thread_reap.tla`'s C1 actions, ARCH 7.3.2, I-48) as 1f7b2c03d before C1b (the code, on
+aux-3-c1). Replaces the 2026-10-20 interim fix above, in which an exited thread waited for its Proc's next create.
+
+- **The reaper.** `sched_resume_tail` is the one resume half (`sched()`'s tail, and `sched_finish_task_switch` for the
+  trampolines and `thread_switch`). It reads whether `prev` is an exited user thread while `on_cpu` still pins it,
+  clears `on_cpu`, releases the handed-off run-queue lock, then calls `thread_reap_dead` with IRQs still masked. One
+  `threads_lock` hold folds the run time and stack watermark, clears a debug focus naming the thread and unlinks it;
+  the unlock is the last touch of the Proc; then the stack and the slot are freed. Kernel threads keep their joiners.
+- **Nothing else frees a user thread.** `proc_reap_exited_threads` and its four callers (both spawn arms, the SQPOLL
+  charge, exec) are deleted, with exec's off-CPU wait. Exec waits until it is the only thread on the list and re-checks
+  that, with the live count, at the swap. `wait_pid` waits for the zombie's `thread_count` to read 0 under its lock and
+  frees only the Proc. `thread_free` extincts on an exited user thread. At most one exited thread per CPU is counted;
+  KERNEL_TESTS checks it at every commit.
+- **Pulled in.** The run counts behind `/ctl` and the quiescence asserts walked each CPU's run tree without its lock
+  (OPEN-BUGS 10-22 08:15Z, P2). Per-band `nr_queued[]` counts kept under the lock replace the walk; the runnable dump
+  copies at most 16 rows per CPU under the lock and prints after.
+- **Fixtures.** User-Proc test threads are now freed at their switch-out, so their joins wait on the tid or the last
+  thread (`test_thread_join_reaped` / `_last`) and park with `test_thread_park_terminal`; the kernel-thread park
+  extincts outside kproc, so a miss fails loudly. Two unlocked `p->threads` walks in test_thread_spawn are locked.
+- **Self-found before audit.** `/pouch-hello-threads` asserted the interim timing (four joined workers still counted).
+  Its legs are now held-counted (four held workers read 5, the positive control), exited-freed (joined, nothing created,
+  the count reads 1 within 5 s) and join-churn (1..ncpu after 300 create+join).
+- **Tests.** `proc.exited_threads_freed_at_switch`, `proc.exited_threads_bounded_by_cpus`,
+  `proc.sqpoll_charge_after_finished_workers` (was `reap_before_sqpoll_charge`), `scheduler.run_counts_match_trees`;
+  `proc.reap_keeps_thread_cap_open` and both exec-wait tests kept. The old `proc.reap_exited_threads_frees_peers` is
+  gone with its function.
+- **Audit.** *(pending: Fable r1 running)*
+- **Posture.** *(pending: the Mac lease -- ci suite, sabotage of each new test, SMP matrix, UBSan, the boot stack
+  watermark, 100,000 create+join with kstack pages flat, the storm row)*
