@@ -2802,17 +2802,20 @@ void test_dev9p_wstat_times_permission(void) {
                    -(s64)T_E_ACCES, "stranger with other-W: chmod denied");
     TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MTIME, 0, 0, 0, 0, NULL),
                    -(s64)T_E_ACCES, "stranger with other-W: now-mtime alone denied");
-    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no denial reached the wire");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull,
+                   "no other-W denial reached the wire");
     TEST_EXPECT_EQ(sys_wstat_for_proc(o, fo, now, 0, 0, 0, 0, NULL), 0L,
                    "stranger with other-W: now through O_PATH");
 
     g_ga_mode = 0100644u;                     // no W for the stranger
     larder_attr_invalidate(&g_client.larder, 0x33u);
+    g_setattr_valid = 0xdeadbeefu;            // the O_PATH touch above reached it
     TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, now, 0, 0, 0, 0, NULL),
                    -(s64)T_E_ACCES, "stranger without W: now denied");
     TEST_EXPECT_EQ(sys_wstat_for_proc(o, fo, T_WSTAT_MTIME, 0, 0, 0, 0, NULL),
                    -(s64)T_E_ACCES, "stranger without W: now-mtime through O_PATH denied");
-    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no denial reached the wire");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull,
+                   "no without-W denial reached the wire");
 
     g_ga_mode = 0100644u;
     o->state = PROC_STATE_ZOMBIE;
