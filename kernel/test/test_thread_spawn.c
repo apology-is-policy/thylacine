@@ -650,6 +650,9 @@ static void ret_frees_entry(void *arg) {
     u64 destroyed_before = thread_total_destroyed();
     __atomic_store_n(&g_ret_go, true, __ATOMIC_RELEASE);
     TEST_YIELD_UNTIL_PROC(!ret_holds_any(p, tid, RET_N_WORKERS));
+    // A reaper unlinks under the lock and counts the free after it, so a
+    // worker leaves the list a moment before it is counted.
+    TEST_YIELD_UNTIL_PROC(thread_total_destroyed() - destroyed_before >= (u64)RET_N_WORKERS);
     g_ret_destroyed = thread_total_destroyed() - destroyed_before;
 
     g_ret_cpu_after     = proc_cpu_ns(p);              // each takes p->threads_lock
@@ -744,6 +747,11 @@ static void reb_entry(void *arg) {
         sched();
     }
     g_reb_max_gap   = max_gap;
+    // Counted after the reaper's unlock (see ret_frees_entry).
+    deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (thread_total_destroyed() - destroyed_before < (u64)REB_N_WORKERS &&
+           timer_now_ns() < deadline)
+        sched();
     g_reb_destroyed = thread_total_destroyed() - destroyed_before;
     irq_state_t s = proc_threads_lock(p);
     g_reb_count_end = p->thread_count;
