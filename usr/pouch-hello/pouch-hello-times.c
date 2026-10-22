@@ -16,7 +16,11 @@
 //                a path that does not exist, and change nothing.
 //   now        : null times, and two UTIME_NOW, take the file server's clock:
 //                within a few seconds of the guest's.
-//   futimens   : the descriptor form, on a read-only descriptor too.
+//   futimens   : the descriptor form. Every descriptor leg opens for writing:
+//                a read-only open of a small file the kernel holds (this
+//                one, just written) is the fidless cached open, which takes
+//                no wstat (FID-LIFECYCLE-DESIGN 3.3; its EOPNOTSUPP is
+//                pinned by the dev9p kernel tests).
 //   utimes     : utimes, futimes, utime and lutimes reach the same call.
 //   empty-path : AT_EMPTY_PATH with "" names the descriptor, and with
 //                AT_FDCWD the working directory; a directory takes times.
@@ -120,8 +124,8 @@ static int leg_now(void) {
 }
 
 static int leg_futimens(void) {
-    int fd = open(FILE_A, O_RDONLY);
-    if (fd < 0) return fail("open read-only");
+    int fd = open(FILE_A, O_RDWR);
+    if (fd < 0) return fail("open for writing");
     struct timespec ts[2] = { { T_NEW, 0 }, { T_OLD, 0 } };
     int r = futimens(fd, ts);
     int e = errno;
@@ -129,7 +133,7 @@ static int leg_futimens(void) {
     int sr = fstat(fd, &st);
     close(fd);
     errno = e;
-    if (r != 0) return fail("futimens on a read-only descriptor");
+    if (r != 0) return fail("futimens");
     if (sr != 0 || st.st_atime != T_NEW || st.st_mtime != T_OLD) return fail("futimens times read back");
     return 0;
 }
@@ -138,7 +142,7 @@ static int leg_utimes(void) {
     struct timeval tv[2] = { { T_OLD, 0 }, { T_NEW, 0 } };
     if (utimes(FILE_A, tv) != 0) return fail("utimes");
     if (times_are(FILE_A, T_OLD, T_NEW) != 0) return fail("utimes times read back");
-    int fd = open(FILE_A, O_RDONLY);
+    int fd = open(FILE_A, O_RDWR);
     if (fd < 0) return fail("open");
     struct timeval tv2[2] = { { T_NEW, 0 }, { T_OLD, 0 } };
     int r = futimes(fd, tv2);
@@ -154,7 +158,7 @@ static int leg_utimes(void) {
 }
 
 static int leg_empty_path(void) {
-    int fd = open(FILE_A, O_RDONLY);
+    int fd = open(FILE_A, O_RDWR);
     if (fd < 0) return fail("open");
     struct timespec ts[2] = { { T_NEW, 0 }, { T_NEW, 0 } };
     int r = utimensat(fd, "", ts, AT_EMPTY_PATH);

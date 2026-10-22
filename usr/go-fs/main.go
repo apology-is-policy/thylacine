@@ -330,12 +330,15 @@ func chtimes() {
 	must(fmt.Sprintf("now is the clock (mtime %d, clock %d..%d)", st.Mtime, t0, t1),
 		int64(st.Mtime) >= t0-2 && int64(st.Mtime) <= t1+2 && int64(st.Atime) >= t0-2 && int64(st.Atime) <= t1+2)
 
-	// The descriptor form, on a read-only file.
-	g, err := os.Open(f)
-	okErr("os.Open(times.txt)", err)
+	// The descriptor form, opened for writing: a read-only open of a small file
+	// the kernel holds (this one, just written) is the fidless cached open, which
+	// takes no wstat (FID-LIFECYCLE-DESIGN 3.3; the dev9p kernel tests pin its
+	// EOPNOTSUPP).
+	g, err := os.OpenFile(f, os.O_WRONLY, 0)
+	okErr("os.OpenFile(times.txt, O_WRONLY)", err)
 	err = syscall.Futimes(int(g.Fd()), []syscall.Timeval{{Sec: tNew}, {Sec: tNew}})
 	g.Close()
-	okErr("syscall.Futimes on a read-only descriptor", err)
+	okErr("syscall.Futimes", err)
 	timesAre("Futimes read back", tNew, tNew)
 
 	// A directory takes times through its path.

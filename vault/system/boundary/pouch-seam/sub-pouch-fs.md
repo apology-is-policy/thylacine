@@ -82,13 +82,18 @@ On the guest, `/bin/pouch-hello-times` (`POUCH_CENSUS_TIMES`) runs after the
 links prover in its own directory at the pool root, as the owner: explicit
 times read back in seconds, `UTIME_OMIT` keeping one time, two `UTIME_OMIT`
 succeeding for a missing path, null times and two `UTIME_NOW` landing within
-two seconds of the guest's clock, `futimens` on a read-only descriptor,
-`utimes`, `futimes`, `utime` and `lutimes`, `AT_EMPTY_PATH` on a descriptor and
+two seconds of the guest's clock, `futimens` through a descriptor opened for
+writing, `utimes`, `futimes`, `utime` and `lutimes`, `AT_EMPTY_PATH` on a descriptor and
 on the working directory, `AT_SYMLINK_NOFOLLOW` on the fixture's dangling link
 (lstat reads its own times; following it is `ENOENT`), and the errnos of the
 refusals that do not need another identity. Each leg sets an old time first,
 so a call that did nothing fails. The authority refusals are the kernel tests'
-and the host test's ([[sub-kernel-perm]]).
+and the host test's ([[sub-kernel-perm]]). The descriptor legs open for writing
+because a read-only open of a small file the kernel holds (an empty one once
+looked up, or one just written, as the leg's own fixture is) is dev9p's fidless
+cached open, and a wstat through it answers `EOPNOTSUPP`: no fid carries the
+`Tsetattr` (FID-LIFECYCLE-DESIGN 3.3; [[sub-kernel-ninep-dev9p]]). With read-only
+descriptors the legs failed on the device's first run (lease 5).
 
 ## link and linkat answer EPERM (2026-10-21, 0062)
 
