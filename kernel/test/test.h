@@ -132,6 +132,10 @@ void test_thread_join_last(struct Proc *p, volatile bool *exited);
 // at all (every one freed), the precondition of a fixture's proc_free?
 bool test_proc_holds_tid(struct Proc *p, int tid);
 bool test_proc_threads_freed(struct Proc *p);
+// Free a fixture Proc only once it holds no thread. A join that timed out leaks
+// it, so the test reports its own FAIL instead of proc_free's extinction ending
+// the suite.
+void test_proc_free_drained(struct Proc *p);
 
 // A user-Proc fixture thread is freed at its last switch-out (ARCH 7.3.2), so
 // once readied it is read by tid under its Proc's threads_lock, never through

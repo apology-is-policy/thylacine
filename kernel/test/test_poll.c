@@ -1415,8 +1415,7 @@ static void pn_finish(int poller) {
         test_thread_join_last(g_pn_proc, &g_pn_exited);
     }
     if (g_pn_proc) {
-        g_pn_proc->state = PROC_STATE_ZOMBIE;
-        proc_free(g_pn_proc);
+        test_proc_free_drained(g_pn_proc);
         g_pn_proc = NULL;
     }
     busy_reset();

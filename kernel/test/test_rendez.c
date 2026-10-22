@@ -282,8 +282,7 @@ void test_rendez_death_interrupts_sleep(void) {
         "consumer cleared its backref on the death-interrupted resume");
 
     test_thread_join_last(g_death_proc, &g_death_exited);
-    g_death_proc->state = PROC_STATE_ZOMBIE;     // proc_free precondition
-    proc_free(g_death_proc);
+    test_proc_free_drained(g_death_proc);
     g_death_proc = NULL;
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after cleanup");
@@ -383,8 +382,7 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
         "consumer cleared its backref on the interrupted resume");
 
     test_thread_join_last(g_intr_proc, &g_intr_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
@@ -424,8 +422,7 @@ void test_rendez_intr_terminate_register_observe(void) {
         "the undone registration left the rendez empty");
 
     test_thread_join_last(g_intr_proc, &g_intr_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
 }
 
@@ -494,8 +491,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
         "death overrides the interrupt mask (SLEEP_INTR)");
 
     test_thread_join_last(g_intr_proc, &g_intr_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
 }
 
@@ -547,8 +543,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
         "consumer cleared its backref on the interrupted resume");
 
     test_thread_join_last(g_intr_proc, &g_intr_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
 }
 
@@ -585,8 +580,7 @@ static void intr_consumer_kill_reap(int tid) {
     intr_publish_death_and_wake(tid);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
     test_thread_join_last(g_intr_proc, &g_intr_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
 }
 
@@ -856,8 +850,7 @@ static void skip_stop_park_run(bool (*walk)(void), const char *armed_msg) {
     int rc_control = g_skip_sleep_rc;
     TEST_YIELD_UNTIL(__atomic_load_n(&g_intr_exited, __ATOMIC_ACQUIRE));
     test_thread_join_last(g_intr_proc, &g_skip_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
 
     TEST_ASSERT(slept, "premise: both threads slept");
@@ -918,8 +911,7 @@ static void exit_close_consumer_reap(int tid) {
     (void)wakeup(&g_intr_rendez);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
     test_thread_join_last(g_intr_proc, &g_intr_exited);
-    g_intr_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_intr_proc);
+    test_proc_free_drained(g_intr_proc);
     g_intr_proc = NULL;
 }
 
@@ -1085,8 +1077,7 @@ void test_rendez_reader_recv_unwinds_death(void) {
     bool no_waiter = g_rf_rendez.waiter == NULL;
     if (joinable) {
         test_thread_join_last(g_rf_proc, &g_rf_exited);
-        g_rf_proc->state = PROC_STATE_ZOMBIE;
-        proc_free(g_rf_proc);
+        test_proc_free_drained(g_rf_proc);
         g_rf_proc = NULL;
     }
 
@@ -1147,8 +1138,7 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
     bool joinable = g_rf_run_cnt >= 2u;
     if (joinable) {
         test_thread_join_last(g_rf_proc, &g_rf_exited);
-        g_rf_proc->state = PROC_STATE_ZOMBIE;
-        proc_free(g_rf_proc);
+        test_proc_free_drained(g_rf_proc);
         g_rf_proc = NULL;
     }
 

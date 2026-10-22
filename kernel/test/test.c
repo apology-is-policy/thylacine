@@ -235,12 +235,15 @@ struct Proc *test_caught_proc(bool linux_pheno) {
     return p;
 }
 
-// A leg whose join timed out leaves its thread on p's list: p is leaked, so the
-// leg's own FAIL is reported instead of proc_free's extinction ending the suite.
-void test_caught_proc_free(struct Proc *p, const struct test_caught_leg *leg) {
-    if (!p || (leg && leg->stranded) || !test_proc_threads_freed(p)) return;
+void test_proc_free_drained(struct Proc *p) {
+    if (!p || !test_proc_threads_freed(p)) return;
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+void test_caught_proc_free(struct Proc *p, const struct test_caught_leg *leg) {
+    if (!p || (leg && leg->stranded)) return;
+    test_proc_free_drained(p);
 }
 
 bool test_caught_post(struct Proc *p) {

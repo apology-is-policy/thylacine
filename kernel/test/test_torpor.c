@@ -229,8 +229,7 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
 static void torpor_consumer_teardown(struct Thread *consumer) {
     if (consumer) test_thread_join_last(g_torpor_proc, &g_torpor_exited);
     if (g_torpor_proc) {
-        g_torpor_proc->state = 2;            // ZOMBIE
-        proc_free(g_torpor_proc);
+        test_proc_free_drained(g_torpor_proc);
         g_torpor_proc = NULL;
     }
 }
@@ -495,8 +494,7 @@ void test_torpor_wake_two_waiters_count_bound(void) {
 
     TEST_YIELD_UNTIL(__atomic_load_n(&g_torpor_exited_a, __ATOMIC_ACQUIRE));
     test_thread_join_last(g_torpor_proc, &g_torpor_exited_b);
-    g_torpor_proc->state = 2;        // ZOMBIE
-    proc_free(g_torpor_proc);
+    test_proc_free_drained(g_torpor_proc);
     g_torpor_proc = NULL;
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after both consumers freed");
