@@ -411,11 +411,11 @@ void test_perm_wstat_rejects_unknown_valid_bit(void) {
                    "non-owner SIZE|MODE still denied by the mode policy");
 }
 
-// G12: the time axes (POSIX utimensat). An explicit time (a _SET bit) needs the
-// owner or CAP_HOSTOWNER -- write permission and CAP_DAC_OVERRIDE do not suffice;
-// "now" alone also admits write permission, by owner/group/other bits or the
-// DAC override (perm_check's own cap bypass). Each refusal sits one variable
-// from an allowed control.
+// G12: the time axes (POSIX utimensat). A time needs the owner or CAP_HOSTOWNER --
+// write permission and CAP_DAC_OVERRIDE do not suffice -- except the touch (both
+// times to "now"), which also admits write permission, by owner/group/other bits
+// or the DAC override (perm_check's own cap bypass). Each refusal sits one
+// variable from an allowed control.
 void test_perm_wstat_times(void) {
     struct Proc p;
     const u32 now      = T_WSTAT_ATIME | T_WSTAT_MTIME;
@@ -454,6 +454,20 @@ void test_perm_wstat_times(void) {
                    "stranger outside the W group: now denied");
     TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, T_WSTAT_ATIME, 0u), -1,
                    "no W: now-atime alone denied");
+    // One time alone, even "now", is not the touch: W no longer suffices.
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ow, T_WSTAT_ATIME, 0u), -1,
+                   "other-W stranger: now-atime alone denied");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ow, T_WSTAT_MTIME, 0u), -1,
+                   "other-W stranger: now-mtime alone denied");
+    mkproc(&p, 999u, 888u, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, T_WSTAT_MTIME, 0u), -1,
+                   "DAC override: now-mtime alone denied");
+    mkproc(&p, 100u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, T_WSTAT_ATIME, 0u), 0,
+                   "owner: now-atime alone");
+    mkproc(&p, 999u, 888u, CAP_HOSTOWNER);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, &ro, T_WSTAT_MTIME, 0u), 0,
+                   "CAP_HOSTOWNER: now-mtime alone");
     // A time riding with chmod: the mode policy still applies.
     mkproc(&p, 999u, 200u, CAP_NONE);
     TEST_EXPECT_EQ(perm_wstat_check(&p, &gw, now | T_WSTAT_MODE, 0u), -1,

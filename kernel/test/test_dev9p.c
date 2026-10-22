@@ -2769,8 +2769,9 @@ void test_dev9p_wstat_times_einval(void) {
 }
 
 // G12: who may set times, through the syscall path on the perm-enforced dev9p
-// (the file is 0x1234's). A stranger may set "now" when the mode grants other
-// W, and never an explicit time; without W, not even now. The O_PATH handle
+// (the file is 0x1234's). A stranger may touch (both times to "now") when the
+// mode grants other W, and never an explicit time or one time alone; without W,
+// not even the touch. The O_PATH handle
 // (chmod's route, so utimensat's) carries the times like any other. Refusals
 // answer EACCES and do not reach the wire.
 void test_dev9p_wstat_times_permission(void) {
@@ -2798,6 +2799,8 @@ void test_dev9p_wstat_times_permission(void) {
                    -(s64)T_E_ACCES, "stranger with other-W: explicit mtime denied");
     TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0666u, 0, 0, 0, NULL),
                    -(s64)T_E_ACCES, "stranger with other-W: chmod denied");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MTIME, 0, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "stranger with other-W: now-mtime alone denied");
     TEST_EXPECT_EQ((u64)g_setattr_valid, 0xdeadbeefull, "no denial reached the wire");
     TEST_EXPECT_EQ(sys_wstat_for_proc(o, fo, now, 0, 0, 0, 0, NULL), 0L,
                    "stranger with other-W: now through O_PATH");

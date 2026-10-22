@@ -115,12 +115,15 @@ int perm_wstat_check(const struct Proc *p, const struct t_stat *cur, u32 valid,
         !(owner && proc_in_group(p, new_gid)))           return -1;
     // Times (G12; POSIX utimensat): an explicit time only by the owner or chmod-any
     // authority -- it can forge a file's history, which a backup or a build would
-    // trust. "Now" is what any write would do anyway, so write permission also
-    // suffices (perm_check carries the CAP_HOSTOWNER DAC-override itself).
-    if (valid & (T_WSTAT_ATIME_SET | T_WSTAT_MTIME_SET)) {
-        if (!owner && !fowner)                           return -1;
-    } else if (valid & (T_WSTAT_ATIME | T_WSTAT_MTIME)) {
+    // trust. Both times to "now" is what a write and a read would do anyway, so
+    // write permission also suffices for exactly that request (POSIX's null-times
+    // touch; perm_check carries the CAP_HOSTOWNER DAC-override itself). One time
+    // alone is the owner's even at "now", as POSIX and Linux's ATTR_TIMES_SET have it.
+    u32 times = valid & (u32)T_WSTAT_TIMES;
+    if (times == (T_WSTAT_ATIME | T_WSTAT_MTIME)) {
         if (!owner && !fowner && perm_check(p, cur, PERM_W) != 0) return -1;
+    } else if (times) {
+        if (!owner && !fowner)                           return -1;
     }
     // T_WSTAT_SIZE (Go Stage 5) deliberately has NO policy arm here: a
     // truncate is a CONTENT mutation whose write authority is the fd's

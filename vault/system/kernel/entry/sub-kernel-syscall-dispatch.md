@@ -814,8 +814,8 @@ and truncate is byte I/O.
 **The metadata policy check is placed here; the policy itself is not.**
 `perm_wstat_check` runs for `{MODE, UID, GID}` and the time bits, only on a
 `perm_enforced` Dev, reading the file's *current* stat first — the who-may
-adjudication is [[sub-kernel-perm]]'s table (owner or CAP for an explicit time,
-also write permission for "now"). A size-only call skips it (its identity check
+adjudication is [[sub-kernel-perm]]'s table (owner or CAP for a time, also
+write permission for the touch, both times to "now"). A size-only call skips it (its identity check
 was the open-time `perm_check`). Since #47 this is the *sole* write-authority gate
 on the mode/uid/gid/times path: load-bearing, not additive to a handle right. The
 times, like chmod, work through an `O_PATH` handle, which is how a path-form

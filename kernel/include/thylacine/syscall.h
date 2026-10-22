@@ -1379,8 +1379,9 @@ enum {
     //                or tv_nsec outside [0, 999999999] -> EINVAL; an unreadable
     //                pointer -> EFAULT. T_WSTAT_ATIME / T_WSTAT_MTIME alone set
     //                that time to the file server's clock and read nothing.)
-    //   Times follow POSIX utimensat(2): an explicit time (a _SET bit) needs the
-    //   owner or CAP_HOSTOWNER; "now" alone also admits a caller with write
+    //   Times follow POSIX utimensat(2): a time needs the owner or
+    //   CAP_HOSTOWNER, except that both times to "now" (ATIME | MTIME with no
+    //   _SET bit, POSIX's null-times touch) also admit a caller with write
     //   permission on the file (perm_check W). Like chmod they work through an
     //   O_PATH handle. ctime is the server's: every change stamps it.
     //   Returns 0, or a -errno per refusal:
@@ -1389,12 +1390,12 @@ enum {
     //                 without RIGHT_WRITE or on an O_PATH handle;
     //     EFAULT      x6 unreadable while a _SET bit is set;
     //     EACCES      perm_wstat_check denial (perm-enforced Dev; caller neither
-    //                 owner nor CAP-holder, or for "now" without write
+    //                 owner nor CAP-holder, or for the touch without write
     //                 permission); a caped session refusing chown/chgrp. Never
     //                 EPERM: -EPERM is -1, which the pouch boundary-line reads
     //                 as EIO (<thylacine/errno.h>). The POSIX front ends answer
     //                 EPERM where ownership is the only possible refusal (mode,
-    //                 uid, gid, an explicit time);
+    //                 uid, gid, any time but the touch);
     //     EOPNOTSUPP  the Dev has no .wstat_native slot, or the fd is a
     //                 fidless cached open (dev9p);
     //     the server's errno (crossing by value, -1 folded to EACCES like every

@@ -441,7 +441,7 @@ errno almost always already exists at the failure source — it is only
 | `SYS_WALK_CREATE` | not a directory | `-T_E_NOTDIR` (20) |
 | `SYS_UNLINK` (rmdir) | directory not empty | `-T_E_NOTEMPTY` (39) |
 | `SYS_FSTAT` / `SYS_*` | bad / wrong-kind handle | `-T_E_BADF` (9) |
-| `SYS_WSTAT` | not the owner (chmod, chown, an explicit time), or no write permission ("now") | `-T_E_ACCES` (13); the POSIX front ends answer `EPERM` for the owner-only kinds |
+| `SYS_WSTAT` | not the owner (chmod, chown, a time), or no write permission (the touch: both times to "now") | `-T_E_ACCES` (13); the POSIX front ends answer `EPERM` for the owner-only kinds |
 | `SYS_WSTAT` | the Dev has no metadata slot, or the fd is dev9p's fidless cached open | `-T_E_OPNOTSUPP` (95) |
 | `SYS_CLOSE` | the close's write-behind flush failed, now or earlier on that open file (dev9p's sticky latch) | `-T_E_IO` (5), the handle closed regardless (POSIX; ARCH 21.11, operator vote 2026-10-07) |
 | any handler | structurally bad argument | `-T_E_INVAL` (22) |
@@ -486,8 +486,9 @@ trigger surfaces; self + Fable audit before the arc closes):
   stat's errno by value (`EBADF` reading `-T_E_IO`, as for `SYS_FSTAT`).
   A denial is `EACCES`, never `EPERM`: `-EPERM` is the `-1` alias. The POSIX
   front ends answer `EPERM` where ownership is the only possible refusal
-  (chmod, chown, an explicit time), as POSIX asks, and leave `EACCES` where
-  write permission would also have done ("now"). `SYS_READDIR` and
+  (chmod, chown, any time but the touch), as POSIX asks, and leave `EACCES`
+  where write permission would also have done (the touch, both times to
+  "now"). `SYS_READDIR` and
   `SYS_CHDIR` still answer a bare `-1` at most refusals (OPEN-BUGS
   2026-10-20 08:24Z): `SYS_CHDIR`'s over-long path wants `ENAMETOOLONG`,
   which this registry does not name.

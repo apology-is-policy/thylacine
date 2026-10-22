@@ -69,7 +69,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-pagemap]] | kernel/pagemap.c, kernel/include/thylacine/pagemap.h, kernel/test/test_capacity.c | inv-i32, inv-i7, inv-i44 | What a reviewer attacks here (the audit-trigger row's addenda; the holotype |
 | [[sub-kernel-path]] | kernel/path.c, kernel/include/thylacine/path.h | inv-i33 | - The refcount balances on EVERY create/destroy/replace path (the #66a |
 | [[sub-kernel-pci-irq]] | kernel/pci_irq.c, kernel/include/thylacine/pci_irq.h, kernel/test/test_pci_irq.c | inv-i5, inv-i9, inv-i15, inv-i34 | Guest shared-ticket test passes: two asserting functions, stalled peer isolation, |
-| [[sub-kernel-perm]] | kernel/perm.c, kernel/include/thylacine/perm.h |  | - No `principal_id` may ever be special-cased here. Adding a |
+| [[sub-kernel-perm]] | kernel/perm.c, kernel/include/thylacine/perm.h, kernel/test/test_perm.c |  | - No `principal_id` may ever be special-cased here. Adding a |
 | [[sub-kernel-pipe]] | kernel/pipe.c, kernel/include/thylacine/pipe.h | inv-i9 | - Every mutation that can enable a waiter must keep its wake — the |
 | [[sub-kernel-poll]] | kernel/poll.c, kernel/include/thylacine/poll.h | inv-i9 | - The sweep's three phases must keep their order: unregister → |
 | [[sub-kernel-proc]] | kernel/proc.c, kernel/include/thylacine/proc.h | inv-i1, inv-i32, inv-i33, inv-i44 | - The `rfork` ledger: every field is inherited, freshened or stripped |

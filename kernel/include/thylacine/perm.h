@@ -57,8 +57,8 @@ rights_t rights_for_omode(u32 omode);
 //   MODE -> file owner OR CAP_HOSTOWNER
 //   UID  -> CAP_HOSTOWNER or CAP_CHOWN only (no give-away)
 //   GID  -> (owner AND member of new_gid) OR CAP_HOSTOWNER or CAP_CHOWN
-//   ATIME_SET / MTIME_SET (an explicit time) -> file owner OR CAP_HOSTOWNER
-//   ATIME / MTIME alone ("now") -> also perm_check(p, cur, PERM_W)
+//   any time other than the touch below -> file owner OR CAP_HOSTOWNER
+//   ATIME | MTIME without a _SET bit (both "now") -> also perm_check(p, cur, PERM_W)
 //   SIZE -> no policy here (the fd's RIGHT_WRITE, at the syscall layer)
 int perm_wstat_check(const struct Proc *p, const struct t_stat *cur, u32 valid,
                      u32 new_gid);

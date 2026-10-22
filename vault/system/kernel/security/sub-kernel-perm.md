@@ -6,6 +6,7 @@ title: "The identity axis — owner-first rwx and the wstat policy"
 code:
   - kernel/perm.c
   - kernel/include/thylacine/perm.h
+  - kernel/test/test_perm.c
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -136,8 +137,8 @@ exception live in `sys_walk_open_handler` ([[sub-kernel-syscall-dispatch]]).
 | chmod (`MODE`) | the owner, or `CAP_HOSTOWNER` |
 | chown (`UID`) | **only** `CAP_HOSTOWNER` or `CAP_CHOWN` |
 | chgrp (`GID`) | chown-any authority, or the owner *to a group they belong to* |
-| an explicit time (`ATIME_SET` / `MTIME_SET`) | the owner, or `CAP_HOSTOWNER` |
-| "now" (`ATIME` / `MTIME` alone) | the owner, `CAP_HOSTOWNER`, or anyone `perm_check` grants W |
+| a time (an explicit one, or one time alone) | the owner, or `CAP_HOSTOWNER` |
+| the touch (`ATIME` and `MTIME`, both "now", no `_SET` bit) | the owner, `CAP_HOSTOWNER`, or anyone `perm_check` grants W |
 
 chown is **no-give-away**: an owner may not hand a file to another
 principal. That is the Plan 9 fileserver-owner rule and Linux's `CAP_CHOWN`,
@@ -150,11 +151,13 @@ set (`DAC_OVERRIDE`, `CHOWN`, `KILL`) contains nothing that grants chmod.
 The time rows are POSIX utimensat's (G12, 2026-10-22). An explicit time can
 rewrite a file's history, which a backup, a build or a font cache trusts, so
 it takes the owner or chmod-any authority, as chmod does; write permission
-and `CAP_DAC_OVERRIDE` do not suffice (Linux asks `CAP_FOWNER`). "Now" only
-does what any write would do, so write permission also admits it, and
-`perm_check` brings its own DAC override (`CAP_HOSTOWNER` or
-`CAP_DAC_OVERRIDE`) with it, as Linux's `inode_permission` does. An explicit
-time anywhere in the mask makes the whole request explicit. Witness:
+and `CAP_DAC_OVERRIDE` do not suffice (Linux asks `CAP_FOWNER`). The touch,
+both times to "now", only does what a write and a read would do, so write
+permission also admits it, and `perm_check` brings its own DAC override
+(`CAP_HOSTOWNER` or `CAP_DAC_OVERRIDE`) with it, as Linux's
+`inode_permission` does. Only that exact request is the touch: one time
+alone, even at "now", or an explicit time anywhere in the mask, is the
+owner's, as POSIX has it and Linux's `ATTR_TIMES_SET` does. Witness:
 `perm.wstat_times`, each refusal one variable from an allowed control.
 
 **`T_WSTAT_SIZE` has deliberately no policy arm here.** A truncate is a
@@ -167,7 +170,7 @@ while metadata policy still applies to any bits combined with it.
 
 None owned. Reads `Proc.principal_id`, `primary_gid`, `supp_gids[]`,
 `supp_gid_count`, `caps`; and the `t_stat` uid/gid/mode filled by the Dev's
-`stat_native` (`perm_wstat_check` reads `cur->uid`, and for "now" the whole
+`stat_native` (`perm_wstat_check` reads `cur->uid`, and for the touch the whole
 stat through `perm_check`). Loom's create-gid rule asks the chgrp question of
 a stat whose only set field is the creator as owner.
 
