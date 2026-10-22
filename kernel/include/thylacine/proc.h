@@ -635,9 +635,8 @@ struct Proc {
     // pointer is still a live thread of `target` (else main). NO UAF -- and the
     // load-bearing reason is the threads_lock PIN, not a stop gate (#95-audit
     // F1): every unlink from p->threads holds p->threads_lock and comes before the free --
-    // wait_pid_for's thread_free loop, run after proc_unlink_child put the target
-    // out of proc_for_each's reach, and the in-Proc reap, which clears a focus
-    // naming the thread it frees in the same hold -- so a pointer that matches an
+    // thread_reap_dead, which clears a focus naming the thread it frees in the
+    // same hold, and the joiner and creator frees -- so a pointer that matches an
     // in-list thread under the lock is a live struct, and the in-list validation
     // rejects any stale/foreign one. The fully-stopped gate is an ADDITIONAL
     // property of the mem / regs / kregs / step readers but NOT of the 8b settled
@@ -981,12 +980,12 @@ struct Proc {
     // the deliberate u32 tail pad, so sizeof is unchanged.
     u32                debug_birth_hold;
 
-    // What the threads proc_reap_exited_threads has freed leave behind, so the
-    // Proc's on-CPU time (proc_cpu_ns) and its kernel-stack watermark
+    // What the threads thread_reap_dead has freed leave behind, so the Proc's
+    // on-CPU time (proc_cpu_ns) and its kernel-stack watermark
     // (proc_kstack_peak, ARCH 8.12: the deepest any of its threads EVER
-    // reached) do not shrink when an exited peer is freed while the Proc lives.
-    // Written by the reap under g_proc_table_lock, read by those two under it.
-    // KP_ZERO-fresh; never rfork-inherited.
+    // reached) do not shrink when an exited thread is freed while the Proc
+    // lives. Written by the reap under p->threads_lock, read by those two under
+    // it. KP_ZERO-fresh; never rfork-inherited.
     u64                reaped_run_ns;
     u32                reaped_kstack_peak;
     int                reaped_kstack_tid;
@@ -1622,7 +1621,8 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 //   fid-lift audit F1), read under p->threads_lock. Not the gate: a peer can
 //   spawn between it and the admit, which re-checks (proc_thread_admit).
 //   thread_count counts every Thread on the list, an exited one included until
-//   it is freed, so both spawn paths call proc_reap_exited_threads first.
+//   the resume path of its last switch-out frees it (ARCH 7.3.2), at most one
+//   per CPU.
 bool proc_thread_cap_ok(struct Proc *p);
 
 // proc_thread_admit -- the thread-spawn GATE (ARCH 7.3.1). Links `nt` (built
@@ -1635,25 +1635,10 @@ bool proc_thread_cap_ok(struct Proc *p);
 //   thread of p, holding no threads_lock.
 bool proc_thread_admit(struct Proc *p, struct Thread *nt);
 
-// proc_reap_exited_threads -- free every Thread of the caller's Proc that has
-//   exited (THREAD_EXITING) and fully left its CPU (on_cpu clear), folding its
-//   run_ns and kstack watermark into the Proc and clearing a debug focus that
-//   names it. Without it an exited peer stays on p->threads, pinning its kstack
-//   and counted by the thread cap, until wait_pid reaps the whole Proc. One
-//   p->threads_lock hold per dead peer, so the IRQ-off time stays one kstack
-//   scan however many peers exited together.
-//   Caller: a RUNNING thread of that Proc, holding no lock -- being RUNNING pins
-//   the Proc ALIVE (it cannot become a ZOMBIE that wait_pid frees under us), and
-//   thread_free_unlinked takes the allocator locks. An exited peer still on a
-//   CPU is skipped; a later call frees it. kproc's threads are never reaped here.
-void proc_reap_exited_threads(void);
-
 // proc_sqpoll_charge / _uncharge -- the SQPOLL-kthread half of the shared
 //   thread budget (fid-lift audit F1). Charge is check-AND-increment under one
 //   p->threads_lock hold (a Loom setup has no other serialization point);
-//   false = at the cap, the setup must refuse. The setup frees the Proc's
-//   exited peers first (proc_reap_exited_threads), as the spawn paths do, since
-//   thread_count counts them until then. Counts even for exempt Procs
+//   false = at the cap, the setup must refuse. Counts even for exempt Procs
 //   (they skip only the cap), so the uncharge -- loom_free's join path, keyed
 //   on Loom.sqpoll_charged -- is unconditional.
 bool proc_sqpoll_charge(struct Proc *p);
@@ -2334,7 +2319,7 @@ struct Thread *proc_main_thread_locked(struct Proc *p);
 // packed status encoding below (a plain wait keeps the raw exit status --
 // full compatibility for every pre-PTY caller); a stop/continue REPORT
 // returns the child's pid + packed status WITHOUT reaping (round-2 R2-F6:
-// only an exit runs the unlink/thread_free/proc_free teardown) and
+// only an exit runs the unlink/proc_free teardown) and
 // consumes the per-child latch exactly once. Job stops only -- a DEBUGGER
 // stop (I-39) is never waitpid-visible; the debug surface has its own
 // /proc wait file.
@@ -2418,10 +2403,9 @@ struct Thread *proc_main_thread_locked(struct Proc *p);
 // WNOHANG with `poll()` on the shell's notes fd, not a hot loop.
 //
 // Picks the first matching zombie in the children list, unlinks it,
-// copies exit_status, and runs the standard thread_free + proc_free
-// teardown. The teardown + lock discipline are byte-for-byte identical to
-// the legacy wait_pid; only the selection (pid filter) and the blocking
-// decision (WNOHANG) differ.
+// copies exit_status, waits for its last thread to be freed (ARCH 7.3.2)
+// and frees the Proc. Only the selection (pid filter) and the blocking
+// decision (WNOHANG) differ from a plain wait.
 int wait_pid_for(int want_pid, int flags, int *status_out);
 
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. The

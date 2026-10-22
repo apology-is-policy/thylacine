@@ -1420,51 +1420,6 @@ u32 proc_kstack_peak(struct Proc *p, int *tid_out, u32 *budget_words) {
     return peak;
 }
 
-// An exited peer is dead for good once on_cpu clears: sched() never re-inserts
-// a THREAD_EXITING prev, ready_on refuses any non-RUNNABLE thread, and an
-// exiting tail never sleeps -- so no CPU will run it or switch out of it again.
-// That is the predicate wait_pid's zombie loop frees on, applied one thread at a
-// time while the Proc lives. Each pass finds a dead peer and unlinks it in one
-// p->threads_lock hold: the unlink is the claim (a concurrent reaper of the
-// same Proc no longer finds it), and every walker that can reach a Thread holds
-// that lock, so none is mid-walk over it when it is freed. The kstack scan runs
-// under the lock on purpose -- folding after the unlink would let /ctl/kstack
-// see the thread in neither place -- and one hold per peer keeps the IRQ-off
-// time to one stack.
-void proc_reap_exited_threads(void) {
-    struct Thread *self = current_thread();
-    struct Proc   *p    = self ? self->proc : NULL;
-    if (!p || p == g_kproc) return;
-    for (;;) {
-        irq_state_t s = proc_threads_lock(p);
-        struct Thread *dead = NULL;
-        for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
-            if (t != self && t->state == THREAD_EXITING &&
-                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-                dead = t;
-                break;
-            }
-        }
-        if (!dead) {
-            proc_threads_unlock(p, s);
-            return;
-        }
-        p->reaped_run_ns += __atomic_load_n(&dead->run_ns, __ATOMIC_RELAXED);
-        u32 used = thread_kstack_used(dead, NULL);
-        if (used > p->reaped_kstack_peak) {
-            p->reaped_kstack_peak = used;
-            p->reaped_kstack_tid  = dead->tid;
-        }
-        // The debug focus is validated by pointer against p->threads; a freed
-        // slot recycled into a new Thread of p would match it.
-        if (__atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == dead)
-            __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
-        thread_unlink_from_proc_locked(dead);
-        proc_threads_unlock(p, s);
-        thread_free_unlinked(dead);
-    }
-}
-
 // The whole-system peak: the deepest kernel stack ANY live thread has ever
 // reached, with the owning pid/tid. Walks the proc table under its lock, which
 // is also the lifetime pin the per-thread scan needs.
@@ -5113,10 +5068,10 @@ void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 p
 }
 
 #ifdef KERNEL_TESTS
-static u64 g_exec_peer_oncpu_waits;
-u64 proc_exec_peer_oncpu_waits_for_test(void);
-u64 proc_exec_peer_oncpu_waits_for_test(void) {
-    return __atomic_load_n(&g_exec_peer_oncpu_waits, __ATOMIC_ACQUIRE);
+static u64 g_exec_peer_waits;
+u64 proc_exec_peer_waits_for_test(void);
+u64 proc_exec_peer_waits_for_test(void) {
+    return __atomic_load_n(&g_exec_peer_waits, __ATOMIC_ACQUIRE);
 }
 #endif
 
@@ -5125,28 +5080,20 @@ u64 proc_exec_peer_oncpu_waits_for_test(void) {
 // switch-out. Its tail stores the clear-child-tid word through this Proc's
 // translation (thread_clear_child_tid_handoff): into a page addrspace_destroy
 // frees, by a stale TLB entry, or, by a fault that demand-pages through p->as,
-// into the NEW image once it is installed. So the swap waits for every peer's
-// last switch-out. The wait re-resolves the peers under p->threads_lock each
-// round and keeps no Thread * across the unlock (ARCH 7.3.1: a pointer read
-// from p->threads is valid only under the lock), so it does not depend on who
-// may free a peer meanwhile. It ends because a tail runs straight to its own
-// sched(): sleep extincts on a thread that is not RUNNING
-// (seam-exiting-tails-never-sleep), and preempt_check_irq does not switch one
-// out.
-static void proc_exec_wait_peers_off_cpu(struct Proc *p, struct Thread *self) {
+// into the NEW image once it is installed. So the swap waits until the caller
+// is the only thread on the list (F-1, ARCH 7.3.2): a peer leaves the list only
+// when the resume path of its last switch-out frees it, so none is on a CPU.
+// The wait ends because a tail runs straight to its own sched(): sleep extincts
+// on a thread that is not RUNNING (seam-exiting-tails-never-sleep), and
+// preempt_check_irq does not switch one out.
+static void proc_exec_wait_alone(struct Proc *p) {
     for (;;) {
-        bool busy = false;
         irq_state_t s = proc_threads_lock(p);
-        for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
-            if (t != self && __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-                busy = true;
-                break;
-            }
-        }
+        int n = __atomic_load_n(&p->thread_count, __ATOMIC_RELAXED);
         proc_threads_unlock(p, s);
-        if (!busy) return;
+        if (n == 1) return;
 #ifdef KERNEL_TESTS
-        __atomic_fetch_add(&g_exec_peer_oncpu_waits, 1u, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&g_exec_peer_waits, 1u, __ATOMIC_RELEASE);
 #endif
         __asm__ __volatile__("yield" ::: "memory");
     }
@@ -5160,11 +5107,10 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         extinction("proc_exec_replace: not the execing thread");
 
     // Every peer is EXITING (admission counted no live one, and only a live
-    // thread creates one). Wait until each is off its CPU, then free them: the
-    // new image starts as this thread alone, with its whole thread budget, as
-    // Linux's de_thread leaves it.
-    proc_exec_wait_peers_off_cpu(p, self);
-    proc_reap_exited_threads();
+    // thread creates one). Wait until each is freed: the new image starts as
+    // this thread alone, with its whole thread budget, as Linux's de_thread
+    // leaves it.
+    proc_exec_wait_alone(p);
 
     struct AddrSpace *old;
     {
@@ -5176,11 +5122,12 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         // proving that from the code, at the moment it matters, is cheaper than
         // asking a future reader to reconstruct it.
         irq_state_t ts = proc_threads_lock(p);
-        bool alone = (p->live_threads == 1);
+        bool alone = p->live_threads == 1 &&
+                     __atomic_load_n(&p->thread_count, __ATOMIC_RELAXED) == 1;
         proc_threads_unlock(p, ts);
         if (!alone) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);
-            extinction("proc_exec_replace: a live peer thread appeared");
+            extinction("proc_exec_replace: a peer thread appeared");
         }
         old   = p->as;
         addrspace_record_holder(old, p);
@@ -6686,20 +6633,15 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
                        : zombie->term_sig ? WAIT_STATUS_SIGNALED(zombie->term_sig)
                        :                    WAIT_STATUS_EXITED(zombie->exit_status);
 
-            // P6-pouch-threads (sub-chunk 9): multi-thread Procs are
-            // allowed. Every Thread in zombie->threads must be EXITING
-            // (the program-exit gate enforces this — see exits() /
-            // thread_exit_self()). Sanity-check ALL threads under the
-            // zombie's threads_lock, nested in this hold: the last commit
-            // and the ZOMBIE publish share one g_proc_table_lock hold, so
-            // the observation is consistent (thread_reap.tla
-            // ZombieImpliesAllExiting).
+            // Every Thread still on zombie->threads must be EXITING (the
+            // program-exit gate enforces this -- see exits() /
+            // thread_exit_self()); the list may already be empty, each thread
+            // freed by the resume path of its last switch-out (ARCH 7.3.2).
+            // Checked under the zombie's threads_lock, nested in this hold:
+            // the last commit and the ZOMBIE publish share one
+            // g_proc_table_lock hold, so the observation is consistent
+            // (thread_reap.tla ZombieImpliesAllExiting).
             irq_state_t zs = proc_threads_lock(zombie);
-            if (!zombie->threads) {
-                proc_threads_unlock(zombie, zs);
-                spin_unlock_irqrestore(&g_proc_table_lock, s);
-                extinction("wait_pid: zombie with no threads");
-            }
             for (struct Thread *ct = zombie->threads; ct; ct = ct->next_in_proc) {
                 if (ct->state != THREAD_EXITING) {
                     proc_threads_unlock(zombie, zs);
@@ -6718,49 +6660,18 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
 
             spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-            // Outside the lock: spin on on_cpu, then free EVERY Thread in
-            // p->threads + proc_free. We released the lock to avoid
-            // holding it across thread_free's multi-CPU run-tree walk
-            // (which acquires every CPU's cs->lock). Lock order would
-            // be: g_proc_table_lock → cs->lock. No reverse exists
-            // (sched/ready/wakeup never touch lineage state), so holding
-            // both would be safe — but releasing first reduces lock-hold
-            // time.
-            //
-            // P2-Dd-pre on_cpu spin: each EXITING thread had its state
-            // set under proc_table_lock + then yielded via sched(); the
-            // destination CPU's resume code clears on_cpu via
-            // cs->prev_to_clear_on_cpu. Without this spin, thread_free
-            // could race with a destination CPU still mid-switch
-            // (TPIDR_EL1 briefly points at ct). Mirrors the on_cpu
-            // spin in wakeup() (P2-Cf).
-            //
-            // The walk holds no threads_lock, the one exception to ARCH
-            // 7.3.1's rule: the zombie is off the tree (proc_unlink_child,
-            // above, under g_proc_table_lock), so no lookup can reach it, and
-            // it has no live thread to reap a peer, so nothing else mutates
-            // its list. Each thread_free unlinks under the lock regardless.
-            //
-            // Walk-with-next discipline: thread_free unlinks ct from
-            // zombie->threads + decrements thread_count, so capture
-            // next BEFORE the free. The list is doubly-linked so an
-            // unlinked node's `next_in_proc` stays valid for the
-            // capture-then-free idiom (the unlink resets it to NULL
-            // AFTER we've read it). Loop terminates when zombie->threads
-            // becomes NULL — every thread freed, thread_count reaches 0.
-            struct Thread *ct = zombie->threads;
-            while (ct) {
-                while (__atomic_load_n(&ct->on_cpu, __ATOMIC_ACQUIRE)) {
-                    __asm__ __volatile__("yield" ::: "memory");
-                }
-                struct Thread *next = ct->next_in_proc;
-                thread_free(ct);
-                ct = next;
+            // wait_pid frees only the Proc, once its last thread is freed. A
+            // zero read under the lock means the last reaper has dropped it,
+            // its last touch of the Proc (thread_reap.tla ProcFreedLast). The
+            // wait is bounded by one switch and one free per remaining thread,
+            // each on its own CPU.
+            for (;;) {
+                zs = proc_threads_lock(zombie);
+                int left = __atomic_load_n(&zombie->thread_count, __ATOMIC_RELAXED);
+                proc_threads_unlock(zombie, zs);
+                if (left == 0) break;
+                __asm__ __volatile__("yield" ::: "memory");
             }
-
-            // thread_free walks unlinked every Thread; thread_count == 0
-            // and threads == NULL by here — proc_free's preconditions
-            // are met.
             proc_free(zombie);
 
             if (status_out) *status_out = status;

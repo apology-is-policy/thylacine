@@ -211,8 +211,8 @@ static void death_consumer_entry(void) {
     g_death_sleep_rc = sleep(&g_death_rendez, death_cond_false, NULL);
     g_death_run_cnt++;                           // → 2: post-INTR run
     // #109: terminal EXITING park (was a RUNNABLE for(;;)sched()); the joiner
-    // reaps via test_kthread_join_free.
-    test_kthread_park_terminal(&g_death_exited);
+    // reaps via test_thread_join_last.
+    test_thread_park_terminal(&g_death_exited);
 }
 
 void test_rendez_death_interrupts_sleep(void) {
@@ -276,7 +276,7 @@ void test_rendez_death_interrupts_sleep(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer cleared its backref on the death-interrupted resume");
 
-    test_kthread_join_free(consumer, &g_death_exited);
+    test_thread_join_last(g_death_proc, &g_death_exited);
     g_death_proc->state = PROC_STATE_ZOMBIE;     // proc_free precondition
     proc_free(g_death_proc);
     g_death_proc = NULL;
@@ -324,7 +324,7 @@ static void intr_consumer_entry(void) {
     g_intr_run_cnt++;                            // -> 1: pre-sleep run
     g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
+    test_thread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
 // The blocked-sleeper leg: consumer parks SLEEPING; boot posts a REAL
@@ -373,7 +373,7 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer cleared its backref on the interrupted resume");
 
-    test_kthread_join_free(consumer, &g_intr_exited);
+    test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -413,7 +413,7 @@ void test_rendez_intr_terminate_register_observe(void) {
     TEST_ASSERT(g_intr_rendez.waiter == NULL,
         "the undone registration left the rendez empty");
 
-    test_kthread_join_free(consumer, &g_intr_exited);
+    test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -429,7 +429,7 @@ static void intr_masked_consumer_entry(void) {
     current_thread()->note_mask |= (1u << NOTE_BIT_INTERRUPT);
     g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
+    test_thread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
 void test_rendez_intr_terminate_masked_sleeps_through(void) {
@@ -480,7 +480,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
         "death overrides the interrupt mask (SLEEP_INTR)");
 
-    test_kthread_join_free(consumer, &g_intr_exited);
+    test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -495,7 +495,7 @@ static void intr_tsleep_consumer_entry(void) {
     g_intr_sleep_rc = tsleep(&g_intr_rendez, death_cond_false, NULL,
                              timer_now_ns() + 60ull * 1000000000ull);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
+    test_thread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
 void test_rendez_intr_terminate_interrupts_tsleep(void) {
@@ -530,7 +530,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer cleared its backref on the interrupted resume");
 
-    test_kthread_join_free(consumer, &g_intr_exited);
+    test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -552,7 +552,7 @@ static void death_only_consumer_entry(void) {
     g_intr_run_cnt++;                            // -> 1: pre-sleep run
     g_intr_sleep_rc = sleep_death_only(&g_intr_rendez, death_cond_false, NULL);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    test_kthread_park_terminal(&g_intr_exited);
+    test_thread_park_terminal(&g_intr_exited);
 }
 
 // Group death, hand-rolled as the death test does it (proc_group_terminate
@@ -569,7 +569,7 @@ static void intr_publish_death_and_wake(struct Thread *t) {
 static void intr_consumer_kill_reap(struct Thread *consumer) {
     intr_publish_death_and_wake(consumer);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
-    test_kthread_join_free(consumer, &g_intr_exited);
+    test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -678,7 +678,7 @@ static void stop_consumer_entry(void) {
     g_intr_run_cnt++;                            // -> 1: pre-sleep run
     g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    test_kthread_park_terminal(&g_intr_exited);
+    test_thread_park_terminal(&g_intr_exited);
 }
 
 // A job stop, hand-rolled as its cascade does it for a sleeper: the RELEASE
@@ -749,7 +749,7 @@ static void skip_control_entry(void) {
     g_skip_run_cnt++;                            // -> 1: pre-sleep run
     g_skip_sleep_rc = sleep_death_only(&g_skip_rendez, death_cond_false, NULL);
     g_skip_run_cnt++;                            // -> 2: post-INTR run
-    test_kthread_park_terminal(&g_skip_exited);
+    test_thread_park_terminal(&g_skip_exited);
 }
 
 // The latch's walk, after the post that arms it.
@@ -823,8 +823,8 @@ static void skip_stop_park_run(bool (*walk)(void), const char *armed_msg) {
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u && g_skip_run_cnt >= 2u);
     int rc_stopped = g_intr_sleep_rc;
     int rc_control = g_skip_sleep_rc;
-    test_kthread_join_free(stopped, &g_intr_exited);
-    test_kthread_join_free(control, &g_skip_exited);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_intr_exited, __ATOMIC_ACQUIRE));
+    test_thread_join_last(g_intr_proc, &g_skip_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -875,7 +875,7 @@ static void exit_close_consumer_entry(void) {
     g_intr_sleep_rc = sleep(&g_intr_rendez, ec_cond, NULL);
     self->exit_close_active = false;
     g_intr_run_cnt++;                            // -> 2: post-sleep run
-    test_kthread_park_terminal(&g_intr_exited);
+    test_thread_park_terminal(&g_intr_exited);
 }
 
 // Whatever the run saw, end the closer's sleep and reap it: the close's
@@ -886,7 +886,7 @@ static void exit_close_consumer_reap(struct Thread *consumer) {
     (void)wakeup(&consumer->debug_rendez);
     (void)wakeup(&g_intr_rendez);
     TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
-    test_kthread_join_free(consumer, &g_intr_exited);
+    test_thread_join_last(g_intr_proc, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -1022,7 +1022,7 @@ static void rf_tsleep_entry(void) {
                            timer_now_ns() + 10ull * 1000000ull);   // +10 ms
     rf_reader_latches(false);
     g_rf_run_cnt++;                              // -> 2: post-tsleep
-    test_kthread_park_terminal(&g_rf_exited);
+    test_thread_park_terminal(&g_rf_exited);
 }
 
 void test_rendez_reader_recv_unwinds_death(void) {
@@ -1047,7 +1047,7 @@ void test_rendez_reader_recv_unwinds_death(void) {
     bool backref   = reader->rendez_blocked_on == NULL;
     bool no_waiter = g_rf_rendez.waiter == NULL;
     if (joinable) {
-        test_kthread_join_free(reader, &g_rf_exited);
+        test_thread_join_last(g_rf_proc, &g_rf_exited);
         g_rf_proc->state = PROC_STATE_ZOMBIE;
         proc_free(g_rf_proc);
         g_rf_proc = NULL;
@@ -1072,7 +1072,7 @@ static void rf_sleep_entry(void) {
     g_rf_sleep_rc = sleep(&g_rf_rendez, rf_cond, NULL);
     rf_reader_latches(false);
     g_rf_run_cnt++;                              // -> 2: post-sleep
-    test_kthread_park_terminal(&g_rf_exited);
+    test_thread_park_terminal(&g_rf_exited);
 }
 
 void test_rendez_reader_recv_unwinds_death_sleep(void) {
@@ -1106,7 +1106,7 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
     }
     bool joinable = g_rf_run_cnt >= 2u;
     if (joinable) {
-        test_kthread_join_free(reader, &g_rf_exited);
+        test_thread_join_last(g_rf_proc, &g_rf_exited);
         g_rf_proc->state = PROC_STATE_ZOMBIE;
         proc_free(g_rf_proc);
         g_rf_proc = NULL;
@@ -1149,7 +1149,7 @@ static void cw_sleeper_entry(void) {
     g_cw_run++;                                    // -> 1: about to sleep
     g_cw_rc = sleep_noteintr(&g_cw_rendez, cw_cond, NULL);
     g_cw_run++;                                    // -> 2: the sleep returned
-    test_kthread_park_terminal(&g_cw_exited);
+    test_thread_park_terminal(&g_cw_exited);
 }
 
 struct cw_leg { bool parked; bool woke; bool joined; int rc; };
@@ -1177,8 +1177,8 @@ static struct cw_leg cw_run_leg(struct Proc *p, void (*post)(void *), void *arg)
     while (g_cw_run < 2u && timer_now_ns() < dl) sched();
     if (g_cw_run < 2u) return r;   // wedged: never free a thread that is still asleep
     r.rc = g_cw_rc;
-    test_kthread_join_free(t, &g_cw_exited);
-    r.joined = true;
+    test_thread_join_last(p, &g_cw_exited);
+    r.joined = test_proc_threads_freed(p);
     return r;
 }
 
@@ -1273,7 +1273,7 @@ static void rcn_sleeper_entry(void) {
     self->stop_no_park = false;
     self->note_unwound = false;
     g_rcn_run++;                                   // -> 2: the sleep returned
-    test_kthread_park_terminal(&g_rcn_exited);
+    test_thread_park_terminal(&g_rcn_exited);
 }
 
 struct rcn_leg { bool parked; bool unwound; bool joined; bool latched; int rc; };
@@ -1315,8 +1315,8 @@ static struct rcn_leg rcn_run_leg(bool reader) {
         if (g_rcn_run >= 2u) {
             r.rc      = g_rcn_rc;
             r.latched = g_rcn_latched;
-            test_kthread_join_free(t, &g_rcn_exited);
-            r.joined = true;
+            test_thread_join_last(par, &g_rcn_exited);
+            r.joined = test_proc_threads_freed(par);
         }
     }
     kid->parent = NULL;
@@ -1491,7 +1491,7 @@ static void c2_sleep(u32 i) {
     g_c2_run[i]++;
     g_c2_rc[i] = sleep_noteintr(&g_c2_rendez[i], c2_cond, (void *)(uintptr_t)i);
     g_c2_run[i]++;
-    test_kthread_park_terminal(&g_c2_exited[i]);
+    test_thread_park_terminal(&g_c2_exited[i]);
 }
 static void c2_entry0(void) { c2_sleep(0); }
 static void c2_entry1(void) { c2_sleep(1); }
@@ -1516,6 +1516,7 @@ void test_rendez_caught_note_one_unwind(void) {
     bool set = viv_sigtab_set(par->sigtab, VIV_SIGNOTE_CHILD_EXIT, &g_cw_hand) &&
                viv_sigtab_set(par->sigtab, VIV_SIGNOTE_TTY_CONT, &g_cw_hand);
     struct Thread *t[2] = { NULL, NULL };
+    int tid[2] = { 0, 0 };
     for (u32 i = 0; i < 2u; i++) {
         g_c2_run[i] = 0; g_c2_rc[i] = 0x7fffffff; g_c2_evals[i] = 0;
         g_c2_release[i] = false; g_c2_exited[i] = false;
@@ -1525,6 +1526,7 @@ void test_rendez_caught_note_one_unwind(void) {
         t[0] = thread_create(par, c2_entry0);
         t[1] = t[0] ? thread_create(par, c2_entry1) : NULL;
         if (t[0] && !t[1]) { thread_free(t[0]); t[0] = NULL; }   // never readied
+        if (t[1]) { tid[0] = t[0]->tid; tid[1] = t[1]->tid; }
     }
 
     bool parked = false;
@@ -1569,7 +1571,8 @@ void test_rendez_caught_note_one_unwind(void) {
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (g_c2_run[i] < 2u && timer_now_ns() < dl) sched();
         if (g_c2_run[i] < 2u) { joined = false; continue; }
-        test_kthread_join_free(t[i], &g_c2_exited[i]);
+        test_thread_join_reaped(par, tid[i], &g_c2_exited[i]);
+        if (test_proc_holds_tid(par, tid[i])) joined = false;
     }
     kid->parent = NULL;
     kid->state  = PROC_STATE_ZOMBIE;
@@ -1644,7 +1647,7 @@ static void c3_entry(void) {
     g_c3_rc2 = sleep_noteintr(&g_c3_rendez, c3_cond, NULL);
     t->note_interruptible = false;
     g_c3_run++;                                      // -> 3
-    test_kthread_park_terminal(&g_c3_exited);
+    test_thread_park_terminal(&g_c3_exited);
 }
 
 void test_rendez_caught_note_tail_discards_and_releases(void) {
@@ -1686,7 +1689,10 @@ void test_rendez_caught_note_tail_discards_and_releases(void) {
         if (g_c3_run < 3u) { g_c3_release = true; (void)wakeup(&g_c3_rendez); }
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (g_c3_run < 3u && timer_now_ns() < dl) sched();
-        if (g_c3_run >= 3u) { test_kthread_join_free(t, &g_c3_exited); joined = true; }
+        if (g_c3_run >= 3u) {
+            test_thread_join_last(par, &g_c3_exited);
+            joined = test_proc_threads_freed(par);
+        }
     }
     TEST_ASSERT(joined, "the sleeper returned and was joined");
     par->state = PROC_STATE_ZOMBIE;
@@ -1729,7 +1735,7 @@ static void d_entry(void) {
     notes_deliver_at_el0_return(&ctx);
     spin_unlock_irqrestore(NULL, s);
     g_d_returned = true;
-    test_kthread_park_terminal(&g_d_exited);
+    test_thread_park_terminal(&g_d_exited);
 }
 
 // One leg on a fresh anchored group (a leader in the same session, another
@@ -1771,7 +1777,10 @@ static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *j
         proc_table_lock_release(s);
         dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (!g_d_returned && timer_now_ns() < dl) sched();
-        if (g_d_returned) { test_kthread_join_free(t, &g_d_exited); *joined = true; }
+        if (g_d_returned) {
+            test_thread_join_last(m, &g_d_exited);
+            *joined = test_proc_threads_freed(m);
+        }
     }
     // A thread that never came back still lives in m, and proc_free would
     // extinct the suite here, before the asserts could name the failure.
@@ -1836,7 +1845,7 @@ static void c4_sleep(u32 i) {
     while (!g_c4_go) sched();                        // the test holds the tail
     c3_tail();
     g_c4_run[i]++;                                   // -> 3: the tail ran
-    test_kthread_park_terminal(&g_c4_exited[i]);
+    test_thread_park_terminal(&g_c4_exited[i]);
 }
 static void c4_entry0(void) { c4_sleep(0); }
 static void c4_entry1(void) { c4_sleep(1); }
@@ -1851,6 +1860,7 @@ void test_rendez_caught_note_release_wakes_peer(void) {
     TEST_ASSERT(par != NULL, "parent alloc");
     bool set = viv_sigtab_set(par->sigtab, VIV_SIGNOTE_INTERRUPT, &g_cw_hand);
     struct Thread *t[2] = { NULL, NULL };
+    int tid[2] = { 0, 0 };
     g_c4_go = false;
     for (u32 i = 0; i < 2u; i++) {
         g_c4_run[i] = 0; g_c4_rc[i] = 0x7fffffff; g_c4_evals[i] = 0;
@@ -1861,6 +1871,7 @@ void test_rendez_caught_note_release_wakes_peer(void) {
         t[0] = thread_create(par, c4_entry0);
         t[1] = t[0] ? thread_create(par, c4_entry1) : NULL;
         if (t[0] && !t[1]) { thread_free(t[0]); t[0] = NULL; }   // never readied
+        if (t[1]) { tid[0] = t[0]->tid; tid[1] = t[1]->tid; }
     }
     bool made = t[0] && t[1];
 
@@ -1902,7 +1913,8 @@ void test_rendez_caught_note_release_wakes_peer(void) {
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (g_c4_run[i] < 3u && timer_now_ns() < dl) sched();
         if (g_c4_run[i] < 3u) { joined = false; continue; }
-        test_kthread_join_free(t[i], &g_c4_exited[i]);
+        test_thread_join_reaped(par, tid[i], &g_c4_exited[i]);
+        if (test_proc_holds_tid(par, tid[i])) joined = false;
     }
     TEST_ASSERT(!made || joined, "both sleepers returned and were joined");
     par->state = PROC_STATE_ZOMBIE;
@@ -1953,6 +1965,7 @@ struct nt_slot {
     struct Rendez rendez;
 };
 static struct nt_slot g_nt[2];
+static int            g_nt_tid[2];
 static struct Proc   *g_nt_proc;
 
 static int nt_cond(void *arg) {
@@ -2001,7 +2014,7 @@ static void nt_loop(u32 i) {
             break;
         default:
             __atomic_store_n(&n->done, seq, __ATOMIC_RELEASE);
-            test_kthread_park_terminal(&n->exited);
+            test_thread_park_terminal(&n->exited);
         }
         __atomic_store_n(&n->done, seq, __ATOMIC_RELEASE);
     }
@@ -2058,6 +2071,7 @@ static bool nt_setup(bool linux_pheno, struct Thread *t[2]) {
     t[0] = thread_create(g_nt_proc, nt_entry0);
     t[1] = t[0] ? thread_create(g_nt_proc, nt_entry1) : NULL;
     if (t[0] && !t[1]) { thread_free(t[0]); t[0] = NULL; }
+    if (t[1]) { g_nt_tid[0] = t[0]->tid; g_nt_tid[1] = t[1]->tid; }
     if (!t[0]) {
         g_nt_proc->state = PROC_STATE_ZOMBIE;
         proc_free(g_nt_proc);
@@ -2070,8 +2084,9 @@ static bool nt_setup(bool linux_pheno, struct Thread *t[2]) {
 }
 
 // End whatever wait each thread is in, park both, reclaim both and the Proc.
-// A thread that exited (NT_EXIT) is reclaimed once it is off its CPU. False if
-// a thread never got there: then nothing is freed.
+// A thread that exited (NT_EXIT) is freed by the resume path of its last
+// switch-out; it is waited for by tid and never touched. False if a thread
+// never got there: then nothing is freed.
 static bool nt_teardown(struct Thread *t[2]) {
     if (!g_nt_proc) return true;
     bool ok = true;
@@ -2079,23 +2094,19 @@ static bool nt_teardown(struct Thread *t[2]) {
         if (!t[i]) continue;
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         if (g_nt[i].step == NT_EXIT) {
-            while (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_EXITING &&
-                   timer_now_ns() < dl)
-                sched();
-            if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_EXITING) {
-                ok = false;
-                continue;
-            }
-            thread_free(t[i]);
             t[i] = NULL;
+            while (test_proc_holds_tid(g_nt_proc, g_nt_tid[i]) && timer_now_ns() < dl)
+                sched();
+            if (test_proc_holds_tid(g_nt_proc, g_nt_tid[i])) ok = false;
             continue;
         }
         if (!nt_done(i)) { g_nt[i].release = true; (void)wakeup(&g_nt[i].rendez); }
         while (!nt_done(i) && timer_now_ns() < dl) sched();
         if (!nt_done(i)) { ok = false; continue; }
         nt_step(i, NT_PARK);
-        test_kthread_join_free(t[i], &g_nt[i].exited);
         t[i] = NULL;
+        test_thread_join_reaped(g_nt_proc, g_nt_tid[i], &g_nt[i].exited);
+        if (test_proc_holds_tid(g_nt_proc, g_nt_tid[i])) ok = false;
     }
     if (!ok) return false;
     g_nt_proc->state = PROC_STATE_ZOMBIE;

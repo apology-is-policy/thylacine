@@ -344,7 +344,7 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
 // at the READ site to owner-or-CAP_HOSTOWNER (devproc_sched_authorized).
 // PRECONDITION: called under g_proc_table_lock (via devproc_read_cb), which
 // pins p; the p->threads walk holds p->threads_lock (every unlink from
-// p->threads holds it, thread_free's and the in-Proc reap's -- ARCH 7.3.1).
+// p->threads holds it, thread_free's and thread_reap_dead's -- ARCH 7.3.1).
 static const char *sched_band_name(u32 band) {
     switch (band) {
     case SCHED_BAND_INTERACTIVE: return "INTR";
@@ -1766,7 +1766,7 @@ bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *tar
 // with on_cpu==false -- the "fully stopped" predicate a coherent cross-Proc
 // mem/reg access relies on (specs/debug_stop.tla NoEL0AfterStopped). Caller holds
 // target->threads_lock (the p->threads walk is stable under it -- both mutators,
-// thread_free and the in-Proc reap, hold it); reads rendez_blocked_on under each
+// thread_free and thread_reap_dead, hold it); reads rendez_blocked_on under each
 // peer's wait_lock (the
 // same lock the park's register-then-observe takes, so it never sees a thread
 // about to proceed to EL0), then the #788 spin-until-off_cpu read (a thread
@@ -1950,9 +1950,8 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // (every caller holds it, across the whole use of the result): NO UAF, and the
 // load-bearing reason is the lock PIN (#95-audit F1; ARCH 7.3.1), NOT a stop
 // gate -- every unlink from p->threads holds this lock and comes before the
-// free: wait_pid_for's thread_free loop, run after proc_unlink_child put the
-// target out of proc_for_each's reach, and the in-Proc reap, which clears a
-// focus naming the thread it frees in the same hold. A pointer that matches an
+// free: thread_reap_dead, which clears a focus naming the thread it frees in
+// the same hold, and the joiner and creator frees. A pointer that matches an
 // in-list thread is therefore a LIVE struct; this validation loop IS the safety
 // net (do NOT delete it as "redundant" -- the 8b settled kstack drops the
 // fully-stopped gate, so this loop is the only thing turning a stale/foreign focus
@@ -1961,8 +1960,8 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 //
 // The fallback is main, never the list head: p->threads is head-inserted, so the
 // head is the NEWEST thread, and one that has exited stays there, EXITING, until
-// a live peer reaps it (proc_reap_exited_threads) -- in a stopped target, for the
-// whole stop, while devproc_all_threads_parked skips it. Neither arm returns an
+// the resume path of its last switch-out frees it (ARCH 7.3.2), while
+// devproc_all_threads_parked skips it. Neither arm returns an
 // EXITING thread: apply_regs and the step verb have no EXITING gate of their own
 // (a step armed on an exiting thread never fires, and the resume lets the target
 // run free). NULL when every thread is exiting; each caller refuses NULL. The

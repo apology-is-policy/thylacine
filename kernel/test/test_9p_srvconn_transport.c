@@ -949,7 +949,7 @@ static void mf_reader_entry(void) {
     g_mf_run = 1;
     g_mf_rc  = p9_client_getattr(&g_sc_client, 0, P9_GETATTR_BASIC, &g_mf_attr);
     g_mf_run = 2;
-    test_kthread_park_terminal(&g_mf_exited);
+    test_thread_park_terminal(&g_mf_exited);
 }
 
 struct mf_async {
@@ -1143,8 +1143,8 @@ static void mf_teardown(struct mf_rig *r) {
         }
     }
     if (r->reader && g_mf_run >= 2u) {
-        test_kthread_join_free(r->reader, &g_mf_exited);
-        r->reader = NULL;
+        test_thread_join_last(g_mf_proc, &g_mf_exited);
+        if (test_proc_threads_freed(g_mf_proc)) r->reader = NULL;
     }
     if (r->reader) return;   // wedged: leak rather than free under it
     if (g_mf_proc) {

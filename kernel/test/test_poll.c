@@ -1383,7 +1383,7 @@ static void pn_poll_entry(void) {
     g_pn_return_ns = timer_now_ns();
     g_pn_revents   = pfds[0].revents;
     __atomic_store_n(&g_pn_result, r, __ATOMIC_RELEASE);
-    test_kthread_park_terminal(&g_pn_exited);
+    test_thread_park_terminal(&g_pn_exited);
 }
 
 // Start a poll(-1) on the busy Dev from a thread of a fresh Proc. NULL on any
@@ -1410,7 +1410,7 @@ static void pn_finish(struct Thread *poller) {
         g_busy_ready = true;
         poll_waiter_list_wake(&g_busy_list);
         TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
-        test_kthread_join_free(poller, &g_pn_exited);
+        test_thread_join_last(g_pn_proc, &g_pn_exited);
     }
     if (g_pn_proc) {
         g_pn_proc->state = PROC_STATE_ZOMBIE;
@@ -1883,7 +1883,7 @@ static void pcn_poll_entry(void) {
     t->note_interruptible = false;
     g_pcn_return_ns = timer_now_ns();
     __atomic_store_n(&g_pcn_result, r, __ATOMIC_RELEASE);
-    test_kthread_park_terminal(&g_pcn_exited);
+    test_thread_park_terminal(&g_pcn_exited);
 }
 
 void test_poll_caught_note_ends_a_noise_driven_poll(void);
@@ -1922,8 +1922,8 @@ void test_poll_caught_note_ends_a_noise_driven_poll(void) {
         poll_waiter_list_wake(&g_busy_list);
         TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pcn_result, __ATOMIC_ACQUIRE) != -999);
         if (__atomic_load_n(&g_pcn_result, __ATOMIC_ACQUIRE) != -999) {
-            test_kthread_join_free(poller, &g_pcn_exited);
-            reaped = __atomic_load_n(&g_pcn_exited, __ATOMIC_ACQUIRE);
+            test_thread_join_last(g_pcn_proc, &g_pcn_exited);
+            reaped = test_proc_threads_freed(g_pcn_proc);
         }
     }
     if (reaped) test_caught_proc_free(g_pcn_proc, NULL);

@@ -900,22 +900,27 @@ struct Thread *thread_alloc_forked(struct Proc *proc,
                                    u64 child_sp,
                                    u64 child_tls);
 
-// Release a Thread descriptor + its kstack. Caller must ensure the
-// thread is not current (current_thread() != t) and not still on any
-// runqueue. Extincts on violation.
+// Release a Thread descriptor + its kstack: a kernel thread, by its joiner, or
+// a thread that never ran, by its creator. Caller must ensure the thread is not
+// current (current_thread() != t). An exited user thread is thread_reap_dead's.
+// Extincts on violation.
 void thread_free(struct Thread *t);
 
 // True once the tid space is spent (alloc_next_tid refuses). A create that
 // failed then reports EAGAIN, a system limit, rather than ENOMEM.
 bool thread_tid_space_spent(void);
 
-// The thread list's mutators (ARCH 7.3.1), each under the caller's hold of
-// the Proc's threads_lock. The link counts the thread live; the unlink drops a
-// thread that never committed from live_threads too. The in-Proc reap unlinks
-// under the lock, then frees with thread_free_unlinked and no lock held.
+// The thread list's link (ARCH 7.3.1), under the caller's hold of the Proc's
+// threads_lock; it counts the thread live. thread_free_unlinked frees a thread
+// that was never admitted to a list.
 void thread_link_into_proc_locked(struct Thread *t, struct Proc *p);
-void thread_unlink_from_proc_locked(struct Thread *t);
 void thread_free_unlinked(struct Thread *t);
+
+// The free of an exited user thread, by the resume path of its last switch-out
+// and by nothing else (ARCH 7.3.2, I-48): IRQs masked, on_cpu just cleared, no
+// lock held. Folds its run time and stack depth into the Proc, clears a debug
+// focus naming it, unlinks it and frees it.
+void thread_reap_dead(struct Thread *t);
 
 // The one writer of state = THREAD_EXITING: under t->proc's threads_lock, and
 // it takes t out of live_threads. Nothing t runs after it may sleep.

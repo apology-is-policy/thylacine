@@ -23,6 +23,7 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -130,10 +131,9 @@ static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
     proc_threads_unlock(p, s);
 }
 
-// The caller holds t->proc->threads_lock. Split out so proc_reap_exited_threads
-// can find an exited peer and unlink it in ONE hold: the unlink is the claim, so
-// no second reaper of the same Proc can find it afterwards.
-void thread_unlink_from_proc_locked(struct Thread *t) {
+// The caller holds t->proc->threads_lock. Split out so thread_reap_dead folds a
+// dead thread into its Proc and unlinks it in one hold.
+static void thread_unlink_from_proc_locked(struct Thread *t) {
     struct Proc *p = t->proc;
     ASSERT_TL_HELD(p);
     if (t->prev_in_proc) {
@@ -177,6 +177,11 @@ void thread_commit_exiting_locked(struct Thread *t) {
 #ifdef KERNEL_TESTS
     if (proc_count_live_peers_locked(p, NULL) != p->live_threads)
         extinction("thread_commit_exiting: live_threads disagrees with the thread list");
+    // I-48's bound: each CPU holds at most one exited thread not yet freed, the
+    // one running its exit tail or the one its resume path is freeing.
+    if (p != kproc() &&
+        p->thread_count - p->live_threads > (int)smp_cpu_online_count())
+        extinction("thread_commit_exiting: more exited threads than CPUs (I-48)");
 #endif
 }
 
@@ -806,13 +811,47 @@ struct Thread *thread_create_forked(struct Proc *proc,
 
 static void thread_release(struct Thread *t, bool unlink);
 
+// The last step of every free. Nothing can reach t any more.
+static void thread_destroy(struct Thread *t) {
+    if (t->kstack_base)
+        kstack_free(t->kstack_base);
+    kmem_cache_free(g_thread_cache, t);
+    __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);
+}
+
+// ARCH 7.3.2. The caller is the resume path of t's last switch-out: it read t
+// EXITING while on_cpu still pinned it, then cleared on_cpu and released the
+// run-queue lock, and IRQs stay masked. Nothing else frees a user thread, so no
+// claim is needed. Nothing writes a dead stack, so its depth is read before the
+// lock. t->proc outlives the unlock: wait_pid frees it only after reading
+// thread_count 0 under the same lock.
+void thread_reap_dead(struct Thread *t) {
+    if (t->magic != THREAD_MAGIC)    extinction("thread_reap_dead of a corrupted or freed Thread");
+    if (t->state != THREAD_EXITING)  extinction("thread_reap_dead of a thread that has not exited");
+    struct Proc *p = t->proc;
+    if (!p || p == kproc())          extinction("thread_reap_dead of a kernel thread");
+    u32 used = thread_kstack_used(t, NULL);
+    irq_state_t s = proc_threads_lock(p);
+    p->reaped_run_ns += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+    if (used > p->reaped_kstack_peak) {
+        p->reaped_kstack_peak = used;
+        p->reaped_kstack_tid  = t->tid;
+    }
+    // The debug focus is validated by pointer against p->threads; a freed slot
+    // recycled into a new Thread of p would match it.
+    if (__atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == t)
+        __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
+    thread_unlink_from_proc_locked(t);
+    proc_threads_unlock(p, s);
+    thread_destroy(t);
+}
+
 void thread_free(struct Thread *t) {
     thread_release(t, true);
 }
 
-// For a Thread that is on no list: one its caller unlinked under the Proc's
-// threads_lock (the in-Proc reap), or one allocated and never admitted. Nothing
-// can find it; the gates below still run.
+// For a Thread allocated and never admitted to a list (a spawn refused at
+// admission). Nothing can find it; the gates below still run.
 void thread_free_unlinked(struct Thread *t) {
     if (t && (t->next_in_proc || t->prev_in_proc || (t->proc && t->proc->threads == t)))
         extinction("thread_free_unlinked of a Thread still on its Proc's list");
@@ -831,6 +870,10 @@ static void thread_release(struct Thread *t, bool unlink) {
                                   extinction("thread_free of uninitialized Thread");
     if (t->state == THREAD_RUNNING)
                                   extinction("thread_free of RUNNING thread");
+    // An exited user thread belongs to the resume path of its last switch-out
+    // (ARCH 7.3.2); a second free here would race it.
+    if (t->state == THREAD_EXITING && t->proc != kproc())
+                                  extinction("thread_free of an exited user thread (its resume path frees it)");
 
     // If t was RUNNABLE and sitting in a run tree, remove it before
     // unlinking from the proc list. sched_remove_if_runnable walks all
@@ -880,10 +923,9 @@ static void thread_release(struct Thread *t, bool unlink) {
     // the freed thread -- 0/20 at -smp 1 vs 2/20 at -smp 4), ~10-20% on the
     // exact clean binary, riding the #789 E-core host-stall that widens the
     // SLEEPING..on_cpu-cleared window past the caller's drain. on_cpu is the
-    // canonical "stack/ctx still in use" signal; gate on it. Mirrors the
-    // reap-path spin in wait_pid (proc.c). thread_free is always called
-    // lock-free, so the spin cannot deadlock; it is bounded by the single
-    // in-flight switch (the peer always resumes and clears on_cpu).
+    // canonical "stack/ctx still in use" signal; gate on it. thread_free is
+    // always called lock-free, so the spin cannot deadlock; it is bounded by
+    // the single in-flight switch (the peer always resumes and clears on_cpu).
     if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
         __atomic_fetch_add(&g_thread_free_oncpu_waits, 1u, __ATOMIC_RELAXED);
         while (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
@@ -894,11 +936,7 @@ static void thread_release(struct Thread *t, bool unlink) {
     if (unlink)
         thread_unlink_from_proc(t);
 
-    if (t->kstack_base)
-        kstack_free(t->kstack_base);
-
-    kmem_cache_free(g_thread_cache, t);
-    __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);
+    thread_destroy(t);
 }
 
 void thread_switch(struct Thread *next) {

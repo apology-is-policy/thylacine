@@ -118,6 +118,21 @@ struct Thread;
 void test_kthread_park_terminal(volatile bool *exited);
 void test_kthread_join_free(struct Thread *t, volatile bool *exited);
 
+// The same pair for a thread of a user Proc (not kproc). The resume path of its
+// last switch-out frees it (ARCH 7.3.2), so the joiner never touches the
+// Thread: it waits for *exited, then for `tid` (read before the thread was
+// readied) to leave p's list. Each park extincts in the other's kind of Proc,
+// so a mismatched pair fails at once rather than freeing a thread twice.
+struct Proc;
+void test_thread_park_terminal(volatile bool *exited);
+void test_thread_join_reaped(struct Proc *p, int tid, volatile bool *exited);
+// The joined thread is p's last: wait for *exited, then for p to hold none.
+void test_thread_join_last(struct Proc *p, volatile bool *exited);
+// Under p->threads_lock: is `tid` still on p's list? And does p hold no thread
+// at all (every one freed), the precondition of a fixture's proc_free?
+bool test_proc_holds_tid(struct Proc *p, int tid);
+bool test_proc_threads_freed(struct Proc *p);
+
 // A thread of a fresh Proc -- not kproc, which never dies -- for tests of what
 // a dying thread does. test_dying_kill kills it the way the group-terminate
 // cascade kills each peer (group_exit_msg, then a wake of the Rendez it sleeps
@@ -125,10 +140,10 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited);
 // would wake the idle secondaries (test_rendez_death_interrupts_sleep). A
 // reap that times out frees nothing: the thread may still be running.
 // Bodies in kernel/test/test.c.
-struct Proc;
 struct test_dying {
     struct Proc   *proc;
-    struct Thread *t;
+    struct Thread *t;          // valid until the thread parks (it is then freed)
+    int            tid;
     void         (*fn)(void *arg);
     void          *arg;
     volatile bool  done;       // fn returned (RELEASE)

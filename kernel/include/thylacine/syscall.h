@@ -797,10 +797,9 @@ enum {
     //      a failed store skips the wake but does not extinct.
     //   3. yield via sched(); never returns.
     //
-    // After-exit reaping: the Thread descriptor + kstack stay
-    // allocated, counted against PROC_THREAD_MAX, until the Proc's
-    // next thread create frees them (proc_reap_exited_threads) or,
-    // once the whole Proc is dead, wait_pid's reap does.
+    // After-exit reaping: the Thread descriptor + kstack are freed by
+    // the resume path of the thread's last switch-out (ARCH 7.3.2), so
+    // an exited thread stops counting against PROC_THREAD_MAX at once.
     //
     // Never returns to userspace — userspace must treat any return as
     // a kernel bug. The x0 the SVC dispatch writes on a fall-through
@@ -3769,8 +3768,8 @@ struct exception_context;
 //
 // SYS_EXITS doesn't return — it transitions through the kernel's exits()
 // path and sched()'s context-switch picks another thread. The user
-// thread is left in EXITING state until it is freed (wait_pid's reap,
-// or sooner a peer's thread create).
+// thread is left in EXITING state until the resume path of its last
+// switch-out frees it (ARCH 7.3.2).
 void syscall_dispatch(struct exception_context *ctx);
 
 // The follow-up round's F1 gate predicate (defined in syscall.c): SYS_ATTACH_9P

@@ -20,31 +20,37 @@
 //   proc.multi_thread_reap                — rfork a child Proc, spawn
 //                                            peer Threads in it, each
 //                                            calls thread_exit_self,
-//                                            main calls exits → parent
-//                                            wait_pid drains ALL
-//                                            Threads (the multi-thread
-//                                            reap path in wait_pid).
+//                                            main calls exits → every
+//                                            Thread is freed and the
+//                                            parent's wait_pid frees the
+//                                            Proc.
 //   proc.{exits,fault}_in_dying_group_keeps_group_status
 //                                          -- a last thread leaving a group
 //                                            whose termination was already
 //                                            claimed reaps with the claimed
 //                                            status (I-24).
-//   proc.reap_exited_threads_frees_peers  -- proc_reap_exited_threads frees
-//                                            every exited, off-CPU peer while
-//                                            the Proc lives, and the Proc keeps
-//                                            their run time + kstack watermark;
-//                                            a debug focus naming one clears.
+//   proc.exited_threads_freed_at_switch   -- every exited peer is freed while
+//                                            the Proc lives, with no spawn, exec
+//                                            or wait, and the Proc keeps their
+//                                            run time + kstack watermark; a
+//                                            debug focus naming one clears.
+//   proc.exited_threads_bounded_by_cpus   -- 64 workers exit at once: those
+//                                            not yet freed never outnumber
+//                                            the CPUs (I-48).
 //   proc.reap_keeps_thread_cap_open       -- 300 workers started and finished
 //                                            one after another under a
 //                                            non-exempt principal: the cap
 //                                            never refuses (it did at 256).
+//   proc.sqpoll_charge_after_finished_workers
+//                                          -- 255 finished workers leave the
+//                                            budget open for an SQPOLL charge.
 //   proc.exit_tail_runs_to_its_end        -- a preempt armed across tick
 //                                            returns does not cut an exit
 //                                            tail short; the tail keeps its
 //                                            CPU to its own sched().
 //   proc.exec_waits_for_exiting_peer      -- exec does not swap the address
-//                                            space while an EXITING peer is
-//                                            still on a CPU, then frees it.
+//                                            space until its EXITING peer is
+//                                            freed.
 //   proc.exec_waits_for_exiting_peer_on_another_cpu
 //                                          -- the same with a real peer holding
 //                                            its exit tail on a second CPU.
@@ -87,8 +93,10 @@
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
-void test_proc_reap_exited_threads_frees_peers(void);
+void test_proc_exited_threads_freed_at_switch(void);
+void test_proc_exited_threads_bounded_by_cpus(void);
 void test_proc_reap_keeps_thread_cap_open(void);
+void test_proc_sqpoll_charge_after_finished_workers(void);
 void test_proc_threads_lock_slot(void);
 void test_proc_spawn_arms_decide_at_the_admit(void);
 void test_proc_multi_thread_reap(void);
@@ -153,7 +161,8 @@ void test_thread_create_user_ctx_layout(void) {
 // rfork a child Proc. In the child's entry, spawn 2 peer Threads (kernel-
 // mode entries — we test the state-machine, not eret-to-EL0). Each peer
 // calls thread_exit_self. Main yields until both peers reach EXITING,
-// then calls exits("ok"). Parent wait_pid reaps the whole Proc.
+// then calls exits("ok"). Each thread is freed by the resume path of its
+// last switch-out; the parent's wait_pid frees the Proc.
 // ---------------------------------------------------------------------------
 
 static volatile u32 g_workers_ran;
@@ -174,17 +183,18 @@ static void mte_parent_entry(void *arg) {
         ready(peer);
     }
 
-    // Yield until every peer Thread reaches THREAD_EXITING. The state
-    // field is monotonic (peers transition only via thread_exit_self,
-    // which writes EXITING under g_proc_table_lock; a stale plain read
-    // here can see RUNNABLE/RUNNING/EXITING but never go backward), so
-    // a yield-and-recheck loop converges.
+    // Yield until every peer still on the list is EXITING. A peer leaves
+    // the list when it is freed, so the walk holds p->threads_lock (ARCH
+    // 7.3.1); EXITING is written under it and never undone, so a
+    // yield-and-recheck loop converges.
     for (;;) {
         bool all_exiting = true;
+        irq_state_t s = proc_threads_lock(p);
         for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
             if (peer == current_thread()) continue;
             if (peer->state != THREAD_EXITING) { all_exiting = false; break; }
         }
+        proc_threads_unlock(p, s);
         if (all_exiting) break;
         sched();
     }
@@ -213,13 +223,13 @@ void test_thread_exit_self_marks_exiting(void) {
                    "both workers should have run");
 
     // 3 threads created in the child Proc (main + 2 peers); all 3
-    // freed by wait_pid's reap loop.
+    // freed by the resume paths of their last switch-outs.
     u64 t_created_delta   = thread_total_created()   - t_created_before;
     u64 t_destroyed_delta = thread_total_destroyed() - t_destroyed_before;
     TEST_EXPECT_EQ(t_created_delta, 3u,
                    "3 Threads created in the child Proc");
     TEST_EXPECT_EQ(t_destroyed_delta, 3u,
-                   "wait_pid drained all 3 Threads");
+                   "all 3 Threads were freed");
 }
 
 // ---------------------------------------------------------------------------
@@ -253,8 +263,8 @@ void test_thread_exit_self_last_thread_zombies(void) {
 // ---------------------------------------------------------------------------
 // proc.multi_thread_reap
 //
-// Larger reap — 5 peers; verifies wait_pid's multi-thread drain loop
-// (walks p->threads, on_cpu-spin each, thread_free each, then proc_free).
+// Larger reap — 5 peers; every thread is freed by the resume path of its
+// last switch-out, and wait_pid frees the Proc once none is left.
 // ---------------------------------------------------------------------------
 
 #define MTR_N_WORKERS 5
@@ -278,10 +288,12 @@ static void mtr_parent_entry(void *arg) {
 
     for (;;) {
         bool all_exiting = true;
+        irq_state_t s = proc_threads_lock(p);
         for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
             if (peer == current_thread()) continue;
             if (peer->state != THREAD_EXITING) { all_exiting = false; break; }
         }
+        proc_threads_unlock(p, s);
         if (all_exiting) break;
         sched();
     }
@@ -311,7 +323,7 @@ void test_proc_multi_thread_reap(void) {
     TEST_EXPECT_EQ(t_created_delta, (u64)(MTR_N_WORKERS + 1),
                    "N+1 Threads created");
     TEST_EXPECT_EQ(t_destroyed_delta, (u64)(MTR_N_WORKERS + 1),
-                   "wait_pid drained all N+1 Threads");
+                   "all N+1 Threads were freed");
 }
 
 // ---------------------------------------------------------------------------
@@ -532,23 +544,25 @@ void test_proc_note_death_with_live_peer_reaps_signalled(void) {
 }
 
 // ---------------------------------------------------------------------------
-// proc.reap_exited_threads_frees_peers
+// proc.exited_threads_freed_at_switch
+// proc.exited_threads_bounded_by_cpus
 // proc.reap_keeps_thread_cap_open
-// proc.reap_before_sqpoll_charge
+// proc.sqpoll_charge_after_finished_workers
 //
-// An exited peer used to stay on p->threads until wait_pid reaped the whole
-// Proc, so a program that started and joined workers hit PROC_THREAD_MAX with a
-// handful of live threads (OpenRCT2 froze at 256; libxml2's runtest failed).
-// The Loom SQPOLL charge shares that budget, so it frees them first too.
-// The child Proc below is the only reaper of its own threads (wait_pid cannot
-// act while it runs), so holding a worker pointer until the child's own
-// proc_reap_exited_threads call is safe.
+// An exited thread is freed by the resume path of its last switch-out (ARCH
+// 7.3.2, I-48). Nothing in these children spawns, execs or waits to free one:
+// a program that starts and joins workers must never reach PROC_THREAD_MAX with
+// a handful of live threads (OpenRCT2 froze at 256; libxml2's runtest failed).
+// A worker is named by its tid, read before it is readied, and never touched
+// once it may have exited.
 // ---------------------------------------------------------------------------
 
 #define RET_N_WORKERS 4
 #define RET_CHURN     300
+#define REB_N_WORKERS 64
 
-static volatile u32 g_ret_spin;
+static volatile u32  g_ret_spin;
+static volatile bool g_ret_go;
 
 static void ret_worker_entry(void *arg) {
     (void)arg;
@@ -557,60 +571,70 @@ static void ret_worker_entry(void *arg) {
     thread_exit_self();
 }
 
-static bool ret_dead(struct Thread *w) {
-    return __atomic_load_n(&w->state, __ATOMIC_ACQUIRE) == THREAD_EXITING &&
-           !__atomic_load_n(&w->on_cpu, __ATOMIC_ACQUIRE);
+// Held until the test releases it, so it can be named while it is alive.
+static void ret_gated_entry(void *arg) {
+    while (!__atomic_load_n(&g_ret_go, __ATOMIC_ACQUIRE))
+        sched();
+    ret_worker_entry(arg);
 }
 
-static volatile int  g_ret_count_before, g_ret_count_after;
-static volatile u64  g_ret_run_sum, g_ret_reaped_run, g_ret_cpu_after;
-static volatile u32  g_ret_used_max, g_ret_reaped_peak, g_ret_peak_after;
+static bool ret_holds_any(struct Proc *p, const int *tid, int n) {
+    for (int i = 0; i < n; i++)
+        if (test_proc_holds_tid(p, tid[i])) return true;
+    return false;
+}
+
+static volatile int  g_ret_count_after, g_ret_live_after;
+static volatile u64  g_ret_reaped_run, g_ret_cpu_after;
+static volatile u32  g_ret_reaped_peak, g_ret_peak_after;
 static volatile u64  g_ret_destroyed;
-static volatile bool g_ret_alone, g_ret_focus_cleared, g_ret_focus_kept;
+static volatile bool g_ret_alone, g_ret_peak_tid_ok, g_ret_focus_cleared, g_ret_focus_kept;
 
 static void ret_frees_entry(void *arg) {
     (void)arg;
     struct Proc   *p    = current_thread()->proc;
     struct Thread *self = current_thread();
-    struct Thread *w[RET_N_WORKERS];
+    int tid[RET_N_WORKERS];
+    irq_state_t s;
+    __atomic_store_n(&g_ret_go, false, __ATOMIC_RELEASE);
     for (int i = 0; i < RET_N_WORKERS; i++) {
-        w[i] = thread_create_with_arg(p, ret_worker_entry, NULL);
-        if (!w[i]) extinction("ret_frees_entry: thread_create_with_arg failed");
-        ready(w[i]);
+        struct Thread *w = thread_create_with_arg(p, ret_gated_entry, NULL);
+        if (!w) extinction("ret_frees_entry: thread_create_with_arg failed");
+        tid[i] = w->tid;
+        if (i == 0) {
+            s = proc_threads_lock(p);
+            __atomic_store_n(&p->debug_focus_thread, w, __ATOMIC_RELEASE);
+            proc_threads_unlock(p, s);
+        }
+        ready(w);
     }
-    for (int i = 0; i < RET_N_WORKERS; i++)
-        TEST_YIELD_UNTIL_PROC(ret_dead(w[i]));
-
-    irq_state_t s = proc_threads_lock(p);
-    g_ret_count_before = p->thread_count;
-    u64 run = 0;
-    u32 used_max = 0;
-    for (int i = 0; i < RET_N_WORKERS; i++) {
-        run += w[i]->run_ns;
-        u32 used = thread_kstack_used(w[i], NULL);
-        if (used > used_max) used_max = used;
-    }
-    __atomic_store_n(&p->debug_focus_thread, w[0], __ATOMIC_RELEASE);
-    proc_threads_unlock(p, s);
-    g_ret_run_sum  = run;
-    g_ret_used_max = used_max;
-
     u64 destroyed_before = thread_total_destroyed();
-    proc_reap_exited_threads();
+    __atomic_store_n(&g_ret_go, true, __ATOMIC_RELEASE);
+    TEST_YIELD_UNTIL_PROC(!ret_holds_any(p, tid, RET_N_WORKERS));
     g_ret_destroyed = thread_total_destroyed() - destroyed_before;
 
     g_ret_cpu_after     = proc_cpu_ns(p);              // each takes p->threads_lock
     g_ret_peak_after    = proc_kstack_peak(p, NULL, NULL);
     s = proc_threads_lock(p);
     g_ret_count_after   = p->thread_count;
+    g_ret_live_after    = p->live_threads;
     g_ret_alone         = p->threads == self && !self->next_in_proc;
     g_ret_reaped_run    = p->reaped_run_ns;
     g_ret_reaped_peak   = p->reaped_kstack_peak;
+    bool tid_ok = false;
+    for (int i = 0; i < RET_N_WORKERS; i++)
+        if (p->reaped_kstack_tid == tid[i]) tid_ok = true;
+    g_ret_peak_tid_ok   = tid_ok;
     g_ret_focus_cleared = __atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == NULL;
     __atomic_store_n(&p->debug_focus_thread, self, __ATOMIC_RELEASE);
     proc_threads_unlock(p, s);
 
-    proc_reap_exited_threads();                 // nothing dead: a live focus stays
+    // A focus naming a live thread survives another thread's free.
+    struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
+    if (!w) extinction("ret_frees_entry: thread_create_with_arg failed");
+    int wtid = w->tid;
+    ready(w);
+    TEST_YIELD_UNTIL_PROC(!test_proc_holds_tid(p, wtid));
     s = proc_threads_lock(p);
     g_ret_focus_kept = __atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == self;
     __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
@@ -618,32 +642,78 @@ static void ret_frees_entry(void *arg) {
     exits("ok");
 }
 
-void test_proc_reap_exited_threads_frees_peers(void) {
+void test_proc_exited_threads_freed_at_switch(void) {
     int child_pid = rfork(RFPROC, ret_frees_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
 
-    TEST_EXPECT_EQ(g_ret_count_before, RET_N_WORKERS + 1,
-        "every exited worker is still counted before the reap");
     // The destroyed counter is system-wide, so a free elsewhere can only raise
     // it; the counts and the list below are this Proc's exact evidence.
     TEST_ASSERT(g_ret_destroyed >= (u64)RET_N_WORKERS,
-        "the reap freed every exited worker while the Proc lives");
+        "every exited worker was freed with no spawn, exec or wait");
     TEST_EXPECT_EQ(g_ret_count_after, 1, "only the caller is left counted");
+    TEST_EXPECT_EQ(g_ret_live_after, 1, "and it is the one live thread");
     TEST_ASSERT(g_ret_alone, "only the caller is left on p->threads");
-    TEST_EXPECT_EQ(g_ret_reaped_run, g_ret_run_sum,
-        "the Proc keeps the freed workers' run time");
-    TEST_ASSERT(g_ret_cpu_after >= g_ret_run_sum,
+    TEST_ASSERT(g_ret_reaped_run > 0u, "the Proc keeps the freed workers' run time");
+    TEST_ASSERT(g_ret_cpu_after >= g_ret_reaped_run,
         "proc_cpu_ns still includes the freed workers' run time");
-    TEST_ASSERT(g_ret_used_max > 0u, "the workers' kstacks show use");
-    TEST_EXPECT_EQ(g_ret_reaped_peak, g_ret_used_max,
-        "the Proc keeps the deepest freed kstack");
-    TEST_ASSERT(g_ret_peak_after >= g_ret_used_max,
+    TEST_ASSERT(g_ret_reaped_peak > 0u, "the Proc keeps the freed workers' kstack depth");
+    TEST_ASSERT(g_ret_peak_tid_ok, "and names the freed worker that reached it");
+    TEST_ASSERT(g_ret_peak_after >= g_ret_reaped_peak,
         "proc_kstack_peak still reports the freed workers' depth");
     TEST_ASSERT(g_ret_focus_cleared, "a debug focus naming a freed thread clears");
     TEST_ASSERT(g_ret_focus_kept, "a debug focus naming a live thread stays");
+}
+
+static volatile int  g_reb_max_gap, g_reb_count_end;
+static volatile u64  g_reb_destroyed;
+
+// Every worker released at once: at each sample, the exited threads not yet
+// freed number at most the CPUs (the commit's KERNEL_TESTS check extincts past
+// that bound; this watches it from outside).
+static void reb_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    int tid[REB_N_WORKERS];
+    __atomic_store_n(&g_ret_go, false, __ATOMIC_RELEASE);
+    for (int i = 0; i < REB_N_WORKERS; i++) {
+        struct Thread *w = thread_create_with_arg(p, ret_gated_entry, NULL);
+        if (!w) extinction("reb_entry: thread_create_with_arg failed");
+        tid[i] = w->tid;
+        ready(w);
+    }
+    u64 destroyed_before = thread_total_destroyed();
+    int max_gap = 0;
+    __atomic_store_n(&g_ret_go, true, __ATOMIC_RELEASE);
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (ret_holds_any(p, tid, REB_N_WORKERS) && timer_now_ns() < deadline) {
+        irq_state_t s = proc_threads_lock(p);
+        int gap = p->thread_count - p->live_threads;
+        proc_threads_unlock(p, s);
+        if (gap > max_gap) max_gap = gap;
+        sched();
+    }
+    g_reb_max_gap   = max_gap;
+    g_reb_destroyed = thread_total_destroyed() - destroyed_before;
+    irq_state_t s = proc_threads_lock(p);
+    g_reb_count_end = p->thread_count;
+    proc_threads_unlock(p, s);
+    exits("ok");
+}
+
+void test_proc_exited_threads_bounded_by_cpus(void) {
+    g_reb_max_gap = -1;
+    int child_pid = rfork(RFPROC, reb_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_EXPECT_EQ(g_reb_count_end, 1, "every released worker was freed");
+    TEST_ASSERT(g_reb_destroyed >= (u64)REB_N_WORKERS, "the frees are this burst's");
+    TEST_ASSERT(g_reb_max_gap >= 0 && g_reb_max_gap <= (int)smp_cpu_online_count(),
+        "exited threads not yet freed never outnumbered the CPUs");
 }
 
 static volatile int  g_rkc_refused_at, g_rkc_max_count, g_rkc_count_end;
@@ -659,17 +729,16 @@ static void rkc_entry(void *arg) {
     g_rkc_refused_at = -1;
     g_rkc_max_count  = 0;
     for (int i = 0; i < RET_CHURN; i++) {
-        proc_reap_exited_threads();
         if (!proc_thread_cap_ok(p)) { g_rkc_refused_at = i; break; }
         struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
         if (!w) extinction("rkc_entry: thread_create_with_arg failed");
+        int wtid = w->tid;
         irq_state_t s = proc_threads_lock(p);
         if (p->thread_count > g_rkc_max_count) g_rkc_max_count = p->thread_count;
         proc_threads_unlock(p, s);
         ready(w);
-        TEST_YIELD_UNTIL_PROC(ret_dead(w));
+        TEST_YIELD_UNTIL_PROC(!test_proc_holds_tid(p, wtid));
     }
-    proc_reap_exited_threads();
     irq_state_t s = proc_threads_lock(p);
     g_rkc_count_end = p->thread_count;
     proc_threads_unlock(p, s);
@@ -721,30 +790,27 @@ static volatile int g_rsq_count_before, g_rsq_count_after, g_rsq_setup_rc;
 static volatile int g_rsq_sqpoll_after, g_rsq_close_rc, g_rsq_sqpoll_closed;
 static volatile bool g_rsq_exempt;
 
-static bool rsq_peers_dead(struct Proc *p, struct Thread *self) {
-    bool dead = true;
+static bool rsq_alone(struct Proc *p) {
     irq_state_t s = proc_threads_lock(p);
-    for (struct Thread *t = p->threads; t; t = t->next_in_proc)
-        if (t != self && !ret_dead(t)) { dead = false; break; }
+    bool alone = p->thread_count == 1;
     proc_threads_unlock(p, s);
-    return dead;
+    return alone;
 }
 
 static void rsq_entry(void *arg) {
     (void)arg;
-    struct Proc   *p    = current_thread()->proc;
-    struct Thread *self = current_thread();
+    struct Proc *p = current_thread()->proc;
     proc_apply_identity(p, 1000u, 1000u, NULL, 0);
     g_rsq_exempt   = proc_resource_exempt(p);
     g_rsq_setup_rc = g_rsq_close_rc = -1;
-    // Created directly, not through a create arm, so nothing frees them
-    // before the setup does.
+    // Created directly, not through a create arm, so the cap does not stop the
+    // budget's worth of workers.
     for (int i = 0; i < PROC_THREAD_MAX - 1; i++) {
         struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
         if (!w) extinction("rsq_entry: thread_create_with_arg failed");
         ready(w);
     }
-    TEST_YIELD_UNTIL_PROC(rsq_peers_dead(p, self));
+    TEST_YIELD_UNTIL_PROC(rsq_alone(p));
 
     irq_state_t s = proc_threads_lock(p);
     g_rsq_count_before = p->thread_count;
@@ -765,18 +831,17 @@ static void rsq_entry(void *arg) {
     exits("ok");
 }
 
-void test_proc_reap_before_sqpoll_charge(void) {
+void test_proc_sqpoll_charge_after_finished_workers(void) {
     int child_pid = rfork(RFPROC, rsq_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
     TEST_ASSERT(!g_rsq_exempt, "the child runs as a user, so the cap applies");
-    TEST_EXPECT_EQ(g_rsq_count_before, PROC_THREAD_MAX,
-        "255 finished workers and the caller fill the thread budget");
-    TEST_EXPECT_EQ(g_rsq_setup_rc, 0,
-        "an SQPOLL setup frees the exited workers first and fits");
-    TEST_EXPECT_EQ(g_rsq_count_after, 1, "only the caller is left counted");
+    TEST_EXPECT_EQ(g_rsq_count_before, 1,
+        "255 finished workers were freed as they finished: the budget is open");
+    TEST_EXPECT_EQ(g_rsq_setup_rc, 0, "an SQPOLL setup fits");
+    TEST_EXPECT_EQ(g_rsq_count_after, 1, "only the caller is counted");
     TEST_EXPECT_EQ(g_rsq_sqpoll_after, 1, "the poller took its charge");
     TEST_EXPECT_EQ(g_rsq_close_rc, 0, "close the SQPOLL ring");
     TEST_EXPECT_EQ(g_rsq_sqpoll_closed, 0, "the charge settled on close");
@@ -791,7 +856,7 @@ void test_proc_reap_before_sqpoll_charge(void) {
 u32  thread_tid_counter_swap_for_test(u32 v);
 u32  proc_pid_counter_swap_for_test(u32 v);
 void proc_exit_tail_test_set_hook(void (*fn)(void));
-u64  proc_exec_peer_oncpu_waits_for_test(void);
+u64  proc_exec_peer_waits_for_test(void);
 s64  sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
 
 // A user entry and stack the spawn gates accept; nothing maps them, and no
@@ -853,11 +918,12 @@ static volatile int  g_ewp_count_after;
 // The exec'ing thread. Its peer is FABRICATED: created, never readied, and
 // committed EXITING with on_cpu raised under the lock -- the state a real
 // peer holds between its exit commit and its last switch-out. The test thread
-// stands in for that peer's CPU and lowers on_cpu once it has seen exec wait,
+// stands in for that peer's CPU: once it has seen exec wait, it lowers on_cpu
+// and frees the peer as the resume path would (thread_reap_dead, IRQs masked),
 // so this runs at any CPU count; the next test holds a real peer on a second
 // CPU. The peer is raised only if the test thread has not given up on the
-// child, decided under the lock both read, so a late child leaves no raised
-// on_cpu for exec to spin on.
+// child, decided under the lock both read, so a late child leaves no peer for
+// exec to wait on.
 static void ewp_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
@@ -908,7 +974,7 @@ void test_proc_exec_waits_for_exiting_peer(void) {
     g_ewp_old  = NULL;
     g_ewp_ready = g_ewp_setup_failed = g_ewp_swapped = g_ewp_abandoned = false;
     g_ewp_count_after = -1;
-    u64 waits0 = proc_exec_peer_oncpu_waits_for_test();
+    u64 waits0 = proc_exec_peer_waits_for_test();
 
     int child_pid = rfork(RFPROC, ewp_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
@@ -924,17 +990,20 @@ void test_proc_exec_waits_for_exiting_peer(void) {
     if (g_ewp_ready) {
         struct Proc *cp = g_ewp_proc;
         u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        while (proc_exec_peer_oncpu_waits_for_test() == waits0 && !ewp_as_swapped(cp) &&
+        while (proc_exec_peer_waits_for_test() == waits0 && !ewp_as_swapped(cp) &&
                timer_now_ns() < deadline)
             sched();
-        waited = proc_exec_peer_oncpu_waits_for_test() != waits0;
+        waited = proc_exec_peer_waits_for_test() != waits0;
         // The peer stays on its CPU a while longer; exec must keep waiting.
         u64 hold = timer_now_ns() + 20000000ull;
         while (timer_now_ns() < hold)
             sched();
         swapped_early = ewp_as_swapped(cp);
-        // Lowered on every path: wait_pid's reap waits on it too.
+        // Freed on every path: exec and wait_pid both wait for it.
+        irq_state_t is = spin_lock_irqsave(NULL);
         __atomic_store_n(&g_ewp_peer->on_cpu, false, __ATOMIC_RELEASE);
+        thread_reap_dead(g_ewp_peer);
+        spin_unlock_irqrestore(NULL, is);
     }
     int status = -1;
     int reaped = wait_pid(&status);
@@ -942,11 +1011,11 @@ void test_proc_exec_waits_for_exiting_peer(void) {
     TEST_ASSERT(!abandoned, "the child reached exec within the budget");
     TEST_ASSERT(!g_ewp_setup_failed, "setup: a peer and a new address space");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
-    TEST_ASSERT(!swapped_early, "exec kept the old address space while the peer was on its CPU");
+    TEST_ASSERT(!swapped_early, "exec kept the old address space while the peer was unfreed");
     // The control for the line above: exec was waiting, not merely slow to swap.
-    TEST_ASSERT(waited, "exec found the peer on its CPU and waited");
-    TEST_ASSERT(g_ewp_swapped, "exec finished once the peer was off its CPU");
-    TEST_EXPECT_EQ(g_ewp_count_after, 1, "exec freed the exited peer: the new image starts alone");
+    TEST_ASSERT(waited, "exec found the peer not yet freed and waited");
+    TEST_ASSERT(g_ewp_swapped, "exec finished once the peer was freed");
+    TEST_EXPECT_EQ(g_ewp_count_after, 1, "the new image starts alone");
 }
 
 static struct Proc      *volatile g_ewr_proc;
@@ -971,10 +1040,10 @@ static void ewr_tail_hook(void) {
     g_ewr_peer_cpu = smp_cpu_idx_self();
     __atomic_store_n(&g_ewr_in_tail, true, __ATOMIC_RELEASE);
     u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-    while (proc_exec_peer_oncpu_waits_for_test() == g_ewr_waits0 && !ewr_as_swapped() &&
+    while (proc_exec_peer_waits_for_test() == g_ewr_waits0 && !ewr_as_swapped() &&
            timer_now_ns() < deadline)
         __asm__ __volatile__("yield" ::: "memory");
-    g_ewr_waited = proc_exec_peer_oncpu_waits_for_test() != g_ewr_waits0;
+    g_ewr_waited = proc_exec_peer_waits_for_test() != g_ewr_waits0;
     u64 hold = timer_now_ns() + 20000000ull;
     while (timer_now_ns() < hold)
         __asm__ __volatile__("yield" ::: "memory");
@@ -1004,7 +1073,7 @@ static void ewr_entry(void *arg) {
     g_ewr_old = p->as;
     proc_table_lock_release(s);
     g_ewr_proc   = p;
-    g_ewr_waits0 = proc_exec_peer_oncpu_waits_for_test();
+    g_ewr_waits0 = proc_exec_peer_waits_for_test();
     peer->cpu_pinned = true;
     ready_on(cpu, peer);
     (void)gic_send_ipi(cpu, IPI_RESCHED);
@@ -1058,9 +1127,9 @@ void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void) {
     TEST_ASSERT(!g_ewr_swapped_early,
         "exec kept the old address space while the peer's tail held its CPU");
     // The control for the line above: exec was waiting, not merely slow to swap.
-    TEST_ASSERT(g_ewr_waited, "exec found the peer on its CPU and waited");
-    TEST_ASSERT(g_ewr_swapped, "exec finished once the peer was off its CPU");
-    TEST_EXPECT_EQ(g_ewr_count_after, 1, "exec freed the exited peer: the new image starts alone");
+    TEST_ASSERT(g_ewr_waited, "exec found the peer not yet freed and waited");
+    TEST_ASSERT(g_ewr_swapped, "exec finished once the peer was freed");
+    TEST_EXPECT_EQ(g_ewr_count_after, 1, "the new image starts alone");
 }
 
 static volatile bool g_srd_exempt, g_srd_tid_spent;

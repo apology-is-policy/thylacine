@@ -66,6 +66,10 @@ struct CpuSched {
     // (insert/remove/pick), the stealer moves on rather than block.
     spin_lock_t    lock;
     struct Thread *run_tree[SCHED_BAND_COUNT];
+    // How many threads each band's tree holds, written under `lock` by
+    // insert_sorted and unlink. The diagnostic counts read these without the
+    // lock rather than walk a tree whose threads a peer may be freeing.
+    u32            nr_queued[SCHED_BAND_COUNT];
     s64            vd_counter;
     bool           initialized;
     struct Thread *idle;             // Per-CPU idle thread. CPU 0 = kthread.
@@ -274,7 +278,8 @@ void sched_init(unsigned cpu_idx) {
 
     spin_lock_init(&cs->lock);
     for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
-        cs->run_tree[b] = NULL;
+        cs->run_tree[b]  = NULL;
+        cs->nr_queued[b] = 0;
     }
     cs->vd_counter   = 1;
     cs->idle         = current_thread();   // CPU's idle thread = first
@@ -617,6 +622,8 @@ static bool in_run_tree(struct CpuSched *cs, struct Thread *t) {
 // vd_t) place `t` AFTER existing equal-keyed nodes — FIFO within ties.
 static void insert_sorted(struct CpuSched *cs, struct Thread *t) {
     struct Thread **head = &cs->run_tree[t->band];
+    __atomic_store_n(&cs->nr_queued[t->band], cs->nr_queued[t->band] + 1u,
+                     __ATOMIC_RELAXED);
 
     // Empty band or t < head: prepend.
     if (!*head || (*head)->vd_t > t->vd_t) {
@@ -643,6 +650,8 @@ static void insert_sorted(struct CpuSched *cs, struct Thread *t) {
 
 // Remove `t` from `cs`'s band tree. Caller has confirmed t is in the tree.
 static void unlink(struct CpuSched *cs, struct Thread *t) {
+    __atomic_store_n(&cs->nr_queued[t->band], cs->nr_queued[t->band] - 1u,
+                     __ATOMIC_RELAXED);
     if (t->runnable_prev) {
         t->runnable_prev->runnable_next = t->runnable_next;
     } else {
@@ -1109,20 +1118,36 @@ void sched_activate_addrspace(struct Thread *t) {
     spin_unlock_irqrestore(NULL, s);
 }
 
-void sched_finish_task_switch(void) {
-    struct CpuSched *cs = this_cpu_sched();
-    // P2-Cf: clear prev's on_cpu (mirror of sched()'s C-side resume
-    // path). For fresh threads coming through thread_trampoline, this
-    // is the first opportunity post-cpu_switch_context to mark prev
-    // as fully switched out.
-    struct Thread *prev_to_clear = cs->prev_to_clear_on_cpu;
+// The resume half of every switch, run on the CPU that switched, by the thread
+// it switched to, before anything else runs there: sched()'s tail, and
+// sched_finish_task_switch for the trampolines and thread_switch. IRQs are
+// masked throughout.
+//
+// P2-Cf: clearing prev's on_cpu tells a wakeup() spinner that prev's registers
+// are saved and it may be made RUNNABLE. ARCH 7.3.2: an exited user prev is
+// freed here, after the run-queue lock is released. Whether prev is one is
+// read while on_cpu still pins it: once it clears, a sleeping prev can be
+// woken, run, exit and be freed on another CPU.
+static void sched_resume_tail(struct CpuSched *cs) {
+    struct Thread *prev = cs->prev_to_clear_on_cpu;
+    struct Thread *dead = NULL;
     cs->prev_to_clear_on_cpu = NULL;
-    if (prev_to_clear) {
-        __atomic_store_n(&prev_to_clear->on_cpu, false, __ATOMIC_RELEASE);
+    if (prev) {
+        if (prev->state == THREAD_EXITING && prev->proc != kproc())
+            dead = prev;
+        __atomic_store_n(&prev->on_cpu, false, __ATOMIC_RELEASE);
     }
     spin_lock_t *lk = cs->pending_release_lock;
     cs->pending_release_lock = NULL;
+    // RW-2 2A-F3: thread_switch bypasses sched() and arms no
+    // pending_release_lock, so a thread it resumes can arrive with lk == NULL.
     if (lk) spin_unlock_raw(lk);   // #360: the cross-thread handoff release
+    if (dead)
+        thread_reap_dead(dead);
+}
+
+void sched_finish_task_switch(void) {
+    sched_resume_tail(this_cpu_sched());
 }
 
 // P2-Ce: try to steal a runnable thread from a peer CPU's run tree.
@@ -1341,9 +1366,9 @@ void sched(void) {
     //                       re-insert into run tree; some peer will
     //                       wake via wakeup()/ready() later.
     //   THREAD_EXITING   → exit: caller is winding down. Same as
-    //                       SLEEPING — don't re-insert, ever: once on_cpu
-    //                       clears, the next thread create or exec of its
-    //                       Proc (proc_reap_exited_threads) or wait_pid frees it.
+    //                       SLEEPING — don't re-insert, ever. A user thread
+    //                       is freed by sched_resume_tail on the other side
+    //                       of this switch; a kernel thread by its joiner.
     //   THREAD_RUNNABLE  → INVALID — prev is current; it cannot be
     //                       both current and already runnable.
     //   _INVALID         → INVALID — magic check above caught corrupt
@@ -1439,8 +1464,8 @@ void sched(void) {
     } else {
         // Block (SLEEPING) or exit (EXITING) — prev stays out of the run tree.
         // wakeup()/ready() will re-insert SLEEPING; EXITING never returns, and
-        // its Proc's next thread create or exec, or wait_pid, frees it once
-        // on_cpu clears. HMP foundation (#864): prev stopped
+        // sched_resume_tail frees it on the far side of this switch (a kernel
+        // thread: its joiner). HMP foundation (#864): prev stopped
         // consuming CPU, so decay its util estimate (the dequeue-to-blocked
         // hook, ARCH §8.4.4). Inert on uniform topology + for pinned threads
         // (select_target_cpu ignores util there).
@@ -1585,27 +1610,8 @@ void sched(void) {
     // destination CPU's prev set this field before switching to us.
     // Then restore IRQ state from our local frame's `s` (per-thread
     // value, captured at our sched entry).
-    {
-        struct CpuSched *cs_now = this_cpu_sched();
-        // P2-Cf: clear PREV's on_cpu now that cpu_switch_context has
-        // saved its full register state. After this release-store any
-        // peer's wakeup() spin loop on prev will exit and proceed to
-        // transition prev → RUNNABLE safely.
-        struct Thread *prev_to_clear = cs_now->prev_to_clear_on_cpu;
-        cs_now->prev_to_clear_on_cpu = NULL;
-        if (prev_to_clear) {
-            __atomic_store_n(&prev_to_clear->on_cpu, false, __ATOMIC_RELEASE);
-        }
-        spin_lock_t *lk = cs_now->pending_release_lock;
-        cs_now->pending_release_lock = NULL;
-        // RW-2 2A-F3: NULL-guard, symmetric with sched_finish_task_switch (the
-        // trampoline resume). The test-only thread_switch primitive bypasses
-        // sched() and arms no pending_release_lock; a thread suspended INSIDE
-        // sched() that is later resumed via thread_switch reaches here with
-        // lk == NULL -> spin_unlock(NULL) would store through address 0.
-        if (lk) spin_unlock_raw(lk);   // #360: the cross-thread handoff release
-        __asm__ __volatile__("msr daif, %x0\n" :: "r"(s) : "memory");
-    }
+    sched_resume_tail(this_cpu_sched());
+    __asm__ __volatile__("msr daif, %x0\n" :: "r"(s) : "memory");
 }
 
 void sched_remove_if_runnable(struct Thread *t) {
@@ -1650,15 +1656,8 @@ unsigned sched_runnable_count(void) {
     // BAND_NORMAL) is still counted, so a genuinely stranded work thread is
     // never masked.
     unsigned n = 0;
-    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
-        struct CpuSched *cs = &g_cpu_sched[i];
-        if (!cs->initialized) continue;
-        for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
-            if (b == SCHED_BAND_IDLE) continue;
-            for (struct Thread *t = cs->run_tree[b]; t; t = t->runnable_next) {
-                n++;
-            }
-        }
+    for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
+        if (b != SCHED_BAND_IDLE) n += sched_runnable_count_band(b);
     }
     return n;
 }
@@ -1669,18 +1668,37 @@ unsigned sched_runnable_count_band(unsigned band) {
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
         if (!cs->initialized) continue;
-        for (struct Thread *t = cs->run_tree[band]; t; t = t->runnable_next) {
-            n++;
-        }
+        n += __atomic_load_n(&cs->nr_queued[band], __ATOMIC_RELAXED);
     }
     return n;
 }
 
+#ifdef KERNEL_TESTS
+// Each CPU's per-band counts against a walk of its trees, under its lock.
+bool sched_run_counts_match_trees_for_test(void);
+bool sched_run_counts_match_trees_for_test(void) {
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        bool ok = true;
+        irq_state_t s = spin_lock_irqsave(&cs->lock);
+        for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
+            u32 n = 0;
+            for (struct Thread *t = cs->run_tree[b]; t; t = t->runnable_next) n++;
+            if (n != cs->nr_queued[b]) ok = false;
+        }
+        spin_unlock_irqrestore(&cs->lock, s);
+        if (!ok) return false;
+    }
+    return true;
+}
+#endif
+
 // TI-4d: is there ANY queued non-idle runnable work anywhere? Reads ONLY each
 // band's HEAD pointer (a stable slot in g_cpu_sched[]) and tests it for NULL --
-// it never dereferences a Thread, so unlike sched_runnable_count() it cannot
-// follow a runnable_next that a peer is concurrently freeing. That makes it
-// safe to call lock-free on the hot idle-park path (3M+ times during boot). A
+// it never dereferences a Thread, so it cannot follow a runnable_next that a
+// peer is concurrently freeing. That makes it safe to call lock-free on the hot
+// idle-park path (3M+ times during boot). A
 // relaxed load races a concurrent insert/unlink, but the answer is only used as
 // a statistic-at-this-instant -- a few-ns-stale yes/no is exactly right for the
 // "was work queued when I parked" sample. SCHED_BAND_IDLE excluded (the per-CPU
@@ -1769,33 +1787,59 @@ u64 sched_cpu_ctxt(unsigned cpu) {
     return __atomic_load_n(&g_cpu_sched[cpu].nctxt, __ATOMIC_RELAXED);
 }
 
-// Best-effort snapshot of every runnable thread across ALL CPUs' run trees
-// (every band, INCLUDING idle -- the dump shows everything so a quiescence
-// failure can be fingerprinted), with enough identity (cpu / tid / band /
-// state / on_cpu / proc) to name a thread. Lock-free on purpose: it is called
-// from the test-fail path and the per-test quiescence guard, where a racing
-// mutation during the walk is acceptable -- the goal is to SEE the thread, not
-// a consistent count. Cost is paid only on the failure path, never the hot
-// path. This is the instrument that cracked #857 (cpu=1 tid=1 band=IDLE = a
+// A snapshot of every runnable thread across ALL CPUs' run trees (every band,
+// INCLUDING idle -- the dump shows everything so a quiescence failure can be
+// fingerprinted), with enough identity (cpu / tid / band / state / on_cpu /
+// proc) to name a thread. Each CPU's trees are copied under its lock and
+// printed after it, so no thread is read after a peer may have freed it and
+// the UART never runs under a run-queue lock. Called from the test-fail path
+// only. This is the instrument that cracked #857 (cpu=1 tid=1 band=IDLE = a
 // benign secondary idle thread, not a stranded work thread).
+#define SCHED_DUMP_MAX 16u
 void sched_dump_runnable(const char *tag) {
+    struct {
+        int        tid;
+        unsigned   band;
+        unsigned   state;
+        bool       on_cpu;
+        bool       magic_ok;
+        uintptr_t  proc;
+    } row[SCHED_DUMP_MAX];
     uart_puts("  [runnable-dump ");
     uart_puts(tag ? tag : "?");
     uart_puts("]\n");
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
         if (!cs->initialized) continue;
+        unsigned n = 0, more = 0;
+        irq_state_t s = spin_lock_irqsave(&cs->lock);
         for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
             for (struct Thread *t = cs->run_tree[b]; t; t = t->runnable_next) {
-                uart_puts("    cpu=");    uart_putdec((u64)i);
-                uart_puts(" tid=");       uart_putdec((u64)(unsigned)t->tid);
-                uart_puts(" band=");      uart_putdec((u64)b);
-                uart_puts(" state=");     uart_putdec((u64)t->state);
-                uart_puts(" on_cpu=");    uart_putdec((u64)(t->on_cpu ? 1u : 0u));
-                uart_puts(" proc=");      uart_puthex64((u64)(uintptr_t)t->proc);
-                uart_puts(" magic_ok=");  uart_putdec((u64)(t->magic == THREAD_MAGIC ? 1u : 0u));
-                uart_puts("\n");
+                if (n == SCHED_DUMP_MAX) { more++; continue; }
+                row[n].tid      = t->tid;
+                row[n].band     = b;
+                row[n].state    = (unsigned)t->state;
+                row[n].on_cpu   = t->on_cpu;
+                row[n].magic_ok = t->magic == THREAD_MAGIC;
+                row[n].proc     = (uintptr_t)t->proc;
+                n++;
             }
+        }
+        spin_unlock_irqrestore(&cs->lock, s);
+        for (unsigned k = 0; k < n; k++) {
+            uart_puts("    cpu=");    uart_putdec((u64)i);
+            uart_puts(" tid=");       uart_putdec((u64)(unsigned)row[k].tid);
+            uart_puts(" band=");      uart_putdec((u64)row[k].band);
+            uart_puts(" state=");     uart_putdec((u64)row[k].state);
+            uart_puts(" on_cpu=");    uart_putdec((u64)(row[k].on_cpu ? 1u : 0u));
+            uart_puts(" proc=");      uart_puthex64((u64)row[k].proc);
+            uart_puts(" magic_ok=");  uart_putdec((u64)(row[k].magic_ok ? 1u : 0u));
+            uart_puts("\n");
+        }
+        if (more) {
+            uart_puts("    cpu=");    uart_putdec((u64)i);
+            uart_puts(" +");          uart_putdec((u64)more);
+            uart_puts(" more\n");
         }
     }
 }

@@ -196,7 +196,7 @@ static void torpor_consumer_entry(void) {
                                                 g_torpor_timeout);
     g_torpor_done++;       // → 2: post-wait
     // #109: terminal EXITING park (was for(;;)sched()); reaped by the teardown.
-    test_kthread_park_terminal(&g_torpor_exited);
+    test_thread_park_terminal(&g_torpor_exited);
 }
 
 // Set up the per-test consumer fixture. Returns 0 on success, -1 on a
@@ -224,10 +224,10 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
     return 0;
 }
 
-// Tear down: free the consumer thread, then free the proc (which drains
-// its VMAs). Caller passes the consumer thread; safe to pass NULL.
+// Tear down: wait for the consumer thread to be freed, then free the proc
+// (which drains its VMAs). Caller passes the consumer thread; safe to pass NULL.
 static void torpor_consumer_teardown(struct Thread *consumer) {
-    if (consumer) test_kthread_join_free(consumer, &g_torpor_exited);
+    if (consumer) test_thread_join_last(g_torpor_proc, &g_torpor_exited);
     if (g_torpor_proc) {
         g_torpor_proc->state = 2;            // ZOMBIE
         proc_free(g_torpor_proc);
@@ -396,7 +396,7 @@ static void torpor_consumer_a_entry(void) {
                                              /*expected=*/0,
                                              /*timeout_us=*/60ll * 1000000ll);
     g_torpor_done_a++;
-    test_kthread_park_terminal(&g_torpor_exited_a);  // #109: EXITING park
+    test_thread_park_terminal(&g_torpor_exited_a);  // #109: EXITING park
 }
 
 static void torpor_consumer_b_entry(void) {
@@ -405,7 +405,7 @@ static void torpor_consumer_b_entry(void) {
                                              /*expected=*/0,
                                              /*timeout_us=*/60ll * 1000000ll);
     g_torpor_done_b++;
-    test_kthread_park_terminal(&g_torpor_exited_b);  // #109: EXITING park
+    test_thread_park_terminal(&g_torpor_exited_b);  // #109: EXITING park
 }
 
 void test_torpor_wake_two_waiters_count_bound(void) {
@@ -494,8 +494,8 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(wake3, (s64)0,
         "third WAKE on emptied bucket returns 0");
 
-    test_kthread_join_free(ca, &g_torpor_exited_a);
-    test_kthread_join_free(cb, &g_torpor_exited_b);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_torpor_exited_a, __ATOMIC_ACQUIRE));
+    test_thread_join_last(g_torpor_proc, &g_torpor_exited_b);
     g_torpor_proc->state = 2;        // ZOMBIE
     proc_free(g_torpor_proc);
     g_torpor_proc = NULL;

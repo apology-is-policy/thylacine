@@ -1741,10 +1741,10 @@ void test_proc_wait_pid_syscall_packed_flag(void) {
 // PTY-1f: the job-control stop -- the second stop owner (specs/pty_stop.tla)
 // =============================================================================
 
-// The sole thread of a live, single-threaded child that only the calling test
-// reaps. Read under the child's threads_lock; kept past it because nothing
-// frees that thread before the caller's wait_pid (a single thread has no peer
-// to reap it).
+// The sole thread of a live, single-threaded child. Read under the child's
+// threads_lock and kept past it: the thread exits only once the caller
+// releases it, and the resume path of its last switch-out then frees it (ARCH
+// 7.3.2), so a caller must not touch the pointer after the release.
 static struct Thread *js_sole_thread(struct Proc *c) {
     irq_state_t s = proc_threads_lock(c);
     struct Thread *t = c->threads;
