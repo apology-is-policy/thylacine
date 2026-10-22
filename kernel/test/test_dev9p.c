@@ -704,6 +704,10 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
 static struct Spoor *make_open_client_and_root(void) {
     g_tlopen_fail_ecode = 0;
     g_setattr_fail_ecode = 0;
+    // The attribute replies' fixtures: an assert returns from its test, so a
+    // test that failed between setting one and restoring it left it set.
+    g_ga_mode = 0100644u;
+    g_ga_fail_ecode = 0;
     if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                             dev9p_responder, NULL) != 0) return NULL;
     if (p9_client_init(&g_client, /*root_fid=*/0, 8192,
