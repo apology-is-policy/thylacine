@@ -51,7 +51,7 @@ void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);
 void test_sys_set_traceable_one_way_to_zero(void);
 void test_sys_corvus_caps_kproc_has_new_caps(void);
-void test_kern_random_seeded_returns_true_on_qemu(void);
+void test_kern_random_strong_source_seeded(void);
 void test_kern_random_bytes_produces_nonzero(void);
 
 static struct Proc *make_test_proc_no_caps(void) {
@@ -157,11 +157,11 @@ void test_sys_corvus_caps_kproc_has_new_caps(void) {
 }
 
 // Only an unobserved strong source flips kern_random_seeded(): RNDR, or the
-// virtio-rng pull after virtio_init (hvf's Apple cores have no RNDR).
-void test_kern_random_seeded_returns_true_on_qemu(void) {
-    if (!test_strong_entropy()) return;
-    TEST_ASSERT(kern_random_seeded(),
-        "kern_random_seeded() returns true on QEMU virt");
+// virtio-rng pull after virtio_init (hvf's Apple cores have no RNDR). The gate
+// is the whole test: a seeded pool passes, an unseeded one fails on a CPU with
+// RNDR or under a declared virtio-rng, and is a counted skip otherwise.
+void test_kern_random_strong_source_seeded(void) {
+    (void)test_strong_entropy();
 }
 
 void test_kern_random_bytes_produces_nonzero(void) {

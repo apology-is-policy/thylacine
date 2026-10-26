@@ -20,7 +20,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-26
 ---
 ## Purpose
 
@@ -378,8 +378,11 @@ CPU's output tore apart is still counted there, and a mismatch fails ("the
 kernel suite counted"). The mirror is a second route to the machine beside the
 launcher's declaration ([[sub-substrate-machine]]), so it is checked against
 it: `tools/test-skip-verdict.py` runs the real `run-vm.sh` under a stand-in
-QEMU that records its argv, for fifteen configurations, and requires the two
-to agree on every kind; then it drives the block's refusals (ungated, torn, the
+QEMU that records its argv, for seventeen configurations (the pi's KVM with
+the host's GIC, and extras in QEMU's long option form, among them), and
+requires the two to agree on every kind; it requires the launcher to refuse,
+before QEMU starts, each extra argument that would attach a device it cannot
+declare; then it drives the block's refusals (ungated, torn, the
 old shape, an unknown kind, a missing machine line, a tally that disagrees),
 each with its acceptance one variable away. It runs a byte-identical copy of
 the launcher inside a scratch tree, because the launcher clears its QMP

@@ -13,9 +13,8 @@
 //   full.attach_open_close              — lifecycle plumbing
 //   full.read_fills_zeroes              — Linux /dev/full read shape
 //   full.write_returns_minus1           — every write fails (-1)
-//   random.rndr_available_or_skipped    — RNDR detection (must be
-//                                          available on QEMU virt
-//                                          -cpu max)
+//   random.read_serves_bytes            — a read once a strong source
+//                                          seeded the CSPRNG
 //   random.read_produces_nonzero_bytes  — ROADMAP §6.2 exit criterion
 //   random.read_varies_across_calls     — basic CSPRNG sanity
 //   cons.write_advances                 — write returns n; bytes go
@@ -41,7 +40,7 @@ void test_zero_write_consumes(void);
 void test_full_attach_open_close(void);
 void test_full_read_fills_zeroes(void);
 void test_full_write_returns_minus1(void);
-void test_random_rndr_available(void);
+void test_random_read_serves_bytes(void);
 void test_random_read_produces_nonzero_bytes(void);
 void test_random_read_varies_across_calls(void);
 void test_cons_write_advances(void);
@@ -237,7 +236,7 @@ void test_full_write_returns_minus1(void) {
 
 // devrandom serves bytes once a strong source (RNDR, or the virtio-rng pull)
 // has seeded the CSPRNG, and refuses (-1) before.
-void test_random_rndr_available(void) {
+void test_random_read_serves_bytes(void) {
     if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");

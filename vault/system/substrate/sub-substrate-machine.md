@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-26
 ---
 ## Purpose
 
@@ -172,9 +172,14 @@ device set because its View menu switches consoles interactively.
 an empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device
 the same way, so the guest cannot tell a device that was never attached from
 one it failed to see -- only the launcher knows. Just before `exec`, the script
-walks every device argument it is about to pass (the extra arguments, the two
-rng devices and the host share included) and appends one bootargs word per
-device: `thylacine.virtio-<kind>` for a virtio-mmio device and
+walks every `-device` and `-virtfs` argument it is about to pass (the extra
+arguments, the two rng devices and the host share included; the long `--`
+forms and a leading `driver=` too) and appends one bootargs word per device.
+It refuses, before QEMU starts, extra arguments that would attach a device any
+other way -- `-drive` without `if=none` or `if=pflash`, `-hd[a-d]`, `-cdrom`,
+`-nic` and `-net` other than `none`, a JSON `-device`, or one whose driver
+follows another key -- since it could not declare what they attach. The
+words: `thylacine.virtio-<kind>` for a virtio-mmio device and
 `thylacine.virtio-pci-<kind>` for a virtio PCI function, the kind naming the
 virtio DeviceID rather than the model (keyboard, mouse, tablet, multitouch and
 input-host are `input`; gpu-gl and gpu-rutabaga are `gpu`; a `-transitional`

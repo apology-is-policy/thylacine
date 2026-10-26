@@ -807,12 +807,35 @@ fi
 # empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device the
 # same way, so only the launcher knows what it asked for: a kernel test FAILS
 # when what it needs was declared and is absent, or is present undeclared, and
-# skips (counted) when it was not declared. Derived from every device argument
-# QEMU is given, extras included, so it cannot drift from them:
+# skips (counted) when it was not declared. Derived from every -device and
+# -virtfs argument QEMU is given, extras included, so it cannot drift from them:
 # thylacine.virtio-<kind> per virtio-mmio device and thylacine.virtio-pci-<kind>
 # per virtio PCI function, where the kind names the virtio DeviceID, not the
 # model (keyboard, mouse, tablet, multitouch and input-host are input; gpu-gl
 # and gpu-rutabaga are gpu), and -virtfs is the virtio-9p PCI function it makes.
+# QEMU also makes devices from -drive (unless if=none or if=pflash), -hd[a-d],
+# -cdrom, -nic and -net, and takes a -device as JSON or with driver= after
+# another key; the extras may use none of these, since the walk could not
+# declare what they attach.
+_prev=
+for _arg in ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
+    _implicit=
+    case "${_prev#-}" in
+        -drive|drive)
+            case ",$_arg," in *,if=none,*|*,if=pflash,*) ;; *) _implicit=1 ;; esac ;;
+        -hd[a-d]|hd[a-d]|-cdrom|cdrom) _implicit=1 ;;
+        -nic|nic|-net|net) [[ "$_arg" == none ]] || _implicit=1 ;;
+        -device|device)
+            _spec=${_arg%%,*}
+            [[ "$_arg" != \{* && ( "$_spec" != *=* || "$_spec" == driver=* ) ]] || _implicit=1 ;;
+    esac
+    if [[ -n "$_implicit" ]]; then
+        echo "run-vm.sh: '$_prev $_arg' attaches a device the launcher cannot declare;" \
+             "attach it with -device (a -drive if=none or -netdev backend beside it)" >&2
+        exit 2
+    fi
+    _prev=$_arg
+done
 rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)
 _prev=
 for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]}"} \
@@ -820,8 +843,9 @@ for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]
             ${gpu_flags[@]+"${gpu_flags[@]}"} "${rng_flags[@]}" ${audio_flags[@]+"${audio_flags[@]}"} \
             ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
             ${share_flags[@]+"${share_flags[@]}"} ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
-    if [[ "$_prev" == -device ]]; then
+    if [[ "$_prev" == -device || "$_prev" == --device ]]; then
         _spec=${_arg%%,*}
+        _spec=${_spec#driver=}
         _spec=${_spec%-non-transitional}
         _spec=${_spec%-transitional}
         case "$_spec" in
@@ -834,7 +858,7 @@ for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]
             gpu-gl|gpu-rutabaga) _kind=gpu ;;
         esac
         [[ -z "$_kind" ]] || append_tokens+=("thylacine.virtio-$_bus$_kind")
-    elif [[ "$_prev" == -virtfs ]]; then
+    elif [[ "$_prev" == -virtfs || "$_prev" == --virtfs ]]; then
         append_tokens+=("thylacine.virtio-pci-9p")
     fi
     _prev=$_arg

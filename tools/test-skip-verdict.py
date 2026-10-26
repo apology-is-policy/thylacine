@@ -62,7 +62,19 @@ def configs(disk, pool):
         ("tcg-gic3-auto", dict(base, THYLACINE_ACCEL="tcg"), 4, dict(FULL, msi=1)),
         ("tcg-its-off", dict(base, THYLACINE_ACCEL="tcg", THYLACINE_ITS="off"), 4, dict(FULL)),
         ("tcg-its-on", dict(base, THYLACINE_ACCEL="tcg", THYLACINE_ITS="on"), 4, dict(FULL, msi=1)),
+        # The pi: KVM with the host's GIC, whose MSI support the launcher cannot see.
+        ("kvm-gic-host", dict(base, THYLACINE_ACCEL="kvm"), 4, dict(FULL)),
+        # Extras are walked too, in QEMU's long option form and with driver= first.
+        ("extra-device", dict(base, THYLACINE_QEMU_EXTRA="--device driver=virtio-net-pci,id=xn0 "
+                                                         "-drive if=none,id=xd0,file=/dev/null"),
+         4, dict(gic2, **{"virtio-pci-net": 2})),
     ]
+
+
+# Extra arguments that make QEMU attach a device the walk cannot declare.
+REFUSED = ["-nic user,model=virtio-net-pci", "-net nic,model=virtio", "-drive file=/dev/null,if=virtio",
+           "-drive file=/dev/null", "-hda /dev/null", "--cdrom /dev/null",
+           "-device id=xn0,driver=virtio-net-pci", '-device {"driver":"virtio-net-pci"}']
 
 
 def launch(work, env, cpus):
@@ -88,6 +100,19 @@ def launch(work, env, cpus):
     qemu = [l for l in (r.stdout + r.stderr).split("\n") if l.startswith("==> qemu: accel=")]
     assert len(qemu) == 1, r.stdout + r.stderr
     return words, qemu[0]
+
+
+def refused(work, extra):
+    """run-vm.sh's exit, its stderr, and whether it started QEMU, for these extras."""
+    argv = work / "argv.txt"
+    if argv.exists():
+        argv.unlink()
+    full = {"PATH": f"{work / 'bin'}:{os.environ['PATH']}", "HOME": os.environ["HOME"],
+            "FAKEQ_OUT": str(argv), "THYLACINE_BUILD_DIR": str(work / "kernel"),
+            "THYLACINE_ACCEL": "hvf", "THYLACINE_NO_AUDIO": "1", "THYLACINE_QEMU_EXTRA": extra}
+    r = subprocess.run([str(work / "tools/run-vm.sh"), "--no-share"], env=full,
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    return r.returncode, r.stderr, argv.exists()
 
 
 def run_block(block, log_text, env, repo_root):
@@ -132,9 +157,9 @@ def main():
         assert (work / "tools/run-vm.sh").read_bytes() == (ROOT / "tools/run-vm.sh").read_bytes()
         (work / "bin").mkdir()
         fake = work / "bin/qemu-system-aarch64"
-        # Answers -accel help as a host with both accelerators would, so
+        # Answers -accel help as a host with every accelerator would, so
         # run-vm.sh keeps the accelerator each configuration asks for.
-        fake.write_text('#!/bin/sh\n[ "$1 $2" = "-accel help" ] && { printf "tcg\\nhvf\\n"; exit 0; }\n'
+        fake.write_text('#!/bin/sh\n[ "$1 $2" = "-accel help" ] && { printf "tcg\\nhvf\\nkvm\\n"; exit 0; }\n'
                         'for a in "$@"; do printf "%s\\n" "$a"; done > "$FAKEQ_OUT"\n')
         fake.chmod(0o755)
         (work / "kernel").mkdir()
@@ -150,6 +175,8 @@ def main():
         for name, env, cpus, want in configs(str(disk), str(pool)):
             words, qemu = launch(work, env, cpus)
             assert f"accel={env['THYLACINE_ACCEL']} " in qemu, f"{name}: {qemu}"
+            if env["THYLACINE_ACCEL"] == "kvm":
+                assert " gic=vhost " in qemu, f"{name}: {qemu}"
             got = collections.Counter(w[len("thylacine."):] for w in words
                                       if w.startswith("thylacine.") and w[len("thylacine."):] in KINDS)
             assert dict(got) == want, f"{name}: run-vm.sh declared {dict(got)}, want {want}"
@@ -165,6 +192,12 @@ def main():
                             f"{name}: a skip of undeclared {kind} x{nth + 1} was refused: {out}"
             report.append(f"PASS {name} ({qemu[len('==> qemu: '):]}): declares "
                           f"{sorted(got.elements())}; test.sh agrees on every kind")
+
+        for extra in REFUSED:
+            rc, err, started = refused(work, extra)
+            assert rc == 2 and "attaches a device the launcher cannot declare" in err and not started, \
+                f"extras '{extra}': exit {rc}, QEMU started {started}: {err}"
+            report.append(f"PASS refused extras '{extra}': exit 2 before QEMU")
 
         env = {"THYLACINE_NO_NET": "1"}
         qemu = "==> qemu: accel=hvf cpu=host gic=v2 smp=4 its=auto"

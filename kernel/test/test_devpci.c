@@ -242,21 +242,26 @@ void test_devpci_readdir(void) {
         return;
     }
     char bdf[32];
-    TEST_ASSERT(first_dirent_name(buf, n, bdf, sizeof(bdf)), "first bdf parsed");
-    struct Spoor *fdir = walk1(root, bdf);
-    TEST_ASSERT(fdir != NULL, "walk to <bdf>");
-    long fn = devpci.readdir(fdir, buf, sizeof(buf), 0);
-    u64 ck; u32 nl; u8 qt;
-    long e = dirent_parse(buf, 0, fn, &ck, &nl, &qt);
+    bool named = first_dirent_name(buf, n, bdf, sizeof(bdf));
+    struct Spoor *fdir = named ? walk1(root, bdf) : NULL;
+    bool walked = fdir != NULL, is_ctl = false;
+    u64 ck = 0; u32 nl = 0; u8 qt = 0;
+    long e = 0, past = -1;
+    if (fdir) {
+        long fn = devpci.readdir(fdir, buf, sizeof(buf), 0);
+        e = dirent_parse(buf, 0, fn, &ck, &nl, &qt);
+        is_ctl = nl == 3 && buf[24] == 'c' && buf[25] == 't' && buf[26] == 'l';
+        // exactly one entry: resuming past it is EOD.
+        past = devpci.readdir(fdir, buf, sizeof(buf), (s64)ck);
+        spoor_unref(fdir);
+    }
+    spoor_unref(root);
+    TEST_ASSERT(named, "first bdf parsed");
+    TEST_ASSERT(walked, "walk to <bdf>");
     TEST_ASSERT(e > 0, "function dir lists an entry");
     TEST_EXPECT_EQ(qt, (u8)QTFILE, "the entry is a file (ctl)");
-    TEST_ASSERT(nl == 3 && buf[24] == 'c' && buf[25] == 't' && buf[26] == 'l',
-                "the entry is named ctl");
-    // exactly one entry: resuming past it is EOD.
-    TEST_EXPECT_EQ(devpci.readdir(fdir, buf, sizeof(buf), (s64)ck), (long)0,
-                   "function dir has exactly one entry");
-    spoor_unref(fdir);
-    spoor_unref(root);
+    TEST_ASSERT(is_ctl, "the entry is named ctl");
+    TEST_EXPECT_EQ(past, (long)0, "function dir has exactly one entry");
 }
 
 // The reuse-nc walk path (#57a) -- the shape clone_walk_zero needs to cross the
@@ -287,17 +292,21 @@ void test_devpci_walk_reuse_nc(void) {
     static u8 dbuf[1024];
     long dn = devpci.readdir(root, dbuf, sizeof(dbuf), 0);
     char bdf[32];
-    TEST_ASSERT(dn > 0 && first_dirent_name(dbuf, dn, bdf, sizeof(bdf)),
-                "root readdir names a function");
-    struct Spoor *nc1 = spoor_clone(root);
-    TEST_ASSERT(nc1 != NULL, "clone nc1");
+    bool named = dn > 0 && first_dirent_name(dbuf, dn, bdf, sizeof(bdf));
+    struct Spoor *nc1 = named ? spoor_clone(root) : NULL;
     const char *names[1] = { bdf };
-    struct Walkqid *wq1 = devpci.walk(root, nc1, names, 1);
-    TEST_ASSERT(wq1 != NULL, "1-element walk allocates");
-    TEST_EXPECT_EQ(wq1->spoor, nc1, "reuse-nc: returned spoor IS nc1");
-    TEST_EXPECT_EQ(wq1->nqid, 1, "walk to <bdf> via nc succeeds");
-    TEST_ASSERT(nc1->qid.path != 0, "nc1 advanced off the root");
-    walkqid_free(wq1);
-    spoor_unref(nc1);
+    struct Walkqid *wq1 = nc1 ? devpci.walk(root, nc1, names, 1) : NULL;
+    bool cloned = nc1 != NULL, walked = wq1 != NULL;
+    bool reused = wq1 && wq1->spoor == nc1;
+    int nqid = wq1 ? wq1->nqid : -1;
+    bool advanced = nc1 && nc1->qid.path != 0;
+    if (wq1) walkqid_free(wq1);
+    if (nc1) spoor_unref(nc1);   // a failed walk leaves nc with the caller
     spoor_unref(root);
+    TEST_ASSERT(named, "root readdir names a function");
+    TEST_ASSERT(cloned, "clone nc1");
+    TEST_ASSERT(walked, "1-element walk allocates");
+    TEST_ASSERT(reused, "reuse-nc: returned spoor IS nc1");
+    TEST_EXPECT_EQ(nqid, 1, "walk to <bdf> via nc succeeds");
+    TEST_ASSERT(advanced, "nc1 advanced off the root");
 }

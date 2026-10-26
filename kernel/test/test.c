@@ -1050,7 +1050,7 @@ void test_zero_write_consumes(void);
 void test_full_attach_open_close(void);
 void test_full_read_fills_zeroes(void);
 void test_full_write_returns_minus1(void);
-void test_random_rndr_available(void);
+void test_random_read_serves_bytes(void);
 void test_random_read_produces_nonzero_bytes(void);
 void test_random_read_varies_across_calls(void);
 void test_cons_write_advances(void);
@@ -2255,7 +2255,7 @@ void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);
 void test_sys_set_traceable_one_way_to_zero(void);
 void test_sys_corvus_caps_kproc_has_new_caps(void);
-void test_kern_random_seeded_returns_true_on_qemu(void);
+void test_kern_random_strong_source_seeded(void);
 void test_kern_random_bytes_produces_nonzero(void);
 void test_chacha20_block_vector(void);
 void test_chacha20_keystream_continuity(void);
@@ -3387,7 +3387,7 @@ struct test_case g_tests[] = {
     { "full.attach_open_close",        test_full_attach_open_close,        false, NULL },
     { "full.read_fills_zeroes",        test_full_read_fills_zeroes,        false, NULL },
     { "full.write_returns_minus1",     test_full_write_returns_minus1,     false, NULL },
-    { "random.rndr_available",         test_random_rndr_available,         false, NULL },
+    { "random.read_serves_bytes",      test_random_read_serves_bytes,      false, NULL },
     { "random.read_produces_nonzero",  test_random_read_produces_nonzero_bytes, false, NULL },
     { "random.read_varies",            test_random_read_varies_across_calls, false, NULL },
     { "cons.write_advances",           test_cons_write_advances,           false, NULL },
@@ -4789,7 +4789,7 @@ struct test_case g_tests[] = {
     { "sys_set_dumpable.one_way_to_zero",              test_sys_set_dumpable_one_way_to_zero,              false, NULL },
     { "sys_set_traceable.one_way_to_zero",             test_sys_set_traceable_one_way_to_zero,             false, NULL },
     { "sys_corvus_caps.kproc_has_new_caps",            test_sys_corvus_caps_kproc_has_new_caps,            false, NULL },
-    { "kern_random.seeded_returns_true_on_qemu",       test_kern_random_seeded_returns_true_on_qemu,       false, NULL },
+    { "kern_random.strong_source_seeded",              test_kern_random_strong_source_seeded,              false, NULL },
     { "kern_random.bytes_produces_nonzero",            test_kern_random_bytes_produces_nonzero,            false, NULL },
     { "chacha20.block_vector",                         test_chacha20_block_vector,                         false, NULL },
     { "chacha20.keystream_continuity",                 test_chacha20_keystream_continuity,                 false, NULL },
@@ -5153,8 +5153,10 @@ void test_soft_warn(const char *msg) {
 
 // fail_msg is a borrowed pointer the runner prints as soon as the test
 // returns, so one buffer serves every composed failure. A skip line is
-// composed whole and emitted by one uart_puts, so tools/test.sh reads it as
-// one line; it has a buffer of its own.
+// composed whole and emitted by one uart_puts, so this CPU's own output cannot
+// split it; uart_puts takes no console lock, so a peer CPU printing at that
+// instant still can, and tools/test.sh's tally reconcile turns a torn line into
+// a red, never a pass. It has a buffer of its own.
 static char g_composed_fail_msg[160];
 static char g_skip_line[160];
 static bool g_test_skipped;     // the running test's configuration lacks what it needs

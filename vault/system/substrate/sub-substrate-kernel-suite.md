@@ -227,9 +227,17 @@ virtio-mmio rng (four tests), the PCI rng function (thirteen) or any virtio PCI
 function (nine), a second PCI input function, the MSI route or controller
 (four), a second CPU (eight -- the `default-smp1` rows' green no-ops), a seeded
 CSPRNG (seven, through `test_strong_entropy`), and the dlopen prover through
-`test_image_lookup`. The guards that could never fire (a virtio-mmio slot
-count, twice; an all-empty slot page, four times) are assertions. A skip line
-is composed whole and printed by one `uart_puts`. Three tests that branch on
+`test_image_lookup`. The census behind that sentence reads every function in
+`kernel/test` that calls a configuration primitive -- the virtio and PCI
+lookups and counts, the CPU counts, the DTB's MSI map and compat properties,
+the GIC version, the bootargs, the ramfs lookup, the CSPRNG; a dependency
+reached only through a syscall handler or a spawned probe is outside it. The
+guards that could never fire (a virtio-mmio slot count, twice; an all-empty
+slot page, four times) are assertions. A skip line is composed whole and
+printed by one `uart_puts`, so this CPU cannot split it; `uart_puts` takes no
+console lock, and the tally line is several calls, so another CPU printing at
+that instant can still tear either -- which `tools/test.sh`'s reconcile turns
+into a red, never a pass. Three tests that branch on
 the CPU count or the DTB's MSI map are not skips: their other arm asserts
 something real (the self-CPU path; that a host without an MSI map invents no
 route), and a declared machine lacking either FAILS a sibling gate.
