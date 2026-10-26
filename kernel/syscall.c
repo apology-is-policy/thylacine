@@ -10515,6 +10515,25 @@ static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
 // it once, below both builders, means a bug in either is a clean error rather
 // than a dead kernel.
 
+// Exec's claim, or the drop of the new image it built (`nas` and the opened
+// `exe`, both the caller's own references) when the claim is refused or
+// abandoned. 0 holds the claim; -EAGAIN has dropped both.
+static s64 exec_claim_or_drop(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe) {
+    if (proc_exec_claim(p) == 0) return 0;
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    return -(s64)T_E_AGAIN;
+}
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): the claim and
+// its drop, called from a kernel-entry thread of the Proc under test.
+s64 exec_claim_or_drop_for_test(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe);
+s64 exec_claim_or_drop_for_test(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe) {
+    return exec_claim_or_drop(p, nas, exe);
+}
+#endif
+
 static s64 sys_execve_core(struct exception_context *ctx,
                            const char *path, u64 path_len,
                            const char *argv_kbuf, u64 argv_data_len, u64 argc,
@@ -10635,11 +10654,8 @@ static s64 sys_execve_core(struct exception_context *ctx,
     //    the last thing that can fail -- because a refused or abandoned claim
     //    means this thread is dying too: the error never reaches EL0, and
     //    nothing of the old image has been touched.
-    if (proc_exec_claim(p) != 0) {
-        addrspace_unref(nas);
-        spoor_clunk(exe);
-        return -(s64)T_E_AGAIN;
-    }
+    s64 cr = exec_claim_or_drop(p, nas, exe);
+    if (cr != 0) return cr;
 
     // 4. COMMIT. Infallible from here -- there is no path back to the caller's
     //    old image, and none is needed.

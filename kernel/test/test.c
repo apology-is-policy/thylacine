@@ -1018,6 +1018,11 @@ void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
 void test_proc_exec_claim_abandoned_on_group_death(void);
 void test_proc_exec_claim_woken_by_an_abandoned_create(void);
 void test_proc_exec_claim_does_not_hold_for_a_stop(void);
+void test_proc_exec_claim_survives_a_doomed_exit(void);
+void test_proc_exec_claim_holds_through_a_terminate_latch(void);
+void test_proc_exec_claim_refused_drops_the_new_image(void);
+void test_proc_exec_claim_kills_a_thread_readied_after_it(void);
+void test_proc_exec_claim_wakes_a_vfork_parent(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -3300,6 +3305,11 @@ struct test_case g_tests[] = {
     { "proc.exec_claim_abandoned_on_group_death", test_proc_exec_claim_abandoned_on_group_death, false, NULL },
     { "proc.exec_claim_woken_by_an_abandoned_create", test_proc_exec_claim_woken_by_an_abandoned_create, false, NULL },
     { "proc.exec_claim_does_not_hold_for_a_stop", test_proc_exec_claim_does_not_hold_for_a_stop, false, NULL },
+    { "proc.exec_claim_survives_a_doomed_exit", test_proc_exec_claim_survives_a_doomed_exit, false, NULL },
+    { "proc.exec_claim_holds_through_a_terminate_latch", test_proc_exec_claim_holds_through_a_terminate_latch, false, NULL },
+    { "proc.exec_claim_refused_drops_the_new_image", test_proc_exec_claim_refused_drops_the_new_image, false, NULL },
+    { "proc.exec_claim_kills_a_thread_readied_after_it", test_proc_exec_claim_kills_a_thread_readied_after_it, false, NULL },
+    { "proc.exec_claim_wakes_a_vfork_parent", test_proc_exec_claim_wakes_a_vfork_parent, false, NULL },
     { "thread.kstack_cache_reuses_without_guard_toggle", test_thread_kstack_cache_reuses_without_guard_toggle, false, NULL },
     { "thread.kstack_cache_keeps_the_guard",     test_thread_kstack_cache_keeps_the_guard,     false, NULL },
     { "thread.kstack_recycled_stack_is_fully_poisoned", test_thread_kstack_recycled_stack_is_fully_poisoned, false, NULL },

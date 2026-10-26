@@ -2619,6 +2619,21 @@ void test_devproc_debug_regs(void) {
     if (regs3) spoor_clunk(regs3);
     __atomic_store_n(&tgt->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
 
+    // (a') An exec's claim (ARCH 7.3.3): its doomed threads die on the same exit
+    //      path, so a claimed target is not stopped either. The claim names th,
+    //      parked here, which no live exec can do; only the gate's reading of a
+    //      held claim is under test. The seal's control below reads the same
+    //      target once the claim is gone.
+    irq_state_t cs = proc_threads_lock(tgt);
+    __atomic_store_n(&tgt->exec_task, &th, __ATOMIC_RELEASE);
+    proc_threads_unlock(tgt, cs);
+    struct Spoor *regs_x = open_pidfile_for(tgt->pid, "regs", 2);
+    long exec_claim_rc = regs_x ? devproc.read(regs_x, &ur, (long)sizeof(ur), 0) : -2;
+    if (regs_x) spoor_clunk(regs_x);
+    cs = proc_threads_lock(tgt);
+    __atomic_store_n(&tgt->exec_task, (struct Thread *)NULL, __ATOMIC_RELEASE);
+    proc_threads_unlock(tgt, cs);
+
     // (b) The EXITING backstop: all-EXITING peers are SKIPPED by
     //     all_threads_parked (vacuously parked, group_exit_msg already NULL
     //     again), so the read must refuse rather than report an exiting thread
@@ -2695,6 +2710,8 @@ void test_devproc_debug_regs(void) {
 
     TEST_EXPECT_EQ(hf1_msg_rc, (long)-1,
                    "regs of a group-terminating target is refused (HF1)");
+    TEST_EXPECT_EQ(exec_claim_rc, (long)-1,
+                   "regs of a target an exec holds is refused (ARCH 7.3.3)");
     TEST_EXPECT_EQ(hf1_exiting_rc, (long)-1,
                    "regs with every thread EXITING is refused (HF1; the selector returns NULL)");
     TEST_ASSERT(f4_main_pc != 0, "premise: main's pc is nonzero, so a failed read cannot match it");

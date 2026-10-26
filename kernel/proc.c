@@ -4510,6 +4510,22 @@ void exits_note(const char *name) {
     exits_signalled(sig, name);
 }
 
+// What a Proc's death owes the registries that name it: its /srv services are
+// tombstoned and their backlogs drained to EOF (specs/corvus.tla
+// ServiceTombstone), its pending /cap grants dropped, and the weft shares the
+// kernel never claimed released with their I-30 pins (weft.tla
+// ShareBoundedByFlow). The last live thread runs it once, on either exit path,
+// in the RUNNING+ALIVE window before the handle close, so it is done before
+// the ZOMBIE a reaper waits for. Never earlier: a thread that is not the last
+// may leave a Proc that lives on, as a doomed thread leaves an exec's
+// (ARCH 7.3.3). Each takes only its own leaf lock, so it runs with no lock held
+// and enters no order with g_proc_table_lock.
+static void proc_exit_departures(struct Proc *p) {
+    srv_proc_exit_notify(p);
+    cap_proc_exit_notify(p);
+    weft_share_release_owner(p);
+}
+
 // The body every exit and every death by note shares: `code` and `sig` are the
 // status the ZOMBIE records (Proc.exit_status / term_sig).
 static void exits_term(int code, int sig, const char *msg) {
@@ -4525,30 +4541,6 @@ static void exits_term(int code, int sig, const char *msg) {
     if (p == g_kproc)        extinction("exits from kproc (boot thread)");
     if (p->state != PROC_STATE_ALIVE)
                              extinction("exits from non-ALIVE proc (double exits?)");
-    // P5-corvus-srv-impl-a2: tombstone any /srv service this Proc posted
-    // (specs/corvus.tla ServiceTombstone). Done here — p still ALIVE,
-    // still this thread's own valid Proc — and BEFORE the g_proc_table_-
-    // lock acquire: srv_proc_exit_notify takes only the leaf registry
-    // lock, so it never enters a lock-ordering relation with
-    // g_proc_table_lock. exits() is the sole termination path at v1.0
-    // (proc.c: state reaches ZOMBIE only through here); a future async-
-    // kill path must call srv_proc_exit_notify too.
-    srv_proc_exit_notify(p);
-
-    // P5-hostowner-b-a: drop any pending /cap grant targeting this Proc.
-    // Same discipline as srv_proc_exit_notify — leaf grant-table lock,
-    // no relation with g_proc_table_lock. Safety doesn't strictly need
-    // this (stripes are fresh per Proc — a recycled pid gets a fresh
-    // stripes, no accidental elevation), but cleanup frees the table slot.
-    cap_proc_exit_notify(p);
-
-    // Weft-6a-2: GC any per-flow ring this Proc registered (SYS_WEFT_SHARE) but
-    // that the kernel never claimed -- drops each I-30 registration pin so a
-    // netd that shared a ring then died can't leak it (weft.tla ShareBounded-
-    // ByFlow). Same leaf-lock discipline (g_weft_lock, no relation with
-    // g_proc_table_lock). No-op for the overwhelming majority (only netd ever
-    // registers shares).
-    weft_share_release_owner(p);
 
     // P3-A (R5-H F75 close): all lineage mutations + parent wakeup
     // happen UNDER g_proc_table_lock atomically. The previous code did
@@ -4588,11 +4580,19 @@ static void exits_term(int code, int sig, const char *msg) {
     // peer does, and thread_exit_self reaps with the claimed status; the
     // last-thread path below would record this call's status over it. A claim
     // made after this check finds this exit already decided.
-    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+    //
+    // An exec by another thread holds the Proc the same way (ARCH 7.3.3): this
+    // thread is doomed, and it leaves alone, as Linux's do_group_exit does
+    // while group_exec_task is set; the Proc goes on into the new image. The
+    // claim is written under this lock. It is never the last live thread: the
+    // execer stays live until it swaps, and only a group death, read first
+    // here, ends a claim early.
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+        proc_exec_dooms(p, t)) {
         proc_threads_unlock(p, ts);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
-        extinction("exits: thread_exit_self returned in a dying group");
+        extinction("exits: thread_exit_self returned for a thread leaving alone");
     }
 
     // live_threads counts t: any other live thread means peers to shoot down.
@@ -4641,12 +4641,13 @@ static void exits_term(int code, int sig, const char *msg) {
     if (close)
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
     proc_threads_unlock(p, ts);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_exit_departures(p);
     if (close) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
         exit_close_test_window();
         proc_close_handles_at_exit(p);
-        s = spin_lock_irqsave(&g_proc_table_lock);
     }
+    s = spin_lock_irqsave(&g_proc_table_lock);
 
     // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit, not
     // reap, so a zombie stops pinning its inherited per-user home 9P mount.
@@ -4789,6 +4790,7 @@ void thread_exit_self(void) {
         // cannot finish goes to the closer (ARCH 7.9.1 parts B and C). proc_free's
         // handle_table_free remains the fallback for orphan/rollback paths
         // (idempotent: p->handles is NULLed by the close).
+        proc_exit_departures(p);
         if (p->handles) {
             exit_close_test_window();
             proc_close_handles_at_exit(p);
@@ -4827,22 +4829,6 @@ void thread_exit_self(void) {
     // fault but never sleeps: demand_page_locked refuses a thread that is not
     // RUNNING the one page-in that would.
     thread_clear_child_tid_handoff(t, p);
-
-    // If we became zombie, also do the srv / cap notifies (the leaf-lock
-    // discipline allows them outside proc_table_lock — same as exits()).
-    // Skipped on the non-last path: a Proc still ALIVE has live /srv
-    // posts and pending /cap grants that should NOT be tombstoned.
-    if (become_zombie) {
-        srv_proc_exit_notify(p);
-        cap_proc_exit_notify(p);
-        weft_share_release_owner(p);   // Weft-6a-2: GC un-claimed per-flow shares
-        // #68: the handle close already ran ABOVE (the pre-ZOMBIE
-        // RUNNING+ALIVE window), so the EOF-on-death contract now covers
-        // multi-thread Procs AND the killed-single-thread path (both reach
-        // here) -- the #926 asymmetry is closed. proc_free's
-        // handle_table_free remains the fallback for orphan/rollback paths
-        // and for hooks a death-flagged close skipped.
-    }
 
     sched();
     extinction("thread_exit_self: returned from sched (impossible)");
@@ -6565,6 +6551,16 @@ static void vfork_await_release(struct Proc *p, int child_pid) {
         extinction("vfork_await_release: bad Proc");
     await_child_release(p, child_pid, vfork_child_released);
 }
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): the vfork
+// parent's park, which only a user fork reaches, taken by a kernel-entry
+// thread of the Proc under test for a child it made with RFPROC|RFMEM.
+void vfork_await_release_for_test(struct Proc *p, int child_pid);
+void vfork_await_release_for_test(struct Proc *p, int child_pid) {
+    vfork_await_release(p, child_pid);
+}
+#endif
 
 // The held spawn's release decision (DEBUG-FS-DESIGN 5f): the child reached its
 // birth park or had its hold released (anything but UNBORN), died, or left the

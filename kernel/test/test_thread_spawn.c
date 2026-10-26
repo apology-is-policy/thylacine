@@ -81,6 +81,27 @@
 //                                          -- under a job stop the claim still
 //                                            returns; the stop stands for the
 //                                            new image.
+//   proc.exec_claim_survives_a_doomed_exit
+//                                          -- a doomed thread's own exits() or
+//                                            trap death leaves alone; the exec
+//                                            completes, its /srv service still
+//                                            posted until the real last exit.
+//   proc.exec_claim_holds_through_a_terminate_latch
+//                                          -- an interrupt that arms the latch
+//                                            mid-wait does not end the claim;
+//                                            the latch stands for the new image.
+//   proc.exec_claim_refused_drops_the_new_image
+//                                          -- a refused claim drops exec's own
+//                                            references to the new space and
+//                                            the program file, and only then.
+//   proc.exec_claim_kills_a_thread_readied_after_it
+//                                          -- a user thread admitted before the
+//                                            claim and readied after it dies
+//                                            before EL0 and frees the exec.
+//   proc.exec_claim_wakes_a_vfork_parent
+//                                          -- a vfork parent's park reads the
+//                                            claim; the child keeps the old
+//                                            image's space after the swap.
 //
 // The kernel test harness runs at EL1 so we can't drive a full eret-to-
 // EL0 from here; the user-mode SVC dispatch + the userland_enter eret
@@ -98,6 +119,7 @@
 
 #include <thylacine/addrspace.h>
 #include <thylacine/context.h>
+#include <thylacine/devsrv.h>
 #include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -107,6 +129,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -131,6 +154,11 @@ void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
 void test_proc_exec_claim_abandoned_on_group_death(void);
 void test_proc_exec_claim_woken_by_an_abandoned_create(void);
 void test_proc_exec_claim_does_not_hold_for_a_stop(void);
+void test_proc_exec_claim_survives_a_doomed_exit(void);
+void test_proc_exec_claim_holds_through_a_terminate_latch(void);
+void test_proc_exec_claim_refused_drops_the_new_image(void);
+void test_proc_exec_claim_kills_a_thread_readied_after_it(void);
+void test_proc_exec_claim_wakes_a_vfork_parent(void);
 
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout
@@ -1580,13 +1608,21 @@ void test_proc_exec_claim_dooms_every_other_thread(void) {
 #define XC_MAX_PEERS  3
 #define XC_UNSET      0x7fffffff
 
-enum xc_kind  { XC_SLEEPER, XC_DEATH_ONLY, XC_SPINNER, XC_DEAF };
+enum xc_kind  { XC_SLEEPER, XC_DEATH_ONLY, XC_SPINNER, XC_DEAF, XC_EXITER, XC_TRAPPED,
+                XC_VFORK };
 enum xc_phase { XC_SETUP, XC_CLAIMING, XC_DONE, XC_FAILED };
+
+#define XC_SVC      "c5svc"
+#define XC_SVC_LEN  5
+
+void vfork_await_release_for_test(struct Proc *p, int child_pid);
+extern void srv_registry_reset(void);
 
 // The fixture each test sets before it forks.
 static int          g_xc_npeers;
 static enum xc_kind g_xc_kind[XC_MAX_PEERS];
 static bool         g_xc_unborn_wanted, g_xc_job_stop, g_xc_second_claim;
+static bool         g_xc_unborn_user, g_xc_post;
 
 static struct Proc   *volatile g_xc_proc;
 static struct Thread *volatile g_xc_unborn;
@@ -1598,10 +1634,19 @@ static volatile u64  g_xc_spins[XC_MAX_PEERS];
 static volatile int  g_xc_second_rc, g_xc_claim_rc, g_xc_live_at_claim, g_xc_count_after;
 static volatile bool g_xc_held_in_place, g_xc_claim_owned, g_xc_stop_during, g_xc_stop_after;
 static volatile bool g_xc_cleared_at_swap, g_xc_cleared_at_abort;
+static volatile bool g_xc_svc_live_at_claim, g_xc_latch_after;
+static struct Proc   *volatile g_xc_vfork_child;
+static volatile int  g_xc_vfork_pid;
+static volatile bool g_xc_vfork_release, g_xc_vfork_kept, g_xc_vfork_reaped;
 
 static void xc_reset(void) {
     g_xc_npeers = 0;
     g_xc_unborn_wanted = g_xc_job_stop = g_xc_second_claim = false;
+    g_xc_unborn_user = g_xc_post = false;
+    g_xc_svc_live_at_claim = g_xc_latch_after = false;
+    g_xc_vfork_child   = NULL;
+    g_xc_vfork_pid     = 0;
+    g_xc_vfork_release = g_xc_vfork_kept = g_xc_vfork_reaped = false;
     g_xc_proc   = NULL;
     g_xc_unborn = NULL;
     g_xc_phase  = XC_SETUP;
@@ -1624,6 +1669,26 @@ static void xc_reset(void) {
 static int xc_never(void *arg) {
     (void)arg;
     return 0;
+}
+
+// The vfork child: it holds the space it shares with its parent until the
+// test lets it go.
+static void xc_vfork_child(void *arg) {
+    (void)arg;
+    __atomic_store_n(&g_xc_vfork_child, current_thread()->proc, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_xc_vfork_release, __ATOMIC_ACQUIRE))
+        sched();
+    exits("ok");
+}
+
+// Lets the vfork child go and reaps it; true iff it was reaped. A dying caller
+// cannot wait, and the child is then left to the orphan rule.
+static bool xc_vfork_reap(void) {
+    __atomic_store_n(&g_xc_vfork_release, true, __ATOMIC_RELEASE);
+    int pid = __atomic_load_n(&g_xc_vfork_pid, __ATOMIC_ACQUIRE);
+    if (pid <= 0) return false;
+    int st = -1;
+    return wait_pid_for(pid, WAIT_PACKED, &st) == pid;
 }
 
 static void xc_peer_entry(void *arg) {
@@ -1651,6 +1716,21 @@ static void xc_peer_entry(void *arg) {
         while (!__atomic_load_n(&g_xc_release, __ATOMIC_ACQUIRE))
             sched();
         break;
+    case XC_EXITER:
+    case XC_TRAPPED:
+        // Woken to die, the thread ends itself instead: an exit call, or a death
+        // by a trap.
+        g_xc_rc[i] = sleep(&g_xc_rendez[i], xc_never, NULL);
+        if (g_xc_kind[i] == XC_EXITER) exits("c5-peer");
+        exits_note(NOTE_NAME_SNARE_ILL);
+    case XC_VFORK: {
+        // A vfork parent parks until its child gives back the space they share.
+        int cpid = rfork(RFPROC | RFMEM, xc_vfork_child, NULL);
+        __atomic_store_n(&g_xc_vfork_pid, cpid, __ATOMIC_RELEASE);
+        if (cpid > 0) vfork_await_release_for_test(self->proc, cpid);
+        g_xc_rc[i] = cpid > 0 ? 0 : -1;
+        break;
+    }
     }
     thread_exit_self();
 }
@@ -1664,7 +1744,10 @@ static bool xc_peers_in_place(struct Proc *p) {
             if (__atomic_load_n(&g_xc_spins[i], __ATOMIC_ACQUIRE) == 0) return false;
         } else if (g_xc_kind[i] != XC_DEAF) {
             struct test_thread_view v = test_thread_view(p, g_xc_tid[i]);
-            bool on = g_xc_job_stop ? v.on_debug_rendez : v.blocked_on == &g_xc_rendez[i];
+            bool on = g_xc_job_stop ? v.on_debug_rendez
+                    : g_xc_kind[i] == XC_VFORK
+                        ? v.blocked_on != NULL && __atomic_load_n(&g_xc_vfork_pid, __ATOMIC_ACQUIRE) > 0
+                        : v.blocked_on == &g_xc_rendez[i];
             if (g_xc_rc[i] != XC_UNSET || !v.present || v.state != THREAD_SLEEPING || !on)
                 return false;
         }
@@ -1680,7 +1763,15 @@ static void xc_main_entry(void *arg) {
     g_xc_proc     = p;
     if (g_xc_job_stop) __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
     struct AddrSpace *nas = addrspace_alloc(p->page_budget);
+    struct AddrSpace *old_as = p->as;
     bool ok = nas != NULL;
+    if (ok && g_xc_post) {
+        proc_mark_may_post_service(p);
+        struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+        ok = root && devsrv_post_listener(p, root, XC_SVC, XC_SVC_LEN, SRV_MODE_9P,
+                                          false, false, false) >= 0;
+        if (root) spoor_clunk(root);
+    }
     for (int i = 0; ok && i < g_xc_npeers; i++) {
         struct Thread *t = thread_create_with_arg(p, xc_peer_entry, (void *)(uintptr_t)i);
         ok = t != NULL;
@@ -1689,7 +1780,13 @@ static void xc_main_entry(void *arg) {
             ready(t);
         }
     }
-    if (ok && g_xc_unborn_wanted) {
+    if (ok && g_xc_unborn_wanted && g_xc_unborn_user) {
+        // Built and admitted as both spawn arms do, and not readied.
+        struct Thread *nt = thread_alloc_user(p, C0_USER_ENTRY, C0_USER_SP, 0, 0);
+        ok = nt != NULL && proc_thread_admit(p, nt);
+        if (ok)      g_xc_unborn = nt;
+        else if (nt) thread_free_unlinked(nt);
+    } else if (ok && g_xc_unborn_wanted) {
         g_xc_unborn = thread_create_with_arg(p, c0_never_entry, NULL);
         ok = g_xc_unborn != NULL;
     }
@@ -1719,6 +1816,8 @@ static void xc_main_entry(void *arg) {
         g_xc_unborn = NULL;
         if (nas) addrspace_unref(nas);
         __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+        // A vfork peer still parked leaves its park once its child is gone.
+        xc_vfork_reap();
         __atomic_store_n(&g_xc_phase, XC_FAILED, __ATOMIC_RELEASE);
         exits("setup");
     }
@@ -1730,14 +1829,26 @@ static void xc_main_entry(void *arg) {
     g_xc_claim_owned   = p->exec_task == self;
     proc_threads_unlock(p, s);
     g_xc_stop_during = proc_stop_requested(p);
-    g_xc_claim_rc    = rc;
+    if (g_xc_post) {
+        struct SrvService *svc = srv_lookup_in(srv_boot_registry(), XC_SVC, XC_SVC_LEN);
+        g_xc_svc_live_at_claim = svc && svc->state == SRV_STATE_LIVE &&
+                                 svc->poster_stripes == proc_stripes(p);
+    }
+    g_xc_claim_rc = rc;
     if (rc == 0) {
         proc_exec_replace(p, nas, p->phenotype);
         s = proc_threads_lock(p);
         g_xc_count_after     = p->thread_count;
         g_xc_cleared_at_swap = p->exec_task == NULL;
         proc_threads_unlock(p, s);
-        g_xc_stop_after = proc_stop_requested(p);
+        g_xc_stop_after  = proc_stop_requested(p);
+        g_xc_latch_after = proc_intr_terminate_pending(p);
+        // The vfork child, spinning until let go, still holds the old space.
+        struct Proc *c = __atomic_load_n(&g_xc_vfork_child, __ATOMIC_ACQUIRE);
+        g_xc_vfork_kept = c && c->state == PROC_STATE_ALIVE && c->as == old_as &&
+                          p->as != old_as;
+        if (__atomic_load_n(&g_xc_vfork_pid, __ATOMIC_ACQUIRE) > 0)
+            g_xc_vfork_reaped = xc_vfork_reap();
         __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&g_xc_phase, XC_DONE, __ATOMIC_RELEASE);
         exits("ok");
@@ -1748,6 +1859,7 @@ static void xc_main_entry(void *arg) {
     g_xc_cleared_at_abort = p->exec_task == NULL;
     proc_threads_unlock(p, s);
     __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+    xc_vfork_reap();
     __atomic_store_n(&g_xc_phase, XC_DONE, __ATOMIC_RELEASE);
     thread_exit_self();
 }
@@ -1790,6 +1902,7 @@ static int xc_finish(int child_pid) {
     TEST_YIELD_UNTIL_SOFT(xc_phase() == XC_DONE || xc_phase() == XC_FAILED);
     if (xc_phase() != XC_DONE && xc_phase() != XC_FAILED) xc_kill();
     __atomic_store_n(&g_xc_release, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xc_vfork_release, true, __ATOMIC_RELEASE);
     int status = -1;
     int reaped = wait_pid_for(child_pid, WAIT_PACKED, &status);
     return reaped == child_pid ? status : -3;
@@ -1815,6 +1928,9 @@ void test_proc_exec_claim_kills_sleeping_and_running_peers(void) {
     TEST_EXPECT_EQ(g_xc_live_at_claim, 1, "it returned once the execer was the only live thread");
     TEST_EXPECT_EQ(g_xc_rc[0], SLEEP_INTR, "the sleep() sleeper was woken to die");
     TEST_EXPECT_EQ(g_xc_rc[1], SLEEP_INTR, "the death-only sleeper was woken to die");
+    // An admitted second claim would not reach this line: its wait would find
+    // the execer already waiting on exec_rendez, and a second waiter on a
+    // Rendez is an extinction. The suite stops loudly rather than reporting red.
     TEST_EXPECT_EQ(g_xc_second_rc, -1, "a doomed thread's own exec was refused");
     TEST_ASSERT(g_xc_cleared_at_swap, "the swap cleared the claim");
     TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
@@ -1822,11 +1938,14 @@ void test_proc_exec_claim_kills_sleeping_and_running_peers(void) {
 }
 
 // Group death ends a claim still waiting for a peer it has not reached: the
-// exec is abandoned and its claim cleared, and the Proc dies of the kill.
+// exec is abandoned and its claim cleared, and the Proc dies of the kill. Its
+// last thread leaves by thread_exit_self, which tombstones its /srv service.
 void test_proc_exec_claim_abandoned_on_group_death(void) {
     xc_reset();
     g_xc_npeers  = 1;
     g_xc_kind[0] = XC_DEAF;
+    g_xc_post    = true;
+    srv_registry_reset();
     int child_pid = rfork(RFPROC, xc_main_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     bool waited = xc_claim_held();
@@ -1838,6 +1957,10 @@ void test_proc_exec_claim_abandoned_on_group_death(void) {
     TEST_EXPECT_EQ(g_xc_claim_rc, -1, "group death abandoned the exec");
     TEST_ASSERT(g_xc_cleared_at_abort, "the abandoned claim was cleared");
     TEST_EXPECT_EQ(status, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL), "the Proc died of the kill");
+    TEST_ASSERT(g_xc_svc_live_at_claim, "the service was posted while the claim waited");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), XC_SVC, XC_SVC_LEN);
+    TEST_ASSERT(svc && svc->state == SRV_STATE_TOMBSTONED,
+        "the killed Proc's last thread out tombstoned its service");
 }
 
 // A created thread that never ran counts live until its creator frees it; the
@@ -1884,6 +2007,183 @@ void test_proc_exec_claim_does_not_hold_for_a_stop(void) {
     TEST_EXPECT_EQ(g_xc_rc[0], SLEEP_INTR, "the parked sleep() sleeper died");
     TEST_EXPECT_EQ(g_xc_rc[1], SLEEP_INTR, "the parked death-only sleeper died");
     TEST_ASSERT(g_xc_stop_after, "the stop stands for the new image");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
+}
+
+// A doomed thread that ends itself -- an exit call, or a death by a trap --
+// leaves alone, as Linux's do_group_exit does while group_exec_task is set
+// (ARCH 7.3.3): the claim still returns and the Proc goes on into the new
+// image with its /srv service posted. The service goes at the real last exit.
+void test_proc_exec_claim_survives_a_doomed_exit(void) {
+    xc_reset();
+    g_xc_npeers  = 2;
+    g_xc_kind[0] = XC_EXITER;
+    g_xc_kind[1] = XC_TRAPPED;
+    g_xc_post    = true;
+    srv_registry_reset();
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a service posted, two peers in place and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "with no claim both peers slept on");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "a doomed thread's own exit did not end the exec");
+    TEST_EXPECT_EQ(g_xc_live_at_claim, 1, "the claim returned once the execer was the only live thread");
+    TEST_EXPECT_EQ(g_xc_rc[0], SLEEP_INTR, "the exiting peer was woken to die before its exits()");
+    TEST_EXPECT_EQ(g_xc_rc[1], SLEEP_INTR, "the trapped peer was woken to die before its trap");
+    TEST_ASSERT(g_xc_svc_live_at_claim, "a doomed thread's exit left the Proc's service posted");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the new image's own exit decided the status");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), XC_SVC, XC_SVC_LEN);
+    TEST_ASSERT(svc && svc->state == SRV_STATE_TOMBSTONED,
+        "the last thread out of exits() tombstoned the service");
+}
+
+// An interrupt with no handler arms its terminate latch and wakes every
+// sleeper, the execer's claim wait included. The wait reads group death alone,
+// so it sleeps on until the last peer is gone, and the latch is the new
+// image's to meet (POSIX keeps a pending signal across exec).
+void test_proc_exec_claim_holds_through_a_terminate_latch(void) {
+    xc_reset();
+    g_xc_npeers  = 1;
+    g_xc_kind[0] = XC_DEAF;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    bool waited = xc_claim_held();
+    bool posted = false, armed = false, held = false;
+    struct Proc *p = g_xc_proc;
+    if (waited && p) {
+        posted = notes_post(p, NOTE_NAME_INTERRUPT, 0u, NULL, true) == 0;
+        armed  = proc_intr_terminate_pending(p);
+        proc_interrupt_terminate_wake(p);
+        u64 hold = timer_now_ns() + 20000000ull;
+        while (timer_now_ns() < hold)
+            sched();
+        held = xc_main_in_claim() && xc_phase() == XC_CLAIMING;
+    }
+    __atomic_store_n(&g_xc_release, true, __ATOMIC_RELEASE);
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a peer in place and a new address space");
+    TEST_ASSERT(waited, "the claim slept while a live peer remained");
+    TEST_ASSERT(posted, "the interrupt was queued");
+    TEST_ASSERT(armed, "with no handler it armed the terminate latch");
+    TEST_ASSERT(held, "the latch and its wake left the claim waiting");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "the claim returned once the peer was gone");
+    TEST_ASSERT(g_xc_latch_after, "the latch stands for the new image");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
+}
+
+s64 exec_claim_or_drop_for_test(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe);
+
+static volatile bool g_xr_setup_failed, g_xr_ctl_owned;
+static volatile s64  g_xr_ctl_rc, g_xr_rc;
+static volatile int  g_xr_ctl_as_ref, g_xr_ctl_exe_ref, g_xr_as_ref, g_xr_exe_ref;
+
+// Exec's own references to its new image are the space it built and the
+// program file it opened. The test holds one more of each, so a drop shows as
+// a count, not a free. The control, one variable away, claims a Proc that is
+// not dying: the claim holds and nothing is dropped.
+static void xr_entry(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    struct Proc *p = self->proc;
+    struct AddrSpace *nas = addrspace_alloc(p->page_budget);
+    struct Spoor *exe = devsrv_attach_registry(srv_boot_registry());
+    if (!nas || !exe) {
+        g_xr_setup_failed = true;
+        if (nas) addrspace_unref(nas);
+        if (exe) spoor_clunk(exe);
+        exits("setup");
+    }
+    addrspace_ref(nas);
+    spoor_ref(exe);
+
+    g_xr_ctl_rc = exec_claim_or_drop_for_test(p, nas, exe);
+    irq_state_t s = proc_threads_lock(p);
+    g_xr_ctl_owned = p->exec_task == self;
+    proc_threads_unlock(p, s);
+    xd_set_claim(p, NULL);
+    g_xr_ctl_as_ref  = __atomic_load_n(&nas->ref, __ATOMIC_ACQUIRE);
+    g_xr_ctl_exe_ref = __atomic_load_n(&exe->ref, __ATOMIC_ACQUIRE);
+
+    s = proc_table_lock_acquire();
+    proc_group_terminate(p, 0, "c5-dying");
+    proc_table_lock_release(s);
+    g_xr_rc = exec_claim_or_drop_for_test(p, nas, exe);
+    g_xr_as_ref  = __atomic_load_n(&nas->ref, __ATOMIC_ACQUIRE);
+    g_xr_exe_ref = __atomic_load_n(&exe->ref, __ATOMIC_ACQUIRE);
+
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    thread_exit_self();
+}
+
+void test_proc_exec_claim_refused_drops_the_new_image(void) {
+    g_xr_setup_failed = g_xr_ctl_owned = false;
+    g_xr_ctl_rc = g_xr_rc = XC_UNSET;
+    g_xr_ctl_as_ref = g_xr_ctl_exe_ref = g_xr_as_ref = g_xr_exe_ref = -1;
+    int child_pid = rfork(RFPROC, xr_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid_for(child_pid, WAIT_PACKED, &status), child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(!g_xr_setup_failed, "setup: a new address space and a file to stand for the program");
+    TEST_EXPECT_EQ(g_xr_ctl_rc, (s64)0, "control: the claim on a live Proc holds");
+    TEST_ASSERT(g_xr_ctl_owned, "control: the claim names the caller");
+    TEST_EXPECT_EQ(g_xr_ctl_as_ref, 2, "control: a held claim drops no reference to the space");
+    TEST_EXPECT_EQ(g_xr_ctl_exe_ref, 2, "control: nor to the file");
+    TEST_EXPECT_EQ(g_xr_rc, (s64)-T_E_AGAIN, "a claim on a dying Proc is refused with EAGAIN");
+    TEST_EXPECT_EQ(g_xr_as_ref, 1, "the refusal dropped exec's reference to the new space");
+    TEST_EXPECT_EQ(g_xr_exe_ref, 1, "and its reference to the program file");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child died of its group exit");
+}
+
+// A user thread admitted before the claim and readied after it counts live
+// until it dies, and it dies at the die-check its first entry takes, before
+// any EL0 instruction. Were that die-check to miss the claim, the thread would
+// fault at its unmapped entry and die there instead, since the fault path
+// reads the claim too; the sabotage that turns this red takes the claim out of
+// the die-check itself, which every EL0 return shares.
+void test_proc_exec_claim_kills_a_thread_readied_after_it(void) {
+    xc_reset();
+    g_xc_unborn_wanted = true;
+    g_xc_unborn_user   = true;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    bool waited = xc_claim_held();
+    // The runner owns the admitted thread once the child has claimed.
+    if (waited && g_xc_unborn) {
+        ready(g_xc_unborn);
+        g_xc_unborn = NULL;
+    }
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: an admitted user thread and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "the admitted thread counted live");
+    TEST_ASSERT(waited, "the claim slept while the admitted thread counted live");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "the readied thread died and freed the claim");
+    TEST_EXPECT_EQ(g_xc_live_at_claim, 1, "the execer was the only live thread");
+    TEST_ASSERT(g_xc_cleared_at_swap, "the swap cleared the claim");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
+}
+
+// A vfork parent parks, death-only, until its child gives the shared space
+// back. An exec by another thread of the parent dooms it there: it leaves the
+// park and dies, and the swap drops only the parent Proc's reference, so the
+// child runs on in the old space until it lets go.
+void test_proc_exec_claim_wakes_a_vfork_parent(void) {
+    xc_reset();
+    g_xc_npeers  = 1;
+    g_xc_kind[0] = XC_VFORK;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a vfork parent parked and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "with no claim the vfork parent stayed parked");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "the claim returned holding the Proc");
+    TEST_EXPECT_EQ(g_xc_rc[0], 0, "the doomed vfork parent left its park");
+    TEST_ASSERT(g_xc_vfork_kept, "the vfork child still runs in the old space after the swap");
+    TEST_ASSERT(g_xc_vfork_reaped, "the new image reaped the vfork child");
     TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
     TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
 }

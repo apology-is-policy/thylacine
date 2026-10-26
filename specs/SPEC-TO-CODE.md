@@ -1506,9 +1506,9 @@ because its claim kills its peers.
 | `ReapUnlink(t)` / `ReapUnlock(t)` (the reaper: one `threads_lock` hold to fold, clear the focus and unlink; the unlock is its last touch of the Proc) | `kernel/thread.c::thread_reap_dead`, called by both resume tails after the run-queue lock is released and before interrupts are restored; it frees the stack and the slot after the unlock | `ExactlyOnce` (no claim: no other path frees a user thread), `NoFreeOnCpu`, `ProcFreedLast` |
 | `FreeEarly(t)` (`BUGGY_FREE_ON_CPU`) | (none -- a free on THREAD_EXITING alone, without the final switch-out: the #788 shape) | `thread_reap_buggy_free_on_cpu` violates `NoFreeOnCpu` |
 | `Sweep(t)` (`BUGGY_TWO_REAPERS`, `BUGGY_REAP_AT_SPAWN`) | (none after C1 -- the shapes C1 deletes: `proc_reap_exited_threads` at each spawn and at exec, and `wait_pid_for`'s per-thread `thread_free` walk) | `thread_reap_buggy_two_reapers` violates `ExactlyOnce`; `thread_reap_buggy_reap_at_spawn` violates `ExitedThreadsFreed` (the 10-19 freeze's leftover, `seam-exited-threads-wait-for-a-create`) |
-| `ExecClaim(s)` (one `threads_lock` hold, after the new image loaded: refused under the group claim or another exec's, else `exec_task = s`) | `kernel/proc.c::proc_exec_claim` from `kernel/syscall.c::sys_execve_core`, between `exec_load_into`'s success and `proc_exec_replace`; then the death wake (`proc_death_wake`, factored out of `group_terminate`) | `OneExecer`, `DoomedNeverLast` |
+| `ExecClaim(s)` (one `threads_lock` hold, after the new image loaded: refused under the group claim or another exec's, else `exec_task = s`) | `kernel/proc.c::proc_exec_claim` from `kernel/syscall.c::sys_execve_core`, between `exec_load_into`'s success and `proc_exec_replace`; then the death wake (`proc_death_wake_locked`, factored out of `group_terminate`) | `OneExecer`, `DoomedNeverLast` |
 | `Doomed(t)` / `DeathReaches(t)` (an exec by another thread is death) | `kernel/include/thylacine/proc.h::proc_exec_dooms`, read by `kernel/notes.c::thread_die_pending` + `thread_group_death_pending`, `kernel/proc.c::el0_return_die_check` + `el0_stop_park`'s death checks; refused by `proc_thread_admit` and the spawn pre-checks; `caught_candidate` skips a doomed thread | `ExecResolves`; `thread_reap_buggy_doom_missed` (the predicate lacks the exec leg) violates it |
-| `DieDecide(t)` / `ExitDecide(t)` (the exit body, driven by a death or not) | `thread_exit_self` from the die-checks, or from the thread's own exit | (fairness: only a death obliges an exit) |
+| `DieDecide(t)` / `ExitDecide(t)` (the exit body, driven by a death or not) | `thread_exit_self` from the die-checks, or from the thread's own exit; `exits_term` sends a thread an exec dooms there as it sends one in a dying group, so a doomed thread's own `exits()` is an exit body, never a `Claim` (ARCH 7.3.3, operator vote 2026-10-26) | (fairness: only a death obliges an exit) |
 | `ExecCheck` / `ExecDoom` (`BUGGY_EXEC_PERTHREAD`) | (none -- LINEAGE L-2b's first sketch: per-thread die flags, the own-flag check and the peers' flags in two holds) | `thread_reap_buggy_exec_perthread` violates `DoomedNeverLast` (two execs doom each other; the last closes the Proc with no group death) |
 | `ExecAbort(s)` (group death reaches the execer: claim cleared, exec abandoned) | `kernel/proc.c::proc_exec_claim`'s wait: `sleep_death_only` until `live_threads == 1`, woken by `proc_exec_live_dropped_locked` at each `live_threads` decrement; returns failure on `thread_group_death_pending(self)` and `sys_execve_core` drops the new image | `ExecResolves` |
 | `ExecSwap(s)` (the swap, once `s` is the only thread on the list; clears the claim) | `kernel/proc.c::proc_exec_replace`: waits for `thread_count == 1` under the thread lock, then re-checks it at the swap under `g_proc_table_lock` with the thread lock nested, and clears `exec_task` there | `NoSwapWhileOnCpu` (F-1, and no peer of the old image survives); `thread_reap_buggy_exec_early` (the swap once the caller is the only LIVE thread) violates it |
@@ -1520,7 +1520,14 @@ death-wake walk itself (`death_wake.tla`), CPUs (the reaper running before its C
 runs anything else is the resume path's code, not an action), kernel threads (freed
 by their joiners), and the clear-child-tid store, which follows the commit and must not sleep
 (`demand_page_locked` refuses the file page-in to a thread that is not RUNNING;
-a kernel test pins it).
+a kernel test pins it). Nor does it see who makes the group claim: `Claim` is
+enabled whenever none is made, so the lone exit a doomed thread takes at its own
+`exits()` lies inside behaviours the model already explores. And `WF(DieDecide)`
+assumes a death that reaches a thread is taken: a thread whose death is held
+(`thread_death_held`, here `loom_free`'s join of its SQPOLL kthread) defers it
+until the join returns. That bound lies outside the model, so `ExecResolves`
+holds only as far as the join ends. (The other hold, an exit close, is the last
+live thread's, which a doomed thread never is.)
 
 Pre-commit gate: `specs/check-thread-reap.sh` -- the clean cfg green at its pinned
 state count and every buggy cfg violating the named invariant -- on any change to

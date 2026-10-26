@@ -211,13 +211,14 @@ AdmitLink(t) ==
     /\ UNCHANGED C5Vars
 
 (* BUGGY_SPAWNER_FREE: a creation path that is not a RUNNING thread of the *)
-(* Proc (a kernel-side spawn into it). It still checks the claim and the   *)
+(* Proc (a kernel-side spawn into it). It still checks both claims and the *)
 (* cap, and refuses a ZOMBIE.                                               *)
 AdmitFree(t) ==
     /\ BUGGY_SPAWNER_FREE
     /\ ~tlheld
     /\ pc[t] = "unborn"
     /\ ~gflag
+    /\ exectask = NoThread
     /\ ~zombie
     /\ CapCount < Cap
     /\ pc'     = [pc EXCEPT ![t] = "run"]
