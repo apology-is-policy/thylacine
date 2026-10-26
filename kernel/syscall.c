@@ -5323,12 +5323,14 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
         if (ptid_va >= UACCESS_USER_VA_TOP)          return -T_E_INVAL;
     }
 
-    // A dying Proc admits no new thread: one made now would only die at its
-    // first entry's die-check, after a kstack allocation, and the spawner
-    // itself dies at this call's own return. This read and the cap pre-check
-    // below are lockless early refusals, so a refused spawn usually allocates
-    // nothing; proc_thread_admit decides both exactly.
+    // A dying Proc, or one an exec holds, admits no new thread: one made now
+    // would only die at its first entry's die-check, after a kstack
+    // allocation, and the spawner itself dies at this call's own return. These
+    // reads and the cap pre-check below are lockless early refusals, so a
+    // refused spawn usually allocates nothing; proc_thread_admit decides each
+    // exactly.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -T_E_AGAIN;
+    if (__atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE))      return -T_E_AGAIN;
 
     // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at PROC_THREAD_MAX is
     // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) -- bounding a thread
@@ -5469,11 +5471,13 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
         if (ctid_va >= UACCESS_USER_VA_TOP)          return -(s64)T_E_INVAL;
     }
 
-    // A dying Proc admits no new thread: one made now would only die at its
-    // first entry's die-check, after a kstack allocation, and the spawner
-    // itself dies at this call's own return. Lockless early refusals, as in
-    // sys_thread_spawn_handler; proc_thread_admit decides exactly.
+    // A dying Proc, or one an exec holds, admits no new thread: one made now
+    // would only die at its first entry's die-check, after a kstack
+    // allocation, and the spawner itself dies at this call's own return.
+    // Lockless early refusals, as in sys_thread_spawn_handler;
+    // proc_thread_admit decides exactly.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -(s64)T_E_AGAIN;
+    if (__atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE))      return -(s64)T_E_AGAIN;
 
     // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
     // sys_thread_spawn_handler). A pthread_create storm fails clean -EAGAIN.
@@ -10560,12 +10564,6 @@ static s64 sys_execve_core(struct exception_context *ctx,
         if (nuls != envc)                              return -(s64)T_E_INVAL;
     }
 
-    // The multi-thread gate, before any allocation or FS work THIS function
-    // does. A front end may have already copied its arguments in by now -- a
-    // wasted copy on a path that is refusing, and nothing more. The gate lives
-    // here rather than in each front end so it cannot be forgotten by one.
-    if (!proc_exec_alone(p))                           return -(s64)T_E_AGAIN;
-
     // 2. Resolve in the CALLER's namespace (I-28: contained at root_spoor,
     //    per-component X-search, OEXEC on the leaf) -- the same helper every
     //    SYS_SPAWN_* uses, so exec and spawn cannot diverge on what is
@@ -10632,6 +10630,17 @@ static s64 sys_execve_core(struct exception_context *ctx,
         return rc == -T_E_NOMEM ? -(s64)T_E_NOMEM : -(s64)T_E_INVAL;
     }
 
+    // 3b. Take the Proc (ARCH 7.3.3, LINEAGE L-2b): every other thread dies, and
+    //    this returns once the caller is the only live one. Only now -- after
+    //    the last thing that can fail -- because a refused or abandoned claim
+    //    means this thread is dying too: the error never reaches EL0, and
+    //    nothing of the old image has been touched.
+    if (proc_exec_claim(p) != 0) {
+        addrspace_unref(nas);
+        spoor_clunk(exe);
+        return -(s64)T_E_AGAIN;
+    }
+
     // 4. COMMIT. Infallible from here -- there is no path back to the caller's
     //    old image, and none is needed.
     proc_exec_replace(p, nas, new_pheno);
@@ -10652,7 +10661,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
     // handed that number and then misroutes through the stale connection
     // (connect dials the right ctl but opens a dead /net/<proto>/<n>/data; poll
     // opens a stale ready file). Runs in execve's sole-live-thread window
-    // (proc_exec_alone, re-checked in proc_exec_replace), so it needs no lock,
+    // (proc_exec_claim, re-checked in proc_exec_replace), so it needs no lock,
     // exactly like the handle_close_on_exec below. NULL-safe (native = no tab).
     viv_socktab_drop_cloexec(p);
 

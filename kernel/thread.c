@@ -154,6 +154,7 @@ static void thread_unlink_from_proc_locked(struct Thread *t) {
     if (t->state != THREAD_EXITING) {
         if (p->live_threads <= 0) extinction("thread_unlink: live_threads underflow");
         p->live_threads--;
+        proc_exec_live_dropped_locked(p);
     }
 }
 
@@ -174,6 +175,7 @@ void thread_commit_exiting_locked(struct Thread *t) {
     if (p->live_threads <= 0)       extinction("thread_commit_exiting: live_threads underflow");
     t->state = THREAD_EXITING;
     p->live_threads--;
+    proc_exec_live_dropped_locked(p);
 #ifdef KERNEL_TESTS
     if (proc_count_live_peers_locked(p, NULL) != p->live_threads)
         extinction("thread_commit_exiting: live_threads disagrees with the thread list");

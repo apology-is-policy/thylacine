@@ -2317,7 +2317,7 @@ bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch
 // handle table -- the entry does not cache it, so two entries that ever share an
 // fd necessarily agree on it. Clears BY SLOT (the pointer is in hand). The
 // caller (sys_execve_core) runs this in execve's sole-live-thread window
-// (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
+// (proc_exec_claim), so it takes NO socktab lock -- there is no peer thread to
 // race, and locking here would nest tab->lock under the handle table's t->lock
 // (handle_get_cloexec requires it). NULL-safe: a native Proc has no socktab.
 void viv_socktab_drop_cloexec(struct Proc *p) {
@@ -3076,7 +3076,7 @@ static bool viv_signote_indexable(enum viv_signote note) {
 //      note_ignored reads nothing else), and every reader that CONSUMES the
 //      copied fields (delivery at EL0 return, the handler-mask compose) runs
 //      on a thread of the table's own Proc, which cannot run during that
-//      Proc's exec (proc_exec_alone). A future cross-Proc consumer of the
+//      Proc's exec (proc_exec_claim). A future cross-Proc consumer of the
 //      copied fields re-opens this argument; say so at the site.
 //
 // What is deliberately NOT promised: entry-to-entry consistency. A reader may

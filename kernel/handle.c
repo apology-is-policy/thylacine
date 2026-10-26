@@ -999,7 +999,7 @@ int handle_close_on_exec(struct Proc *p) {
     //     close the same slot twice, whatever a future caller does.
     //
     // The snapshot cannot go stale in the only caller that exists: execve
-    // refuses unless this is the Proc's sole live thread (proc_exec_alone,
+    // runs this only once it is the Proc's sole thread (proc_exec_claim,
     // re-checked inside proc_exec_replace), so no peer is running to open or
     // close anything while this walks. The clear-first form does not DEPEND on
     // that, which is the point of writing it this way.

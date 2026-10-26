@@ -1659,7 +1659,7 @@ bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd);
 // looks the table up by number, so a connect() on that file fd would find the
 // stale row and dial its dead connection. Still load-bearing. Reads cloexec
 // live from the handle table; runs in execve's sole-live-thread window
-// (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
+// (proc_exec_claim), so it takes NO socktab lock -- there is no peer thread to
 // race, and taking the lock would nest it under the handle table's own lock
 // (handle_get_cloexec requires t->lock) for no benefit. NULL-safe.
 struct Proc;

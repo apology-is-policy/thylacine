@@ -468,9 +468,11 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 // A caller that wants an fd born with the flag set does alloc-then-set rather
 // than passing it through handle_alloc, which would mean touching ~100 call
 // sites for one bit. The window between the two is provably empty: only exec
-// consumes the flag, execve refuses unless it is the Proc's only live thread
-// (proc_exec_alone), and the caller IS a live thread mid-syscall -- so no exec
-// can run between the alloc and the set.
+// consumes the flag, exec's commit waits until it is the Proc's only live
+// thread (proc_exec_claim), and the caller IS a live thread mid-syscall that
+// cannot commit its exit before its own die-check at the call's end -- no path
+// between the alloc and the set reaches one -- so no exec can commit between
+// them.
 int handle_set_cloexec(struct Proc *p, hidx_t h, bool on);
 int handle_get_cloexec(struct Proc *p, hidx_t h);
 

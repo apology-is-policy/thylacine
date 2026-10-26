@@ -994,7 +994,8 @@ struct Proc {
     // The lock on this Proc's threads (thread-model C3, ARCH 7.3.1). It guards
     // `threads` and the links, thread_count, live_threads, loom_sqpoll_count,
     // every THREAD_EXITING commit (thread_commit_exiting_locked is the one
-    // writer), debug_focus_thread, the per-Proc thread walks and EXIT_CLOSING;
+    // writer), debug_focus_thread, exec_task, the per-Proc thread walks and
+    // EXIT_CLOSING;
     // the group claim is written under it AND g_proc_table_lock, so a reader
     // holding either reads it exactly. An IRQ-off leaf below g_proc_table_lock,
     // at most one held per CPU. A Thread * read from `threads` stays valid only
@@ -1004,6 +1005,16 @@ struct Proc {
     // commit, or at the unlink of a thread freed without ever exiting. The
     // last-out, exec and kill decisions read it. Under threads_lock.
     int                live_threads;
+
+    // The thread whose exec holds this Proc (ARCH 7.3.3; Linux's
+    // signal->group_exec_task), or NULL. Written under threads_lock: set by
+    // proc_exec_claim, cleared at the swap or when group death abandons the
+    // exec. Read lock-free by the death predicates (proc_exec_dooms), which
+    // compare it and never dereference it.
+    struct Thread     *exec_task;
+    // The execer sleeps here until it is the only live thread. One sleeper at
+    // most: only the claim's holder waits.
+    struct Rendez      exec_rendez;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1321,8 +1332,10 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 432,
- "struct Proc size: thread-model C3 appended threads_lock (a u32 spinlock) + "
+_Static_assert(sizeof(struct Proc) == 456,
+ "struct Proc size: thread-model C5 appended exec_task (a pointer) + "
+ "exec_rendez (a 16-byte Rendez): 432 -> 456. Before that: "
+ "thread-model C3 appended threads_lock (a u32 spinlock) + "
  "live_threads int: 424 -> 432. Before that: "
  "the in-Proc thread reap appended reaped_run_ns u64 + "
  "reaped_kstack_peak u32 + reaped_kstack_tid int (what a freed exited peer "
@@ -1481,6 +1494,10 @@ _Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 424 &&
                __builtin_offsetof(struct Proc, live_threads) == 428,
                "thread-model C3: threads_lock and live_threads append after "
                "reaped_kstack_tid; nothing moves.");
+_Static_assert(__builtin_offsetof(struct Proc, exec_task) == 432 &&
+               __builtin_offsetof(struct Proc, exec_rendez) == 440,
+               "thread-model C5: exec_task and exec_rendez append after "
+               "live_threads; nothing moves.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
  "magic must be at offset 0 so SLUB's freelist write on "
  "kmem_cache_free clobbers it (double-free defense — "
@@ -1948,13 +1965,26 @@ void proc_group_kill(struct Proc *p);
 
 // LINEAGE L-2 (docs/LINEAGE.md section 5.2, I-44): execve's address-space swap.
 //
-// proc_exec_alone -- true iff the CALLING thread is the only live thread of `p`
-// (peers already EXITING do not count: such a thread has passed through
-// thread_exit_self, will never be scheduled again and can never touch user
-// memory, so it neither observes the swap nor blocks it). This is execve's
-// admission gate at L-2a; the multi-thread case needs a per-Thread termination
-// primitive that does not exist yet -- see the L-2b note in LINEAGE.md section 7.
-bool proc_exec_alone(struct Proc *p);
+// proc_exec_claim -- exec's claim on `p` (ARCH 7.3.3, LINEAGE L-2b), taken by
+// the calling thread once its new image has loaded: dooms every other thread
+// of `p`, wakes them as group termination does, and sleeps until the caller
+// is the only live thread. Returns 0 holding the claim (proc_exec_replace
+// clears it at the swap), or -1 without it: a group death or another exec
+// holds `p`, or a group death arrived during the wait. On -1 the caller drops
+// its new image and returns; its EL0-return die-check kills it.
+int proc_exec_claim(struct Proc *p);
+
+// True iff an exec by a thread other than `t` holds `p`, which every death
+// predicate reads as `t`'s death (ARCH 7.3.3). Lock-free; compares the claim,
+// never dereferences it.
+static inline bool proc_exec_dooms(const struct Proc *p, const struct Thread *t) {
+    const struct Thread *x = __atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE);
+    return x != NULL && x != t;
+}
+
+// Called with threads_lock held after every decrement of live_threads: wakes
+// a waiting execer once it is the only live thread.
+void proc_exec_live_dropped_locked(struct Proc *p);
 
 // proc_exec_replace -- commit `nas` as `p`'s address space and destroy the
 // outgoing one, then reset the per-image state a new program must not inherit
@@ -1967,7 +1997,7 @@ bool proc_exec_alone(struct Proc *p);
 // there is nothing left to roll back.
 //
 // PRECONDITIONS: the caller is the execing thread; it is the only live thread of
-// `p` (proc_exec_alone); `nas` is a completely built address space no other
+// `p` (proc_exec_claim); `nas` is a completely built address space no other
 // thread can reach. Each is re-checked or extincts -- a violation is structural
 // corruption, not a runtime error.
 // Design D (VIVARIUM 13.10.4): `new_pheno` is the phenotype the NEW image was
@@ -1988,7 +2018,8 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno);
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
 // return-to-EL0 (the sync-from-EL0 SVC + fault-handled tails in
 // exception.c, and the IRQ-from-EL0 tail in vectors.S 0x480). If the calling
-// Thread's Proc is group-terminating (group_exit_msg != NULL), the Thread
+// Thread's Proc is group-terminating (group_exit_msg != NULL), or another
+// thread's exec holds it (proc_exec_dooms, ARCH 7.3.3), the Thread
 // self-terminates here via thread_exit_self() (NEVER returns in that case).
 // Otherwise returns. #713: runs BEFORE the DAIF-masked ELR-set..eret window;
 // the die path sched()s away and never reaches the eret.

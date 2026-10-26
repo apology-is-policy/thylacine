@@ -558,7 +558,7 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
 // the quiescence argument is live_peers == 0 (every peer has committed
 // EXITING, whose residual execution never touches the table, and no new
 // peer can spawn without a RUNNING thread); at proc_free all threads are
-// reaped; at exec the caller is the Proc's one live thread (proc_exec_alone,
+// reaped; at exec the caller is the Proc's one thread (proc_exec_claim,
 // re-checked under p->threads_lock at the swap). Returns the device count
 // for the regression tests.
 //
@@ -1331,8 +1331,10 @@ bool proc_thread_admit(struct Proc *p, struct Thread *nt) {
 #endif
     irq_state_t s = proc_threads_lock(p);
     // The claim is written under this lock (group_terminate), so the read is
-    // exact: a thread linked now is one the death-wake walk will find.
+    // exact: a thread linked now is one the death-wake walk will find. So is
+    // an exec's (proc_exec_claim): a thread linked under it would only die.
     bool ok = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&
+              p->exec_task == NULL &&
               proc_thread_room_locked(p);
     if (ok) thread_link_into_proc_locked(nt, p);
     proc_threads_unlock(p, s);
@@ -3362,8 +3364,9 @@ void proc_caught_note_wake(struct Proc *p) {
 }
 
 // ARCH 8.8.3, "Which thread takes a caught note" (operator votes 2026-10-12;
-// specs/caught_target.tla). A candidate for family `fam` is not exiting (read
-// under p->threads_lock, which every walk holds), has the family unmasked,
+// specs/caught_target.tla). A candidate for family `fam` is not exiting and not
+// doomed by an exec (both read under p->threads_lock, which every walk holds),
+// has the family unmasked,
 // runs no handler, and is not in a wait that holds. The mask and the handler
 // flag are the thread's own, written without a lock, so they read exactly only
 // while it is blocked (it wrote them before it published its wait under
@@ -3372,6 +3375,8 @@ void proc_caught_note_wake(struct Proc *p) {
 // BUGGY_STALE_KEEPS).
 static bool caught_candidate(const struct Thread *x, u32 fam) {
     if (x->state == THREAD_EXITING) return false;
+    // An exec has doomed it: it dies at its tail before the notes leg runs.
+    if (proc_exec_dooms(x->proc, x)) return false;
     if (__atomic_load_n(&x->note_mask, __ATOMIC_RELAXED) & fam) return false;
     if (__atomic_load_n(&x->in_handler, __ATOMIC_RELAXED)) return false;
     return __atomic_load_n(&x->caught_wait, __ATOMIC_RELAXED) != CAUGHT_WAIT_HOLDS;
@@ -4816,8 +4821,8 @@ void thread_exit_self(void) {
     exit_tail_test_hook();
 
     // F3 audit close: the clear-child-tid handoff runs HERE, after the EXITING
-    // commit, so a joiner that reads the zeroed word finds us EXITING -- exec's
-    // alone gate (proc_exec_alone) and every live-peer decision rely on it --
+    // commit, so a joiner that reads the zeroed word finds us EXITING -- every
+    // live-peer decision relies on it --
     // and with no lock held (torpor_wake takes torpor_lock). The store may
     // fault but never sleeps: demand_page_locked refuses a thread that is not
     // RUNNING the one page-in that would.
@@ -4896,21 +4901,93 @@ struct Allowance *proc_allowance_install_locked(struct Proc *p, struct Allowance
 // costs no stack in a syscall frame.
 static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
 
-bool proc_exec_alone(struct Proc *p) {
-    if (!p || p->magic != PROC_MAGIC) return false;
+// The death wake (#811, ARCH 8.8.1), run under p->threads_lock after a death
+// is published -- group termination's claim, or an exec's (proc_exec_claim) --
+// so that every thread of p asleep returns to the die-check that reads it.
+// AFTER the publish: a thread that registers after the walk re-observes the
+// death in its post-register check (register-then-observe; I-9).
+//
+// First every futex (torpor) sleeper; torpor_lock is strictly below
+// threads_lock. Then EVERY thread blocked in a sleep()/tsleep() Rendez sleep,
+// so it returns *_INTR -- which closed the 7.9.1 residual where an indefinite
+// poll(-1) / pipe / devnotes_read sleeper was never woken and its Proc never
+// reaped (the #809-audit F1 hang). The only record of "Thread T sleeps on
+// Rendez R" is t->rendez_blocked_on, read under T's wait_lock -- the SAME lock
+// the sleeper's register-then-observe takes -- and wait_lock is HELD ACROSS
+// wakeup (Option A, ARCH 8.8.1) so a torpor waiter's stack-allocated rendez
+// cannot be popped from under the waker. A RUNNING thread reads NULL and is
+// skipped (it reaches its own die-check); wakeup re-validates r->waiter under
+// r->lock, so one already woken is a no-op. Order: threads_lock -> wait_lock ->
+// (wakeup: g_timerwait.lock -> r->lock); only the owner writes
+// rendez_blocked_on.
+static void proc_death_wake_locked(struct Proc *p) {
+    ASSERT_TL_HELD(p);
+    torpor_wake_all_for_proc(p);
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        struct Rendez *r = peer->rendez_blocked_on;
+        if (r) wakeup(r);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
+}
+
+// ARCH 7.3.3 (thread-model C5, LINEAGE L-2b; specs/thread_reap.tla ExecClaim,
+// ExecAbort). The cond of the execer's sleep: it is the only live thread.
+// Lock-free, as a sleep cond must be: live_threads changes under the thread
+// lock, and each decrement that leaves one calls wakeup after it.
+static int proc_exec_alone_cond(void *arg) {
+    const struct Proc *p = arg;
+    return __atomic_load_n(&p->live_threads, __ATOMIC_RELAXED) == 1;
+}
+
+int proc_exec_claim(struct Proc *p) {
     struct Thread *self = current_thread();
-    if (!self || self->proc != p)     return false;
+    if (!p || p->magic != PROC_MAGIC || !self || self->proc != p)
+        extinction("proc_exec_claim: not a thread of the Proc");
+
+    // The group claim is written under this lock too, so both reads are exact.
+    // A held claim is another exec's, which has doomed this thread.
     irq_state_t s = proc_threads_lock(p);
-    bool alone = (p->live_threads == 1);   // counts self
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+        p->exec_task != NULL) {
+        proc_threads_unlock(p, s);
+        return -1;
+    }
+    // RELEASE pairs with proc_exec_dooms's ACQUIRE at each die-check.
+    __atomic_store_n(&p->exec_task, self, __ATOMIC_RELEASE);
+    bool alone = p->live_threads == 1;
+    if (!alone) proc_death_wake_locked(p);
     proc_threads_unlock(p, s);
-    return alone;
+    if (alone) return 0;
+
+    // A doomed thread running at EL0 elsewhere takes its die-check at the IPI
+    // rather than at its next tick, as group termination kicks.
+    smp_resched_others();
+
+    // Only group death ends this early (sleep_death_only): a terminate latch is
+    // the new image's to meet, its handler reset to the default. The decrement
+    // of live_threads that leaves one wakes us (proc_exec_live_dropped_locked).
+    if (sleep_death_only(&p->exec_rendez, proc_exec_alone_cond, p) == SLEEP_OK)
+        return 0;
+
+    s = proc_threads_lock(p);
+    if (p->exec_task == self)
+        __atomic_store_n(&p->exec_task, NULL, __ATOMIC_RELEASE);
+    proc_threads_unlock(p, s);
+    return -1;
+}
+
+void proc_exec_live_dropped_locked(struct Proc *p) {
+    ASSERT_TL_HELD(p);
+    if (p->exec_task != NULL && p->live_threads == 1)
+        wakeup(&p->exec_rendez);
 }
 
 // The note-side half of "drop everything that names the OUTGOING image",
 // factored out of proc_exec_replace so it can be driven directly by a test --
 // the exec path itself cannot be, since it demands current_thread()->proc == p
 // and performs a real TTBR0 swap. Its caller supplies the single-live-thread
-// guarantee (proc_exec_alone, re-checked under the lock at the swap); nothing
+// guarantee (proc_exec_claim, re-checked under the lock at the swap); nothing
 // here re-establishes it.
 //
 // Keep this the ONE place the note-side reset happens. Splitting it -- an
@@ -4929,7 +5006,7 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     //
     // The free's old justification named ONE reader ("notes_deliver_at_el0_
     // return, which runs on a thread of THIS Proc") and concluded from
-    // proc_exec_alone that there was nobody else. The single-THREAD half was
+    // the sole-live-thread gate that there was nobody else. The single-THREAD half was
     // true; the single-READER half was not, and the gap is invisible from the
     // free's own line. Resetting IN PLACE loses nothing (a reset row reads
     // SIG_DFL by the SIG_DFL==0 argument in viv_sigtab_reset), so keeping the
@@ -5060,7 +5137,7 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
 // Test hook (the *_for_test convention; deliberately absent from the header --
 // the harness extern-declares it and there is no production caller). The
 // precondition is unenforced here and therefore stated: `p` must have no live
-// thread but `t` -- exec establishes that (proc_exec_alone, re-checked under
+// thread but `t` -- exec establishes that (proc_exec_claim, re-checked under
 // g_proc_table_lock at the swap); the table is written without a lock, so
 // driving this on a RUNNING Proc would interleave a whole-table reset with that
 // Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
@@ -5109,10 +5186,10 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     if (!self || self->proc != p)
         extinction("proc_exec_replace: not the execing thread");
 
-    // Every peer is EXITING (admission counted no live one, and only a live
-    // thread creates one). Wait until each is freed: the new image starts as
-    // this thread alone, with its whole thread budget, as Linux's de_thread
-    // leaves it.
+    // Every peer is EXITING: proc_exec_claim returned once this thread was the
+    // only live one, and while the claim holds only a live thread could admit
+    // another. Wait until each is freed: the new image starts as this thread
+    // alone, with its whole thread budget, as Linux's de_thread leaves it.
     proc_exec_wait_alone(p);
 
     struct AddrSpace *old;
@@ -5127,6 +5204,9 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         irq_state_t ts = proc_threads_lock(p);
         bool alone = p->live_threads == 1 &&
                      __atomic_load_n(&p->thread_count, __ATOMIC_RELAXED) == 1;
+        // The claim ends with the old image: nothing is left for it to doom,
+        // and the new image may spawn.
+        if (alone) __atomic_store_n(&p->exec_task, NULL, __ATOMIC_RELEASE);
         proc_threads_unlock(p, ts);
         if (!alone) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);
@@ -5353,40 +5433,10 @@ static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED,
                           __ATOMIC_RELEASE);
 
-    // Wake every futex (torpor) sleeper of p so it returns from torpor_wait to
-    // its EL0-return die-check. MUST run AFTER the flag set: a peer that
-    // registers in torpor_wait after this walk re-observes the now-set flag in
-    // torpor_wait's post-register check (register-then-observe; I-9). The
-    // torpor lock-order (torpor_lock) is strictly below threads_lock, so this
-    // composes under the locks held here.
-    torpor_wake_all_for_proc(p);
-
-    // Universal death-wake (#811, ARCH §8.8.1): wake EVERY peer blocked in a
-    // sleep()/tsleep() rendez sleep so it returns *_INTR and dies at its EL0-
-    // return die-check -- closing the §7.9.1 residual where an indefinite
-    // poll(-1) / pipe / devnotes_read sleeper was never woken and its Proc was
-    // never reaped (the #809-audit F1 hang). The only record of "Thread T
-    // sleeps on Rendez R" is the reverse pointer t->rendez_blocked_on: read it
-    // under the peer's wait_lock -- the SAME lock the sleeper's register-then-
-    // observe takes, which is the I-9 serialization -- and wakeup() the Rendez.
-    //
-    // wait_lock is HELD ACROSS wakeup (Option A, ARCH §8.8.1): it pins the peer
-    // so a torpor waiter's STACK-allocated w.rendez (rendez_blocked_on can
-    // point into a sleeping peer's kernel stack frame) cannot be popped out
-    // from under the waker. rendez_blocked_on is non-NULL exactly while the
-    // owner is registered-and-sleeping (set/cleared only by the owner, under
-    // wait_lock); a RUNNING peer reads NULL and is skipped (it reaches its own
-    // die-check). wakeup() re-validates r->waiter under r->lock, so a peer
-    // already woken on its normal path (or by torpor_wake_all above) is a safe
-    // no-op. Lock order: g_proc_table_lock -> threads_lock -> wait_lock ->
-    // (wakeup: g_timerwait.lock -> r->lock); acyclic (only the owner WRITES
-    // rendez_blocked_on; the cascade only READS it, under wait_lock).
-    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
-        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
-        struct Rendez *r = peer->rendez_blocked_on;
-        if (r) wakeup(r);
-        spin_unlock_irqrestore(&peer->wait_lock, ws);
-    }
+    // The death wake: every futex sleeper and every Rendez sleeper of p
+    // returns to its die-check. After the flag set, so a peer that registers
+    // after the walk re-observes the flag (register-then-observe; I-9).
+    proc_death_wake_locked(p);
     proc_threads_unlock(p, ts);
 
     // Kick any peer RUNNING in userspace on another CPU so it traps + hits its
@@ -5454,10 +5504,13 @@ void el0_return_die_check(void) {
         proc_for_each(legate_teardown_cb, &tctx);
     }
 
-    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
-        // The Proc is group-terminating; self-terminate. thread_exit_self
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+        proc_exec_dooms(p, t)) {
+        // The Proc is group-terminating, or another thread's exec holds it
+        // (ARCH 7.3.3); self-terminate. thread_exit_self
         // marks self EXITING and, if this is the last live Thread, transitions
-        // the Proc to ZOMBIE with the recorded group_exit_msg status. NEVER
+        // the Proc to ZOMBIE with the recorded group_exit_msg status (never an
+        // exec's victim: the execer stays live until it swaps). NEVER
         // returns (sched() away) -- so on the sync tail the subsequent
         // notes_deliver is skipped, and on the IRQ tail the eret is never
         // reached (#713-safe: no interruptible ELR-set..eret window is entered
@@ -5521,8 +5574,10 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
         // flagged while we were parked woke debug_rendez (proc_group_terminate's
         // cascade reads rendez_blocked_on == &debug_rendez under wait_lock), so
         // we resume here and die rather than re-parking. group_exit_msg is the
-        // model's `gflag`.
-        if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        // model's `gflag`. An exec by another thread kills a parked thread the
+        // same way (ARCH 7.3.3); its claim woke debug_rendez too.
+        if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+            proc_exec_dooms(p, t)) {
             t->debug_trapframe = NULL;   // 8a-1c holotype F2: don't die with a dangling frame pointer
             thread_exit_self();          // noreturn
         }
@@ -5544,7 +5599,8 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
             // just before the terminate reads the cleared flags here. The
             // terminate is ordered before the clear wake_cond ACQUIRE-read
             // (both RELEASE), so this load sees it: a dying thread never erets.
-            if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+            if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+                proc_exec_dooms(p, t)) {
                 t->debug_trapframe = NULL;
                 thread_exit_self();          // noreturn
             }

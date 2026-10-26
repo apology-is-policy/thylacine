@@ -1366,6 +1366,10 @@ bool thread_die_pending(struct Thread *t) {
     if (!p) return false;
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
         return true;
+    // An exec by another thread holds the Proc (ARCH 7.3.3): this thread dies
+    // as a group-death victim does, and, like group death, ignores the mask.
+    if (proc_exec_dooms(p, t))
+        return true;
     // kproc never takes the latch leg (RW-0 F3 defense-in-depth): the sole
     // arm site (notes_arm_intr_terminate_locked) already refuses kproc, but
     // a future arm path that forgot the guard would otherwise put every
@@ -1408,11 +1412,14 @@ bool thread_death_reaches(struct Thread *t) {
 
 // A stopped thread keeps its stop when an interrupt arrives, and a parent
 // suspend must not return on a latch a peer can revoke (DEBUG-FS-DESIGN 5g), so
-// the waits that honour that ask only this: group death, which nothing revokes.
+// the waits that honour that ask only this: group death, which nothing revokes,
+// or an exec's doom, which only the swap clears and only once this thread is
+// gone (ARCH 7.3.3).
 bool thread_group_death_pending(struct Thread *t) {
     if (!t || thread_death_held(t)) return false;
     struct Proc *p = t->proc;
-    return p && __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL;
+    return p && (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
+                 proc_exec_dooms(p, t));
 }
 
 void notes_fault_dying_latch(struct Thread *t) {
