@@ -1897,7 +1897,9 @@ static bool xc_claim_held(void) {
 }
 
 // The child's end: its claim resolved, or a kill past the budget, then a deaf
-// peer released and the Proc reaped. Returns the packed status.
+// peer released and the Proc reaped. Returns the packed status. A vfork child
+// the dying Proc could not reap is orphaned to kproc, this thread's Proc, where
+// a later test's wait for any child would take it; it is reaped here.
 static int xc_finish(int child_pid) {
     TEST_YIELD_UNTIL_SOFT(xc_phase() == XC_DONE || xc_phase() == XC_FAILED);
     if (xc_phase() != XC_DONE && xc_phase() != XC_FAILED) xc_kill();
@@ -1905,6 +1907,11 @@ static int xc_finish(int child_pid) {
     __atomic_store_n(&g_xc_vfork_release, true, __ATOMIC_RELEASE);
     int status = -1;
     int reaped = wait_pid_for(child_pid, WAIT_PACKED, &status);
+    int vpid = __atomic_load_n(&g_xc_vfork_pid, __ATOMIC_ACQUIRE);
+    if (vpid > 0 && !g_xc_vfork_reaped) {
+        int vst = -1;
+        (void)wait_pid_for(vpid, WAIT_PACKED, &vst);
+    }
     return reaped == child_pid ? status : -3;
 }
 
