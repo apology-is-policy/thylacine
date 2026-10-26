@@ -156,15 +156,16 @@ void test_sys_corvus_caps_kproc_has_new_caps(void) {
         "kproc still has CAP_HW_CREATE");
 }
 
+// Only an unobserved strong source flips kern_random_seeded(): RNDR, or the
+// virtio-rng pull after virtio_init (hvf's Apple cores have no RNDR).
 void test_kern_random_seeded_returns_true_on_qemu(void) {
-    // QEMU's virt machine reports FEAT_RNG; kern_random_seeded() ≡
-    // g_rndr_available is true. If this fails the boot environment
-    // changed.
+    if (!test_strong_entropy()) return;
     TEST_ASSERT(kern_random_seeded(),
         "kern_random_seeded() returns true on QEMU virt");
 }
 
 void test_kern_random_bytes_produces_nonzero(void) {
+    if (!test_strong_entropy()) return;
     u8 buf[32] = {0};
     long got = kern_random_bytes(buf, (long)sizeof(buf));
     TEST_EXPECT_EQ(got, (long)sizeof(buf),

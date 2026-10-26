@@ -10,13 +10,11 @@
 //   - SYS_IRQ_CREATE + SYS_IRQ_WAIT for the device's completion IRQ.
 //
 // Setup:
-//   1. devramfs_lookup("bin/virtio-blk-probe", ...) — pre-built userspace
-//      ELF from the cpio. Graceful skip if not built.
+//   1. test_probe_lookup("bin/virtio-blk-probe", ...) — pre-built userspace
+//      ELF from the cpio.
 //   2. Verify a virtio-mmio slot with DeviceID = 2 (block) exists in
-//      the kernel's probe table (populated by virtio_init at boot).
-//      Without a `-device virtio-blk-device,drive=disk0` flag in
-//      tools/run-vm.sh's invocation, no slot will have DeviceID=2 and
-//      we report SKIP rather than spawning a probe that would block
+//      the kernel's probe table (populated by virtio_init at boot), via
+//      test_virtio_device -- never spawning a probe that would block
 //      forever on t_irq_wait.
 //   3. rfork_with_caps(RFPROC, ..., CAP_HW_CREATE) — child starts
 //      with child->caps = kproc.caps & CAP_HW_CREATE = CAP_HW_CREATE.
@@ -58,10 +56,9 @@
 //     would cause the device to never complete the request; t_irq_wait
 //     blocks until BOOT_TIMEOUT.
 //
-// If the probe binary OR the virtio-blk device is absent, the test
-// prints a SKIP notice and returns PASS — production / CI both ship
-// the binary AND the device, so this guards against partial builds
-// in development workflows.
+// A missing probe binary FAILS the test when the image carries userspace
+// (bin/joey), and a missing virtio-blk FAILS it when the launcher declared
+// one; otherwise each is a counted skip.
 
 #include "test.h"
 

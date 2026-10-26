@@ -34,9 +34,8 @@
 //   - Look up /virtio-blk-rw in devramfs; copy to the static blob
 //     (with R5-G alignment).
 //   - Confirm a virtio-mmio slot with DeviceID = 2 (block) exists
-//     (graceful SKIP if -device virtio-blk-device is absent in
-//     tools/run-vm.sh's flags, e.g. tools/run-vm.sh --no-share for a
-//     headless dev VM that nonetheless ships disk-less).
+//     (test_virtio_device: FAILS when the launcher declared one, a
+//     counted skip when it attached no virtio-blk).
 //   - rfork_with_caps(RFPROC, ..., CAP_HW_CREATE).
 //   - wait_pid; assert exit_status == 0.
 //

@@ -9,11 +9,13 @@
 // the RNDR-only baseline so the same path runs on RNDR-less targets.
 //
 // Invariants:
-//   - kern_random_seeded() is the readiness signal: false until a
-//     strong entropy source has ever contributed (DTB boot seed, RNDR,
-//     or a virtio-rng pull), monotonic true thereafter. While false,
-//     kern_random_bytes returns -1 (fail closed) and SYS_GETRANDOM
-//     refuses -- the same contract the RNDR-only baseline held.
+//   - kern_random_seeded() is the readiness signal: false until an
+//     unobserved strong source has ever contributed (RNDR, or a
+//     virtio-rng pull), monotonic true thereafter. The DTB boot seed and
+//     CNTPCT are mixed in but never flip it (KASLR consumes and partly
+//     discloses the DTB seed). While false, kern_random_bytes returns -1
+//     (fail closed) and SYS_GETRANDOM refuses -- the same contract the
+//     RNDR-only baseline held.
 //   - The CSPRNG re-keys on every keystream-buffer drain (fast key
 //     erasure -> backtracking resistance) and pulls fresh entropy every
 //     ~1 MiB served (state-compromise recovery).
@@ -38,10 +40,13 @@
 // buffer + uaccess_store_u8 per byte for user-VA targets.
 long kern_random_bytes(void *out, long len);
 
-// Is the kernel CSPRNG ready to deliver bytes? Returns true iff a strong
-// entropy source has ever seeded the pool (DTB boot seed, RNDR, or a
-// virtio-rng pull); monotonic. kern_random_bytes returns -1 while false.
+// Is the kernel CSPRNG ready to deliver bytes? Returns true iff an
+// unobserved strong source has ever seeded the pool (RNDR, or a virtio-rng
+// pull); monotonic. kern_random_bytes returns -1 while false.
 bool kern_random_seeded(void);
+
+// Does this CPU implement RNDR (FEAT_RNG)? Fixed at devrandom_init.
+bool kern_random_rndr_available(void);
 
 // Pull strong entropy from the kernel virtio-rng device and re-key the
 // CSPRNG. Called once at boot (after virtio_init, from kernel/main.c) and

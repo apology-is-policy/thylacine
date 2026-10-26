@@ -2961,9 +2961,10 @@ void test_cons_tx_unit_echo_atomic(void) {
 // producer's sequence must ascend. Under per-byte pushes the frames mix within
 // a few units. The overlap witness (each side samples the other's in-emit flag
 // before each unit) says whether the interleave was actually exercised this
-// boot; with < 2 CPUs the test prints a SKIP note and returns (one CPU cannot
-// interleave two pushers). Sabotage S1/S2 (per-byte pushes on either side)
-// -> torn frames whenever the emits overlapped.
+// boot; it needs a second CPU (one CPU cannot interleave two pushers), so it
+// FAILS on one when the launcher declared thylacine.smp and skips otherwise.
+// Sabotage S1/S2 (per-byte pushes on either side) -> torn frames whenever the
+// emits overlapped.
 
 #define TUS_UNITS   60u
 #define TUS_UNIT    64u

@@ -7,8 +7,8 @@
 // directly (which the irqfwd tests already cover at the kernel layer).
 //
 // Setup:
-//   1. devramfs_lookup("bin/irq-probe", ...) — pre-built userspace ELF
-//      from the cpio. Graceful skip if not built (fresh checkout).
+//   1. test_probe_lookup("bin/irq-probe", ...) — pre-built userspace ELF
+//      from the cpio.
 //   2. gic_set_pending_spi(intid) — manually pend selected SPI
 //      at GICD_ISPENDR<n>.bit. The IRQ is now pending but not yet
 //      enabled (no driver has gic_enable_irq'd it), so the GIC keeps
@@ -81,9 +81,8 @@
 //     mutated under r->lock; sleep returns when cond is true. Pins
 //     scheduler.tla I-9 NoMissedWakeup at runtime.
 //
-// If /irq-probe wasn't built (fresh checkout where `tools/build.sh
-// userspace` hasn't run yet), the test prints a skip notice and
-// returns PASS. Production / CI always builds the full ramfs.
+// A missing /irq-probe FAILS the test when the image carries userspace
+// (bin/joey); a userspace-less image makes it a counted skip.
 
 #include "test.h"
 

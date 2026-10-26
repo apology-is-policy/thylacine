@@ -23,6 +23,7 @@
 #include <thylacine/devramfs.h>     // test_probe_lookup: the probe and bin/joey
 #include <thylacine/dtb.h>          // test_virtio_device: the launcher's declaration
 #include <thylacine/virtio.h>       // test_virtio_device: the slot lookup
+#include <thylacine/random.h>       // test_strong_entropy: the CSPRNG's sources
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
@@ -5230,6 +5231,16 @@ struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token) {
     struct virtio_mmio_dev *dev = virtio_mmio_find_by_device_id(device_id);
     return test_requires(dev != NULL, token, 0, true,
                          "no virtio-mmio slot carries its DeviceID") ? dev : NULL;
+}
+
+bool test_strong_entropy(void) {
+    if (kern_random_seeded()) return true;
+    if (kern_random_rndr_available()) {
+        test_fail("RNDR is present, yet no strong source seeded the pool");
+        return false;
+    }
+    return test_requires(false, "thylacine.virtio-rng", 0, false,
+                         "no strong source seeded the pool");
 }
 
 int proc_test_serial_sak(int posture);

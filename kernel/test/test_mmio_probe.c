@@ -43,9 +43,8 @@
 //     stale RAM contents instead of the live "virt" magic, and the
 //     probe would exit 1.
 //
-// If /mmio-probe wasn't built (fresh checkout where `tools/build.sh
-// userspace` hasn't run yet), the test prints a skip notice and
-// returns PASS. Production / CI always builds the full ramfs.
+// A missing /mmio-probe FAILS the test when the image carries userspace
+// (bin/joey); a userspace-less image makes it a counted skip.
 
 #include "test.h"
 

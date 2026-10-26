@@ -680,6 +680,7 @@ void test_pci_claim_nth(void) {
 // A mapped function cannot be reclaimed after its ordinary handle closes.
 // The retained whole BAR also keeps its excluded routing pages exclusive.
 void test_pci_mapping_holds_function(void) {
+    if (!rng_pci_present()) return;
     struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
     TEST_ASSERT(k != NULL, "claim idle RNG for mapping lifetime");
     struct pci_map_window windows[PCI_MAP_WINDOW_MAX];

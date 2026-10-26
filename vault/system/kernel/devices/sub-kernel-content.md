@@ -23,7 +23,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-10-26
 ---
 ## Purpose
 
@@ -206,7 +206,9 @@ readiness. Only the CPU's own generator, or a pull from the host, flips the gate
 **The CPU's own generator is RNDR (FEAT_RNG), and its capture idiom is
 load-bearing.** Presence is probed once at init from `ID_AA64ISAR0_EL1`
 bits[63:60] (a value `>= 1`) into a cross-CPU-read flag, which the boot banner
-reports. A read of the RNDR register sets `PSTATE.NZCV` — `Z == 0` means it
+reports and `kern_random_rndr_available()` exports: the kernel suite's entropy
+gate reads it, since an unseeded pool on a CPU with RNDR is a seeding bug, not
+a configuration ([[sub-substrate-kernel-suite]]). A read of the RNDR register sets `PSTATE.NZCV` — `Z == 0` means it
 returned fresh entropy — so the read is captured with a `cset` on `ne` and
 retried up to ten times when the source is transiently dry, and the inline
 assembly **must clobber `cc`**, because RNDR writes the flags and omitting the

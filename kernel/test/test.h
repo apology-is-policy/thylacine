@@ -113,6 +113,11 @@ bool test_requires(bool present, const char *token, u32 nth, bool exact, const c
 struct virtio_mmio_dev;
 struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token);
 
+// Has a strong source seeded the kernel CSPRNG? An unseeded pool FAILS the
+// test on a CPU with RNDR (a seeding bug, whatever the launcher declared);
+// without RNDR the virtio-rng is the only strong source (test_requires).
+bool test_strong_entropy(void);
+
 // Convenience macros. TEST_ASSERT short-circuits the current test on
 // failure (returns from the test_case's fn). TEST_EXPECT_EQ is a
 // thin wrapper that stringifies operands for a more useful message.

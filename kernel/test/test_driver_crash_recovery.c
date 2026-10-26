@@ -47,9 +47,10 @@
 //     Real hardware behavior would need a per-device reset hook on
 //     release, Phase 5+.
 //
-// SKIP path: if `virtio-blk-probe` binary is missing from devramfs OR
-// no virtio-mmio slot has DeviceID=2, prints a SKIP notice + returns
-// PASS (same gating shape as test_virtio_blk_probe.c).
+// A missing `virtio-blk-probe` FAILS the test when the image carries
+// userspace (bin/joey), and a missing DeviceID=2 slot FAILS it when the
+// launcher declared one; otherwise each is a counted skip (the gates of
+// test_virtio_blk_probe.c).
 
 #include "test.h"
 

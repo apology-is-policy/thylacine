@@ -235,34 +235,24 @@ void test_full_write_returns_minus1(void) {
     spoor_clunk(c);
 }
 
-// RNDR detection — on QEMU virt with -cpu max, FEAT_RNG should be live.
-// If for some reason RNDR is absent (unusual config), random.read will
-// return -1 and the boot banner notes it; this test then becomes a
-// reminder that random.read is degenerate.
+// devrandom serves bytes once a strong source (RNDR, or the virtio-rng pull)
+// has seeded the CSPRNG, and refuses (-1) before.
 void test_random_rndr_available(void) {
+    if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");
 
     u8 buf[8];
     long got = devrandom.read(c, buf, 8, 0);
-
-    // -1 means no strong source (RNDR, virtio-rng) ever seeded the pool. The
-    // launcher attaches a virtio-rng and declares it, so that is a FAIL; a
-    // launcher without one leaves the test a counted skip.
-    if (got == -1) {
-        spoor_clunk(c);
-        test_requires(false, "thylacine.virtio-rng", 0, true, "no strong source seeded the pool");
-        return;
-    }
-    TEST_ASSERT(got == 8, "devrandom.read returns the 8 bytes asked for");
-
     spoor_clunk(c);
+    TEST_ASSERT(got == 8, "devrandom.read returns the 8 bytes asked for");
 }
 
 // ROADMAP §6.2 exit criterion: "cat /dev/random produces non-zero
 // bytes." Read 16 bytes; assert at least one is non-zero. (16 bytes
 // being all zero by chance from a CSPRNG is 2^-128.)
 void test_random_read_produces_nonzero_bytes(void) {
+    if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");
 
@@ -270,14 +260,8 @@ void test_random_read_produces_nonzero_bytes(void) {
     for (int i = 0; i < 16; i++) buf[i] = 0;
 
     long got = devrandom.read(c, buf, 16, 0);
-    if (got == -1) {
-        spoor_clunk(c);
-        test_requires(false, "thylacine.virtio-rng", 0, true, "no strong source seeded the pool");
-        return;
-    }
-
-    TEST_ASSERT(got == 16,
-                "devrandom.read must return full 16 bytes when RNDR up");
+    spoor_clunk(c);
+    TEST_ASSERT(got == 16, "devrandom.read returns the 16 bytes asked for");
 
     bool any_nonzero = false;
     for (int i = 0; i < 16; i++) {
@@ -285,24 +269,17 @@ void test_random_read_produces_nonzero_bytes(void) {
     }
     TEST_ASSERT(any_nonzero,
                 "ROADMAP §6.2: cat /dev/random produces non-zero bytes");
-
-    spoor_clunk(c);
 }
 
 void test_random_read_varies_across_calls(void) {
+    if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");
 
     u8 a[16], b[16];
     long ga = devrandom.read(c, a, 16, 0);
     long gb = devrandom.read(c, b, 16, 0);
-
-    if (ga == -1 || gb == -1) {
-        spoor_clunk(c);
-        test_requires(false, "thylacine.virtio-rng", 0, true, "no strong source seeded the pool");
-        return;
-    }
-
+    spoor_clunk(c);
     TEST_ASSERT(ga == 16 && gb == 16, "two 16-byte reads succeed");
 
     bool different = false;
@@ -312,8 +289,6 @@ void test_random_read_varies_across_calls(void) {
     TEST_ASSERT(different,
                 "two consecutive devrandom reads must differ "
                 "(probabilistic; 2^-128 fail rate)");
-
-    spoor_clunk(c);
 }
 
 void test_cons_write_advances(void) {

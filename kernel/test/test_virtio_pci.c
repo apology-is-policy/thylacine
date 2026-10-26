@@ -1,9 +1,8 @@
 // Tests for kernel/virtio_pci.c (P4-H).
 //
 // Exercises ECAM-based enumeration of VirtIO-PCI devices on bus 0 of
-// the QEMU virt PCIe root complex. tools/run-vm.sh attaches at least
-// one VirtIO PCI device (virtio-rng-pci) so the count assertions hold
-// in the integration boot.
+// the QEMU virt PCIe root complex. tools/run-vm.sh attaches and declares
+// virtio-rng-pci, so the per-function tests gate on it (test_requires).
 
 #include "test.h"
 
@@ -21,8 +20,7 @@ void test_virtio_pci_cfg_write_bounds(void);
 
 // virtio_pci_init has already run (in boot_main before tests). The
 // device count reflects whatever QEMU virt + tools/run-vm.sh's
-// -device flags exposed. tools/run-vm.sh attaches virtio-rng-pci, so
-// count >= 1 in this configuration.
+// -device flags exposed.
 void test_virtio_pci_init_called(void) {
     int count = virtio_pci_dev_count();
     TEST_ASSERT(count >= 0, "virtio_pci_dev_count returned negative");
@@ -31,14 +29,15 @@ void test_virtio_pci_init_called(void) {
 }
 
 void test_virtio_pci_count_within_bound(void) {
-    int count = virtio_pci_dev_count();
-    TEST_ASSERT(count >= 1,
-                "expected at least 1 VirtIO PCI device "
-                "(virtio-rng-pci via tools/run-vm.sh)");
+    (void)test_requires(virtio_pci_dev_count() >= 1, "thylacine.virtio-pci-rng", 0, false,
+                        "no virtio PCI function enumerates");
 }
 
 void test_virtio_pci_devices_have_vendor(void) {
     int count = virtio_pci_dev_count();
+    if (!test_requires(count > 0, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates"))
+        return;
     for (int i = 0; i < count; i++) {
         struct virtio_pci_dev *d = virtio_pci_dev_get(i);
         TEST_ASSERT(d != NULL, "dev_get returned NULL for in-range idx");
@@ -58,6 +57,9 @@ void test_virtio_pci_devices_have_vendor(void) {
 
 void test_virtio_pci_devices_have_cfg(void) {
     int count = virtio_pci_dev_count();
+    if (!test_requires(count > 0, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates"))
+        return;
     for (int i = 0; i < count; i++) {
         struct virtio_pci_dev *d = virtio_pci_dev_get(i);
         TEST_ASSERT(d->cfg != NULL, "d->cfg should be a mapped KVA");
@@ -68,15 +70,14 @@ void test_virtio_pci_devices_have_cfg(void) {
     }
 }
 
-// tools/run-vm.sh attaches virtio-rng-pci, which exposes
-// virtio_device_id = VIRTIO_DEVICE_ID_RNG (4) on modern transport.
-// QEMU may also synthesize other PCI VirtIO devices on the default
-// machine; this test asserts the specific RNG is among them.
+// virtio-rng-pci exposes virtio_device_id = VIRTIO_DEVICE_ID_RNG (4) on
+// modern transport, among whatever other virtio PCI functions are attached.
 void test_virtio_pci_find_rng(void) {
     struct virtio_pci_dev *d =
         virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0);
-    TEST_ASSERT(d != NULL,
-                "virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG) returned NULL");
+    if (!test_requires(d != NULL, "thylacine.virtio-pci-rng", 0, true,
+                       "no PCI function carries its DeviceID"))
+        return;
     TEST_EXPECT_EQ((u64)d->virtio_device_id, (u64)VIRTIO_DEVICE_ID_RNG,
                    "find_by_device_id returned mismatched device");
 }

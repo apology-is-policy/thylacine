@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-22
+updated: 2026-10-26
 ---
 
 ## Purpose
@@ -210,18 +210,29 @@ deliberately no bare skip call:
   GICv3 the launcher cannot know. `test_virtio_device` is its form for a
   virtio-mmio device. The probe each such test spawns runs only once the
   device is found, so its own missed scan is a FAIL too ([[sub-virtio-probes]]).
+- `test_strong_entropy` asks whether a strong source seeded the CSPRNG
+  ([[sub-kernel-content]]). A seeded pool passes without consulting the
+  launcher. An unseeded one FAILS on a CPU with RNDR, whatever the launcher
+  declared, because that is a seeding bug; without RNDR the virtio-rng is the
+  only strong source left, so it goes through `test_requires` on
+  `thylacine.virtio-rng`.
 
 The first census counted only the tests that printed `[skip]`. Audit round 1
-cited twenty-five sites that returned silently instead, and a census of every
-early return in `kernel/test` found eight more. Those that a configuration can
-lack go through `test_requires` now: the virtio rng (three tests), a PCI
-function (nine: seven on the rng function, two on any), a second PCI input
-function, the MSI route (three), a CSPRNG no strong source seeded (two, and a
-third test that had accepted it as a pass), a second CPU (eight -- the
-`default-smp1` rows' green no-ops), and the dlopen prover through
+cited twenty-five sites that returned silently instead, a census of every
+early return in `kernel/test` found eight more, and round 2 found the
+unconditional assertions beside them -- a test that FAILED for the same absence
+a sibling skipped, and loops that passed over an empty set. Every test that
+needs something a configuration can lack goes through a gate now: the
+virtio-mmio rng (four tests), the PCI rng function (thirteen) or any virtio PCI
+function (nine), a second PCI input function, the MSI route or controller
+(four), a second CPU (eight -- the `default-smp1` rows' green no-ops), a seeded
+CSPRNG (seven, through `test_strong_entropy`), and the dlopen prover through
 `test_image_lookup`. The guards that could never fire (a virtio-mmio slot
 count, twice; an all-empty slot page, four times) are assertions. A skip line
-is composed whole and printed by one `uart_puts`.
+is composed whole and printed by one `uart_puts`. Three tests that branch on
+the CPU count or the DTB's MSI map are not skips: their other arm asserts
+something real (the self-CPU path; that a host without an MSI map invents no
+route), and a declared machine lacking either FAILS a sibling gate.
 
 The initrd guards that returned silently (`devramfs_entry_count() < 1`, a
 `welcome` file that would not open) are assertions now: the suite already

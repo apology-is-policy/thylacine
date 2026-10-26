@@ -13,6 +13,7 @@
 #include <thylacine/types.h>
 #include <thylacine/chacha20.h>
 #include <thylacine/random.h>
+#include <thylacine/virtio.h>
 
 void test_chacha20_block_vector(void);
 void test_chacha20_keystream_continuity(void);
@@ -71,6 +72,7 @@ void test_chacha20_keystream_continuity(void) {
 }
 
 void test_kern_random_two_reads_differ(void) {
+    if (!test_strong_entropy()) return;
     u8 a[32] = {0};
     u8 b[32] = {0};
     TEST_EXPECT_EQ(kern_random_bytes(a, (long)sizeof(a)), (long)sizeof(a),
@@ -86,6 +88,7 @@ void test_kern_random_two_reads_differ(void) {
 static u8 g_big_read[2048];
 
 void test_kern_random_large_read_nonzero(void) {
+    if (!test_strong_entropy()) return;
     long n = (long)sizeof(g_big_read);
     TEST_EXPECT_EQ(kern_random_bytes(g_big_read, n), n,
                    "2048-byte read fills (crosses internal buffer boundary)");
@@ -101,6 +104,7 @@ void test_kern_random_large_read_nonzero(void) {
 // the all-zero guard in random_virtio_pull, `got > 0` also asserts the
 // pulled bytes are non-degenerate (a stale/coherency-miss read returns 0).
 void test_kern_random_virtio_reseed(void) {
+    if (!test_virtio_device(VIRTIO_DEVICE_ID_RNG, "thylacine.virtio-rng")) return;
     size_t got = random_seed_from_virtio();
     TEST_ASSERT(got > 0, "virtio-rng pull returns non-zero entropy");
     TEST_ASSERT(kern_random_virtio_contributed(),

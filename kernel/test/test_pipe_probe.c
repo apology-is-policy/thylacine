@@ -11,9 +11,8 @@
 //                                  + t_exits(0)
 //   wait_pid                   → status = 0 → test PASS
 //
-// If /pipe-probe wasn't built (user invoked tools/build.sh kernel only)
-// the devramfs lookup fails — we SKIP rather than FAIL so the kernel
-// boot test runner still passes.
+// A missing /pipe-probe FAILS the test when the image carries userspace
+// (bin/joey); a userspace-less image makes it a counted skip.
 
 #include "test.h"
 

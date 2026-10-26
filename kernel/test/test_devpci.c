@@ -1,10 +1,10 @@
 // devpci tests (Menagerie 6b) -- the kernel-mediated PCI topology as a tree.
 //
 // Runs against the boot PCI enumeration (virtio_pci_init -> g_virtio_pci_devs[]).
-// Under the test/boot QEMU-virt config a virtio-net-pci function is present (the
-// netdev-pci probe claims it), so virtio_pci_dev_count() is normally >= 1; the
-// per-function tests guard on count > 0 so the suite stays correct on a config
-// with no PCI device (the root + read-only + reuse-nc paths still run).
+// tools/run-vm.sh attaches virtio PCI functions (the rng among them), so
+// virtio_pci_dev_count() is >= 1; the per-function legs gate on count > 0
+// (test_requires), so a launcher that declared none skips them after the root
+// + read-only + reuse-nc paths ran, and one that declared the rng fails them.
 //
 // The load-bearing properties: devpci is READ-ONLY (no config-space write / no
 // raw ECAM -- the I-5 posture), its ctl line is well-formed + bounded, and the
@@ -108,14 +108,12 @@ void test_devpci_attach_root(void) {
     spoor_unref(c);
 }
 
-// The core: root -> <bdf> dir -> ctl -> read -> a well-formed line. Skips the
-// function-specific assertions on a no-PCI config (root still proven above).
+// The core: root -> <bdf> dir -> ctl -> read -> a well-formed line. Needs a
+// virtio PCI function (test_requires); the root alone is proven above.
 void test_devpci_walk_read_ctl(void) {
-    int count = virtio_pci_dev_count();
-    if (count <= 0) {
-        TEST_ASSERT(true, "no PCI function present -- ctl path skipped (config)");
+    if (!test_requires(virtio_pci_dev_count() > 0, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates"))
         return;
-    }
 
     struct Spoor *root = devpci.attach("");
     TEST_ASSERT(root != NULL, "attach root");
@@ -182,25 +180,28 @@ void test_devpci_readonly(void) {
     TEST_EXPECT_EQ(devpci.wstat(root, junk, sizeof(junk)), -1, "wstat -> -1");
     TEST_EXPECT_EQ(devpci.bwrite(root, NULL, 0), (long)-1, "bwrite -> -1");
 
-    if (virtio_pci_dev_count() > 0) {
-        static u8 dbuf[1024];
-        long dn = devpci.readdir(root, dbuf, sizeof(dbuf), 0);
-        char bdf[32];
-        if (dn > 0 && first_dirent_name(dbuf, dn, bdf, sizeof(bdf))) {
-            struct Spoor *fdir = walk1(root, bdf);
-            if (fdir) {
-                struct Spoor *ctl = walk1(fdir, "ctl");
-                if (ctl) {
-                    TEST_EXPECT_EQ(devpci.write(ctl, junk, sizeof(junk), 0), (long)-1,
-                                   "write ctl -> -1 (no config-space write)");
-                    TEST_EXPECT_EQ(devpci.wstat(ctl, junk, sizeof(junk)), -1, "wstat ctl -> -1");
-                    spoor_unref(ctl);
-                }
-                spoor_unref(fdir);
-            }
-        }
+    if (!test_requires(virtio_pci_dev_count() > 0, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates")) {
+        spoor_unref(root);
+        return;
     }
+    static u8 dbuf[1024];
+    long dn = devpci.readdir(root, dbuf, sizeof(dbuf), 0);
+    char bdf[32];
+    bool named = dn > 0 && first_dirent_name(dbuf, dn, bdf, sizeof(bdf));
+    struct Spoor *fdir = named ? walk1(root, bdf) : NULL;
+    struct Spoor *ctl = fdir ? walk1(fdir, "ctl") : NULL;
+    bool walked = fdir != NULL, has_ctl = ctl != NULL;
+    long wrote = ctl ? devpci.write(ctl, junk, sizeof(junk), 0) : 0;
+    int wstat = ctl ? devpci.wstat(ctl, junk, sizeof(junk)) : 0;
+    if (ctl) spoor_unref(ctl);
+    if (fdir) spoor_unref(fdir);
     spoor_unref(root);
+    TEST_ASSERT(named, "root readdir names a function");
+    TEST_ASSERT(walked, "walk root/<bdf> resolves");
+    TEST_ASSERT(has_ctl, "walk <bdf>/ctl resolves");
+    TEST_EXPECT_EQ(wrote, (long)-1, "write ctl -> -1 (no config-space write)");
+    TEST_EXPECT_EQ(wstat, -1, "wstat ctl -> -1");
 }
 
 // readdir: the root lists one QTDIR per function with a strictly-increasing,
@@ -235,31 +236,34 @@ void test_devpci_readdir(void) {
     TEST_ASSERT(strict, "root cookies strictly increase");
     TEST_ASSERT(all_dirs, "every root entry is a directory");
 
-    if (count > 0) {
-        char bdf[32];
-        TEST_ASSERT(first_dirent_name(buf, n, bdf, sizeof(bdf)), "first bdf parsed");
-        struct Spoor *fdir = walk1(root, bdf);
-        TEST_ASSERT(fdir != NULL, "walk to <bdf>");
-        long fn = devpci.readdir(fdir, buf, sizeof(buf), 0);
-        u64 ck; u32 nl; u8 qt;
-        long e = dirent_parse(buf, 0, fn, &ck, &nl, &qt);
-        TEST_ASSERT(e > 0, "function dir lists an entry");
-        TEST_EXPECT_EQ(qt, (u8)QTFILE, "the entry is a file (ctl)");
-        TEST_ASSERT(nl == 3 && buf[24] == 'c' && buf[25] == 't' && buf[26] == 'l',
-                    "the entry is named ctl");
-        // exactly one entry: resuming past it is EOD.
-        TEST_EXPECT_EQ(devpci.readdir(fdir, buf, sizeof(buf), (s64)ck), (long)0,
-                       "function dir has exactly one entry");
-        spoor_unref(fdir);
+    if (!test_requires(count > 0, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates")) {
+        spoor_unref(root);
+        return;
     }
+    char bdf[32];
+    TEST_ASSERT(first_dirent_name(buf, n, bdf, sizeof(bdf)), "first bdf parsed");
+    struct Spoor *fdir = walk1(root, bdf);
+    TEST_ASSERT(fdir != NULL, "walk to <bdf>");
+    long fn = devpci.readdir(fdir, buf, sizeof(buf), 0);
+    u64 ck; u32 nl; u8 qt;
+    long e = dirent_parse(buf, 0, fn, &ck, &nl, &qt);
+    TEST_ASSERT(e > 0, "function dir lists an entry");
+    TEST_EXPECT_EQ(qt, (u8)QTFILE, "the entry is a file (ctl)");
+    TEST_ASSERT(nl == 3 && buf[24] == 'c' && buf[25] == 't' && buf[26] == 'l',
+                "the entry is named ctl");
+    // exactly one entry: resuming past it is EOD.
+    TEST_EXPECT_EQ(devpci.readdir(fdir, buf, sizeof(buf), (s64)ck), (long)0,
+                   "function dir has exactly one entry");
+    spoor_unref(fdir);
     spoor_unref(root);
 }
 
 // The reuse-nc walk path (#57a) -- the shape clone_walk_zero needs to cross the
 // /hw/pci mount. devpci.walk(c, nc, ...) MUST return nc AS wq->spoor with its qid
 // advanced. Proven on the root (a 0-element walk returns nc unchanged with
-// nqid == 0; a 1-element walk advances nc). Function-specific only when a PCI
-// device is present.
+// nqid == 0; a 1-element walk advances nc). The function leg needs a virtio PCI
+// function (test_requires).
 void test_devpci_walk_reuse_nc(void) {
     struct Spoor *root = devpci.attach("");
     TEST_ASSERT(root != NULL, "attach root");
@@ -275,22 +279,25 @@ void test_devpci_walk_reuse_nc(void) {
     walkqid_free(wq0);
     spoor_unref(nc0);
 
-    if (virtio_pci_dev_count() > 0) {
-        static u8 dbuf[1024];
-        long dn = devpci.readdir(root, dbuf, sizeof(dbuf), 0);
-        char bdf[32];
-        if (dn > 0 && first_dirent_name(dbuf, dn, bdf, sizeof(bdf))) {
-            struct Spoor *nc1 = spoor_clone(root);
-            TEST_ASSERT(nc1 != NULL, "clone nc1");
-            const char *names[1] = { bdf };
-            struct Walkqid *wq1 = devpci.walk(root, nc1, names, 1);
-            TEST_ASSERT(wq1 != NULL, "1-element walk allocates");
-            TEST_EXPECT_EQ(wq1->spoor, nc1, "reuse-nc: returned spoor IS nc1");
-            TEST_EXPECT_EQ(wq1->nqid, 1, "walk to <bdf> via nc succeeds");
-            TEST_ASSERT(nc1->qid.path != 0, "nc1 advanced off the root");
-            walkqid_free(wq1);
-            spoor_unref(nc1);
-        }
+    if (!test_requires(virtio_pci_dev_count() > 0, "thylacine.virtio-pci-rng", 0, false,
+                       "no virtio PCI function enumerates")) {
+        spoor_unref(root);
+        return;
     }
+    static u8 dbuf[1024];
+    long dn = devpci.readdir(root, dbuf, sizeof(dbuf), 0);
+    char bdf[32];
+    TEST_ASSERT(dn > 0 && first_dirent_name(dbuf, dn, bdf, sizeof(bdf)),
+                "root readdir names a function");
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone nc1");
+    const char *names[1] = { bdf };
+    struct Walkqid *wq1 = devpci.walk(root, nc1, names, 1);
+    TEST_ASSERT(wq1 != NULL, "1-element walk allocates");
+    TEST_EXPECT_EQ(wq1->spoor, nc1, "reuse-nc: returned spoor IS nc1");
+    TEST_EXPECT_EQ(wq1->nqid, 1, "walk to <bdf> via nc succeeds");
+    TEST_ASSERT(nc1->qid.path != 0, "nc1 advanced off the root");
+    walkqid_free(wq1);
+    spoor_unref(nc1);
     spoor_unref(root);
 }

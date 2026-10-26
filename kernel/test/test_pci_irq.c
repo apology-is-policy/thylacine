@@ -136,6 +136,9 @@ void test_pci_msi_allocator(void) {
 
 void test_pci_restart_placement(void);
 void test_pci_restart_placement(void) {
+    if (!test_requires(virtio_pci_find_by_device_id(4, 0) != NULL, "thylacine.virtio-pci-rng", 0,
+                       true, "no PCI function carries its DeviceID"))
+        return;
     u64 pa[PCI_BAR_COUNT], size[PCI_BAR_COUNT];
     u64 before = kobj_pci_live_count();
     for (u32 round = 0; round < 16; round++) {
@@ -173,6 +176,9 @@ void test_pci_msix_rng(void) {
     struct dtb_pci_msi route;
     if (!test_requires(dtb_pci_msi_route(8, &route), "thylacine.msi", 0, false,
                        "the DTB routes no PCI MSI"))
+        return;
+    if (!test_requires(virtio_pci_find_by_device_id(4, 0) != NULL, "thylacine.virtio-pci-rng", 0,
+                       true, "no PCI function carries its DeviceID"))
         return;
     struct KObj_PCI *pci = kobj_pci_claim(4, 0);
     struct KObj_IRQ *irq = NULL;
@@ -294,6 +300,9 @@ void test_pci_msix_failures(void) {
     struct dtb_pci_msi route;
     if (!test_requires(dtb_pci_msi_route(8, &route), "thylacine.msi", 0, false,
                        "the DTB routes no PCI MSI"))
+        return;
+    if (!test_requires(virtio_pci_find_by_device_id(4, 0) != NULL, "thylacine.virtio-pci-rng", 0,
+                       true, "no PCI function carries its DeviceID"))
         return;
     u32 baseline = gic_msi_live_count();
     struct KObj_PCI *pci = kobj_pci_claim(4, 0);

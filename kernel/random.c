@@ -521,6 +521,10 @@ bool kern_random_seeded(void) {
     return __atomic_load_n(&g_rng_seeded, __ATOMIC_ACQUIRE);
 }
 
+bool kern_random_rndr_available(void) {
+    return __atomic_load_n(&g_rndr_available, __ATOMIC_ACQUIRE);
+}
+
 // =============================================================================
 // Dev bring-up + the Plan 9 /dev/random surface (thin wrapper over the API).
 // =============================================================================
