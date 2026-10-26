@@ -2135,7 +2135,8 @@ void test_proc_exec_claim_refused_drops_the_new_image(void) {
     TEST_EXPECT_EQ(g_xr_rc, (s64)-T_E_AGAIN, "a claim on a dying Proc is refused with EAGAIN");
     TEST_EXPECT_EQ(g_xr_as_ref, 1, "the refusal dropped exec's reference to the new space");
     TEST_EXPECT_EQ(g_xr_exe_ref, 1, "and its reference to the program file");
-    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child died of its group exit");
+    // proc_group_terminate records exit 1 for any message but "ok".
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(1), "the child died of its group exit");
 }
 
 // A user thread admitted before the claim and readied after it counts live
