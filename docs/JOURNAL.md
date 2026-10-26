@@ -22,6 +22,103 @@ needed the operator.
 
 
 ---
+## 2026-10-26 -- no userspace without a strong seed (vote 18; corona)
+
+*What this run was for:* OPEN-BUGS P2, found 10-22 in the skip-as-pass
+CSPRNG census: exec_build_init_stack drew AT_RANDOM with
+`u8 rand[16] = {0}; (void)kern_random_bytes(rand, sizeof(rand));`, so on an
+RNDR-less CPU whose boot virtio-rng pull failed, every process got sixteen
+zero bytes as musl's stack-protector canary and mallocng's secret. It was the
+only CSPRNG consumer that discarded the refusal.
+
+- *The operator's vote 18 (10-26):* an unseeded CSPRNG refuses userspace,
+  and exec fails closed as well. Rejected: a jitter source, blocking exec
+  until seeded, failing exec alone.
+- *Placement, left to the chunk by the vote:* my pre-compaction plan put the
+  refusal just before joey_run, AFTER the suite, so kit mutant M13 would
+  keep its suite-FAIL kill. *Wrong turn, caught before code:* that fitted the
+  design to a test kit. With exec failing closed, an unseeded test build
+  cannot pass its suite (every probe spawn fails), so a post-suite refusal
+  would only ever print in a production build. The refusal sits right after
+  the reseed (main.c), ahead of the suite; Fuchsia's
+  kernel.cprng-seed-require.* is the precedent.
+- *a1e4a16c9* (scripture): PORTABILITY section 6 bullet; ARCHITECTURE's
+  getrandom row said "blocks until seeded" via GRND_NONBLOCK -- the code
+  never blocked, and now userspace never meets an unseeded pool; the CSPRNG
+  audit rows. No errno added: execve already reports EINVAL for every load
+  failure but a refused allocation, so ERRORS.md is unchanged.
+- *b5502fb26* (code, UNBUILT at commit): the refusal; exec draws AT_RANDOM
+  before the frame allocation, fails the exec on a refused draw, and scrubs
+  the stack array and the frame's copy before kfree (the slab does not zero
+  on free); a KERNEL_TESTS-only hook and exec.at_random_refusal_fails_exec;
+  THYLACINE_NO_RNG in run-vm.sh, test.sh's mirror, test-skip-verdict's
+  no-rng configuration (43/43; red without the mirror line); test-fault.sh's
+  first LAUNCH variant, no_entropy (TCG cortex-a72 + NO_RNG; "  tests:"
+  forbidden).
+- *A voided proof, found by asking what the change broke:*
+  test_strong_entropy skipped an unseeded pool on a CPU without RNDR. After
+  the refusal that state cannot reach the suite, so the skip arm described a
+  boot that no longer exists; it now FAILS. The untracked skip-as-pass kit
+  followed: M13 retired (its unseeded suite cannot exist), the site census
+  54 -> 47 rows, the controls rewritten (11/11, 6/6).
+- *The smoke series at b5502fb26* (Mac lease 13:23-13:35Z): ci build;
+  test.sh 2088/2088, nothing skipped; no_entropy PASS; controls -- cortex-a72
+  WITH virtio-rng seeds ("reseed OK") and reaches the suite; TCG max (RNDR)
+  WITHOUT virtio-rng runs test.sh 2071/2088 with 17 explained skips, seeded
+  via RNDR. Sabotage (refusal and exec check removed): no_entropy FAIL
+  ("kernel test suite failed", the wrong extinction); the exec test FAILs
+  ("a refused AT_RANDOM draw fails the exec"). Restored: no_entropy PASS.
+- *Self-found:* the refusal body said "no RNDR" even when RNDR is present
+  but dry on every read; reworded to one body true in both cases. W4 (the
+  Pi bring-up) now REQUIRES the BCM2711 HW RNG driver, or the board refuses
+  userspace -- recorded in PORTABILITY section 7.
+- *The audit* (holotype-reviewer on Fable 5.1, cross-family to the Opus
+  implementer, MODEL start == end, reading `git show b5502fb26` while the
+  smoke series ran its sabotage in the tree): 0 P0 / 0 P1 / 0 P2 / 5 P3,
+  all fixed in *9c6b860c9* (UNBUILT at commit). F1 is the reword above, the
+  reviewer reaching the same defect from the other side; F2 the PORTABILITY
+  section 6/7 text and the W4 entropy requirement; F3 THYLACINE_NO_RNG
+  shifts the PCI functions so sound lands on the NIC's INTx line, which
+  matters only with THYLACINE_ITS=off (comment + dossier name
+  THYLACINE_NO_AUDIO=1); F4 the new test asserted before drop_proc, so a red
+  would also leak a Proc -- it now captures, drops, then asserts; F5 a
+  variant count in a CMake comment. Verified sound by the round: the refusal
+  precedes all 27 userland_enter sites in both builds; exec's refusal
+  allocates nothing and scrubs on every path; the hook is KERNEL_TESTS-only
+  and released before any assert; the witness discriminates (removed ->
+  wrong extinction or silent; moved after "  tests:" -> forbid trips).
+  *Lesson for the next prompt:* the reviewer proposed a cause-NEUTRAL body;
+  a cause-ACCURATE one is stronger -- ask for "true in every state that
+  reaches it".
+- *The close gate at 9c6b860c9* (Mac lease 13:49-16:22Z; every stamp from
+  its log): the skip-as-pass kit's host legs 50/50 (14:05:38Z) and mutants
+  exit 0 (14:44:13Z); its gate exit 0 at 15:56:30Z -- CONTROL 2088/2088
+  nothing skipped, SAK-ON/OFF, NO-NET 2085 (3 virtio-net skips),
+  NO-IN-GPU 2085, ONE-CPU 2080 (8 smp skips), REPLAY on the real logs,
+  CONTROL-Q 2088, UBSAN 2088 with no trap, check-production --all, SMP 5
+  configs x 10 boots. test-fault.sh, all 10 variants PASS (16:16:46Z).
+  no_entropy in the production shape PASS with "  tests:" absent
+  (16:18:08Z) -- its build log, read afterwards rather than assumed, says
+  "in-kernel test suite DISABLED (KERNEL_TESTS=OFF)". TCG max without
+  virtio-rng: test.sh 2071/2088, seeded via RNDR (16:21:34Z); its 17 skips
+  were diffed against the smoke run's by test name AND reason and are the
+  same set (13 virtio-pci-rng, 4 virtio-rng, each undeclared by the
+  launcher). My first diff compared only the reasons -- it said "same" while
+  proving less than it seemed; caught before it was written here. build/
+  left as the ci image (16:22:28Z).
+- *What "fixed" covers:* no Thylacine boot reaches userspace with a pool that
+  was never reseeded from RNDR or virtio-rng, so no process receives a
+  predictable AT_RANDOM; and exec refuses rather than zero-fills if a draw is
+  ever refused, so a future path that reaches exec unseeded fails the exec
+  instead of handing out sixteen known bytes. *Not covered:* the QUALITY of
+  either source (RNDR and the host's virtio-rng are trusted as seeded once
+  they answer); getrandom(2) keeps its own refusal path, now unreachable from
+  EL0 but not removed; the Pi (W4) cannot start userspace until its BCM2711
+  HW RNG driver exists -- PORTABILITY section 7 records it as a bring-up
+  requirement, nothing builds it yet.
+- *The operator's decisions:* vote 18 (10-26).
+
+---
 ## 2026-10-22/26 -- a kernel test skips only what the launcher did not declare (corona)
 
 *What this run was for:* OPEN-BUGS' M-PIN "kernel tests that need an initrd
