@@ -22,6 +22,145 @@ needed the operator.
 
 
 ---
+## 2026-10-22/26 -- a kernel test skips only what the launcher did not declare (corona)
+
+*What this run was for:* OPEN-BUGS' M-PIN "kernel tests that need an initrd
+file pass": a test that could not find what it needed printed `[skip]` and
+returned, and the runner, the summary, test.sh and every gate read it as PASS.
+
+- *The census at 9d00b5ee3:* 32 `[skip]` sites in 19 files, all in
+  kernel/test: 24 for a probe binary missing from the ramfs, 8 for an absent
+  virtio-mmio slot; and 12 silent returns besides (test_sys_pipe.c x2,
+  test_devramfs.c x10).
+- *The operator's vote 17:* the launcher declares what it attached. QEMU's virt
+  machine always has 32 virtio-mmio slots and an empty one reads DeviceID 0, so
+  the kernel cannot tell "not attached" from "attached and missed"; only
+  tools/run-vm.sh knows.
+- *9ca6789cd* (UNBUILT): the probe lookup keyed on bin/joey, the device gate on
+  `thylacine.virtio-<kind>` bootargs words, a counted SKIP verdict, and
+  test.sh's skip block.
+- *Audit round 1* (holotype-reviewer, Fable 5.1 at start and end): 1 P2 + 5
+  P3. F1: tests that returned SILENTLY on a configuration they lacked still
+  read PASS. *Wrong turn:* my census had counted only the sites that printed
+  `[skip]` -- a negative over a set I had not enumerated. The auditor's summary
+  said 22 sites; its cited list held 25, each checked against the tree. A
+  brace-aware census of every early return in kernel/test (controlled against
+  the auditor's list) found 8 more: six single-CPU returns,
+  test_trivial_devs.c:273 and test_virtio_pci.c:95.
+- *b7ae97a2a* (UNBUILT): vote 17 applied to every axis the launcher chooses --
+  one bootargs word per `-device` instance on both buses, `thylacine.smp`,
+  `thylacine.msi` where the launcher can know -- through
+  `test_requires(present, token, nth, exact, absent)`; a present device the
+  launcher did not declare also FAILS, so every green boot checks the channel.
+  tools/test-skip-verdict.py runs the real run-vm.sh under a stand-in QEMU in
+  12 configurations against test.sh's mirror (25/25; each side's sabotage
+  turns it red).
+- *A withdrawn queue:* I had queued for the Mac at 15:04Z for an early look at
+  c9eac90ba; round 1 made that tree obsolete, and I withdrew at 15:18Z.
+- *Self-found at the kit's dry run:* test-skip-verdict.py spelled its option
+  `"--logs"`; every gate kit finds options by `'--logs'`, so host.sh would have
+  run it without one and argparse would have killed the leg. Fixed in
+  bb19c8a28.
+- *Round 2:* the Fable spawn died at its first step (credits, HTTP 429), so
+  it re-ran on Opus with a same-family prompt: 1 P2 + 6 P3, every cite
+  checked. F1 [P2]: test-skip-verdict.py ran the REAL run-vm.sh, which deletes
+  the tree's QMP sockets. Fixing it surfaced a pre-existing fail-open in
+  test.sh: the G-4 console gate passed silently when its socket was missing,
+  python3 was absent or QEMU had exited. That now FAILS "could not run".
+  F2: test.sh never reconciled the kernel's "(K skipped)" with the lines it
+  read. F6: run-vm.sh's walk named QEMU models, not DeviceIDs, and missed
+  -virtfs.
+- *Self-found by the new walk:* `--no-share` had been a NO-OP since 2b332d8cf
+  (P1-A). The flag emptied an array that the default branch then refilled, so
+  every test.sh and test-fault boot carried the 9P function. The fix is a
+  `no_share` flag (5ba2ba312).
+- *Part 2 (cf66f3a09):* the kernel tests round 2 named (F3 silent branches;
+  F4 unconditional asserts on an axis a sibling gated; F7 stale comments),
+  plus `test_strong_entropy()`: an unseeded pool FAILS on a CPU with RNDR,
+  otherwise it is keyed on the virtio-rng. *Wrong turn:* the first run of my
+  dependency census missed functions, because a `[^;]*` in its definition
+  pattern crossed newlines. A control on known gated sites caught it. The
+  corrected census found more round 2 had not named: devpci x4 (one returned
+  `TEST_ASSERT(true, "...skipped (config)")`), an ungated rng claim, an
+  ungated virtio-rng reseed, and four unconditional seeded-pool asserts.
+  sites.py: 35 -> 54 gated rows.
+- *Found beside it, enqueued, not fixed here:* exec.c hands userspace an
+  all-zero AT_RANDOM when the CSPRNG is unseeded (OPEN-BUGS P2, a design
+  vote).
+- *A reboot during a 3.5-day pause (10-22 -> 10-26)* wiped the session
+  scratchpad: this draft, the round prompt and two checkers. The draft and
+  prompt came back from the transcript JSONL (a Write's and an Agent call's
+  full inputs are recorded there); the checkers were rewritten. The kit's
+  inputs now live in work/oct22-skip/.
+- *Round 3* (holotype-reviewer, Fable 5.1 at start and end, cross-family to
+  the Opus implementer, on 5ba2ba312 + cf66f3a09 + the kit): 0 P0, 0 P1, 0
+  P2, 8 P3, every cite checked. A clean close, so no round 4 is owed. All
+  eight fixed in 74210919a and the kit. The one with reach, F1: run-vm.sh's
+  walk saw only `-device` and `-virtfs`, but QEMU also makes devices from
+  `-drive` (virt's default `if=` is virtio), `-hd[a-d]`, `-cdrom`, `-nic`,
+  `-net` and a JSON `-device`. Such a device would boot undeclared and fail
+  every exact gate on its kind with no stated cause. The launcher now
+  refuses those extras before QEMU starts. Nothing in the repo passes one
+  (checked by grep, with a control that the pattern finds run-vm.sh's own two
+  `-drive` lines). F2: mutant M13 assumed an RNDR-less CPU without pinning
+  one; it now pins hvf, and mutants.sh refuses a host whose QEMU lacks a
+  mutant's accelerator.
+- *Disk:* the gate's 8192 MiB floor stood at 4196 MiB free. With the
+  operator's approval (10-26): the merged corona-merge checkout (+720 MiB by
+  df), the Go build cache (+2443) and my earlier runs' bulk output under work/
+  (+1251; scripts and text kept) -> 8802 MiB.
+- *The gate at 74210919a* (10-26): host.sh, all 50 legs PASS (08:07-08:17Z);
+  mutants.sh, all 15 killed by their own messages (08:29-08:56Z). *A wrong
+  turn:* my first mutants run omitted GOFORK and was refused at its
+  preconditions. Between the two drivers, free disk fell back under the
+  floor: the Go build cache regrew 632 MiB. The Mac was released while
+  the operator approved a second round (+1880 MiB). One approved deletion
+  was NOT done: the Codex cache turned out to hold a staged app update
+  that its updater is waiting to install, not the regenerable cache I had
+  described. gate.sh, run 1: stopped by its own disk floor after the
+  control build (9501 -> 8109 MiB). With two leftover VS Code update copies
+  deleted (operator-approved, +2873 MiB), run 2: CONTROL 2086/2086 PASS,
+  nothing skipped; SAK-ON green; SAK-OFF red at its last check. *A false
+  red, mine:* the check counted `cons: SAK (` over the whole transcript,
+  which also holds the in-kernel suite's own SAK tests (44 lines) and the
+  scenario's FAIL message quoting the needle. After the suite summary,
+  SAK-ON has 2 real SAK lines and SAK-OFF has 0, so the kernel was right.
+  The check now counts line-start SAK lines after the summary, with a
+  positive control on SAK-ON. That leg had never run before.
+- *Gate run 3 found a real bug:* CONTROL, SAK both ways and NO-NET were
+  green; NO-IN-GPU went red on test.sh's tally reconcile ("counted 3
+  skip(s), but 2 [skip] line(s) are readable"). The unread line was
+  `[skip] thylacine.virtio-input\001\240\353b@\003: the launcher ...`:
+  test_requires composed the instance suffix into an uninitialized stack
+  buffer, and compose_instances returned for a first instance before
+  anything terminated it. Introduced in b7ae97a2a; three audit rounds
+  missed it (round 2 checked the composer's bounds, not its terminator);
+  NO-NET's lines were clean by luck. The reconcile added in round 2
+  caught it, failing closed. Fixed in 1a23c2fa5: the helper terminates
+  on entry. A regression test composes into a 0xa5-filled buffer,
+  shown GREEN and RED on the host from the committed source, plus kit
+  mutant M16 for the guest.
+- *The series at 1a23c2fa5* (11:03-12:53Z, one Mac lease): host.sh, all
+  50 legs PASS; mutants.sh, all 16 killed by their own messages (M16 by the
+  new test's); gate.sh ALL GREEN -- CONTROL 2087/2087 with nothing skipped,
+  SAK both ways (2 SAK lines after the suite with the token, 0 without),
+  NO-NET 2084/2087 (3 virtio-net skips), NO-IN-GPU 2084/2087 (3 clean
+  skips: virtio-input, virtio-gpu, virtio-pci-input x2), ONE-CPU 2079/2087
+  (8 smp skips), REPLAY on the real logs, CONTROL-Q and UBSan 2087/2087,
+  SMP 5 configurations x N=10.
+- *What "fixed" covers:* a kernel test skips only through a gate keyed on
+  what tools/run-vm.sh declared (vote 17) or on the image's own contents; a
+  skip is counted in the summary line, test.sh reads and reconciles each
+  one, and a full-configuration boot with any skip FAILS. Outside it: a
+  dependency reached only through a syscall handler or a spawned probe (the
+  census's stated boundary), and a boot not launched through run-vm.sh
+  (none in the repo). Userspace entropy consumers on an unseeded pool FAIL
+  rather than skip; exec's all-zero AT_RANDOM is vote 18's chunk, next.
+- *The operator's decisions:* vote 17, the launcher declares (10-22);
+  vote 18, an unseeded CSPRNG refuses userspace and exec fails closed
+  (10-26); three rounds of disk deletions (10-26); deleting the WIP branch
+  corona/skip-wip, whose commit 740842a1a had skipped the hooks.
+
 ## 2026-10-22 -- main merged into corona: what the textual merge lost, and the gate that reads it (corona)
 
 *What this run was for:* to qualify corona/merge-main (main a0128885b into
