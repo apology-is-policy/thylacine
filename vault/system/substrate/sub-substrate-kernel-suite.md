@@ -237,7 +237,10 @@ slot page, four times) are assertions. A skip line is composed whole and
 printed by one `uart_puts`, so this CPU cannot split it; `uart_puts` takes no
 console lock, and the tally line is several calls, so another CPU printing at
 that instant can still tear either -- which `tools/test.sh`'s reconcile turns
-into a red, never a pass. Three tests that branch on
+into a red, never a pass. The instance suffix is a terminated string even when
+it is empty, so a first-instance line carries no stack bytes;
+`harness.skip_line_composes_clean` composes it into a garbage-filled buffer for
+the first three instances. Three tests that branch on
 the CPU count or the DTB's MSI map are not skips: their other arm asserts
 something real (the self-CPU path; that a host without an MSI map invents no
 route), and a declared machine lacking either FAILS a sibling gate.

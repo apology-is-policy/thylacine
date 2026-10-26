@@ -2381,6 +2381,7 @@ void test_burrow_mmio_lifecycle_round_trip(void);
 void test_mmio_map_install_vma(void);
 void test_mmio_map_overlap_rejected(void);
 void test_mmio_map_proc_free_releases_kobj(void);
+static void test_harness_skip_line_composes_clean(void);   // beside the composer, below
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -2397,6 +2398,7 @@ struct test_case g_tests[] = {
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
     { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
     { "dtb.bootargs_whole_words",      test_dtb_bootargs_whole_words,      false, NULL },
+    { "harness.skip_line_composes_clean", test_harness_skip_line_composes_clean, false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
     { "phys.leak_10k",                 test_phys_leak_10k,                 false, NULL },
     { "phys.drain_meets_live_owners",  test_phys_drain_meets_live_owners,  false, NULL },
@@ -5168,14 +5170,36 @@ static void compose(struct composer *c, const char *s) {
     c->buf[c->len] = '\0';
 }
 
-// " x<n>" for a test that needs the n-th instance of a kind, n > 1.
+// " x<n>" for a test that needs the n-th instance of a kind, n > 1; nothing for
+// the first. Terminates either way: a fresh composer's buffer holds whatever
+// the stack held.
 static void compose_instances(struct composer *c, u32 nth) {
+    c->buf[c->len] = '\0';
     if (nth == 0) return;
     char digits[11];
     u32 n = nth + 1, d = 0;
     while (n && d < sizeof(digits)) { digits[d++] = (char)('0' + n % 10); n /= 10; }
     compose(c, " x");
     while (d) { char one[2] = { digits[--d], '\0' }; compose(c, one); }
+}
+
+static bool harness_streq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+// test_requires composes the instance suffix into a fresh stack buffer, so the
+// suffix must be a terminated string even when it is empty.
+static void test_harness_skip_line_composes_clean(void) {
+    static const char *const want[] = { "", " x2", " x3" };
+    char buf[16];
+    for (u32 nth = 0; nth < 3; nth++) {
+        for (u32 i = 0; i < sizeof(buf); i++) buf[i] = (char)0xa5;
+        struct composer c = { buf, sizeof(buf), 0 };
+        compose_instances(&c, nth);
+        TEST_ASSERT(harness_streq(buf, want[nth]),
+                    "compose_instances leaves a fresh buffer the instance suffix, terminated");
+    }
 }
 
 static void skip_with(const char *a, const char *b, const char *c3, const char *d) {
