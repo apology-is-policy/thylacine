@@ -113,7 +113,7 @@ expected_for() {
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
         extinction_peer_chatter) echo "EXTINCTION: peer chatter: this banner must reach the wire whole" ;;
-        no_entropy)      echo "EXTINCTION: CSPRNG unseeded: no RNDR, and no virtio-mmio virtio-rng answered the boot reseed; refusing to start userspace" ;;
+        no_entropy)      echo "EXTINCTION: CSPRNG unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed entropy; refusing to start userspace" ;;
         # ROUND F6: the variant REACHES cons_tx_claim_for_dump's
         # already-ours arm but could not FAIL if it were wrong -- delete that
         # arm and the re-entrant claim burns its bound, returns false, and the

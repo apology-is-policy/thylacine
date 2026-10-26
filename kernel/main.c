@@ -642,8 +642,8 @@ void boot_main(void) {
     // g_rng_seeded never goes back to false, so every exec after this line
     // draws from a seeded pool.
     if (!kern_random_seeded())
-        extinction("CSPRNG unseeded: no RNDR, and no virtio-mmio virtio-rng answered "
-                   "the boot reseed; refusing to start userspace");
+        extinction("CSPRNG unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the "
+                   "boot reseed entropy; refusing to start userspace");
 
     // P4-Ib R9 F142: reserve kernel-owned INTIDs in g_intid_claimed
     // so that subsequent kobj_irq_create (via SYS_IRQ_CREATE syscall

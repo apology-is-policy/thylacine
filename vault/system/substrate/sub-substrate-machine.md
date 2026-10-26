@@ -35,7 +35,10 @@ inconsistencies" (TOOLING.md §3).
   `THYLACINE_NO_RNG=1` (2026-10-26) drops both RNGs: on a CPU without RNDR
   the kernel then has no strong entropy and refuses userspace (vote 18),
   which is the boot `tools/test-fault.sh no_entropy` makes. Like
-  `THYLACINE_NO_GPU`, it moves the PCI functions after `rng_pci0` up a slot.
+  `THYLACINE_NO_GPU`, it moves every PCI function after `rng_pci0` up a slot,
+  which puts the IRQ-claiming sound function on the NIC's INTx line (slot 5);
+  that matters only where INTx is used (`THYLACINE_ITS=off`), and
+  `THYLACINE_NO_AUDIO=1` avoids it there.
 
 ## Mechanism
 

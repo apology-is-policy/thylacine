@@ -816,23 +816,26 @@ void test_exec_at_random_refusal_fails_exec(void) {
     int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
     exec_random_refuse_for_test(false);
 
+    // Read what the asserts need, then release the Proc, so a red here is one
+    // red and not a leaked Proc besides.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
-    u8 *fb = (sv && sv->burrow)
-           ? lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE) : NULL;
+    bool stack_mapped = sv != NULL && sv->burrow != NULL;
+    bool frame_populated = stack_mapped &&
+        lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE) != NULL;
+    drop_proc(p);
     TEST_EXPECT_EQ(rc, -1, "a refused AT_RANDOM draw fails the exec");
     TEST_EXPECT_EQ(sp, 0ull, "a refused exec hands back no stack pointer");
-    TEST_ASSERT(sv != NULL && sv->burrow != NULL,
+    TEST_ASSERT(stack_mapped,
         "the stack was mapped, so the refusal came from the frame builder");
-    TEST_ASSERT(fb == NULL, "no frame page was populated: the draw precedes the frame");
-    drop_proc(p);
+    TEST_ASSERT(!frame_populated, "no frame page was populated: the draw precedes the frame");
 
     // One variable away: the hook released, the same exec succeeds.
     struct Proc *q = make_proc();
     TEST_ASSERT(q != NULL, "proc_alloc (control)");
-    TEST_EXPECT_EQ(exec_setup(q, g_elf_blob, size, &entry, &sp), 0,
-        "the same exec succeeds once the draw is served");
-    TEST_ASSERT(sp != 0, "the served exec hands back a stack pointer");
+    int served = exec_setup(q, g_elf_blob, size, &entry, &sp);
     drop_proc(q);
+    TEST_EXPECT_EQ(served, 0, "the same exec succeeds once the draw is served");
+    TEST_ASSERT(sp != 0, "the served exec hands back a stack pointer");
 }
 
 // #140: a Proc with a real /env gets a real envp on its new image's stack.

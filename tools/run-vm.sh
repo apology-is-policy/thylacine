@@ -839,7 +839,10 @@ done
 # THYLACINE_NO_RNG=1 attaches neither: on a CPU without RNDR (HVF, -cpu
 # cortex-a72) the kernel then has no strong entropy and refuses userspace
 # (vote 18; tools/test-fault.sh no_entropy). Like THYLACINE_NO_GPU, it moves
-# the PCI functions after rng_pci0 (audio, then the mouse) up a slot.
+# every PCI function after rng_pci0 up a slot (audio, the mouse, the share,
+# any extra). That puts the sound function on the NIC's INTx line (slot 5),
+# which matters only where INTx is used (THYLACINE_ITS=off): there, add
+# THYLACINE_NO_AUDIO=1.
 rng_flags=()
 if [[ "${THYLACINE_NO_RNG:-0}" != "1" ]]; then
     rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)

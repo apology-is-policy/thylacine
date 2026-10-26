@@ -206,7 +206,9 @@ Since vote 18 (2026-10-26) the gate is also the boot's: a pool still unseeded
 after the boot's virtio-rng reseed stops the boot before any EL0 code runs
 ([[sub-kernel-boot-sequence]]), so userspace never meets the refusal, and
 exec's `AT_RANDOM` draw fails the exec rather than serve zeros
-([[sub-kernel-exec]]).
+([[sub-kernel-exec]]). A target with neither source -- the bare-metal RPi 400
+until W4 lands the BCM2711 HW RNG driver -- now refuses userspace where it
+used to run with a fail-closed `/dev/random` and a zero canary.
 
 **The CPU's own generator is RNDR (FEAT_RNG), and its capture idiom is
 load-bearing.** Presence is probed once at init from `ID_AA64ISAR0_EL1`

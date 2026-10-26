@@ -632,11 +632,14 @@ stir source, not the gate. As-built:
   after `virtio_init` (`kernel/main.c`).
 - **No userspace without a strong seed** (operator vote 18, 2026-10-26). The
   boot's strong reseed is the last chance a strong source gets before any EL0
-  code runs. If the pool is still unseeded after it -- the CPU has no RNDR and
-  no virtio-rng pull succeeded in its three tries -- the kernel extincts right
-  there, before the in-kernel test suite and before init, with a message that
-  names the cause and the remedy (attach a virtio-rng device, or boot a CPU
-  with FEAT_RNG). So every process starts on a seeded pool, and because
+  code runs. If the pool is still unseeded after it -- RNDR is absent (or
+  returned nothing on every read) and no virtio-rng pull succeeded in its three
+  tries -- the kernel extincts right there, before the in-kernel test suite
+  and before init, with a message naming the two sources that gave nothing
+  (RNDR, a virtio-mmio virtio-rng); supplying either is the remedy, and the
+  line above it says why the pull failed. A bare-metal RPi 400 (Cortex-A72,
+  no virtio) therefore refuses userspace until W4 lands its BCM2711 HW RNG
+  driver (section 7). So every process starts on a seeded pool, and because
   `g_rng_seeded` is monotonic, `kern_random_bytes` cannot refuse a caller for
   want of a seed once userspace exists. exec checks anyway, so the contract is
   local: `exec_build_init_stack` draws the frame's 16 AT_RANDOM bytes (musl's
@@ -712,6 +715,11 @@ gate M1.** Components:
   boot. **Storage approach is an open W4-design fork** (§9).
 - **USB**: DWC2/xHCI for keyboard input.
 - **Framebuffer/HDMI**: via the mailbox (feeds Halcyon, post-v1.0).
+- **Entropy -- REQUIRED, not optional** (since vote 18, section 6): the
+  Cortex-A72 has no RNDR and real hardware has no virtio-rng, so without a
+  kernel driver for the BCM2711 HW RNG (`/soc/rng`, a register read, no DMA)
+  the boot refuses userspace. It has to land with the bring-up, before the
+  first userspace boot on the board.
 
 W4 stays near its planned post-v1.0 slot (ARCH §4.4). M1 is fully exercisable
 under QEMU (TCG + HVF) without any of W4.

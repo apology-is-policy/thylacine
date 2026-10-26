@@ -133,8 +133,8 @@ guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:
 this banner must reach the wire whole` (`extinction_peer_chatter`, which
 `whole_line_for` matches as an entire line, so a banner torn by a peer's
 console byte fails it), and, since 2026-10-26, `EXTINCTION: CSPRNG unseeded:
-no RNDR, and no virtio-mmio virtio-rng answered the boot reseed; refusing to
-start userspace` (`no_entropy`, printed by `kernel/main.c`'s vote-18 refusal
+neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed entropy;
+refusing to start userspace` (`no_entropy`, printed by `kernel/main.c`'s vote-18 refusal
 on a launch with no strong entropy source). The comment directly above it says "Keep the
 case below in sync with this" — an instruction to a person, inside the file,
 which is the weakest form of the guarantee ([[dec-2026-08-15-cutover]]).

@@ -90,9 +90,10 @@ behaviour, and exec init.
 - **No userspace without a strong seed, decided before the suite**
   (2026-10-26, operator vote 18). Right after `virtio_init` the boot
   strong-reseeds the CSPRNG from the virtio-rng device. If the pool is still
-  unseeded -- no RNDR, and no virtio-mmio virtio-rng answered -- the boot
-  extincts: `EXTINCTION: CSPRNG unseeded: no RNDR, and no virtio-mmio
-  virtio-rng answered the boot reseed; refusing to start userspace`. It sits
+  unseeded -- neither RNDR (absent, or dry on every read) nor a virtio-mmio
+  virtio-rng gave it entropy -- the boot extincts: `EXTINCTION: CSPRNG
+  unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed
+  entropy; refusing to start userspace`. It sits
   ahead of the suite, not just ahead of init, because the suite's probes are
   EL0 processes too and exec fails closed on an unseeded pool
   ([[sub-kernel-exec]]): a refusal after the suite would never print in a
