@@ -3373,10 +3373,10 @@ void proc_caught_note_wake(struct Proc *p) {
 // wait_lock); an awake thread designated on a stale value gives the
 // designation up at its tail or at its next wait (caught_target.tla Fresh,
 // BUGGY_STALE_KEEPS).
-static bool caught_candidate(const struct Thread *x, u32 fam) {
+static bool caught_candidate(const struct Proc *p, const struct Thread *x, u32 fam) {
     if (x->state == THREAD_EXITING) return false;
     // An exec has doomed it: it dies at its tail before the notes leg runs.
-    if (proc_exec_dooms(x->proc, x)) return false;
+    if (proc_exec_dooms(p, x)) return false;
     if (__atomic_load_n(&x->note_mask, __ATOMIC_RELAXED) & fam) return false;
     if (__atomic_load_n(&x->in_handler, __ATOMIC_RELAXED)) return false;
     return __atomic_load_n(&x->caught_wait, __ATOMIC_RELAXED) != CAUGHT_WAIT_HOLDS;
@@ -3398,13 +3398,13 @@ static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster
     ASSERT_TL_HELD(p);
     struct Thread *main_t = proc_main_thread_locked(p);
     if (main_t == skip) main_t = NULL;
-    if (poster && poster != skip && caught_candidate(poster, fam)) return poster;
+    if (poster && poster != skip && caught_candidate(p, poster, fam)) return poster;
     static const u8 order[2] = { CAUGHT_WAIT_NONE, CAUGHT_WAIT_UNWINDS };
     for (u32 i = 0; i < 2u; i++) {
-        if (main_t && caught_candidate(main_t, fam) && caught_waits(main_t, order[i]))
+        if (main_t && caught_candidate(p, main_t, fam) && caught_waits(main_t, order[i]))
             return main_t;
         for (struct Thread *x = p->threads; x; x = x->next_in_proc)
-            if (x != skip && caught_candidate(x, fam) && caught_waits(x, order[i]))
+            if (x != skip && caught_candidate(p, x, fam) && caught_waits(x, order[i]))
                 return x;
     }
     return NULL;
@@ -3464,7 +3464,7 @@ static int caught_designate(struct Proc *p, struct Thread *x, u32 fam) {
 #endif
     int rc = CAUGHT_STALE;
     irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
-    if (caught_candidate(x, fam)) {
+    if (caught_candidate(p, x, fam)) {
         rc = CAUGHT_SETTLED;
         u16 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
         while ((flags & (fam << CAUGHT_LATCH_SHIFT)) &&
@@ -3490,7 +3490,7 @@ static void caught_wake_unwinders(struct Proc *p, u32 fam) {
     for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
         struct Rendez *r = x->rendez_blocked_on;
-        if (caught_candidate(x, fam) && caught_waits(x, CAUGHT_WAIT_UNWINDS) &&
+        if (caught_candidate(p, x, fam) && caught_waits(x, CAUGHT_WAIT_UNWINDS) &&
             r && r != &x->debug_rendez)
             wakeup(r);
         spin_unlock_irqrestore(&x->wait_lock, ws);
