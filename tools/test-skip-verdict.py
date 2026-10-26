@@ -49,6 +49,7 @@ def configs(disk, pool):
         ("no-net", dict(base, THYLACINE_NO_NET="1"), 4, drop(gic2, "virtio-net", "virtio-pci-net")),
         ("no-input", dict(base, THYLACINE_NO_INPUT="1"), 4, drop(gic2, "virtio-input", "virtio-pci-input")),
         ("no-gpu", dict(base, THYLACINE_NO_GPU="1"), 4, drop(gic2, "virtio-gpu", "virtio-pci-gpu")),
+        ("no-rng", dict(base, THYLACINE_NO_RNG="1"), 4, drop(gic2, "virtio-rng", "virtio-pci-rng")),
         ("display-console", dict(base, THYLACINE_DISPLAY="console"), 4,
          drop(gic2, "virtio-gpu", "virtio-pci-gpu")),
         ("one-cpu", dict(base), 1, drop(gic2, "smp")),

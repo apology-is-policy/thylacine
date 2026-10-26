@@ -157,9 +157,9 @@ void test_sys_corvus_caps_kproc_has_new_caps(void) {
 }
 
 // Only an unobserved strong source flips kern_random_seeded(): RNDR, or the
-// virtio-rng pull after virtio_init (hvf's Apple cores have no RNDR). The gate
-// is the whole test: a seeded pool passes, an unseeded one fails on a CPU with
-// RNDR or under a declared virtio-rng, and is a counted skip otherwise.
+// virtio-rng pull after virtio_init (hvf's Apple cores have no RNDR). The check
+// is the whole test: a seeded pool passes and an unseeded one fails, since the
+// boot refuses userspace on an unseeded pool before the suite runs (vote 18).
 void test_kern_random_strong_source_seeded(void) {
     (void)test_strong_entropy();
 }

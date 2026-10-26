@@ -114,8 +114,8 @@ struct virtio_mmio_dev;
 struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token);
 
 // Has a strong source seeded the kernel CSPRNG? An unseeded pool FAILS the
-// test on a CPU with RNDR (a seeding bug, whatever the launcher declared);
-// without RNDR the virtio-rng is the only strong source (test_requires).
+// test: the boot refuses userspace on one before the suite runs (vote 18), so
+// reaching here unseeded means a seeding bug or a refusal that moved.
 bool test_strong_entropy(void);
 
 // Convenience macros. TEST_ASSERT short-circuits the current test on

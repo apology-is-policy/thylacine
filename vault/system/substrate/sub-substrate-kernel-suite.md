@@ -211,11 +211,12 @@ deliberately no bare skip call:
   virtio-mmio device. The probe each such test spawns runs only once the
   device is found, so its own missed scan is a FAIL too ([[sub-virtio-probes]]).
 - `test_strong_entropy` asks whether a strong source seeded the CSPRNG
-  ([[sub-kernel-content]]). A seeded pool passes without consulting the
-  launcher. An unseeded one FAILS on a CPU with RNDR, whatever the launcher
-  declared, because that is a seeding bug; without RNDR the virtio-rng is the
-  only strong source left, so it goes through `test_requires` on
-  `thylacine.virtio-rng`.
+  ([[sub-kernel-content]]), and is a check, not a gate. Since vote 18
+  (2026-10-26) the boot refuses userspace on an unseeded pool before the
+  suite runs ([[sub-kernel-boot-sequence]]), so an unseeded pool here FAILS:
+  a seeding bug on a CPU with RNDR, a refusal that moved on one without.
+  Until then it skipped through `test_requires` on `thylacine.virtio-rng`
+  on a CPU without RNDR.
 
 The first census counted only the tests that printed `[skip]`. Audit round 1
 cited twenty-five sites that returned silently instead, a census of every
@@ -226,7 +227,8 @@ needs something a configuration can lack goes through a gate now: the
 virtio-mmio rng (four tests), the PCI rng function (thirteen) or any virtio PCI
 function (nine), a second PCI input function, the MSI route or controller
 (four), a second CPU (eight -- the `default-smp1` rows' green no-ops), a seeded
-CSPRNG (seven, through `test_strong_entropy`), and the dlopen prover through
+CSPRNG (seven, through `test_strong_entropy`, a check that FAILS rather than
+skips since vote 18), and the dlopen prover through
 `test_image_lookup`. The census behind that sentence reads every function in
 `kernel/test` that calls a configuration primitive -- the virtio and PCI
 lookups and counts, the CPU counts, the DTB's MSI map and compat properties,

@@ -836,11 +836,18 @@ for _arg in ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
     fi
     _prev=$_arg
 done
-rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)
+# THYLACINE_NO_RNG=1 attaches neither: on a CPU without RNDR (HVF, -cpu
+# cortex-a72) the kernel then has no strong entropy and refuses userspace
+# (vote 18; tools/test-fault.sh no_entropy). Like THYLACINE_NO_GPU, it moves
+# the PCI functions after rng_pci0 (audio, then the mouse) up a slot.
+rng_flags=()
+if [[ "${THYLACINE_NO_RNG:-0}" != "1" ]]; then
+    rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)
+fi
 _prev=
 for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]}"} \
             ${net_flags[@]+"${net_flags[@]}"} ${input_flags[@]+"${input_flags[@]}"} \
-            ${gpu_flags[@]+"${gpu_flags[@]}"} "${rng_flags[@]}" ${audio_flags[@]+"${audio_flags[@]}"} \
+            ${gpu_flags[@]+"${gpu_flags[@]}"} ${rng_flags[@]+"${rng_flags[@]}"} ${audio_flags[@]+"${audio_flags[@]}"} \
             ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
             ${share_flags[@]+"${share_flags[@]}"} ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
     if [[ "$_prev" == -device || "$_prev" == --device ]]; then
@@ -902,7 +909,7 @@ exec qemu-system-aarch64 \
     ${net_flags[@]+"${net_flags[@]}"} \
     ${input_flags[@]+"${input_flags[@]}"} \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
-    "${rng_flags[@]}" \
+    ${rng_flags[@]+"${rng_flags[@]}"} \
     ${audio_flags[@]+"${audio_flags[@]}"} \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \

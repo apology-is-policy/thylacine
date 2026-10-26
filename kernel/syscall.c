@@ -8838,9 +8838,8 @@ static s64 sys_explicit_bzero_handler(u64 buf_va, u64 len) {
 // the per-byte loop, and 4 KiB of entropy per call needs no bulk path).
 //
 // CSPRNG-seeded check (C-15): if kern_random_seeded() is false, returns
-// -1 immediately. The GRND_NONBLOCK flag is effectively v1.0's only
-// mode — v1.x adds a real blocking primitive if/when software-CSPRNG
-// mixing introduces an unseeded state.
+// -1 immediately. No caller can see it: the boot refuses userspace on an
+// unseeded pool (PORTABILITY.md section 6), so no blocking primitive is owed.
 static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;

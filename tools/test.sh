@@ -512,6 +512,7 @@ case "$result" in
                 case "$1" in
                     thylacine.virtio-net) [[ "${THYLACINE_NO_NET:-0}" == "1" ]] ;;
                     thylacine.virtio-input|thylacine.virtio-pci-input*) [[ "${THYLACINE_NO_INPUT:-0}" == "1" ]] ;;
+                    thylacine.virtio-rng|thylacine.virtio-pci-rng) [[ "${THYLACINE_NO_RNG:-0}" == "1" ]] ;;
                     thylacine.virtio-gpu)
                         [[ "${THYLACINE_NO_GPU:-0}" == "1" ]] && return 0
                         case "${THYLACINE_DISPLAY:-none}" in

@@ -60,7 +60,7 @@
 #include <thylacine/9p_attach.h>  // p9_closer_start (FID-LIFECYCLE section 9)
 #include <thylacine/dev9p.h>
 #include <thylacine/pipe.h>
-#include <thylacine/random.h>  // random_seed_from_virtio (Lazarus W3b)
+#include <thylacine/random.h>  // random_seed_from_virtio (Lazarus W3b), kern_random_seeded
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/virtio_pci.h>
@@ -636,6 +636,14 @@ void boot_main(void) {
             uart_puts(" iters; chacha keeps the boot seed)\n");
         }
     }
+
+    // Vote 18 (PORTABILITY.md section 6): no EL0 code runs on an unseeded pool.
+    // This reseed is the last one before the suite's probes and init, and
+    // g_rng_seeded never goes back to false, so every exec after this line
+    // draws from a seeded pool.
+    if (!kern_random_seeded())
+        extinction("CSPRNG unseeded: no RNDR, and no virtio-mmio virtio-rng answered "
+                   "the boot reseed; refusing to start userspace");
 
     // P4-Ib R9 F142: reserve kernel-owned INTIDs in g_intid_claimed
     // so that subsequent kobj_irq_create (via SYS_IRQ_CREATE syscall

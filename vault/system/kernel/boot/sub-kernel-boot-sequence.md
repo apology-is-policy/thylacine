@@ -19,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-26
 ---
 ## Purpose
 
@@ -87,6 +87,18 @@ behaviour, and exec init.
   and the pool refuses every non-exempt charge until it is sized
   (fail-closed). A second call extincts, as does a machine that leaves no pool
   ([[sub-kernel-addrspace]]).
+- **No userspace without a strong seed, decided before the suite**
+  (2026-10-26, operator vote 18). Right after `virtio_init` the boot
+  strong-reseeds the CSPRNG from the virtio-rng device. If the pool is still
+  unseeded -- no RNDR, and no virtio-mmio virtio-rng answered -- the boot
+  extincts: `EXTINCTION: CSPRNG unseeded: no RNDR, and no virtio-mmio
+  virtio-rng answered the boot reseed; refusing to start userspace`. It sits
+  ahead of the suite, not just ahead of init, because the suite's probes are
+  EL0 processes too and exec fails closed on an unseeded pool
+  ([[sub-kernel-exec]]): a refusal after the suite would never print in a
+  test build, which would die under failed probe execs instead. The pool
+  never returns to unseeded ([[sub-kernel-content]]), so the check holds for
+  every exec after it.
 - **The idle thread before the suite**, because tests block, and a blocking
   thread with nothing else runnable needs somewhere to go.
 - **Console receive and the manager thread after the scheduler**, because the
@@ -125,7 +137,7 @@ the overwrite, and a compiler barrier forces the write to complete before
 lifetime. A frame that straddled the write would fail its own epilogue check on a
 stack it never smashed. `__stack_chk_fail` routes a detected smash to
 `extinction()`, the last-resort path any kernel invariant break takes; it is one
-of the seven `tools/test-fault.sh` provokers that prove the protection actually
+of the nine `tools/test-fault.sh` provokers that prove the protection actually
 *fires* rather than merely compiling in.
 
 **Those provokers are load-bearing precisely because they are fragile, and the
@@ -278,7 +290,8 @@ Almost every initializer that can fail is fatal, and deliberately so: there is n
 degraded mode for a kernel without a physical allocator or an interrupt
 controller. The exceptions are the ones with a defined fallback — no
 power-management interface means running with one CPU, no entropy device means
-keeping the boot seed, no real-time clock means an epoch of zero and a clock that
+keeping the boot seed on a CPU with RNDR (and refusing userspace on one without,
+above), no real-time clock means an epoch of zero and a clock that
 reads uptime.
 
 The suite failing is fatal. Init exiting non-zero before signalling completion is
@@ -400,3 +413,9 @@ test-fault.sh passes `THYLACINE_FAULT_BUILD_ARGS` (word-split) to build.sh
 before the variant's define. A harness whose mutant fails a suite test, which
 would extinct before the provoker, builds that variant with `--config default
 --set TESTS=n`.
+
+**Launch variant (2026-10-26).** `no_entropy` builds no provoker: its
+`launch_env_for` entry boots it under TCG `-cpu cortex-a72` (no RNDR) with
+`THYLACINE_NO_RNG=1`, and test-fault.sh requires the refusal's body with the
+suite's first line, `  tests:`, absent -- a refusal printed once the suite
+had started came too late.

@@ -610,6 +610,31 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
     *a++ = AT_NULL;   *a++ = 0;
 }
 
+#ifdef KERNEL_TESTS
+static bool g_exec_random_refuse;
+
+void exec_random_refuse_for_test(bool on) {
+    __atomic_store_n(&g_exec_random_refuse, on, __ATOMIC_RELEASE);
+}
+#endif
+
+// The AT_RANDOM draw. The boot refuses userspace on an unseeded pool
+// (PORTABILITY.md section 6), so kern_random_bytes cannot refuse it today; a
+// test build can force the refusal to prove exec answers it.
+static long exec_draw_at_random(u8 *out, long n) {
+#ifdef KERNEL_TESTS
+    if (__atomic_load_n(&g_exec_random_refuse, __ATOMIC_ACQUIRE)) return -1;
+#endif
+    return kern_random_bytes(out, n);
+}
+
+// The AT_RANDOM bytes are the new image's stack-protector canary and malloc
+// secret: no copy may outlive the exec in kernel memory.
+static void exec_scrub(void *p, size_t n) {
+    volatile u8 *q = (volatile u8 *)p;
+    while (n--) *q++ = 0;
+}
+
 // `vdso_va` is the user VA of the mapped vDSO clock page (from exec_map_vdso),
 // or 0 if it could not be mapped (-> no AT_VDSO_CLOCK; reader falls back).
 // Returns the initial user sp, or 0 on failure -- LINEAGE L-4a made this failable
@@ -685,8 +710,23 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     // EXEC_INIT_STACK_MAX_SIZE (~104 KiB worst case since #140 added the
     // environment; 176 bytes with no argv and an empty env), against the 1 MiB
     // the eager stack used to cost unconditionally.
+    //
+    // AT_RANDOM -- 16 bytes of kernel-CSPRNG entropy, drawn before anything is
+    // allocated so a refusal has nothing to give back. A refused draw fails the
+    // exec: a zero canary is worse than no process.
+    u8 rand[16];
+    if (exec_draw_at_random(rand, sizeof(rand)) != (long)sizeof(rand)) {
+        exec_report_fail("the CSPRNG refused the AT_RANDOM draw, bytes wanted",
+                         (u64)sizeof(rand));
+        return 0;    // *err_out stays -1: execve reports EINVAL, a spawn fail-exec
+    }
+
     u8 *frame = kzalloc((size_t)frame_size, 0);
-    if (!frame) { *err_out = -T_E_NOMEM; return 0; }
+    if (!frame) {
+        exec_scrub(rand, sizeof(rand));
+        *err_out = -T_E_NOMEM;
+        return 0;
+    }
 
     // AT_PHDR — the user VA of the program-header table. The phdrs sit
     // at file offset img->phoff; find the PT_LOAD segment whose file
@@ -709,11 +749,6 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
             }
         }
     }
-
-    // AT_RANDOM — 16 bytes of kernel-CSPRNG entropy. Same shape across
-    // both layouts; the in-frame offset differs.
-    u8 rand[16] = {0};
-    (void)kern_random_bytes(rand, sizeof(rand));
 
     // Lay out the frame. The frame base is 16-byte aligned (exec.h
     // _Static_assert + the round_up above); every u64 below is 8-aligned.
@@ -756,6 +791,7 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
 
     u8 *rand_dst = frame + random_offset_from_sp;
     for (size_t i = 0; i < sizeof(rand); i++) rand_dst[i] = rand[i];
+    exec_scrub(rand, sizeof(rand));
 
     // LINEAGE L-4a: make the frame's pages resident and copy it in. The run is the
     // page holding the frame's first byte through the top of the stack -- the frame
@@ -777,6 +813,7 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
         // and uncharging there as well would UNDER-count.
         if (rc != 0) lazy_populate_uncharge(as, n);
     }
+    exec_scrub(rand_dst, sizeof(rand));
     kfree(frame);
     if (rc != 0) return 0;      // caller disposes the partially-built address space
 

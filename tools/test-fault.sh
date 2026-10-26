@@ -31,6 +31,11 @@
 #                     (the per-byte console gate) →
 #                     "EXTINCTION: peer chatter: this banner must reach the wire whole"
 #                     matched as the ENTIRE line, not a substring
+#   no_entropy      — no provoker in the build: the LAUNCH leaves the kernel
+#                     no strong entropy source (TCG -cpu cortex-a72 has no
+#                     RNDR; THYLACINE_NO_RNG=1 attaches no virtio-rng), and the
+#                     boot must refuse userspace before the suite (vote 18) →
+#                     "EXTINCTION: CSPRNG unseeded: ..." with "  tests:" absent
 #
 # This list is the one place a reader learns what exists, so keep it equal to
 # ALL_VARIANTS below. It was short by two (bootcpu_idle_guard,
@@ -63,7 +68,16 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter no_entropy"
+
+# Launcher settings a variant boots under, word-split into run-vm.sh's
+# environment. Empty = the caller's own.
+launch_env_for() {
+    case "$1" in
+        no_entropy) echo "THYLACINE_ACCEL=tcg THYLACINE_CPU=cortex-a72 THYLACINE_NO_RNG=1" ;;
+        *)          echo "" ;;
+    esac
+}
 
 # A substring that must NOT appear for a variant to PASS. Empty = no such
 # requirement. Paired with expected_for: "the right line appeared" and "the
@@ -82,6 +96,8 @@ forbid_for() {
     case "$1" in
         el1_sync_runaway) echo "console-ring: NOT held" ;;
         extinction_peer_chatter) echo "console-claim: taken with irqs on" ;;
+        # The suite's first line: a refusal printed after it came too late.
+        no_entropy)       echo "  tests:" ;;
         *)                echo "" ;;
     esac
 }
@@ -97,6 +113,7 @@ expected_for() {
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
         extinction_peer_chatter) echo "EXTINCTION: peer chatter: this banner must reach the wire whole" ;;
+        no_entropy)      echo "EXTINCTION: CSPRNG unseeded: no RNDR, and no virtio-mmio virtio-rng answered the boot reseed; refusing to start userspace" ;;
         # ROUND F6: the variant REACHES cons_tx_claim_for_dump's
         # already-ours arm but could not FAIL if it were wrong -- delete that
         # arm and the re-entrant claim burns its bound, returns false, and the
@@ -176,7 +193,9 @@ for variant in $selected; do
     grep -E '^==> (populate pool: bake config|WARNING: a clade)' "$bake_log" || true
 
     echo "==> [$variant] booting (expecting: $expect)..."
-    THYLACINE_BUILD_DIR="$build_dir" "$REPO_ROOT/tools/run-vm.sh" --no-share \
+    read -r -a launch_env <<< "$(launch_env_for "$variant")"
+    env ${launch_env[@]+"${launch_env[@]}"} \
+        THYLACINE_BUILD_DIR="$build_dir" "$REPO_ROOT/tools/run-vm.sh" --no-share \
         < /dev/null > "$log_file" 2>&1 &
     pid=$!
 

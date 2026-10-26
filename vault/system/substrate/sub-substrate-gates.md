@@ -368,7 +368,10 @@ by `THYLACINE_NO_GPU=1` or a display that drops the MMIO GPU (console, vnc,
 egl-headless, dbus-gl, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
 `smp` and `msi` by run-vm.sh's own `==> qemu:` line (one CPU; a GICv3 machine
 with `its=off`, or under KVM or hvf, where the launcher cannot know the ITS);
-the dlopen prover by a sysroot without `libc.so`. `virtio-rng`, `virtio-pci-rng`, a probe in an image with
+the dlopen prover by a sysroot without `libc.so`; `virtio-rng` and
+`virtio-pci-rng` by `THYLACINE_NO_RNG=1` (2026-10-26: without RNDR that boot
+refuses userspace before the suite, so only an RNDR machine reaches the
+mirror with them skipped). A probe in an image with
 `/bin/joey`, and any kind the mirror does not name are never explained. An
 unexplained skip fails: the launcher dropped what this configuration attaches
 without declaring the drop. The rest are printed as NOT coverage, in the #212

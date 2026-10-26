@@ -202,13 +202,19 @@ seed**, so it is entropy someone can partially observe. It is mixed in as
 material — through a deliberately different avalanche function, so the two
 derivations do not correlate ([[inv-i16]]) — but it does not count toward
 readiness. Only the CPU's own generator, or a pull from the host, flips the gate.
+Since vote 18 (2026-10-26) the gate is also the boot's: a pool still unseeded
+after the boot's virtio-rng reseed stops the boot before any EL0 code runs
+([[sub-kernel-boot-sequence]]), so userspace never meets the refusal, and
+exec's `AT_RANDOM` draw fails the exec rather than serve zeros
+([[sub-kernel-exec]]).
 
 **The CPU's own generator is RNDR (FEAT_RNG), and its capture idiom is
 load-bearing.** Presence is probed once at init from `ID_AA64ISAR0_EL1`
 bits[63:60] (a value `>= 1`) into a cross-CPU-read flag, which the boot banner
 reports and `kern_random_rndr_available()` exports: the kernel suite's entropy
-gate reads it, since an unseeded pool on a CPU with RNDR is a seeding bug, not
-a configuration ([[sub-substrate-kernel-suite]]). A read of the RNDR register sets `PSTATE.NZCV` — `Z == 0` means it
+check reads it to name the failure it saw -- on a CPU with RNDR an unseeded
+pool is a seeding bug, on one without a boot refusal that moved
+([[sub-substrate-kernel-suite]]). A read of the RNDR register sets `PSTATE.NZCV` — `Z == 0` means it
 returned fresh entropy — so the read is captured with a `cset` on `ne` and
 retried up to ten times when the source is transiently dry, and the inline
 assembly **must clobber `cc`**, because RNDR writes the flags and omitting the

@@ -75,10 +75,11 @@ tools/test-smp-classify.sh
 # `test-a72` and `check-v80-floor` -- one screen down, in this block -- did not.
 # test-fault builds one kernel per provoker and PASSes iff each EXTINCTIONs with
 # its expected message: the ONLY proof that the canary / W^X / BTI / the two
-# stack guards / the idle guard / the recursion arm actually FIRE, as opposed to
+# stack guards / the idle guard / the recursion arm / the no-entropy refusal
+# (vote 18; a launch with no RNDR and no virtio-rng) actually FIRE, as opposed to
 # merely being compiled in. Its absence from every gate is how #244 --
 # recursive_kernel_fault emitting nothing at all -- hid for about a month.
-tools/test-fault.sh                 # all 7 variants    (or: make test-fault)
+tools/test-fault.sh                 # every variant     (or: make test-fault)
 tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 
 # verify-kaslr multi-boots and PASSes iff the slide varies across N: ROADMAP

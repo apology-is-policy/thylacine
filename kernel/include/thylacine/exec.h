@@ -566,6 +566,10 @@ extern void userland_enter_held(u64 entry_pc, u64 user_sp);
 #ifdef KERNEL_TESTS
 void exec_icache_last_for_test(u64 *addr_out, size_t *len_out);
 u64  exec_icache_calls_for_test(void);
+// While on, exec's AT_RANDOM draw is refused as an unseeded pool refuses it.
+// The arming test releases it before any assert, so a failure cannot leave
+// every later exec refused.
+void exec_random_refuse_for_test(bool on);
 #endif
 
 #endif // THYLACINE_EXEC_H

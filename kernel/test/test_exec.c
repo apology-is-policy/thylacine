@@ -802,6 +802,39 @@ void test_exec_setup_auxv(void) {
     drop_proc(p);
 }
 
+// Vote 18: a refused AT_RANDOM draw fails the exec; the image never runs on
+// zeros. The boot refuses userspace on an unseeded pool, so only the hook can
+// make the draw refuse here.
+void test_exec_at_random_refusal_fails_exec(void);
+void test_exec_at_random_refusal_fails_exec(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    exec_random_refuse_for_test(true);
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    exec_random_refuse_for_test(false);
+
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    u8 *fb = (sv && sv->burrow)
+           ? lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE) : NULL;
+    TEST_EXPECT_EQ(rc, -1, "a refused AT_RANDOM draw fails the exec");
+    TEST_EXPECT_EQ(sp, 0ull, "a refused exec hands back no stack pointer");
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL,
+        "the stack was mapped, so the refusal came from the frame builder");
+    TEST_ASSERT(fb == NULL, "no frame page was populated: the draw precedes the frame");
+    drop_proc(p);
+
+    // One variable away: the hook released, the same exec succeeds.
+    struct Proc *q = make_proc();
+    TEST_ASSERT(q != NULL, "proc_alloc (control)");
+    TEST_EXPECT_EQ(exec_setup(q, g_elf_blob, size, &entry, &sp), 0,
+        "the same exec succeeds once the draw is served");
+    TEST_ASSERT(sp != 0, "the served exec hands back a stack pointer");
+    drop_proc(q);
+}
+
 // #140: a Proc with a real /env gets a real envp on its new image's stack.
 //
 // This is the test the bug survived for lack of. Every other frame test above

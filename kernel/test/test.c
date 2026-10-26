@@ -703,6 +703,7 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_at_random_refusal_fails_exec(void);   // vote 18
 void test_exec_setup_bss_tail_icache_synced(void);
 void test_exec_from_spoor_bss_only_text_icache_synced(void);
 void test_exec_setup_env_frame(void);            // #140
@@ -2996,6 +2997,9 @@ struct test_case g_tests[] = {
     { "exec.setup_auxv_no_phdr_segment",
                                        test_exec_setup_auxv_no_phdr_segment,
                                                                            false, NULL },
+    { "exec.at_random_refusal_fails_exec",
+                                       test_exec_at_random_refusal_fails_exec,
+                                                                           false, NULL },
     { "exec.setup_bss_tail_icache_synced",
                                        test_exec_setup_bss_tail_icache_synced,
                                                                            false, NULL },
@@ -5261,12 +5265,10 @@ struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token) {
 
 bool test_strong_entropy(void) {
     if (kern_random_seeded()) return true;
-    if (kern_random_rndr_available()) {
-        test_fail("RNDR is present, yet no strong source seeded the pool");
-        return false;
-    }
-    return test_requires(false, "thylacine.virtio-rng", 0, false,
-                         "no strong source seeded the pool");
+    test_fail(kern_random_rndr_available()
+              ? "RNDR is present, yet no strong source seeded the pool"
+              : "the pool is unseeded, yet the boot did not refuse userspace before the suite");
+    return false;
 }
 
 int proc_test_serial_sak(int posture);

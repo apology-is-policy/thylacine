@@ -31,7 +31,11 @@ inconsistencies" (TOOLING.md §3).
   host share, and a QMP control socket.
 - Prints `==> qemu: accel=<a> cpu=<c> gic=v<n> smp=<n>` — the line
   downstream harnesses read back rather than re-deriving.
-- Every device group is disable-able by env (`THYLACINE_NO_{NET,INPUT,GPU,QMP,SHARE}`).
+- Every device group is disable-able by env (`THYLACINE_NO_{NET,INPUT,GPU,RNG,QMP,SHARE}`).
+  `THYLACINE_NO_RNG=1` (2026-10-26) drops both RNGs: on a CPU without RNDR
+  the kernel then has no strong entropy and refuses userspace (vote 18),
+  which is the boot `tools/test-fault.sh no_entropy` makes. Like
+  `THYLACINE_NO_GPU`, it moves the PCI functions after `rng_pci0` up a slot.
 
 ## Mechanism
 
@@ -106,7 +110,8 @@ the launcher still works on a non-Apple box. The kernel autodetects v2-vs-v3
 from the DTB, so neither choice is baked into the guest. Under HVF the guest
 sees Apple cores, which have LSE+PAC+BTI but **not** FEAT_RNG/RNDR — which
 is precisely why the kernel CSPRNG seeds from virtio-rng (Lazarus W3): one
-software path on every target.
+software path on every target. An HVF boot without it refuses userspace
+(vote 18, [[sub-kernel-boot-sequence]]).
 
 **The `nowatchpoint` token, and why its ABSENCE is the safe default.** QEMU
 TCG programs `DBGWVR`/`DBGWCR` but never raises EC 0x34; a guest thread that
