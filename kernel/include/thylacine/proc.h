@@ -2170,10 +2170,14 @@ static inline bool proc_stop_owned(const struct Proc *p) {
 // die check still parks and dies in the park instead of erets; clearing them at
 // the terminate would lose that. Both delivers refuse a dying Proc, so nothing
 // sets them after the kill. The flags are read first, so the common case costs
-// the same two loads.
+// the same two loads. An exec's claim reads the same way (ARCH 7.3.3): its
+// doomed threads die rather than park, and the execer's wait must not hold for
+// a stop. The flags stay set, so the stop parks the new image at its first EL0
+// return.
 static inline bool proc_stop_requested(const struct Proc *p) {
     return proc_stop_owned(p) &&
-           __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL;
+           __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&
+           __atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE) == NULL;
 }
 
 // proc_job_stop_pgrp: the SYS_TTY_SIGNAL TSTP fan-out -- deliver the

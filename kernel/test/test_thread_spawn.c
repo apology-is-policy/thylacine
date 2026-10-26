@@ -61,6 +61,26 @@
 //                                            out; past them a create is
 //                                            refused and a spawn answers
 //                                            EAGAIN, never an extinction.
+//   proc.exec_claim_dooms_every_other_thread
+//                                          -- a held exec claim reads as death
+//                                            for every thread but the execer,
+//                                            and both spawn arms and admission
+//                                            refuse while it is held.
+//   proc.exec_claim_kills_sleeping_and_running_peers
+//                                          -- the claim kills peers asleep in
+//                                            sleep() and sleep_death_only and
+//                                            one at its die-check, then exec
+//                                            swaps with one thread left.
+//   proc.exec_claim_abandoned_on_group_death
+//                                          -- a kill ends a waiting claim and
+//                                            clears it.
+//   proc.exec_claim_woken_by_an_abandoned_create
+//                                          -- freeing a never-run thread wakes
+//                                            the claim.
+//   proc.exec_claim_does_not_hold_for_a_stop
+//                                          -- under a job stop the claim still
+//                                            returns; the stop stands for the
+//                                            new image.
 //
 // The kernel test harness runs at EL1 so we can't drive a full eret-to-
 // EL0 from here; the user-mode SVC dispatch + the userland_enter eret
@@ -106,6 +126,11 @@ void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
+void test_proc_exec_claim_dooms_every_other_thread(void);
+void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
+void test_proc_exec_claim_abandoned_on_group_death(void);
+void test_proc_exec_claim_woken_by_an_abandoned_create(void);
+void test_proc_exec_claim_does_not_hold_for_a_stop(void);
 
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout
@@ -1402,4 +1427,463 @@ void test_thread_tid_and_pid_spaces_refuse_when_spent(void) {
     TEST_EXPECT_EQ(g_tps_spawn_rc, (s64)-T_E_AGAIN,
         "a spawn past the last tid answers EAGAIN, a system limit, not ENOMEM");
     TEST_ASSERT(g_tps_pid_refused, "a Proc past the last pid is refused");
+}
+
+// ---------------------------------------------------------------------------
+// Exec with threads (ARCH 7.3.3, thread-model C5; specs/thread_reap.tla
+// ExecClaim, ExecAbort, ExecSwap).
+//
+// proc.exec_claim_dooms_every_other_thread reads the predicates and the spawn
+// gates against a claim set by hand. The rest drive a real claim from a
+// child's main thread: it brings its peers into place, holds them there with
+// no claim (the control: nothing but the claim moves them), then claims. The
+// claim sleeps for group death alone, so past the runner's budget a claim that
+// never returned is ended by a kill.
+// ---------------------------------------------------------------------------
+
+static volatile bool g_xd_setup_failed, g_xd_exempt, g_xd_admitted, g_xd_hook_ran;
+static volatile bool g_xd_n_die, g_xd_n_gdeath, g_xd_n_dooms;
+static volatile bool g_xd_m_die, g_xd_m_gdeath, g_xd_m_dooms;
+static volatile bool g_xd_ctl_die, g_xd_ctl_gdeath, g_xd_ctl_dooms;
+static volatile bool g_xd_pre_reached[2], g_xd_admit_reached[2];
+static volatile s64  g_xd_pre_rc[2], g_xd_admit_rc[2];
+static volatile int  g_xd_admit_linked[2], g_xd_claim_rc;
+static struct Thread *volatile g_xd_main;
+
+static void xd_set_claim(struct Proc *p, struct Thread *t) {
+    irq_state_t s = proc_threads_lock(p);
+    __atomic_store_n(&p->exec_task, t, __ATOMIC_RELEASE);
+    proc_threads_unlock(p, s);
+}
+
+static void xd_hook_note(struct Proc *p) {
+    (void)p;
+    g_xd_hook_ran = true;
+}
+
+// A claim landing at the top of the admit, after the arm's pre-checks passed.
+static void xd_hook_claim(struct Proc *p) {
+    g_xd_hook_ran = true;
+    xd_set_claim(p, g_xd_main);
+}
+
+static s64 xd_spawn(int arm) {
+    if (arm) {
+        struct exception_context ctx;
+        for (size_t i = 0; i < sizeof(ctx); i++) ((u8 *)&ctx)[i] = 0;
+        u64 args[5] = { 0, C0_USER_SP, 0, 0, 0 };
+        return viv_clone_thread_for_test(&ctx, args);
+    }
+    return sys_thread_spawn_for_test(C0_USER_ENTRY, C0_USER_SP, 0, 0, 0);
+}
+
+static void xd_entry(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    struct Proc *p = self->proc;
+    g_xd_main   = self;
+    g_xd_exempt = proc_resource_exempt(p);
+    struct Thread *n = thread_create_with_arg(p, c0_never_entry, NULL);
+    if (!n) {
+        g_xd_setup_failed = true;
+        exits("setup");
+    }
+
+    xd_set_claim(p, self);
+    g_xd_n_die    = thread_die_pending(n);
+    g_xd_n_gdeath = thread_group_death_pending(n);
+    g_xd_n_dooms  = proc_exec_dooms(p, n);
+    g_xd_m_die    = thread_die_pending(self);
+    g_xd_m_gdeath = thread_group_death_pending(self);
+    g_xd_m_dooms  = proc_exec_dooms(p, self);
+    for (int arm = 0; arm < 2; arm++) {
+        g_xd_hook_ran = false;
+        proc_thread_admit_test_set_hook(xd_hook_note);
+        g_xd_pre_rc[arm] = xd_spawn(arm);
+        proc_thread_admit_test_set_hook(NULL);
+        g_xd_pre_reached[arm] = g_xd_hook_ran;
+    }
+    struct Thread *nt = thread_alloc_user(p, C0_USER_ENTRY, C0_USER_SP, 0, 0);
+    if (nt) {
+        g_xd_admitted = proc_thread_admit(p, nt);
+        if (g_xd_admitted) thread_free(nt);
+        else               thread_free_unlinked(nt);
+    } else {
+        g_xd_setup_failed = true;
+    }
+
+    xd_set_claim(p, NULL);
+    g_xd_ctl_die    = thread_die_pending(n);
+    g_xd_ctl_gdeath = thread_group_death_pending(n);
+    g_xd_ctl_dooms  = proc_exec_dooms(p, n);
+    for (int arm = 0; arm < 2; arm++) {
+        g_xd_hook_ran = false;
+        int before = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);
+        proc_thread_admit_test_set_hook(xd_hook_claim);
+        g_xd_admit_rc[arm] = xd_spawn(arm);
+        proc_thread_admit_test_set_hook(NULL);
+        g_xd_admit_reached[arm] = g_xd_hook_ran;
+        g_xd_admit_linked[arm]  = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE) - before;
+        xd_set_claim(p, NULL);
+    }
+
+    thread_free(n);
+    irq_state_t s = proc_table_lock_acquire();
+    proc_group_terminate(p, 0, "c5-dying");
+    proc_table_lock_release(s);
+    g_xd_claim_rc = proc_exec_claim(p);
+    thread_exit_self();
+}
+
+void test_proc_exec_claim_dooms_every_other_thread(void) {
+    static const char *const arm[2] = { "thread_spawn", "clone" };
+    g_xd_setup_failed = g_xd_exempt = g_xd_admitted = g_xd_hook_ran = false;
+    g_xd_n_die = g_xd_n_gdeath = g_xd_n_dooms = false;
+    g_xd_m_die = g_xd_m_gdeath = g_xd_m_dooms = true;
+    g_xd_ctl_die = g_xd_ctl_gdeath = g_xd_ctl_dooms = true;
+    g_xd_main = NULL;
+    g_xd_claim_rc = 0x7fffffff;
+    for (int i = 0; i < 2; i++) {
+        g_xd_pre_reached[i] = true;
+        g_xd_admit_reached[i] = false;
+        g_xd_pre_rc[i] = g_xd_admit_rc[i] = 0;
+        g_xd_admit_linked[i] = -1;
+    }
+    int child_pid = rfork(RFPROC, xd_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(!g_xd_setup_failed, "setup: a never-run peer and a user thread to admit");
+    TEST_ASSERT(g_xd_exempt, "the child is exempt, so the thread cap cannot refuse");
+    TEST_ASSERT(g_xd_n_die, "another thread's claim reads as death (thread_die_pending)");
+    TEST_ASSERT(g_xd_n_gdeath, "and as group death (thread_group_death_pending)");
+    TEST_ASSERT(g_xd_n_dooms, "and dooms the peer");
+    TEST_ASSERT(!g_xd_m_die && !g_xd_m_gdeath && !g_xd_m_dooms,
+        "the execer is not doomed by its own claim");
+    // The control for the three lines above, one variable away: no claim.
+    TEST_ASSERT(!g_xd_ctl_die && !g_xd_ctl_gdeath && !g_xd_ctl_dooms,
+        "with no claim the same peer is not doomed");
+    TEST_ASSERT(!g_xd_admitted, "admission refuses a thread while a claim is held");
+    for (int i = 0; i < 2; i++) {
+        uart_puts("    xd arm=");
+        uart_puts(arm[i]);
+        uart_puts("\n");
+        TEST_EXPECT_EQ(g_xd_pre_rc[i], (s64)-T_E_AGAIN, "a held claim refuses the spawn");
+        TEST_ASSERT(!g_xd_pre_reached[i], "it refused before the admit");
+        TEST_ASSERT(g_xd_admit_reached[i], "with no claim the arm reached its admit");
+        TEST_EXPECT_EQ(g_xd_admit_rc[i], (s64)-T_E_AGAIN, "a claim at the admit refuses the spawn");
+        TEST_EXPECT_EQ(g_xd_admit_linked[i], 0, "the refused thread was never linked");
+    }
+    TEST_EXPECT_EQ(g_xd_claim_rc, -1, "a claim on a dying Proc is refused");
+}
+
+#define XC_MAX_PEERS  3
+#define XC_UNSET      0x7fffffff
+
+enum xc_kind  { XC_SLEEPER, XC_DEATH_ONLY, XC_SPINNER, XC_DEAF };
+enum xc_phase { XC_SETUP, XC_CLAIMING, XC_DONE, XC_FAILED };
+
+// The fixture each test sets before it forks.
+static int          g_xc_npeers;
+static enum xc_kind g_xc_kind[XC_MAX_PEERS];
+static bool         g_xc_unborn_wanted, g_xc_job_stop, g_xc_second_claim;
+
+static struct Proc   *volatile g_xc_proc;
+static struct Thread *volatile g_xc_unborn;
+static struct Rendez g_xc_rendez[XC_MAX_PEERS];
+static volatile int  g_xc_phase, g_xc_main_tid;
+static volatile int  g_xc_tid[XC_MAX_PEERS], g_xc_rc[XC_MAX_PEERS];
+static volatile bool g_xc_up[XC_MAX_PEERS], g_xc_release;
+static volatile u64  g_xc_spins[XC_MAX_PEERS];
+static volatile int  g_xc_second_rc, g_xc_claim_rc, g_xc_live_at_claim, g_xc_count_after;
+static volatile bool g_xc_held_in_place, g_xc_claim_owned, g_xc_stop_during, g_xc_stop_after;
+static volatile bool g_xc_cleared_at_swap, g_xc_cleared_at_abort;
+
+static void xc_reset(void) {
+    g_xc_npeers = 0;
+    g_xc_unborn_wanted = g_xc_job_stop = g_xc_second_claim = false;
+    g_xc_proc   = NULL;
+    g_xc_unborn = NULL;
+    g_xc_phase  = XC_SETUP;
+    g_xc_main_tid = 0;
+    for (int i = 0; i < XC_MAX_PEERS; i++) {
+        g_xc_kind[i]  = XC_SLEEPER;
+        g_xc_tid[i]   = 0;
+        g_xc_rc[i]    = XC_UNSET;
+        g_xc_up[i]    = false;
+        g_xc_spins[i] = 0;
+        rendez_init(&g_xc_rendez[i]);
+    }
+    g_xc_release = false;
+    g_xc_second_rc = g_xc_claim_rc = XC_UNSET;
+    g_xc_live_at_claim = g_xc_count_after = -1;
+    g_xc_held_in_place = g_xc_claim_owned = g_xc_stop_during = g_xc_stop_after = false;
+    g_xc_cleared_at_swap = g_xc_cleared_at_abort = false;
+}
+
+static int xc_never(void *arg) {
+    (void)arg;
+    return 0;
+}
+
+static void xc_peer_entry(void *arg) {
+    int i = (int)(uintptr_t)arg;
+    struct Thread *self = current_thread();
+    __atomic_store_n(&g_xc_up[i], true, __ATOMIC_RELEASE);
+    switch (g_xc_kind[i]) {
+    case XC_SLEEPER:
+    case XC_DEATH_ONLY:
+        g_xc_rc[i] = g_xc_kind[i] == XC_SLEEPER
+                   ? sleep(&g_xc_rendez[i], xc_never, NULL)
+                   : sleep_death_only(&g_xc_rendez[i], xc_never, NULL);
+        if (g_xc_second_claim && g_xc_kind[i] == XC_SLEEPER)
+            g_xc_second_rc = proc_exec_claim(self->proc);
+        break;
+    case XC_SPINNER:
+        // A thread at EL0 meets the claim at its return tail's die-check.
+        for (;;) {
+            __atomic_fetch_add(&g_xc_spins[i], 1u, __ATOMIC_RELEASE);
+            el0_return_die_check();
+            sched();
+        }
+    case XC_DEAF:
+        // A thread the claim has not reached: it takes no die-check until released.
+        while (!__atomic_load_n(&g_xc_release, __ATOMIC_ACQUIRE))
+            sched();
+        break;
+    }
+    thread_exit_self();
+}
+
+// Each peer where the claim must find it: a sleeper still in its sleep, on its
+// rendez or parked for the stop; a spinner running; a deaf peer up.
+static bool xc_peers_in_place(struct Proc *p) {
+    for (int i = 0; i < g_xc_npeers; i++) {
+        if (!__atomic_load_n(&g_xc_up[i], __ATOMIC_ACQUIRE)) return false;
+        if (g_xc_kind[i] == XC_SPINNER) {
+            if (__atomic_load_n(&g_xc_spins[i], __ATOMIC_ACQUIRE) == 0) return false;
+        } else if (g_xc_kind[i] != XC_DEAF) {
+            struct test_thread_view v = test_thread_view(p, g_xc_tid[i]);
+            bool on = g_xc_job_stop ? v.on_debug_rendez : v.blocked_on == &g_xc_rendez[i];
+            if (g_xc_rc[i] != XC_UNSET || !v.present || v.state != THREAD_SLEEPING || !on)
+                return false;
+        }
+    }
+    return true;
+}
+
+static void xc_main_entry(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    struct Proc *p = self->proc;
+    g_xc_main_tid = self->tid;
+    g_xc_proc     = p;
+    if (g_xc_job_stop) __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
+    struct AddrSpace *nas = addrspace_alloc(p->page_budget);
+    bool ok = nas != NULL;
+    for (int i = 0; ok && i < g_xc_npeers; i++) {
+        struct Thread *t = thread_create_with_arg(p, xc_peer_entry, (void *)(uintptr_t)i);
+        ok = t != NULL;
+        if (ok) {
+            g_xc_tid[i] = t->tid;
+            ready(t);
+        }
+    }
+    if (ok && g_xc_unborn_wanted) {
+        g_xc_unborn = thread_create_with_arg(p, c0_never_entry, NULL);
+        ok = g_xc_unborn != NULL;
+    }
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (ok && !xc_peers_in_place(p) && timer_now_ns() < deadline)
+        sched();
+    ok = ok && xc_peers_in_place(p);
+    if (ok) {
+        u64 spins0[XC_MAX_PEERS];
+        for (int i = 0; i < g_xc_npeers; i++)
+            spins0[i] = __atomic_load_n(&g_xc_spins[i], __ATOMIC_ACQUIRE);
+        u64 hold = timer_now_ns() + 20000000ull;
+        while (timer_now_ns() < hold)
+            sched();
+        bool held = xc_peers_in_place(p) &&
+                    __atomic_load_n(&p->live_threads, __ATOMIC_RELAXED) ==
+                        1 + g_xc_npeers + (g_xc_unborn_wanted ? 1 : 0);
+        for (int i = 0; i < g_xc_npeers; i++)
+            if (g_xc_kind[i] == XC_SPINNER &&
+                __atomic_load_n(&g_xc_spins[i], __ATOMIC_ACQUIRE) == spins0[i])
+                held = false;
+        g_xc_held_in_place = held;
+    }
+    if (!ok) {
+        // The runner frees the unborn thread only once the child claims.
+        if (g_xc_unborn) thread_free(g_xc_unborn);
+        g_xc_unborn = NULL;
+        if (nas) addrspace_unref(nas);
+        __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_xc_phase, XC_FAILED, __ATOMIC_RELEASE);
+        exits("setup");
+    }
+
+    __atomic_store_n(&g_xc_phase, XC_CLAIMING, __ATOMIC_RELEASE);
+    int rc = proc_exec_claim(p);
+    irq_state_t s = proc_threads_lock(p);
+    g_xc_live_at_claim = p->live_threads;
+    g_xc_claim_owned   = p->exec_task == self;
+    proc_threads_unlock(p, s);
+    g_xc_stop_during = proc_stop_requested(p);
+    g_xc_claim_rc    = rc;
+    if (rc == 0) {
+        proc_exec_replace(p, nas, p->phenotype);
+        s = proc_threads_lock(p);
+        g_xc_count_after     = p->thread_count;
+        g_xc_cleared_at_swap = p->exec_task == NULL;
+        proc_threads_unlock(p, s);
+        g_xc_stop_after = proc_stop_requested(p);
+        __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_xc_phase, XC_DONE, __ATOMIC_RELEASE);
+        exits("ok");
+    }
+    // Abandoned: group death ended the wait, and the execer dies with the group.
+    addrspace_unref(nas);
+    s = proc_threads_lock(p);
+    g_xc_cleared_at_abort = p->exec_task == NULL;
+    proc_threads_unlock(p, s);
+    __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xc_phase, XC_DONE, __ATOMIC_RELEASE);
+    thread_exit_self();
+}
+
+static int xc_phase(void) {
+    return __atomic_load_n(&g_xc_phase, __ATOMIC_ACQUIRE);
+}
+
+static bool xc_main_in_claim(void) {
+    struct Proc *p = g_xc_proc;
+    if (!p) return false;
+    struct test_thread_view v = test_thread_view(p, g_xc_main_tid);
+    return v.present && v.state == THREAD_SLEEPING && v.blocked_on == &p->exec_rendez;
+}
+
+// Every peer but a deaf one dies with the group, and so does a claim's wait.
+static void xc_kill(void) {
+    struct Proc *p = g_xc_proc;
+    if (!p) return;
+    irq_state_t s = proc_table_lock_acquire();
+    if (p->state == PROC_STATE_ALIVE) proc_group_kill(p);
+    proc_table_lock_release(s);
+}
+
+// Once the child has claimed: hold a while and report whether its claim was
+// still waiting at the end, asleep for it.
+static bool xc_claim_held(void) {
+    TEST_YIELD_UNTIL_SOFT(xc_main_in_claim() || xc_phase() == XC_DONE ||
+                          xc_phase() == XC_FAILED);
+    if (!xc_main_in_claim()) return false;
+    u64 hold = timer_now_ns() + 20000000ull;
+    while (timer_now_ns() < hold)
+        sched();
+    return xc_main_in_claim() && xc_phase() == XC_CLAIMING;
+}
+
+// The child's end: its claim resolved, or a kill past the budget, then a deaf
+// peer released and the Proc reaped. Returns the packed status.
+static int xc_finish(int child_pid) {
+    TEST_YIELD_UNTIL_SOFT(xc_phase() == XC_DONE || xc_phase() == XC_FAILED);
+    if (xc_phase() != XC_DONE && xc_phase() != XC_FAILED) xc_kill();
+    __atomic_store_n(&g_xc_release, true, __ATOMIC_RELEASE);
+    int status = -1;
+    int reaped = wait_pid_for(child_pid, WAIT_PACKED, &status);
+    return reaped == child_pid ? status : -3;
+}
+
+// A sleeper in sleep(), one in a death-only sleep and a thread at its die-check
+// all die of the claim, which returns once the execer is alone; a doomed
+// thread's own exec is refused; the swap leaves one thread and no claim.
+void test_proc_exec_claim_kills_sleeping_and_running_peers(void) {
+    xc_reset();
+    g_xc_npeers  = 3;
+    g_xc_kind[0] = XC_SLEEPER;
+    g_xc_kind[1] = XC_DEATH_ONLY;
+    g_xc_kind[2] = XC_SPINNER;
+    g_xc_second_claim = true;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: three peers in place and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "with no claim the sleepers slept on and the spinner ran");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "the claim returned holding the Proc");
+    TEST_ASSERT(g_xc_claim_owned, "the claim names the execer");
+    TEST_EXPECT_EQ(g_xc_live_at_claim, 1, "it returned once the execer was the only live thread");
+    TEST_EXPECT_EQ(g_xc_rc[0], SLEEP_INTR, "the sleep() sleeper was woken to die");
+    TEST_EXPECT_EQ(g_xc_rc[1], SLEEP_INTR, "the death-only sleeper was woken to die");
+    TEST_EXPECT_EQ(g_xc_second_rc, -1, "a doomed thread's own exec was refused");
+    TEST_ASSERT(g_xc_cleared_at_swap, "the swap cleared the claim");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
+}
+
+// Group death ends a claim still waiting for a peer it has not reached: the
+// exec is abandoned and its claim cleared, and the Proc dies of the kill.
+void test_proc_exec_claim_abandoned_on_group_death(void) {
+    xc_reset();
+    g_xc_npeers  = 1;
+    g_xc_kind[0] = XC_DEAF;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    bool waited = xc_claim_held();
+    if (waited) xc_kill();
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a peer in place and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "with no claim the peer stayed up");
+    TEST_ASSERT(waited, "the claim slept while a live peer remained");
+    TEST_EXPECT_EQ(g_xc_claim_rc, -1, "group death abandoned the exec");
+    TEST_ASSERT(g_xc_cleared_at_abort, "the abandoned claim was cleared");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL), "the Proc died of the kill");
+}
+
+// A created thread that never ran counts live until its creator frees it; the
+// unlink that drops the count to one wakes the claim.
+void test_proc_exec_claim_woken_by_an_abandoned_create(void) {
+    xc_reset();
+    g_xc_unborn_wanted = true;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    bool waited = xc_claim_held();
+    // The runner owns the unborn thread once the child has claimed.
+    int phase = xc_phase();
+    if ((phase == XC_CLAIMING || phase == XC_DONE) && g_xc_unborn) {
+        thread_free(g_xc_unborn);
+        g_xc_unborn = NULL;
+    }
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a never-run thread and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "the never-run thread counted live");
+    TEST_ASSERT(waited, "the claim slept while the never-run thread counted live");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "freeing it woke the claim");
+    TEST_EXPECT_EQ(g_xc_live_at_claim, 1, "the execer was the only live thread");
+    TEST_ASSERT(g_xc_cleared_at_swap, "the swap cleared the claim");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
+}
+
+// Under a job stop the peers are parked; the claim kills them and returns with
+// the stop still requested and never resumed. No thread is asked to park while
+// the claim holds, and the stop stands for the new image.
+void test_proc_exec_claim_does_not_hold_for_a_stop(void) {
+    xc_reset();
+    g_xc_npeers  = 2;
+    g_xc_kind[0] = XC_SLEEPER;
+    g_xc_kind[1] = XC_DEATH_ONLY;
+    g_xc_job_stop = true;
+    int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = xc_finish(child_pid);
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: two peers parked for the stop");
+    TEST_ASSERT(g_xc_held_in_place, "with no claim both peers stayed parked");
+    TEST_EXPECT_EQ(g_xc_claim_rc, 0, "the claim returned though nothing resumed the stop");
+    TEST_ASSERT(!g_xc_stop_during, "no thread is asked to park while the claim holds");
+    TEST_EXPECT_EQ(g_xc_rc[0], SLEEP_INTR, "the parked sleep() sleeper died");
+    TEST_EXPECT_EQ(g_xc_rc[1], SLEEP_INTR, "the parked death-only sleeper died");
+    TEST_ASSERT(g_xc_stop_after, "the stop stands for the new image");
+    TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
 }

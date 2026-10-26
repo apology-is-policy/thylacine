@@ -1858,6 +1858,9 @@ static bool devproc_target_fully_stopped_locked(struct Proc *target) {
     // target with a pending group_exit_msg is never fully-stopped. Serialized
     // with proc_group_terminate's set (it holds both locks).
     if (__atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) return false;
+    // An exec's doomed threads are EXITING on the same exit path, and its
+    // claim is set under threads_lock, held here (ARCH 7.3.3).
+    if (__atomic_load_n(&target->exec_task, __ATOMIC_ACQUIRE) != NULL) return false;
     return devproc_all_threads_parked(target);
 }
 

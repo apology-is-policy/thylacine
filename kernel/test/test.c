@@ -1013,6 +1013,11 @@ void test_directmap_guard_toggle_invalidates_a_warm_entry(void);
 void test_thread_kstack_create_free_cost(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
+void test_proc_exec_claim_dooms_every_other_thread(void);
+void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
+void test_proc_exec_claim_abandoned_on_group_death(void);
+void test_proc_exec_claim_woken_by_an_abandoned_create(void);
+void test_proc_exec_claim_does_not_hold_for_a_stop(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -3290,6 +3295,11 @@ struct test_case g_tests[] = {
     { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },
     { "proc.spawn_refused_in_dying_proc",       test_proc_spawn_refused_in_dying_proc,       false, NULL },
     { "thread.tid_and_pid_spaces_refuse_when_spent", test_thread_tid_and_pid_spaces_refuse_when_spent, false, NULL },
+    { "proc.exec_claim_dooms_every_other_thread", test_proc_exec_claim_dooms_every_other_thread, false, NULL },
+    { "proc.exec_claim_kills_sleeping_and_running_peers", test_proc_exec_claim_kills_sleeping_and_running_peers, false, NULL },
+    { "proc.exec_claim_abandoned_on_group_death", test_proc_exec_claim_abandoned_on_group_death, false, NULL },
+    { "proc.exec_claim_woken_by_an_abandoned_create", test_proc_exec_claim_woken_by_an_abandoned_create, false, NULL },
+    { "proc.exec_claim_does_not_hold_for_a_stop", test_proc_exec_claim_does_not_hold_for_a_stop, false, NULL },
     { "thread.kstack_cache_reuses_without_guard_toggle", test_thread_kstack_cache_reuses_without_guard_toggle, false, NULL },
     { "thread.kstack_cache_keeps_the_guard",     test_thread_kstack_cache_keeps_the_guard,     false, NULL },
     { "thread.kstack_recycled_stack_is_fully_poisoned", test_thread_kstack_recycled_stack_is_fully_poisoned, false, NULL },

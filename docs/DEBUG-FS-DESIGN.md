@@ -2273,6 +2273,21 @@ that:
 This restores DeathWinsOverStop (§6) and `pty_stop.tla`'s DeathWinsOverJobStop
 in a region neither model reaches.
 
+**An exec's claim reads the same way, for a while.** Once a thread's exec has
+claimed the Proc (ARCH 7.3.3), every other thread is doomed and dies at its next
+die check, and the execer waits for them. `proc_stop_requested` answers false
+while the claim holds, so the doomed die instead of parking, and the execer's
+wait does not park either. Parked, it would hold the exec until the stop
+cleared, and the stopped-only surface would find a target whose one live thread
+is parked and whose others are EXITING. Unlike a death, the claim ends: the swap
+clears it, and the flags a stop set, before or during the exec, still stand. So
+the new image parks at its first EL0 return, and `stop` and `waitstop` keep
+waiting, and report the new image stopped. The delivers do not refuse an
+exec-held Proc, and a parent's wait reports a latched stop as it does any other
+stop. The mem/reg gate refuses the Proc while the claim holds, as it refuses a
+dying one. Linux refuses to begin a group stop while `group_exec_task` is set,
+and its exec waits killable, not stoppable.
+
 **What does not change.** The latch's arming, and its wake for every thread
 outside a stop park; every other sleep,
 including a stopped thread's outer syscall wait once its stop clears; the stop,
