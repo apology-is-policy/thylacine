@@ -623,12 +623,37 @@ stir source, not the gate. As-built:
   zeroed in place), and pulls a fresh strong stir every ~1 MiB. `g_rng_seeded`
   is the readiness gate -- false until a strong source has ever contributed,
   monotonic, `kern_random_bytes` returns -1 while false (the prior fail-closed
-  contract; `SYS_GETRANDOM` is unchanged).
+  contract; `SYS_GETRANDOM` is unchanged). Since vote 18 no EL0 code runs
+  while it is false (the refusal below).
 - **Seed sources**: DTB `/chosen` `kaslr-seed` + `rng-seed` (host boot entropy),
   CNTPCT jitter, RNDR when present (stir only), and the kernel **virtio-rng**
   driver (the strong/real source). The boot path seeds the pool early
   (`devrandom_init`, DTB + cntpct) then strong-reseeds from virtio-rng right
   after `virtio_init` (`kernel/main.c`).
+- **No userspace without a strong seed** (operator vote 18, 2026-10-26). The
+  boot's strong reseed is the last chance a strong source gets before any EL0
+  code runs. If the pool is still unseeded after it -- the CPU has no RNDR and
+  no virtio-rng pull succeeded in its three tries -- the kernel extincts right
+  there, before the in-kernel test suite and before init, with a message that
+  names the cause and the remedy (attach a virtio-rng device, or boot a CPU
+  with FEAT_RNG). So every process starts on a seeded pool, and because
+  `g_rng_seeded` is monotonic, `kern_random_bytes` cannot refuse a caller for
+  want of a seed once userspace exists. exec checks anyway, so the contract is
+  local: `exec_build_init_stack` draws the frame's 16 AT_RANDOM bytes (musl's
+  stack-protector canary and mallocng's secret) before it allocates the frame,
+  and a refused draw fails the exec with a log line naming the cause -- execve
+  reports EINVAL, its existing catch-all, and a spawned child exits
+  `fail-exec` -- so zeros never reach a process. The drawn bytes are scrubbed
+  from the kernel stack and from the frame buffer once copied out. Witness:
+  `tools/test-fault.sh no_entropy` boots an RNDR-less cortex-a72 under TCG
+  with no virtio-rng (`THYLACINE_NO_RNG=1`) and PASSes only on the refusal;
+  every green boot elsewhere is its control. Precedent: Fuchsia's
+  `kernel.cprng-seed-require.*` panics at boot when a required seed source
+  fails; Plan 9's `/dev/random` blocks its readers until the kernel's
+  generator has run. Rejected: a jitter source (a VM's timer jitter is not
+  entropy the guest can trust), blocking exec until seeded (a sourceless
+  machine would hang without a word), failing exec alone (init could not
+  start and nothing would say why).
 - **The kernel virtio-rng driver** (`random_virtio_pull`): the first kernel
   consumer of the P4-F virtio substrate to do a real virtqueue transfer (find
   device-id RNG, negotiate features=0, create queue 0, DRIVER_OK, submit one
