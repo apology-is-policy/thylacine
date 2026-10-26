@@ -3796,9 +3796,11 @@ static void loom_sqpoll_fanin_park(struct loom_sqpoll_wait *w, u32 gen0) {
 // inside loom_free's join.
 static u32 g_loom_sqpoll_exit_hold;
 
+#ifdef KERNEL_TESTS
 void loom_sqpoll_hold_exit_for_test(bool hold) {
     __atomic_store_n(&g_loom_sqpoll_exit_hold, hold ? 1u : 0u, __ATOMIC_RELEASE);
 }
+#endif
 
 static void loom_private_executor_loop(struct Loom *l) {
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);

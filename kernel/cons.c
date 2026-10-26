@@ -710,6 +710,7 @@ static u32 cons_tx_push_bulk(const u8 *b, u32 n, bool all_or_nothing) {
     return take;
 }
 
+#ifdef KERNEL_TESTS
 // Test hook: a NON-consuming copy from the ring head. The unit tests' witness --
 // a torn unit is provable only by reading the ring's byte order back, with the
 // UART stalled so the bytes stay where the pushes put them.
@@ -725,6 +726,7 @@ u32 cons_test_tx_ring_peek(u8 *out, u32 n) {
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
     return take;
 }
+#endif
 
 // Hand the FIFO whatever it will take now + (re)arm TXIM for the remainder.
 static void cons_tx_kick(void) {
@@ -793,6 +795,7 @@ static int cons_tx_role_acquire(bool caught_ok) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // #75 test hooks. The RING is exercised by every byte of console output on
 // every boot (a ring bug means no boot at all), so it needs no dedicated test;
 // the ROLE does -- it is the mechanism that makes a write call-atomic, and its
@@ -807,6 +810,7 @@ void cons_test_tx_role_hold(void) {
 bool cons_test_tx_role_held(void) {
     return tx_writing_load();
 }
+#endif
 
 
 static void cons_tx_role_release(void) {
@@ -847,6 +851,7 @@ bool cons_kernel_writer_begin(void) {
 
 void cons_kernel_writer_end(void) { cons_tx_role_release(); }
 
+#ifdef KERNEL_TESTS
 // #75 test hook -- the release half of cons_test_tx_role_hold.
 void cons_test_tx_role_drop(void) { cons_tx_role_release(); }
 
@@ -920,6 +925,7 @@ bool cons_test_tx_armed(void) {
 bool cons_test_serial_silent(void) {
     return cons_serial_silent_load();
 }
+#endif
 
 // DISPLAY-MODES.md 1b (audit F2): restore serial output unconditionally. The SAK
 // path (proc_console_sak) calls this so the operator's trusted-path prompt is
@@ -931,11 +937,13 @@ void cons_serial_silent_clear(void) {
     cons_serial_silent_store(false);
 }
 
+#ifdef KERNEL_TESTS
 // Exported so the test asserts against the REAL constants instead of mirroring
 // them -- a silently-drifted mirror is its own bug class (the struct t_stat
 // lesson: a per-mirror size assert proves only that mirror's self-consistency).
 u32 cons_test_tx_ring_capacity(void)  { return CONS_TX_RING_SIZE; }
 u64 cons_test_tx_room_wait_ns(void)   { return CONS_TX_ROOM_WAIT_NS; }
+#endif
 
 // LS-8b: the echo / output sink. Console echo (cons_rx_input) AND program output
 // (cons_output_write) emit one cooked byte through cons_emit. In production it is
@@ -1200,7 +1208,9 @@ static bool cons_ring_push(u8 byte, bool *wake_mgr) {
 // lockless PRE-check; this is the decision.
 // #136-audit F1 (test-only; production never sets this). See cons.h.
 static bool g_cons_test_force_full;
+#ifdef KERNEL_TESTS
 void cons_test_force_full(bool on) { g_cons_test_force_full = on; }
+#endif
 
 static u32 cons_ring_room(void) {
     if (g_cons_test_force_full) return 0u;
@@ -1447,10 +1457,12 @@ static int cons_mgr_pending(void *arg) {
         || cons_dropreport_load();  // #95: an input byte was dropped, unreported
 }
 
+#ifdef KERNEL_TESTS
 void cons_test_mgr_hold(bool on) {
     __atomic_store_n(&g_cons_mgr_hold, on, __ATOMIC_RELEASE);
     if (!on) wakeup(&g_cons_mgr_rendez);   // release re-arms the mgr
 }
+#endif
 
 // The SAK arm of the deferred service: the A-4c-2 handoff decides and, since
 // IM-1, opens the episode + posts the `sak` note, all under ONE
@@ -1462,9 +1474,11 @@ static void cons_sak_dispatch(void) {
     (void)proc_console_sak();
 }
 
+#ifdef KERNEL_TESTS
 void cons_test_sak_dispatch(void) {
     cons_sak_dispatch();
 }
+#endif
 
 // Service all deferred console actions in process context: drain the flags
 // under g_cons.lock, then act with the lock RELEASED. The act must run lock-free
@@ -1573,6 +1587,7 @@ void console_mgr_main(void) {
     }
 }
 
+#ifdef KERNEL_TESTS
 void cons_test_reset(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     g_cons.head = g_cons.tail = 0u;
@@ -1617,6 +1632,7 @@ void cons_test_reset(void) {
     drain_pollwake_store(false);
     spin_unlock_irqrestore(&g_cons_drain.lock, s);
 }
+#endif
 
 // #95: the TX-side counts, for /ctl/cons. Same values the cons_test_tx_*
 // accessors return; a separate production-named entry point so the surface does
@@ -1657,6 +1673,7 @@ u32 cons_rx_drop_modeflush(void) {
     return v;
 }
 
+#ifdef KERNEL_TESTS
 bool cons_test_intr_pending(void) {
     return cons_intr_load();
 }
@@ -1792,6 +1809,7 @@ u32 cons_test_release_owned_state(void) {
 
     return owned;
 }
+#endif
 
 static void devcons_reset(void)    { /* no-op */ }
 static void devcons_init(void)     { /* no-op — UART came up at boot */ }
@@ -2565,6 +2583,7 @@ long cons_feed_write(const void *buf, long n) {
     return i;
 }
 
+#ifdef KERNEL_TESTS
 // #129-audit F2: the RX ring depth, NON-BLOCKING. A test cannot use cons_drain
 // (= devcons.read) to observe emptiness, because that PARKS on an empty ring --
 // so an assertion that should fail cleanly instead hangs the boot (the #133
@@ -2580,6 +2599,7 @@ u32 cons_test_drain_overflow(void) {
     return v;
 }
 bool cons_test_drain_pollwake_pending(void) { return drain_pollwake_load(); }
+#endif
 
 static long devcons_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
     (void)c; (void)bp; (void)off;

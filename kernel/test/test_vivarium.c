@@ -254,6 +254,7 @@ static void viv_t1_regs_child(void *arg) {
     exits(bad ? "fail" : "ok");
 }
 
+void test_vivarium_t1_keeps_guest_registers(void);
 void test_vivarium_t1_keeps_guest_registers(void) {
     int pid = rfork(RFPROC, viv_t1_regs_child, NULL);
     TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");
@@ -449,6 +450,7 @@ void test_vivarium_unknown_forwards(void) {
                    (int)VIV_TIER2, "gettid is classified (N-3) -- no longer a forward");
 }
 
+void test_vivarium_git_chunk_rows(void);
 void test_vivarium_git_chunk_rows(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;
@@ -488,6 +490,7 @@ void test_vivarium_git_chunk_rows(void) {
                 "readlinkat(78) collides with SYS_PCI_INFO -- AT_FDCWD gate refuses it");
 }
 
+void test_vivarium_faccessat_gate(void);
 void test_vivarium_faccessat_gate(void) {
     // The shared AT_FDCWD gate (faccessat/fchmodat/readlinkat all route through
     // vivarium_faccessat_decide). It is BOTH the "only the cwd form is
@@ -1063,6 +1066,7 @@ void test_vivarium_mmap_domain(void) {
 // shape we thought reasonable -- and each decline is named, because this arm
 // hands a guest a mapping of a FILE and a widening here is an I-36 question, not
 // a fidelity one.
+void test_vivarium_mmap_file_domain(void);
 void test_vivarium_mmap_file_domain(void) {
     const u64 priv = (u64)VIV_MAP_PRIVATE;
     const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
@@ -1148,6 +1152,7 @@ void test_vivarium_mmap_file_domain(void) {
 
 // The two MAP_FIXED argument domains (DISTRO D-3b). Measured off map_library's
 // overlay calls, so each admitted case is asserted as THE CALL STOCK LDSO MAKES.
+void test_vivarium_mmap_fixed_domain(void);
 void test_vivarium_mmap_fixed_domain(void) {
     const u64 pf   = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED);
     const u64 pfa  = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS);
@@ -1248,6 +1253,7 @@ void test_vivarium_mmap_fixed_domain(void) {
 // were admitted by two arms, the order would silently decide which semantics a
 // guest receives, and D-3b's arms differ in whether the guest gets shared
 // demand-paged file bytes or a private eager copy.
+void test_vivarium_mmap_arms_disjoint(void);
 void test_vivarium_mmap_arms_disjoint(void) {
     // Sweep the cross product of every prot/flag/fd/offset value either arm
     // reasons about. Cheap and exhaustive over the interesting space -- far more
@@ -1501,6 +1507,7 @@ void test_vivarium_clone_domain(void) {
 // Dropping REQUEUE is the one that ships a green single-waiter demo and then
 // deadlocks pthread_cond_broadcast (>=2 waiters on a default mutex), so it is
 // pinned SERVED here -- a regression to ENOSYS on op 3 fails this test.
+void test_vivarium_futex_decide(void);
 void test_vivarium_futex_decide(void) {
     enum viv_futex_op op;
 
@@ -1700,6 +1707,7 @@ void test_vivarium_wait4_domain(void) {
 // UNMAPPED set is asserted just as explicitly: those are decisions (no note
 // carries them), not gaps, and collapsing them into "default" would lose that.
 // -----------------------------------------------------------------------------
+void test_vivarium_signal_map(void);
 void test_vivarium_signal_map(void) {
     // Every mapped row, checked individually.
     TEST_ASSERT(viv_signal_note(VIV_SIGINT)   == VIV_SIGNOTE_INTERRUPT,
@@ -1753,6 +1761,7 @@ void test_vivarium_signal_map(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigaction_domain — the rt_sigaction argument domain (V-6, §6.22).
 // -----------------------------------------------------------------------------
+void test_vivarium_sigaction_domain(void);
 void test_vivarium_sigaction_domain(void) {
     const u64 H = 0x400000;   // a plausible handler VA
     const u64 R = VIV_SA_RESTORER;
@@ -1841,6 +1850,7 @@ void test_vivarium_sigaction_domain(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigset_to_notemask — the mask decode (V-6, §6.22).
 // -----------------------------------------------------------------------------
+void test_vivarium_sigset_to_notemask(void);
 void test_vivarium_sigset_to_notemask(void) {
     // The real NOTE_BIT_* numbering, passed in so vivarium.c stays free of
     // kernel headers. These values are notes.h's.
@@ -1911,6 +1921,7 @@ void test_vivarium_sigset_to_notemask(void) {
 // rt_sigreturn puts the pre-handler mask back (notes.phenotype_sigreturn_
 // restores_mask covers that half; the probe's L237-L244 the wiring).
 // -----------------------------------------------------------------------------
+void test_vivarium_handler_mask(void);
 void test_vivarium_handler_mask(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
@@ -1963,6 +1974,7 @@ void test_vivarium_handler_mask(void) {
 // honouring the request silences a second signal the guest said nothing about.
 // This is also what makes the REVERSE direction (note -> signal) well-defined,
 // which is what the notes_post discard needs.
+void test_vivarium_signal_exclusivity(void);
 void test_vivarium_signal_exclusivity(void) {
     // Every mapped signal owns its note outright. V-6b made this universal by
     // evicting SIGTERM from `interrupt`; before that, SIGINT failed here -- and
@@ -2004,6 +2016,7 @@ void test_vivarium_signal_exclusivity(void) {
 // MEASURED against notes.c, not assumed: g_known_notes holds interrupt / kill /
 // pipe / child_exit / tty:*, and NOT snare:*. proc_fault_terminate calls
 // exits(name) directly, so a fault never reaches notes_post at all.
+void test_vivarium_signote_deliverable(void);
 void test_vivarium_signote_deliverable(void) {
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_INTERRUPT),  "interrupt");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TERM),       "term");
@@ -2040,6 +2053,7 @@ static bool kd_is(u64 sig, enum viv_kill_kind want, const char *name) {
     }
 }
 
+void test_vivarium_kill_decide(void);
 void test_vivarium_kill_decide(void) {
     TEST_ASSERT(kd_is(0, VIV_KILL_PROBE, NULL), "signal 0 probes");
     TEST_ASSERT(kd_is(VIV_SIGINT,  VIV_KILL_POST, NOTE_NAME_INTERRUPT), "SIGINT posts interrupt");
@@ -2069,6 +2083,7 @@ void test_vivarium_kill_decide(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigtab — the disposition table + the note-name reverse map (V-6b).
 // -----------------------------------------------------------------------------
+void test_vivarium_sigtab(void);
 void test_vivarium_sigtab(void) {
     // The reverse map ROUND-TRIPS against the forward one for every deliverable
     // signal. Driving it from the forward map means a future edit to either
@@ -2194,6 +2209,7 @@ void test_vivarium_sigtab(void) {
 // -----------------------------------------------------------------------------
 // vivarium.notemask_to_sigset — reporting a mask back honestly (V-6b).
 // -----------------------------------------------------------------------------
+void test_vivarium_notemask_to_sigset(void);
 void test_vivarium_notemask_to_sigset(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,

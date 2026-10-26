@@ -29,6 +29,7 @@ static u64 read_id_aa64pfr1_el1_again(void) {
     return v;
 }
 
+void test_hardening_detect_smoke(void);
 void test_hardening_detect_smoke(void) {
     // Canary cookie should be non-zero (kaslr_init seeded it from
     // mixed entropy; our canary_init guarantees non-zero output).

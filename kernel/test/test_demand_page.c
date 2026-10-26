@@ -82,6 +82,16 @@ void test_demand_page_lazy_zero_fill(void);
 void test_demand_page_lazy_decommit_refault(void);
 void test_demand_page_lazy_charge_on_fault_oom(void);
 void test_demand_page_lazy_detach_uncharges_resident(void);
+void test_pgtable_install_user_pte_attr_index(void);
+void test_demand_page_file_geometry_shift_bails(void);
+void test_demand_page_file_geometry_shift_bails_single(void);
+void test_demand_page_file_read_revoked_latch_is_dying(void);
+void test_demand_page_file_cluster_short_read(void);
+void test_demand_page_file_eof_tail_zero(void);
+void test_mmap_eager_copy_charge_pairing(void);
+void test_demand_page_file_past_limit_bus(void);
+void test_demand_page_file_partial_page_zero_with_limit(void);
+void test_demand_page_file_cluster_clamps_at_limit(void);
 
 // The lazy attach/detach _for_proc inners (non-static cores in kernel/syscall.c),
 // driven directly -- the same pattern test_sys_burrow / test_resource use.

@@ -90,6 +90,10 @@ void test_pipe_cnbframe_refusal_posts_no_note(void);
 void test_pipe_client_death_hangs_up_the_tx_pipe(void);
 void test_pipe_transport_reads_now_without_sleeping(void);
 void test_pipe_pump_treats_a_closed_transport_as_dead(void);
+void test_pipe_nonblock_returns_eagain(void);
+void test_pipe_cnbframe_atomic_nonblocking(void);
+void test_pipe_attach_9p_admits_pipes_only(void);
+void test_pipe_fstat_reports_fifo(void);
 
 // =============================================================================
 // Helpers.

@@ -35,6 +35,7 @@ static void test_thread_entry(void) {
     // trampoline's WFE halt picks up.
 }
 
+void test_context_create_destroy(void);
 void test_context_create_destroy(void) {
     u64 created_before   = thread_total_created();
     u64 destroyed_before = thread_total_destroyed();
@@ -64,6 +65,7 @@ void test_context_create_destroy(void) {
         "proc thread_count did not retreat");
 }
 
+void test_context_round_trip(void);
 void test_context_round_trip(void) {
     g_test_main  = current_thread();
     TEST_ASSERT(g_test_main != NULL,
@@ -111,6 +113,7 @@ void test_context_round_trip(void) {
 //     suite FAIL (EXTINCTION).
 // Proven both ways: the temp unconditional-spin experiment smashed pre-fix and
 // PASSed post-fix (1165/1165). Deterministic fail-pre/pass-post guard.
+void test_context_switch_irq_safe(void);
 void test_context_switch_irq_safe(void) {
     g_test_main = current_thread();
     TEST_ASSERT(g_test_main != NULL,

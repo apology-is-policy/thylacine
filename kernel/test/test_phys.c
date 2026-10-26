@@ -19,6 +19,7 @@
 
 #define SMOKE_N 256
 
+void test_phys_alloc_smoke(void);
 void test_phys_alloc_smoke(void) {
     static struct page *pages[SMOKE_N];   // static so we don't crowd boot stack
 
@@ -76,6 +77,7 @@ void test_phys_alloc_smoke(void) {
 //
 // Test runs in <100 ms on QEMU virt; fits inside tools/test.sh's
 // 10-second timeout with margin.
+void test_phys_leak_10k(void);
 void test_phys_leak_10k(void) {
     // Same robustness rule as alloc_smoke: drain pre-baseline so the
     // post-drain comparison is exact regardless of resident magazine
@@ -134,6 +136,7 @@ static void dmo_owner(void *arg) {
     test_kthread_park_terminal(&g_dmo_exited[id]);
 }
 
+void test_phys_drain_meets_live_owners(void);
 void test_phys_drain_meets_live_owners(void) {
     struct Thread *t[DMO_OWNERS];
     g_dmo_bad = 0;

@@ -75,6 +75,7 @@ void test_9p_session_flush_owner_waits_keeps_fid_live(void);
 void test_9p_session_flush_names_no_fid(void);
 void test_9p_session_flush_headroom_grows_table(void);
 void test_9p_session_sync_owner_index(void);
+void test_9p_session_walk_fid_full_no_latch(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];

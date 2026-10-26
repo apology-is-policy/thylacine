@@ -54,6 +54,7 @@ static int tsl_cond_false(void *arg) { (void)arg; return 0; }
 // tsleep.fast_path_cond_true
 // ---------------------------------------------------------------------------
 
+void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_fast_path_cond_true(void) {
     struct Rendez r = RENDEZ_INIT;
 
@@ -79,6 +80,7 @@ void test_tsleep_fast_path_cond_true(void) {
 // tsleep.no_deadline_degrades
 // ---------------------------------------------------------------------------
 
+void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_no_deadline_degrades(void) {
     struct Rendez r = RENDEZ_INIT;
 
@@ -98,6 +100,7 @@ void test_tsleep_no_deadline_degrades(void) {
 // tsleep.past_deadline_immediate
 // ---------------------------------------------------------------------------
 
+void test_tsleep_past_deadline_immediate(void);
 void test_tsleep_past_deadline_immediate(void) {
     struct Rendez r = RENDEZ_INIT;
 
@@ -145,6 +148,7 @@ static void tsl_consumer_entry(void) {
 // tsleep.woken_before_deadline
 // ---------------------------------------------------------------------------
 
+void test_tsleep_woken_before_deadline(void);
 void test_tsleep_woken_before_deadline(void) {
     g_tsl_cond     = 0;
     g_tsl_ran      = 0;
@@ -208,6 +212,7 @@ void test_tsleep_woken_before_deadline(void) {
 // tsleep.timeout_via_tick
 // ---------------------------------------------------------------------------
 
+void test_tsleep_timeout_via_tick(void);
 void test_tsleep_timeout_via_tick(void) {
     g_tsl_cond     = 0;
     g_tsl_ran      = 0;
@@ -283,6 +288,7 @@ static void tsl_herd_consumer(void *arg) {
     test_kthread_park_terminal(&g_tsl_herd_exited[i]);  // #109: EXITING park
 }
 
+void test_tsleep_herd_timeout(void);
 void test_tsleep_herd_timeout(void) {
     g_tsl_herd_done = 0;
     for (unsigned i = 0; i < TSL_HERD_N; i++) {
@@ -354,6 +360,7 @@ static void ed_consumer(void *arg) {
     test_kthread_park_terminal(&g_ed_exited[i]);
 }
 
+void test_timerwait_earliest_deadline(void);
 void test_timerwait_earliest_deadline(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree must be empty at test entry");
@@ -421,6 +428,7 @@ void test_timerwait_earliest_deadline(void) {
 // min(nearest deadline, now + backstop), or just the backstop when no deadline.
 // Pure, so every branch is driven deterministically without the live timer/list.
 
+void test_tickless_target_cnt(void);
 void test_tickless_target_cnt(void) {
     u64 now      = 1000000;
     u64 backstop = 6250000;   // an arbitrary backstop delta in counter ticks

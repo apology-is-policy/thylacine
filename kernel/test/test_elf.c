@@ -40,6 +40,8 @@ void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
 void test_elf_pie_load_bias(void);
+void test_elf_brand_hint(void);
+void test_elf_read_interp(void);
 
 #define TEST_ELF_BLOB_SIZE 4096
 // R5-G F71 close: explicit alignment so the cast `(struct Elf64_Ehdr *)

@@ -16,6 +16,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/types.h>
 
+void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_chosen_kaslr_seed_present(void) {
     TEST_ASSERT(dtb_is_ready(),
         "DTB parser should be initialized post-phys_init");
@@ -40,6 +41,7 @@ void test_dtb_chosen_kaslr_seed_present(void) {
 // pci-1a: the PCIe host bridge's INTx -> GIC INTID routing, parsed from
 // the live boot DTB's interrupt-map. Device-independent (the routing
 // table exists regardless of which PCI devices are plugged).
+void test_dtb_pci_intx_route(void);
 void test_dtb_pci_intx_route(void) {
     TEST_ASSERT(dtb_is_ready(), "DTB must be initialized post-phys_init");
 
@@ -71,6 +73,7 @@ void test_dtb_pci_intx_route(void) {
                 "NULL out_gic_intid should return false");
 }
 
+void test_dtb_pci_intid_is_level(void);
 void test_dtb_pci_intid_is_level(void) {
     TEST_ASSERT(dtb_is_ready(), "DTB must be initialized post-phys_init");
 
@@ -100,6 +103,7 @@ void test_dtb_pci_intid_is_level(void) {
 
 // pci-1a: the PCIe 32-bit MMIO window (the `ranges` entry the kernel
 // assigns BARs from). QEMU virt: base 0x10000000, ~768 MiB.
+void test_dtb_pci_mem_window(void);
 void test_dtb_pci_mem_window(void) {
     TEST_ASSERT(dtb_is_ready(), "DTB must be initialized post-phys_init");
 
@@ -132,6 +136,7 @@ void test_dtb_pci_mem_window(void) {
 // catching -- a walker ignoring the space code returns true with the
 // 32-bit window, which fails the `base >= 4 GiB` assert on TCG and the
 // "must be absent, not aliased" assert on HVF.
+void test_dtb_pci_mem_window64(void);
 void test_dtb_pci_mem_window64(void) {
     TEST_ASSERT(dtb_is_ready(), "DTB must be initialized post-phys_init");
 
@@ -166,6 +171,7 @@ static void msi_put32(u8 *p, u32 v) {
     p[0] = (u8)(v >> 24); p[1] = (u8)(v >> 16);
     p[2] = (u8)(v >> 8); p[3] = (u8)v;
 }
+void test_dtb_msi_map_bounds(void);
 void test_dtb_msi_map_bounds(void) {
     // Deliberately unaligned; the parser is a byte API, not a u32 array API.
     u8 storage[33] = {0}; u8 *map = storage + 1;
@@ -194,6 +200,7 @@ void test_dtb_msi_map_bounds(void) {
     TEST_ASSERT(dtb_msi_map_decode(map, 32, 0xffff, 0x128, &ph, &id), "disjoint routes");
 }
 
+void test_dtb_pci_msi_route(void);
 void test_dtb_pci_msi_route(void) {
     struct dtb_pci_msi first, other;
     const u8 *data; u32 len;
@@ -221,6 +228,7 @@ static bool scan(const char *args, u32 len, const char *token) {
     return dtb_bootargs_scan((const u8 *)args, len, token);
 }
 
+void test_dtb_bootargs_whole_words(void);
 void test_dtb_bootargs_whole_words(void) {
     static const char sak[] = "thylacine.serial-sak=1";
     static const char net[] = "thylacine.virtio-net";

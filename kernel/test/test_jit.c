@@ -156,6 +156,7 @@ static int jit_alias_count(struct Proc *p, const struct Burrow *b) {
 // ---------------------------------------------------------------------------
 // The CAP_JIT gate.
 // ---------------------------------------------------------------------------
+void test_jit_create_requires_cap(void);
 void test_jit_create_requires_cap(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/false);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -183,6 +184,7 @@ void test_jit_create_requires_cap(void) {
     jit_drop_proc(p);
 }
 
+void test_jit_create_rejects_bad_args(void);
 void test_jit_create_rejects_bad_args(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -201,6 +203,7 @@ void test_jit_create_rejects_bad_args(void) {
 // ---------------------------------------------------------------------------
 // I-42's core: two aliases, W^X-clean AT THE PTE, over ONE physical region.
 // ---------------------------------------------------------------------------
+void test_jit_dual_alias_pte_wx_clean(void);
 void test_jit_dual_alias_pte_wx_clean(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -297,6 +300,7 @@ void test_jit_dual_alias_pte_wx_clean(void) {
 // I-32: a page is charged ONCE, when first touched -- not once per alias, and
 // not at create (B-2a: the region is a reservation).
 // ---------------------------------------------------------------------------
+void test_jit_charges_once_per_page(void);
 void test_jit_charges_once_per_page(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -338,6 +342,7 @@ void test_jit_charges_once_per_page(void) {
 // B-2a: the largest region is a reservation -- created without a physical
 // page, committed one touched page at a time, and refunded whole.
 // ---------------------------------------------------------------------------
+void test_jit_max_region_is_a_reservation(void);
 void test_jit_max_region_is_a_reservation(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -379,6 +384,7 @@ void test_jit_max_region_is_a_reservation(void) {
 // releases a lazy page through ONE mapping; on a code region the other alias's
 // leaf would still name the freed page.
 // ---------------------------------------------------------------------------
+void test_jit_decommit_refuses_code(void);
 void test_jit_decommit_refuses_code(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -412,6 +418,7 @@ void test_jit_decommit_refuses_code(void) {
 // ---------------------------------------------------------------------------
 // Teardown: both aliases, and the pages.
 // ---------------------------------------------------------------------------
+void test_jit_destroy_tears_down_both(void);
 void test_jit_destroy_tears_down_both(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -443,6 +450,7 @@ void test_jit_destroy_tears_down_both(void) {
     jit_drop_proc(p);
 }
 
+void test_jit_destroy_rejects_non_writer(void);
 void test_jit_destroy_rejects_non_writer(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -489,6 +497,7 @@ void test_jit_destroy_rejects_non_writer(void) {
 // alias, which SYS_JIT_DESTROY then refuses (no peer) -- unreleasable until
 // Proc exit.
 // ---------------------------------------------------------------------------
+void test_jit_alias_not_detachable(void);
 void test_jit_alias_not_detachable(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -537,6 +546,7 @@ void test_jit_alias_not_detachable(void) {
 // ---------------------------------------------------------------------------
 // SYS_ICACHE_SYNC: region-confined publish.
 // ---------------------------------------------------------------------------
+void test_jit_icache_sync_gate(void);
 void test_jit_icache_sync_gate(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -614,6 +624,7 @@ void test_jit_icache_sync_gate(void) {
 // ---------------------------------------------------------------------------
 // The write-then-read path through both aliases: what a JIT actually does.
 // ---------------------------------------------------------------------------
+void test_jit_write_through_writer_visible_at_exec(void);
 void test_jit_write_through_writer_visible_at_exec(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -660,6 +671,7 @@ void test_jit_write_through_writer_visible_at_exec(void) {
 // invalidate the whole I-cache. A VA-indexed invalidate by the direct-map VA is
 // exact only on a PIPT I-cache.
 // ---------------------------------------------------------------------------
+void test_jit_icache_policy_decode(void);
 void test_jit_icache_policy_decode(void) {
     // L1Ip is CTR_EL0 bits 15:14. The other fields are a Cortex-A53's (VIPT,
     // 0x84448004) and a Cortex-A72's (PIPT, 0x8444c004).
@@ -681,6 +693,7 @@ void test_jit_icache_policy_decode(void) {
 // I-cache, so the witness is that the sync RAN: counted, with the anonymous
 // commit as the control that the count is not simply every fault's.
 // ---------------------------------------------------------------------------
+void test_jit_commit_invalidates_icache(void);
 void test_jit_commit_invalidates_icache(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -737,6 +750,7 @@ static enum fault_result jit_fetch(struct Proc *p, u64 vaddr) {
     return userland_demand_page(p, &fi);
 }
 
+void test_jit_fetch_admission(void);
 void test_jit_fetch_admission(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -780,6 +794,7 @@ void test_jit_fetch_admission(void) {
 // On an aliasing I-cache every sync invalidates the whole I-cache. Forced on
 // here, since no target this suite boots on reports one.
 // ---------------------------------------------------------------------------
+void test_jit_icache_aliasing_invalidates_all(void);
 void test_jit_icache_aliasing_invalidates_all(void) {
     static u8 buf[64];
     bool was = hw_icache_aliasing();
@@ -832,6 +847,7 @@ static void sealed_src_fill(void) {
         for (u32 k = 0; k < 4; k++) g_sealed_src[i * 4u + k] = (u8)(code[i] >> (8u * k));
 }
 
+void test_jit_sealed_region(void);
 void test_jit_sealed_region(void) {
     sealed_src_fill();
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
@@ -904,6 +920,7 @@ void test_jit_sealed_region(void) {
 
 // The control for the reader and admits() legs above, one variable away: a
 // pair's exec alias is READ|EXEC, and both admit a load of it.
+void test_jit_exec_alias_stays_readable(void);
 void test_jit_exec_alias_stays_readable(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -922,6 +939,7 @@ void test_jit_exec_alias_stays_readable(void) {
     jit_drop_proc(p);
 }
 
+void test_jit_sealed_rejects(void);
 void test_jit_sealed_rejects(void) {
     sealed_src_fill();
     u64 xva = 0;
@@ -955,6 +973,7 @@ void test_jit_sealed_rejects(void) {
 // puts the writer at the window's base and the exec alias right after it, so
 // either equality below is first-fit; a random start hits one about once in
 // 2^34 boots.
+void test_jit_placement_not_first_fit(void);
 void test_jit_placement_not_first_fit(void) {
     sealed_src_fill();
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
@@ -979,6 +998,7 @@ void test_jit_placement_not_first_fit(void) {
 // EXEC without READ is execute-only only over a code Burrow. Anywhere else
 // vma_alloc grants READ with it, so a PROT_EXEC mapping and an ELF PF_X-only
 // segment stay readable, as before B-2b.
+void test_jit_xonly_promoted_off_code(void);
 void test_jit_xonly_promoted_off_code(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/false);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -1004,6 +1024,7 @@ void test_jit_xonly_promoted_off_code(void) {
 // narrowed to one page plus those nodes (measured, not assumed), so the create
 // is refused at its second page with both kinds already charged, and the count,
 // the pool and the address space must all come back to where they were.
+void test_jit_sealed_fill_failure_refunds(void);
 void test_jit_sealed_fill_failure_refunds(void) {
     const u64 pages = (u64)PAGEMAP_INLINE_MAX + 1u;
     const u64 len   = pages * ONE_PAGE;
@@ -1062,6 +1083,7 @@ void test_jit_sealed_fill_failure_refunds(void) {
 // jit.region_is_128_mib (B-2e2, operator vote dec-2026-10-13-jit-region-128)
 // ---------------------------------------------------------------------------
 
+void test_jit_region_is_128_mib(void);
 void test_jit_region_is_128_mib(void) {
     TEST_EXPECT_EQ((u64)JIT_REGION_MAX, 128ull * 1024 * 1024,
                    "a code region may be 128 MiB, JavaScriptCore's ARM64 pool");
@@ -1185,6 +1207,7 @@ static struct ss_hold ss_measure_hold(unsigned cpu0) {
     return h;
 }
 
+void test_jit_space_sync_targets(void);
 void test_jit_space_sync_targets(void) {
     TEST_EXPECT_EQ(sched_sync_space(NULL), 0ull, "no space interrupts no CPU");
 

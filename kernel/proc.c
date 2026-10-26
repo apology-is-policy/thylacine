@@ -2381,6 +2381,7 @@ bool proc_is_console_renderer(const struct Proc *p) {
     return yes;
 }
 
+#ifdef KERNEL_TESTS
 struct Proc *proc_test_console_renderer(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *r = g_console_renderer;
@@ -2400,6 +2401,7 @@ void proc_test_clear_console_renderer(void) {
     g_console_renderer = NULL;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
+#endif
 
 // Post the `interrupt` note (Ctrl-C) to the current console owner. Runs in the
 // console_mgr kthread's process context. Reads g_console_owner + posts under
@@ -3153,6 +3155,7 @@ int proc_console_episode(struct Proc *p, u32 op) {
     return rc;
 }
 
+#ifdef KERNEL_TESTS
 struct Proc *proc_test_console_owner_pre_sak(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *o = g_console_owner_pre_sak;
@@ -3175,6 +3178,7 @@ struct Proc *proc_test_console_owner(void) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return o;
 }
+#endif
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
@@ -4235,6 +4239,7 @@ static void proc_close_handles_at_exit(struct Proc *p) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention; deliberately absent from the header):
 // the at-exit close, driven on a Proc a test built and never ran. The closer
 // flag lands on the calling test thread and is cleared before return, as at a
@@ -4243,6 +4248,7 @@ void proc_close_handles_at_exit_for_test(struct Proc *p);
 void proc_close_handles_at_exit_for_test(struct Proc *p) {
     proc_close_handles_at_exit(p);
 }
+#endif
 
 // The window between a last thread's commit to exit and its final close: a
 // kill landing there must find the close marked (ARCH 7.9.1 part B). A test
@@ -5075,6 +5081,7 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     self->cons_frozen_unwound = false;
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention; deliberately absent from the header --
 // the harness extern-declares it and there is no production caller). The
 // precondition is unenforced here and therefore stated: `p` must have no live
@@ -5087,6 +5094,7 @@ void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 p
 void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno) {
     proc_exec_drop_image_state(p, t, pheno);
 }
+#endif
 
 #ifdef KERNEL_TESTS
 static u64 g_exec_peer_oncpu_waits;
@@ -6784,6 +6792,7 @@ int wait_pid(int *status_out) {
 // bare proc_alloc'd Proc must link it first. The harness extern-declares
 // these; they have no production caller.
 
+#ifdef KERNEL_TESTS
 // proc_test_link — splice `p` in as a child of kproc.
 void proc_test_link(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC)
@@ -6896,6 +6905,7 @@ void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
     struct legate_teardown_ctx tctx = { .scope_id = scope_id, .except = except };
     proc_for_each(legate_teardown_cb, &tctx);
 }
+#endif
 
 
 // HI-1: a fresh process lookup and pts comparison share ONE lifecycle hold.

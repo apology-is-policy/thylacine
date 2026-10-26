@@ -84,6 +84,10 @@ void test_territory_mount_covered_self_mount_refused(void);    // Plan 9 unions
 void test_territory_mount_covered_clone(void);                 // Plan 9 unions
 void test_territory_mount_covered_noexec_scoped(void);         // Plan 9 unions
 void test_territory_mount_covered_format_ns(void);             // Plan 9 unions
+void test_territory_mount_mrepl_existing_replaces_group(void);
+void test_territory_mount_mbefore_moves_existing(void);
+void test_territory_mount_lookup_ref_survives_unmount(void);
+void test_territory_root_ref_survives_pivot(void);
 
 // Mint a mount-point Spoor with a distinct identity (devnone dc '-', devno 0,
 // the given qid.path). The mount table keys on (dc, devno, qid.path), so a

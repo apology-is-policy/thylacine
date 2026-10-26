@@ -88,6 +88,7 @@ void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
 void test_poll_pre_resolved_spoor(void);
+void test_poll_cons_deferred_block_then_wake(void);
 
 // =============================================================================
 // Helpers: test Proc + per-test Spoor → fd installation.

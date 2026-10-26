@@ -56,6 +56,22 @@ void test_sys_burrow_detach_dma_map_by_identity(void);
 void test_sys_burrow_detach_mmio_map_by_identity(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_lazy_len_from_args(void);
+void test_sys_burrow_attach_lazy_large(void);
+void test_burrow_map_fixed_split_left(void);
+void test_burrow_map_fixed_split_right(void);
+void test_burrow_map_fixed_split_three_way(void);
+void test_burrow_map_fixed_exact_cover(void);
+void test_burrow_map_fixed_carries_offset(void);
+void test_burrow_map_fixed_refusals(void);
+void test_burrow_map_fixed_successive(void);
+void test_burrow_map_fixed_into_free_space(void);
+void test_burrow_munmap_range_tiled(void);
+void test_burrow_munmap_range_partial_trims(void);
+void test_burrow_munmap_range_empty_ok(void);
+void test_burrow_detach_file_frees_outside_lock(void);
+void test_burrow_munmap_range_file_frees_outside_lock(void);
+void test_burrow_map_fixed_replace_file_frees_outside_lock(void);
+void test_burrow_map_fixed_refuses_code_alias(void);
 
 // The non-static inners of the SVC handlers (defined in kernel/syscall.c).
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);

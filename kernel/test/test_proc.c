@@ -67,6 +67,21 @@ void test_proc_stripes_smoke(void);
 void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_legate_teardown_from_zombie_chokepoint(void);
+void test_proc_orphan_reparent_zombie_to_init(void);
+void test_proc_group_terminate_smoke(void);
+void test_proc_wait_pid_for_no_match(void);
+void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
+void test_proc_wait_pid_for_selects_target(void);
+void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void);
+void test_proc_wait_pid_for_pgrp_selectors(void);
+void test_proc_wait_pid_for_report_not_reap(void);
+void test_proc_wait_pid_syscall_untraced_flag(void);
+void test_proc_wait_packed_signalled(void);
+void test_proc_group_claim_decides_signal(void);
+void test_proc_wait_pid_syscall_packed_flag(void);
+void test_proc_rfork_refused_while_terminating(void);
+void test_proc_walk_deep_chain(void);
+void test_proc_walk_preorder_and_early_exit(void);
 
 // Test-harness hooks (kept out of proc.h; no production caller). The legate
 // teardown walk + the synthetic-Proc table splice let the test verify the walk

@@ -88,6 +88,27 @@ void test_devproc_park_state_settled(void);
 // IM-2: /proc/<pid>/imperium (the legate scope; owner-or-CAP_HOSTOWNER).
 void test_devproc_imperium_read_gated(void);
 void test_devproc_read_imperium_format(void);
+void test_devproc_dump_seal_predicate(void);
+void test_devproc_dump_seal_disclosure(void);
+void test_devproc_dump_seal_scope(void);
+void test_devproc_debug_exitkill_terminates_on_close(void);
+void test_devproc_maps_code_visible(void);
+void test_devproc_maps_code_redacted(void);
+void test_devproc_maps_code_truncated(void);
+void test_devproc_maps_code_trimmed(void);
+void test_devproc_maps_code_budget_stop(void);
+void test_devproc_debug_cover_weighs_departed(void);
+void test_devproc_seal_outlives_its_holder(void);
+void test_devproc_taint_outlives_its_holder(void);
+void test_devproc_zombie_records_departure(void);
+void test_devproc_exec_records_departure(void);
+void test_devproc_image_cover_join(void);
+void test_devproc_image_seal_join(void);
+void test_proc_seal_stamps_the_image(void);
+void test_proc_elevation_ignores_a_zombie_sharer(void);
+void test_proc_debug_taint_refuses_elevation(void);
+void test_proc_debug_taint_crosses_fork(void);
+void test_devproc_zombie_status_signal(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).

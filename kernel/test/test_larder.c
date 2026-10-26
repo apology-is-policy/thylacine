@@ -51,6 +51,9 @@ void test_larder_pages_snapshot_gen_witness(void);
 void test_larder_page_overwrite(void);
 void test_larder_page_bounded(void);
 void test_larder_page_destroy_frees(void);
+void test_larder_attr_downgrade_perm_only(void);
+void test_larder_downgrade_guards_raced_populate(void);
+void test_larder_gen_scope_qid(void);
 
 // struct larder is now small (pointers + counters): all three sub-cache arrays are
 // HEAP + lazy (attr 4096 / dentry 4096 / page 32768 entries; the page BUFFERS too),

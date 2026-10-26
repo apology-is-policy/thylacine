@@ -34,6 +34,9 @@ void test_devdev_winsize_leaf(void);            // #55
 void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
 void test_devdev_drain_walk_off_opened_dev_no_disarm(void); // the unprivileged route to H9
 void test_devdev_spawn_unbump_runs_close(void);       // shed r4 F1 / H6: an unwind's last drop closes
+void test_devdev_renderer_gate(void);
+void test_devdev_fd_devclass(void);
+void test_devdev_beacon_leaf(void);
 
 // =============================================================================
 // Helpers.

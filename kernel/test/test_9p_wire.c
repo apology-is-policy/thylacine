@@ -52,6 +52,7 @@ void test_9p_wire_tlink_round_trip(void);
 void test_9p_wire_tmkdir_round_trip(void);
 void test_9p_wire_trenameat_round_trip(void);
 void test_9p_wire_tunlinkat_round_trip(void);
+void test_9p_wire_twalkgetattr_round_trip(void);
 
 // 4 KiB scratch buffer; every message we build at v1.0 fits in this
 // (Tattach with full-length uname+aname stays under 600 bytes;

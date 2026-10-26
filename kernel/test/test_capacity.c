@@ -104,6 +104,7 @@ void test_capacity_page_tables_charged_and_reclaimed(void);
 void test_capacity_memory_bomb_leaves_the_reserve(void);
 void test_capacity_fork_costs_the_pool_only_its_nodes(void);
 void test_vma_range_is_mapped(void);
+void test_capacity_fork_clone_charges_pages_and_nodes(void);
 
 // The non-static inners of the SVC handlers (kernel/syscall.c).
 extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,

@@ -66,6 +66,8 @@ void test_sys_prw_rights_and_walkonly(void);
 void test_sys_attach_9p_rejection_paths(void);
 void test_sys_attach_9p_names_root_by_its_pipe(void);
 void test_sys_attach_9p_declarations(void);
+void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
+void test_sys_pipe_fstat_reports_fifo(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
 // independent so the two test files can be reordered without import

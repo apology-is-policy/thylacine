@@ -129,6 +129,7 @@ static void test_fp_helper_entry(void) {
     // Unreachable in the test — main thread doesn't switch back.
 }
 
+void test_fp_cpacr_enabled(void);
 void test_fp_cpacr_enabled(void) {
     u64 cpacr;
     __asm__ __volatile__("mrs %0, CPACR_EL1" : "=r"(cpacr));
@@ -153,6 +154,7 @@ void test_fp_cpacr_enabled(void) {
 }
 
 __attribute__((target("+fp+simd")))
+void test_fp_round_trip_v_regs_fpsr_fpcr(void);
 void test_fp_round_trip_v_regs_fpsr_fpcr(void) {
     g_fp_test_main = current_thread();
     TEST_ASSERT(g_fp_test_main != NULL,

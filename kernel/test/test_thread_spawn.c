@@ -100,6 +100,12 @@ void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
+void test_proc_wait_pid_concurrent_waiters_both_reap(void);
+void test_proc_exits_in_dying_group_keeps_group_status(void);
+void test_proc_fault_in_dying_group_keeps_group_status(void);
+void test_proc_fault_in_dying_group_reaps_exited_packed(void);
+void test_proc_note_death_with_live_peer_reaps_signalled(void);
+void test_proc_reap_before_sqpoll_charge(void);
 
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout

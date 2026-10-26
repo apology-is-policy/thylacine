@@ -27,6 +27,8 @@ void test_devhw_prop_read(void);
 void test_devhw_stat_native(void);
 void test_devhw_readdir_cookie_contract(void);
 void test_devhw_iter_api(void);
+void test_devhw_walk_reuse_nc(void);
+void test_devhw_synth_pci_child(void);
 
 // =============================================================================
 // Helpers.

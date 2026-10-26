@@ -2700,6 +2700,7 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
     return 1;
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention: absent from the header, extern-declared
 // by the harness, no production caller): one pass of the scan stop and waitstop
 // poll, since waitstop itself would block on a target that never stops.
@@ -2709,6 +2710,7 @@ int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl) {
     proc_for_each(devproc_stopscan_cb, &s);
     return s.state;
 }
+#endif
 
 // tsleep cond for the stop-wait poll: never wakes on the cond (only the deadline
 // does), so tsleep is a pure timed sleep between re-scans.
@@ -3037,6 +3039,7 @@ static int devproc_waitscan_cb(struct Proc *target, void *arg) {
     return 1;
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention: absent from the header, extern-declared
 // by the harness, no production caller): one pass of the scan /proc/<pid>/wait
 // (ctl NULL) and step (the slot owner's ctl) poll.
@@ -3047,6 +3050,7 @@ int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl)
     proc_for_each(devproc_waitscan_cb, &w);
     return w.state;
 }
+#endif
 
 // The wait's verdict on one scan state: +1 stopped, 0 exited/gone,
 // DEVPROC_WAIT_RELEASED for a step's wait whose slot was released, -T_E_ACCES refused,
@@ -3060,12 +3064,14 @@ static int devproc_wait_verdict(int state) {
     return DEVPROC_WAIT_POLL;                        // 0: ALIVE, not yet stopped
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention: absent from the header, extern-declared
 // by the harness, no production caller): the verdict for one scan state.
 int devproc_wait_verdict_for_test(int state);
 int devproc_wait_verdict_for_test(int state) {
     return devproc_wait_verdict(state);
 }
+#endif
 
 // Block until a wait event. Returns +1 stopped, 0 exited/gone,
 // DEVPROC_WAIT_RELEASED (a step's wait, ctl set) slot released, -T_E_ACCES
@@ -3097,11 +3103,13 @@ static long devproc_step_result(int ev, long n) {
     return devproc_walk_fail(ev);
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention): the step write's return for a verdict.
 long devproc_step_result_for_test(int ev, long n);
 long devproc_step_result_for_test(int ev, long n) {
     return devproc_step_result(ev, n);
 }
+#endif
 
 static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf || n < 0) return -1;

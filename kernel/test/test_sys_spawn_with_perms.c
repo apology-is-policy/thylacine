@@ -81,6 +81,8 @@ void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
 void test_sys_spawn_with_perms_seat_roles(void);
+void test_sys_spawn_with_perms_renderer_gate(void);
+void test_sys_spawn_with_perms_seal_blocks_debug_and_dump(void);
 
 extern void proc_test_seat_reset(void);
 // (U) F1: the I-39 debug-authority predicate, so the NOTRACE arm can assert the

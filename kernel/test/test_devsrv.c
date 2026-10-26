@@ -78,6 +78,7 @@ void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
 void test_devsrv_post_listener(void);
 void test_devsrv_service_keys_distinct(void);
+void test_devsrv_registry_full_tombstone_rebinds(void);
 
 static struct Proc *make_test_proc(void) {
     return proc_alloc();

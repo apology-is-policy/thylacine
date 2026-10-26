@@ -59,6 +59,11 @@ void test_handles_dup_lifecycle(void);
 void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
 void test_handles_srv_kind(void);
+void test_handles_cloexec_lifecycle(void);
+void test_handles_cloexec_exec_sweep(void);
+void test_handles_cloexec_fork_preserves(void);
+void test_handles_dup_posix(void);
+void test_handles_dup_to(void);
 
 // Shared test helper: allocate a Proc, exercise it, then transition to
 // ZOMBIE + free. proc_alloc has already allocated a fresh empty handle
@@ -394,7 +399,7 @@ void test_handles_replace(void) {
     // the slot mechanics without needing a live Dev.
     hidx_t h = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
     TEST_ASSERT(h >= 0, "handle_alloc(SPOOR) returned -1");
-    u64 count_before = handle_table_count(p->handles);
+    int count_before = handle_table_count(p->handles);
 
     // THE INDEX IS PRESERVED. That is the entire reason the primitive exists --
     // the guest is holding this number across connect().

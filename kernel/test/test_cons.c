@@ -120,6 +120,22 @@ void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buf
 void test_cons_cook_mode_flip_delivers(void);         // PTY-DESIGN: a mode write delivers, never discards
 void test_cons_cook_isig_discards_pending_line(void); // PTY-DESIGN: an ISIG char discards the pending line (F5)
 void test_cons_cook_canonical_poll_edge(void);        // LS-8b audit F2a (whole-line poll edge)
+void test_cons_mgr_hold_defers_consumption(void);
+void test_cons_rx_drop_counters(void);
+void test_cons_winsize_roundtrip(void);
+void test_cons_beacon_roundtrip(void);
+void test_cons_winsize_winch_iff_changed(void);
+void test_cons_stat_native_qid_contract(void);
+void test_cons_stat_devno_full_width(void);
+void test_cons_drain_tap_mirrors_output(void);
+void test_cons_drain_feed_runs_discipline(void);
+void test_cons_drain_overflow_drops_oldest(void);
+void test_cons_drain_close_and_reopen_epoch(void);
+void test_cons_drain_poll_deferred_wake(void);
+void test_cons_sys_puts_uses_shared_console_path(void);
+void test_cons_tx_unit_diag_line_atomic(void);
+void test_cons_tx_unit_echo_atomic(void);
+void test_cons_tx_unit_smp_no_tear(void);
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).

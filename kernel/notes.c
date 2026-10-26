@@ -449,6 +449,7 @@ static u32 notes_name_terminate_latch(const char *name) {
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 // Test support (the burrow_*_for_test convention). Deliberately absent from
 // the header: the harness extern-declares it, and there is no production
 // caller. It exists so the #15 table test can assert that the EL0-tail
@@ -469,6 +470,7 @@ const char *notes_snare_death_name_for_test(u32 i);
 const char *notes_snare_death_name_for_test(u32 i) {
     return i < NOTE_NUM_SNARE_DEATHS ? g_snare_deaths[i].name : NULL;
 }
+#endif
 
 // V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
 // below answers that for a native Proc, and answers it WRONG for a phenotyped
@@ -2204,9 +2206,11 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
                        "KERNEL_EXIT, which inherits its mask (#713)");
 }
 
+#ifdef KERNEL_TESTS
 // Test hook: the release a claimant's tail makes, for a Thread with no tail.
 void notes_release_claims_for_test(struct Thread *t);
 void notes_release_claims_for_test(struct Thread *t) { notes_release_claims(t); }
+#endif
 
 // ---------------------------------------------------------------------------
 // SYS_NOTED restore + default-action helpers (called from kernel/syscall.c).
@@ -2216,7 +2220,6 @@ void notes_release_claims_for_test(struct Thread *t) { notes_release_claims(t); 
 // Returns 0 on success, -1 if the Thread is not in a handler. The caller
 // (sys_noted_handler) supplies ctx; on success ctx is rewritten with the
 // pre-handler user state.
-int notes_noted_restore(struct exception_context *ctx, struct Thread *t);
 int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
     if (!ctx || !t) return -1;
     if (!t->in_handler) return -1;
@@ -2261,7 +2264,6 @@ int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
 // disposition re-queues it -- matching the no-handler stop path, whose own
 // test asserts the default stop leaves zero susp notes pending. A stale susp
 // surviving a later cont would re-suspend a resumed program.
-int notes_noted_default(struct exception_context *ctx, struct Thread *t);
 int notes_noted_default(struct exception_context *ctx, struct Thread *t) {
     if (!ctx || !t || !t->in_handler) {
         // Caller validated in_handler; reaching here is a programmer bug.

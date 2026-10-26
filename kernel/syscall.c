@@ -3625,14 +3625,14 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
 // (self-or-child lookup misses) rather than mis-treating as huge-positive.
 // =============================================================================
 
-s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+static s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
     return (s64)proc_setsid(p);
 }
 
-s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+static s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
@@ -3641,7 +3641,7 @@ s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return (s64)proc_setpgid(p, pid, pgid);
 }
 
-s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+static s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
@@ -3650,7 +3650,7 @@ s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return (s64)proc_getpgid(p, pid);
 }
 
-s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+static s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
@@ -5813,12 +5813,6 @@ static s64 viv_futex(struct Proc *p, u64 uaddr, u64 op_raw, u64 val,
 // Five thin handlers over kernel/notes.c + kernel/devnotes.c. Design in
 // ARCH §7.6.1-§7.6.8.
 
-extern int  notes_noted_restore(struct exception_context *ctx,
-                                struct Thread *t);
-// #15: no longer noreturn -- the STOP and IGNORE dispositions return.
-extern int  notes_noted_default(struct exception_context *ctx,
-                                struct Thread *t);
-
 // SYS_NOTE_OPEN — mint a fd to the calling Proc's note queue.
 //   (no args)
 //
@@ -6115,6 +6109,7 @@ static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name)
     return wctx.err ? wctx.err : -(s64)T_E_INVAL;
 }
 
+#ifdef KERNEL_TESTS
 // Test support (the mmap_eager_copy_for_test convention). Deliberately absent
 // from any header -- the harness extern-declares it, and there is no
 // production caller. It drives the REAL cross arm, the function the syscall
@@ -6126,6 +6121,7 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name) {
     return postnote_cross(caller, target_pid, name);
 }
+#endif
 
 // The SELF arm, extracted from sys_postnote_handler so it has a name a test can
 // call (aux#253). The handler resolves `p` from current_thread(); everything
@@ -6161,6 +6157,7 @@ static s64 postnote_self(struct Proc *p, const char *name) {
     return (s64)rc;
 }
 
+#ifdef KERNEL_TESTS
 // Test support, the sys_postnote_cross_for_test twin: drives the REAL self arm
 // with an explicit caller, because the production entry takes its target from
 // current_thread() and a kernel unit test's current thread is the harness's.
@@ -6169,6 +6166,7 @@ s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
     return postnote_self(caller, name);
 }
+#endif
 
 static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
                                  u64 name_va, u64 name_len_raw) {
@@ -7581,8 +7579,8 @@ fail:
 }
 
 // SYS_JIT_CREATE_SEALED: the mechanism above, plus the copy-out of the VA.
-s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
-                                   u64 out_va) {
+static s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+                                          u64 out_va) {
     if (!p)                                          return -T_E_INVAL;
     // The cap before either buffer check, as SYS_JIT_CREATE does.
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
@@ -8014,7 +8012,7 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
 
 // SYS_WEFT_MAP: lazily map a /net data fd's per-flow ring into the caller. The
 // guest side.
-s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+static s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
     if (!p) return -1;
 
     struct Handle dh;
@@ -8052,7 +8050,7 @@ s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
 
 // SYS_WEFT_UNSHARE: disarm one of the caller's own un-claimed shares (G-2 --
 // the retire/reweave NoStaleMap disarm + the #289 minted-but-unclaimed GC).
-s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+static s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
     if (!p) return -1;
     // The same driver-tier gate as SYS_WEFT_SHARE (Weft-7 F1); the owner check
     // inside weft_share_unregister is the real authority -- only the
@@ -10376,7 +10374,7 @@ int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
 
 // Back-compat entry: not held (debug_flags 0). Keeps the CL-5 / V-1b signature
 // for the kernel test suite.
-int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+static int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
@@ -14394,12 +14392,14 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
     return w.err ? w.err : -(s64)T_E_PERM;
 }
 
+#ifdef KERNEL_TESTS
 // Test support (the sys_postnote_*_for_test convention): drives the REAL shell
 // with an explicit caller. Deliberately absent from any header.
 s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
 s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
     return viv_kill(NULL, caller, pid, tid, sig);
 }
+#endif
 
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
@@ -15873,6 +15873,7 @@ static void viv_trace_call(u64 nr, struct Proc *p) {
 }
 #endif
 
+#ifdef KERNEL_TESTS
 // Test support (the burrow_*_for_test convention): drive the T2 fcntl arm on a
 // caller-supplied Proc with no exception frame. Deliberately absent from the
 // header; the harness extern-declares it. Safe ONLY because the FCNTL case
@@ -16047,6 +16048,7 @@ s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
     u64 args[VIV_NARGS] = { a0, a1, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, linux_num, args);
 }
+#endif
 
 // ARCH 8.8.3: is `fd` a signal(7)-"slow" file -- a socket, a pipe or FIFO, a
 // character device? A socket is its socktab row (whatever Dev backs it); any
@@ -16087,10 +16089,12 @@ static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args
     return false;
 }
 
+#ifdef KERNEL_TESTS
 // Drives viv_fd_is_slow so a test can prove the classification and its
 // per-Spoor cache (ARCH 8.8.3).
 bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
 bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd) { return viv_fd_is_slow(p, fd); }
+#endif
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // Linux reads x8 as `int scno` (el0_svc_common), so a number with bits
@@ -16227,6 +16231,7 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // The dispatcher itself, for its entry hooks. `p` is the phenotyped Proc and
 // `ctx` a frame holding a Linux number and its arguments; a true return means
 // the native handler would run on ctx's renumbered frame.
@@ -16234,6 +16239,7 @@ bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
 bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p) {
     return viv_linux_dispatch(ctx, p);
 }
+#endif
 
 static void syscall_dispatch_body(struct exception_context *ctx);
 static void syscall_native_switch(struct exception_context *ctx);

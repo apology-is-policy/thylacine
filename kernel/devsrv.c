@@ -708,6 +708,7 @@ void srv_registry_reset(void) {
     srv_registry_drain(g_boot_srv_registry);
 }
 
+#ifdef KERNEL_TESTS
 // Test-only observation/injection for the accepter identity-pin window.
 // Keep the registry representation private, and exercise the same lock as
 // production reservation. mode < 0 observes; otherwise it sets the pin.
@@ -719,6 +720,7 @@ bool srv_test_accept_pin(struct SrvService *svc, int mode) {
     spin_unlock_irqrestore(&svc->reg->lock, irq);
     return active;
 }
+#endif
 
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).

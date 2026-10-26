@@ -62,6 +62,11 @@ void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
 void test_srvconn_server_send_blocks_then_drain_wakes(void);
 void test_srvconn_ctl_counters(void);
+void test_srvconn_bulk_ring_class(void);
+void test_srvconn_role_park_second_writer(void);
+void test_srvconn_role_park_second_reader(void);
+void test_srvconn_client_send_blocking_backpressure(void);
+void test_srvconn_client_send_blocking_poll_edge(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.

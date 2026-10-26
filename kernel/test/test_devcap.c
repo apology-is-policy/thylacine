@@ -62,6 +62,7 @@ void test_devcap_clearance_cross_stripes(void);
 void test_devcap_clearance_valid_until(void);
 void test_devcap_clearance_kind_isolation(void);
 void test_devcap_clearance_audio_graph(void);
+void test_devcap_taint_refuses_hostowner_redeem(void);
 
 // Test-only Proc construction. proc_alloc() draws a fresh stripes, so
 // each test Proc has a unique tag. The console-attached + cap setup is

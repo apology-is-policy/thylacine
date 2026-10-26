@@ -52,6 +52,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+void test_smp_bringup_smoke(void);
 void test_smp_bringup_smoke(void) {
     u32 dtb_cpus = dtb_cpu_count();
     TEST_ASSERT(dtb_cpus >= 1,
@@ -95,6 +96,7 @@ void test_smp_bringup_smoke(void) {
     }
 }
 
+void test_smp_exception_stack_smoke(void);
 void test_smp_exception_stack_smoke(void) {
     // P5-el1h-kernel: the kernel runs uniformly at EL1h — PSTATE.SPSel
     // must be 1 at all times (sp = SP_EL1 = the running thread's own
@@ -125,6 +127,7 @@ void test_smp_exception_stack_smoke(void) {
     }
 }
 
+void test_smp_secondary_stack_guard_layout(void);
 void test_smp_secondary_stack_guard_layout(void) {
     // P5-secondary-stack-guard: each per-CPU boot-stack slot is a 4 KiB
     // guard page followed by a 16 KiB usable stack. The guard LEADS the
@@ -180,6 +183,7 @@ void test_smp_secondary_stack_guard_layout(void) {
     }
 }
 
+void test_smp_per_cpu_idle_smoke(void);
 void test_smp_per_cpu_idle_smoke(void) {
     unsigned cpus = smp_cpu_count();
     TEST_ASSERT(cpus >= 1, "smp_cpu_count is positive");
@@ -228,6 +232,7 @@ void test_smp_per_cpu_idle_smoke(void) {
     }
 }
 
+void test_smp_ipi_resched_smoke(void);
 void test_smp_ipi_resched_smoke(void) {
     // #868: cpu0 is now a full IPI_RESCHED peer (smp_boot_cpu_ipi_init attached
     // the handler + enabled SGI 0 on cpu0's redistributor). Prove cpu0 RECEIVES
@@ -334,6 +339,7 @@ static void steal_test_entry(void) {
     // Unreachable — sleep loops on cond which is always false.
 }
 
+void test_smp_work_stealing_smoke(void);
 void test_smp_work_stealing_smoke(void) {
     unsigned cpus = smp_cpu_count();
     if (!test_requires(cpus >= 2, "thylacine.smp", 0, true, "one CPU is online"))

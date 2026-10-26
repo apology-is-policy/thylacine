@@ -19,6 +19,7 @@
 #include "../../arch/arm64/hwfeat.h"
 #include <thylacine/types.h>
 
+void test_alternatives_patch_applied(void);
 void test_alternatives_patch_applied(void) {
     // The spinlock test-and-set + the Spoor/SrvConn refcounts + the
     // scheduler steal-rotate are all inlined widely, so every build emits
@@ -38,6 +39,7 @@ void test_alternatives_patch_applied(void) {
     }
 }
 
+void test_alternatives_atomics_correct(void);
 void test_alternatives_atomics_correct(void) {
     // exchange-acquire (the spinlock primitive): returns PRE, stores new.
     u32 x = 0x11223344u;

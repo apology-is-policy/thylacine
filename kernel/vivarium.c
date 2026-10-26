@@ -258,10 +258,10 @@ struct viv_row {
 static const struct viv_row g_viv_t1[] = {
     // read/write/close(unsigned int fd, ...), lseek(unsigned int fd, off_t,
     // unsigned int whence), pread64/pwrite64(unsigned int fd, ...).
-    { VIV_LINUX_READ,       SYS_READ,       3, 0x1 },
-    { VIV_LINUX_WRITE,      SYS_WRITE,      3, 0x1 },
-    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1, 0x1 },
-    { VIV_LINUX_LSEEK,      SYS_LSEEK,      3, 0x5 },
+    { VIV_LINUX_READ,       SYS_READ,       3, 0x1, 0 },
+    { VIV_LINUX_WRITE,      SYS_WRITE,      3, 0x1, 0 },
+    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1, 0x1, 0 },
+    { VIV_LINUX_LSEEK,      SYS_LSEEK,      3, 0x5, 0 },
     // pread64/pwrite64 (the git 6.27 clone arm): identical (fd, buf, count,
     // offset) shape to SYS_PREAD/SYS_PWRITE, and the native handlers validate
     // the buffer + gate on off>=0 / RIGHT_* exactly as read/write do -- so a
@@ -269,8 +269,8 @@ static const struct viv_row g_viv_t1[] = {
     // the cloned pack via pread; without this it FORWARDs to ENOSYS. The
     // sub-ceiling collision with the LOOM pair is the read/write renumbers'
     // damage-envelope argument (see vivarium.h).
-    { VIV_LINUX_PREAD64,    SYS_PREAD,      4, 0x1 },
-    { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4, 0x1 },
+    { VIV_LINUX_PREAD64,    SYS_PREAD,      4, 0x1, 0 },
+    { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4, 0x1, 0 },
     // exit_group(int): narrowed as Linux declares it, though the native handler
     // keeps only the low byte, which the narrowing does not change.
     { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1, 0, 0x1 },
@@ -293,7 +293,7 @@ static const struct viv_row g_viv_t1[] = {
     // viv_linux_dispatch, so its 93 stays PTY_REGISTER. The two readings never
     // meet. (Before this row, 93 FORWARDed to a clean ENOSYS -- no collision then
     // either, since FORWARD returns -ENOSYS without touching the native switch.)
-    { VIV_LINUX_EXIT,       SYS_THREAD_EXIT, 0 },
+    { VIV_LINUX_EXIT,       SYS_THREAD_EXIT, 0, 0, 0 },
 
     // #150. getpid is the ONLY member of the startup batch that is a clean
     // renumber, and stating why the others are not is the point of listing it
@@ -307,7 +307,7 @@ static const struct viv_row g_viv_t1[] = {
     // read, a return that is a plain pid < 2^32 (never in the [-4095,-1] errno
     // band a Linux caller checks), and no error path at all in the native
     // handler beyond the current_thread() sanity check.
-    { VIV_LINUX_GETPID,     SYS_GETPID,     0 },
+    { VIV_LINUX_GETPID,     SYS_GETPID,     0, 0, 0 },
     // C2-k2: getpgid/getsid are PURE renumbers -- the native cores return the
     // pgid/sid (a plain id < 2^32, never in the errno band) or -T_E_SRCH, which
     // IS Linux ESRCH; pid 0 = self in both. No errno remap is needed, unlike
@@ -319,10 +319,12 @@ static const struct viv_row g_viv_t1[] = {
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
 
+#ifdef KERNEL_TESTS
 // vivarium.t1_narrows_linux_widths checks each row's masks against Linux's
 // prototype and requires its list to be as long as the table.
 u32 vivarium_t1_count_for_test(void);
 u32 vivarium_t1_count_for_test(void) { return VIV_T1_COUNT; }
+#endif
 
 // The calls we have DECIDED are not table rows. Keeping them as an explicit list
 // rather than letting them fall through to a default matters: a Linux number that

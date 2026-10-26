@@ -187,12 +187,14 @@ static const char *procs_state_name(const struct Proc *p) {
     return state_name(p->state);
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention: absent from the header, extern-declared
 // by the harness, no production caller): the STATE column's word for `p`.
 const char *devctl_procs_state_name_for_test(const struct Proc *p);
 const char *devctl_procs_state_name_for_test(const struct Proc *p) {
     return procs_state_name(p);
 }
+#endif
 
 // =============================================================================
 // Per-leaf content generators.
@@ -339,12 +341,14 @@ static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
     return s.off;
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention): /ctl/procs formatted into a buffer of
 // the caller's size, so a test can make any row the one that overflows.
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_procs(reader, buf, cap);
 }
+#endif
 
 // ARCH 8.12's kernel-stack watermark, per Proc and as a whole-system peak.
 //
@@ -920,11 +924,13 @@ static size_t format_9p_sessions(const struct Proc *reader, char *buf, size_t ca
     return f.off;
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention): /ctl/9p-sessions as `reader` sees it.
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_9p_sessions(reader, buf, cap);
 }
+#endif
 
 // =============================================================================
 // Per-leaf table.

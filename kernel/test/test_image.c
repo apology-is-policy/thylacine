@@ -45,6 +45,7 @@ void test_image_devno_full_width_distinct_entry(void);
 void test_image_distinct_offset_distinct_entry(void);
 void test_image_eviction_bounds_cache(void);
 void test_image_bad_arg_retains_spoor(void);
+void test_image_exec_discriminates_key(void);
 
 // A trivial backing Dev. The cache never reads it (only R-4's fault path will),
 // and the test spoors are never opened, so spoor_clunk skips dev->close -- no

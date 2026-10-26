@@ -24,6 +24,9 @@ void test_caps_rfork_with_caps_clamps_to_parent(void);
 void test_caps_rfork_with_caps_zero_mask(void);
 void test_caps_rfork_strips_elevation_only(void);
 void test_caps_rfork_inherits_legate_scope(void);
+void test_caps_rfork_flows_under_propagating_scope(void);
+void test_caps_rfork_no_flow_without_propagating(void);
+void test_caps_rfork_flow_bounded_by_mask(void);
 
 // kproc starts with CAP_ALL (currently == CAP_HW_CREATE).
 void test_caps_kproc_has_all(void) {

@@ -639,6 +639,14 @@ void notes_set_handler(struct Proc *p, u64 handler_va);
 // q->lock, same serialization rationale as notes_set_handler.
 void notes_mark_self_managing(struct Proc *p);
 
+// The SYS_NOTED bodies. notes_noted_restore puts back the user context saved
+// at delivery (NCONT): 0, or -1 when `t` is not in a handler. notes_noted_default
+// takes the note's default action (NDFLT); its STOP and IGNORE dispositions
+// return.
+struct exception_context;
+int notes_noted_restore(struct exception_context *ctx, struct Thread *t);
+int notes_noted_default(struct exception_context *ctx, struct Thread *t);
+
 // The WIDENED #811 death predicate (ARCH 8.8.1 + 8.8.2): true iff `t`, on
 // returning to its EL0-return tail now, will die there -- its Proc is
 // group-terminating (group_exit_msg set), OR a terminate-disposition

@@ -100,6 +100,13 @@ void test_notes_stop_dequeue_picks_its_own_note(void);     // the class-blind po
 void test_notes_class_scans_read_phenotype_sigtab(void);   // c8ab2744 F1
 void test_notes_discard_name_purges_pending(void);        // the install-time SIG_IGN discard
 void test_notes_self_kill_through_full_ring(void);        // aux#253
+void test_notes_pipe_die_pending(void);
+void test_notes_term_die_pending(void);
+void test_notes_kill_family_gate(void);
+void test_notes_fault_dying_latch_live_note_exits(void);
+void test_notes_fault_dying_latch_clears_only_stale(void);
+void test_notes_postnote_errnos(void);
+void test_notes_self_death_snare(void);
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke

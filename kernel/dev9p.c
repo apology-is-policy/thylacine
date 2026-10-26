@@ -334,9 +334,11 @@ u64 dev9p_wb_budget_used(void) {
     return __atomic_load_n(&g_wb_budget_used, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 void dev9p_wb_budget_bias_for_test(s64 n) {
     __atomic_fetch_add(&g_wb_budget_used, (u64)n, __ATOMIC_RELAXED);
 }
+#endif
 
 // Write a run as msize-max Twrites. 0 or a negative errno.
 static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,

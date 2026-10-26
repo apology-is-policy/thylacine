@@ -34,6 +34,7 @@ void test_weft_ready_arm_park_sees_race(void);
 void test_weft_notif_terminal_release(void);
 void test_weft_notif_premature_blocked(void);
 void test_weft_notif_copied_immediate(void);
+void test_weft_binding_validate_rw(void);
 
 #define WEFT_TEST_VA   0x20000000ull          // 512 MiB; well inside user-VA
 #define WEFT_RING_ENTRIES 8u

@@ -58,6 +58,10 @@ void test_resource_page_cap_attach_enforced(void);
 void test_resource_vma_cap(void);
 void test_resource_attach_charges_buddy_rounded(void);
 void test_resource_detach_shared_in_keeps_page_count(void);
+void test_resource_page_peak_high_water(void);
+void test_resource_spawn_budget_resolve(void);
+void test_resource_measured_compile_needs_raise(void);
+void test_resource_detach_retained_handle_keeps_page_count(void);
 
 #define A_REAL_USER 1000u
 

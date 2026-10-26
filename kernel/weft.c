@@ -549,7 +549,8 @@ void weft_binding_release(struct weft_binding *b) {
 int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
     if (!wb || !closer) return -1;
     if (!weft_kind_maponly((int)wb->kind)) return -1; // RING keeps its lifetime
-    if (closer->pid != wb->map_pid)  return -1;       // not the mapping Proc
+    // proc_alloc issues only positive pids, so the conversion is exact.
+    if ((u32)closer->pid != wb->map_pid) return -1;   // not the mapping Proc
     spin_lock(&closer->as->lock);
     // The G-2 audit F1 guard: the binding's guest_va is a RECORD, not a live
     // claim -- the client may have SYS_BURROW_DETACHed the weave and a fresh

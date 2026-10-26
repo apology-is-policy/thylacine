@@ -22,6 +22,7 @@
 // kaslr.c exposes mix64 for testing via this declaration.
 u64 kaslr_test_mix64(u64 x);
 
+void test_kaslr_mix64_avalanche(void);
 void test_kaslr_mix64_avalanche(void) {
     // mix64(0) should be 0 only if the function is the identity, which
     // it isn't (multiplies + xors guarantee a non-trivial result).

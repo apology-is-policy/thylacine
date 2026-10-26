@@ -98,6 +98,7 @@ u64 poll_total_arm_retries(void) {
     return __atomic_load_n(&g_poll_arm_retries, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 void poll_test_set_snap_bound_ns(u64 bound_ns) {
     __atomic_store_n(&g_poll_snap_bound_ns, bound_ns, __ATOMIC_RELAXED);
 }
@@ -105,6 +106,7 @@ void poll_test_set_snap_bound_ns(u64 bound_ns) {
 bool poll_test_snap_bound_release(void) {
     return __atomic_exchange_n(&g_poll_snap_bound_ns, 0ull, __ATOMIC_RELAXED) != 0;
 }
+#endif
 
 // Only the first few are printed: the first one already fails every gate, and a
 // hung server would otherwise print one line per polled fd per second.

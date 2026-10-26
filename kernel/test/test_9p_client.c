@@ -99,6 +99,31 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
 void test_9p_client_loom_enter_sees_a_sibling_submit(void);
 void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
 void test_9p_client_loom_quiesce_drains_the_late_reply(void);
+void test_9p_client_walkgetattr(void);
+void test_9p_client_bulk_write_clamps_short(void);
+void test_9p_client_loom_link_cancel_cascade(void);
+void test_9p_client_loom_link_success_ordering(void);
+void test_9p_client_loom_drain_barrier(void);
+void test_9p_client_loom_independent_past_held(void);
+void test_9p_client_loom_drain_waits_for_rearm_pending(void);
+void test_9p_client_loom_weft_read_e2e(void);
+void test_9p_client_loom_weft_write_e2e(void);
+void test_9p_client_loom_weft_hybrid_fallback(void);
+void test_9p_client_loom_weft_oob_rejected(void);
+void test_9p_client_loom_multi_inflight_e2e(void);
+void test_9p_client_loom_multi_inflight_read_e2e(void);
+void test_9p_client_async_clunk_burst_no_fid_leak(void);
+void test_9p_client_full_pool_sync_op_gets_a_tag(void);
+void test_9p_client_send_backpressure_self_pump(void);
+void test_9p_client_send_backpressure_multi_waiter(void);
+void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
+void test_9p_client_abandon_async_eagain_keeps_session_alive(void);
+void test_9p_client_async_send_eagain_keeps_session_alive(void);
+void test_9p_client_async_full_tag_pool_is_eagain(void);
+void test_9p_client_resumed_waiter_is_designated(void);
+void test_9p_client_tag_table_grows(void);
+void test_9p_client_abandon_flush_fits_full_share(void);
+void test_9p_client_async_share_leaves_sync_tags(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -5639,21 +5664,6 @@ static void dy_stop_flag(struct test_dying *d, bool job, u32 v) {
                      __ATOMIC_RELEASE);
 }
 
-// A third op thread: an async clunk.
-static struct test_dying g_dyz;
-static struct { u32 fid; int rc; } g_dyzop;
-
-static void dyz_run(void *arg) {
-    (void)arg;
-    g_dyzop.rc = p9_client_clunk_async(&g_client, g_dyzop.fid);
-}
-
-static bool dyz_start_clunk(u32 fid) {
-    g_dyzop.fid = fid;
-    g_dyzop.rc  = 0x7fffffff;
-    return test_dying_start(&g_dyz, dyz_run, NULL, /*dead_now=*/false);
-}
-
 // The read X waits behind the held reader with its Rread queued and is stopped
 // there (^Z). The reader departs with nobody to designate, and X resumes. X
 // must then take the role and read its own reply. Parked in place, it re-checked
@@ -6342,7 +6352,7 @@ bool test_9p_client_release(void);
 bool test_9p_client_release(void) {
     __atomic_store_n(&g_loom_fanin_test_cap, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
-    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle, &g_dle2 };
+    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dle, &g_dle2 };
     bool left = false;
     for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         struct test_dying *d = ops[i];

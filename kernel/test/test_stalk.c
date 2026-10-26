@@ -159,6 +159,8 @@ void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
 void test_stalk_open_create_leaf_rows(void);
 void test_stalk_open_create_containment_and_denials(void);
+void test_stalk_landed_roots(void);
+void test_stalk_landed_identity(void);
 
 // =============================================================================
 // The fixture Dev.

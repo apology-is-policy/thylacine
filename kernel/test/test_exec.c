@@ -61,6 +61,16 @@ void test_exec_setup_auxv_no_phdr_segment(void);
 void test_exec_from_spoor_rodata_dispatch(void);
 void test_exec_setup_env_frame(void);            // #140
 void test_exec_stage_env_bounds(void);           // #140
+void test_exec_unaligned_stays_off_image_cache(void);
+void test_exec_from_spoor_aliased_window_distinct(void);
+void test_exec_unaligned_segment_loads(void);
+void test_exec_unaligned_lazy_segment_loads(void);
+void test_exec_shared_page_segments_refused(void);
+void test_exec_setup_bss_tail_icache_synced(void);
+void test_exec_from_spoor_bss_only_text_icache_synced(void);
+void test_exec_writable_segment_is_sparse(void);
+void test_exec_stack_is_sparse(void);
+void test_exec_interp_argv_shape(void);
 
 #define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use

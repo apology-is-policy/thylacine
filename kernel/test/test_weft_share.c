@@ -73,6 +73,9 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 void test_weft_sharer_charge_released_at_detach(void);
+void test_weft_reap_kproc_pid_survives_walk(void);
+void test_weft_hostmem_refcount(void);
+void test_weft_hostmem_resolve(void);
 
 #define WEFT_TEST_VA 0x12000000ull
 

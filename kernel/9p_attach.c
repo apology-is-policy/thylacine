@@ -847,6 +847,7 @@ static void closer_main(void *arg) {
     }
 }
 
+#ifdef KERNEL_TESTS
 u32 p9_closer_fail_spawns_for_test(u32 n) {
     return __atomic_exchange_n(&g_closer_fail_spawns, n, __ATOMIC_RELAXED);
 }
@@ -862,6 +863,7 @@ void p9_closer_hold_spawn_for_test(bool hold) {
 bool p9_closer_spawn_held_for_test(void) {
     return __atomic_load_n(&g_closer_hold, __ATOMIC_ACQUIRE) == 2u;
 }
+#endif
 
 static void closer_spawn_hold_for_test(void) {
     u32 armed = 1u;

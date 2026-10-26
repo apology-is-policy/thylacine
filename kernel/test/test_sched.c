@@ -50,6 +50,7 @@ static void sched_test_thread_b(void) {
     // Unreachable in dispatch_smoke.
 }
 
+void test_sched_dispatch_smoke(void);
 void test_sched_dispatch_smoke(void) {
     g_test_sched_state[0] = 0;
     g_test_sched_state[1] = 0;
@@ -146,6 +147,7 @@ static void preempt_test_thread_b(void) {
     test_kthread_park_terminal(&g_preempt_test_exited[1]);
 }
 
+void test_sched_preemption_smoke(void);
 void test_sched_preemption_smoke(void) {
     // Pre-conditions.
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
@@ -211,6 +213,7 @@ void test_sched_preemption_smoke(void) {
         "run tree empty after thread_free");
 }
 
+void test_sched_runnable_count(void);
 void test_sched_runnable_count(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "tree must be empty at test entry");
@@ -245,6 +248,7 @@ void test_sched_runnable_count(void) {
 //   pins the fix deterministically at smp1: a band-IDLE thread in the tree is
 //   invisible to the work count yet visible to the per-band query, and a
 //   band-WORK thread is still counted (so a real strand is never masked).
+void test_sched_runnable_count_excludes_idle(void);
 void test_sched_runnable_count_excludes_idle(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "work count 0 at entry");
 
@@ -293,6 +297,7 @@ void test_sched_runnable_count_excludes_idle(void) {
 //
 // Closes part of R5-H F78 verification — the "is this peer in WFI?"
 // signal that ready/wakeup consult to choose a wake target.
+void test_sched_idle_in_wfi_observability(void);
 void test_sched_idle_in_wfi_observability(void) {
     // Out-of-range — no extinction, returns false defensively.
     TEST_EXPECT_EQ(sched_idle_in_wfi(DTB_MAX_CPUS), false,
@@ -364,6 +369,7 @@ static void notify_test_thread(void) {
 //
 // Closes the load-bearing piece of R5-H F78. Without sched_set_notify_
 // enabled(true), ready() doesn't IPI; with it, ready() does.
+void test_sched_notify_idle_peer_smoke(void);
 void test_sched_notify_idle_peer_smoke(void) {
     if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
@@ -507,6 +513,7 @@ void test_sched_notify_idle_peer_smoke(void) {
 // scheduler.notify_disabled_no_ipi — when notify is disabled (default
 // during in-kernel tests), ready() does NOT send IPI to peers. Tests
 // that assume UP-like consumer-runs-on-readier semantics keep working.
+void test_sched_notify_disabled_no_ipi(void);
 void test_sched_notify_disabled_no_ipi(void) {
     if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
@@ -564,6 +571,7 @@ void test_sched_notify_disabled_no_ipi(void) {
 // scheduler.capacity_normalize_synthetic_dtb
 //   sched_capacity_normalize maps raw capacity-dmips-mhz (0 == not declared)
 //   to normalized [0, SCHED_CAPACITY_SCALE] capacities + the hetero verdict.
+void test_sched_capacity_normalize_synthetic_dtb(void);
 void test_sched_capacity_normalize_synthetic_dtb(void) {
     u32 out[DTB_MAX_CPUS];
 
@@ -623,6 +631,7 @@ void test_sched_capacity_normalize_synthetic_dtb(void) {
 //   CPU, leave a light task put, and not migrate a heavy task already on the
 //   biggest core?" util values are chosen far from the misfit boundary so the
 //   test is robust to the v1.0 placeholder threshold value.
+void test_sched_place_by_capacity_synthetic_dtb(void);
 void test_sched_place_by_capacity_synthetic_dtb(void) {
     // cpu0 = big (1024), cpu1 = little (512).
     u32 caps2[2] = { 1024, 512 };
@@ -664,6 +673,7 @@ void test_sched_place_by_capacity_synthetic_dtb(void) {
 //   for EVERY CPU and EVERY task -- this is the v1.0 behavior-preservation
 //   guarantee that ready() == ready_on(self) == the pre-#864 placement. Also
 //   pins that a CPU-pinned thread never migrates.
+void test_sched_select_target_cpu_homogeneous_is_prev(void);
 void test_sched_select_target_cpu_homogeneous_is_prev(void) {
     // QEMU virt / RPi declare no capacity-dmips-mhz -> homogeneous.
     TEST_EXPECT_EQ(sched_topology_hetero(), false,
@@ -698,6 +708,7 @@ void test_sched_select_target_cpu_homogeneous_is_prev(void) {
 //   future misfit-push both consume. Notify is disabled during tests, so a
 //   placed-on-a-parked-secondary thread sits still (deterministic) until
 //   removed. At -smp 1 the self-target path is exercised instead.
+void test_sched_ready_on_cross_cpu_enqueue(void);
 void test_sched_ready_on_cross_cpu_enqueue(void) {
     struct Thread *t = thread_create(kproc(), sched_test_thread_a);
     TEST_ASSERT(t != NULL, "thread_create failed");
@@ -748,6 +759,7 @@ void test_sched_ready_on_cross_cpu_enqueue(void) {
 //   (the per-CPU idle + best-effort IDLE work are never a cross-CPU kick
 //   reason); removal returns it to FALSE. thread_may_run_on (the inert affinity-
 //   ready gate) is exercised on the placement path by ready_on_cross_cpu_enqueue.
+void test_sched_cpu_surplus_for_kick(void);
 void test_sched_cpu_surplus_for_kick(void) {
     unsigned self = smp_cpu_idx_self();
 
@@ -787,6 +799,7 @@ void test_sched_cpu_surplus_for_kick(void) {
 //   band-IDLE thread is likewise not competition -- the predicate is
 //   cpu_has_surplus_for_kick, and band IDLE holds the pinned idle + at most
 //   best-effort work that the tick path serves at slice granularity.
+void test_sched_yield_fast_path_no_work(void);
 void test_sched_yield_fast_path_no_work(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree must be empty at test entry");
@@ -820,6 +833,7 @@ void test_sched_yield_fast_path_no_work(void) {
 //   one tick preemption drives). The rotation is the dispatch_smoke shape:
 //   the queued thread runs (counter increments), yields away, the caller
 //   resumes. Pre-#33 nothing but preemption drove this transition from EL0.
+void test_sched_yield_dispatches_queued_work(void);
 void test_sched_yield_dispatches_queued_work(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree must be empty at test entry");
@@ -862,6 +876,7 @@ void test_sched_yield_dispatches_queued_work(void) {
 //   high stale key tails the thread behind every fresh local yielder ->
 //   starvation (the I-17 / ARCH §8.2 "reinsert at current virtual time"
 //   violation). Pre-fix ready_on inserted the stale key verbatim.
+void test_sched_ready_on_clamps_stale_vd(void);
 void test_sched_ready_on_clamps_stale_vd(void) {
     const s64 STALE = (s64)1 << 40;   // far above any real test-time vd_counter
     unsigned self = smp_cpu_idx_self();
@@ -910,6 +925,7 @@ void test_sched_ready_on_clamps_stale_vd(void) {
 //   strictly-higher-priority (lower-number) band preempts; same band is EEVDF-
 //   fair (no wake-preempt). This is what enforces 8.3's "always serves the
 //   highest-priority band with runnable threads" ON THE WAKE PATH.
+void test_sched_wake_preempts_policy(void);
 void test_sched_wake_preempts_policy(void) {
     // A CPU running its idle yields to ANY real wake (the idle->real case),
     // regardless of the woken band.
@@ -946,6 +962,7 @@ void test_sched_wake_preempts_policy(void) {
 //   slice-expiry preempt would dispatch the placed thread / race the flag, like
 //   the clamp test above) + a clean baseline via the test-clear. Also pins the
 //   sched_mark_interactive gate: it is a no-op on a kproc (kernel) thread.
+void test_sched_wake_preempt_same_cpu(void);
 void test_sched_wake_preempt_same_cpu(void) {
     unsigned self = smp_cpu_idx_self();
 
@@ -1000,6 +1017,7 @@ void test_sched_wake_preempt_same_cpu(void) {
 // mask so no tick perturbs the reads (the counted IRQ-handler locks are
 // inc/dec-balanced within each handler, but masking makes the assertions
 // exact). The count is per-thread (Thread.preempt_count, #360).
+void test_spinlock_preempt_count_balance(void);
 void test_spinlock_preempt_count_balance(void) {
     irq_state_t s0 = spin_lock_irqsave(NULL);
     struct Thread *me = current_thread();
@@ -1041,6 +1059,7 @@ void test_spinlock_preempt_count_balance(void) {
 // consumed a pending flag (preempting the holder mid-hold -- the #359
 // deadlock ingredient), and the sample below runs strictly after a tick
 // return, so it always read clear.
+void test_sched_preempt_gate_defers_while_locked(void);
 void test_sched_preempt_gate_defers_while_locked(void) {
     spin_lock_t l = SPIN_LOCK_INIT;
 
@@ -1140,6 +1159,7 @@ static void kstack_probe_entry(void) {
     sched();
 }
 
+void test_thread_kstack_watermark_follows_the_frontier(void);
 void test_thread_kstack_watermark_follows_the_frontier(void) {
     g_kstack_probe_reached = 0;
     __atomic_store_n(&g_kstack_probe_done, 0u, __ATOMIC_RELAXED);
