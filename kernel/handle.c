@@ -155,7 +155,8 @@ static int handle_release_obj(enum kobj_kind kind, void *obj) {
         // listener:
         //   SRV_SERVICE_MAGIC — a service registry entry from create=post
         //     (devsrv_post_listener). Its lifetime is the poster Proc's
-        //     (tombstoned by exits() -> srv_proc_exit_notify, never freed),
+        //     (tombstoned by its last live thread out -> srv_proc_exit_notify,
+        //     never freed),
         //     NOT the handle's — closing the handle must not touch it. No-op.
         //   SRV_CONN_MAGIC — a SrvConn. Before stalk-3c a client connection
         //     was a KObj_Srv handle (the retired SYS_SRV_CONNECT); now the

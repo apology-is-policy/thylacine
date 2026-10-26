@@ -4476,8 +4476,9 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     cons_diag_line_emit(&dl);
 
     exits_note(name);
-    /* UNREACHABLE -- exits_note is noreturn (single-thread: sched; multi-
-       thread: thread_exit_self after the group cascade) */
+    /* UNREACHABLE -- exits_note is noreturn (the last live thread: sched;
+       otherwise thread_exit_self, after the group cascade or, when an exec
+       dooms this thread, alone) */
 }
 
 // #91: the string-only wrapper preserving the native Plan 9 exits(string)
@@ -4510,19 +4511,24 @@ void exits_note(const char *name) {
     exits_signalled(sig, name);
 }
 
-// What a Proc's death owes the registries that name it: its /srv services are
-// tombstoned and their backlogs drained to EOF (specs/corvus.tla
-// ServiceTombstone), its pending /cap grants dropped, and the weft shares the
-// kernel never claimed released with their I-30 pins (weft.tla
-// ShareBoundedByFlow). The last live thread runs it once, on either exit path,
-// in the RUNNING+ALIVE window before the handle close, so it is done before
-// the ZOMBIE a reaper waits for. Never earlier: a thread that is not the last
-// may leave a Proc that lives on, as a doomed thread leaves an exec's
-// (ARCH 7.3.3). Each takes only its own leaf lock, so it runs with no lock held
-// and enters no order with g_proc_table_lock.
-static void proc_exit_departures(struct Proc *p) {
+// What a Proc's death owes before the ZOMBIE a reaper waits for, run by the
+// last live thread once, on either exit path, in the RUNNING+ALIVE window.
+// Never earlier: a thread that is not the last may leave a Proc that lives on,
+// as a doomed thread leaves an exec's (ARCH 7.3.3). The Proc's /srv services
+// are tombstoned and their backlogs drained to EOF (specs/corvus.tla
+// ServiceTombstone) and its pending /cap grants dropped; then its handles close
+// (`close`); then the weft shares the kernel never claimed go with their I-30
+// pins (weft.tla ShareBoundedByFlow). The weft release follows the close, whose
+// first step quiesces the Proc's devices, because a pin can be a DMA or hostmem
+// Burrow's last reference (RW-7 R3-F1). The registries take only their own leaf
+// locks, so this runs with no lock held.
+static void proc_exit_last_out(struct Proc *p, bool close) {
     srv_proc_exit_notify(p);
     cap_proc_exit_notify(p);
+    if (close) {
+        exit_close_test_window();
+        proc_close_handles_at_exit(p);
+    }
     weft_share_release_owner(p);
 }
 
@@ -4584,9 +4590,9 @@ static void exits_term(int code, int sig, const char *msg) {
     // An exec by another thread holds the Proc the same way (ARCH 7.3.3): this
     // thread is doomed, and it leaves alone, as Linux's do_group_exit does
     // while group_exec_task is set; the Proc goes on into the new image. The
-    // claim is written under this lock. It is never the last live thread: the
-    // execer stays live until it swaps, and only a group death, read first
-    // here, ends a claim early.
+    // claim is written under this lock. Either way thread_exit_self never makes
+    // this thread the ZOMBIE without a group claim: the execer stays live until
+    // it swaps, and only a group death, read first here, ends a claim early.
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
         proc_exec_dooms(p, t)) {
         proc_threads_unlock(p, ts);
@@ -4642,11 +4648,7 @@ static void exits_term(int code, int sig, const char *msg) {
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
     proc_threads_unlock(p, ts);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
-    proc_exit_departures(p);
-    if (close) {
-        exit_close_test_window();
-        proc_close_handles_at_exit(p);
-    }
+    proc_exit_last_out(p, close);
     s = spin_lock_irqsave(&g_proc_table_lock);
 
     // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit, not
@@ -4790,11 +4792,7 @@ void thread_exit_self(void) {
         // cannot finish goes to the closer (ARCH 7.9.1 parts B and C). proc_free's
         // handle_table_free remains the fallback for orphan/rollback paths
         // (idempotent: p->handles is NULLed by the close).
-        proc_exit_departures(p);
-        if (p->handles) {
-            exit_close_test_window();
-            proc_close_handles_at_exit(p);
-        }
+        proc_exit_last_out(p, p->handles != NULL);
 
         irq_state_t g = spin_lock_irqsave(&g_proc_table_lock);
         // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit

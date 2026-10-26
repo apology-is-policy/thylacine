@@ -1609,13 +1609,14 @@ void test_proc_exec_claim_dooms_every_other_thread(void) {
 #define XC_UNSET      0x7fffffff
 
 enum xc_kind  { XC_SLEEPER, XC_DEATH_ONLY, XC_SPINNER, XC_DEAF, XC_EXITER, XC_TRAPPED,
-                XC_VFORK };
+                XC_GROUP_EXITER, XC_VFORK };
 enum xc_phase { XC_SETUP, XC_CLAIMING, XC_DONE, XC_FAILED };
 
 #define XC_SVC      "c5svc"
 #define XC_SVC_LEN  5
 
 void vfork_await_release_for_test(struct Proc *p, int child_pid);
+__attribute__((noreturn)) void sys_exit_group_for_test(u64 status);
 extern void srv_registry_reset(void);
 
 // The fixture each test sets before it forks.
@@ -1664,6 +1665,13 @@ static void xc_reset(void) {
     g_xc_live_at_claim = g_xc_count_after = -1;
     g_xc_held_in_place = g_xc_claim_owned = g_xc_stop_during = g_xc_stop_after = false;
     g_xc_cleared_at_swap = g_xc_cleared_at_abort = false;
+}
+
+// The unborn thread is disposed of by whichever side takes it first: the
+// child's failed setup or abandoned claim, the runner once the claim waits, or
+// xc_finish after a kill.
+static struct Thread *xc_take_unborn(void) {
+    return __atomic_exchange_n(&g_xc_unborn, NULL, __ATOMIC_ACQ_REL);
 }
 
 static int xc_never(void *arg) {
@@ -1718,10 +1726,12 @@ static void xc_peer_entry(void *arg) {
         break;
     case XC_EXITER:
     case XC_TRAPPED:
-        // Woken to die, the thread ends itself instead: an exit call, or a death
-        // by a trap.
+    case XC_GROUP_EXITER:
+        // Woken to die, the thread ends itself instead: an exit call, a death by
+        // a trap, or an exit_group.
         g_xc_rc[i] = sleep(&g_xc_rendez[i], xc_never, NULL);
         if (g_xc_kind[i] == XC_EXITER) exits("c5-peer");
+        if (g_xc_kind[i] == XC_GROUP_EXITER) sys_exit_group_for_test(3);
         exits_note(NOTE_NAME_SNARE_ILL);
     case XC_VFORK: {
         // A vfork parent parks until its child gives back the space they share.
@@ -1811,9 +1821,9 @@ static void xc_main_entry(void *arg) {
         g_xc_held_in_place = held;
     }
     if (!ok) {
-        // The runner frees the unborn thread only once the child claims.
-        if (g_xc_unborn) thread_free(g_xc_unborn);
-        g_xc_unborn = NULL;
+        // Freed by a live creator, it cannot be the Proc's last live thread.
+        struct Thread *u = xc_take_unborn();
+        if (u) thread_free(u);
         if (nas) addrspace_unref(nas);
         __atomic_store_n(&p->job_stop_req, 0u, __ATOMIC_RELEASE);
         // A vfork peer still parked leaves its park once its child is gone.
@@ -1854,6 +1864,8 @@ static void xc_main_entry(void *arg) {
         exits("ok");
     }
     // Abandoned: group death ended the wait, and the execer dies with the group.
+    struct Thread *u = xc_take_unborn();
+    if (u) thread_free(u);
     addrspace_unref(nas);
     s = proc_threads_lock(p);
     g_xc_cleared_at_abort = p->exec_task == NULL;
@@ -1903,6 +1915,12 @@ static bool xc_claim_held(void) {
 static int xc_finish(int child_pid) {
     TEST_YIELD_UNTIL_SOFT(xc_phase() == XC_DONE || xc_phase() == XC_FAILED);
     if (xc_phase() != XC_DONE && xc_phase() != XC_FAILED) xc_kill();
+    // An unborn thread nobody took counts live, so the killed Proc would never
+    // reach ZOMBIE. Readied, it meets the group death at its first die-check and
+    // may leave as the last thread; freed, it could take the live count to zero
+    // with no thread left to publish the ZOMBIE.
+    struct Thread *u = xc_take_unborn();
+    if (u) ready(u);
     __atomic_store_n(&g_xc_release, true, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xc_vfork_release, true, __ATOMIC_RELEASE);
     int status = -1;
@@ -1978,12 +1996,8 @@ void test_proc_exec_claim_woken_by_an_abandoned_create(void) {
     int child_pid = rfork(RFPROC, xc_main_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     bool waited = xc_claim_held();
-    // The runner owns the unborn thread once the child has claimed.
-    int phase = xc_phase();
-    if ((phase == XC_CLAIMING || phase == XC_DONE) && g_xc_unborn) {
-        thread_free(g_xc_unborn);
-        g_xc_unborn = NULL;
-    }
+    struct Thread *u = waited ? xc_take_unborn() : NULL;
+    if (u) thread_free(u);
     int status = xc_finish(child_pid);
     TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a never-run thread and a new address space");
     TEST_ASSERT(g_xc_held_in_place, "the never-run thread counted live");
@@ -2018,26 +2032,29 @@ void test_proc_exec_claim_does_not_hold_for_a_stop(void) {
     TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
 }
 
-// A doomed thread that ends itself -- an exit call, or a death by a trap --
-// leaves alone, as Linux's do_group_exit does while group_exec_task is set
-// (ARCH 7.3.3): the claim still returns and the Proc goes on into the new
-// image with its /srv service posted. The service goes at the real last exit.
+// A doomed thread that ends itself -- an exit call, a death by a trap, or an
+// exit_group -- leaves alone, as Linux's do_group_exit does while
+// group_exec_task is set (ARCH 7.3.3): the claim still returns and the Proc
+// goes on into the new image with its /srv service posted. The service goes at
+// the real last exit.
 void test_proc_exec_claim_survives_a_doomed_exit(void) {
     xc_reset();
-    g_xc_npeers  = 2;
+    g_xc_npeers  = 3;
     g_xc_kind[0] = XC_EXITER;
     g_xc_kind[1] = XC_TRAPPED;
+    g_xc_kind[2] = XC_GROUP_EXITER;
     g_xc_post    = true;
     srv_registry_reset();
     int child_pid = rfork(RFPROC, xc_main_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     int status = xc_finish(child_pid);
-    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a service posted, two peers in place and a new address space");
-    TEST_ASSERT(g_xc_held_in_place, "with no claim both peers slept on");
+    TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a service posted, three peers in place and a new address space");
+    TEST_ASSERT(g_xc_held_in_place, "with no claim the three peers slept on");
     TEST_EXPECT_EQ(g_xc_claim_rc, 0, "a doomed thread's own exit did not end the exec");
     TEST_EXPECT_EQ(g_xc_live_at_claim, 1, "the claim returned once the execer was the only live thread");
     TEST_EXPECT_EQ(g_xc_rc[0], SLEEP_INTR, "the exiting peer was woken to die before its exits()");
     TEST_EXPECT_EQ(g_xc_rc[1], SLEEP_INTR, "the trapped peer was woken to die before its trap");
+    TEST_EXPECT_EQ(g_xc_rc[2], SLEEP_INTR, "the exit_group peer was woken to die before its exit_group");
     TEST_ASSERT(g_xc_svc_live_at_claim, "a doomed thread's exit left the Proc's service posted");
     TEST_EXPECT_EQ(g_xc_count_after, 1, "the new image starts alone");
     TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the new image's own exit decided the status");
@@ -2159,11 +2176,8 @@ void test_proc_exec_claim_kills_a_thread_readied_after_it(void) {
     int child_pid = rfork(RFPROC, xc_main_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     bool waited = xc_claim_held();
-    // The runner owns the admitted thread once the child has claimed.
-    if (waited && g_xc_unborn) {
-        ready(g_xc_unborn);
-        g_xc_unborn = NULL;
-    }
+    struct Thread *u = waited ? xc_take_unborn() : NULL;
+    if (u) ready(u);
     int status = xc_finish(child_pid);
     TEST_ASSERT(xc_phase() != XC_FAILED, "setup: an admitted user thread and a new address space");
     TEST_ASSERT(g_xc_held_in_place, "the admitted thread counted live");

@@ -165,8 +165,8 @@ extern struct Dev devcap;
 // table. Tests + diagnostics; takes the table lock.
 int cap_pending_count(void);
 
-// cap_proc_exit_notify — called from exits() for every exiting Proc.
-// Drops any pending grant targeting `p` (matched by stripes). A Proc
+// cap_proc_exit_notify — called by every Proc's last live thread out
+// (kernel/proc.c proc_exit_last_out), on either exit path. Drops any pending grant targeting `p` (matched by stripes). A Proc
 // that never had a pending grant is a cheap no-op scan. Defense in
 // depth: stripes are fresh per Proc (immutable, never recycled while
 // the Proc lives), so a grant for an exited Proc cannot accidentally

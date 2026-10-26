@@ -122,8 +122,14 @@ static void sys_exit_group_handler(u64 status) {
         // itself, ARCH 7.3.1). Acquire it around the call and RELEASE before
         // thread_exit_self -- thread_exit_self re-acquires it for the last-out
         // ZOMBIE transition (spinlocks are not recursive).
+        //
+        // An exec by another thread holds the Proc (ARCH 7.3.3): this thread is
+        // doomed and leaves alone, as Linux's do_group_exit does while
+        // group_exec_task is set. The claim is written under this lock, so the
+        // read is exact against it.
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate_code(p, code, msg);
+        if (!proc_exec_dooms(p, t))
+            proc_group_terminate_code(p, code, msg);
         proc_table_lock_release(s);
     }
     // Exit the caller (a Thread of p). thread_exit_self validates current /
@@ -132,6 +138,15 @@ static void sys_exit_group_handler(u64 status) {
     // Unreachable -- thread_exit_self is noreturn.
     extinction("sys_exit_group returned");
 }
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): exit_group
+// from a kernel-entry thread of the Proc under test.
+__attribute__((noreturn)) void sys_exit_group_for_test(u64 status);
+void sys_exit_group_for_test(u64 status) {
+    sys_exit_group_handler(status);
+}
+#endif
 
 // =============================================================================
 // SYS_PUTS — write `len` bytes to UART.

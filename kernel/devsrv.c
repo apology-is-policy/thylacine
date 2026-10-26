@@ -688,11 +688,13 @@ static int accept_cond_is_ready(void *arg) {
     return (svc->backlog_count > 0) || (svc->state != SRV_STATE_LIVE);
 }
 
-// An accept is an identity pin, not merely a waiter: exits_code can tombstone
-// a service BEFORE its peer threads leave their syscalls. Under reg->lock,
-// validate the caller, exclude a second waiter on the single-waiter Rendez,
-// and prevent rebind/recycle until this call unwinds. Sleep returns on death;
-// every exit below releases the pin before the EL0-return die check.
+// An accept is an identity pin, not merely a waiter. The tombstone comes only
+// from the poster's last live thread out, after every accepter (a thread of
+// the poster) has unwound; the pin keeps that true without relying on the
+// order. Under reg->lock, validate the caller, exclude a second waiter on the
+// single-waiter Rendez, and prevent rebind/recycle until this call unwinds.
+// Sleep returns on death; every exit below releases the pin before the
+// EL0-return die check.
 struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes) {
     if (!svc || svc->magic != SRV_SERVICE_MAGIC || !svc->reg || !poster_stripes)
         return NULL;
