@@ -335,8 +335,10 @@ Tids and pids are one id space since thread-model C6: `proc_id_alloc`'s
 64-bit counter ([[sub-kernel-proc]]). An id is never reused, so the counter is
 cumulative rather than a count of live threads, and an unprivileged
 create-and-join loop walks it toward `PROC_ID_LAST` (2^31 - 1); past it every
-draw answers -1, and 64 bits mean no number of refused draws wraps it back
-onto an id a live Proc or thread holds. `thread_new` claims the tid first,
+draw answers -1. A draw is the PAYER's: a thread whose kernel memory a user
+Proc pays stops at `PROC_ID_USER_LAST`, the TCB's tail (the last 2^20 ids)
+stays open to exempt payers, and a refused draw leaves the counter unmoved, so
+no user's churn spends the ids the TCB spawns with (operator vote 10). `thread_new` claims the tid first,
 before anything is allocated, and returns NULL on a spent space, which both
 spawn arms report as EAGAIN (`proc_id_space_spent`), a system limit, rather
 than the ENOMEM of a pool refusal or a short allocator ([[inv-i32]]); only the

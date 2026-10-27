@@ -5353,7 +5353,7 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
     struct Thread *nt = thread_alloc_user(p, entry_va, sp_va, arg_va, tls_va);
-    if (!nt) return proc_id_space_spent() ? -T_E_AGAIN : -T_E_NOMEM;
+    if (!nt) return proc_id_space_spent(proc_resource_exempt(p)) ? -T_E_AGAIN : -T_E_NOMEM;
     // The gate (ARCH 7.3.1): the claim and the cap again, and the link, in one
     // threads_lock hold -- so the cap is exact and no thread joins a group
     // whose claim is set (specs/thread_reap.tla Admit).
@@ -5502,7 +5502,7 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // CLONE_THREAD rather than a fork: shared address space, one pid, one ASID
     // (I-31).
     struct Thread *nt = thread_alloc_forked(p, ctx, child_sp, child_tls);
-    if (!nt) return proc_id_space_spent() ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
+    if (!nt) return proc_id_space_spent(proc_resource_exempt(p)) ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
     if (!proc_thread_admit(p, nt)) {
         thread_free_unlinked(nt);
         return -(s64)T_E_AGAIN;

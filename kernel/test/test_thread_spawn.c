@@ -160,6 +160,7 @@ void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
 void test_proc_ids_are_one_space(void);
+void test_thread_id_space_keeps_a_tcb_tail(void);
 void test_proc_exec_from_a_peer_takes_the_pid(void);
 void test_thread_kernel_memory_charged_to_the_pool(void);
 void test_thread_pool_refuses_users_keeps_tcb(void);
@@ -1344,7 +1345,7 @@ static void srd_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
     g_srd_exempt    = proc_resource_exempt(p);
-    g_srd_tid_spent = proc_id_space_spent();
+    g_srd_tid_spent = proc_id_space_spent(true);
     irq_state_t s = proc_table_lock_acquire();
     proc_group_terminate(p, 0, "c0-dying");
     proc_table_lock_release(s);
@@ -1439,7 +1440,7 @@ static void tps_entry(void *arg) {
     // sleeps, so the window stays short.
     u64 saved = proc_id_counter_swap_for_test(PROC_ID_LAST);
     struct Thread *last    = thread_create_with_arg(p, c0_never_entry, NULL);
-    g_tps_spent            = proc_id_space_spent();
+    g_tps_spent            = proc_id_space_spent(true);
     struct Thread *refused = thread_create_with_arg(p, c0_never_entry, NULL);
     g_tps_spawn_rc         = sys_thread_spawn_for_test(C0_USER_ENTRY, C0_USER_SP, 0, 0, 0);
     struct Proc *q         = proc_alloc();
@@ -1551,9 +1552,103 @@ void test_proc_ids_are_one_space(void) {
     TEST_ASSERT(g_ios_kproc_distinct, "no two kernel threads share an id");
 }
 
+// The id space's last PROC_ID_TCB_TAIL ids are the TCB's (ARCH 7.3.4): a user's
+// churn spends the ids below them and no more. Each window parks the counter
+// and restores it before anything can sleep.
+static volatile int  g_ttl_a_last, g_ttl_x, g_ttl_q, g_ttl_g_rc_ok, g_ttl_g_rc_tail;
+static volatile u64  g_ttl_counter;
+static volatile bool g_ttl_made, g_ttl_a_refused, g_ttl_user_spent, g_ttl_tcb_spent;
+static volatile bool g_ttl_g_user, g_ttl_g_reaped;
+
+static void ttl_leaf(void *arg) {
+    (void)arg;
+    exits("ok");
+}
+
+static void ttl_user_entry(void *arg) {
+    (void)arg;
+    struct Proc *g = current_thread()->proc;
+    proc_apply_identity(g, 1000u, 1000u, NULL, 0);
+    g_ttl_g_user = !proc_resource_exempt(g);
+    int st = -1;
+    // The control: a user may fork, so the refusal below is the id space's.
+    g_ttl_g_rc_ok = rfork(RFPROC, ttl_leaf, NULL);
+    if (g_ttl_g_rc_ok > 0) (void)wait_pid(&st);
+    u64 saved = proc_id_counter_swap_for_test(PROC_ID_USER_LAST + 1u);
+    g_ttl_g_rc_tail = rfork(RFPROC, ttl_leaf, NULL);
+    proc_id_counter_swap_for_test(saved);
+    if (g_ttl_g_rc_tail > 0) (void)wait_pid(&st);
+    exits("ok");
+}
+
+static void ttl_entry(void *arg) {
+    (void)arg;
+    struct Proc *S = current_thread()->proc;
+    struct Proc *A = proc_alloc();
+    g_ttl_made = A && !proc_resource_exempt(A) && proc_resource_exempt(S);
+    if (!g_ttl_made) exits("setup");
+    struct Thread *a0 = thread_create_with_arg(A, c0_never_entry, NULL);  // takes A's pid
+    u64 saved = proc_id_counter_swap_for_test(PROC_ID_USER_LAST);
+    struct Thread *a1 = thread_create_with_arg(A, c0_never_entry, NULL);
+    struct Thread *a2 = thread_create_with_arg(A, c0_never_entry, NULL);
+    struct Thread *a3 = thread_create_with_arg(A, c0_never_entry, NULL);
+    g_ttl_counter    = proc_id_counter_swap_for_test(PROC_ID_USER_LAST + 1u);
+    g_ttl_user_spent = proc_id_space_spent(false);
+    g_ttl_tcb_spent  = proc_id_space_spent(true);
+    struct Thread *x = thread_create_with_arg(S, c0_never_entry, NULL);
+    struct Proc   *q = proc_alloc();
+    proc_id_counter_swap_for_test(saved);
+    g_ttl_a_last    = a1 ? a1->tid : -1;
+    g_ttl_a_refused = !a2 && !a3;
+    g_ttl_x         = x ? x->tid : -1;
+    g_ttl_q         = q ? q->pid : -1;
+    if (a3) thread_free(a3);
+    if (a2) thread_free(a2);
+    if (a1) thread_free(a1);
+    if (a0) thread_free(a0);
+    if (x)  thread_free(x);
+    if (q) {
+        q->state = PROC_STATE_ZOMBIE;
+        proc_free(q);
+    }
+    A->state = PROC_STATE_ZOMBIE;
+    proc_free(A);
+    int gpid = rfork(RFPROC, ttl_user_entry, NULL);
+    int st = -1;
+    g_ttl_g_reaped = gpid > 0 && wait_pid(&st) == gpid && st == 0;
+    exits("ok");
+}
+
+void test_thread_id_space_keeps_a_tcb_tail(void) {
+    g_ttl_a_last = g_ttl_x = g_ttl_q = g_ttl_g_rc_ok = g_ttl_g_rc_tail = 0;
+    g_ttl_counter = 0;
+    g_ttl_made = g_ttl_a_refused = g_ttl_user_spent = g_ttl_tcb_spent = false;
+    g_ttl_g_user = g_ttl_g_reaped = false;
+    int child_pid = rfork(RFPROC, ttl_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(g_ttl_made, "a user Proc beside the exempt child");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_EXPECT_EQ(g_ttl_a_last, (int)PROC_ID_USER_LAST, "a user's thread takes the last user id");
+    TEST_ASSERT(g_ttl_a_refused, "and the next two are refused");
+    TEST_EXPECT_EQ(g_ttl_counter, (u64)PROC_ID_USER_LAST + 1u,
+        "a refused draw leaves the counter where it was");
+    TEST_ASSERT(g_ttl_user_spent, "the space reads spent for a user");
+    TEST_ASSERT(!g_ttl_tcb_spent, "but not for the TCB");
+    TEST_EXPECT_EQ(g_ttl_x, (int)PROC_ID_USER_LAST + 1, "the TCB's thread draws from the tail");
+    TEST_EXPECT_EQ(g_ttl_q, (int)PROC_ID_USER_LAST + 2, "so does a Proc the TCB creates");
+    TEST_ASSERT(g_ttl_g_reaped, "the user Proc ran and was reaped");
+    TEST_ASSERT(g_ttl_g_user, "and ran as a user");
+    TEST_ASSERT(g_ttl_g_rc_ok > 0, "a user's fork is served below the tail");
+    TEST_EXPECT_EQ(g_ttl_g_rc_tail, -1, "and refused once only the tail is left");
+}
+
 static volatile int  g_xp_pid, g_xp_main_tid, g_xp_peer_tid, g_xp_tid_after, g_xp_claim_rc;
 static volatile int  g_xp_count_after, g_xp_holders_before, g_xp_holders_after;
+static volatile int  g_xp_holders_doomed;
 static volatile bool g_xp_holder_was_main, g_xp_holder_is_self, g_xp_main_left;
+static volatile bool g_xp_doomed_holder_main;
 
 static void xp_peer_entry(void *arg) {
     (void)arg;
@@ -1593,9 +1688,22 @@ static void xp_main_entry(void *arg) {
     ready(peer);
     // The peer's claim dooms this thread, which meets it at the die-check an
     // EL0 thread takes on its way back to user mode and leaves alone there.
+    // Once the claim is set and before this thread dies, the pid still names
+    // this thread and only it: an execer that took the pid at the claim (the
+    // spec's BUGGY_PID_AT_CLAIM) would make two holders here.
     u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    // The die-check runs only once the claim is seen (it cannot doom this
+    // thread before), so the reading is never skipped by a claim landing
+    // between the two.
     while (timer_now_ns() < deadline) {
-        el0_return_die_check();
+        if (__atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE)) {
+            if (g_xp_holders_doomed < 0) {
+                struct Thread *h = NULL;
+                g_xp_holders_doomed     = pid_holders(p, &h);
+                g_xp_doomed_holder_main = h == self;
+            }
+            el0_return_die_check();
+        }
         sched();
     }
     g_xp_main_left = true;
@@ -1605,7 +1713,9 @@ static void xp_main_entry(void *arg) {
 void test_proc_exec_from_a_peer_takes_the_pid(void) {
     g_xp_pid = g_xp_main_tid = g_xp_peer_tid = g_xp_tid_after = g_xp_claim_rc = -1;
     g_xp_count_after = g_xp_holders_before = g_xp_holders_after = -1;
+    g_xp_holders_doomed = -1;
     g_xp_holder_was_main = g_xp_holder_is_self = g_xp_main_left = false;
+    g_xp_doomed_holder_main = false;
     int child_pid = rfork(RFPROC, xp_main_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     int status = -1;
@@ -1618,6 +1728,8 @@ void test_proc_exec_from_a_peer_takes_the_pid(void) {
     TEST_ASSERT(g_xp_holder_was_main, "and that thread is main");
     TEST_EXPECT_EQ(g_xp_claim_rc, 0, "the peer's claim held the Proc");
     TEST_ASSERT(!g_xp_main_left, "the claim doomed main before its deadline");
+    TEST_EXPECT_EQ(g_xp_holders_doomed, 1, "while the claim holds, the pid names one thread");
+    TEST_ASSERT(g_xp_doomed_holder_main, "and that thread is still main");
     TEST_EXPECT_EQ(g_xp_count_after, 1, "the new image starts as the execer alone");
     TEST_EXPECT_EQ(g_xp_tid_after, child_pid, "the execer took the pid as its tid");
     TEST_EXPECT_EQ(g_xp_holders_after, 1, "the pid names one thread on the list");

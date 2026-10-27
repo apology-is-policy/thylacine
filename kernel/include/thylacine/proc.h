@@ -1586,11 +1586,16 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget);
 // reused, except that an exec moves the pid to the execer. -1 once the space
 // is spent: ids end at PROC_ID_LAST, below 2^31, and a refusal is the caller's
 // to report, never an extinction (I-32). 0 is kproc's and its boot thread's,
-// PROC_ID_INIT is init's (rfork_init); the draws start after it.
-#define PROC_ID_INIT 1
-#define PROC_ID_LAST 0x7fffffffu
-int  proc_id_alloc(void);
-bool proc_id_space_spent(void);
+// PROC_ID_INIT is init's (rfork_init); the draws start after it. The last
+// PROC_ID_TCB_TAIL ids are drawn only for the TCB (`exempt`: a creator or a
+// thread's payer that proc_resource_exempt), so a user's churn spends at most
+// the ids below them and the TCB can still spawn (ARCH 7.3.4).
+#define PROC_ID_INIT      1
+#define PROC_ID_LAST      0x7fffffffu
+#define PROC_ID_TCB_TAIL  0x100000u
+#define PROC_ID_USER_LAST (PROC_ID_LAST - PROC_ID_TCB_TAIL)
+int  proc_id_alloc(bool exempt);
+bool proc_id_space_spent(bool exempt);
 
 // Release a Proc descriptor. Caller must ensure thread_count == 0
 // (no live threads) and state == ZOMBIE (or post-reap path). Extincts

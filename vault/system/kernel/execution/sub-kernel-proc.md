@@ -95,7 +95,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a pid drawn from the id space + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
 | `rfork_init` | `RFPROC` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
-| `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1; nothing is reused |
+| `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1, a user's past `PROC_ID_USER_LAST` (the last 2^20 ids are the TCB's, vote 10), and a refused draw leaves the counter unmoved; nothing is reused |
 | `proc_spawn_thread_budget_resolve` | the spawn's thread budget (ARCH 7.3.5): 0 inherits the parent's; past `proc_thread_budget_hard_max()` refused; at or below the parent's own allowed; above it only with `PROC_FLAG_MAY_RAISE_THREAD_BUDGET`. 0 means refused |
 | `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
@@ -192,8 +192,11 @@ note queue have all succeeded, so a rolled-back allocation never sparsifies
 either space (R5-H F89's discipline, extended to the tag space). The pid is
 drawn from the id space Procs and threads share (`proc_id_alloc`, thread-model
 C6: a main thread's tid is its pid, [[sub-kernel-thread]]), a 64-bit
-fetch-add whose draws past `PROC_ID_LAST` answer -1, so no number of refused
-draws wraps it back. Ids are never recycled (a session's identity leans on
+counter advanced by compare-and-swap only when the draw is granted: past
+`PROC_ID_LAST` every draw answers -1, and a user's (`exempt` false: the
+creator, `parent` at rfork, is not the TCB) stops `PROC_ID_TCB_TAIL` (2^20)
+short of it, so a user's churn, refused or not, never spends the ids the TCB
+spawns with (operator vote 10). Ids are never recycled (a session's identity leans on
 it), so at the end of the space `proc_alloc` refuses through the same
 rollback as any other failure, rather than extincting or wrapping onto the -1
 sentinel ([[inv-i32]]). Draws start at 2: init takes 1 through `rfork_init`,

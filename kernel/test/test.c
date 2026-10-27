@@ -1014,6 +1014,7 @@ void test_thread_kstack_create_free_cost(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
 void test_proc_ids_are_one_space(void);
+void test_thread_id_space_keeps_a_tcb_tail(void);
 void test_proc_exec_from_a_peer_takes_the_pid(void);
 void test_thread_kernel_memory_charged_to_the_pool(void);
 void test_thread_pool_refuses_users_keeps_tcb(void);
@@ -3306,6 +3307,7 @@ struct test_case g_tests[] = {
     { "proc.spawn_refused_in_dying_proc",       test_proc_spawn_refused_in_dying_proc,       false, NULL },
     { "thread.tid_and_pid_spaces_refuse_when_spent", test_thread_tid_and_pid_spaces_refuse_when_spent, false, NULL },
     { "proc.ids_are_one_space",                test_proc_ids_are_one_space,                false, NULL },
+    { "thread.id_space_keeps_a_tcb_tail",      test_thread_id_space_keeps_a_tcb_tail,      false, NULL },
     { "proc.exec_from_a_peer_takes_the_pid",   test_proc_exec_from_a_peer_takes_the_pid,   false, NULL },
     { "thread.kernel_memory_charged_to_the_pool", test_thread_kernel_memory_charged_to_the_pool, false, NULL },
     { "thread.pool_refuses_users_keeps_tcb",   test_thread_pool_refuses_users_keeps_tcb,   false, NULL },

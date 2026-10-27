@@ -73,17 +73,18 @@ u64 thread_free_oncpu_waits(void) {
 }
 
 // The tid a new thread of `proc` is born with, or -1 once the id space is
-// spent. Procs and threads share one id space (proc_id_alloc) and a Proc's
+// spent for its payer (`exempt`: the TCB's tail is open to it). Procs and
+// threads share one id space (proc_id_alloc) and a Proc's
 // first thread takes the pid, so a main thread's tid is its pid (ARCH 7.3.4);
 // every later thread draws. The first create to set PROC_FLAG_MAIN_TID wins
 // the pid, so it goes to exactly one thread even if two creates race. kproc's
 // threads always draw: its 0 is the boot thread's.
-static int thread_id_for(struct Proc *proc) {
+static int thread_id_for(struct Proc *proc, bool exempt) {
     if (proc != kproc() &&
         !(__atomic_fetch_or(&proc->proc_flags, PROC_FLAG_MAIN_TID, __ATOMIC_RELAXED) &
           PROC_FLAG_MAIN_TID))
         return proc->pid;
-    return proc_id_alloc();
+    return proc_id_alloc(exempt);
 }
 
 // The thread list and its counts live under the Proc's own threads_lock
@@ -406,7 +407,7 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     // it has no portable per-thread kstack, so try_steal must never
     // migrate it (sched.c, audit F2 / I-21).
     t->magic  = THREAD_MAGIC;
-    t->tid    = proc_id_alloc();
+    t->tid    = proc_id_alloc(true);
     if (t->tid < 0) extinction("thread_init: id space spent at boot");
     t->state  = THREAD_RUNNING;
     t->proc   = kproc();
@@ -459,7 +460,7 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
     // kstack_base stays NULL (KP_ZERO) -- runs on the dedicated BSS stack, owns
     // no per-thread kstack (thread_free's free_pages is gated on kstack_base).
     t->magic  = THREAD_MAGIC;
-    t->tid    = proc_id_alloc();
+    t->tid    = proc_id_alloc(true);
     if (t->tid < 0) extinction("thread_create_bootcpu_idle: id space spent at boot");
     t->state  = THREAD_RUNNABLE;           // ready()-able by sched_install_bootcpu_idle
     t->proc   = kproc();
@@ -496,7 +497,7 @@ _Static_assert(THREAD_POOL_PAGES <= 255, "Thread.pool_pages is a u8");
 static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
     // The tid first: a spent id space refuses before anything is allocated
     // (one a later failure burns is skipped, never reused).
-    int tid = thread_id_for(proc);
+    int tid = thread_id_for(proc, proc_resource_exempt(payer));
     if (tid < 0) return NULL;
 
     u32 pool = (payer == kproc()) ? 0u : THREAD_POOL_PAGES;

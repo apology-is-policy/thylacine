@@ -85,9 +85,9 @@ static struct Proc       *g_kproc;
 // the lock-free accessor proc_init_proc() pairs acquire with the
 // store-release.
 static struct Proc       *g_init_proc;
-// The one id space Procs and threads draw from (proc_id_alloc). 64 bits, so
-// no number of refused draws past the end can wrap it back into ids that live
-// Procs or threads still hold.
+// The one id space Procs and threads draw from (proc_id_alloc): the next id
+// to hand out. A refused draw leaves it where it is, and it never moves past
+// PROC_ID_LAST + 1.
 static u64                g_next_id;
 static bool               g_init_id_taken;
 static u64                g_proc_created;
@@ -376,14 +376,22 @@ u32 proc_default_thread_budget(void) {
 // thread; session_hangup_cb's isolation leans on it), so the counter is
 // cumulative and a spawn or create/join loop walks it toward the end of the
 // positive ints in hours; spent is a refusal the creator reports, never an
-// extinction (I-32).
-int proc_id_alloc(void) {
-    u64 id = __atomic_fetch_add(&g_next_id, 1u, __ATOMIC_RELAXED);
-    return id > PROC_ID_LAST ? -1 : (int)id;
+// extinction (I-32). A user's draw stops PROC_ID_TCB_TAIL short of the end
+// and leaves the counter unmoved when refused, so no churn of a user's can
+// spend the ids the TCB spawns with (ARCH 7.3.4).
+int proc_id_alloc(bool exempt) {
+    u64 last = exempt ? PROC_ID_LAST : PROC_ID_USER_LAST;
+    u64 id = __atomic_load_n(&g_next_id, __ATOMIC_RELAXED);
+    do {
+        if (id > last) return -1;
+    } while (!__atomic_compare_exchange_n(&g_next_id, &id, id + 1u, true,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return (int)id;
 }
 
-bool proc_id_space_spent(void) {
-    return __atomic_load_n(&g_next_id, __ATOMIC_RELAXED) > PROC_ID_LAST;
+bool proc_id_space_spent(bool exempt) {
+    return __atomic_load_n(&g_next_id, __ATOMIC_RELAXED) >
+           (exempt ? PROC_ID_LAST : PROC_ID_USER_LAST);
 }
 
 #ifdef KERNEL_TESTS
@@ -396,14 +404,18 @@ u64 proc_id_counter_swap_for_test(u64 v) {
 }
 #endif
 
-static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id);
+static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id,
+                                  bool exempt);
 
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
-    return proc_alloc_id(share, page_budget, 0);
+    return proc_alloc_id(share, page_budget, 0,
+                         proc_resource_exempt(current_thread()->proc));
 }
 
-// `id` 0 draws the pid from the id space; PROC_ID_INIT is init's, taken once.
-static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id) {
+// `id` 0 draws the pid from the id space, as a TCB creator's draw when
+// `exempt`; PROC_ID_INIT is init's, taken once.
+static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id,
+                                  bool exempt) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
@@ -510,7 +522,7 @@ static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int 
     // R6-A F107: the public PID type stays signed (`int`) so -1 remains the
     // error sentinel. A spent id space is a refusal through the same rollback
     // as any other failure here.
-    int pid = id ? id : proc_id_alloc();
+    int pid = id ? id : proc_id_alloc(exempt);
     if (pid < 0) {
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
@@ -1614,7 +1626,8 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // so the parameter only governs the case that would otherwise be wrong.
     struct Proc *child =
         proc_alloc_id(cloned ? cloned : ((flags & RFMEM) ? parent->as : NULL),
-                      parent->page_budget, init ? PROC_ID_INIT : 0);
+                      parent->page_budget, init ? PROC_ID_INIT : 0,
+                      proc_resource_exempt(parent));
     if (cloned) addrspace_unref(cloned);   // hand sole ownership to the child
     if (!child) return -1;
 
@@ -5250,9 +5263,10 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         // The claim ends with the old image: nothing is left for it to doom,
         // and the new image may spawn. The new image's main thread is this
         // one, so it takes the pid as its tid (ARCH 7.3.4); its old tid is
-        // retired. The old main is freed by now (thread_count is 1), so the
-        // pid names one thread on the list, and every reader of a peer's tid
-        // walks the list under this lock (thread_reap.tla PidNamesOne).
+        // retired. The old main has left the list (thread_count is 1; its
+        // free may still be running on its reaper's CPU), so the pid names one
+        // thread ON THE LIST, and every lookup of a thread by tid walks the
+        // list under this lock (thread_reap.tla PidNamesOne).
         if (alone) {
             __atomic_store_n(&p->exec_task, NULL, __ATOMIC_RELEASE);
             self->tid = p->pid;
