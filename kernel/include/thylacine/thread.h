@@ -268,7 +268,12 @@ struct Thread {
     // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
     // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
     u8                 caught_wait;
-    u8                 _pad_in_handler[5];   // explicit 8-byte alignment
+    // The user-pool pages this thread's kernel memory is charged as (ARCH
+    // 7.3.5): THREAD_POOL_PAGES, or 0 for a kproc thread that is the reserve's.
+    // Set at create, before anything can free the thread; returned once, by
+    // thread_destroy. Carved from in_handler's pad -- no size change.
+    u8                 pool_pages;
+    u8                 _pad_in_handler[4];   // explicit 8-byte alignment
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;

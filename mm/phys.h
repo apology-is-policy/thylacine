@@ -91,6 +91,14 @@ u32  capacity_reserve_pages(void);  // the TCB reserve
 // the charge. NULL, with nothing charged, when the pool or the buddy refuses.
 struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt);
 
+// The kernel memory a user Proc's existence costs that is not a user page (a
+// thread's kernel stack and slot, ARCH 7.3.5): charged to the same pool, with
+// the same bound and the same reclaim under pressure, by its owner, who keeps
+// the count and returns it exactly once. false, with nothing charged, when the
+// pool refuses. Same calling context as alloc_user_pages.
+bool capacity_charge(u32 npages, bool exempt);
+void capacity_uncharge(u32 npages);
+
 // The reclaim step under pressure (B-1a' audit F8): when a NON-exempt
 // allocation would take the pool past its bound, alloc_user_pages calls the
 // registered function with the pages it needs and retries the charge if it
