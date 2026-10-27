@@ -17,6 +17,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/fault_test.h>
 
 // ---------------------------------------------------------------------------
 // canary_smash — write past stack-array bounds; canary check fires.

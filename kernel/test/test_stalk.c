@@ -1947,8 +1947,6 @@ void test_stalk_union_xskip(void) {
 // declared order, 1-based ordinal cookies, and correct paginated resume.
 // =============================================================================
 
-extern s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
-                             u64 in_ordinal);
 
 // Parse the idx-th 9P2000.L dirent in buf[0..len). Returns its byte span (> 0)
 // or 0 if idx is past the last complete entry. Fills qid_path / cookie / name.
@@ -2144,9 +2142,6 @@ void test_stalk_union_readdir_nontagged(void) {
 // SYS_OPEN_CREATE battery); forward-declare them for the two e2e create tests
 // here. A static forward decl matching the later static definition is legal;
 // the extern matches the identical decl at the #50 section head.
-extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
-                                          const char *kpath, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
 static struct Proc *ocp_proc(const char *dot);
 static void ocp_teardown(struct Proc *p);
 
@@ -3559,8 +3554,6 @@ void test_stalk_stat_mount_leaf(void) {
 
 // SYS_STAT's testable inner (the #37 *_for_proc shape; kernel path + kernel
 // t_stat -- the handler's uaccess staging wraps it).
-extern s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len, u32 stalk_flags,
-                             struct t_stat *out_k);
 
 void test_sys_stat_for_proc(void) {
     struct Proc p;
@@ -4632,9 +4625,6 @@ void test_stalk_served_same_session(void) {
 // generic -1 by design).
 // =============================================================================
 
-extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
-                                          const char *kpath, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
 
 // One heap Proc with a Territory rooted in the fixture + a cwd. proc_free
 // tears the whole thing down (handles -> clunks; territory_unref -> root).
@@ -5100,9 +5090,6 @@ void test_stalk_landed_identity(void) {
 // openat onto (vault dec-2026-10-14-descriptor-slot-reservation): a kept Spoor
 // installs nothing, O_DIRECTORY refuses a non-directory before any install,
 // and close-on-exec lands in the install itself.
-extern s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
-                                    u64 omode, bool create, u64 perm, bool cloexec,
-                                    bool dir_required, struct Spoor **keep);
 
 void test_stalk_open_finish_policy(void);
 void test_stalk_open_finish_policy(void) {
@@ -5162,9 +5149,6 @@ void test_stalk_open_finish_policy(void) {
 // The directory resolver SYS_CHDIR and a spawn's cwd tail share (STALK-DESIGN
 // 4.3): the landed name, and each refusal's errno -- never the bare -1 that
 // pouch and Go read as EPERM.
-extern s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
-                               char *joined, u32 joined_cap,
-                               char *name, u32 name_cap);
 
 void test_stalk_dir_landed_name(void) {
     char joined[SYS_OPEN_PATH_MAX + 1];

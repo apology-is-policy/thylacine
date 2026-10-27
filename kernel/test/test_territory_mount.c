@@ -57,7 +57,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-extern struct Dev devnone;
 
 void test_territory_mount_smoke(void);
 void test_territory_mount_idempotent_same_source(void);

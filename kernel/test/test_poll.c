@@ -38,19 +38,15 @@
 
 // V-5c-2: poll.sleep_for_waits MEASURES the sleep, so it needs the clock.
 #include "../../arch/arm64/timer.h"
+#include <thylacine/syscall.h>
 
-extern s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds,
-                             u64 nfds, s32 timeout_ms);
 
 // devsrv test-support — non-static cores of the SYS_POST_SERVICE +
 // SYS_SRV_ACCEPT syscall + the test-only registry reset.
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
-extern void srv_registry_reset(void);
 
 // #103: the console Dev + its IRQ-side input hook + the test drive of the
 // deferred-wake relay -- to exercise a real sys_poll_for_proc-blocked thread
 // woken through the cons deferred path (nora's exact path).
-extern struct Dev devcons;
 
 void test_poll_ready_immediately_pollin(void);
 void test_poll_ready_immediately_pollout(void);

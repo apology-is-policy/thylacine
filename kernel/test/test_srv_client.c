@@ -50,14 +50,9 @@
 #include <thylacine/types.h>
 
 // Read/write + accept cores defined in kernel/syscall.c (non-static).
-extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                              u64 len);
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
 
 // Test-support: registry wipe (non-static in kernel/devsrv.c, no
 // production caller).
-extern void srv_registry_reset(void);
 
 void test_srv_client_no_per_proc_cap(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
@@ -441,9 +436,6 @@ void test_srv_client_cape_post(void) {
     srv_registry_reset();
 }
 
-extern s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
-                                          const char *kname, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
 
 // A service post through SYS_WALK_CREATE's own path (its inner): the cape bit
 // reaches the post and marks the service, and a caped 9P-mode post is refused

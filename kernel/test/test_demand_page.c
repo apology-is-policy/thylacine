@@ -56,6 +56,7 @@
 #include <thylacine/burrow.h>
 #include <thylacine/addrspace.h>     // B-1a' audit F8: the holder's file_pages
 #include <thylacine/image.h>         // B-1a' audit F8: the cache's reclaim
+#include <thylacine/syscall.h>
 
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
@@ -95,8 +96,6 @@ void test_demand_page_file_cluster_clamps_at_limit(void);
 
 // The lazy attach/detach _for_proc inners (non-static cores in kernel/syscall.c),
 // driven directly -- the same pattern test_sys_burrow / test_resource use.
-extern s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 #define USER_VA   0x10000000ull           // 256 MiB; well within user-half
 #define ONE_PAGE  PAGE_SIZE
@@ -506,8 +505,6 @@ static struct Vma *g_rev_shift_vma = NULL;
 static struct Proc *g_rev_protect_proc = NULL;
 static u64          g_rev_protect_va   = 0;
 static u64          g_rev_protect_prot = 0;
-extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
-                                       u64 prot_raw, u64 flags_raw);
 
 // ARCH 8.8.3: what note_interruptible read DURING the page-in -- the stub read
 // is the one place that runs inside it. -1 = not recorded.
@@ -1562,9 +1559,6 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
 // The POSITIVE control comes first and is what stops this passing vacuously: a
 // test that only watched the failure path would pass identically against a
 // mmap_eager_copy that charged nothing at all.
-extern struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
-                                               struct Spoor *sp, u64 offset,
-                                               u64 length);
 
 void test_mmap_eager_copy_charge_pairing(void) {
     struct Proc *p = make_proc();

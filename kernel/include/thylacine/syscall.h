@@ -37,7 +37,9 @@
 #ifndef THYLACINE_SYSCALL_H
 #define THYLACINE_SYSCALL_H
 
+#include <thylacine/caps.h>       // caps_t, in the tests' declarations below
 #include <thylacine/errno.h>
+#include <thylacine/handle.h>     // hidx_t, likewise
 #include <thylacine/types.h>
 
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
@@ -3872,5 +3874,185 @@ bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx
 //     either mode).
 bool sys_attach_9p_flags_ok(u64 flags, bool srv);
 bool sys_srv_post_perm_ok(u32 perm);
+
+struct AddrSpace;
+struct Burrow;
+struct KObj_PCI;
+struct Proc;
+struct spawn_allowance;
+struct srv_route;
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into syscall.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void apply_spawn_perms(struct Proc *p, u32 perm_flags);
+u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw);
+s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out);
+struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                        struct Spoor *sp, u64 offset, u64 length);
+int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
+int spoor_devclass(struct Spoor *c);
+s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
+                           const u8 *aname, u64 aname_len, u64 n_uname,
+                           u64 flags);
+s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
+                               const u8 *aname, u64 aname_len,
+                               u64 n_uname, u64 flags);
+s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+                                 u64 length_raw, u64 prot_raw, u64 flags_raw,
+                                 u64 addr_raw);
+s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                                u64 prot_raw, u64 flags_raw);
+s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+                                u64 align_log2);
+s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3);
+s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3);
+s64 sys_close_for_test(struct Proc *p, u64 h);
+hidx_t sys_console_open_for_proc(struct Proc *p);
+s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+                        char *joined, u32 joined_cap,
+                        char *name, u32 name_cap);
+s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries);
+s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length);
+s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va);
+s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+                          u64 *out_writer, u64 *out_exec);
+s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+                                 u64 length_raw, u64 *out_exec);
+s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
+int sys_mlockall_for_proc(struct Proc *p, u32 flags);
+s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+                           bool exec, u64 offset);
+s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+                                 u32 pr);
+s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+                                 u64 length_raw, u32 pr, u64 offset);
+int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+                       struct Spoor *mountpoint, u32 flags);
+s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                   const char *kpath, u64 klen,
+                                   u64 omode_raw, u64 perm_raw);
+s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
+                             u64 omode, bool create, u64 perm, bool cloexec,
+                             bool dir_required, struct Spoor **keep);
+s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
+s64 sys_pci_info_handler(u64 hraw, u64 info_va);
+s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw);
+int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name);
+s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
+s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);
+s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3);
+s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+                        s64 off);
+s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
+s64 sys_rfork_handler(struct exception_context *ctx);
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
+int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
+int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len);
+int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags,
+        const char *cwd, u32 cwd_len);
+int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags);
+int sys_spawn_full_argv_for_proc(struct Proc *p,
+                                 const char *name, size_t name_len,
+                                 const char *argv_data, u32 argv_data_len,
+                                 u32 argc,
+                                 const u32 *fds, u32 fd_count,
+                                 caps_t cap_mask, u32 perm_flags);
+int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance);
+int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req);
+int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+                            const u32 *fds, u32 fd_count, caps_t cap_mask);
+void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+                                 caps_t cap_mask);
+int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+                                const u32 *fds, u32 fd_count);
+int sys_spawn_with_perms_for_proc(struct Proc *p,
+                                  const char *name, size_t name_len,
+                                  const u32 *fds, u32 fd_count,
+                                  caps_t cap_mask, u32 perm_flags);
+int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
+int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+                          struct srv_peer_info *out);
+s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+    const struct srv_route *routes, u64 count, u64 flags);
+s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+                      u32 stalk_flags, struct t_stat *out_k);
+s64 sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
+s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg);
+s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class);
+int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint);
+s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
+                                   const char *kname, u64 klen,
+                                   u64 omode_raw, u64 perm_raw);
+s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
+s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
+s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                       u32 uid, u32 gid, u64 size);
+s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+                      u64 in_ordinal);
+s64 viv_accept_for_test(struct Proc *p, u64 fd);
+u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+                            u8 *dst, u64 dst_cap,
+                            u64 *last_cookie_out);
+s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
+s64 viv_dup_for_test(struct Proc *p, u64 fd);
+s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
+s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
+s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
+                            u64 optval_va, u64 optlen_va);
+s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
+s64 viv_listen_for_test(struct Proc *p, u64 fd);
+s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);
+s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
+s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
+s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd);
+s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
+void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
+s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
+s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_SYSCALL_H

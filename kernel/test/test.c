@@ -3164,8 +3164,6 @@ bool test_strong_entropy(void) {
     return false;
 }
 
-int proc_test_serial_sak(int posture);
-u32 proc_test_release_leaked(int *pids, u32 max);
 void test_run_all(void) {
     // Legacy console transition tests require the serial recovery posture.
     // Select it explicitly for the fixture; the real boot policy is restored

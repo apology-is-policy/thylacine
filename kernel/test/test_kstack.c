@@ -60,9 +60,6 @@ void test_directmap_guard_toggle_invalidates_a_warm_entry(void);
 void test_thread_kstack_create_free_cost(void);
 
 // Test hooks in mmu.c (the *_for_test convention).
-u64  mmu_guard_toggles_for_test(void);
-bool mmu_kva_readable_for_test(const void *kva);
-u64  mmu_directmap_tlbi_operand_for_test(paddr_t pa);
 
 static void kstack_never_runs(void) { }
 

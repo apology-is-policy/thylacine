@@ -447,7 +447,6 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // (vectors.S .Lel0_return, which sync-from-EL0 and, since #964, IRQ-from-EL0
 // both take), not from the C handlers here; the decl is retained for
 // documentation.
-void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
 // EL0-return-tail die-check (defined in kernel/proc.c). If the calling
@@ -455,7 +454,6 @@ void notes_deliver_at_el0_return(struct exception_context *ctx);
 // otherwise returns. As of #107 invoked from the vector tails (vectors.S
 // .Lel0_return), AFTER preempt_check_irq -- so a group-terminate
 // landing during the preempt is caught before any EL0 instruction runs.
-void el0_return_die_check(void);
 
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     // 8c-2 (#88): publish THIS EL0-entry frame as the current thread's debug

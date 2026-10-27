@@ -414,4 +414,13 @@ void addrspace_uncharge_table(struct AddrSpace *as);
 bool addrspace_charge_file(struct AddrSpace *as, bool exempt);
 void addrspace_uncharge_file(struct AddrSpace *as, u32 npages);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into addrspace.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u64 addrspace_drain_device_resets_for_test(void);
+u64 addrspace_drain_seq_for_test(void);
+u64 addrspace_teardown_stamp(void);
+#endif // KERNEL_TESTS
+
 #endif // THYLACINE_ADDRSPACE_H

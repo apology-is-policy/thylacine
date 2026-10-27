@@ -1148,10 +1148,6 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
 // the test asserts anything, so a RED run leaks no parked thread.
 // ---------------------------------------------------------------------------
 
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern void proc_test_orphan_rule(struct Proc *dying);
 
 static volatile u32  g_cw_run;
 static volatile int  g_cw_rc;
@@ -1622,7 +1618,6 @@ void test_rendez_caught_note_one_unwind(void) {
 // The claim ends at the claimant's EL0-return tail (VIV-EINTR round-2 F1).
 // ---------------------------------------------------------------------------
 
-void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 // The EL0-return tail of the call that just returned, run on this kernel
 // thread. The sp passes the tail's own checks but sits below a Linux signal
@@ -2130,7 +2125,6 @@ static bool nt_teardown(struct Thread *t[2]) {
     return true;
 }
 
-void notes_release_claims_for_test(struct Thread *t);
 
 // rendez.caught_note_prefers_awake -- the walk prefers a thread that is not
 // blocked: main, awake, is designated and the peer asleep in an unwinding wait
@@ -2389,8 +2383,6 @@ void test_rendez_caught_note_native_kicks_only(void) {
 // threads sleep in unwinding waits; the stale picks are forced. The control,
 // one variable away, forces one stale pick fewer: the last re-pick designates
 // main, which unwinds alone while the peer sleeps on.
-u32 caught_force_stale_for_test(struct Proc *p, u32 n);
-u32 caught_repicks_for_test(void);
 
 struct nt_repick {
     bool ok, down;

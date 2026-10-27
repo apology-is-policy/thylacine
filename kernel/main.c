@@ -66,6 +66,7 @@
 #include <thylacine/virtio_pci.h>
 
 #include "../arch/arm64/psci.h"
+#include <thylacine/fault_test.h>
 
 // From arch/arm64/start.S — DTB physical address handed to us by the
 // bootloader (in x0 per the Linux ARM64 boot protocol). Populated
@@ -934,7 +935,6 @@ void boot_main(void) {
     // was hit on this boot (host-stalled secondary; common only under E-core
     // contention) AND the on_cpu gate handled it instead of corrupting.
     {
-        extern u64 thread_free_oncpu_waits(void);
         u64 waits = thread_free_oncpu_waits();
         if (waits > 0) {
             uart_puts("  thread_free on_cpu-waits: ");
@@ -967,7 +967,6 @@ void boot_main(void) {
     // THYLACINE_FAULT_TEST is set, this triggers exactly one
     // hardening protection (canary smash / W^X / BTI); the resulting
     // EXTINCTION: line is what tools/test-fault.sh checks for.
-    extern void fault_test_run(void);
     fault_test_run();
 
     // P3-G: enable cross-CPU work-stealing IPIs from ready()/wakeup().

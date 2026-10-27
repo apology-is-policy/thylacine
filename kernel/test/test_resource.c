@@ -41,12 +41,8 @@
 
 // The _for_proc inners of the burrow SVC handlers (non-static cores in
 // kernel/syscall.c), driven directly -- the same pattern test_sys_burrow uses.
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 // Test-only Proc list helpers (no production caller; defined in kernel/proc.c).
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
 
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);

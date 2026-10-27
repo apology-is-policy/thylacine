@@ -44,8 +44,6 @@ void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
 void test_p9_closer_kill_at_final_close_start_forces_it(void);
 void test_p9_closer_loom_register_flushes_staged_run(void);
-extern void proc_close_handles_at_exit_for_test(struct Proc *p);
-extern void proc_exit_close_test_set_window_hook(void (*fn)(void));
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
 void test_p9_closer_failed_spawn_retried_by_hand_off(void);
@@ -55,8 +53,6 @@ void test_p9_closer_clunk_killed_while_self_pumping(void);
 void test_p9_closer_orphan_oom_on_dead_session_quiet(void);
 
 // test_9p_client.c: the shared canned 9P2000.L replies.
-int canonical_responder(void *ctx, const u8 *req, size_t req_len,
-                        u8 *resp, size_t resp_cap);
 
 static struct p9_closer_stats closer_now(void) {
     struct p9_closer_stats st;

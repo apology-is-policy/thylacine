@@ -3274,4 +3274,11 @@ enum viv_verdict vivarium_pipe2_decide(u64 flags, bool *cloexec_out);
 // arguments in this sense, and are the shell's business.
 enum viv_verdict vivarium_dup3_decide(u64 flags, bool *cloexec_out);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into vivarium.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u32 vivarium_t1_count_for_test(void);
+#endif // KERNEL_TESTS
+
 #endif // THYLACINE_VIVARIUM_H

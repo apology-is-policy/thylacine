@@ -136,4 +136,11 @@ u64 kobj_irq_live_count(void);
 // out-of-range intid.
 bool kobj_irq_intid_claimed(u32 intid);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into irqfwd.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void irqfwd_test_dispatch(u32 intid, void *untrusted_arg);
+#endif // KERNEL_TESTS
+
 #endif  // THYLACINE_IRQFWD_H

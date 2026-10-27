@@ -35,10 +35,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-extern int sys_spawn_full_for_proc(struct Proc *p, const char *name,
-                                    size_t name_len,
-                                    const u32 *fds, u32 fd_count,
-                                    caps_t cap_mask);
 
 void test_sys_spawn_full_happy_path_fds_and_caps(void);
 void test_sys_spawn_full_zero_count_zero_mask_succeeds(void);

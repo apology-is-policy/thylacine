@@ -43,7 +43,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-extern struct Dev devnone;
 
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);

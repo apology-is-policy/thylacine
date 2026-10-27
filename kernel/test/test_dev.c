@@ -34,6 +34,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
+#include <thylacine/syscall.h>
 
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
@@ -45,7 +46,6 @@ void test_spoor_clone_lifecycle(void);
 void test_spoor_clone_copies_state(void);
 void test_spoor_clunk_dispatches_close(void);
 void test_spoor_close_error_reaches_close_syscall(void);
-s64 sys_close_for_test(struct Proc *p, u64 h);
 void test_spoor_alloc_10k_no_leak(void);
 
 // =============================================================================

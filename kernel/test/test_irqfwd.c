@@ -255,7 +255,6 @@ void test_irqfwd_wait_timeout(void) {
 // The callback must resolve a live owner before its first object dereference.
 // A deliberately invalid callback argument catches the old raw-pointer path
 // even without allocator reuse or a particular interrupt/teardown race timing.
-void irqfwd_test_dispatch(u32 intid, void *untrusted_arg);
 void test_irqfwd_detached_dispatch(void);
 void test_irqfwd_detached_dispatch(void) {
     struct KObj_IRQ *k = kobj_irq_create(IPI_IRQFWD_TEST);

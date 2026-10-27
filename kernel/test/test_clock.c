@@ -21,11 +21,6 @@
 #include <thylacine/vivarium.h>
 
 // LS-K syscall handlers (non-static in syscall.c; no public header).
-extern s64 sys_getpid_handler(u64, u64, u64, u64);
-extern s64 sys_getuid_handler(u64, u64, u64, u64);
-extern s64 sys_getgid_handler(u64, u64, u64, u64);
-extern s64 sys_clock_gettime_handler(u64, u64, u64, u64);
-extern s64 sys_clock_settime_handler(u64, u64, u64, u64);   // net-7a
 
 void test_clock_monotonic_advances(void);
 void test_clock_monotonic_advances(void) {

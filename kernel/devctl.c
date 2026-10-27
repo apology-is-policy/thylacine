@@ -49,6 +49,9 @@
 #include "../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident + linux_hwcap (/proc/cpuinfo)
 #include "../arch/arm64/kaslr.h"
 #include "../mm/phys.h"
+#include <thylacine/devctl.h>
+#include <thylacine/devproc.h>
+#include <thylacine/visibility.h>
 
 // =============================================================================
 // Qid encoding.
@@ -140,10 +143,8 @@ static size_t fmt_gated_udec(char *buf, size_t cap, size_t off, bool shown, u64 
 
 // devproc.c: owner (same principal, never none) or CAP_HOSTOWNER; the caller
 // holds g_proc_table_lock, as format_procs_cb does.
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 // devproc.c: true when a reader running as none may not see target (Plan 9's
 // nonone; IDENTITY-DESIGN's reserved ids).
-bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 
 // IMPERIUM-DESIGN 11.3 item 10: a counter that moves whenever any Proc runs --
 // per-CPU idle time, context switches and interrupts, the runnable count, the
@@ -153,7 +154,9 @@ bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 // TCB, and the boot benchmarks) and to a CAP_HOSTOWNER holder. Both fields are
 // cross-thread writable (proc_apply_identity, proc_become_legate), hence the
 // atomic loads. Non-static: test-driven.
+VISIBLE_IF_KERNEL_TESTS
 bool devctl_system_counters_readable(const struct Proc *reader);
+VISIBLE_IF_KERNEL_TESTS
 bool devctl_system_counters_readable(const struct Proc *reader) {
     if (!reader) return false;
     if (__atomic_load_n(&reader->principal_id, __ATOMIC_ACQUIRE) == PRINCIPAL_SYSTEM)
@@ -975,6 +978,7 @@ static const struct ctl_leaf *leaf_for_kind(u32 kind) {
 // Non-static so the deny/allow regression test can drive it with synthetic
 // callers (devctl.perm_enforced is false -- the gate is at the read site, the
 // devproc kill-gate idiom). `caller` is the reading Proc; NULL -> deny.
+VISIBLE_IF_KERNEL_TESTS
 bool devctl_kernel_base_readable(const struct Proc *caller) {
     if (!caller) return false;
     return (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER) != 0;

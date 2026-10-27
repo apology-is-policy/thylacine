@@ -402,4 +402,8 @@ extern const char *volatile g_test_proc_wait_what;
         spin_unlock_irqrestore(NULL, _tsd);                                 \
     } while (0)
 
+// Called from the tests (no header held it before).
+int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+                                 u8 *resp, size_t resp_cap);
+
 #endif // THYLACINE_KERNEL_TEST_H

@@ -139,28 +139,18 @@ void test_cons_tx_unit_smp_no_tear(void);
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
-extern struct Dev devcons;
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern struct Proc *proc_test_console_owner(void);   // A-4c-2 SAK assertions
 
 // A-5a: the SYS_CONSOLE_OPEN core + the shared read-via-handle helper (the
 // test_sys_pipe.c pattern). devcons_read ignores the Spoor and drains the
 // global ring, so the opened handle is a valid console reader.
-extern hidx_t sys_console_open_for_proc(struct Proc *p);
-extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 
 // #943: the PL011 RX path lives in arch/arm64/uart.c.
-extern bool uart_rx_path_enabled(void);
 
 // #67: uart_putc's bounded-TXFF-spin self-test lives in arch/arm64/uart.c
 // (needs the static PL011 base + register offsets).
-extern bool uart_selftest_tx_bounded(void);
 
 // #75-audit F2: the stalled-consumer emulator (arch/arm64/uart.c) + the clock
 // the deadline assertion reads.
-extern void uart_test_tx_stall(bool on);
-extern u64  timer_now_ns(void);
 
 // #943 regression: the PL011 RX path must be live after boot (CR.UARTEN|RXE).
 // QEMU's PL011 resets with UARTEN clear, so this FAILS on the pre-fix kernel
@@ -2715,9 +2705,6 @@ void test_cons_tx_room_wait_and_deadline(void) {
 // so reading first would turn a pre-fix run into a BOOT HANG instead of a
 // failed test -- and a hang reports nothing.
 
-extern int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name,
-                                       size_t name_len,
-                                       const u32 *fds, u32 fd_count);
 
 void test_cons_sys_puts_uses_shared_console_path(void) {
     struct Thread *t = current_thread();
@@ -4021,8 +4008,7 @@ void test_cons_episode_fixture_fails_clean(void) {
 #include <thylacine/seat.h>
 #include <thylacine/caps.h>
 #include <thylacine/devcap.h>
-void proc_test_seat_reset(void);
-int proc_test_serial_sak(int posture);
+#include "../../arch/arm64/timer.h"
 void test_cons_graphical_seat_gate(void);
 static int seat_test_key(struct Proc *p, u32 code, u32 down, u8 byte) {
     struct seat_message m;
@@ -4242,7 +4228,6 @@ cleanup:
 // and the two seat Procs dying mid-episode go through the REAL ZOMBIE
 // chokepoint. Each failure closes the seat's own episode, and a dead client's
 // slot is free again once the service has recovered.
-void proc_test_seat_expire(void);
 void test_cons_graphical_seat_deadline_and_death(void);
 enum { EPD_ROLE_SEAT_CLIENT = 3, EPD_ROLE_SEAT_SERVICE = 4 };
 static struct Proc *volatile g_seat_child;

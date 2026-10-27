@@ -48,29 +48,18 @@
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/devproc.h>
 
-extern int sys_spawn_with_perms_for_proc(struct Proc *p,
-                                         const char *name, size_t name_len,
-                                         const u32 *fds, u32 fd_count,
-                                         caps_t cap_mask, u32 perm_flags);
 
 struct spawn_allowance;
-extern int sys_spawn_full_argv_for_proc(struct Proc *, const char *, size_t,
-    const char *, u32, u32, const u32 *, u32, caps_t, u32);
-extern int sys_spawn_full_argv_debug_for_proc(struct Proc *, const char *, size_t,
-    const char *, u32, u32, const u32 *, u32, caps_t, u32,
-    bool, u32, u32, const u32 *, u32, const struct spawn_allowance *, u32, u32, u32);
 
 // A-5b #827b: the per-bit grant gate, exported so the decision can be driven
 // directly on synthetic Procs (decoupled from the heavyweight spawn body).
-extern int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
 
 // LS-5: the perm-application helper (the bit->action mapping both spawn thunks
 // run) + the console-owner accessor, exported so the owner-set WIRING can be
 // driven deterministically — a real spawn races the child's fast exit clearing
 // g_console_owner, so the wiring is unobservable through a full spawn.
-extern void apply_spawn_perms(struct Proc *p, u32 perm_flags);
-extern struct Proc *proc_test_console_owner(void);
 
 void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
 void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
@@ -84,15 +73,10 @@ void test_sys_spawn_with_perms_seat_roles(void);
 void test_sys_spawn_with_perms_renderer_gate(void);
 void test_sys_spawn_with_perms_seal_blocks_debug_and_dump(void);
 
-extern void proc_test_seat_reset(void);
 // (U) F1: the I-39 debug-authority predicate, so the NOTRACE arm can assert the
 // CONSEQUENCE of the stamp and not merely that a bit landed in a word.
 // The seal's one-way setters (kernel/syscall.c); the test drives their re-enable
 // refusal directly (devproc's image gate is pinned in test_devproc.c).
-extern int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
-extern int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
-extern bool devproc_debug_authorized(const struct Proc *caller,
-                                     const struct Proc *target);
 
 static void drain_zombies(void) {
     int status = 0;

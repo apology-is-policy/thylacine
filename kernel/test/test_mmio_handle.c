@@ -233,7 +233,6 @@ void test_mmio_handle_double_unref_extincts(void) {
     // is verified by inspection of kobj_mmio_unref's `ref <= 0` check.
 }
 
-extern bool kobj_mmio_test_reservation_union(void);
 void test_mmio_kernel_reservation_union(void);
 void test_mmio_kernel_reservation_union(void) {
     TEST_ASSERT(kobj_mmio_test_reservation_union(),

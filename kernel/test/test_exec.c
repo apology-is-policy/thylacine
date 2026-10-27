@@ -1481,8 +1481,6 @@ void test_exec_native_rejects_dynamic_linux(void) {
 // 13.10.6) -- under either field value, since B-1d took the phenotype out of the
 // load. Both field values are driven, so a loader that reset the field to either
 // one would fail the other leg.
-extern void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t,
-                                                u32 pheno);
 void test_exec_load_failure_leaves_phenotype(void);
 void test_exec_load_failure_leaves_phenotype(void) {
     struct Proc *p = make_proc();

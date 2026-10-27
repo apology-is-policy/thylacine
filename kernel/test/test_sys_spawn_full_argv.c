@@ -53,17 +53,10 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-extern int sys_spawn_full_argv_for_proc(struct Proc *p,
-                                        const char *name, size_t name_len,
-                                        const char *argv_data, u32 argv_data_len,
-                                        u32 argc,
-                                        const u32 *fds, u32 fd_count,
-                                        caps_t cap_mask, u32 perm_flags);
 // R1 F1 fix: handler-side field-bound validation extracted as an
 // internal helper so tests can exercise the handler's distinctive
 // checks (unknown ext_flags bits, perm_flags & ~ALL, oversize fields) without
 // SVC instrumentation or a user-VA fixture.
-extern int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req);
 
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);

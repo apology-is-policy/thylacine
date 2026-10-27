@@ -38,19 +38,6 @@
 #include "../../arch/arm64/exception.h"
 #include "../../mm/slub.h"
 
-extern s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
-extern s64 viv_accept_for_test(struct Proc *p, u64 fd);
-extern s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
-extern s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd);
-extern s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
-extern s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
-extern s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
-extern bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
-extern s64 viv_listen_for_test(struct Proc *p, u64 fd);
-extern s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
-extern void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
-extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
-extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 
 void test_vivsock_accept_wait_is_over(void);
 void test_vivsock_connect_tcp_holds_the_dial(void);

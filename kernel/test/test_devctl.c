@@ -22,11 +22,10 @@
 #include "../../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count
 #include "../../arch/arm64/fault.h"    // prowl-6: userland_demand_page
 #include "../../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident
+#include <thylacine/devctl.h>
 
 // prowl-6: the lazy reservation the capacity tests use (kernel/syscall.c), so the
 // probe's first touch is the EL0 shape of an allocation.
-extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
-                                       u64 align_log2_raw);
 
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
@@ -427,7 +426,6 @@ void test_devctl_read_kernel_base_format(void) {
 // thread to CAP_HOSTOWNER; kproc's CAP_ALL does NOT include the elevation-only
 // CAP_HOSTOWNER -- caps.h pins CAP_ALL & CAP_ELEVATION_ONLY == 0.)
 void test_devctl_kernel_base_gated(void) {
-    extern bool devctl_kernel_base_readable(const struct Proc *caller);
 
     struct Proc admin, user;
     for (size_t i = 0; i < sizeof(admin); i++) ((u8 *)&admin)[i] = 0;
@@ -532,7 +530,6 @@ void test_devctl_read_cons_format(void) {
 // #210: /ctl/9p-sessions end to end through the Dev vtable -- a live conn
 // with known counters must render as a `conn` row, and the row must be
 // gone after the last unref (nothing stale in the registry).
-size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 void test_devctl_read_9p_sessions_format(void) {
     struct SrvConn *cn = srvconn_create(0xBBBBu, 31337, 0xA11CEu, false, 0, 0xB0B0u,
                                         SRVCONN_MSIZE);
@@ -881,7 +878,6 @@ static void counters_gated_thunk(void *arg) {
 }
 
 void test_devctl_counters_gated(void) {
-    extern bool devctl_system_counters_readable(const struct Proc *reader);
     g_gate[0] = (struct gate_read){ 0 };
     g_gate[1] = (struct gate_read){ 0 };
     g_gate_self = 0;
@@ -938,7 +934,6 @@ void test_devctl_counters_gated(void) {
 // A /ctl/procs row is committed whole or not at all. At every buffer size the
 // output is the header and whole rows of nine columns: a row cut mid-number
 // would hand ps and prowl a plausible smaller figure.
-size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
 void test_devctl_procs_rows_whole(void) {
     static char buf[1024];
     const struct Proc *self = current_thread()->proc;

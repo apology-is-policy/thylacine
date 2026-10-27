@@ -537,4 +537,12 @@ int srv_backlog_depth(struct SrvService *svc);
 
 short srv_handle_poll(void *obj, short events, struct poll_waiter *pw);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into devsrv.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void srv_registry_reset(void);
+bool srv_test_accept_pin(struct SrvService *svc, int mode);
+#endif // KERNEL_TESTS
+
 #endif  // THYLACINE_DEVSRV_H

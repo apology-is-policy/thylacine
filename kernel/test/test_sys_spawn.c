@@ -37,7 +37,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-extern int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len);
 
 void test_sys_spawn_happy_path(void);
 void test_sys_spawn_rejects_null_name(void);

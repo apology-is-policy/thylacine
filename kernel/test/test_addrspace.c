@@ -61,8 +61,6 @@
 #include <thylacine/vma.h>
 
 // Existing KERNEL_TESTS-only process-table fixtures.
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
 
 // A payer's charge record, read WITHOUT settling it: the kernel has no
 // stand-alone claim (AS-R9), so a test peeks under the record's leaf lock.

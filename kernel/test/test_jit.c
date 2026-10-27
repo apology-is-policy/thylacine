@@ -45,15 +45,6 @@
 // wrapper adds only the user copy-out, which a kproc-context test cannot
 // exercise (any address it can pass is a kernel VA, correctly refused by
 // sys_validate_user_buf). The copy-out arm is proven by the in-guest prover.
-s64 sys_jit_create_region(struct Proc *p, u64 length_raw, u64 *out_w, u64 *out_x);
-s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
-                                 u64 length_raw, u64 *out_exec);
-s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va);
-s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
-s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length);
-s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
-s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 // What the address space is charged for MEMORY: its count less the page-table
 // pages the faults built, which the I-32 count also carries (a table lives

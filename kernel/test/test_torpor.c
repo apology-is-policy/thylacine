@@ -57,6 +57,7 @@
 
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uaccess.h"
+#include <thylacine/syscall.h>
 
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -69,9 +70,6 @@ void test_torpor_wake_two_waiters_count_bound(void);
 
 // The non-static inners of the SVC handlers (defined in kernel/syscall.c /
 // kernel/torpor.c).
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw,
-                                      u64 length_raw);
 
 // ---------------------------------------------------------------------------
 // torpor.wait_rejects_bad_args

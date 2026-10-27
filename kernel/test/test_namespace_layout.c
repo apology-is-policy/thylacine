@@ -22,10 +22,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-extern struct Dev devramfs;
-extern struct Dev devproc;
-extern struct Dev devctl;
-extern struct Dev devdev;
 
 void test_namespace_layout_proc_ctl_cross(void);
 

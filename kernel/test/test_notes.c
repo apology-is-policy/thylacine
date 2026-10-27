@@ -45,19 +45,6 @@
 // #15: test-support hooks + the harness's Proc-table linkage (see the
 // "Test support" blocks in kernel/notes.c and kernel/proc.c -- deliberately
 // absent from the headers, so every consumer extern-declares them).
-extern u32  notes_name_terminate_latch_for_test(const char *name);
-extern const char *notes_known_name_for_test(u32 i);
-extern const char *notes_snare_death_name_for_test(u32 i);
-extern int  notes_noted_default(struct exception_context *ctx, struct Thread *t);
-extern int  notes_noted_restore(struct exception_context *ctx, struct Thread *t);
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern s64  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
-                                        const char *name);   // #241
-extern s64  viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
-extern s64  sys_postnote_self_for_test(struct Proc *caller,
-                                       const char *name);    // aux#253
 
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -1299,7 +1286,6 @@ void test_notes_caught_note_deliverable_predicate(void) {
 // while its note is still queued, the note is open to another thread (round-2
 // F1 -- a tail that ended short of the note stranded it). Families claim
 // independently.
-void notes_release_claims_for_test(struct Thread *t);
 
 void test_notes_caught_note_claim_once(void) {
     struct Proc *p = proc_alloc();

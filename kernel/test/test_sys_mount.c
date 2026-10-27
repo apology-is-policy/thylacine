@@ -82,14 +82,10 @@
 #include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
+#include <thylacine/syscall.h>
 
-extern struct Dev devnone;
 
 // Inner SVC handlers (extern; defined in kernel/syscall.c) -- stalk-2 Spoor-keyed.
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
-extern int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
-                              struct Spoor *mountpoint, u32 flags);
-extern int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint);
 
 void test_sys_mount_happy_path_grafts_pipe_spoor(void);
 void test_sys_mount_idempotent_on_duplicate(void);

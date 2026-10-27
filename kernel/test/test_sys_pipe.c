@@ -41,16 +41,8 @@
 
 // The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
 // tests read (/welcome is pinned by tools/build.sh).
-extern struct Dev devramfs;
 
 // Inner SVC handlers (extern declarations; defined in kernel/syscall.c).
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
-extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
-                              s64 off);
-extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                               u64 len, s64 off);
 
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -315,12 +307,6 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
 // the attach sent is read back non-blocking, so "nothing sent" is a measured 0.
 // ---------------------------------------------------------------------------
 
-extern s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
-                                  const u8 *aname, u64 aname_len, u64 n_uname,
-                                  u64 flags);
-extern int canonical_responder(void *ctx, const u8 *req, size_t req_len,
-                               u8 *resp, size_t resp_cap);
-extern struct Dev devnone;
 
 enum pa_ends { PA_PIPES, PA_BOGUS_TX, PA_BOGUS_RX, PA_DEVNONE_TX };
 

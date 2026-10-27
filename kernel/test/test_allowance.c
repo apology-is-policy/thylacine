@@ -21,6 +21,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>       // VIRTIO_DEVICE_ID_RNG
+#include <thylacine/syscall.h>
 
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
@@ -38,7 +39,6 @@ void test_allowance_confer_within_parent(void);
 
 // The SYS_PCI_CLAIM handler is not header-declared (a syscall handler); the
 // F2 regression drives it directly (the established test-TU extern pattern).
-extern s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
 void test_allowance_revoke_on_group_terminate(void);
 void test_allowance_narrowed_proc_cannot_spawn(void);
 

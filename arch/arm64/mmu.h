@@ -571,4 +571,13 @@ u64 mmu_uninstall_pte_calls(void);
 long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len);
 long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into mmu.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
+u64 mmu_guard_toggles_for_test(void);
+bool mmu_kva_readable_for_test(const void *kva);
+#endif // KERNEL_TESTS
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H

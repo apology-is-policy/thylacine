@@ -26,7 +26,7 @@
 struct percpu_data g_percpu[NCPUS];
 
 void magazines_init(void) {
-    for (int cpu = 0; cpu < NCPUS; cpu++) {
+    for (u32 cpu = 0; cpu < NCPUS; cpu++) {
         spin_lock_init(&g_percpu[cpu].lock);
         for (int i = 0; i < NUM_MAG_ORDERS; i++) {
             g_percpu[cpu].mags[i].count = 0;
@@ -161,7 +161,7 @@ bool mag_free(struct page *p, unsigned order) {
 // fast path holds the same lock. What it cannot give is a stable global
 // count -- a peer may refill its set the moment the drain lets go.
 void magazines_drain_all(void) {
-    for (int cpu = 0; cpu < NCPUS; cpu++) {
+    for (u32 cpu = 0; cpu < NCPUS; cpu++) {
         struct percpu_data *pc = &g_percpu[cpu];
         irq_state_t s = spin_lock_irqsave(&pc->lock);
         for (int idx = 0; idx < NUM_MAG_ORDERS; idx++) {

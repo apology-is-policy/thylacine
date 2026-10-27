@@ -3015,4 +3015,31 @@ void proc_caught_note_walk(struct Proc *p, struct Thread *skip);
 // the same code.
 void proc_exit_notify_parent_locked(struct Proc *p);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into proc.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u32 caught_force_stale_for_test(struct Proc *p, u32 n);
+u32 caught_repicks_for_test(void);
+void proc_close_handles_at_exit_for_test(struct Proc *p);
+u64 proc_exec_device_resets_for_test(void);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno);
+u64 proc_exec_peer_oncpu_waits_for_test(void);
+u64 proc_exec_walk_a_seq_for_test(void);
+void proc_exit_close_test_set_window_hook(void (*fn)(void));
+void proc_exit_tail_test_set_hook(void (*fn)(void));
+u32 proc_pid_counter_swap_for_test(u32 v);
+struct Proc *proc_test_console_owner(void);
+void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
+void proc_test_link(struct Proc *p);
+void proc_test_link_child(struct Proc *parent, struct Proc *p);
+void proc_test_orphan_rule(struct Proc *dying);
+u32 proc_test_release_leaked(int *pids, u32 max);
+void proc_test_seat_expire(void);
+void proc_test_seat_reset(void);
+int proc_test_serial_sak(int posture);
+void proc_test_set_init(struct Proc *p);
+void proc_test_unlink(struct Proc *p);
+#endif // KERNEL_TESTS
+
 #endif // THYLACINE_PROC_H

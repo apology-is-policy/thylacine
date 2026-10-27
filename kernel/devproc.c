@@ -65,6 +65,8 @@
 #include "../arch/arm64/halls_symtab.h" // 8a-1b-gamma-3: halls_symbolize -- on-target kstack symbolization
 #include "../arch/arm64/kaslr.h"        // 8a-1b-gamma-3: kaslr_get_offset -- kstack link-translation
 #include "../mm/slub.h"                 // 8a-2b: kzalloc/kfree -- the lazy debug_hw table
+#include <thylacine/devproc.h>
+#include <thylacine/visibility.h>
 
 // =============================================================================
 // Qid path encoding.
@@ -1167,7 +1169,9 @@ static int devproc_close(struct Spoor *c) {
 // prowl-3b: forward-declared so devproc_read_cb (below) can apply the OQ-4 gate;
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 // Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
@@ -1179,8 +1183,10 @@ static bool devproc_dump_sealed_against(const struct Proc *caller,
                                         const struct Proc *target);
 static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
                                 u32 kind);
+VISIBLE_IF_KERNEL_TESTS
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
+VISIBLE_IF_KERNEL_TESTS
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
                                    char *buf, size_t cap, bool *denied);
 
@@ -1195,6 +1201,7 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 // leak); otherwise formats target's per-thread block. `target` is resolved +
 // pinned alive under g_proc_table_lock by the real caller (devproc_read_cb).
 // Non-static: test-driven.
+VISIBLE_IF_KERNEL_TESTS
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied) {
     if (!devproc_sched_authorized(caller, target)) { *denied = true; return 0; }
@@ -1255,6 +1262,7 @@ static size_t format_imperium(struct Proc *p, char *buf, size_t cap) {
 // :2392, which this copy outlived.) Same policy predicate as sched/environ
 // (devproc_owner_or_hostowner), deliberately NOT the I-39 debug predicate.
 // Non-static: test-driven.
+VISIBLE_IF_KERNEL_TESTS
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
                                    char *buf, size_t cap, bool *denied) {
     if (!devproc_owner_or_hostowner(caller, target)) { *denied = true; return 0; }
@@ -1441,6 +1449,7 @@ static bool devproc_same_owner(const struct Proc *caller, const struct Proc *tar
 // fs-admin and process-kill orthogonal (mirrors Linux CAP_DAC_OVERRIDE vs
 // CAP_KILL). No identity bypasses (I-22 — the cap axes are capabilities, never
 // identities). Non-static: the kernel test suite exercises the predicate.
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     // Self, always: a none Proc owns no other Proc, but it still owns itself, as
@@ -1622,12 +1631,14 @@ static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *ta
 // that is not ambient to begin with. Authority first, then the seal -- the order is
 // for legibility, not safety: both run under g_proc_table_lock, which is what makes
 // the pair atomic against proc_seal.
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (!devproc_owner_or_hostowner(caller, target))   return false;   // authority
     return !devproc_read_sealed(caller, target, PQS_ENVIRON);           // the seal
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
     return devproc_owner_or_hostowner(caller, target);
 }
@@ -1727,12 +1738,14 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
 // The public predicate: takes g_proc_table_lock, which the image join needs and
 // which every /proc gate site already holds (they run inside proc_for_each, and
 // call the _locked form directly). The kernel tests are the callers that do not.
+#ifdef KERNEL_TESTS
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     irq_state_t s = proc_table_lock_acquire();
     bool ok = devproc_debug_authorized_locked(caller, target);
     proc_table_lock_release(s);
     return ok;
 }
+#endif
 
 // May `caller` see where `target`'s code aliases lie (format_maps)? Debug
 // authority over it, or the target itself: the reflexive case is stated rather
@@ -1746,12 +1759,14 @@ static bool devproc_maps_code_visible_locked(const struct Proc *caller,
 }
 
 // The kernel tests' entry: takes the lock the image join needs.
+#ifdef KERNEL_TESTS
 bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target) {
     irq_state_t s = proc_table_lock_acquire();
     bool ok = devproc_maps_code_visible_locked(caller, target);
     proc_table_lock_release(s);
     return ok;
 }
+#endif
 
 // =============================================================================
 // 8a-1b-gamma: /proc/<pid>/mem -- cross-Proc user-memory RW (I-39; DEBUG-FS 4.5).
@@ -1795,10 +1810,12 @@ bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *tar
 // by construction: nothing becomes newly readable. And it converges -- a
 // RUNNABLE peer gets dispatched, re-checks its cond, and (if the stop still
 // holds) re-registers as SLEEPING, so the caller's poll terminates.
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state) {
     return registered && !on_cpu && state == THREAD_SLEEPING;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool devproc_all_threads_parked(struct Proc *target) {
     for (struct Thread *peer = target->threads; peer; peer = peer->next_in_proc) {
         if (peer->state == THREAD_EXITING) continue;   // dying -- need not park
@@ -1951,6 +1968,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // other gates (on_cpu / a valid trapframe) are re-checked by each caller
 // downstream. NON-static so the selection is unit-testable (#95-audit F3;
 // the focus-selection leg of devproc.debug_stop_start_resume).
+VISIBLE_IF_KERNEL_TESTS
 struct Thread *devproc_focus_thread(struct Proc *target) {
     struct Thread *focus = __atomic_load_n(&target->debug_focus_thread, __ATOMIC_ACQUIRE);
     if (focus)

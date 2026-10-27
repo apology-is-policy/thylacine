@@ -111,14 +111,6 @@ void test_protect_noop_protect_needs_no_headroom(void);
 void test_sys_mmap_fixed_anon_w_alone_maps_rw(void);
 
 // The non-static inners of the SVC handlers (kernel/syscall.c).
-extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
-                                       u64 align_log2);
-extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
-                                       u64 prot_raw, u64 flags_raw);
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
-extern s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
-extern s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw, u32 pr);
 
 #define P            PAGE_SIZE
 #define PR_NONE      ((u64)BURROW_PROT_NONE)

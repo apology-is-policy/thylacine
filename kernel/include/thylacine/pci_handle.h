@@ -276,4 +276,11 @@ u32 kobj_pci_map_windows(const struct KObj_PCI *k,
 u64 kobj_pci_total_created(void);
 u64 kobj_pci_live_count(void);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into pci_handle.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void pci_test_msix_fail(struct KObj_PCI *k, u32 stages);
+#endif // KERNEL_TESTS
+
 #endif  // THYLACINE_PCI_HANDLE_H

@@ -119,4 +119,11 @@ u64 kobj_mmio_live_count(void);
 // false if the range is fully free. Acquires g_mmio_lock internally.
 bool kobj_mmio_pa_claimed(u64 pa, size_t size);
 
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into mmio_handle.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+bool kobj_mmio_test_reservation_union(void);
+#endif // KERNEL_TESTS
+
 #endif  // THYLACINE_MMIO_HANDLE_H

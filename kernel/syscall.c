@@ -65,6 +65,7 @@
 #include "../mm/phys.h"             // B-2b: alloc_user_pages / free_pages for a sealed region
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
+#include <thylacine/visibility.h>
 
 // =============================================================================
 // Argument width (ERRORS.md principle 6): every argument arrives as a whole
@@ -689,8 +690,10 @@ static s64 sys_dma_create_gpu_bo_handler(u64 size, u64 rights) {
 // an OOB subrange. Non-wrapping bounds: offset <= shm.length and length <=
 // shm.length - offset, and discovery pins shm.offset + shm.length <= bar.size,
 // so base_pa + length never escapes the BAR (I-45).
+VISIBLE_IF_KERNEL_TESTS
 int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
                              u64 length, u64 *base_pa_out);
+VISIBLE_IF_KERNEL_TESTS
 int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
                              u64 length, u64 *base_pa_out) {
     if (!k || !base_pa_out)                          return -1;
@@ -832,6 +835,7 @@ static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
 // The core is separated from the current_thread() wrapper so the resolve +
 // type-gate + range logic is unit-testable with a synthetic Proc (the
 // hostmem_resolve_subrange precedent). NOT static: the test declares it.
+VISIBLE_IF_KERNEL_TESTS
 s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
     if (!p || !p->as)       return -T_E_INVAL;
     if (len == 0)           return -T_E_INVAL;
@@ -1041,6 +1045,7 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len);
 // bound would otherwise be reachable from no test at all -- and
 // refuse-vs-truncate is the leg whose failure is SILENT (a partial backing
 // attached as a whole one).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -1109,6 +1114,7 @@ s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
 // future 9P transfer path could narrow them.) Returns hidx_t (>= 0) on
 // success, -1 on EPERM / device-not-found / already-claimed / BAR-assign
 // failure / malformed-cap-list / OOM / table-full.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
     (void)a1;
     struct Thread *t = current_thread();
@@ -1252,6 +1258,7 @@ static s64 pci_map_range(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw,
 
 // The original four-argument syscall retains its ABI; a protected BAR now
 // fails closed. Do not read unused argument registers from old callers.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     return pci_map_range(hraw, vaddr, bar_index, prot_raw, 0, 0, true);
 }
@@ -1294,6 +1301,7 @@ static s64 sys_pci_windows_handler(u64 hraw, u64 out_va, u64 capacity) {
 // struct t_pci_info (no uninitialized padding leaked -- the RW-8 R2-F1 class),
 // and copies it out byte-by-byte (the fd2path / getcwd idiom; uaccess has no
 // bulk copy + no alignment requirement on uaccess_store_u8). Returns 0 / -1.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -1500,6 +1508,7 @@ static void sys_pipe_abandon(struct Proc *p, hidx_t rd_h, hidx_t wr_h,
     spoor_clunk(wr);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
     if (!p || !out_rd || !out_wr)                    return -1;
 
@@ -1705,12 +1714,14 @@ static s64 spoor_write_common(struct Proc *p, hidx_t h, const u8 *kbuf,
 
 // Inner — testable with kernel-side buf. Returns bytes written (>=0)
 // or -1 on bad handle / wrong kind / missing rights / dev error.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     return spoor_write_common(p, h, kbuf, len, /*positioned=*/false, 0);
 }
 
 // SYS_PWRITE inner (#37) — testable with kernel-side buf. The cursor is
 // untouched on every path.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
                         s64 off) {
     return spoor_write_common(p, h, kbuf, len, /*positioned=*/true, off);
@@ -1767,12 +1778,14 @@ static s64 spoor_read_common(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
 // Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
 // on EOF), -1 on bad handle / wrong kind / missing rights, or the Dev's
 // negative -errno on a dev error (#3 -- dev9p now surfaces -T_E_IO etc.).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     return spoor_read_common(p, h, kbuf, len, /*positioned=*/false, 0);
 }
 
 // SYS_PREAD inner (#37) — testable with kernel-side buf. The cursor is
 // untouched on every path.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
     return spoor_read_common(p, h, kbuf, len, /*positioned=*/true, off);
 }
@@ -2317,6 +2330,7 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 // STALK_NOFOLLOW (the lstat shape -- the final link's OWN record); the
 // vivarium newfstatat shell passes it for AT_SYMLINK_NOFOLLOW. Native SYS_STAT
 // always passes 0 (no native lstat surface at D-1 -- a recorded seam).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
                       u32 stalk_flags, struct t_stat *out_k) {
     if (!p || !path || !out_k)                       return -1;
@@ -2522,6 +2536,7 @@ bool sys_attach_9p_flags_ok(u64 flags, bool srv) {
     return (flags & ~ok) == 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
                            const u8 *aname, u64 aname_len, u64 n_uname,
                            u64 flags);
@@ -2554,6 +2569,7 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
 // Inner -- testable without a live EL0 thread (a kernel aname, no user buffer),
 // like SYS_ATTACH_9P_SRV's. Every refusal before the attach is the bare -1, so
 // moving the copy ahead of them changes no answer.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
                            const u8 *aname, u64 aname_len, u64 n_uname,
                            u64 flags) {
@@ -2761,10 +2777,12 @@ s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
 // (max SYS_ATTACH_ANAME_MAX = 256). Copied into kernel scratch via
 // per-byte uaccess_load_u8. NULL with len=0 is allowed (empty aname).
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
                                const u8 *aname, u64 aname_len,
                                u64 n_uname, u64 flags);
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
     const struct srv_route *routes, u64 count, u64 flags) {
     if (!proc_may_create_srv_registry(p)) return -T_E_ACCES;
@@ -2823,6 +2841,7 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
 // Inner -- testable without a live EL0 thread (a kernel aname, no user buffer);
 // the handler thins to the aname copy + this. Every refusal before the attach
 // is the bare -1, so moving the copy ahead of them changes no answer.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
                                const u8 *aname, u64 aname_len,
                                u64 n_uname, u64 flags) {
@@ -3406,6 +3425,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
 // root (never refs/clunks it); RW-4 SA-F1: territory_root_ref takes the ref
 // ATOMICALLY under ns_lock (a plain read-then-ref raced a concurrent
 // pivot_root's swap+clunk-to-zero).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
                         char *joined, u32 joined_cap,
                         char *name, u32 name_cap) {
@@ -3562,6 +3582,7 @@ static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) 
 // (conn, qid) binding, kernel/pts.c -- the same resolve the tty seam uses),
 // so a 9P server cannot dress a file as a terminal either. is-a-terminal is
 // (dc == 'c' || dc == 't'); the Beacon gate (BEACON.md 12.4) reads both.
+VISIBLE_IF_KERNEL_TESTS
 int spoor_devclass(struct Spoor *c) {
     if (!c) return '-';
     if (c->dc == devdev.dc) return devdev_fd_devclass(c);
@@ -3595,6 +3616,7 @@ static s64 sys_fd_devclass_handler(u64 fd_raw) {
 // syscall frame -- the !t / !p guards are defense-in-depth.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
@@ -3602,6 +3624,7 @@ s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return (s64)p->pid;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
@@ -3609,6 +3632,7 @@ s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return (s64)(u64)p->principal_id;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
@@ -3673,6 +3697,7 @@ static s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
 // all, making this defense-in-depth). NON-static for the kernel tests.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
     if (!p) return -T_E_INVAL;
 
@@ -3788,12 +3813,14 @@ s64 sys_pty_register_test_native(u64 op, u64 a1, u64 a2, u64 a3) {
 // clunked on every path (#844). NON-static _for_proc bodies for the tests.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
     if (!p) return -T_E_INVAL;
     if (sig_class > 0xffffffffull) return -T_E_INVAL;
     return pts_tty_signal(p, pts_id, (u32)sig_class);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
     if (!p) return -T_E_INVAL;
     struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
@@ -3865,6 +3892,7 @@ static s64 sys_yield_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     (void)a2; (void)a3;
     // Validate the clock id FIRST -- a bad id never touches the buffer.
@@ -3904,6 +3932,7 @@ s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
 // MONOTONIC is untouched. CAP_HOSTOWNER-gated (a clock step is system-global, so
 // it is the host owner's authority, never an identity's -- I-22). The clk_id +
 // the cap are validated BEFORE any buffer read.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     (void)a2; (void)a3;
     // Only CLOCK_REALTIME is settable. MONOTONIC is the boot-counter timebase and
@@ -4199,6 +4228,7 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
                                 const char *name_scratch, u64 name_len_raw,
                                 u64 omode_raw, u32 perm, bool srv_post_ok,
                                 const struct sys_open_finish *how);
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
                                    const char *kname, u64 klen,
                                    u64 omode_raw, u64 perm_raw);
@@ -4253,6 +4283,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
 // `kname` is NUL-terminated at klen (dev9p's create scans for the NUL). The
 // handler's checks repeat here so a kernel caller meets the same refusals; for
 // a syscall they already passed, so the handler's precedence is unchanged.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
                                    const char *kname, u64 klen,
                                    u64 omode_raw, u64 perm_raw) {
@@ -4598,6 +4629,7 @@ static s64 sys_open_create_kpath_how(struct Proc *p, u64 start_fd_raw,
                                      u64 omode_raw, u64 perm_raw,
                                      const struct sys_open_finish *how);
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
                                    const char *kpath, u64 klen,
                                    u64 omode_raw, u64 perm_raw) {
@@ -4802,6 +4834,7 @@ enum { UNION_RD_TMP = 2048 };   // per-member read batch (kmalloc, off-stack)
 // spoor_readdir_run passes current_thread()->proc. Non-static so the merge /
 // dedup / ordinal-pagination logic is unit-testable with a Proc + a mounted
 // union of readdir-capable Devs (kernel/test/test_stalk.c).
+VISIBLE_IF_KERNEL_TESTS
 s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                       u64 in_ordinal) {
     if (!p || !c->union_snap)                        return -T_E_IO;
@@ -5270,6 +5303,7 @@ static int spoor_wstat_native(struct Spoor *c, u32 valid, u32 mode,
 static s64 sys_wstat_spoor_consume(struct Proc *p, struct Spoor *c, u32 valid,
                                    u32 mode, u32 uid, u32 gid, u64 size);
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
                        u32 uid, u32 gid, u64 size) {
     if (!p)                                          return -1;
@@ -6297,6 +6331,7 @@ static s64 sys_note_mask_handler(u64 new_mask, u64 old_mask_out_va) {
 // SVC handlers are the thin current_thread() wrappers (the
 // sys_pipe_for_proc pattern).
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     if (!p)                                          return -1;
 
@@ -6487,6 +6522,7 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
 // split). Outside the window the row is not served: every ELF, stack, guard and
 // vDSO mapping lives below it, and a munmap there is declined (NOSYS) rather
 // than faked, exactly as before.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
     if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
@@ -6523,6 +6559,7 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 // page at FAULT time (the whole point of a free reservation, so page_count tracks
 // true RSS). The VMA-count axis (PROC_VMA_MAX) IS charged inside vma_insert, so a
 // free lazy reservation cannot exhaust the vma slab.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
@@ -6632,6 +6669,7 @@ static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
 }
 
 // Returns the mapped VA, or a negated T_E_* the caller passes straight out.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
                            bool exec, u64 offset) {
     if (!p)                                          return -(s64)T_E_INVAL;
@@ -6884,6 +6922,7 @@ struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
 // windows ride the shared Image cache exactly as D-3a does; a writable one gets
 // the eager private copy above. Returns `addr` on success (MAP_FIXED's contract:
 // the requested address or nothing).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
                                  u64 length_raw, u32 pr, u64 offset) {
     if (!p)                                          return -(s64)T_E_INVAL;
@@ -6979,6 +7018,7 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
 // DISTRO D-3b arm 3 (dynlink.c:851): the anonymous MAP_FIXED bss tail. Demand-
 // zero, so it charges per page at fault time exactly like every other lazy anon
 // mapping.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
                                  u32 pr) {
     if (!p)                                          return -(s64)T_E_INVAL;
@@ -7017,6 +7057,7 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
 // native 1-arg form nor an anonymous-private Linux mmap, so a file-backed or
 // MAP_FIXED request keeps the pre-CL-4 fail-closed -1 instead of silently
 // receiving anonymous zero pages (ARCH 6.5: there is no file-backed mmap).
+VISIBLE_IF_KERNEL_TESTS
 u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
     if (x0 != 0) return x0;                  // native: length in x0
     // Linux/aarch64 mmap flag encoding -- inherent to a shim whose whole job is
@@ -7046,6 +7087,7 @@ static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
 // (every ELF, stack, guard and vDSO mapping lives there -- not the phenotype's
 // to release), else burrow_decommit_in's own answer (NOMEM for a hole, INVAL
 // for a mapping that is not plain lazy anonymous memory of this Proc).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (!p)                                          return -(s64)T_E_INVAL;
     if (length_raw == 0)                             return -(s64)T_E_INVAL;
@@ -7070,6 +7112,7 @@ s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
 }
 
 // The native SYS_BURROW_DECOMMIT (84) keeps its 0 / -1 ABI over the core.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     return sys_burrow_decommit_core(p, vaddr_raw, length_raw) == 0 ? 0 : -1;
 }
@@ -7106,6 +7149,7 @@ static s64 burrow_prot_word_check(u64 prot_raw) {
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
                                 u64 align_log2) {
     if (!p)                                          return -(s64)T_E_INVAL;
@@ -7155,6 +7199,7 @@ s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
     return (s64)vaddr;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
                                 u64 prot_raw, u64 flags_raw) {
     if (!p)                                          return -(s64)T_E_INVAL;
@@ -7194,6 +7239,7 @@ _Static_assert(BURROW_PROT_READ  == (u64)VIV_PROT_READ &&
                "SYS_BURROW_MAP_FILE hands its prot word to the phenotype's "
                "fixed-window cores unconverted");
 
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
                                  u64 length_raw, u64 prot_raw, u64 flags_raw,
                                  u64 addr_raw) {
@@ -7286,6 +7332,7 @@ static s64 sys_burrow_map_file_handler(u64 fd_raw, u64 offset, u64 length_raw,
 // with exactly two mappings and is never cross-Proc shareable
 // (burrow_share_into admits ANON only), so at most one peer can exist.
 //
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 
 // PRECONDITION: caller holds p->vma_lock (walks p->as->vmas).
@@ -7358,6 +7405,7 @@ static int jit_draw(u64 *rnd, long n) {
 // mechanism test would fail on the ABI plumbing and prove nothing about the
 // mechanism. (The copy-out arm itself is exercised by the in-guest prover,
 // which is a real EL0 Proc with a real user buffer.)
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
                           u64 *out_writer, u64 *out_exec) {
     if (!p || !out_writer || !out_exec)              return -T_E_INVAL;
@@ -7442,6 +7490,7 @@ fail_unref:
 }
 
 // SYS_JIT_CREATE: the mechanism above, plus the copy-out of the alias pair.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
     if (!p)                                          return -T_E_INVAL;
 
@@ -7496,6 +7545,7 @@ static s64 sys_jit_create_handler(u64 length_raw, u64 out_va) {
 // a writer, or a readable view of its bytes in EL0. Its pages are already
 // resident, so the first fetch maps a leaf and needs no sync (the CODE fault
 // arm's resident hit).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
                                  u64 length_raw, u64 *out_exec) {
     if (!p || !out_exec)                             return -T_E_INVAL;
@@ -7617,6 +7667,7 @@ static s64 sys_jit_create_sealed_handler(u64 src_va, u64 length_raw, u64 out_va)
 // belonging to different regions. Not CAP_JIT-gated -- see the syscall.h note;
 // releasing memory you already own is not an exercise of the emit authority,
 // and gating it would turn a capability expiry into a leak.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     if (!p)                                          return -T_E_INVAL;
     if (writer_va & (PAGE_SIZE - 1))                 return -T_E_INVAL;
@@ -7730,6 +7781,7 @@ static s64 sys_jit_destroy_handler(u64 writer_va) {
 // invalidate by the direct-map VA reaches the exec alias's lines only on a PIPT
 // I-cache, so on any other arch_icache_sync_range invalidates the whole I-cache
 // (Linux's sync_icache_aliases, which publishes user text the same way).
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
     if (!p)                                          return -T_E_INVAL;
     if (length == 0)                                 return -T_E_INVAL;
@@ -7827,6 +7879,7 @@ static s64 sys_icache_sync_space_handler(void) {
 
 // SYS_WEFT_SHARE: register the caller's ANON ring Burrow (mapped whole at
 // ring_va, RW / no-exec) as a per-flow ring + mint a share_id. The netd side.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     if (!p)                                          return -1;
     // Weft-7 F1: gate the share to the NIC-owning driver tier (CAP_HW_CREATE).
@@ -8591,6 +8644,7 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
 // inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
 // only as the covered member of a union the mount starts.
+VISIBLE_IF_KERNEL_TESTS
 int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
                        struct Spoor *mountpoint, u32 flags) {
     if (!p)                                          return -1;
@@ -8639,6 +8693,7 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
 
 // Inner — testable kernel-internally. Returns 0 on success, -1 if no
 // entry matches the mount point's identity.
+VISIBLE_IF_KERNEL_TESTS
 int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
     if (!p)                                          return -1;
     if (!p->territory)                               return -1;
@@ -8729,6 +8784,7 @@ static s64 sys_unmount_handler(u64 path_va, u64 path_len_raw) {
 
 // SYS_MLOCKALL — pin pages. CAP_LOCK_PAGES required. Sets PROC_FLAG_MLOCKED.
 // v1.0 has no swap; the flag is forward-compat scaffolding.
+VISIBLE_IF_KERNEL_TESTS
 int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
     if (!p)                                          return -1;
     (void)flags;       // unused at v1.0; reserved for MCL_CURRENT/MCL_FUTURE
@@ -8753,6 +8809,7 @@ static s64 sys_mlockall_handler(u64 flags_raw) {
 
 // SYS_SET_DUMPABLE — the EXTRACTION seal (PROC_FLAG_NODUMP; DEBUG-FS-DESIGN 3.2).
 // One-way to 0. Setting to 1 from a Proc that already has PROC_FLAG_NODUMP is REFUSED.
+VISIBLE_IF_KERNEL_TESTS
 int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
     if (!p)                                          return -1;
     if (dumpable == 0) {
@@ -8779,6 +8836,7 @@ static s64 sys_set_dumpable_handler(u64 dumpable_raw) {
 
 // SYS_SET_TRACEABLE — the CONTROL seal (PROC_FLAG_NOTRACE; DEBUG-FS-DESIGN 3.2).
 // One-way to 0.
+VISIBLE_IF_KERNEL_TESTS
 int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
     if (!p)                                          return -1;
     if (traceable == 0) {
@@ -8960,7 +9018,9 @@ static void sys_spawn_thunk(void *arg) {
 // making this drop the LAST ref, and the Dev's close hook (the console drain's
 // disarm, a pipe's EOF, a SrvConn teardown, a 9P fid clunk) must run then
 // (shed audit r4 F1; aux's H6). Non-static for devdev.spawn_unbump_runs_close.
+VISIBLE_IF_KERNEL_TESTS
 void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+VISIBLE_IF_KERNEL_TESTS
 void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n) {
     for (u32 j = 0; j < n; j++) spoor_clunk(bumped[j]);
 }
@@ -9080,6 +9140,7 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
 // caller's Proc (used for context; the rfork creates a fresh child Proc
 // regardless of the caller). Exported (non-static) for kernel-internal
 // tests in kernel/test/test_sys_spawn.c.
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
@@ -9183,6 +9244,7 @@ struct spawn_with_fds_args {
 
 // Both spawn thunks call apply_spawn_perms (defined below, next to the grant
 // gate); forward-declared here for the first caller.
+VISIBLE_IF_KERNEL_TESTS
 void apply_spawn_perms(struct Proc *p, u32 perm_flags);
 
 __attribute__((noreturn))
@@ -9264,6 +9326,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
 // Kernel-side body. Exported (non-static) for kernel-internal tests.
 // fds is a kernel-resident array of fd_count entries; each must refer
 // to an open KOBJ_SPOOR handle in `p`.
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
                                 const u32 *fds, u32 fd_count) {
     if (!p)                                            return -1;
@@ -9334,6 +9397,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
 // Reuses the existing sys_spawn_thunk + spawn_args from SYS_SPAWN —
 // the only difference is whether rfork or rfork_with_caps is used.
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
                                  caps_t cap_mask) {
     if (!p)                                            return -1;
@@ -9484,6 +9548,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     return pid;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
                             const u32 *fds, u32 fd_count, caps_t cap_mask) {
     return sys_spawn_full_with_perms_for_proc(p, name, name_len, fds, fd_count,
@@ -9508,6 +9573,7 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // entry points (SYS_SPAWN_WITH_PERMS and SYS_SPAWN_FULL_ARGV) route through here so
 // the grant authority lives in exactly one place. Non-static so the kernel test
 // suite can drive the per-bit decision directly on synthetic Procs.
+VISIBLE_IF_KERNEL_TESTS
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
     if ((perm_flags & SPAWN_PERM_SESSION_REGISTRY) &&
@@ -9564,6 +9630,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
 // Non-static so the kernel test suite can drive the bit->action mapping directly
 // (a real spawn races the child's exit clearing g_console_owner, so the owner-set
 // wiring is unobservable through a full spawn).
+VISIBLE_IF_KERNEL_TESTS
 void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     if (perm_flags & SPAWN_PERM_SESSION_REGISTRY) proc_mark_session_registry(p);
     if (perm_flags & SPAWN_PERM_SEAT_MANAGER) proc_mark_seat_manager(p);
@@ -9617,6 +9684,7 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
 // (spawn_perm_grant_check) is per-bit. Setting perm_flags=0 is identical to
 // SYS_SPAWN_FULL — kept as a single entry point so callers that grant no
 // permissions do not need a separate code path.
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_with_perms_for_proc(struct Proc *p,
                                   const char *name, size_t name_len,
                                   const u32 *fds, u32 fd_count,
@@ -10262,6 +10330,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 // tail's path. It is resolved here, in the spawner, after the gates and before
 // any child exists, as the image is: a bad cwd answers chdir's errno
 // (sys_dir_landed_name) and leaves nothing to reap. Every other refusal is -1.
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -10353,7 +10422,11 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
     return pid;
 }
 
-// Back-compat entry: no cwd tail (the child inherits the spawner's cwd).
+// The kernel test suite's spawn entries; nothing in production calls them.
+// Each fixes the arguments a newer core added at their inherit values, so a
+// test names only what it varies.
+#ifdef KERNEL_TESTS
+// No cwd tail (the child inherits the spawner's cwd).
 int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -10372,8 +10445,7 @@ int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
                                             /*cwd=*/NULL, 0u);
 }
 
-// Back-compat entry: not held (debug_flags 0). Keeps the CL-5 / V-1b signature
-// for the kernel test suite.
+// Not held (debug_flags 0): the CL-5 / V-1b signature.
 static int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -10393,9 +10465,8 @@ static int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
                                               /*debug_flags=*/0u);
 }
 
-// Back-compat entry: no budget request and no phenotype declaration (0 == 
-// inherit, for both). Keeps the pre-CL-5 / pre-V-1b signature for the
-// existing callers + the kernel test suite.
+// No budget request and no phenotype declaration (0 == inherit, for both):
+// the pre-CL-5 / pre-V-1b signature.
 int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -10414,9 +10485,8 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
                                                /*pheno_flags=*/0u);
 }
 
-// Back-compat entry: inherit identity (no SET). Unchanged signature for
-// existing callers + the SYS_SPAWN_WITH_PERMS-shaped tests. perm_flags
-// console-attachment gate is enforced by the identity entry above.
+// SYS_SPAWN_WITH_PERMS-shaped: inherit identity (no SET). The perm_flags
+// console-attachment gate is enforced by the cores the entries above reach.
 int sys_spawn_full_argv_for_proc(struct Proc *p,
                                  const char *name, size_t name_len,
                                  const char *argv_data, u32 argv_data_len,
@@ -10432,6 +10502,7 @@ int sys_spawn_full_argv_for_proc(struct Proc *p,
                                                  NULL, 0u,
                                                  /*want_allowance=*/NULL);
 }
+#endif
 
 // uaccess-loader helper: copy the struct sys_spawn_args from user memory
 // in a single pass. The struct is 80 bytes (pinned by _Static_assert in
@@ -10459,6 +10530,7 @@ static int sys_load_spawn_args(u64 req_va, struct sys_spawn_args *out) {
 // from a field-bounds violation. The argc/argv_data_len symmetry check
 // (argc == 0 ⟺ argv_data_len == 0) is also enforced here; the body
 // re-checks defense-in-depth on the same invariant.
+VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     if (!req)                                          return -1;
     if (req->name_len == 0 || req->name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -11181,6 +11253,7 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
 // synthetic frame (the sys_pci_claim_handler pattern -- the test carries its
 // own extern decl). Every rejection in the core lands ahead of rfork_forked,
 // which is what makes that coverage possible from kproc.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_rfork_handler(struct exception_context *ctx) {
     if (!ctx) return -(s64)T_E_INVAL;
     // A flags word that does not fit is refused like an unknown flag.
@@ -11281,6 +11354,7 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
 // kernel-owned throughout (invariant C-23).
 //
 // Returns the connection handle (hidx ≥ 0) on success, -1 on failure.
+VISIBLE_IF_KERNEL_TESTS
 int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
     if (!p) return -1;
 
@@ -11363,6 +11437,7 @@ static s64 sys_srv_accept_handler(u64 service_h_raw) {
 // peer fail-closes.
 //
 // Returns 0 on success (*out filled), -1 on failure.
+VISIBLE_IF_KERNEL_TESTS
 int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
                           struct srv_peer_info *out) {
     if (!p || !out) return -1;
@@ -11457,7 +11532,9 @@ static s64 sys_set_nonblock_handler(u64 fd, u64 on) {
 // Non-static so the kernel tests drive every gate with a synthetic Proc (the
 // sys_weft_share_for_proc shape). Both identity gates run BEFORE the claim:
 // the claim consumes the share, so a stranger must never reach it.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id) {
     if (!p || conn >= PROC_HANDLE_MAX || !proc_is_seat_service(p)) return -1;
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0) return -1;
@@ -11742,6 +11819,7 @@ static s64 sys_console_episode_handler(u64 op) {
 // global RX ring, so any opened handle is a valid console reader. Exposed
 // (non-static) for kernel-internal tests (test_cons.c). Returns the fd or -1;
 // on handle-table failure the Spoor ref taken by attach is released.
+VISIBLE_IF_KERNEL_TESTS
 hidx_t sys_console_open_for_proc(struct Proc *p) {
     if (!p)                            return -1;
     struct Spoor *cs = devcons.attach(NULL);   // dev_simple_attach -> ref=1
@@ -14121,6 +14199,7 @@ static s64 viv_clock_nanosleep(u64 clk, u64 flags, u64 req_va, u64 rem_va) {
 // the first record does not fit -- the caller's EINVAL row).
 // Non-static: the format row is pinned by unit tests (the
 // sys_open_create_kpath_for_proc pattern -- testable without an EL0 thread).
+VISIBLE_IF_KERNEL_TESTS
 u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
                             u8 *dst, u64 dst_cap,
                             u64 *last_cookie_out) {

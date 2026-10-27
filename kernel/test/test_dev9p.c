@@ -124,7 +124,6 @@ void test_dev9p_open_create_noent_then_create(void);
 void test_dev9p_open_create_exists_race_retries_open(void);
 void test_dev9p_open_create_excl_eexist_exact(void);
 
-extern struct Dev devnone;
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -2404,14 +2403,6 @@ void test_dev9p_poll_reads_every_client(void) {
 // =============================================================================
 
 // The positioned inners + the wstat inner (defined in kernel/syscall.c).
-extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
-                              s64 off);
-extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                               u64 len, s64 off);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                              u64 len);
-extern s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size);
 
 // #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
 // never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
@@ -4134,9 +4125,6 @@ void test_dev9p_wb_writethrough_range_invalidate(void) {
 // pattern every real transport absorbs (the demux's #210 orphan-clunk arm).
 // =============================================================================
 
-extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
-                                          const char *kpath, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
 
 // A Proc holding an UNOPENED fd at the loopback root (clone + clone-walk for
 // its own fid -- the walkable start base). CAP_DAC_OVERRIDE: the canonical
@@ -4422,9 +4410,6 @@ void test_dev9p_path_create_refuses_dmsrvcape(void) {
     teardown(root);
 }
 
-extern s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
-                                          const char *kname, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
 
 // One fd-based create on a fresh session; *seen = the Tlcreates it sent.
 static s64 wc_dmsrv_create(u32 perm, u32 *seen) {

@@ -41,11 +41,9 @@
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/types.h>
+#include <thylacine/syscall.h>
 
 // Inner SVC handlers (extern; defined in kernel/syscall.c).
-extern int sys_mlockall_for_proc(struct Proc *p, u32 flags);
-extern int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
-extern int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
 
 void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);

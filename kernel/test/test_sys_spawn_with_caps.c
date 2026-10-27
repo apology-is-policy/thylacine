@@ -35,8 +35,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-extern int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name,
-                                         size_t name_len, caps_t cap_mask);
 
 void test_sys_spawn_with_caps_happy_path_zero_mask(void);
 void test_sys_spawn_with_caps_happy_path_subset_of_parent(void);

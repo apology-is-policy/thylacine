@@ -82,29 +82,17 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
+#include <thylacine/devctl.h>
 
 // Inner syscall cores (non-static; defined in kernel/syscall.c).
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
-extern int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
-                                 struct srv_peer_info *out);
-extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                              u64 len);
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c;
 // deliberately not in devsrv.h — no production caller).
-extern void srv_registry_reset(void);
 
 // Test-support process-table linkage (non-static; defined in kernel/proc.c;
 // deliberately not in proc.h). proc_caps_by_stripes — the SYS_SRV_PEER
 // live-caps scan — only sees Procs spliced into the kproc-rooted table;
 // these link / unlink a bare proc_alloc'd test Proc.
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern void proc_test_seat_reset(void);
-extern s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
-extern s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
@@ -388,7 +376,6 @@ void test_devsrv_open_connect_byte(void) {
 // SrvConn by value; the row renders numbers to either end and "-" to anyone
 // else (the system principal and a hostowner are devctl.counters_gated's).
 // ---------------------------------------------------------------------------
-size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 
 static char g_ends_buf[4096];
 

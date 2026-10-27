@@ -14,20 +14,13 @@
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/syscall.h>
 
 // Defined in kernel/syscall.c; identity passed as scalars so this test needs
 // no kernel-internal struct spawn_identity. The trailing want_allowance
 // (Menagerie step 5) is the hardware-allowance bundle; these identity tests
 // pass NULL (the broad/inherit path), needing only a forward declaration.
 struct spawn_allowance;
-extern int sys_spawn_full_argv_identity_for_proc(
-        struct Proc *p, const char *name, size_t name_len,
-        const char *argv_data, u32 argv_data_len, u32 argc,
-        const u32 *fds, u32 fd_count,
-        caps_t cap_mask, u32 perm_flags,
-        bool set_identity, u32 principal_id, u32 primary_gid,
-        const u32 *supp_gids, u32 supp_gid_count,
-        const struct spawn_allowance *want_allowance);
 
 void test_proc_identity_kproc_is_system(void);
 void test_proc_identity_rfork_inherits(void);
@@ -238,8 +231,6 @@ void test_proc_identity_set_rejects_system_supp_gid(void) {
 // its stripes yields its identity; the 0 sentinel + an unassigned tag fail.
 // Native unpublished fixtures use the production process-table walk; no thread
 // runs in these Procs while the test changes their fields/exec-image pointer.
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
 static void test_service_admission_identity(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "service identity proc");

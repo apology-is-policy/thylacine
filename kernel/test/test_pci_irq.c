@@ -7,7 +7,6 @@
 #include <thylacine/errno.h>
 #include "../../mm/slub.h"
 
-void pci_irq_test_dispatch(u32 intid);
 void test_pci_irq_shared_tickets(void);
 
 struct fixture {
@@ -278,10 +277,7 @@ cleanup:
 #include <thylacine/thread.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
-void pci_test_msix_fail(struct KObj_PCI *pci, u32 stages);
-void pci_irq_test_msix_dispatch(u32 intid);
-void pci_irq_test_controller_fault(u32 node);
-bool gic_its_test_fault_notify(u32 node);
+#include "../../arch/arm64/gic_its.h"
 static struct KObj_IRQ *fault_wait_irq;
 static volatile bool fault_wait_exited;
 static int fault_wait_result;

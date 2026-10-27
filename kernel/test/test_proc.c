@@ -53,6 +53,7 @@
 #include "../../arch/arm64/timer.h"   // PTY-1f: the sleeper thunk's deadlines
 #include <thylacine/page.h>           // PTY-4e #19: the torpor sleeper's page
 #include <thylacine/torpor.h>         // PTY-4e #19: the preserved-wait probe
+#include <thylacine/devctl.h>
 
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
@@ -87,15 +88,6 @@ void test_proc_walk_preorder_and_early_exit(void);
 // teardown walk + the synthetic-Proc table splice let the test verify the walk
 // flags every scope member -- the actual death fires at the EL0 die-check,
 // which kernel test threads (EL1) never reach, so the flag is the observable.
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
-extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern void proc_test_set_init(struct Proc *p);
-extern void proc_exec_drop_image_state_for_test(struct Proc *p,
-                                                struct Thread *t,
-                                                u32 pheno);          // #247 + Design D
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -2402,7 +2394,6 @@ static bool dts_is_stopped(const char *s) {
 // it with a live Proc one variable (group_exit_msg) apart, so a deliver that
 // refused every Proc would fail too.
 void test_proc_dying_takes_no_stop(void) {
-    extern const char *devctl_procs_state_name_for_test(const struct Proc *p);
     struct Proc *live  = proc_alloc();
     struct Proc *dying = proc_alloc();
     TEST_ASSERT(live != NULL && dying != NULL, "proc_alloc live/dying");

@@ -88,6 +88,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/syscall.h>
 
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
@@ -840,11 +841,6 @@ void test_proc_reap_before_private_executor_charge(void) {
 // ---------------------------------------------------------------------------
 
 // Test hooks (the *_for_test convention; absent from the headers).
-u32  thread_tid_counter_swap_for_test(u32 v);
-u32  proc_pid_counter_swap_for_test(u32 v);
-void proc_exit_tail_test_set_hook(void (*fn)(void));
-u64  proc_exec_peer_oncpu_waits_for_test(void);
-s64  sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
 
 // A user entry and stack the spawn gates accept; nothing maps them, and no
 // thread spawned here reaches EL0 in a passing run.

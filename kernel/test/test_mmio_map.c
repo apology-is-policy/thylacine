@@ -39,8 +39,6 @@ void test_mmio_map_proc_free_releases_kobj(void);
 #define USER_VA_MMIO     0x40000000ull        // 1 GiB into user-VA
 
 // Forward decls for proc helpers (defined in proc.c — exposed via test).
-extern struct Proc *proc_alloc(void);
-extern void         proc_free(struct Proc *p);
 
 // burrow_create_mmio + burrow_map installs a VMA reachable via
 // vma_lookup. Verifies the integration pipeline at the kernel API

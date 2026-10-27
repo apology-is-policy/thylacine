@@ -74,13 +74,8 @@ void test_burrow_map_fixed_replace_file_frees_outside_lock(void);
 void test_burrow_map_fixed_refuses_code_alias(void);
 
 // The non-static inners of the SVC handlers (defined in kernel/syscall.c).
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw,
-                                      u64 length_raw);
 // Overcommit / I-32 (ARCH section 6.5): the demand-zero lazy attach.
-extern s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
 // CL-4: the pure dual-ABI length selector behind the dispatch case.
-extern u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw);
 
 static void drop_proc(struct Proc *p) {
     if (!p) return;
@@ -874,8 +869,6 @@ void test_burrow_map_fixed_into_free_space(void) {
 // range succeeds (Linux no-op).
 // =============================================================================
 
-extern s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw,
-                                     u64 length_raw);
 
 // The musl unmap_library shape: a lazy reservation cut into three VMAs by a
 // MAP_FIXED overlay, then ONE whole-span munmap. All three go; the space is

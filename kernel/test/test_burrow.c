@@ -51,10 +51,10 @@
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
 #include <thylacine/vma.h>         // AS-R9: VMA_PROT_RW for the unmap-refusal witness
+#include "../../mm/phys.h"
 
 // REVENANT R-1: the buddy free-page counter (mm/phys.h) — witness for the
 // resident-page-free assertion; forward-declared to avoid a relative mm include.
-u64 phys_free_pages(void);
 
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);

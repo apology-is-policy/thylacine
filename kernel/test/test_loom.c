@@ -80,9 +80,6 @@ void test_loom_regbuf_foreign_charge_not_refunded(void);
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
 // forward-declare it like test_sys_burrow.c does for its inner).
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 static struct Proc *test_proc_make(void) {
     return proc_alloc();
@@ -1057,6 +1054,7 @@ void test_loom_register_replaces(void) {
 // zero-copy payload. Mirrors specs/loom.tla's `reg` slot + ObjPinnedToSnapshot.
 // ---------------------------------------------------------------------------
 #include "private_pool_fixture.h"
+#include <thylacine/syscall.h>
 
 // A sibling thread closes the new fd the instant setup installs it. That close
 // drops the handle's reference; setup must still hold its own, so the Loom
@@ -2513,12 +2511,9 @@ void test_loom_private_targets(void) {
 // charged preallocated client. No server thread: preparation must perform no
 // transport I/O and must leave the backlog empty. This does not exercise CONNECT
 // publication, request binding, handshake progress or retirement of active work.
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
 // Real admission and real preallocated handshake. The canned responder only
 // supplies wire replies; READY, request completion and retirement use production
 // code. CQ backpressure must preserve both success and cancelled obligations.
-int canonical_responder(void *, const u8 *, size_t, u8 *, size_t);
 static int lc_reply(struct SrvConn *cn, u8 type, u16 tag) {
     u8 req[7]={7,0,0,0,type,(u8)tag,(u8)(tag>>8)}, resp[64];
     int n=canonical_responder(NULL,req,sizeof(req),resp,sizeof(resp));

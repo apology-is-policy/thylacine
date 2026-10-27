@@ -84,8 +84,6 @@
 
 #include "../../mm/slub.h"       // kmalloc: a point-only union_snap
 
-extern struct Dev devnone;
-extern struct Dev devenv;
 
 void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);

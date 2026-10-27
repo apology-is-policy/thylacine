@@ -25,6 +25,7 @@
 #include <thylacine/vma.h>             // VMA_PROT_*
 
 #include "../../mm/slub.h"             // kmalloc / kfree / KP_ZERO
+#include <thylacine/syscall.h>
 
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
@@ -45,9 +46,6 @@ void test_pci_syscall_claim_info(void);
 // The SUCCESS copy-out (SYS_PCI_INFO) + the BAR burrow-map (SYS_PCI_MAP_BAR)
 // need a real user buffer + user address space, which the in-kernel kproc
 // context cannot supply, so those are proven by the pci-2 userspace probe.
-extern s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
-extern s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw);
-extern s64 sys_pci_info_handler(u64 hraw, u64 info_va);
 
 // Deterministic (no-hardware) regression for the BAR-size decode. A 32-bit
 // BAR's size mask occupies only the low 32 bits, so it MUST be inverted in

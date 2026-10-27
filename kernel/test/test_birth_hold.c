@@ -43,19 +43,9 @@
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/devproc.h>
 
 struct spawn_allowance;
-extern int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req);
-extern int sys_spawn_full_argv_debug_for_proc(
-        struct Proc *p, const char *name, size_t name_len,
-        const char *argv_data, u32 argv_data_len, u32 argc,
-        const u32 *fds, u32 fd_count,
-        caps_t cap_mask, u32 perm_flags,
-        bool set_identity, u32 principal_id, u32 primary_gid,
-        const u32 *supp_gids, u32 supp_gid_count,
-        const struct spawn_allowance *want_allowance,
-        u32 req_budget, u32 pheno_flags, u32 debug_flags);
-bool devproc_all_threads_parked(struct Proc *target);
 
 void test_birth_hold_validate_req(void);
 void test_birth_hold_publication_mark(void);

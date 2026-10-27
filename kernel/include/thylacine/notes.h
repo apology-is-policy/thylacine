@@ -781,4 +781,17 @@ void notes_post_pipe(struct Proc *writer);
 // the proc_alloc path.
 void notes_queue_init(struct NoteQueue *q);
 
+// Called from arch/arm64/exception.c (no header held it before).
+void notes_deliver_at_el0_return(struct exception_context *ctx);
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into notes.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+const char *notes_known_name_for_test(u32 i);
+u32 notes_name_terminate_latch_for_test(const char *name);
+void notes_release_claims_for_test(struct Thread *t);
+const char *notes_snare_death_name_for_test(u32 i);
+#endif // KERNEL_TESTS
+
 #endif  // THYLACINE_NOTES_H

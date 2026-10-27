@@ -309,11 +309,6 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
 // exec'ing thread), three execs in a row over one device claim: a shared old space
 // (frees nothing, so resets nothing), the claim on an fd with the space ours alone
 // (exec's walk a), then the claim on a mapping only (walk b, in the drain).
-u64 proc_exec_device_resets_for_test(void);
-u64 proc_exec_walk_a_seq_for_test(void);
-u64 addrspace_drain_device_resets_for_test(void);
-u64 addrspace_drain_seq_for_test(void);
-u64 addrspace_teardown_stamp(void);
 
 static struct {
     u64 page;

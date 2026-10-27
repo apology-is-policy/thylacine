@@ -38,8 +38,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
 
 void test_syscall_dispatch_unknown(void);
 void test_syscall_native_gap_unassigned(void);

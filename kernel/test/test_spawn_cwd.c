@@ -27,20 +27,9 @@
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/exec.h>
 
 struct spawn_allowance;
-extern int sys_spawn_full_argv_cwd_for_proc(
-        struct Proc *p, const char *name, size_t name_len,
-        const char *argv_data, u32 argv_data_len, u32 argc,
-        const u32 *fds, u32 fd_count,
-        caps_t cap_mask, u32 perm_flags,
-        bool set_identity, u32 principal_id, u32 primary_gid,
-        const u32 *supp_gids, u32 supp_gid_count,
-        const struct spawn_allowance *want_allowance,
-        u32 req_budget, u32 pheno_flags, u32 debug_flags,
-        const char *cwd, u32 cwd_len);
-extern struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
-                                                 size_t name_len, size_t *size_out);
 
 void test_spawn_cwd_child_born_in_cwd(void);
 void test_spawn_cwd_image_joins_child_cwd(void);

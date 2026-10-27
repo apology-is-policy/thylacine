@@ -107,15 +107,6 @@ void test_vma_range_is_mapped(void);
 void test_capacity_fork_clone_charges_pages_and_nodes(void);
 
 // The non-static inners of the SVC handlers (kernel/syscall.c).
-extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
-                                       u64 align_log2);
-extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
-                                       u64 prot_raw, u64 flags_raw);
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
-extern s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
-extern s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 #define P            PAGE_SIZE
 #define PR_R         ((u64)BURROW_PROT_READ)
@@ -1159,7 +1150,6 @@ void test_vma_range_is_mapped(void) {
     TEST_ASSERT(!across, "a range across the hole is not mapped");
     TEST_ASSERT(head && tail, "the two pieces are");
     // The release core's errnos over the same shapes (B-1b): a hole is ENOMEM.
-    extern s64 sys_burrow_decommit_core(struct Proc *, u64, u64);
     TEST_EXPECT_EQ(sys_burrow_decommit_core(p, lo, 4 * P), ERR(T_E_NOMEM),
                    "decommit across the hole is ENOMEM");
     TEST_EXPECT_EQ(sys_burrow_decommit_core(p, lo, P), (s64)0, "decommit the head piece");

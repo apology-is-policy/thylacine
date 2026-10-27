@@ -57,6 +57,7 @@
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
+#include <thylacine/visibility.h>
 
 // The registry. Heap-allocated by srv_registry_create (stalk-3a); was a
 // single static struct pre-stalk-3a. `magic` (offset 0) discriminates a
@@ -699,14 +700,16 @@ int srv_backlog_depth(struct SrvService *svc) {
 }
 
 // srv_registry_reset — TEST SUPPORT ONLY. Drain the BOOT registry to
-// all-FREE, tearing down every pending connection first. Deliberately NOT
-// declared in devsrv.h: no production caller exists; the in-kernel test
-// harness extern-declares it so each devsrv test starts from an empty boot
-// registry (the registry its public-API calls resolve).
+// all-FREE, tearing down every pending connection first. No production
+// caller exists; devsrv.h declares it under KERNEL_TESTS so each devsrv test
+// starts from an empty boot registry (the registry its public-API calls
+// resolve).
+#ifdef KERNEL_TESTS
 void srv_registry_reset(void) {
     if (!g_boot_srv_registry) return;
     srv_registry_drain(g_boot_srv_registry);
 }
+#endif
 
 #ifdef KERNEL_TESTS
 // Test-only observation/injection for the accepter identity-pin window.

@@ -59,12 +59,6 @@
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c;
 // deliberately not in devsrv.h — no production caller).
-extern void srv_registry_reset(void);
-extern bool srv_test_accept_pin(struct SrvService *svc, int mode);
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
-extern int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
-                              struct Spoor *mountpoint, u32 flags);
-extern int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint);
 
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
@@ -787,8 +781,6 @@ void test_devsrv_service_keys_distinct(void) {
     srv_registry_reset();
 }
 
-extern s64 sys_srv_registry_new_for_proc(struct Proc *, u64, const struct srv_route *, u64, u64);
-extern int spawn_perm_grant_check(struct Proc *, u32);
 
 // The constructor answers a descriptor or a refusal as s64. Anything that is
 // not a descriptor reads as -1, so it fails the caller's >= 0 check rather

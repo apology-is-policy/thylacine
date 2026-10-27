@@ -52,8 +52,6 @@ void test_vivarium_t1_renumbers(void);
 void test_vivarium_t1_narrows_linux_widths(void);
 void test_vivarium_t2_shells_narrow_linux_widths(void);
 
-extern bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_fails_closed(void);
@@ -129,7 +127,6 @@ void test_vivarium_t1_renumbers(void) {
 //   unsigned int whence), pread64/pwrite64(unsigned int fd, ...),
 //   getpgid/getsid(pid_t), exit_group(int). exit and getpid read no word. The
 //   list is every row of g_viv_t1, and its length is checked against the table.
-extern u32 vivarium_t1_count_for_test(void);
 void test_vivarium_t1_narrows_linux_widths(void) {
     static const struct { u64 nr; u8 u32w, s32w; const char *what; } rows[] = {
         { VIV_LINUX_READ,       0x1, 0,   "read" },
@@ -4390,9 +4387,6 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
     bare->state   = PROC_STATE_ZOMBIE; proc_free(bare);
 }
 
-extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
-extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
-extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 // The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
 //
 // The decide half above is pure; this drives the arm that turns a decision into
@@ -4474,7 +4468,6 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
 // (which sets CNONBLOCK directly); THIS covers the fcntl -> handle-helper -> Spoor
 // leg, which otherwise only the SKIPpable git-workflow E2E exercises. Also pins F2
 // (a pipe write end reports OWRITE, not a misleading OREAD).
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 void test_vivarium_fcntl_nonblock_roundtrip(void);
 void test_vivarium_fcntl_nonblock_roundtrip(void) {
     struct Proc *p = proc_alloc();
@@ -5132,7 +5125,6 @@ void test_vivarium_socktab_ready_cache(void) {
 // cloexec socket's Spoor is released, a kept socket's is not), and exit (the
 // rest goes with the fds, in the at-exit close -- not at reap, so a zombie pins
 // no netd fid).
-extern void proc_close_handles_at_exit_for_test(struct Proc *p);
 void test_vivarium_socktab_ready_release_paths(void);
 void test_vivarium_socktab_ready_release_paths(void) {
     struct Proc *parent = proc_alloc();
@@ -5214,8 +5206,6 @@ void test_vivarium_socktab_ready_release_paths(void) {
 // buffer receiving 0/4 -- needs a live EL0 mapping the kernel unit harness
 // cannot stage; it is the curl-demo E2E's job, where verifyconnect reads a 0
 // and the fetch completes.)
-extern s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level,
-                                   u64 optname, u64 optval_va, u64 optlen_va);
 void test_vivarium_getsockopt_shell_guards_uaccess(void);
 void test_vivarium_getsockopt_shell_guards_uaccess(void) {
     struct Proc *p = proc_alloc();
@@ -5561,8 +5551,6 @@ void test_vivarium_renameat_domain(void) {
 // E2E witnesses the whole shell, this pins the layout math).
 // =============================================================================
 
-extern u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
-                                   u8 *dst, u64 dst_cap, u64 *last_cookie_out);
 
 // Append one 9P2000.L dirent (qid.type/qid.path + cookie + d_type + name) at
 // *pos; qid.version is zeroed (the encode never reads it).
@@ -5635,7 +5623,6 @@ void test_vivarium_dirent64_encode(void) {
 // it). Driven through the REAL arm (viv_getdents64_for_test -> viv_tier2), the
 // same shape as the getsockopt uaccess-guard test. The guard runs before the
 // fd lookup, so this needs no live directory -- the FAULT is the buffer check.
-extern s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_getdents64_guards_uaccess(void) {
     struct Proc *p = proc_alloc();
@@ -5687,8 +5674,6 @@ void test_vivarium_getdents64_guards_uaccess(void) {
 // fixup gate (fi.vaddr < UACCESS_USER_VA_TOP) is false -> extinction, so the
 // harness dies rather than returning. The EFAULT here pins the guard's presence;
 // the count==0 control isolates it (same kern_va, EBADF not EFAULT).
-extern s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
-extern s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
 
 void test_vivarium_readv_writev_guard_iovec_array(void);
 void test_vivarium_readv_writev_guard_iovec_array(void) {
@@ -5924,7 +5909,6 @@ void test_vivarium_session_errno_remap(void) {
 // (the global-mode flip) is gated on the caller's session OWNING the console, so
 // a non-owner-session / post-SAK proc is refused -- while reads (isatty's
 // TIOCGWINSZ) stay ungated for any cons-fd holder.
-extern hidx_t sys_console_open_for_proc(struct Proc *p);
 void test_vivarium_ioctl_cons_identity_and_gate(void);
 void test_vivarium_ioctl_cons_identity_and_gate(void) {
     // F1: spoor_is_console by device identity (spoor_is_console only reads
@@ -6058,8 +6042,6 @@ void test_vivarium_intr_class(void) {
 // the Dev's stat and cached on the Spoor. A stat that fails answers "not slow"
 // and is NOT cached, so a stat cut short by a group exit cannot pin a
 // fork-shared pts as uninterruptible for the Proc that survives.
-extern bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 
 static int g_intr_stat_calls = 0;
 static int g_intr_stat_fail  = 0;
@@ -6159,8 +6141,6 @@ void test_vivarium_fd_is_slow_cached(void) {
 // past the reservation and checks the call published nothing (the table's
 // install count), returned its number, and left no row behind.
 // ---------------------------------------------------------------------------
-extern s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);
-extern s64 viv_accept_for_test(struct Proc *p, u64 fd);
 
 static int viv_reserved_count(struct Proc *p) {
     int n = 0;

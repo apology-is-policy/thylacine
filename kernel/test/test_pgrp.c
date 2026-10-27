@@ -51,8 +51,6 @@ void test_tty_pgrp_fanout_exactly_once(void);
 void test_tty_terminate_class_gate(void);
 
 // Test-harness hooks (the test_proc.c pattern).
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
 
 static volatile u32 g_child_sid;
 static volatile u32 g_child_pgid;

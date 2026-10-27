@@ -42,6 +42,8 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
+#include <thylacine/devctl.h>
+#include <thylacine/devproc.h>
 
 void test_devproc_bestiary_smoke(void);
 void test_devproc_attach_returns_dir(void);
@@ -112,22 +114,6 @@ void test_devproc_zombie_status_signal(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
-bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
-bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target);
-bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
-size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
-size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
-                                char *buf, size_t cap, bool *denied);
-size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
-                                   char *buf, size_t cap, bool *denied);   // IM-2
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state);
-bool devproc_all_threads_parked(struct Proc *target);
 
 // =============================================================================
 // Helpers.
@@ -1858,7 +1844,6 @@ static void birth_hold_target_free(struct Proc *p) {
 // the proc table stalls whichever later test walks it.
 #define BHC_UNSEEN 0xDEADu
 
-int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
 
 static u32 bhc_hold(struct Proc *p) {
     return __atomic_load_n(&p->debug_birth_hold, __ATOMIC_ACQUIRE);
@@ -2146,8 +2131,6 @@ void test_devproc_debug_stop_start_resume(void) {
     //     thread of the debugger resumes the target, whose step trap then finds
     //     no owner and delivers no stop, so waiting for the re-stop would last
     //     until the target exits. /proc/<pid>/wait (ctl NULL) is not slot-bound.
-    extern int devproc_wait_state_for_test(int pid, struct Proc *caller,
-                                           struct Spoor *ctl);
     struct Spoor *gctl = open_ctl_for_pid(tgt->pid);
     long g_attach = 0, g_stop = 0, g_detach = 0;
     int g_owned = -9, g_released = -9, g_wait = -9;
@@ -2198,7 +2181,6 @@ void test_devproc_debug_stop_start_resume(void) {
                    "the resumed target reads not-yet to /proc/<pid>/wait, which the slot does not bind");
     // The scan's state only ends the wait through its verdict: a released slot
     // must END it, where a live, not-yet-stopped target polls on.
-    extern int devproc_wait_verdict_for_test(int state);
     int v_released = devproc_wait_verdict_for_test(2);
     int v_gone     = devproc_wait_verdict_for_test(-1);
     int v_stopped  = devproc_wait_verdict_for_test(1);
@@ -2212,7 +2194,6 @@ void test_devproc_debug_stop_start_resume(void) {
     TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1 && v_notyet != v_released,
                 "a live target not yet stopped polls on");
     // And the step write answers each verdict: only a re-stop completes the step.
-    extern long devproc_step_result_for_test(int ev, long n);
     TEST_EXPECT_EQ(devproc_step_result_for_test(v_stopped, 5L), 5L,
                    "a re-stopped target completes the step");
     TEST_EXPECT_EQ(devproc_step_result_for_test(v_gone, 5L), (long)(-T_E_SRCH),
@@ -2244,7 +2225,6 @@ void test_devproc_debug_stop_start_resume(void) {
     // freestanding kernel does not link). ft is never linked into the proc table;
     // the lock is the selector's contract. Recorded under it, asserted after the
     // stack Threads are unlinked.
-    extern struct Thread *devproc_focus_thread(struct Proc *target);
     struct Proc *ft = proc_alloc();
     TEST_ASSERT(ft != NULL, "alloc focus-select target");
     ft->state = PROC_STATE_ALIVE;
@@ -3263,10 +3243,6 @@ void test_devproc_maps_code_visible(void) {
     TEST_ASSERT(!nobody, "B-2b: a reader with no Proc sees none");
 }
 
-s64 sys_jit_create_region(struct Proc *p, u64 length_raw, u64 *out_w, u64 *out_x);
-s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
-                                 u64 length_raw, u64 *out_exec);
-s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 
 // "0x<hex>-": how a maps row starting at `va` begins (fmt_hex's format).
 static void maps_va_prefix(u64 va, char out[24]) {

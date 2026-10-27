@@ -16,9 +16,8 @@
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/dev9p.h>
 
-extern struct Dev devramfs;
-extern struct Dev dev9p;
 
 void test_perm_check_owner_group_other(void);
 void test_perm_check_owner_first_authoritative(void);

@@ -41,9 +41,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-extern int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name,
-                                        size_t name_len,
-                                        const u32 *fds, u32 fd_count);
 
 void test_sys_spawn_with_fds_rejects_oversize_fd_count(void);
 void test_sys_spawn_with_fds_rejects_bad_fd(void);

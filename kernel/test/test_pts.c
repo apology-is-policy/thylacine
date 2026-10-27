@@ -80,16 +80,8 @@ void test_pts_tty_acquire_matrix(void);
 void test_pts_tty_set_get_fg_matrix(void);
 void test_pts_tty_signal_routing(void);
 
-extern s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2,
-                                     u64 a3);
-extern s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class);
-extern s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num,
-                                  u64 arg);
 
 // Test-harness hooks (the test_proc.c pattern).
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 
 static struct SrvConn *pts_make_conn(struct Proc *owner) {
     return srvconn_create(proc_stripes(owner), owner->pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID,

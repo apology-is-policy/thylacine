@@ -40,4 +40,13 @@ int pci_irq_get_info(struct KObj_IRQ *irq, struct pci_irq_info *info);
 struct KObj_PCI *pci_irq_owner(struct KObj_IRQ *irq); // borrowed while IRQ pinned
 void pci_irq_revoke_function(struct KObj_PCI *pci);
 void pci_irq_free(struct KObj_IRQ *irq); // refcount reached zero
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into pci_irq.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void pci_irq_test_controller_fault(u32 node);
+void pci_irq_test_dispatch(u32 intid);
+void pci_irq_test_msix_dispatch(u32 intid);
+#endif // KERNEL_TESTS
+
 #endif

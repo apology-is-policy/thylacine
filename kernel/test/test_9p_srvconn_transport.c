@@ -52,17 +52,14 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include "../../arch/arm64/uart.h"
+#include "../../arch/arm64/timer.h"
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c).
-extern void srv_registry_reset(void);
-extern u64 timer_now_ns(void);
 
 // The shared 9P2000.L canned-reply builder (non-static; defined in
 // test_9p_client.c). The SrvConn-vehicle device-gone tests pre-stage their
 // handshake replies through it -- one source of truth for the reply byte
 // layouts, so a future wire change cannot silently desync this file.
-int canonical_responder(void *ctx, const u8 *req, size_t req_len,
-                        u8 *resp, size_t resp_cap);
 
 // Forward decls for the registered test entries (suppress -Wmissing-
 // prototypes; matches the rest of the kernel test corpus pattern).
@@ -1289,7 +1286,6 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
 // (the stale-pts fail-closed arm).
 // =============================================================================
 
-extern int spoor_devclass(struct Spoor *c);   // kernel/syscall.c (the syscall's body)
 
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void) {
     srv_registry_reset();
@@ -1469,9 +1465,6 @@ static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_re
     return r;
 }
 
-extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
-                                      const u8 *aname, u64 aname_len,
-                                      u64 n_uname, u64 flags);
 
 // SYS_ATTACH_9P_SRV's own half, through its inner: the flags word reaches the
 // helper, and a refused word sends nothing (n_uname stays the 0xBAD0 no-frame

@@ -42,6 +42,7 @@
 #include <thylacine/pci_handle.h>   // V-2: synthetic KObj_PCI for the hostmem test
 #include "../../arch/arm64/mmu.h"   // V-2: MAIR_IDX_* for burrow_create_hostmem
 #include "../../mm/slub.h"          // V-2: kmalloc/kfree/KP_ZERO
+#include <thylacine/syscall.h>
 
 void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
@@ -64,13 +65,8 @@ void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
 void test_weft_reap_live_sweep_leaves_test_bindings(void);
 
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
 
 // Non-static syscall inner (kernel/syscall.c). ring_va (x0), ring_size (x1).
-s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
-s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 void test_weft_sharer_charge_released_at_detach(void);
 void test_weft_reap_kproc_pid_survives_walk(void);
@@ -1380,7 +1376,6 @@ void test_weft_hostmem_share(void) {
 // holds the tapestryd-shape burrow {handle:0, mapping:1}. Exercises: clean==1 (reap-safe),
 // pin-not-mapped==2 (PARK -- the F1 window), pin+map==3, back to 1 after both
 // drop, and every reject path (-T_E_INVAL).
-s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);
 void test_weft_hostmem_refcount(void) {
     struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
     TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
@@ -1466,8 +1461,6 @@ void test_weft_hostmem_refcount(void) {
 // V-2 (audit F2): the pure subrange resolver behind SYS_BURROW_FROM_HOSTMEM --
 // the security-load-bearing shm-scan + OOB rejects + base_pa arithmetic, tested
 // without the syscall's Proc/handle setup.
-int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
-                             u64 length, u64 *base_pa_out);
 void test_weft_hostmem_resolve(void) {
     struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
     TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");

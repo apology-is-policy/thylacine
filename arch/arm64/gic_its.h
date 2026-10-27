@@ -16,4 +16,11 @@ bool gic_its_set_enabled(u32 intid, bool enabled);
 bool gic_its_enabled(u32 intid);
 // Kernel regression injection, serialized with mapping retirement.
 bool gic_its_set_pending(const struct gic_msi_route *route);
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into gic_its.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+bool gic_its_test_fault_notify(u32 node);
+#endif // KERNEL_TESTS
+
 #endif

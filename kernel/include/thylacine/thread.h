@@ -931,4 +931,14 @@ extern volatile u64 g_thread_switch_test_window_ns;
 u64 thread_total_created(void);
 u64 thread_total_destroyed(void);
 
+// Called from kernel/main.c (no header held it before).
+u64 thread_free_oncpu_waits(void);
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into thread.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u32 thread_tid_counter_swap_for_test(u32 v);
+#endif // KERNEL_TESTS
+
 #endif // THYLACINE_THREAD_H

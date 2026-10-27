@@ -18,6 +18,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
+#include <thylacine/devctl.h>
 
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -528,7 +529,6 @@ static bool att_contains(const char *h, size_t hl, const char *needle) {
     return false;
 }
 
-size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 void test_p9_attached_ctl_registry(void) {
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
                                 sizeof(g_loopback_resp),

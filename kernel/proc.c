@@ -60,6 +60,7 @@
 #include "../arch/arm64/uart.h"
 #include "../mm/phys.h"           // B-1a': capacity_pool_pages (the default budget)
 #include "../mm/slub.h"
+#include <thylacine/addrspace.h>
 
 // Declared here rather than by including <thylacine/vivarium.h> ON PURPOSE.
 // `struct viv_sigtab` stays INCOMPLETE in this file (proc.h forward-declares
@@ -70,9 +71,6 @@
 // rfork copies the table (viv_sigtab_clone_into: the child gets its OWN
 // table, or NULL when the parent has none), execve resets CAUGHT rows only
 // (viv_sigtab_reset_caught: SIG_IGN survives), and the native full reset stays.
-void viv_sigtab_reset(struct viv_sigtab *tab);
-void viv_sigtab_reset_caught(struct viv_sigtab *tab);
-int  viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent);
 
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
@@ -720,7 +718,6 @@ int proc_quiesce_owned_devices(struct Proc *p) {
 #ifdef KERNEL_TESTS
 // Devices reset by exec's walk (a), summed over every exec, and the stamp of its
 // latest run (the *_for_test convention: extern-declared by the harness).
-u64 addrspace_teardown_stamp(void);
 static u64 g_exec_device_resets;
 static u64 g_exec_walk_a_seq;
 u64 proc_exec_device_resets_for_test(void);
