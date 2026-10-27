@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Graphical seat incarnations
 
@@ -101,6 +101,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
+| `proc_exec_claim(p)` / `proc_exec_dooms(p, t)` | exec's claim on a process with live peers (thread-model C5, ARCH 7.3.3): -1 while a group claim or another exec holds it; otherwise it dooms every other thread, wakes them, and sleeps death-only until the caller is the only live thread, returning -1 only if group death ends the wait. `proc_exec_dooms` is the pointer compare every death predicate reads |
 | `proc_apply_identity` | the single audited identity-mutation site |
 | `proc_seal` | the only writer of `PROC_FLAG_NODUMP`/`NOTRACE`: OR-only, under `g_proc_table_lock`, both SEAL bits in one critical section |
 | `proc_mark_*` / `proc_is_*` | the one-way `proc_flags` stamps and their fail-closed readers |
@@ -346,11 +347,33 @@ governing everything it clears is one sentence: **the image is gone, so anything
 holding an address into it, or a disposition installed by it, is now a pointer
 into someone else's program.**
 
+**With live peers, exec first claims the process** (thread-model C5, LINEAGE
+L-2b; before it, execve refused with EAGAIN). `proc_exec_claim` runs after the
+new image is loaded and before the swap: in one thread-lock hold it refuses if
+the group claim or another exec's claim is set, else stores itself in
+`exec_task` (RELEASE) and, with peers live, runs the death-wake walk
+(`proc_death_wake_locked`, shared with group termination); then it kicks the
+other CPUs and sleeps death-only on `exec_rendez` until `live_threads == 1`.
+Every decrement of the live count wakes it (`proc_exec_live_dropped_locked`, at
+the exit commit and at the unlink of a created thread that never ran,
+[[sub-kernel-thread]]). Only group death ends the wait early, and the claim is
+then cleared; a terminate latch does not, because the new image meets it, its
+handler reset to default, as POSIX keeps a pending signal across exec. A
+per-Proc pointer rather than a per-thread flag, for two reasons: the group claim
+is set once (exempting the execer from it would void a later kill), and two
+execers setting per-thread flags in two holds could doom each other and end the
+process with no group death (`thread_reap_buggy_exec_perthread`,
+DoomedNeverLast). No stop parks the claim's wait: `proc_stop_requested` reads
+false while a claim is held ([[sub-kernel-jobctl]]). A refused claim drops the
+new image -- space and program file -- in `exec_claim_or_drop`
+([[sub-kernel-syscall-dispatch]]). The swap clears the claim. Regressions: the
+`proc.exec_claim_*` family in `kernel/test/test_thread_spawn.c`.
+
 **Before the swap, exec waits until it is the only thread on the list**
 (`proc_exec_wait_alone`: `thread_count == 1` under the thread lock), and the
 swap re-checks `live_threads == 1 && thread_count == 1` under the table lock with
-the thread lock nested. Admission counted no live peer, and only a live thread
-creates one, so every peer is EXITING; but one can still be on another CPU between
+the thread lock nested. The claim returned with no live peer, and admission
+refuses while the claim is held, so every peer is EXITING; but one can still be on another CPU between
 its exit commit and its last switch-out, and its tail stores its clear-child-tid
 word through this Proc's translation -- by a stale TLB entry into a page the drain
 below frees, or by a fault that demand-pages through `p->as` into the new image. A
@@ -396,9 +419,10 @@ cross-process readers, the earlier comment that was true about threads and false
 about processes, the store-width hazard.
 
 What belongs here is the boundary it draws around this function's own guarantee.
-`proc_exec_alone` bounds **the threads of this process**. It says nothing
-whatever about other processes, and that is exactly the half the superseded
-comment got wrong. The same gate correctly covers the same-process readers and
+Exec's aloneness (the claim's wait, then the swap's re-check) bounds **the
+threads of this process**. It says nothing whatever about other processes, and
+that is exactly the half the superseded comment got wrong. The same guarantee
+correctly covers the same-process readers and
 covers nothing else.
 
 And the reset is explicitly **not a snapshot**: a lock-free reader on another
@@ -457,7 +481,8 @@ commit, against a run of appends before and after (it is back to 392 through a
 socket table and a ring-poll field, 408 with IM-2's propagating legate scope,
 and 424 with the reaper's folds: `reaped_run_ns`, `reaped_kstack_peak`,
 `reaped_kstack_tid`, zeroed at allocation and never inherited by rfork, which
-`proc_cpu_ns` and `proc_kstack_peak` start from). Worth naming because the struct is
+`proc_cpu_ns` and `proc_kstack_peak` start from; 432 with thread-model C3's
+`threads_lock` and `live_threads`; 456 with C5's `exec_task` and `exec_rendez`). Worth naming because the struct is
 otherwise grown strictly by appending, with **every** load-bearing offset
 individually `_Static_assert`ed and each assert carrying the reason its field
 landed where it did. `magic` is at offset 0 so SLUB's
@@ -517,10 +542,12 @@ and exposed only as an acquire/release pair, guards the children lists, the
 `g_init_proc`. Each Proc's [[lock-proc-threads]] (thread-model C3) guards its
 thread list, `thread_count`, `live_threads`, `loom_sqpoll_count`, every
 `THREAD_EXITING` commit, the debugger's focus and the per-Proc walks. The group
-claim is written under both, so a reader under either is exact. A spawn
-admits its new thread in one hold of the thread lock (`proc_thread_admit`:
-the claim, the cap, the link), so `PROC_THREAD_MAX` is exact and no thread
-joins a group whose claim is set.
+claim is written under both, so a reader under either is exact; so is exec's
+claim (`exec_task`), which the death predicates also read lock-free with
+ACQUIRE. A spawn admits its new thread in one hold of the thread lock
+(`proc_thread_admit`: the group claim, the exec claim, the cap, the link), so
+`PROC_THREAD_MAX` is exact and no thread joins a group whose claim is set or
+that an exec holds.
 
 Everything else on a Proc is either (a) written once before the Proc runs at
 EL0 and read plainly thereafter (identity, `stripes`), (b) an atomic RMW
@@ -631,7 +658,7 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   unconditionally — the hardware debug slots are re-armed from their counts at
   *every* context switch, so a slot left set is not stale, it is actively
   re-installed into the new image forever.
-- **`proc_exec_alone` bounds threads, not processes.** Any argument that reaches
+- **Exec's aloneness bounds threads, not processes.** Any argument that reaches
   for it as an exclusivity guarantee owes a check on whether the racer is a peer
   thread or another process. It has been misread in that direction once already,
   in a comment that stood for the life of the feature.

@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -43,6 +43,10 @@ Three calls, and none of them hands a shared object to anyone:
   claims it, and maps the region in. Idempotent: a second call returns the same
   address.
 - **Unshare** — the registrant disarms one of its own unclaimed identifiers.
+  Its death disarms the rest: its last live thread out drops each unclaimed
+  share's registration pin (`weft_share_release_owner`, from
+  `proc_exit_last_out`) after the handle close has quiesced its devices, since
+  a pin can be a DMA Burrow's last reference ([[sub-kernel-death]]).
 - **Claim from a named owner** (`weft_share_claim_from`, Lictor's seat import,
   2026-09-22) — a trusted broker claims an identifier only if its registrant's
   stripes match the peer the broker's accepted connection names, so a mismatch

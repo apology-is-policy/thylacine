@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Graphical grant commit
 
@@ -342,7 +342,8 @@ fail-closed sentinel; a zero or over-`u32` `session_id` is refused; a full
 table refuses rather than evicting a live grant. `/grant` and `/use` are
 write-only — reads return `-1`, as does any non-frame write length.
 
-`cap_proc_exit_notify` clears pending grants for a dying Proc's stripes, so
+`cap_proc_exit_notify` clears pending grants for a dying Proc's stripes (run
+by its last live thread out, `proc_exit_last_out`; [[sub-kernel-death]]), so
 a grant cannot outlive its intended target and be redeemed by a stripe
 collision later.
 

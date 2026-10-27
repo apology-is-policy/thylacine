@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -261,8 +261,11 @@ explicitly named the fd it wants gone.
 it, and the window is argued closed rather than assumed small.** A flag
 parameter on `handle_alloc` would mean touching ~100 call sites for one
 bit. The gap between alloc and set is provably empty: only exec consumes
-the flag, execve refuses unless it is the Proc's only live thread, and the
-caller **is** a live thread mid-syscall — so no exec can run between them.
+the flag, exec's swap waits until it is the Proc's only live thread
+(`proc_exec_claim`, thread-model C5), and the caller **is** a live thread
+mid-syscall that cannot commit its exit before its own die-check at the
+call's end (no path between the alloc and the set reaches one) — so no exec
+can swap between them.
 
 **Fork copies the table, and what it declines to copy is the interesting
 half.** `handle_table_copy_into` carries rights verbatim (POSIX fork gives

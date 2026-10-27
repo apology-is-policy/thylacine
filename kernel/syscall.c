@@ -124,9 +124,9 @@ static void sys_exit_group_handler(u64 status) {
         // ZOMBIE transition (spinlocks are not recursive).
         //
         // An exec by another thread holds the Proc (ARCH 7.3.3): this thread is
-        // doomed and leaves alone, as Linux's do_group_exit does while
-        // group_exec_task is set. The claim is written under this lock, so the
-        // read is exact against it.
+        // doomed and leaves alone, as Linux's do_group_exit does. A claim made
+        // after this read is abandoned by the group death below, as a kill
+        // during a claim abandons it: the order of an exit_group that came first.
         irq_state_t s = proc_table_lock_acquire();
         if (!proc_exec_dooms(p, t))
             proc_group_terminate_code(p, code, msg);
