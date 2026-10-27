@@ -3,13 +3,13 @@ id: sub-kernel-thread
 type: sub
 title: "The Thread: context, kstack, and the on_cpu protocol"
 parent: moc-kernel-execution
-code: ["kernel/thread.c", "kernel/include/thylacine/thread.h"]
+code: ["kernel/thread.c", "kernel/include/thylacine/thread.h", "kernel/test/test_thread_spawn.c"]
 audit: hard
 guarded-by: [inv-i21, inv-i31, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -271,7 +271,18 @@ out. Found by the ARCH 8.12 audit round (F2).
 `thread_link_into_proc` / `thread_unlink_from_proc` take the Proc's
 [[lock-proc-threads]] (they took [[lock-proc-table]] until thread-model C3).
 The link counts the thread in `thread_count` and `live_threads`; the unlink
-drops `live_threads` too when the thread never committed. The user spawn arms
+drops `live_threads` too when the thread never committed. Both decrements of
+the live count -- that unlink and the exit commit -- wake an exec's claim
+waiting for the caller to be alone (`proc_exec_live_dropped_locked`,
+thread-model C5, [[sub-kernel-proc]]); a new path that lowers the count without
+it leaves the exec asleep. Freeing a never-run thread is a creator's act: freed
+by another Proc's thread once every other thread has committed, it would take
+the count to zero with no thread left to publish the ZOMBIE, so a test that
+abandons an admitted thread after a kill readies it instead (it dies at its
+first die-check). `kernel/test/test_thread_spawn.c` holds the spawn, exit,
+reclamation and exec-claim tests; its `xc_*` fixture forks a child whose main
+claims with peers of each kind in place and settles every one on a budget, and
+its unborn thread belongs to whichever side takes it first. The user spawn arms
 build a thread unlinked (`thread_alloc_user` / `thread_alloc_forked`) and link
 it through `proc_thread_admit`, or free it with `thread_free_unlinked`.
 `thread_commit_exiting_locked` is the only writer of `THREAD_EXITING`, always

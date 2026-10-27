@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -116,7 +116,9 @@ has threads — the clean-address-space test excludes the multi-thread case only
 *as a side effect* — and warned that this is "a real guarantee arrived at
 sideways ... exactly the guarantee replace-in-place removes." It did remove it,
 and two explicit checks replaced it: the exec-alone gate in the syscall's shared
-core, and a re-check of the live-peer count *inside the same critical section as
+core (since thread-model C5 not a refusal but a claim that dooms the peers and
+waits until the caller is the only live thread, [[sub-kernel-proc]]), and a
+re-check of the live-peer count *inside the same critical section as
 the swap*, which extincts if a peer appeared. The second exists because proving
 the property at the moment it matters is cheaper than asking a future reader to
 reconstruct why no peer could have appeared.

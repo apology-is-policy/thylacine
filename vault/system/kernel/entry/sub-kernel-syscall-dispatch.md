@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -244,9 +244,9 @@ arrives in two incompatible register layouts:
   three arguments explicitly and the native reader is a four-line register read.
 
 The gate-placement rule generalises to this shape and the code says so
-explicitly. In execve, the multi-thread gate sits in the core rather than in
-each front end **so it cannot be forgotten by one** — at the cost of a wasted
-argument copy on a refusing path, which is the right trade. The argument blob's
+explicitly. In execve, the multi-thread claim (thread-model C5; before it, an
+up-front refusal) sits in the core rather than in each front end **so it cannot
+be forgotten by one**. The argument blob's
 packing contract is validated in the core for the same reason and a sharper one:
 the stack builder *extincts* on a NUL count that disagrees with the argument
 count, so a mis-packed blob from either front end must become a clean `-EINVAL`
@@ -256,11 +256,12 @@ in either front end into an error return instead of a dead kernel.
 ### execve's ordering is the file's most consequential, and it is ordered by what can still fail
 
 The sequence is: copy both user-side vectors into kernel memory (after this the
-user addresses mean something else entirely) → gate → resolve the program in
-the **caller's** namespace, through the same helper every spawn uses so exec and
+user addresses mean something else entirely) → resolve the program in the
+**caller's** namespace, through the same helper every spawn uses so exec and
 spawn cannot diverge on what is executable → build the whole new image in a
-**detached** address space → commit → stamp identity → consume close-on-exec →
-rewrite the frame.
+**detached** address space → claim the process (`exec_claim_or_drop`: with live
+peers, doom them and wait until the caller is alone, [[sub-kernel-proc]]) →
+commit → stamp identity → consume close-on-exec → rewrite the frame.
 
 Two placements in that list are load-bearing and each carries its reason in the
 source:
@@ -269,6 +270,13 @@ source:
   load failure leaves it running its old image untouched. On failure the
   detached space is the only reference and its release drains whatever got
   mapped.
+- **The claim comes after the last thing that can fail.** A refused claim
+  (another exec, or a group death, holds the process) or one a group death
+  abandons means this thread is dying too, so its error never reaches EL0;
+  `exec_claim_or_drop` drops the new space and the program file and returns
+  EAGAIN, and the caller dies at its EL0-return die-check. Claimed earlier, a
+  load failure would have doomed the peers of a process that then keeps running
+  its old image.
 - **Everything that closes or renames happens *after* the last thing that can
   fail.** The name and executable-path stamps land after the commit, because a
   process advertising a program it is not running is worse than one that is

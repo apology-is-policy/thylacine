@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -249,7 +249,14 @@ false once the group's exit message is published (`proc_stop_requested`): the
 dying Proc's last thread, which reads no death while it closes its handles,
 never parks for the stop, and one parked while its group lived leaves when it
 dies. The flags a stop set before the kill stay set, because the tail reads
-them (below). A dying Proc takes no new stop: `proc_job_stop_one_locked`
+them (below). **No stop parks an exec either** (thread-model C5, SF-1): the park
+predicate also reads false while another thread's exec holds the process
+(`exec_task`, [[sub-kernel-proc]]), as Linux's group stop refuses while
+`group_exec_task` is set. Otherwise the execer's death-only claim wait took the
+sleep path's stop detour, parked with the claim held while its doomed peers
+were exiting, and devproc read the target as fully stopped under the dying
+threads' final switch ([[sub-kernel-devproc]]); the stop stands, and the new
+image meets it. A dying Proc takes no new stop: `proc_job_stop_one_locked`
 refuses it under the table lock (the terminate's lock), so a Ctrl-Z or
 `/proc` `suspend` after the kill sets no flag and latches no report for the
 parent — `pty_stop.tla`'s `StopJob` is guarded so — and `/ctl/procs` shows a

@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-14
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -308,8 +308,9 @@ Enumerating the readers by *enclosing function* rather than by grep hit
 finds **four** lock-free loads in the notes layer, not two: the two
 cross-process ones above, plus the Linux delivery path's reset-handler arm
 and the return-to-user-mode delivery entry. Both of those are genuinely
-same-process, so the exec-alone gate really does cover them and the
-cross-process count stands at two.
+same-process, so exec's aloneness (its claim's wait and the swap's re-check,
+[[sub-kernel-proc]]) really does cover them and the cross-process count stands
+at two.
 
 Stating the total matters more than it looks. A reader who greps finds four
 and, handed an enumeration of two or three, cannot tell which of the
@@ -367,8 +368,8 @@ it locally turned up two writer call sites, and on their strength the severity
 was raised to "use-after-free *writes* — heap corruption".
 
 **That escalation was wrong and was withdrawn.** Both writers run on a thread of
-the target process, exactly like the two same-process readers, so the
-exec-alone gate really does exclude them. The reporter's narrower original read
+the target process, exactly like the two same-process readers, so exec's
+aloneness really does exclude them. The reporter's narrower original read
 was the correct one, and the ceiling is **a wrong disposition, not corruption**.
 
 Two things generalize. **Finding more call sites is not the same as finding more

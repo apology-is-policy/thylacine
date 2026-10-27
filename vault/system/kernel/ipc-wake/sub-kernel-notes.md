@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -406,7 +406,9 @@ and its target, and the handler is not that target. The restore puts the saved
 value back.
 
 **The pick.** For each caught family queued and held by nobody,
-`proc_caught_note_walk` picks one candidate: not exiting, the family unmasked,
+`proc_caught_note_walk` picks one candidate: not exiting, not doomed by another
+thread's exec (`proc_exec_dooms`, thread-model C5; the walk passes its own Proc,
+since a test fixture may link a Thread whose `proc` is NULL), the family unmasked,
 no handler running, and not in a wait that holds. It prefers the posting
 thread, then main (the oldest live thread, `proc_main_thread_locked`:
 `p->threads` is head-inserted, so the last one not exiting), any thread not
@@ -522,7 +524,10 @@ wakes every blocked thread of the Proc outside a stop park
 another CPU, so a thread spinning at EL0 takes an IRQ into its tail, whose notes
 leg meets the latch (#964). An ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
 its return tail: `thread_die_pending` reports the latch in any family the
-thread has not masked, as well as group death. Five waits read
+thread has not masked, as well as group death, and, like group death and
+ignoring the mask, an exec by another thread of the Proc (`proc_exec_dooms`,
+thread-model C5, [[sub-kernel-proc]]); `thread_group_death_pending` reads the
+same exec leg. Five waits read
 `thread_group_death_pending` instead, `thread_die_pending`'s group-death leg
 alone with the same hold. They are the tail's stop park, the
 birth park, the nested stop park a sleep detours into, the vfork suspend and

@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -465,8 +465,8 @@ as it cannot catch a `/proc` kill.
 ### Fully-stopped is a conjunction, and death wins
 
 Cross-Proc reads of memory and registers require the target to be *fully
-stopped*: ALIVE, with a debug stop pending, with no pending group-exit message,
-and with every non-EXITING thread parked on its own `debug_rendez` **and**
+stopped*: ALIVE, with a debug stop pending, with no pending group-exit message
+and no exec claim, and with every non-EXITING thread parked on its own `debug_rendez` **and**
 off-CPU. Each conjunct closed a real failure:
 
 - the off-CPU spin, because a thread mid-context-switch still reads on-CPU while
@@ -477,6 +477,11 @@ off-CPU. Each conjunct closed a real failure:
 - the group-exit check, because a dying target's threads go EXITING (which the
   parked scan *skips*) and then write their context outside the global lock. Death
   wins over a stop, everywhere.
+- the exec-claim check (thread-model C5, SF-1), for the same reason: while
+  another thread's exec holds the target, its doomed threads go EXITING, so the
+  scan would read a parked execer as the whole target. No stop parks an exec
+  ([[sub-kernel-jobctl]]), and this refusal keeps it so for the readers.
+  Witness: `devproc.debug_regs`'s exec leg.
 
 ### The park predicate lied about a thread on its way out
 
