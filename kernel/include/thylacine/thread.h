@@ -972,6 +972,14 @@ void thread_switch(struct Thread *next);
 // context.switch_irq_safe only.
 extern volatile u64 g_thread_switch_test_window_ns;
 
+#ifdef KERNEL_TESTS
+// Tests only (thread.kernel_memory_charged_to_the_pool): the pool's charge as
+// thread_reap_dead found it and at its unlink, for threads of the watched pid.
+extern volatile int g_thread_reap_watch_pid;
+extern volatile u32 g_thread_reap_pool_found;
+extern volatile u32 g_thread_reap_pool_at_unlink;
+#endif
+
 // Diagnostic.
 u64 thread_total_created(void);
 u64 thread_total_destroyed(void);

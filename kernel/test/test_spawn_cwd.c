@@ -242,6 +242,8 @@ void test_spawn_cwd_refusals(void) {
 
 static volatile u32 g_stb_inherit, g_stb_lower, g_stb_raised, g_stb_hard;
 static volatile int g_stb_raise_refused, g_stb_over, g_stb_over_auth, g_stb_reaped;
+static volatile u32 g_stb_rforked;
+static volatile int g_stb_rfork_reaped;
 
 // A held spawn asking for `req` threads (0: no tail). The child's stamped
 // budget, or 0 when there is no child; the child is released and reaped.
@@ -256,10 +258,19 @@ static u32 stb_budget(u32 req, int *rc) {
     return b;
 }
 
+static void stb_grandchild(void *arg) {
+    (void)arg;
+    g_stb_rforked = __atomic_load_n(&current_thread()->proc->thread_budget, __ATOMIC_ACQUIRE);
+    exits("ok");
+}
+
 static void stb_entry(void *arg) {
     (void)arg;
     struct Proc *self = current_thread()->proc;
     __atomic_store_n(&self->thread_budget, 64u, __ATOMIC_RELEASE);
+    int gc = rfork(RFPROC, stb_grandchild, NULL);
+    int gst = -1;
+    if (gc > 0 && wait_pid(&gst) == gc && gst == 0) g_stb_rfork_reaped = 1;
     const u32 max = proc_thread_budget_hard_max();
     int rc = 0;
     g_stb_inherit = stb_budget(0u, &rc);
@@ -279,7 +290,8 @@ static void stb_entry(void *arg) {
 void test_spawn_cwd_thread_budget_resolves(void) {
     g_stb_inherit = g_stb_lower = g_stb_raised = g_stb_hard = 0;
     g_stb_raise_refused = g_stb_over = g_stb_over_auth = 0;
-    g_stb_reaped = 0;
+    g_stb_reaped = g_stb_rfork_reaped = 0;
+    g_stb_rforked = 0u;
     int child_pid = rfork(RFPROC, stb_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     int status = -1;
@@ -287,6 +299,8 @@ void test_spawn_cwd_thread_budget_resolves(void) {
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
     const u32 max = proc_thread_budget_hard_max();
     TEST_ASSERT(max > 65u, "the pool holds more threads than the test asks for");
+    TEST_EXPECT_EQ(g_stb_rfork_reaped, 1, "an rfork'd grandchild ran and was reaped");
+    TEST_EXPECT_EQ(g_stb_rforked, 64u, "rfork carries the budget to the child");
     TEST_EXPECT_EQ(g_stb_inherit, 64u, "no tail: the child inherits the spawner's budget");
     TEST_EXPECT_EQ(g_stb_lower, 32u, "a lower budget needs no authority");
     TEST_EXPECT_EQ(g_stb_raise_refused, -1, "a raise without the authority is refused");

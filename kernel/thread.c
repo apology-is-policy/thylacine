@@ -58,6 +58,15 @@ static u64                g_thread_free_oncpu_waits;
 // deterministic fail-pre/pass-post guard for the #101 IRQ-mask discipline.
 volatile u64              g_thread_switch_test_window_ns;
 
+#ifdef KERNEL_TESTS
+// Tests only: a reaped thread of the Proc with this pid records the pool's
+// charge as thread_reap_dead found it and as it stood at the unlink. 0 watches
+// nothing (kproc's threads never come here).
+volatile int              g_thread_reap_watch_pid;
+volatile u32              g_thread_reap_pool_found;
+volatile u32              g_thread_reap_pool_at_unlink;
+#endif
+
 u64 thread_free_oncpu_waits(void);
 u64 thread_free_oncpu_waits(void) {
     return __atomic_load_n(&g_thread_free_oncpu_waits, __ATOMIC_RELAXED);
@@ -802,6 +811,10 @@ void thread_reap_dead(struct Thread *t) {
     struct Proc *p = t->proc;
     if (!p || p == kproc())          extinction("thread_reap_dead of a kernel thread");
     u32 used = thread_kstack_used(t, NULL);
+#ifdef KERNEL_TESTS
+    bool watched = p->pid == __atomic_load_n(&g_thread_reap_watch_pid, __ATOMIC_ACQUIRE);
+    if (watched) g_thread_reap_pool_found = capacity_pool_charged();
+#endif
     // The pool charge returns before the unlink, not at thread_destroy: once
     // thread_count reads 0 a waiter frees the Proc and returns, and the pool
     // it then reads must hold nothing of the child's. The memory follows a
@@ -820,6 +833,9 @@ void thread_reap_dead(struct Thread *t) {
     if (__atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == t)
         __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
     thread_unlink_from_proc_locked(t);
+#ifdef KERNEL_TESTS
+    if (watched) g_thread_reap_pool_at_unlink = capacity_pool_charged();
+#endif
     proc_threads_unlock(p, s);
     thread_destroy(t);
 }

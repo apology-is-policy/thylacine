@@ -1640,6 +1640,7 @@ static volatile bool g_tkc_made, g_tkc_for_in_kproc;
 static void tkc_entry(void *arg) {
     (void)arg;
     struct Proc *S = current_thread()->proc;
+    __atomic_store_n(&g_thread_reap_watch_pid, S->pid, __ATOMIC_RELEASE);
     struct Proc *A = proc_alloc();
     g_tkc_made = A && !proc_resource_exempt(A) && proc_resource_exempt(S);
     if (!g_tkc_made) exits("setup");
@@ -1673,10 +1674,12 @@ void test_thread_kernel_memory_charged_to_the_pool(void) {
     g_tkc_user = g_tkc_alloc_user = g_tkc_kproc = g_tkc_exempt = g_tkc_for = g_tkc_back = 0xDEADu;
     g_tkc_pages_user = g_tkc_pages_kproc = g_tkc_pages_for = 0xDEADu;
     g_tkc_made = g_tkc_for_in_kproc = false;
+    g_thread_reap_pool_found = g_thread_reap_pool_at_unlink = 0u;
     int child_pid = rfork(RFPROC, tkc_entry, NULL);
     TEST_ASSERT(child_pid > 0, "rfork failed");
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    __atomic_store_n(&g_thread_reap_watch_pid, 0, __ATOMIC_RELEASE);
     TEST_ASSERT(g_tkc_made, "a user Proc beside the exempt child");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
     const u32 T = THREAD_POOL_PAGES;
@@ -1691,6 +1694,11 @@ void test_thread_kernel_memory_charged_to_the_pool(void) {
     TEST_EXPECT_EQ(g_tkc_pages_for, T, "and keeps its count");
     TEST_ASSERT(g_tkc_for_in_kproc, "though it lives in kproc");
     TEST_EXPECT_EQ(g_tkc_back, 0u, "every charge returns at the free, exactly once");
+    // The child's own thread, which an exempt Proc's charge counted: its reaper
+    // returns the charge before the unlink, after which wait_pid may free the
+    // Proc and return, so the waiter never reads the pool holding it.
+    TEST_EXPECT_EQ(g_thread_reap_pool_found - g_thread_reap_pool_at_unlink, T,
+                   "the reaper returned the thread's charge before its unlink");
 }
 
 static volatile u32  g_tpr_edge, g_tpr_after_refusals, g_tpr_exempt, g_tpr_kproc, g_tpr_at_edge;
