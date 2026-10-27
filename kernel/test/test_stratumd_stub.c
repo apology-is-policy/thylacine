@@ -71,10 +71,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_stratumd_stub_round_trip(void);
-void test_stratumd_stub_fs_round_trip(void);
-void test_stratumd_stub_walk_round_trip(void);
-
 // Each userspace binary at this chunk is well under 32 KiB.
 // (attach-probe ≈ 15 KiB; stratumd-stub similar.)
 #define STUB_BLOB_MAX 32768

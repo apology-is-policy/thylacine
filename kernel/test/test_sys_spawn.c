@@ -37,15 +37,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-
-void test_sys_spawn_happy_path(void);
-void test_sys_spawn_rejects_null_name(void);
-void test_sys_spawn_rejects_zero_len(void);
-void test_sys_spawn_rejects_oversize_name(void);
-void test_sys_spawn_rejects_missing_binary(void);
-void test_sys_spawn_rejects_embedded_nul(void);
-void test_sys_wait_pid_no_children_returns_neg1(void);
-
 // Reap any leftover zombies from prior tests so wait_pid coverage stays
 // deterministic. wait_pid returns -1 when no children remain; loop until
 // drained.

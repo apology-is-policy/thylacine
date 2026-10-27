@@ -19,9 +19,6 @@
 
 #include <thylacine/types.h>
 
-// kaslr.c exposes mix64 for testing via this declaration.
-
-void test_kaslr_mix64_avalanche(void);
 void test_kaslr_mix64_avalanche(void) {
     // mix64(0) should be 0 only if the function is the identity, which
     // it isn't (multiplies + xors guarantee a non-trivial result).

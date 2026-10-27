@@ -18,22 +18,6 @@
 #include <thylacine/types.h>
 #include <thylacine/dev9p.h>
 
-
-void test_perm_check_owner_group_other(void);
-void test_perm_check_owner_first_authoritative(void);
-void test_perm_check_hostowner_override(void);
-void test_perm_in_group(void);
-void test_perm_want_for_omode(void);
-void test_perm_rights_for_omode(void);
-void test_perm_oexec_no_read_leak(void);
-void test_perm_wstat_policy(void);
-void test_perm_devramfs_enforced_real_metadata(void);
-void test_perm_dev_flags(void);
-void test_perm_check_dac_override_cap(void);
-void test_perm_wstat_chown_cap(void);
-void test_perm_check_want_zero_denied(void);
-void test_perm_wstat_rejects_unknown_valid_bit(void);
-
 // =============================================================================
 // Helpers.
 // =============================================================================

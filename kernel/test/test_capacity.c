@@ -88,26 +88,6 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
-void test_detach_range_trims_left_right_middle(void);
-void test_detach_range_across_burrows_and_holes(void);
-void test_detach_range_refusals_change_nothing(void);
-void test_detach_eager_pages_go_with_the_last_piece(void);
-void test_detach_lazy_over_256mib_detaches(void);
-void test_detach_four_gib_reservation_round_trips(void);
-void test_capacity_window_sized_reservation_releases_in_bounded_steps(void);
-void test_capacity_replace_window_releases_orphans(void);
-void test_capacity_pagemap_nodes_charged_and_reclaimed(void);
-void test_capacity_default_is_ram_minus_reserve(void);
-void test_capacity_pool_refuses_users_keeps_tcb(void);
-void test_capacity_death_returns_charges_to_pool(void);
-void test_capacity_page_tables_charged_and_reclaimed(void);
-void test_capacity_memory_bomb_leaves_the_reserve(void);
-void test_capacity_fork_costs_the_pool_only_its_nodes(void);
-void test_vma_range_is_mapped(void);
-void test_capacity_fork_clone_charges_pages_and_nodes(void);
-
-// The non-static inners of the SVC handlers (kernel/syscall.c).
-
 #define P            PAGE_SIZE
 #define PR_R         ((u64)BURROW_PROT_READ)
 #define PR_RW        ((u64)(BURROW_PROT_READ | BURROW_PROT_WRITE))

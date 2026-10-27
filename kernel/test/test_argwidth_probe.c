@@ -15,8 +15,6 @@
 #include <thylacine/types.h>
 #include "../../arch/arm64/uart.h"
 
-void test_syscall_argwidth_probe(void);
-
 #define ARGWIDTH_PROBE_STATUS 72
 
 // The probe names these by number (libt has no wrapper for them).

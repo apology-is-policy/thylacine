@@ -14,16 +14,6 @@
 
 #include <thylacine/types.h>
 
-void test_halls_fp_sane_accepts_valid(void);
-void test_halls_fp_sane_rejects_misaligned(void);
-void test_halls_fp_sane_rejects_non_increasing(void);
-void test_halls_fp_sane_rejects_out_of_range(void);
-void test_halls_link_addr_removes_slide(void);
-void test_halls_link_addr_underflow_guarded(void);
-void test_halls_frame_enter_leave_nesting(void);
-void test_halls_frame_is_live_gate(void);
-void test_halls_symbolize_table(void);
-
 // A plausible kernel-stack window for the gate tests.
 #define LO  0xffff000000010000ull
 #define HI  (LO + 0x10000ull)

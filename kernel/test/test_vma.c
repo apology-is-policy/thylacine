@@ -9,18 +9,6 @@
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 
-void test_vma_alloc_free_smoke(void);
-void test_vma_alloc_constraints(void);
-void test_vma_insert_lookup_smoke(void);
-void test_vma_insert_overlap_rejected(void);
-void test_vma_insert_sorted_invariant(void);
-void test_vma_drain_releases_all(void);
-void test_vma_linked_in_tracks_the_list(void);
-void test_vma_find_gap_smoke(void);
-void test_vma_find_gap_no_fit(void);
-void test_vma_find_gap_constraints(void);
-void test_vma_find_gap_straddle(void);
-
 // User-VA test ranges. We use bits 47:0 directly (TTBR0 user-half).
 // 0x10000000 = 256 MiB; well within any reasonable user-VA bound.
 #define VA_BASE       0x10000000ull

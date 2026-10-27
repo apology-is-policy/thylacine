@@ -9,15 +9,6 @@
 #include <thylacine/virtio.h>
 #include <thylacine/virtio_pci.h>
 
-void test_virtio_pci_init_called(void);
-void test_virtio_pci_count_within_bound(void);
-void test_virtio_pci_devices_have_vendor(void);
-void test_virtio_pci_devices_have_cfg(void);
-void test_virtio_pci_find_rng(void);
-void test_virtio_pci_find_unknown_returns_null(void);
-void test_virtio_pci_cfg_read_bounds(void);
-void test_virtio_pci_cfg_write_bounds(void);
-
 // virtio_pci_init has already run (in boot_main before tests). The
 // device count reflects whatever QEMU virt + tools/run-vm.sh's
 // -device flags exposed.

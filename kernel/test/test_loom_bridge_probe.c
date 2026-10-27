@@ -17,8 +17,6 @@
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uart.h"
 
-void test_loom_bridge_probe(void);
-
 #ifdef LOOM_PRIVATE_QUALIFICATION
 #define BRIDGE_PROBE_STATUS 71
 #define BRIDGE_PROBE_RINGS  4ull // the first, two rolled back, the last

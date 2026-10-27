@@ -19,13 +19,6 @@
 #include <thylacine/types.h>
 #include <thylacine/virtio_pci.h>  // virtio_pci_dev_count
 
-void test_devpci_bestiary_smoke(void);
-void test_devpci_attach_root(void);
-void test_devpci_walk_read_ctl(void);
-void test_devpci_readonly(void);
-void test_devpci_readdir(void);
-void test_devpci_walk_reuse_nc(void);
-
 // =============================================================================
 // Helpers.
 // =============================================================================

@@ -53,30 +53,6 @@
 #include <thylacine/vma.h>         // AS-R9: VMA_PROT_RW for the unmap-refusal witness
 #include "../../mm/phys.h"
 
-// REVENANT R-1: the buddy free-page counter (mm/phys.h) — witness for the
-// resident-page-free assertion; forward-declared to avoid a relative mm include.
-
-void test_vmo_create_close_round_trip(void);
-void test_vmo_refcount_lifecycle(void);
-void test_vmo_map_unmap_lifecycle(void);
-void test_vmo_handles_x_mappings_matrix(void);
-void test_vmo_via_handle_table(void);
-void test_vmo_handle_table_orphan_cleanup(void);
-void test_vmo_size_overflow_rejected(void);
-void test_vmo_dup_oom_rollback(void);
-// REVENANT R-1: BURROW_TYPE_FILE lifecycle.
-void test_vmo_file_create_close_round_trip(void);
-void test_vmo_file_create_failure_retains_spoor(void);
-void test_vmo_file_map_unmap_lifecycle(void);
-void test_vmo_file_resident_pages_freed(void);
-void test_burrow_backing_pages_matches_alloc(void);
-// AS-R9: settled drops + the JIT remaining-reference premise.
-void test_burrow_settled_drop_retains_nonfinal_charge(void);
-void test_burrow_settled_drop_exact_payer(void);
-void test_burrow_settled_mapping_drop_defers_free(void);
-void test_burrow_unmap_failure_leaves_mapping_attached(void);
-void test_burrow_unmap_interior_start_refused(void);
-
 // Convenience: test "did we free a BURROW this turn" by snapshot diff.
 static u64 created_diff_snap;
 static u64 destroyed_diff_snap;

@@ -1767,6 +1767,7 @@ struct test_case g_tests[] = {
     { "devcap.clearance_grant_gate_no_cap",   test_devcap_clearance_grant_gate_no_cap,   false, NULL },
     { "devcap.clearance_grant_bad_args",      test_devcap_clearance_grant_bad_args,      false, NULL },
     { "devcap.clearance_redeem_basic",        test_devcap_clearance_redeem_basic,        false, NULL },
+    { "devcap.clearance_audio_graph",         test_devcap_clearance_audio_graph,         false, NULL },
     { "devcap.imperium_grant_gate_and_bounds", test_devcap_imperium_grant_gate_and_bounds, false, NULL },
     { "devcap.imperium_redeem_propagating",   test_devcap_imperium_redeem_propagating,   false, NULL },
     { "devcap.imperium_nest_refused",         test_devcap_imperium_nest_refused,         false, NULL },

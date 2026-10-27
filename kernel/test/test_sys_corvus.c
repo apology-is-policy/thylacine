@@ -1,7 +1,7 @@
 // P5-corvus-syscalls — kernel-internal tests for the 5 v1.0 hardening
 // syscalls + 2 new caps (CORVUS-DESIGN.md §4.1.1 + ARCH §11.2b).
 //
-// Each syscall is tested via its non-static `_for_proc` inner with a
+// Each syscall is tested via its `_for_proc` core with a
 // kernel-allocated test Proc. The SVC wrapper's user-VA validation
 // path is shared with SYS_PUTS / SYS_READ / SYS_WRITE and tested by
 // userspace probes (deferred to P5-corvus-bringup when corvus's
@@ -42,15 +42,6 @@
 #include <thylacine/random.h>
 #include <thylacine/types.h>
 #include <thylacine/syscall.h>
-
-// Inner SVC handlers (extern; defined in kernel/syscall.c).
-
-void test_sys_mlockall_cap_gate(void);
-void test_sys_set_dumpable_one_way_to_zero(void);
-void test_sys_set_traceable_one_way_to_zero(void);
-void test_sys_corvus_caps_kproc_has_new_caps(void);
-void test_kern_random_strong_source_seeded(void);
-void test_kern_random_bytes_produces_nonzero(void);
 
 static struct Proc *make_test_proc_no_caps(void) {
     return proc_alloc();

@@ -781,7 +781,8 @@ void notes_post_pipe(struct Proc *writer);
 // the proc_alloc path.
 void notes_queue_init(struct NoteQueue *q);
 
-// Called from arch/arm64/exception.c (no header held it before).
+// The last leg of every EL0-return tail (vectors.S), after the die and stop
+// checks: delivers the deliverable notes before the thread re-enters EL0.
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 #ifdef KERNEL_TESTS

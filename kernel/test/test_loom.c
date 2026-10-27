@@ -37,50 +37,6 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
-void test_loom_private_targets(void);
-void test_loom_create_geometry(void);
-void test_loom_create_rejects_bad_args(void);
-void test_loom_refcount_lifecycle(void);
-void test_loom_setup_via_proc(void);
-void test_loom_setup_rejects(void);
-void test_loom_register_handles(void);
-void test_loom_register_rejects(void);
-void test_loom_setup_resource_refusals(void);
-void test_loom_register_replaces(void);
-void test_loom_post_cqe_back_pressure(void);
-void test_loom_post_cqe_ignores_hostile_header(void);
-void test_loom_dup_rejected(void);
-void test_loom_enter_nop(void);
-void test_loom_sq_release_after_copy(void);
-void test_loom_sq_release_after_index(void);
-void test_loom_sq_release_after_copy_chain(void);
-void test_loom_enter_submit_rejects(void);
-void test_loom_enter_flags_and_bad_index(void);
-void test_loom_enter_cq_admission_backpressure(void);
-void test_loom_admission_counts_admitting(void);
-void test_loom_wait_counts_admitting(void);
-void test_loom_drain_waits_for_admitting(void);
-void test_loom_cq_waiter_wake(void);
-void test_loom_cq_waiter_no_spurious_wake_on_full(void);
-void test_loom_poll(void);
-void test_loom_enter_inline_min_complete(void);
-void test_loom_enter_min_complete_no_inflight(void);
-void test_loom_sqpoll_setup_and_teardown(void);
-void test_loom_sqpoll_drains_sq(void);
-void test_loom_sqpoll_parks_on_cq_full(void);
-void test_loom_sqpoll_join_held_through_forced_close(void);
-
-void test_loom_register_buffers(void);
-void test_loom_register_buffers_rejects(void);
-void test_loom_register_buffers_replace(void);
-void test_loom_ring_charge_balance(void);
-void test_loom_regbuf_charge_balance(void);
-void test_loom_regbuf_foreign_charge_not_refunded(void);
-
-// The testable syscall inners live in kernel/syscall.c (declared in loom.h);
-// sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
-// forward-declare it like test_sys_burrow.c does for its inner).
-
 static struct Proc *test_proc_make(void) {
     return proc_alloc();
 }
@@ -99,22 +55,18 @@ static void test_proc_drop(struct Proc *p) {
 #include "loom_private_fixture.h"
 #include "loom_bridge_fixture.h"
 
-void test_loom_private_bridge(void);
 void test_loom_private_bridge(void) {
     const char *error = loom_bridge_fixture_run();
     TEST_ASSERT(!error, error);
 }
-void test_loom_setup_rollback_settles(void);
 void test_loom_setup_rollback_settles(void) {
     const char *error = loom_setup_rollback_fixture_run();
     TEST_ASSERT(!error, error);
 }
-void test_loom_setup_rollback_identity(void);
 void test_loom_setup_rollback_identity(void) {
     const char *error = loom_setup_identity_fixture_run();
     TEST_ASSERT(!error, error);
 }
-void test_loom_private_setup_rollback_identity(void);
 void test_loom_private_setup_rollback_identity(void) {
     const char *error = loom_private_setup_identity_fixture_run();
     TEST_ASSERT(!error, error);
@@ -122,21 +74,18 @@ void test_loom_private_setup_rollback_identity(void) {
 #include "loom_slots_fixture.h"
 #include "loom_nodes_fixture.h"
 
-void test_loom_service_nodes(void);
 void test_loom_service_nodes(void) {
     const char *error = loom_nodes_fixture();
     TEST_ASSERT(!error, error);
 }
 
 #include "loom_fids_fixture.h"
-void test_loom_service_fid_reap(void);
 void test_loom_service_fid_reap(void) {
     const char *error = loom_fids_fixture();
     TEST_ASSERT(!error, error);
 }
 
 #include "loom_requests_fixture.h"
-void test_loom_service_requests(void);
 void test_loom_service_requests(void) {
     const char *error = loom_requests_fixture();
     TEST_ASSERT(!error,error);
@@ -225,7 +174,6 @@ done:
 #undef RO
     return error;
 }
-void test_loom_private_requests(void);
 void test_loom_private_requests(void) {
     const char *error=loom_request_owner_fixture();
     TEST_ASSERT(!error,error);
@@ -233,7 +181,6 @@ void test_loom_private_requests(void) {
 
 #include "loom_node_owner_fixture.h"
 
-void test_loom_private_node_owner(void);
 void test_loom_private_node_owner(void) {
     struct Proc *p = test_proc_make();
     struct Loom *l = p ? loom_create_private(p,2,2,true) : NULL;
@@ -247,7 +194,6 @@ void test_loom_private_node_owner(void) {
 
 #include "loom_pool_table_fixture.h"
 
-void test_loom_service_pool_table(void);
 void test_loom_service_pool_table(void) {
     const char *error = loom_pool_table_fixture();
     TEST_ASSERT(error == NULL, error);
@@ -390,7 +336,6 @@ done:
 #undef SO_CHECK
     return error;
 }
-void test_loom_private_slot_owner(void);
 void test_loom_private_slot_owner(void) {
     const char *error = loom_slot_owner_fixture();
     TEST_ASSERT(error == NULL, error);
@@ -704,25 +649,21 @@ done:
 #undef FX_CHECK
     return error;
 }
-void test_loom_private_fixed(void);
 void test_loom_private_fixed(void) {
     const char *error=loom_private_fixed_fixture();
     TEST_ASSERT(error==NULL,error);
 }
 
-void test_loom_private_pool_pins(void);
 void test_loom_private_pool_pins(void) {
     const char *error = loom_private_pool_pins_fixture();
     TEST_ASSERT(error == NULL, error);
 }
 
-void test_loom_private_buffers(void);
 void test_loom_private_buffers(void) {
     const char *error = loom_private_buffers_fixture();
     TEST_ASSERT(error == NULL, error);
 }
 
-void test_loom_service_slots(void);
 void test_loom_service_slots(void) {
     const char *slot_error = loom_slots_fixture();
     TEST_ASSERT(slot_error == NULL, slot_error);
@@ -731,7 +672,6 @@ void test_loom_service_slots(void) {
 // Its own test rather than a passenger on the geometry fixture: this one
 // asserts the whole private-owner admission/retirement lifecycle, and a failure
 // should name that instead of a ring-layout check.
-void test_loom_private_owner_lifecycle(void);
 void test_loom_private_owner_lifecycle(void) {
     const char *owner_error = loom_private_fixture();
     TEST_ASSERT(owner_error == NULL, owner_error);
@@ -1065,7 +1005,6 @@ static void setup_race_close(struct Proc *p, hidx_t fd) {
     setup_race_closed = handle_close(p, fd) == 0;
     setup_race_destroyed_at_close = loom_total_destroyed();
 }
-void test_loom_setup_close_race(void);
 void test_loom_setup_close_race(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1463,7 +1402,6 @@ static bool sq_private_refill_run(bool bad_index, struct sq_refill_obs *o) {
     return retired;
 }
 
-void test_loom_private_sq_release_after_copy(void);
 void test_loom_private_sq_release_after_copy(void) {
     struct sq_refill_obs o;
     TEST_ASSERT(sq_private_refill_run(false, &o), "private ring made and retired");
@@ -1480,7 +1418,6 @@ void test_loom_private_sq_release_after_copy(void) {
     TEST_EXPECT_EQ(o.head, 2u, "each private position released exactly once");
 }
 
-void test_loom_private_sq_release_after_index(void);
 void test_loom_private_sq_release_after_index(void) {
     struct sq_refill_obs o;
     TEST_ASSERT(sq_private_refill_run(true, &o), "private ring made and retired");
@@ -2057,7 +1994,6 @@ void test_loom_sqpoll_parks_on_cq_full(void) {
 // the boundary (the test_resource.c idiom) so only two real kthreads spawn:
 // refusal at the cap, no over-settle by the refused ring's free, plain rings
 // uncharged, and the close -> uncharge -> fits-again round trip.
-void test_loom_sqpoll_charges_thread_budget(void);
 void test_loom_sqpoll_charges_thread_budget(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4298,25 +4234,21 @@ done:
 #undef PO
     return error;
 }
-void test_loom_private_protocol(void);
 void test_loom_private_protocol(void) {
     const char *error=loom_protocol_fixture(false);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_connect(void);
 void test_loom_private_connect(void) {
     const char *error=loom_protocol_fixture(true);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_engine(void);
 void test_loom_private_engine(void) {
     const char *error=loom_protocol_fixture(2);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_close(void);
 void test_loom_private_close(void) {
     for (u32 kind=3;kind<=9;++kind) {
         const char *error=loom_protocol_fixture(kind);
@@ -4324,13 +4256,11 @@ void test_loom_private_close(void) {
     }
 }
 
-void test_loom_private_control(void);
 void test_loom_private_control(void) {
     const char *error=loom_protocol_fixture(10);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_executor(void);
 void test_loom_private_executor(void) {
     const char *error=loom_protocol_fixture(11);
     TEST_ASSERT(!error,error);
@@ -4338,7 +4268,6 @@ void test_loom_private_executor(void) {
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_operation_storage(void);
 void test_loom_private_operation_storage(void) {
     const char *error=loom_protocol_fixture(13);
     TEST_ASSERT(!error,error);
@@ -4346,21 +4275,18 @@ void test_loom_private_operation_storage(void) {
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_frontend(void);
 void test_loom_private_frontend(void) {
     const char *error=loom_protocol_fixture(15);
     if(!error)error=loom_protocol_fixture(16);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_native_operations(void);
 void test_loom_private_native_operations(void) {
     const char *error=loom_protocol_fixture(17);
     if(!error)error=loom_protocol_fixture(18);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_native_faults(void);
 void test_loom_private_native_faults(void) {
     for(u32 kind=19;kind<=34;++kind) {
         const char *error=loom_protocol_fixture(kind);
@@ -4372,14 +4298,12 @@ void test_loom_private_native_faults(void) {
     }
 }
 
-void test_loom_private_native_reconnects(void);
 void test_loom_private_native_reconnects(void) {
     const char *error=loom_protocol_fixture(35);
     if(!error)error=loom_protocol_fixture(36);
     TEST_ASSERT(!error,error);
 }
 
-void test_loom_private_native_stages(void);
 void test_loom_private_native_stages(void) {
     for(u32 kind=40;kind<=51;++kind) {
         const char *error=loom_protocol_fixture(kind);
@@ -4387,7 +4311,6 @@ void test_loom_private_native_stages(void) {
     }
 }
 
-void test_loom_private_native_stage_close(void);
 void test_loom_private_native_stage_close(void) {
     for(u32 kind=60;kind<=95;++kind) {
         const char *error=loom_protocol_fixture(kind);
@@ -4395,7 +4318,6 @@ void test_loom_private_native_stage_close(void) {
     }
 }
 
-void test_loom_private_native_isolation(void);
 void test_loom_private_native_isolation(void) {
     for(u32 kind=100;kind<=101;++kind) {
         const char *error=loom_protocol_fixture(kind);

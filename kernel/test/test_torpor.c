@@ -59,18 +59,6 @@
 #include "../../arch/arm64/uaccess.h"
 #include <thylacine/syscall.h>
 
-void test_torpor_wait_rejects_bad_args(void);
-void test_torpor_wait_rejects_unmapped_va(void);
-void test_torpor_wake_rejects_bad_args(void);
-void test_torpor_wake_empty_bucket_returns_zero(void);
-void test_torpor_wait_value_mismatch_fast_path(void);
-void test_torpor_wait_timeout_zero_returns_etimedout(void);
-void test_torpor_wait_wake_handoff(void);
-void test_torpor_wake_two_waiters_count_bound(void);
-
-// The non-static inners of the SVC handlers (defined in kernel/syscall.c /
-// kernel/torpor.c).
-
 // ---------------------------------------------------------------------------
 // torpor.wait_rejects_bad_args
 // ---------------------------------------------------------------------------
@@ -534,7 +522,6 @@ static struct test_caught_leg ctw_leg(bool linux_pheno) {
     return leg;
 }
 
-void test_torpor_caught_note_ends_wait(void);
 void test_torpor_caught_note_ends_wait(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct test_caught_leg leg = ctw_leg(true);

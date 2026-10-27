@@ -12,49 +12,6 @@
 #include <thylacine/larder.h>
 #include <thylacine/types.h>
 
-void test_larder_install_serve(void);
-void test_larder_serve_miss(void);
-void test_larder_invalidate(void);
-void test_larder_gen_guard_skips_raced_install(void);
-void test_larder_root_qid_zero(void);
-void test_larder_overwrite_wins(void);
-void test_larder_eviction_bounded(void);
-// L1d dentry sub-cache. Maps to fs_cache.tla's Read + OwnWrite subset (NO Open
-// gate -- a name-binding has no content-version to revalidate; the parent's
-// si_cvers does not track a dirent change, so own-write invalidation is the sole
-// coherence mechanism).
-void test_larder_dentry_serve(void);
-void test_larder_dentry_serve_miss(void);
-void test_larder_dentry_negative(void);
-void test_larder_dentry_multi_hop(void);
-void test_larder_dentry_partial_chain_bails(void);
-void test_larder_dentry_attr_miss_bails(void);
-void test_larder_dentry_invalidate_name(void);
-void test_larder_dentry_gen_guard(void);
-void test_larder_dentry_name_too_long(void);
-void test_larder_dentry_bounded(void);
-// L1e page sub-cache. Maps to fs_cache.tla's Read + Open + OwnWrite on content
-// tokens keyed (qid.path, page_index): serve = Read (cvers-gated), install =
-// Open/Refetch (gen-guarded), invalidate = OwnWrite (drop + bump gen). Each test
-// that installs pages calls larder_destroy at the end to free the lazily-allocated
-// buffers (larder_init on the next test zeroes the slot pointers, so a prior
-// buffer must be freed first -- production never re-inits a used larder).
-void test_larder_page_serve(void);
-void test_larder_page_serve_miss(void);
-void test_larder_page_offset(void);
-void test_larder_page_cvers_mismatch(void);
-void test_larder_page_partial(void);
-void test_larder_page_invalidate(void);
-void test_larder_page_invalidate_multifile(void);
-void test_larder_page_gen_guard(void);
-void test_larder_pages_snapshot_gen_witness(void);
-void test_larder_page_overwrite(void);
-void test_larder_page_bounded(void);
-void test_larder_page_destroy_frees(void);
-void test_larder_attr_downgrade_perm_only(void);
-void test_larder_downgrade_guards_raced_populate(void);
-void test_larder_gen_scope_qid(void);
-
 // struct larder is now small (pointers + counters): all three sub-cache arrays are
 // HEAP + lazy (attr 4096 / dentry 4096 / page 32768 entries; the page BUFFERS too),
 // allocated on first install -- file scope, not stack.
@@ -240,6 +197,10 @@ void test_larder_eviction_bounded(void) {
 }
 
 // -- L1d dentry sub-cache ------------------------------------------------------
+//
+// Maps to fs_cache.tla's Read + OwnWrite subset (NO Open gate -- a name-binding
+// has no content-version to revalidate; the parent's si_cvers does not track a
+// dirent change, so own-write invalidation is the sole coherence mechanism).
 
 // Serve (Read): a cached positive dentry + the child's attr resolve a one-hop
 // walk RPC-free.
@@ -418,6 +379,13 @@ void test_larder_dentry_bounded(void) {
 }
 
 // -- L1e page sub-cache ---------------------------------------------------------
+//
+// Maps to fs_cache.tla's Read + Open + OwnWrite on content tokens keyed
+// (qid.path, page_index): serve = Read (cvers-gated), install = Open/Refetch
+// (gen-guarded), invalidate = OwnWrite (drop + bump gen). Each test that
+// installs pages calls larder_destroy at the end to free the lazily-allocated
+// buffers (larder_init on the next test zeroes the slot pointers, so a prior
+// buffer must be freed first -- production never re-inits a used larder).
 
 // Install a full page, serve it whole -- the bytes round-trip (fs_cache.tla Read).
 void test_larder_page_serve(void) {

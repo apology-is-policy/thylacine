@@ -31,10 +31,6 @@
 
 struct spawn_allowance;
 
-void test_spawn_cwd_child_born_in_cwd(void);
-void test_spawn_cwd_image_joins_child_cwd(void);
-void test_spawn_cwd_refusals(void);
-
 #define SC_BUDGET_NS (6ull * 1000ull * 1000ull * 1000ull)
 
 static u32 sc_len(const char *s) {

@@ -30,9 +30,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_userspace_first_iteration(void);
-void test_userspace_second_iteration(void);
-
 // Hand-encoded AArch64 program: SYS_EXITS(0).
 //   0xd2800000 movz x0, #0          ; status 0
 //   0xd2800008 movz x8, #0          ; SYS_EXITS

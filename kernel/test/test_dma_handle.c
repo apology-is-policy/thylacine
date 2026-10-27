@@ -29,35 +29,10 @@
 #include "../../mm/phys.h"   // alloc_pages/free_pages for the hand-built skein
 #include <thylacine/syscall.h>
 
-void test_dma_handle_create_basic(void);
-void test_dma_handle_create_zero_size_rejected(void);
-void test_dma_handle_create_oversize_rejected(void);
-void test_dma_handle_create_round_up_to_page(void);
-void test_dma_handle_distinct_pa(void);
-void test_dma_handle_unref_releases_chunk(void);
-void test_dma_handle_zero_init(void);
-void test_burrow_dma_create_basic(void);
-void test_burrow_dma_create_null_rejected(void);
-void test_burrow_dma_holds_kobj_ref(void);
-void test_burrow_dma_lifecycle_round_trip(void);
-void test_dma_map_install_vma(void);
-void test_dma_map_proc_free_releases_kobj(void);
-void test_skein_blocks_tile_the_buffer(void);
-void test_skein_offset_resolution(void);
-void test_skein_small_weave_stays_one_block(void);
-void test_skein_scope_plain_never_scatters(void);
-void test_skein_gpu_bo_scatters(void);
-void test_skein_full_envelope_weave(void);
-void test_skein_zero_init_across_blocks(void);
-void test_skein_stride_is_the_objects_not_the_constant(void);
-void test_skein_one_block_resolves_throughout(void);
-void test_dma_segments_refuses_rather_than_truncates(void);
-
 // Test sizes — small (fits comfortably in any test universe).
 #define TEST_DMA_SIZE_1PAGE  0x1000ull
 #define TEST_DMA_SIZE_4PAGE  0x4000ull
 #define USER_VA_DMA          0x50000000ull
-
 
 // =============================================================================
 // KObj_DMA layer.
@@ -616,7 +591,6 @@ void test_skein_one_block_resolves_throughout(void) {
 // handler reads current_thread()->proc, so a hand-rolled Proc would not be
 // what it sees. kproc holds CAP_ALL, so the capability gate passes and the
 // REFUSAL legs are what these actually measure.
-
 void test_dma_segments_refuses_rather_than_truncates(void) {
     struct Proc *me = kproc();
     TEST_ASSERT(me != NULL, "kproc");

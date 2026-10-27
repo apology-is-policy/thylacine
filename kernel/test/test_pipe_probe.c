@@ -26,8 +26,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_pipe_probe_round_trip(void);
-
 // pipe-probe is slightly larger than virtio-blk-probe etc. (12-16 KiB
 // range): the inline syscall stubs for pipe/read/write/close/dup
 // each instantiate per-call SVC sequences. 32 KiB cap with headroom.

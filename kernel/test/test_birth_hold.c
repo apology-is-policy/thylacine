@@ -47,15 +47,6 @@
 
 struct spawn_allowance;
 
-void test_birth_hold_validate_req(void);
-void test_birth_hold_publication_mark(void);
-void test_birth_hold_released_predicate(void);
-void test_birth_hold_parked_wakes_birth_wait(void);
-void test_birth_hold_orphan_rule(void);
-void test_birth_hold_birth_wait_survives_latch(void);
-void test_birth_hold_held_spawn_parks(void);
-void test_birth_hold_held_spawn_death_wins(void);
-
 // Not a mark value: a child that never ran must not read as NONE (0), or every
 // "born NONE" control would pass on a child that did nothing.
 #define BH_UNSEEN 0xDEADu

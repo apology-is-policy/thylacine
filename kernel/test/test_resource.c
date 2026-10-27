@@ -39,26 +39,6 @@
 
 #include "../include/thylacine/errno.h"
 
-// The _for_proc inners of the burrow SVC handlers (non-static cores in
-// kernel/syscall.c), driven directly -- the same pattern test_sys_burrow uses.
-
-// Test-only Proc list helpers (no production caller; defined in kernel/proc.c).
-
-void test_resource_exempt_only_system(void);
-void test_resource_page_charge_caps(void);
-void test_resource_thread_cap_ok(void);
-void test_resource_child_cap_ok(void);
-void test_resource_child_count_tracks_list(void);
-void test_resource_child_count_rfork_reap(void);
-void test_resource_page_cap_attach_enforced(void);
-void test_resource_vma_cap(void);
-void test_resource_attach_charges_buddy_rounded(void);
-void test_resource_detach_shared_in_keeps_page_count(void);
-void test_resource_page_peak_high_water(void);
-void test_resource_spawn_budget_resolve(void);
-void test_resource_measured_compile_needs_raise(void);
-void test_resource_detach_retained_handle_keeps_page_count(void);
-
 #define A_REAL_USER 1000u
 
 static struct Proc *res_make(u32 principal) {

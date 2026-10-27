@@ -2,8 +2,8 @@
 //
 // Exercises the syscall handler's integration of pipe_create +
 // handle_alloc + KOBJ_SPOOR release-path discipline. Calls
-// `sys_pipe_for_proc(p, ...)` (the non-static inner of the SVC
-// handler) with a test Proc; verifies the resulting handles are
+// `sys_pipe_for_proc(p, ...)` (the SVC handler's core) with a test
+// Proc; verifies the resulting handles are
 // well-formed KOBJ_SPOOR slots; verifies proc_free's
 // handle_table_free walks the table and spoor_clunks each entry
 // end-to-end.
@@ -41,25 +41,6 @@
 
 // The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
 // tests read (/welcome is pinned by tools/build.sh).
-
-// Inner SVC handlers (extern declarations; defined in kernel/syscall.c).
-
-void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
-void test_sys_pipe_proc_free_releases_handles(void);
-void test_sys_pipe_handle_close_releases_one_end(void);
-void test_sys_rw_write_then_read_round_trip(void);
-void test_sys_rw_rights_check(void);
-void test_sys_rw_zero_length_validates_fd(void);
-void test_sys_rw_read_after_close_returns_eof(void);
-void test_sys_rw_write_after_read_close_returns_epipe(void);
-void test_sys_prw_pipe_not_seekable(void);
-void test_sys_pread_devramfs_offset_and_cursor(void);
-void test_sys_prw_rights_and_walkonly(void);
-void test_sys_attach_9p_rejection_paths(void);
-void test_sys_attach_9p_names_root_by_its_pipe(void);
-void test_sys_attach_9p_declarations(void);
-void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
-void test_sys_pipe_fstat_reports_fifo(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
 // independent so the two test files can be reordered without import
@@ -306,7 +287,6 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
 // assertion instead of blocking the suite on a handshake nobody answers. What
 // the attach sent is read back non-blocking, so "nothing sent" is a measured 0.
 // ---------------------------------------------------------------------------
-
 
 enum pa_ends { PA_PIPES, PA_BOGUS_TX, PA_BOGUS_RX, PA_DEVNONE_TX };
 
@@ -688,7 +668,6 @@ void test_sys_pipe_fstat_reports_fifo(void) {
 // before either end is installed. The by-number unwind this replaced installed
 // the read end, then closed it -- one install, and a window in which a peer
 // thread could reuse the number and have its own file closed.
-void test_sys_pipe_full_table_publishes_nothing(void);
 void test_sys_pipe_full_table_publishes_nothing(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");

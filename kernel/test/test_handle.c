@@ -53,18 +53,6 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 
-void test_handles_alloc_close_smoke(void);
-void test_handles_rights_monotonic(void);
-void test_handles_dup_lifecycle(void);
-void test_handles_full_table_oom(void);
-void test_handles_kind_classifiers(void);
-void test_handles_srv_kind(void);
-void test_handles_cloexec_lifecycle(void);
-void test_handles_cloexec_exec_sweep(void);
-void test_handles_cloexec_fork_preserves(void);
-void test_handles_dup_posix(void);
-void test_handles_dup_to(void);
-
 // Shared test helper: allocate a Proc, exercise it, then transition to
 // ZOMBIE + free. proc_alloc has already allocated a fresh empty handle
 // table; proc_free will release it (closing any straggler handles).
@@ -389,7 +377,6 @@ void test_handles_srv_kind(void) {
 // caller rather than the outgoing slot, and every kind but KOBJ_SPOOR is
 // refused on BOTH sides.
 // =============================================================================
-void test_handles_replace(void);
 void test_handles_replace(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
@@ -747,7 +734,6 @@ void test_handles_dup_to(void) {
 // The reserved slot (vault dec-2026-10-14-descriptor-slot-reservation): not
 // free, not live, and only its own call fills or returns it. Every operation
 // that could otherwise reach the number is driven against it.
-void test_handles_reservation(void);
 void test_handles_reservation(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "test_proc_make returned NULL");

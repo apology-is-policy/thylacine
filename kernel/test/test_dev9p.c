@@ -37,94 +37,6 @@
 #include "../../mm/slub.h"             // kmalloc (the wb heap scratch)
 #include "../../arch/arm64/uart.h"
 
-void test_dev9p_registered(void);
-void test_dev9p_attach_client_root_spoor(void);
-void test_dev9p_walk_one_component(void);
-void test_dev9p_walk_clone(void);
-void test_dev9p_open_lopens_fid(void);
-void test_dev9p_read_routes_through_client(void);
-void test_dev9p_write_routes_through_client(void);
-void test_dev9p_close_clunks_owned_fid(void);
-void test_dev9p_close_does_not_clunk_root_fid(void);
-void test_dev9p_create_file(void);
-void test_dev9p_create_errno_propagates_eexist(void);   // #99
-void test_dev9p_create_dir(void);
-void test_dev9p_fsync(void);
-void test_dev9p_readdir(void);
-void test_dev9p_poll_regular_file_always_ready(void);
-bool test_dev9p_np_release(void);
-void test_dev9p_poll_snapshot_answers_at_zero_timeout(void);
-void test_dev9p_poll_local_and_remote_both_reported(void);
-void test_dev9p_poll_snapshot_shortage_is_resent(void);
-void test_dev9p_poll_unanswered_snapshot_fails_safe(void);
-void test_dev9p_poll_arm_wakes_the_parked_poller(void);
-void test_dev9p_poll_retry_timer_is_a_wake(void);
-void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
-void test_dev9p_poll_cancel_at_close(void);
-void test_dev9p_poll_gc_flushes_with_the_unlink(void);
-void test_dev9p_poll_reads_every_client(void);
-void test_dev9p_prw_wire_offset_and_cursor(void);
-void test_dev9p_wstat_readonly_fd(void);
-void test_dev9p_wstat_size(void);
-void test_dev9p_walk_attrs(void);
-void test_dev9p_wga_unsupported_latches_by_errno(void);
-void test_dev9p_page_cache_serve_and_gate(void);
-void test_dev9p_cached_open(void);
-void test_dev9p_cached_open_fallbacks(void);
-void test_dev9p_cached_open_loose(void);
-void test_dev9p_wb_coalesce_one_twrite(void);
-void test_dev9p_wb_overlay_read(void);
-void test_dev9p_wb_flush_at_close(void);
-void test_dev9p_wb_fsync_flush_and_error(void);
-void test_dev9p_wb_close_returns_flush_error(void);
-void test_dev9p_wb_dying_flush_keeps_run(void);
-void test_dev9p_wb_dying_wstat_keeps_staging(void);
-void test_dev9p_wb_wstat_keeps_the_latch(void);
-void test_dev9p_wb_dying_loom_register_keeps_staging(void);
-void test_dev9p_wb_loom_register_keeps_the_latch(void);
-void test_dev9p_wb_interrupted_flush_keeps_run(void);
-void test_dev9p_wb_server_eintr_latches(void);
-void test_dev9p_wb_nonappend_writethrough(void);
-void test_dev9p_wb_fstat_staged_size(void);
-void test_dev9p_wb_cap_flush(void);
-void test_dev9p_wb_budget_fallback(void);
-void test_dev9p_wb_populate_readback(void);
-void test_dev9p_wb_populate_append_chain(void);
-void test_dev9p_wb_populate_failed_flush(void);
-void test_dev9p_wb_writethrough_range_invalidate(void);
-void test_dev9p_cape(void);
-void test_dev9p_path_create_refuses_dmsrvcape(void);
-void test_dev9p_walk_create_refuses_dmsrv_bits(void);
-void test_dev9p_remote_format_ns(void);
-void test_dev9p_origin_format_ns(void);
-void test_dev9p_open_errno(void);
-void test_dev9p_write_read_propagate_errno(void);
-void test_dev9p_create_invalidates_reused_child(void);
-void test_dev9p_create_invalidates_reused_child_pages(void);
-void test_dev9p_create_downgrades_parent_attr(void);
-void test_dev9p_dirfid_consume_and_recycle(void);
-void test_dev9p_dirfid_perm_only_leaf_consume(void);
-void test_dev9p_dirfid_create_reuse_drop(void);
-void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void);
-void test_dev9p_dirfid_suspect_not_reparked(void);
-void test_dev9p_create_invalidates_negative_dentry(void);
-void test_dev9p_readdir_cookie_high_bit(void);
-void test_dev9p_rename(void);
-void test_dev9p_unlink(void);
-void test_dev9p_unlink_rename_errno_propagates(void);
-void test_dev9p_stat_native_maps_getattr(void);
-void test_dev9p_wstat_native_drives_setattr(void);
-void test_dev9p_perm_enforced_deny_allow(void);
-void test_dev9p_read_align_heals_partial(void);
-void test_dev9p_read_align_short_not_eof(void);
-void test_dev9p_open_trunc_invalidates(void);
-void test_dev9p_read_eof_attr_served(void);
-void test_dev9p_stalk_open_errno(void);
-void test_dev9p_open_create_noent_then_create(void);
-void test_dev9p_open_create_exists_race_retries_open(void);
-void test_dev9p_open_create_excl_eexist_exact(void);
-
-
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
 static struct p9_client g_client;
@@ -2402,8 +2314,6 @@ void test_dev9p_poll_reads_every_client(void) {
 // tests against the loopback client (the wire-visible halves).
 // =============================================================================
 
-// The positioned inners + the wstat inner (defined in kernel/syscall.c).
-
 // #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
 // never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
 // there and advancing it. The loopback responder captures the wire offsets.
@@ -4125,7 +4035,6 @@ void test_dev9p_wb_writethrough_range_invalidate(void) {
 // pattern every real transport absorbs (the demux's #210 orphan-clunk arm).
 // =============================================================================
 
-
 // A Proc holding an UNOPENED fd at the loopback root (clone + clone-walk for
 // its own fid -- the walkable start base). CAP_DAC_OVERRIDE: the canonical
 // Rgetattr reports S_IFREG|0644/uid 0x1234, which would fail the A-2d W|X
@@ -4409,7 +4318,6 @@ void test_dev9p_path_create_refuses_dmsrvcape(void) {
     proc_free(p);
     teardown(root);
 }
-
 
 // One fd-based create on a fresh session; *seen = the Tlcreates it sent.
 static s64 wc_dmsrv_create(u32 perm, u32 *seen) {

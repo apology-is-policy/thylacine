@@ -74,8 +74,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_virtio_blk_probe_rfork_with_caps(void);
-
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
 // requirement on the Ehdr cast in exec_setup). Sized to match the P4-K
 // convention (16 KiB) after every userspace binary dropped under 16 KiB

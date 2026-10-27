@@ -22,20 +22,6 @@
 #include <thylacine/burrow.h>
 #include <thylacine/weft.h>
 
-void test_weft_ring_basic(void);
-void test_weft_ring_toctou_snapshot(void);
-void test_weft_ring_bounds_reject(void);
-void test_weft_ring_multi_split(void);
-void test_weft_should_ring_threshold(void);
-void test_weft_ring_layout_constraints(void);
-void test_weft_ready_signal_observe(void);
-void test_weft_ready_park_handshake(void);
-void test_weft_ready_arm_park_sees_race(void);
-void test_weft_notif_terminal_release(void);
-void test_weft_notif_premature_blocked(void);
-void test_weft_notif_copied_immediate(void);
-void test_weft_binding_validate_rw(void);
-
 #define WEFT_TEST_VA   0x20000000ull          // 512 MiB; well inside user-VA
 #define WEFT_RING_ENTRIES 8u
 // A 4-page ring Burrow: ring_hdr (64) + ready_hdr (128) + desc[8] (128) + a

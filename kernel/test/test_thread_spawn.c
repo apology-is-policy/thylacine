@@ -90,24 +90,6 @@
 #include <thylacine/types.h>
 #include <thylacine/syscall.h>
 
-void test_thread_create_user_ctx_layout(void);
-void test_thread_exit_self_marks_exiting(void);
-void test_thread_exit_self_last_thread_zombies(void);
-void test_proc_reap_exited_threads_frees_peers(void);
-void test_proc_reap_keeps_thread_cap_open(void);
-void test_proc_multi_thread_reap(void);
-void test_proc_exit_tail_runs_to_its_end(void);
-void test_proc_exec_waits_for_exiting_peer(void);
-void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
-void test_proc_spawn_refused_in_dying_proc(void);
-void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
-void test_proc_wait_pid_concurrent_waiters_both_reap(void);
-void test_proc_exits_in_dying_group_keeps_group_status(void);
-void test_proc_fault_in_dying_group_keeps_group_status(void);
-void test_proc_fault_in_dying_group_reaps_exited_packed(void);
-void test_proc_note_death_with_live_peer_reaps_signalled(void);
-void test_proc_reap_before_sqpoll_charge(void);
-
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout
 // ---------------------------------------------------------------------------
@@ -800,7 +782,6 @@ static void rpx_entry(void *arg) {
     exits("ok");
 }
 
-void test_proc_reap_before_private_executor_charge(void);
 void test_proc_reap_before_private_executor_charge(void) {
     u64 made0 = loom_private_created(), gone0 = loom_private_retired();
     int child_pid = rfork(RFPROC, rpx_entry, NULL);
@@ -839,8 +820,6 @@ void test_proc_reap_before_private_executor_charge(void) {
 // The exit tail, exec against an exiting peer, a spawn in a dying Proc, and
 // the tid and pid spaces at their edge.
 // ---------------------------------------------------------------------------
-
-// Test hooks (the *_for_test convention; absent from the headers).
 
 // A user entry and stack the spawn gates accept; nothing maps them, and no
 // thread spawned here reaches EL0 in a passing run.

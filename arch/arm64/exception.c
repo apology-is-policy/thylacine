@@ -437,19 +437,6 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also terminate
 // via proc_fault_terminate (snare:align / snare:bti / snare:brk
 // respectively).
-// P6-pouch-signals-impl (sub-chunk 13a): the EL0-return-tail note-delivery hook
-// (defined in kernel/notes.c). As of #107 it is invoked from the vector tail
-// (vectors.S .Lel0_return, which sync-from-EL0 and, since #964, IRQ-from-EL0
-// both take), not from the C handlers here; the decl is retained for
-// documentation.
-
-// SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
-// EL0-return-tail die-check (defined in kernel/proc.c). If the calling
-// Thread's Proc is group-terminating, the Thread self-exits here (noreturn);
-// otherwise returns. As of #107 invoked from the vector tails (vectors.S
-// .Lel0_return), AFTER preempt_check_irq -- so a group-terminate
-// landing during the preempt is caught before any EL0 instruction runs.
-
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     // 8c-2 (#88): publish THIS EL0-entry frame as the current thread's debug
     // trapframe, so a thread that DETOUR-parks (proc_stop_sleeper_park --

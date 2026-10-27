@@ -233,7 +233,6 @@ static const char *state_name(enum proc_state s) {
 // p->threads, and p->parent is read here, both stable only under that lock.
 // `caller` is the reading Proc (NULL is no one); cpu_ns is "-" unless it is
 // p's owner or a hostowner.
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
@@ -1168,12 +1167,11 @@ static int devproc_close(struct Spoor *c) {
 // genuinely needs the lock. No sleep / no allocation runs under either lock.
 // prowl-3b: forward-declared so devproc_read_cb (below) can apply the OQ-4 gate;
 // the definition sits with the other authority predicates (after
-// devproc_kill_authorized). Non-static -- the test suite exercises it.
+// devproc_kill_authorized).
 VISIBLE_IF_KERNEL_TESTS
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 VISIBLE_IF_KERNEL_TESTS
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 // Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
 // sits above the definitions.
 static bool devproc_kind_is_image(u32 kind);
@@ -1200,7 +1198,6 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 // neither owner nor CAP_HOSTOWNER), returns 0, and formats NOTHING (no partial
 // leak); otherwise formats target's per-thread block. `target` is resolved +
 // pinned alive under g_proc_table_lock by the real caller (devproc_read_cb).
-// Non-static: test-driven.
 VISIBLE_IF_KERNEL_TESTS
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied) {
@@ -1261,7 +1258,6 @@ static size_t format_imperium(struct Proc *p, char *buf, size_t cap) {
 // them -- the same wrong parenthetical audit F10 struck at devproc.c:1051 and
 // :2392, which this copy outlived.) Same policy predicate as sched/environ
 // (devproc_owner_or_hostowner), deliberately NOT the I-39 debug predicate.
-// Non-static: test-driven.
 VISIBLE_IF_KERNEL_TESTS
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
                                    char *buf, size_t cap, bool *denied) {
@@ -1448,7 +1444,7 @@ static bool devproc_same_owner(const struct Proc *caller, const struct Proc *tar
 // admin — is deliberately NOT a kill axis. The A-4 capability split keeps
 // fs-admin and process-kill orthogonal (mirrors Linux CAP_DAC_OVERRIDE vs
 // CAP_KILL). No identity bypasses (I-22 — the cap axes are capabilities, never
-// identities). Non-static: the kernel test suite exercises the predicate.
+// identities).
 VISIBLE_IF_KERNEL_TESTS
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
@@ -1465,17 +1461,6 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
     return false;
 }
 
-// prowl-3b (PROWL-DESIGN.md OQ-4): the deep-internals visibility gate for
-// /proc/<pid>/sched (the per-thread scheduler view). Owner-or-CAP_HOSTOWNER --
-// the operator's-or-owner's view: the SUMMARY (name / %cpu / state / mem) stays
-// all-visible via /ctl/procs + /proc/<pid>/status (the Plan 9 all-pids posture),
-// but a process's deep per-thread scheduler internals are the owner's own or the
-// host owner's. STRICTLY NARROWER than the kill / debug gates: CAP_KILL and
-// CAP_DEBUG are deliberately NOT axes (reading scheduler telemetry is neither
-// killing nor debugging -- keep the capability split orthogonal, I-22); no
-// identity bypasses. Composes I-1 (a confined user sees full detail only on its
-// own Procs) + the /ctl visibility-not-authority posture; NO new §28 invariant.
-// Non-static: the kernel test suite exercises the predicate.
 // The owner-or-host-owner policy, shared by every per-Proc file that discloses
 // MORE than devproc's ambient all-pids-visible set (prowl-3b's OQ-4 gate on
 // sched; V-4b-6's on environ). Extracted rather than copied so the two cannot
@@ -1638,6 +1623,16 @@ bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *ta
     return !devproc_read_sealed(caller, target, PQS_ENVIRON);           // the seal
 }
 
+// prowl-3b (PROWL-DESIGN.md OQ-4): the deep-internals visibility gate for
+// /proc/<pid>/sched (the per-thread scheduler view). Owner-or-CAP_HOSTOWNER --
+// the operator's-or-owner's view: the SUMMARY (name / %cpu / state / mem) stays
+// all-visible via /ctl/procs + /proc/<pid>/status (the Plan 9 all-pids posture),
+// but a process's deep per-thread scheduler internals are the owner's own or the
+// host owner's. STRICTLY NARROWER than the kill / debug gates: CAP_KILL and
+// CAP_DEBUG are deliberately NOT axes (reading scheduler telemetry is neither
+// killing nor debugging -- keep the capability split orthogonal, I-22); no
+// identity bypasses. Composes I-1 (a confined user sees full detail only on its
+// own Procs) + the /ctl visibility-not-authority posture; NO new §28 invariant.
 VISIBLE_IF_KERNEL_TESTS
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
     return devproc_owner_or_hostowner(caller, target);
@@ -1669,8 +1664,7 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 // would stop the kernel) and a PROC_FLAG_NOTRACE target (the SYS_SET_TRACEABLE(0)
 // no-trace seam — e.g. the login session Proc, DEBUG-FS-DESIGN §8) are refused
 // whatever the authority axes say: kproc before them, the seam after, and no cap
-// holder can debug either. Non-static: the
-// kernel test suite exercises the predicate.
+// holder can debug either.
 static bool devproc_debug_authorized_locked(const struct Proc *caller,
                                             const struct Proc *target) {
     if (!caller || !target)                            return false;
@@ -1735,9 +1729,9 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
     return true;
 }
 
-// The public predicate: takes g_proc_table_lock, which the image join needs and
-// which every /proc gate site already holds (they run inside proc_for_each, and
-// call the _locked form directly). The kernel tests are the callers that do not.
+// The locking form, for the kernel tests: the image join needs g_proc_table_lock,
+// which every /proc gate site already holds (they run inside proc_for_each and
+// call the _locked form directly).
 #ifdef KERNEL_TESTS
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     irq_state_t s = proc_table_lock_acquire();
@@ -1966,8 +1960,8 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // (a step armed on an exiting thread never fires, and the resume lets the target
 // run free). NULL when every thread is exiting; each caller refuses NULL. The
 // other gates (on_cpu / a valid trapframe) are re-checked by each caller
-// downstream. NON-static so the selection is unit-testable (#95-audit F3;
-// the focus-selection leg of devproc.debug_stop_start_resume).
+// downstream. Visible to the tests so the selection is unit-testable
+// (#95-audit F3; the focus-selection leg of devproc.debug_stop_start_resume).
 VISIBLE_IF_KERNEL_TESTS
 struct Thread *devproc_focus_thread(struct Proc *target) {
     struct Thread *focus = __atomic_load_n(&target->debug_focus_thread, __ATOMIC_ACQUIRE);
@@ -2719,10 +2713,8 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention: absent from the header, extern-declared
-// by the harness, no production caller): one pass of the scan stop and waitstop
-// poll, since waitstop itself would block on a target that never stops.
-int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
+// Test hook: one pass of the scan stop and waitstop poll, since waitstop
+// itself would block on a target that never stops.
 int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl) {
     struct devproc_stopscan_ctx s = { .target_pid = pid, .ctl = ctl, .state = -1 };
     proc_for_each(devproc_stopscan_cb, &s);
@@ -3058,10 +3050,8 @@ static int devproc_waitscan_cb(struct Proc *target, void *arg) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention: absent from the header, extern-declared
-// by the harness, no production caller): one pass of the scan /proc/<pid>/wait
-// (ctl NULL) and step (the slot owner's ctl) poll.
-int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl);
+// Test hook: one pass of the scan /proc/<pid>/wait (ctl NULL) and step (the
+// slot owner's ctl) poll.
 int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl) {
     struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .ctl = ctl,
                                       .state = -1 };
@@ -3083,9 +3073,7 @@ static int devproc_wait_verdict(int state) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention: absent from the header, extern-declared
-// by the harness, no production caller): the verdict for one scan state.
-int devproc_wait_verdict_for_test(int state);
+// Test hook: the verdict for one scan state.
 int devproc_wait_verdict_for_test(int state) {
     return devproc_wait_verdict(state);
 }
@@ -3122,8 +3110,7 @@ static long devproc_step_result(int ev, long n) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention): the step write's return for a verdict.
-long devproc_step_result_for_test(int ev, long n);
+// Test hook: the step write's return for a verdict.
 long devproc_step_result_for_test(int ev, long n) {
     return devproc_step_result(ev, n);
 }

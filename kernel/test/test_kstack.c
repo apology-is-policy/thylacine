@@ -51,16 +51,6 @@
 
 #include "../../mm/phys.h"
 
-void test_thread_kstack_cache_reuses_without_guard_toggle(void);
-void test_thread_kstack_cache_keeps_the_guard(void);
-void test_thread_kstack_recycled_stack_is_fully_poisoned(void);
-void test_thread_kstack_cache_is_bounded(void);
-void test_directmap_tlbi_operand_masks_the_ttl_hint(void);
-void test_directmap_guard_toggle_invalidates_a_warm_entry(void);
-void test_thread_kstack_create_free_cost(void);
-
-// Test hooks in mmu.c (the *_for_test convention).
-
 static void kstack_never_runs(void) { }
 
 // The guard pages do not translate and the usable pages do.

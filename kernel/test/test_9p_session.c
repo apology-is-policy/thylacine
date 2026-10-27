@@ -17,66 +17,6 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/types.h>
 
-void test_9p_session_init_destroy(void);
-void test_9p_session_version_handshake(void);
-void test_9p_session_attach_handshake(void);
-void test_9p_session_walk_round_trip(void);
-void test_9p_session_clunk_round_trip(void);
-void test_9p_session_clunk_send_time_unbinds(void);
-void test_9p_session_dispatch_rlerror(void);
-void test_9p_session_walk_to_root_refused(void);
-void test_9p_session_walk_to_bound_fid_refused(void);
-void test_9p_session_walk_from_unbound_fid_refused(void);
-void test_9p_session_clunk_root_refused(void);
-void test_9p_session_clunk_with_inflight_on_fid_refused(void);
-void test_9p_session_fid_after_clunk_refused(void);
-void test_9p_session_dispatch_wrong_tag_rejected(void);
-void test_9p_session_dispatch_wrong_type_rejected(void);
-void test_9p_session_close_with_inflight_refused(void);
-void test_9p_session_state_gate_send_walk_before_open(void);
-void test_9p_session_lopen_round_trip(void);
-void test_9p_session_lcreate_round_trip(void);
-void test_9p_session_read_round_trip(void);
-void test_9p_session_write_round_trip(void);
-void test_9p_session_lopen_with_inflight_on_fid_refused(void);
-void test_9p_session_read_permits_concurrent(void);
-void test_9p_session_io_from_unbound_fid_refused(void);
-void test_9p_session_io_before_open_refused(void);
-void test_9p_session_getattr_round_trip(void);
-void test_9p_session_setattr_round_trip(void);
-void test_9p_session_readdir_round_trip(void);
-void test_9p_session_statfs_round_trip(void);
-void test_9p_session_weft_round_trip(void);
-void test_9p_session_weftio_round_trip(void);
-void test_9p_session_fsync_round_trip(void);
-void test_9p_session_setattr_with_inflight_on_fid_refused(void);
-void test_9p_session_getattr_permits_concurrent(void);
-void test_9p_session_meta_from_unbound_fid_refused(void);
-void test_9p_session_symlink_round_trip(void);
-void test_9p_session_mknod_round_trip(void);
-void test_9p_session_rename_round_trip(void);
-void test_9p_session_readlink_round_trip(void);
-void test_9p_session_link_round_trip(void);
-void test_9p_session_mkdir_round_trip(void);
-void test_9p_session_renameat_round_trip(void);
-void test_9p_session_unlinkat_round_trip(void);
-void test_9p_session_rename_with_inflight_on_fid_refused(void);
-void test_9p_session_unlinkat_permits_concurrent(void);
-void test_9p_session_mutation_from_unbound_fid_refused(void);
-void test_9p_session_flush_reclaims_both(void);
-void test_9p_session_late_reply_does_not_free_awaiting_flush(void);
-void test_9p_session_abort_unsent_reclaims_tag(void);
-void test_9p_session_flush_rollback_restores_victim(void);
-void test_9p_session_clunk_retract_after_peer_fill(void);
-void test_9p_session_flushed_walk_late_reply_binds(void);
-void test_9p_session_flushed_reply_honoured_for_waiting_owner(void);
-void test_9p_session_flush_retract_restores_live_op(void);
-void test_9p_session_flush_owner_waits_keeps_fid_live(void);
-void test_9p_session_flush_names_no_fid(void);
-void test_9p_session_flush_headroom_grows_table(void);
-void test_9p_session_sync_owner_index(void);
-void test_9p_session_walk_fid_full_no_latch(void);
-
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
 

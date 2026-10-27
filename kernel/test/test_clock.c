@@ -20,9 +20,6 @@
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>
 
-// LS-K syscall handlers (non-static in syscall.c; no public header).
-
-void test_clock_monotonic_advances(void);
 void test_clock_monotonic_advances(void) {
     u64 a = timer_now_ns();
     timer_busy_wait_ticks(2);
@@ -30,7 +27,6 @@ void test_clock_monotonic_advances(void) {
     TEST_ASSERT(b > a, "CLOCK_MONOTONIC (timer_now_ns) did not advance");
 }
 
-void test_clock_realtime_anchored(void);
 void test_clock_realtime_anchored(void) {
     // CLOCK_REALTIME = CLOCK_MONOTONIC + a non-negative offset (the boot anchor;
     // the RTC epoch dominates the boot-early monotonic, so the offset >= 0). This
@@ -53,7 +49,6 @@ void test_clock_realtime_anchored(void) {
         "CLOCK_REALTIME implausibly far in the future (anchor math overflow?)");
 }
 
-void test_clock_wallclock_offset_math(void);
 void test_clock_wallclock_offset_math(void) {
     // Fail-soft: a 0 epoch yields a 0 offset (realtime == monotonic).
     TEST_ASSERT(timer_wallclock_offset_ns(0, 12345) == 0,
@@ -73,7 +68,6 @@ void test_clock_wallclock_offset_math(void) {
         "offset(epoch_ns < mono) must be 0 (no u64 underflow)");
 }
 
-void test_clock_identity_syscalls(void);
 void test_clock_identity_syscalls(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t != (void *)0 && t->proc != (void *)0,
@@ -91,7 +85,6 @@ void test_clock_identity_syscalls(void) {
         "SYS_GETGID must return primary_gid");
 }
 
-void test_clock_gettime_errors(void);
 void test_clock_gettime_errors(void) {
     // A bad clk_id is rejected BEFORE the buffer is touched, so a NULL va is safe.
     TEST_ASSERT(sys_clock_gettime_handler(999, 0, 0, 0) == -T_E_INVAL,
@@ -109,7 +102,6 @@ void test_clock_gettime_errors(void) {
 // boot anchor (projected forward by the elapsed monotonic so the original offset
 // is preserved within ns, not frozen) so the later realtime-plausibility checks
 // hold regardless of test order. MONOTONIC must not move.
-void test_clock_settime_reanchors(void);
 void test_clock_settime_reanchors(void) {
     u64 mono0 = timer_now_ns();
     u64 real0 = timer_realtime_ns();
@@ -138,7 +130,6 @@ void test_clock_settime_reanchors(void) {
 // any buffer read (a NULL va never faults first); with it set, the same NULL va
 // now faults (-EFAULT) -- proving the cap actually gates and is checked first.
 // clk_id is validated before the cap, so MONOTONIC stays EINVAL either way.
-void test_clock_settime_cap_gate(void);
 void test_clock_settime_cap_gate(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t != (void *)0 && t->proc != (void *)0,
@@ -211,7 +202,6 @@ static long cns_sleep(void *arg) {
 // already past returns 0 at once even with a note pending -- the opposite of
 // pause()'s zero timeout -- and an absolute deadline of 0, tsleep's no-deadline
 // sentinel, is a past deadline, never a sleep without one.
-void test_clock_nanosleep_caught_note(void);
 void test_clock_nanosleep_caught_note(void) {
     cns_set(false, false, CNS_LONG);
     struct Proc *lin = test_caught_proc(true);
@@ -330,7 +320,6 @@ static void cnw_release(void *arg) {
 // the instant ends the sleep at once, and a step back sleeps on toward the
 // instant's new place. A relative sleep never consults the wall clock, so a step
 // leaves it alone. Native Procs: the note the fixture posts is ridden out.
-void test_clock_nanosleep_wall_step(void);
 void test_clock_nanosleep_wall_step(void) {
     g_cnw_off0 = timer_wallclock_offset_ns_now();
 

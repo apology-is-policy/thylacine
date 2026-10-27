@@ -62,16 +62,6 @@
 #include "../mm/slub.h"
 #include <thylacine/addrspace.h>
 
-// Declared here rather than by including <thylacine/vivarium.h> ON PURPOSE.
-// `struct viv_sigtab` stays INCOMPLETE in this file (proc.h forward-declares
-// it), so proc.c can hold the pointer and hand it to vivarium.c but cannot
-// reach into the layout -- which is what keeps exec's disposition reset a
-// single call to the owning module instead of a field walk that drifts from it.
-// The three are the phenotype's fork/exec signal-state rule (ARCH 7.6, POSIX):
-// rfork copies the table (viv_sigtab_clone_into: the child gets its OWN
-// table, or NULL when the parent has none), execve resets CAUGHT rows only
-// (viv_sigtab_reset_caught: SIG_IGN survives), and the native full reset stays.
-
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
 // 2B-F3: init (joey, the first user Proc) -- the orphan-adopter per ARCH
@@ -384,9 +374,7 @@ static int alloc_next_pid(void) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; absent from the header): replace the
-// pid counter, returning the old value.
-u32 proc_pid_counter_swap_for_test(u32 v);
+// Test hook: replace the pid counter, returning the old value.
 u32 proc_pid_counter_swap_for_test(u32 v) {
     return __atomic_exchange_n(&g_next_pid, v, __ATOMIC_RELAXED);
 }
@@ -717,14 +705,12 @@ int proc_quiesce_owned_devices(struct Proc *p) {
 
 #ifdef KERNEL_TESTS
 // Devices reset by exec's walk (a), summed over every exec, and the stamp of its
-// latest run (the *_for_test convention: extern-declared by the harness).
+// latest run.
 static u64 g_exec_device_resets;
 static u64 g_exec_walk_a_seq;
-u64 proc_exec_device_resets_for_test(void);
 u64 proc_exec_device_resets_for_test(void) {
     return __atomic_load_n(&g_exec_device_resets, __ATOMIC_ACQUIRE);
 }
-u64 proc_exec_walk_a_seq_for_test(void);
 u64 proc_exec_walk_a_seq_for_test(void) {
     return __atomic_load_n(&g_exec_walk_a_seq, __ATOMIC_ACQUIRE);
 }
@@ -2706,7 +2692,6 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
 // Kernel-only fixture posture, compiled out of production. The test runner
 // restores -1 BEFORE launching userspace; no syscall can change this setting.
 static int g_test_serial_sak = -1;
-int proc_test_serial_sak(int posture);
 int proc_test_serial_sak(int posture) {
     return __atomic_exchange_n(&g_test_serial_sak, posture, __ATOMIC_ACQ_REL);
 }
@@ -2730,14 +2715,12 @@ bool proc_console_sak(void) {
 }
 
 #ifdef KERNEL_TESTS
-void proc_test_seat_reset(void);
 void proc_test_seat_reset(void) {
     irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
     seat_zero(&g_seat, sizeof(g_seat));
     spin_unlock_irqrestore(&g_proc_table_lock, lock);
 }
 // The deadlines are 5 s and 90 s of wall clock; a test cannot wait them out.
-void proc_test_seat_expire(void);
 void proc_test_seat_expire(void) {
     irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
     g_seat.deadline = 0;
@@ -3468,17 +3451,15 @@ enum { CAUGHT_DESIGNATED, CAUGHT_SETTLED, CAUGHT_STALE };
 #define CAUGHT_REPICKS 4u
 
 #ifdef KERNEL_TESTS
-// The *_for_test convention: the next `n` designations in `p` go stale, as when
+// Test hook: the next `n` designations in `p` go stale, as when
 // each pick enters a wait that holds between the pick and the re-check. Returns
 // what the last count left unconsumed; (NULL, 0) resets.
 static struct Proc *g_caught_stale_proc;
 static u32          g_caught_stale_left;
-u32 caught_force_stale_for_test(struct Proc *p, u32 n);
 u32 caught_force_stale_for_test(struct Proc *p, u32 n) {
     __atomic_store_n(&g_caught_stale_proc, p, __ATOMIC_RELEASE);
     return __atomic_exchange_n(&g_caught_stale_left, n, __ATOMIC_ACQ_REL);
 }
-u32 caught_repicks_for_test(void);
 u32 caught_repicks_for_test(void) { return CAUGHT_REPICKS; }
 static bool caught_forced_stale(const struct Proc *p) {
     if (__atomic_load_n(&g_caught_stale_proc, __ATOMIC_ACQUIRE) != p) return false;
@@ -4237,11 +4218,9 @@ static void proc_close_handles_at_exit(struct Proc *p) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; deliberately absent from the header):
-// the at-exit close, driven on a Proc a test built and never ran. The closer
+// Test hook: the at-exit close, driven on a Proc a test built and never ran. The closer
 // flag lands on the calling test thread and is cleared before return, as at a
 // real exit.
-void proc_close_handles_at_exit_for_test(struct Proc *p);
 void proc_close_handles_at_exit_for_test(struct Proc *p) {
     proc_close_handles_at_exit(p);
 }
@@ -4255,7 +4234,6 @@ void proc_close_handles_at_exit_for_test(struct Proc *p) {
 static void (*g_exit_close_test_window)(void);
 static struct Thread *g_exit_close_test_owner;
 
-void proc_exit_close_test_set_window_hook(void (*fn)(void));
 void proc_exit_close_test_set_window_hook(void (*fn)(void)) {
     __atomic_store_n(&g_exit_close_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
     __atomic_store_n(&g_exit_close_test_window, fn, __ATOMIC_RELEASE);
@@ -4277,7 +4255,6 @@ static inline void exit_close_test_window(void) {}
 static void (*g_exit_tail_test_hook)(void);
 static struct Thread *g_exit_tail_test_owner;
 
-void proc_exit_tail_test_set_hook(void (*fn)(void));
 void proc_exit_tail_test_set_hook(void (*fn)(void)) {
     __atomic_store_n(&g_exit_tail_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
     __atomic_store_n(&g_exit_tail_test_hook, fn, __ATOMIC_RELEASE);
@@ -5079,15 +5056,12 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; deliberately absent from the header --
-// the harness extern-declares it and there is no production caller). The
-// precondition is unenforced here and therefore stated: `p` must have no live
+// Test hook. The precondition is unenforced here and therefore stated: `p` must have no live
 // thread but `t` -- exec establishes that (proc_exec_alone, re-checked under
 // g_proc_table_lock at the swap); the table is written without a lock, so
 // driving this on a RUNNING Proc would interleave a whole-table reset with that
 // Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
 // scheduled.
-void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno);
 void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno) {
     proc_exec_drop_image_state(p, t, pheno);
 }
@@ -5095,7 +5069,6 @@ void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 p
 
 #ifdef KERNEL_TESTS
 static u64 g_exec_peer_oncpu_waits;
-u64 proc_exec_peer_oncpu_waits_for_test(void);
 u64 proc_exec_peer_oncpu_waits_for_test(void) {
     return __atomic_load_n(&g_exec_peer_oncpu_waits, __ATOMIC_ACQUIRE);
 }
@@ -6779,15 +6752,14 @@ int wait_pid(int *status_out) {
 }
 
 // =============================================================================
-// Test support — NOT a production API; deliberately absent from proc.h.
+// Test support: the process-table fixtures, compiled only with the tests.
 // =============================================================================
 //
 // A production Proc is spliced into the kproc-rooted process table by
 // rfork (proc_link_child); a Proc the in-kernel test harness allocates
 // directly with proc_alloc is not. proc_for_each / proc_find_by_pid only
 // see linked Procs, so a test exercising proc_caps_by_stripes against a
-// bare proc_alloc'd Proc must link it first. The harness extern-declares
-// these; they have no production caller.
+// bare proc_alloc'd Proc must link it first.
 
 #ifdef KERNEL_TESTS
 // proc_test_link — splice `p` in as a child of kproc.
@@ -6869,7 +6841,6 @@ void proc_test_unlink(struct Proc *p) {
 // marked child of kproc, its subtree with it, and return how many (the first
 // `max` pids land in `pids`). The memory stays allocated, threads and all: the
 // failed test may have left pointers to it anywhere.
-u32 proc_test_release_leaked(int *pids, u32 max);
 u32 proc_test_release_leaked(int *pids, u32 max) {
     u32 n = 0;
     struct Proc *kp = kproc();

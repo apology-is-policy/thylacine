@@ -21,18 +21,6 @@
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
 
-void test_mmio_handle_create_basic(void);
-void test_mmio_handle_create_misaligned_rejected(void);
-void test_mmio_handle_create_zero_size_rejected(void);
-void test_mmio_handle_create_overflow_rejected(void);
-void test_mmio_handle_create_overlap_rejected(void);
-void test_mmio_handle_create_adjacent_ok(void);
-void test_mmio_handle_create_unref_releases_slot(void);
-void test_mmio_handle_double_unref_extincts(void);
-void test_mmio_handle_create_kernel_reserved_rejected(void);
-void test_mmio_handle_virtio_mmio_claimable(void);
-void test_mmio_handle_create_out_of_ips_rejected(void);
-
 // Synthetic PA range used by the tests. Page-aligned. Picked
 // arbitrarily — claim tracking doesn't touch the actual memory.
 #define TEST_MMIO_PA_A   0x100000000ull
@@ -233,7 +221,6 @@ void test_mmio_handle_double_unref_extincts(void) {
     // is verified by inspection of kobj_mmio_unref's `ref <= 0` check.
 }
 
-void test_mmio_kernel_reservation_union(void);
 void test_mmio_kernel_reservation_union(void) {
     TEST_ASSERT(kobj_mmio_test_reservation_union(),
                 "partial/transitive overlap must reserve entire union atomically");

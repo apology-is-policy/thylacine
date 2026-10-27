@@ -42,11 +42,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-void test_proc_pgtable_alloc_smoke(void);
-void test_proc_pgtable_lifecycle_stress(void);
-void test_proc_ttbr0_swap_smoke(void);
-void test_proc_pgtable_destroy_walk_releases_subtables(void);
-
 void test_proc_pgtable_alloc_smoke(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc returned NULL");

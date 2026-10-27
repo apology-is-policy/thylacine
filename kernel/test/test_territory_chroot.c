@@ -43,14 +43,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-
-void test_territory_chroot_smoke(void);
-void test_territory_chroot_idempotent_same_spoor(void);
-void test_territory_chroot_replace_clunks_old(void);
-void test_territory_chroot_clone_bumps_ref(void);
-void test_territory_chroot_destroy_drops_ref(void);
-void test_territory_chroot_null_returns_error(void);
-
 void test_territory_chroot_smoke(void) {
     struct Territory *p = territory_alloc();
     TEST_ASSERT(p != NULL, "territory_alloc returned NULL");

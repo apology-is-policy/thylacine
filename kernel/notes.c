@@ -281,10 +281,6 @@ bool notes_name_user_postable(const char *name) {
     return notes_name_to_bit(name) >= 0;
 }
 
-// R4-F4 audit close: notes_name_is_kill is now declared in the public
-// header (`<thylacine/notes.h>`) -- the prior forward decl block here
-// and the function-local extern decls in syscall.c are removed.
-
 // F10 audit close: return the canonical string-literal pointer for a
 // supported note name. The literal lives for the program's lifetime
 // (read-only data section), so it's safe to capture by reference into
@@ -450,23 +446,18 @@ static u32 notes_name_terminate_latch(const char *name) {
 }
 
 #ifdef KERNEL_TESTS
-// Test support (the burrow_*_for_test convention). Deliberately absent from
-// the header: the harness extern-declares it, and there is no production
-// caller. It exists so the #15 table test can assert that the EL0-tail
-// uncaught arm and the NDFLT arm read the SAME `dfl` column -- the two used to
-// be independent lists, and a future edit that re-splits them fails there.
-u32 notes_name_terminate_latch_for_test(const char *name);
+// Test support: lets the #15 table test assert that the EL0-tail uncaught arm
+// and the NDFLT arm read the SAME `dfl` column -- the two used to be
+// independent lists, and a future edit that re-splits them fails there.
 u32 notes_name_terminate_latch_for_test(const char *name) {
     return notes_name_terminate_latch(name);
 }
 
 // The note-table test walks both tables through these, so a row added to either
 // is checked without anyone extending a list. NULL past the last row.
-const char *notes_known_name_for_test(u32 i);
 const char *notes_known_name_for_test(u32 i) {
     return i < NOTE_NUM_KNOWN ? g_known_notes[i].name : NULL;
 }
-const char *notes_snare_death_name_for_test(u32 i);
 const char *notes_snare_death_name_for_test(u32 i) {
     return i < NOTE_NUM_SNARE_DEATHS ? g_snare_deaths[i].name : NULL;
 }
@@ -1065,7 +1056,6 @@ void notes_post_pipe(struct Proc *writer) {
 // kill-name predicate (used by the EL0-return-tail dispatch).
 // ---------------------------------------------------------------------------
 
-int notes_name_is_kill(const char *name);
 int notes_name_is_kill(const char *name) {
     return notes_name_eq(name, NOTE_NAME_KILL);
 }
@@ -2192,7 +2182,6 @@ static void notes_release_claims(struct Thread *t) {
 // passes over the queue afresh, as Linux's get_signal parks in do_signal_stop
 // and loops. One budget bounds every pass and every discard, so a flooded queue
 // cannot hold the masked tail.
-void notes_deliver_at_el0_return(struct exception_context *ctx);
 void notes_deliver_at_el0_return(struct exception_context *ctx) {
     u32 passes = 0;
     while (notes_deliver_tail(ctx, &passes)) {
@@ -2208,7 +2197,6 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
 
 #ifdef KERNEL_TESTS
 // Test hook: the release a claimant's tail makes, for a Thread with no tail.
-void notes_release_claims_for_test(struct Thread *t);
 void notes_release_claims_for_test(struct Thread *t) { notes_release_claims(t); }
 #endif
 

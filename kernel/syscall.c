@@ -692,9 +692,6 @@ static s64 sys_dma_create_gpu_bo_handler(u64 size, u64 rights) {
 // so base_pa + length never escapes the BAR (I-45).
 VISIBLE_IF_KERNEL_TESTS
 int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
-                             u64 length, u64 *base_pa_out);
-VISIBLE_IF_KERNEL_TESTS
-int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
                              u64 length, u64 *base_pa_out) {
     if (!k || !base_pa_out)                          return -1;
     if (length == 0)                                 return -1;
@@ -1039,7 +1036,7 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len);
 // Failure cases: no/corrupt Proc; missing CAP_HW_CREATE; bad handle (range,
 // kind, missing RIGHT_MAP); corrupted object; count > max_entries; the user
 // buffer failing the range check or the copy-out faulting.
-// Non-static so the kernel test suite can drive the REFUSAL legs directly.
+// Visible to the tests so they can drive the REFUSAL legs directly.
 // The guest exercises only the success path (tapestryd reads a weave's list
 // on every mint), so refuse-vs-truncate, the rights gate and the buffer
 // bound would otherwise be reachable from no test at all -- and
@@ -1455,10 +1452,7 @@ static s64 sys_pci_irq_op(u64 op, u64 hraw, u64 a1, u64 a2) {
 // read end; write-only for the write end) — at v1.0 the dev9p_read /
 // dev9p_write checks (which look at is_read_end) provide the actual
 // gating; handle rights are an additional gate, not the primary one.
-//
-// Exposed (non-static) for kernel-internal tests in test_sys_pipe.c.
-// Returns 0 on success with *out_rd / *out_wr populated; -1 on
-// failure with both Spoors clunked.
+
 // Reserve two numbers (lowest first) and create the pipe; nothing is
 // installed. -1 with nothing held on failure.
 static int sys_pipe_reserve(struct Proc *p, hidx_t *rd_h, hidx_t *wr_h,
@@ -1508,6 +1502,8 @@ static void sys_pipe_abandon(struct Proc *p, hidx_t rd_h, hidx_t wr_h,
     spoor_clunk(wr);
 }
 
+// The kernel-side body. Returns 0 on success with *out_rd / *out_wr populated;
+// -1 on failure with both Spoors clunked.
 VISIBLE_IF_KERNEL_TESTS
 int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
     if (!p || !out_rd || !out_wr)                    return -1;
@@ -2096,7 +2092,6 @@ static s64 sys_close_handler(u64 hraw) {
 }
 
 #ifdef KERNEL_TESTS
-s64 sys_close_for_test(struct Proc *p, u64 h);
 s64 sys_close_for_test(struct Proc *p, u64 h) { return sys_close_in(p, h); }
 #endif
 
@@ -3611,8 +3606,8 @@ static s64 sys_fd_devclass_handler(u64 fd_raw) {
 // return the calling Proc's durable fields (no args, no memory write, no
 // capability); the field values are < 2^32 so the s64 return is never negative
 // (no error-aliasing). SYS_CLOCK_GETTIME fills a t_timespec for MONOTONIC
-// (CNTVCT) or the boot-anchored REALTIME wall clock. All four are NON-static so
-// the kernel tests call them directly. current_thread() is always valid in a
+// (CNTVCT) or the boot-anchored REALTIME wall clock. All four are visible to
+// the tests, which call them directly. current_thread() is always valid in a
 // syscall frame -- the !t / !p guards are defense-in-depth.
 // =============================================================================
 
@@ -3643,8 +3638,7 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
 // =============================================================================
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. Thin
 // fronts over the proc.c cores (which hold g_proc_table_lock across find +
-// validate + mutate). NON-static so the kernel tests call them directly (the
-// LS-K identity-handler precedent). pid args arrive as u64 registers; the
+// validate + mutate). pid args arrive as u64 registers; the
 // (int)(s64) cast preserves a negative pid, which the cores answer -T_E_SRCH
 // (self-or-child lookup misses) rather than mis-treating as huge-positive.
 // =============================================================================
@@ -3694,7 +3688,7 @@ static s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
 // (conn, qid) bindings the server never made. MINT additionally requires
 // PROC_FLAG_MAY_POST_SERVICE (the service tier -- the Weft-7 F1 registry-
 // squat lesson; only a flag holder can post a service and so be a server at
-// all, making this defense-in-depth). NON-static for the kernel tests.
+// all, making this defense-in-depth).
 // =============================================================================
 
 VISIBLE_IF_KERNEL_TESTS
@@ -3810,7 +3804,7 @@ s64 sys_pty_register_test_native(u64 op, u64 a1, u64 a2, u64 a3) {
 // controlling terminal (POSIX), and no I/O runs here; the registry axes are
 // the authority. The Spoor ref is held across the core (the extracted cn is
 // only pointer-compared, but the hold keeps the chain trivially sound) and
-// clunked on every path (#844). NON-static _for_proc bodies for the tests.
+// clunked on every path (#844).
 // =============================================================================
 
 VISIBLE_IF_KERNEL_TESTS
@@ -4831,7 +4825,7 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
 enum { UNION_RD_TMP = 2048 };   // per-member read batch (kmalloc, off-stack)
 
 // `p` is the resolving Proc (its Territory holds the union's mount table);
-// spoor_readdir_run passes current_thread()->proc. Non-static so the merge /
+// spoor_readdir_run passes current_thread()->proc. Visible to the tests so the merge /
 // dedup / ordinal-pagination logic is unit-testable with a Proc + a mounted
 // union of readdir-capable Devs (kernel/test/test_stalk.c).
 VISIBLE_IF_KERNEL_TESTS
@@ -5628,9 +5622,8 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; absent from the header): the native
+// Test hook: the native
 // spawn arm, called from a kernel-entry thread of the Proc under test.
-s64 sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
 s64 sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va) {
     return sys_thread_spawn_handler(entry_va, sp_va, arg_va, tls_va, ptid_va);
 }
@@ -6144,13 +6137,9 @@ static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name)
 }
 
 #ifdef KERNEL_TESTS
-// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
-// from any header -- the harness extern-declares it, and there is no
-// production caller. It drives the REAL cross arm, the function the syscall
+// Test support: drives the REAL cross arm, the function the syscall
 // calls, rather than a reimplementation the test could quietly drift from.
 // Returns the syscall's own answer: 0, or a negative errno.
-s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
-                                const char *name);
 s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name) {
     return postnote_cross(caller, target_pid, name);
@@ -6195,8 +6184,6 @@ static s64 postnote_self(struct Proc *p, const char *name) {
 // Test support, the sys_postnote_cross_for_test twin: drives the REAL self arm
 // with an explicit caller, because the production entry takes its target from
 // current_thread() and a kernel unit test's current thread is the harness's.
-// Deliberately absent from any header; no production caller.
-s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
 s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
     return postnote_self(caller, name);
 }
@@ -6871,14 +6858,6 @@ static void mmap_eager_unwind(struct AddrSpace *as, struct Burrow *b,
 //
 // Returns the Burrow with ONE handle ref for the caller, or NULL. Does not
 // consume `sp`. On NULL, the charge has been fully returned.
-#ifdef KERNEL_TESTS
-// #197's regression drives this directly: the leak lives entirely inside it,
-// and reaching it through the syscall shell would need a handle-table fixture
-// that tests the lookup rather than the charge pairing.
-struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
-                                        struct Spoor *sp, u64 offset, u64 length);
-#endif
-
 static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
                                       struct Spoor *sp, u64 offset, u64 length) {
     struct Burrow *b = burrow_create_anon_lazy((size_t)length);
@@ -6912,6 +6891,9 @@ eof:
 }
 
 #ifdef KERNEL_TESTS
+// #197's regression drives this directly: the leak lives entirely inside it,
+// and reaching it through the syscall shell would need a handle-table fixture
+// that tests the lookup rather than the charge pairing.
 struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
                                         struct Spoor *sp, u64 offset, u64 length) {
     return mmap_eager_copy(as, exempt, sp, offset, length);
@@ -9017,9 +8999,7 @@ static void sys_spawn_thunk(void *arg) {
 // spoor_unref: a sibling thread may close the fd while the spawn is in flight,
 // making this drop the LAST ref, and the Dev's close hook (the console drain's
 // disarm, a pipe's EOF, a SrvConn teardown, a 9P fid clunk) must run then
-// (shed audit r4 F1; aux's H6). Non-static for devdev.spawn_unbump_runs_close.
-VISIBLE_IF_KERNEL_TESTS
-void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+// (shed audit r4 F1; aux's H6).
 VISIBLE_IF_KERNEL_TESTS
 void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n) {
     for (u32 j = 0; j < n; j++) spoor_clunk(bumped[j]);
@@ -9138,8 +9118,7 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
 // caller's Proc (used for context; the rfork creates a fresh child Proc
-// regardless of the caller). Exported (non-static) for kernel-internal
-// tests in kernel/test/test_sys_spawn.c.
+// regardless of the caller).
 VISIBLE_IF_KERNEL_TESTS
 int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     if (!p)                                            return -1;
@@ -9323,7 +9302,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     userland_enter(entry, sp);
 }
 
-// Kernel-side body. Exported (non-static) for kernel-internal tests.
+// Kernel-side body.
 // fds is a kernel-resident array of fd_count entries; each must refer
 // to an open KOBJ_SPOOR handle in `p`.
 VISIBLE_IF_KERNEL_TESTS
@@ -9571,8 +9550,8 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // cap_mask bit, so I-2 (the fork-grantable cap set only reduces) is unaffected.
 // Returns 0 iff every requested bit may be granted by p; -1 otherwise. Both spawn
 // entry points (SYS_SPAWN_WITH_PERMS and SYS_SPAWN_FULL_ARGV) route through here so
-// the grant authority lives in exactly one place. Non-static so the kernel test
-// suite can drive the per-bit decision directly on synthetic Procs.
+// the grant authority lives in exactly one place. Visible to the tests so they
+// can drive the per-bit decision directly on synthetic Procs.
 VISIBLE_IF_KERNEL_TESTS
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
@@ -9627,7 +9606,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
 // already gate-checked every bit (spawn_perm_grant_check); a bit outside
 // SPAWN_PERM_ALL surviving to here is a kernel invariant violation. proc_set_*
 // take g_proc_table_lock -- safe in the thunk (no lock held at this point).
-// Non-static so the kernel test suite can drive the bit->action mapping directly
+// Visible to the tests so they can drive the bit->action mapping directly
 // (a real spawn races the child's exit clearing g_console_owner, so the owner-set
 // wiring is unobservable through a full spawn).
 VISIBLE_IF_KERNEL_TESTS
@@ -10321,8 +10300,8 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 
 // A-1a: identity-aware entry — the real gate site. Does the per-bit SPAWN_PERM
 // grant gate (spawn_perm_grant_check) AND the CAP_SET_IDENTITY gate (FAIL-CLOSED)
-// + reserved-value reject, then delegates to the body. Exported (non-static) for
-// kernel tests; the identity is passed as scalars (not the internal struct
+// + reserved-value reject, then delegates to the body. The identity is passed
+// as scalars (not the internal struct
 // spawn_identity) so the test file needs no kernel-internal type. set_identity ==
 // false (the back-compat path) means the child inherits the parent's identity.
 //
@@ -11249,9 +11228,8 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
 
 // The NATIVE reader: the SYS_RFORK ABI's register layout, and nothing else.
 //
-// Non-static so the argument gate is reachable from a kernel test with a
-// synthetic frame (the sys_pci_claim_handler pattern -- the test carries its
-// own extern decl). Every rejection in the core lands ahead of rfork_forked,
+// Visible to the tests so the argument gate is reachable with a synthetic
+// frame. Every rejection in the core lands ahead of rfork_forked,
 // which is what makes that coverage possible from kproc.
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_rfork_handler(struct exception_context *ctx) {
@@ -11529,11 +11507,9 @@ static s64 sys_set_nonblock_handler(u64 fd, u64 on) {
     return handle_set_nonblock(t->proc, (hidx_t)fd, on != 0) == 0 ? 0 : -T_E_BADF;
 }
 
-// Non-static so the kernel tests drive every gate with a synthetic Proc (the
+// Visible to the tests so they drive every gate with a synthetic Proc (the
 // sys_weft_share_for_proc shape). Both identity gates run BEFORE the claim:
 // the claim consumes the share, so a stranger must never reach it.
-VISIBLE_IF_KERNEL_TESTS
-s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
 VISIBLE_IF_KERNEL_TESTS
 s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id) {
     if (!p || conn >= PROC_HANDLE_MAX || !proc_is_seat_service(p)) return -1;
@@ -11816,8 +11792,8 @@ static s64 sys_console_episode_handler(u64 op) {
 // SYS_CONSOLE_OPEN core -- attach /dev/cons + install a KOBJ_SPOOR R|W handle.
 // The getty (joey) hands this to /sbin/login as its tty (fd 0/1/2; the Unix
 // login-reads-the-tty model). devcons_read ignores the Spoor and drains the
-// global RX ring, so any opened handle is a valid console reader. Exposed
-// (non-static) for kernel-internal tests (test_cons.c). Returns the fd or -1;
+// global RX ring, so any opened handle is a valid console reader. Returns the
+// fd or -1;
 // on handle-table failure the Spoor ref taken by attach is released.
 VISIBLE_IF_KERNEL_TESTS
 hidx_t sys_console_open_for_proc(struct Proc *p) {
@@ -12336,7 +12312,6 @@ static s64 viv_sock_connect_row(struct Proc *p, struct viv_socktab *tab,
 // Runs where a peer thread's dup3 or connect lands in the race: after the arm
 // read the row, before it pins the fd.
 static void (*viv_sock_pin_hook)(struct Proc *, u64);
-void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
 void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64)) {
     __atomic_store_n(&viv_sock_pin_hook, hook, __ATOMIC_RELEASE);
 }
@@ -14197,7 +14172,7 @@ static s64 viv_clock_nanosleep(u64 clk, u64 flags, u64 req_va, u64 rem_va) {
 // next getdents64 resumes at the first unconsumed entry with no shell-side
 // state (the cookie is the 9P resume token). Returns bytes emitted (0 when
 // the first record does not fit -- the caller's EINVAL row).
-// Non-static: the format row is pinned by unit tests (the
+// Visible to the tests: the format row is pinned by unit tests (the
 // sys_open_create_kpath_for_proc pattern -- testable without an EL0 thread).
 VISIBLE_IF_KERNEL_TESTS
 u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
@@ -14472,9 +14447,7 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
 }
 
 #ifdef KERNEL_TESTS
-// Test support (the sys_postnote_*_for_test convention): drives the REAL shell
-// with an explicit caller. Deliberately absent from any header.
-s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+// Test support: drives the REAL shell with an explicit caller.
 s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
     return viv_kill(NULL, caller, pid, tid, sig);
 }
@@ -15953,13 +15926,11 @@ static void viv_trace_call(u64 nr, struct Proc *p) {
 #endif
 
 #ifdef KERNEL_TESTS
-// Test support (the burrow_*_for_test convention): drive the T2 fcntl arm on a
-// caller-supplied Proc with no exception frame. Deliberately absent from the
-// header; the harness extern-declares it. Safe ONLY because the FCNTL case
+// Test support: drive the T2 fcntl arm on a caller-supplied Proc with no
+// exception frame. Safe ONLY because the FCNTL case
 // reads `p` and `args` and never touches ctx -- a hook that handed a NULL frame
 // to the arms that measure user memory (openat, the stat family) would fault,
 // so this is not a general T2 driver and must not grow into one.
-s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
 s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
     u64 args[VIV_NARGS] = { fd, cmd, arg, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_FCNTL, args);
@@ -15967,7 +15938,6 @@ s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
 
 // Drives connect()'s dial and wait with a KERNEL address -- everything past the
 // sockaddr copy, which a test has no user pointer for.
-s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
 s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
@@ -15977,7 +15947,6 @@ s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port)
 
 // Drives the REAL listen arm through the T2 dispatcher (the LISTEN case reads
 // no frame).
-s64 viv_listen_for_test(struct Proc *p, u64 fd);
 s64 viv_listen_for_test(struct Proc *p, u64 fd) {
     u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_LISTEN, args);
@@ -15985,7 +15954,6 @@ s64 viv_listen_for_test(struct Proc *p, u64 fd) {
 
 // Drives the datagram sendto past its destination's copy and parse, with a
 // KERNEL address and an empty payload, so no user memory is read.
-s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
 s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
@@ -15995,7 +15963,6 @@ s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 po
 
 // Drives the REAL accept arm through the T2 dispatcher with no address out-
 // pointer (the ACCEPT case never reads the frame, and addr 0 skips uaccess).
-s64 viv_accept_for_test(struct Proc *p, u64 fd);
 s64 viv_accept_for_test(struct Proc *p, u64 fd) {
     u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_ACCEPT, args);
@@ -16005,24 +15972,20 @@ s64 viv_accept_for_test(struct Proc *p, u64 fd) {
 // buffer, so what runs is the shell's own step before any transfer. The native
 // write or read it ends in resolves the fd on the CALLING thread's Proc, which
 // a kernel test does not share, so that half's result is not the test's.
-s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd);
 s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd) {
     u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_SENDTO, args);
 }
-s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
 s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd) {
     u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_RECVFROM, args);
 }
-s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
 s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va) {
     u64 args[VIV_NARGS] = { fd, msg_va, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_RECVMSG, args);
 }
 
 // SO_ERROR's value, which getsockopt stores through a user pointer.
-s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
 s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd) {
     return viv_sock_pending_error(p, __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE), fd);
 }
@@ -16030,7 +15993,6 @@ s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd) {
 // Drives the REAL dup arm through the T2 dispatcher (the DUP case never reads
 // the exception frame, so NULL ctx is safe), so a test proves the arm is wired
 // to the reserve-then-dup primitive -- not merely that the verdict is TIER2.
-s64 viv_dup_for_test(struct Proc *p, u64 fd);
 s64 viv_dup_for_test(struct Proc *p, u64 fd) {
     u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_DUP, args);
@@ -16040,16 +16002,12 @@ s64 viv_dup_for_test(struct Proc *p, u64 fd) {
 // frame), so a test proves the alias rule AT THE ARM: a socket source's row is
 // copied onto the target number, and a non-socket source onto a socket number
 // drops that number's row.
-s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags) {
     u64 args[VIV_NARGS] = { oldfd, newfd, flags, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_DUP3, args);
 }
 
 // The open and create cores under a finish policy (sys_open_finish).
-s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
-                             u64 omode, bool create, u64 perm, bool cloexec,
-                             bool dir_required, struct Spoor **keep);
 s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
                              u64 omode, bool create, u64 perm, bool cloexec,
                              bool dir_required, struct Spoor **keep) {
@@ -16062,13 +16020,11 @@ s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
     return sys_open_kpath_how(p, SYS_WALK_OPEN_FROM_ROOT, kpath, klen, omode, &how);
 }
 
-s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
 s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol) {
     u64 args[VIV_NARGS] = { domain, type, protocol, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_SOCKET, args);
 }
 
-s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);
 s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags) {
     u64 args[VIV_NARGS] = { fds_va, flags, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_PIPE2, args);
@@ -16077,8 +16033,6 @@ s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags) {
 // Drives the REAL getsockopt shell through the T2 dispatcher, so a test can
 // prove the F1 uaccess guard (the shell validates BOTH spans before any
 // memory access, so a kernel-range VA is rejected -T_E_FAULT with no access).
-s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
-                            u64 optval_va, u64 optlen_va);
 s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
                             u64 optval_va, u64 optlen_va) {
     u64 args[VIV_NARGS] = { fd, level, optname, optval_va, optlen_va, 0 };
@@ -16091,7 +16045,6 @@ s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
 // extinction (the getdents64 copy-out writes via uaccess_store_u8, whose fault
 // fixup does not engage for a kernel-half VA). Same NULL-ctx safety as the
 // fcntl/getsockopt hooks: getdents64 reads `p` + `args` and never touches ctx.
-s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count) {
     u64 args[VIV_NARGS] = { fd, dirp, count, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_GETDENTS64, args);
@@ -16103,13 +16056,11 @@ s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count) {
 // with no copy_in and no extinction (uaccess_copy_in's fixup does not engage for
 // a kernel-half VA -- the getdents64 P0 class, on the array read). Same NULL-ctx
 // safety as the getdents64 hook: readv/writev read `p` + `args`, never ctx.
-s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
 s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
     u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_READV, args);
 }
 
-s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
 s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
     u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_WRITEV, args);
@@ -16171,7 +16122,6 @@ static bool viv_call_interruptible(struct Proc *p, u64 linux_nr, const u64 *args
 #ifdef KERNEL_TESTS
 // Drives viv_fd_is_slow so a test can prove the classification and its
 // per-Spoor cache (ARCH 8.8.3).
-bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
 bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd) { return viv_fd_is_slow(p, fd); }
 #endif
 
@@ -16314,7 +16264,6 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
 // The dispatcher itself, for its entry hooks. `p` is the phenotyped Proc and
 // `ctx` a frame holding a Linux number and its arguments; a true return means
 // the native handler would run on ctx's renumbered frame.
-bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
 bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p) {
     return viv_linux_dispatch(ctx, p);
 }

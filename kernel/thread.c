@@ -66,7 +66,6 @@ static u64                g_thread_free_oncpu_waits;
 // deterministic fail-pre/pass-post guard for the #101 IRQ-mask discipline.
 volatile u64              g_thread_switch_test_window_ns;
 
-u64 thread_free_oncpu_waits(void);
 u64 thread_free_oncpu_waits(void) {
     return __atomic_load_n(&g_thread_free_oncpu_waits, __ATOMIC_RELAXED);
 }
@@ -92,10 +91,8 @@ bool thread_tid_space_spent(void) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; absent from the header): replace the
-// tid counter, returning the old value, so a test can park it at the edge of
-// the space and restore it afterwards.
-u32 thread_tid_counter_swap_for_test(u32 v);
+// Test hook: replace the tid counter, returning the old value, so a test can
+// park it at the edge of the space and restore it afterwards.
 u32 thread_tid_counter_swap_for_test(u32 v) {
     return __atomic_exchange_n(&g_next_tid, v, __ATOMIC_RELAXED);
 }

@@ -18,18 +18,6 @@
 #include <thylacine/syscall.h>    // struct t_stat + T_S_IFDIR / T_S_IFREG
 #include <thylacine/types.h>
 
-void test_devhw_bestiary_smoke(void);
-void test_devhw_attach_returns_root(void);
-void test_devhw_walk_node_and_prop(void);
-void test_devhw_walk_deep_and_dotdot(void);
-void test_devhw_walk_miss(void);
-void test_devhw_prop_read(void);
-void test_devhw_stat_native(void);
-void test_devhw_readdir_cookie_contract(void);
-void test_devhw_iter_api(void);
-void test_devhw_walk_reuse_nc(void);
-void test_devhw_synth_pci_child(void);
-
 // =============================================================================
 // Helpers.
 // =============================================================================

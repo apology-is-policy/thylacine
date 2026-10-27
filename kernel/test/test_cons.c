@@ -48,109 +48,11 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-void test_cons_blocking_read_wakeup(void);
-void test_cons_tx_role_serializes_writers(void);
-void test_cons_tx_room_wait_and_deadline(void);
-void test_cons_ring_fill_drain(void);
-void test_cons_ring_full_refuses(void);
-void test_cons_rx_can_accept_boundary(void);
-void test_cons_full_line_fits_ring(void);            // #129 (ring holds a max line)
-void test_cons_full_ring_never_blocks_sak(void);     // #129 (I-27)
-void test_cons_feed_write_short_on_full(void);       // #129 defect (1)
-void test_cons_refused_byte_is_not_echoed(void);     // #129-audit F3
-void test_cons_serial_silent_gate(void);             // DISPLAY-MODES.md 1b
-void test_cons_serial_silent_sak_restores(void);     // DISPLAY-MODES.md 1b audit F2
-void test_cons_rx_holdback_reoffer(void);            // #129-audit F2
-void test_cons_rx_holdback_not_stranded(void);       // #136-audit F1
-void test_cons_ring_claim_core_returns_holding(void);  // the extinction ring claim
-void test_cons_ring_claim_core_bounded_when_held(void);
-void test_cons_ring_unclaimed_on_clean_boot(void);
-
 // Defined with the LS-8b cooking tests further down; forward-declared so the
 // #129 tests above them can use the same two helpers rather than open-coding a
 // second drain/settle pair that could drift from these.
 static long cons_drain(u8 *buf, long n);
 static void cons_settle_mgr(void);
-void test_cons_ctrlc_consumed(void);
-void test_cons_break_sets_sak(void);
-void test_cons_read_busy_guard(void);
-void test_cons_read_bad_args(void);
-void test_cons_console_owner_intr(void);
-void test_proc_revoke_console_attached(void);
-void test_cons_sak_revoke_regrant(void);
-void test_cons_sak_failsafe_revoke_only(void);
-void test_cons_sak_idempotent_flood(void);
-void test_cons_sak_via_console_mgr(void);
-void test_cons_sak_does_not_terminate_trusted(void);
-void test_cons_sak_attaches_from_relinquished_state(void);
-void test_cons_episode_requires_arm(void);                // IM-1: the trusted EPISODE
-void test_cons_episode_begins_on_sak(void);
-void test_cons_episode_discards_pending_input(void);
-void test_cons_episode_freezes_nonattached_reader(void);
-void test_cons_episode_freezes_nonattached_writer(void);
-void test_cons_episode_freezes_feed_consctl_poll(void);
-void test_cons_episode_frozen_poller_follows_end(void);
-void test_cons_episode_prior_poller_not_woken_by_keys(void);
-void test_cons_episode_end_restores(void);
-void test_cons_episode_repeat_sak_idempotent(void);
-void test_cons_episode_gate(void);
-void test_cons_episode_relinquish_ends(void);
-void test_cons_episode_trusted_death_ends(void);
-void test_cons_episode_saved_owner_death(void);
-void test_cons_episode_mode_write_straddling_begin(void);
-void test_cons_episode_feed_straddling_begin(void);
-void test_cons_episode_repeat_sak_keeps_saved_owner(void);
-void test_cons_episode_fixture_fails_clean(void);
-void test_proc_console_relinquish(void);              // A-5a (I-27)
-void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
-void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
-void test_uart_rx_path_enabled(void);                 // #943 console-RX guard
-void test_uart_putc_tx_bounded(void);                 // #67 bounded TX spin
-void test_cons_poll_readiness(void);                  // LS-8a (POLLIN/POLLOUT sample)
-void test_cons_poll_deferred_wake(void);              // LS-8a (the I-9 deferred relay)
-void test_cons_termios_default(void);                 // LS-8b (default == pre-LS-8b)
-void test_cons_cook_canonical_line(void);             // LS-8b (assemble + erase + deliver)
-void test_cons_cook_echo_off_no_output(void);         // LS-8b (the ECHO-off hard guarantee)
-void test_cons_cook_isig_toggle(void);                // LS-8b (Ctrl-C note vs data byte)
-void test_cons_cook_icrnl(void);                      // LS-8b (input CR -> NL)
-void test_cons_cook_onlcr_output(void);               // LS-8b (output NL -> CR NL)
-void test_cons_consctl_parse(void);                   // LS-8b (+/-flag parse + malformed)
-void test_cons_consctl_render(void);                  // LS-8b (read-back render)
-void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buffer)
-void test_cons_cook_mode_flip_delivers(void);         // PTY-DESIGN: a mode write delivers, never discards
-void test_cons_cook_isig_discards_pending_line(void); // PTY-DESIGN: an ISIG char discards the pending line (F5)
-void test_cons_cook_canonical_poll_edge(void);        // LS-8b audit F2a (whole-line poll edge)
-void test_cons_mgr_hold_defers_consumption(void);
-void test_cons_rx_drop_counters(void);
-void test_cons_winsize_roundtrip(void);
-void test_cons_beacon_roundtrip(void);
-void test_cons_winsize_winch_iff_changed(void);
-void test_cons_stat_native_qid_contract(void);
-void test_cons_stat_devno_full_width(void);
-void test_cons_drain_tap_mirrors_output(void);
-void test_cons_drain_feed_runs_discipline(void);
-void test_cons_drain_overflow_drops_oldest(void);
-void test_cons_drain_close_and_reopen_epoch(void);
-void test_cons_drain_poll_deferred_wake(void);
-void test_cons_sys_puts_uses_shared_console_path(void);
-void test_cons_tx_unit_diag_line_atomic(void);
-void test_cons_tx_unit_echo_atomic(void);
-void test_cons_tx_unit_smp_no_tear(void);
-
-// cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
-// tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
-
-// A-5a: the SYS_CONSOLE_OPEN core + the shared read-via-handle helper (the
-// test_sys_pipe.c pattern). devcons_read ignores the Spoor and drains the
-// global ring, so the opened handle is a valid console reader.
-
-// #943: the PL011 RX path lives in arch/arm64/uart.c.
-
-// #67: uart_putc's bounded-TXFF-spin self-test lives in arch/arm64/uart.c
-// (needs the static PL011 base + register offsets).
-
-// #75-audit F2: the stalled-consumer emulator (arch/arm64/uart.c) + the clock
-// the deadline assertion reads.
 
 // #943 regression: the PL011 RX path must be live after boot (CR.UARTEN|RXE).
 // QEMU's PL011 resets with UARTEN clear, so this FAILS on the pre-fix kernel
@@ -2705,7 +2607,6 @@ void test_cons_tx_room_wait_and_deadline(void) {
 // so reading first would turn a pre-fix run into a BOOT HANG instead of a
 // failed test -- and a hang reports nothing.
 
-
 void test_cons_sys_puts_uses_shared_console_path(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
@@ -2764,7 +2665,6 @@ void test_cons_sys_puts_uses_shared_console_path(void) {
 // the real boot, before any test could observe the role. The durable coverage
 // for the call site is the SMP gate itself, which is what surfaced the bug and
 // is the honest thing to say rather than implying this test covers it.
-void test_cons_kernel_writer_bracket(void);
 void test_cons_kernel_writer_bracket(void) {
     TEST_ASSERT(!cons_test_tx_role_held(), "role starts free");
 
@@ -4009,7 +3909,6 @@ void test_cons_episode_fixture_fails_clean(void) {
 #include <thylacine/caps.h>
 #include <thylacine/devcap.h>
 #include "../../arch/arm64/timer.h"
-void test_cons_graphical_seat_gate(void);
 static int seat_test_key(struct Proc *p, u32 code, u32 down, u8 byte) {
     struct seat_message m;
     seat_zero(&m, sizeof(m));
@@ -4127,7 +4026,6 @@ cleanup:
 // a later recovery releases nothing; and a seat failure never closes an
 // episode the seat did not open (a serial episode runs while the seat is
 // NORMAL -- closing it would unfreeze the console under a serial key entry).
-void test_cons_graphical_seat_grant_and_failure(void);
 static int seat_test_grant(struct Proc *corvus, u64 generation, u64 caps, u64 stripes, u64 session) {
     struct seat_message m;
     seat_zero(&m, sizeof(m));
@@ -4228,7 +4126,6 @@ cleanup:
 // and the two seat Procs dying mid-episode go through the REAL ZOMBIE
 // chokepoint. Each failure closes the seat's own episode, and a dead client's
 // slot is free again once the service has recovered.
-void test_cons_graphical_seat_deadline_and_death(void);
 enum { EPD_ROLE_SEAT_CLIENT = 3, EPD_ROLE_SEAT_SERVICE = 4 };
 static struct Proc *volatile g_seat_child;
 
@@ -4350,7 +4247,6 @@ cleanup:
 
 // The SERVICE dies mid-episode: the episode closes, the seat is FAILED with no
 // owner, and nothing a survivor holds can drive it (the ops are service-gated).
-void test_cons_graphical_seat_service_death(void);
 void test_cons_graphical_seat_service_death(void) {
     struct ep_fixture f;
     const char *err = NULL;
@@ -4418,7 +4314,6 @@ static void ccr_feed(void *arg) {
     (void)cons_rx_input((u8)'z', false);
 }
 
-void test_cons_caught_note_ends_read(void);
 void test_cons_caught_note_ends_read(void) {
     cons_test_reset();
     struct Proc *lin = test_caught_proc(true);
@@ -4459,7 +4354,6 @@ static bool cce_begin(void *arg) {
     return cons_test_episode_parked() == 1u && !cons_test_reader_busy();
 }
 
-void test_cons_caught_note_ends_frozen_read(void);
 void test_cons_caught_note_ends_frozen_read(void) {
     // At the door: a non-attached reader that starts while an episode is open.
     struct ep_fixture f;
@@ -4508,7 +4402,6 @@ static void ccs_free_and_feed(void *arg) {
     (void)cons_rx_input((u8)'z', false);
 }
 
-void test_cons_caught_note_ends_slot_wait(void);
 void test_cons_caught_note_ends_slot_wait(void) {
     // An ATTACHED reader during an episode waits for a busy slot, where any
     // other reader would fail BUSY.
@@ -4556,7 +4449,6 @@ static void ccw_end_episode(void *arg) {
     (void)cons_episode_end();
 }
 
-void test_cons_caught_note_ends_write_waits(void);
 void test_cons_caught_note_ends_write_waits(void) {
     u8 got[8];
 
@@ -4605,7 +4497,6 @@ void test_cons_caught_note_ends_write_waits(void) {
 // before the write starts: the wait's own first look claims it, and neither
 // the deadline nor the #67 drop that ends a stalled write is reached. The
 // drop counter is what tells the two apart, not the time taken.
-void test_cons_caught_note_ends_room_wait(void);
 void test_cons_caught_note_ends_room_wait(void) {
     const u32 cap = cons_test_tx_ring_capacity();
     TEST_ASSERT(cap + 64u <= TXW_FILL_MAX, "filler must exceed the ring -- grow TXW_FILL_MAX");
@@ -4663,7 +4554,6 @@ void test_cons_caught_note_ends_room_wait(void) {
 // the drain armed and the serial side loud: a caught note with nothing out
 // (EINTR), a caught note with one byte out, and the #67 deadline with one byte
 // out. The filler goes in before the drain arms, so it is never mirrored.
-void test_cons_short_write_mirrors_what_went_out(void);
 void test_cons_short_write_mirrors_what_went_out(void) {
     const u32 cap = cons_test_tx_ring_capacity();
     TEST_ASSERT(cap + 64u <= TXW_FILL_MAX, "filler must exceed the ring -- grow TXW_FILL_MAX");
@@ -4745,7 +4635,6 @@ static void cdw_writer(void) {
     test_kthread_park_terminal(&g_cdw_exited);
 }
 
-void test_cons_congested_write_whole_in_drain(void);
 void test_cons_congested_write_whole_in_drain(void) {
     const u32 cap = cons_test_tx_ring_capacity();
     TEST_ASSERT(cap + 64u <= TXW_FILL_MAX, "filler must exceed the ring -- grow TXW_FILL_MAX");
@@ -4820,7 +4709,6 @@ static long cfr_read_retry(void *arg) {
     return cons_input_read(g_ccr_buf, (long)sizeof(g_ccr_buf));
 }
 
-void test_cons_caught_note_frozen_retry_waits(void);
 void test_cons_caught_note_frozen_retry_waits(void) {
     struct ep_fixture f;
     TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");

@@ -931,7 +931,8 @@ extern volatile u64 g_thread_switch_test_window_ns;
 u64 thread_total_created(void);
 u64 thread_total_destroyed(void);
 
-// Called from kernel/main.c (no header held it before).
+// How many thread_free calls waited out an in-flight switch away from their
+// victim (#788); boot_main reports a non-zero count.
 u64 thread_free_oncpu_waits(void);
 
 #ifdef KERNEL_TESTS

@@ -1,3 +1,7 @@
+// /ctl (devctl.c): the kernel's control and introspection files. Its Dev is
+// declared with the others in dev.h; nothing outside devctl.c calls into it
+// but the in-kernel tests.
+
 #ifndef THYLACINE_DEVCTL_H
 #define THYLACINE_DEVCTL_H
 

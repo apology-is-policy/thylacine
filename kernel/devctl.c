@@ -141,11 +141,6 @@ static size_t fmt_gated_udec(char *buf, size_t cap, size_t off, bool shown, u64 
     return shown ? fmt_udec(buf, cap, off, (unsigned long)v) : fmt_str(buf, cap, off, "-");
 }
 
-// devproc.c: owner (same principal, never none) or CAP_HOSTOWNER; the caller
-// holds g_proc_table_lock, as format_procs_cb does.
-// devproc.c: true when a reader running as none may not see target (Plan 9's
-// nonone; IDENTITY-DESIGN's reserved ids).
-
 // IMPERIUM-DESIGN 11.3 item 10: a counter that moves whenever any Proc runs --
 // per-CPU idle time, context switches and interrupts, the runnable count, the
 // park counts -- changes once per key the trusted episode's authority handles on
@@ -153,9 +148,7 @@ static size_t fmt_gated_udec(char *buf, size_t cap, size_t off, bool shown, u64 
 // counters are the system principal's: shown exactly to PRINCIPAL_SYSTEM (the
 // TCB, and the boot benchmarks) and to a CAP_HOSTOWNER holder. Both fields are
 // cross-thread writable (proc_apply_identity, proc_become_legate), hence the
-// atomic loads. Non-static: test-driven.
-VISIBLE_IF_KERNEL_TESTS
-bool devctl_system_counters_readable(const struct Proc *reader);
+// atomic loads.
 VISIBLE_IF_KERNEL_TESTS
 bool devctl_system_counters_readable(const struct Proc *reader) {
     if (!reader) return false;
@@ -191,9 +184,7 @@ static const char *procs_state_name(const struct Proc *p) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention: absent from the header, extern-declared
-// by the harness, no production caller): the STATE column's word for `p`.
-const char *devctl_procs_state_name_for_test(const struct Proc *p);
+// Test hook: the STATE column's word for `p`.
 const char *devctl_procs_state_name_for_test(const struct Proc *p) {
     return procs_state_name(p);
 }
@@ -345,9 +336,8 @@ static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention): /ctl/procs formatted into a buffer of
-// the caller's size, so a test can make any row the one that overflows.
-size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
+// Test hook: /ctl/procs formatted into a buffer of the caller's size, so a
+// test can make any row the one that overflows.
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_procs(reader, buf, cap);
 }
@@ -928,8 +918,7 @@ static size_t format_9p_sessions(const struct Proc *reader, char *buf, size_t ca
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention): /ctl/9p-sessions as `reader` sees it.
-size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
+// Test hook: /ctl/9p-sessions as `reader` sees it.
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_9p_sessions(reader, buf, cap);
 }
@@ -975,7 +964,7 @@ static const struct ctl_leaf *leaf_for_kind(u32 kind) {
 // KASLR). The other leaves stay world-readable (Plan 9 introspection); procs,
 // cpu, sched and 9p-sessions render the fields IMPERIUM-DESIGN 11.3 item 10
 // withholds as "-" per reader.
-// Non-static so the deny/allow regression test can drive it with synthetic
+// Visible to the tests so the deny/allow regression can drive it with synthetic
 // callers (devctl.perm_enforced is false -- the gate is at the read site, the
 // devproc kill-gate idiom). `caller` is the reading Proc; NULL -> deny.
 VISIBLE_IF_KERNEL_TESTS

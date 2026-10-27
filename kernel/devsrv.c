@@ -715,7 +715,6 @@ void srv_registry_reset(void) {
 // Test-only observation/injection for the accepter identity-pin window.
 // Keep the registry representation private, and exercise the same lock as
 // production reservation. mode < 0 observes; otherwise it sets the pin.
-bool srv_test_accept_pin(struct SrvService *svc, int mode);
 bool srv_test_accept_pin(struct SrvService *svc, int mode) {
     irq_state_t irq = spin_lock_irqsave(&svc->reg->lock);
     if (mode >= 0) svc->accept_active = mode != 0;

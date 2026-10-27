@@ -13,33 +13,6 @@
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
-void test_devramfs_bestiary_smoke(void);
-void test_devramfs_initialized_with_files(void);
-void test_devramfs_attach_returns_dir(void);
-void test_devramfs_walk_to_welcome(void);
-void test_devramfs_walk_unknown_misses(void);
-void test_devramfs_read_welcome(void);
-void test_devramfs_read_version(void);
-void test_devramfs_read_partial_offset(void);
-void test_devramfs_read_dir_returns_neg1(void);
-void test_devramfs_write_rejected(void);
-void test_devramfs_stat_native_system_owned(void);
-void test_spoor_stat_native_stamps_devno(void);
-void test_devramfs_readdir_enumerates_root(void);
-void test_devramfs_readdir_file_returns_neg1(void);
-void test_devramfs_readdir_buffer_too_small_errs(void);
-void test_devramfs_readdir_synth_dir_empty(void);
-void test_devramfs_readdir_paginates_no_dup_no_skip(void);
-void test_devramfs_walk_attrs(void);
-void test_devramfs_tree_walk_and_dotdot(void);
-void test_devramfs_tree_readdir_per_directory(void);
-void test_devramfs_tree_stat_read_lookup(void);
-void test_devramfs_tree_load_refusals(void);
-void test_devramfs_tree_truncates_at_cap(void);
-void test_devramfs_load_complete(void);
-void test_devramfs_live_lib_when_prover_ships(void);
-void test_devramfs_live_bin_holds_the_programs(void);
-
 // =============================================================================
 // Helpers.
 // =============================================================================

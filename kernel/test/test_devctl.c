@@ -24,30 +24,6 @@
 #include "../../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident
 #include <thylacine/devctl.h>
 
-// prowl-6: the lazy reservation the capacity tests use (kernel/syscall.c), so the
-// probe's first touch is the EL0 shape of an allocation.
-
-void test_devctl_bestiary_smoke(void);
-void test_devctl_attach_returns_dir(void);
-void test_devctl_walk_to_each_leaf(void);
-void test_devctl_walk_unknown_misses(void);
-void test_devctl_read_procs_format(void);
-void test_devctl_procs_tables_column(void);
-void test_devctl_counters_gated(void);
-void test_devctl_procs_rows_whole(void);
-void test_devctl_read_memory_format(void);
-void test_devctl_read_devices_format(void);
-void test_devctl_read_kernel_base_format(void);
-void test_devctl_kernel_base_gated(void);
-void test_devctl_kstack_gated(void);
-void test_devctl_read_sched_format(void);
-void test_devctl_read_cons_format(void);
-void test_devctl_read_cpu_format(void);
-void test_devctl_write_rejected(void);
-void test_devctl_read_dir_returns_neg1(void);
-void test_devctl_stat_native_shapes(void);
-void test_devctl_read_9p_sessions_format(void);
-
 // =============================================================================
 // Helpers.
 // =============================================================================
@@ -188,7 +164,6 @@ void test_devctl_read_cpu_format(void) {
 // diorama needs, checked at the source rather than through the text -- a column
 // that renders but reports nothing is the failure this catches. Each value is
 // asserted for the property the diorama depends on, not merely for presence.
-void test_devctl_cpu_sources_live(void);
 void test_devctl_cpu_sources_live(void) {
     // ctxt: the per-CPU context-switch count ADVANCES. Same forced-yield vehicle
     // as prowl's per-thread nsched test -- a yield switches this thread out and

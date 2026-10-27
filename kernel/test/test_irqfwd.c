@@ -56,14 +56,6 @@ u32 test_irq_choose_spi(void) {
     return 0xffffffffu;
 }
 
-void test_irqfwd_create_destroy(void);
-void test_irqfwd_refcount_lifecycle(void);
-void test_irqfwd_wait_wakes_on_sgi(void);
-void test_irqfwd_collapses_concurrent_fires(void);
-void test_irqfwd_second_waiter_refused(void);
-void test_irqfwd_level_mask_ack(void);
-void test_irqfwd_wait_timeout(void);
-
 // =============================================================================
 // Helpers.
 // =============================================================================
@@ -255,7 +247,6 @@ void test_irqfwd_wait_timeout(void) {
 // The callback must resolve a live owner before its first object dereference.
 // A deliberately invalid callback argument catches the old raw-pointer path
 // even without allocator reuse or a particular interrupt/teardown race timing.
-void test_irqfwd_detached_dispatch(void);
 void test_irqfwd_detached_dispatch(void) {
     struct KObj_IRQ *k = kobj_irq_create(IPI_IRQFWD_TEST);
     TEST_ASSERT(k != NULL, "raw IRQ owner");

@@ -48,20 +48,6 @@
 #include <thylacine/vivarium.h>    // #217: VIV_PROT_* (the MAP_FIXED prot word)
 #include <thylacine/vma.h>         // #217: vma_drain
 
-// Non-static in syscall.c but header-less, like the resolver above.
-
-void test_exec_ns_resolve_absolute_ok(void);
-void test_exec_ns_resolve_relative_ok(void);
-void test_exec_ns_miss_returns_null(void);
-void test_exec_ns_non_executable_denied(void);
-void test_exec_ns_noexec_mount_denied(void);      // #217
-void test_mmap_file_noexec_mount_denied(void);    // #217
-void test_mmap_file_devenv_never_exec_backs(void); // #217 F1
-void test_map_file_native_arms(void);              // B-1d
-void test_map_file_native_refusals(void);          // B-1d
-void test_map_file_native_noexec_denied(void);     // B-1d
-void test_exec_ns_pheno_mount_crossing(void);      // VIVARIUM section 13
-
 void test_exec_ns_resolve_absolute_ok(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");

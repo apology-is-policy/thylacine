@@ -368,8 +368,6 @@ static void provoke_extinction_peer_chatter(void) {
 // In a production build, evaluates to a single return.
 // ---------------------------------------------------------------------------
 
-void fault_test_run(void);
-
 void fault_test_run(void) {
 #if defined(THYLACINE_FAULT_TEST_canary_smash)
     uart_puts("  fault-test: invoking canary_smash...\n");

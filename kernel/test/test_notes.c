@@ -42,59 +42,6 @@
 #include "../../arch/arm64/timer.h"
 #include "../../mm/slub.h"          // V-6b: a real sigtab, so proc_free frees it
 
-// #15: test-support hooks + the harness's Proc-table linkage (see the
-// "Test support" blocks in kernel/notes.c and kernel/proc.c -- deliberately
-// absent from the headers, so every consumer extern-declares them).
-
-void test_notes_queue_alloc_free_smoke(void);
-void test_notes_post_dequeue_smoke(void);
-void test_notes_post_ordering(void);
-void test_notes_unknown_name_rejected(void);
-void test_notes_snare_forge_rejected(void);
-void test_notes_queue_full_returns_eagain(void);
-void test_notes_coalesce_synthetic(void);
-void test_notes_mask_defers(void);
-void test_notes_kill_dequeue_smoke(void);
-void test_notes_kill_bypasses_mask(void);
-void test_notes_reenqueue_head_smoke(void);
-void test_notes_fd_read_skips_kill(void);
-void test_notes_fd_peek_skips_kill(void);
-void test_notes_post_child_exit_helper(void);
-void test_notes_post_pipe_helper(void);
-void test_notes_proc_lifecycle(void);
-void test_notes_peek_does_not_pop(void);
-void test_notes_interrupt_terminate_gate(void);
-void test_notes_self_managing_flag(void);
-void test_notes_intr_latch_lifecycle(void);
-void test_notes_die_pending_predicate(void);
-void test_notes_death_reaches_predicate(void);
-void test_notes_forced_close_lifts_the_hold(void);
-void test_notes_caught_note_latch_lifecycle(void);
-void test_notes_caught_note_deliverable_predicate(void);
-void test_notes_caught_note_claim_once(void);
-void test_notes_handler_escape_predicate(void);
-void test_notes_caught_note_stop_dequeue_drains(void);
-void test_notes_fstat_reports_chr(void);
-void test_notes_linux_sigign_discard(void);
-void test_notes_default_action_table(void);
-void test_notes_death_signal_table(void);
-void test_notes_ndflt_dispatch(void);
-void test_notes_kill_terminates_single_thread(void);
-void test_notes_ndflt_stop_discarded_after_cont(void);
-void test_notes_susp_gate_reads_phenotype_sigtab(void);   // #251
-void test_notes_masked_susp_stops_at_delivery(void);      // #252
-void test_notes_stop_dequeue_picks_its_own_note(void);     // the class-blind pop
-void test_notes_class_scans_read_phenotype_sigtab(void);   // c8ab2744 F1
-void test_notes_discard_name_purges_pending(void);        // the install-time SIG_IGN discard
-void test_notes_self_kill_through_full_ring(void);        // aux#253
-void test_notes_pipe_die_pending(void);
-void test_notes_term_die_pending(void);
-void test_notes_kill_family_gate(void);
-void test_notes_fault_dying_latch_live_note_exits(void);
-void test_notes_fault_dying_latch_clears_only_stale(void);
-void test_notes_postnote_errnos(void);
-void test_notes_self_death_snare(void);
-
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
 // ---------------------------------------------------------------------------
@@ -1286,7 +1233,6 @@ void test_notes_caught_note_deliverable_predicate(void) {
 // while its note is still queued, the note is open to another thread (round-2
 // F1 -- a tail that ended short of the note stranded it). Families claim
 // independently.
-
 void test_notes_caught_note_claim_once(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
@@ -3138,7 +3084,6 @@ void test_notes_class_scans_read_phenotype_sigtab(void) {
 // restore fails the phenotype leg. vivarium.handler_mask covers the value the
 // delivery path stores; the probe's L237-L244 cover the wiring end to end.
 // -----------------------------------------------------------------------------
-void test_notes_phenotype_sigreturn_restores_mask(void);
 void test_notes_phenotype_sigreturn_restores_mask(void) {
     struct Proc *m = proc_alloc();
     if (m == NULL) {

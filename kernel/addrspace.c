@@ -112,20 +112,16 @@ int addrspace_ref_count(const struct AddrSpace *as) {
 #ifdef KERNEL_TESTS
 // Devices reset by the last-owner drain, summed, and the teardown order: one
 // monotonic stamp source, read by exec's handle-table walk and the drain, so a
-// test can ask which ran first (the *_for_test convention: extern-declared by
-// the harness).
+// test can ask which ran first.
 static u64 g_drain_device_resets;
 static u64 g_teardown_seq;
 static u64 g_drain_seq;
-u64 addrspace_teardown_stamp(void);
 u64 addrspace_teardown_stamp(void) {
     return __atomic_add_fetch(&g_teardown_seq, 1, __ATOMIC_ACQ_REL);
 }
-u64 addrspace_drain_device_resets_for_test(void);
 u64 addrspace_drain_device_resets_for_test(void) {
     return __atomic_load_n(&g_drain_device_resets, __ATOMIC_ACQUIRE);
 }
-u64 addrspace_drain_seq_for_test(void);
 u64 addrspace_drain_seq_for_test(void) {
     return __atomic_load_n(&g_drain_seq, __ATOMIC_ACQUIRE);
 }

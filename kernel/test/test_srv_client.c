@@ -49,24 +49,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-// Read/write + accept cores defined in kernel/syscall.c (non-static).
-
-// Test-support: registry wipe (non-static in kernel/devsrv.c, no
-// production caller).
-
-void test_srv_client_no_per_proc_cap(void);
-void test_srv_client_byte_mode_propagates_to_conn(void);
-void test_srv_client_byte_mode_conn_dispatch(void);
-void test_srv_client_byte_mode_mode_change_rebind_refused(void);
-void test_srv_client_byte_mode_server_recv_blocking_eof(void);
-void test_srv_client_cape_post(void);
-void test_srv_client_cape_admission(void);
-void test_srv_client_cape_post_syscall(void);
-void test_srv_client_remote_admission(void);
-void test_srv_client_remote_post(void);
-void test_srv_client_remote_recycle(void);
-void test_srv_client_remote_post_syscall(void);
-
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
@@ -435,7 +417,6 @@ void test_srv_client_cape_post(void) {
     drop_test_proc(client);
     srv_registry_reset();
 }
-
 
 // A service post through SYS_WALK_CREATE's own path (its inner): the cape bit
 // reaches the post and marks the service, and a caped 9P-mode post is refused

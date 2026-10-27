@@ -30,9 +30,6 @@
 #include "../../arch/arm64/uart.h"
 #include "../../mm/phys.h"
 
-void test_loom_native_probe_rust(void);
-void test_loom_native_probe_c(void);
-
 // Each probe makes two rings: one it retires, one it closes with leases held.
 // Its connections are six scopes: the main one, the deadline, the dropped READ,
 // the dropped stream, the explicit abort and the second ring's.

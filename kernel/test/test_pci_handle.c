@@ -27,22 +27,8 @@
 #include "../../mm/slub.h"             // kmalloc / kfree / KP_ZERO
 #include <thylacine/syscall.h>
 
-void test_pci_bar_decode_size(void);
-void test_pci_walk_caps_hostile(void);
-void test_pci_walk_caps_shm(void);
-void test_pci_msix_windows(void);
-void test_pci_mapping_holds_function(void);
-void test_pci_claim_rng(void);
-void test_pci_claim_unknown(void);
-void test_pci_claim_exclusive(void);
-void test_pci_claim_nth(void);
-void test_pci_unref_releases_bars(void);
-void test_pci_live_count_balances(void);
-void test_pci_syscall_reject(void);
-void test_pci_syscall_claim_info(void);
-
-// The pci-1c syscall handlers (non-static, like sys_clock_gettime_handler) --
-// driven directly to exercise the cap gate / handle mint / validation paths.
+// The pci-1c syscall handlers are driven directly to exercise the cap gate /
+// handle mint / validation paths.
 // The SUCCESS copy-out (SYS_PCI_INFO) + the BAR burrow-map (SYS_PCI_MAP_BAR)
 // need a real user buffer + user address space, which the in-kernel kproc
 // context cannot supply, so those are proven by the pci-2 userspace probe.

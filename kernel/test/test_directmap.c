@@ -39,11 +39,6 @@
 
 #include "../../mm/phys.h"
 
-void test_directmap_kva_round_trip(void);
-void test_directmap_alloc_through_directmap(void);
-void test_directmap_vmalloc_mmio_smoke(void);
-void test_directmap_pagemapped_808(void);
-
 void test_directmap_kva_round_trip(void) {
     // Arithmetic identity: pa | KERNEL_DIRECT_MAP_BASE → kva; kva &
     // ~KERNEL_DIRECT_MAP_BASE → pa. Verify across a representative

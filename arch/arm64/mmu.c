@@ -1220,21 +1220,17 @@ static void directmap_tlbi_pages(paddr_t pa, unsigned n_pages) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hooks (the *_for_test convention; absent from the header): the
-// invalidate operand for a page, the count of kstack guard toggles (the two
-// range calls below), and whether a privileged read of `kva` translates right
-// now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs masked across the pair
-// so no handler can replace PAR_EL1 between them.
-u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
+// Test hooks: the invalidate operand for a page, the count of kstack guard
+// toggles (the two range calls below), and whether a privileged read of `kva`
+// translates right now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs
+// masked across the pair so no handler can replace PAR_EL1 between them.
 u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa) {
     return directmap_tlbi_operand(pa);
 }
 static u64 g_guard_toggles_for_test;
-u64 mmu_guard_toggles_for_test(void);
 u64 mmu_guard_toggles_for_test(void) {
     return __atomic_load_n(&g_guard_toggles_for_test, __ATOMIC_RELAXED);
 }
-bool mmu_kva_readable_for_test(const void *kva);
 bool mmu_kva_readable_for_test(const void *kva) {
     u64 par;
     irq_state_t s = spin_lock_irqsave(NULL);

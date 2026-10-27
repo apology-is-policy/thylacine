@@ -20,14 +20,6 @@
 
 #include <thylacine/types.h>
 
-void test_uaccess_fixup_table_well_formed(void);
-void test_uaccess_fixup_lookup_known(void);
-void test_uaccess_fixup_lookup_unknown_returns_zero(void);
-void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void);
-void test_uaccess_copy_out_unmapped_faults_all_arms(void);
-void test_uaccess_copy_in_unmapped_faults_all_arms(void);
-void test_uaccess_copy_fixup_entries_present(void);
-
 void test_uaccess_fixup_table_well_formed(void) {
     // start < end (table is non-empty).
     TEST_ASSERT(_uaccess_fixup_start < _uaccess_fixup_end,

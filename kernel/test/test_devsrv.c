@@ -57,23 +57,6 @@
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
-// Test-support registry wipe (non-static; defined in kernel/devsrv.c;
-// deliberately not in devsrv.h — no production caller).
-
-void test_devsrv_registered(void);
-void test_devsrv_open_root_dir(void);
-void test_devsrv_stat_native_root(void);
-void test_devsrv_post_gate(void);
-void test_devsrv_post_basic(void);
-void test_devsrv_tombstone(void);
-void test_devsrv_registry_full(void);
-void test_devsrv_post_rollback(void);
-void test_devsrv_registry_lifecycle(void);
-void test_devsrv_svc_ref_holds_registry(void);
-void test_devsrv_post_listener(void);
-void test_devsrv_service_keys_distinct(void);
-void test_devsrv_registry_full_tombstone_rebinds(void);
-
 static struct Proc *make_test_proc(void) {
     return proc_alloc();
 }
@@ -599,7 +582,6 @@ void test_devsrv_post_listener(void) {
 }
 
 
-void test_devsrv_cap_post_bounds(void);
 void test_devsrv_cap_post_bounds(void) {
     srv_registry_reset();
     struct Proc *p = make_test_proc(), *q = make_test_proc();
@@ -666,7 +648,6 @@ static void test_accept_worker(void) {
     test_kthread_park_terminal(&g_accept_exited);
 }
 
-void test_devsrv_accept_lifetime(void);
 void test_devsrv_accept_lifetime(void) {
     srv_registry_reset();
     struct Proc *p = make_marked_test_proc(), *q = make_marked_test_proc();
@@ -780,7 +761,6 @@ void test_devsrv_service_keys_distinct(void) {
     drop_test_proc(p);
     srv_registry_reset();
 }
-
 
 // The constructor answers a descriptor or a refusal as s64. Anything that is
 // not a descriptor reads as -1, so it fails the caller's >= 0 check rather

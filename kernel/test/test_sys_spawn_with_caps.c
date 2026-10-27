@@ -35,13 +35,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-
-void test_sys_spawn_with_caps_happy_path_zero_mask(void);
-void test_sys_spawn_with_caps_happy_path_subset_of_parent(void);
-void test_sys_spawn_with_caps_clamps_to_parent(void);
-void test_sys_spawn_with_caps_rejects_missing_binary(void);
-void test_sys_spawn_with_caps_rejects_oversize_name(void);
-
 static void drain_zombies(void) {
     int status = 0;
     while (wait_pid(&status) > 0) { /* drain */ }

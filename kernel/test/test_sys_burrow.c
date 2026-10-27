@@ -1,7 +1,7 @@
 // P6-pouch-mem: SYS_BURROW_ATTACH / SYS_BURROW_DETACH tests.
 //
-// Drives the _for_proc inners (the non-static cores of the SVC handlers,
-// defined in kernel/syscall.c) on a fresh proc_alloc'd Proc:
+// Drives the _for_proc cores of the SVC handlers (kernel/syscall.c) on a fresh
+// proc_alloc'd Proc:
 //
 //   sys_burrow.attach_returns_window_va
 //     attach installs an anonymous RW VMA in the burrow-attach window;
@@ -44,38 +44,6 @@
 #include <thylacine/thread.h>       // D-3c F1: current_thread()->preempt_count
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
-
-void test_sys_burrow_attach_returns_window_va(void);
-void test_sys_burrow_attach_detach_round_trip(void);
-void test_sys_burrow_attach_distinct(void);
-void test_sys_burrow_attach_rounds_up(void);
-void test_sys_burrow_attach_rejects_bad_length(void);
-void test_sys_burrow_detach_rejects(void);
-void test_sys_burrow_detach_window_confined(void);
-void test_sys_burrow_detach_dma_map_by_identity(void);
-void test_sys_burrow_detach_mmio_map_by_identity(void);
-void test_sys_burrow_attach_lazy_window_va(void);
-void test_sys_burrow_lazy_len_from_args(void);
-void test_sys_burrow_attach_lazy_large(void);
-void test_burrow_map_fixed_split_left(void);
-void test_burrow_map_fixed_split_right(void);
-void test_burrow_map_fixed_split_three_way(void);
-void test_burrow_map_fixed_exact_cover(void);
-void test_burrow_map_fixed_carries_offset(void);
-void test_burrow_map_fixed_refusals(void);
-void test_burrow_map_fixed_successive(void);
-void test_burrow_map_fixed_into_free_space(void);
-void test_burrow_munmap_range_tiled(void);
-void test_burrow_munmap_range_partial_trims(void);
-void test_burrow_munmap_range_empty_ok(void);
-void test_burrow_detach_file_frees_outside_lock(void);
-void test_burrow_munmap_range_file_frees_outside_lock(void);
-void test_burrow_map_fixed_replace_file_frees_outside_lock(void);
-void test_burrow_map_fixed_refuses_code_alias(void);
-
-// The non-static inners of the SVC handlers (defined in kernel/syscall.c).
-// Overcommit / I-32 (ARCH section 6.5): the demand-zero lazy attach.
-// CL-4: the pure dual-ABI length selector behind the dispatch case.
 
 static void drop_proc(struct Proc *p) {
     if (!p) return;
@@ -868,7 +836,6 @@ void test_burrow_map_fixed_into_free_space(void) {
 // outright: every VMA wholly inside goes, a straddled one is trimmed, an empty
 // range succeeds (Linux no-op).
 // =============================================================================
-
 
 // The musl unmap_library shape: a lazy reservation cut into three VMAs by a
 // MAP_FIXED overlay, then ONE whole-span munmap. All three go; the space is

@@ -37,8 +37,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_virtio_net_probe_rfork_with_caps(void);
-
 // 8-aligned static buffer. 16 KiB per blob (P4-image-shrink convention;
 // every userspace binary fits under 16 KiB with -z max-page-size=4096
 // on both Rust + C sides).

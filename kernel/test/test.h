@@ -402,7 +402,8 @@ extern const char *volatile g_test_proc_wait_what;
         spin_unlock_irqrestore(NULL, _tsd);                                 \
     } while (0)
 
-// Called from the tests (no header held it before).
+// test_9p_client.c's canned 9P2000.L responder: the one source of the reply
+// byte layouts, which the SrvConn device-gone tests stage handshakes through.
 int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap);
 

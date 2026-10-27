@@ -84,34 +84,6 @@
 #include <thylacine/weft.h>
 #include <thylacine/devctl.h>
 
-// Inner syscall cores (non-static; defined in kernel/syscall.c).
-
-// Test-support registry wipe (non-static; defined in kernel/devsrv.c;
-// deliberately not in devsrv.h — no production caller).
-
-// Test-support process-table linkage (non-static; defined in kernel/proc.c;
-// deliberately not in proc.h). proc_caps_by_stripes — the SYS_SRV_PEER
-// live-caps scan — only sees Procs spliced into the kproc-rooted table;
-// these link / unlink a bare proc_alloc'd test Proc.
-
-void test_devsrv_walk_service(void);
-void test_devsrv_open_connect_byte(void);
-void test_devsrv_kernel_attached_io_refused(void);
-void test_devsrv_kernel_attached_server_close_eofs(void);
-void test_devsrv_accept_immediate(void);
-void test_devsrv_accept_blocks_then_wakes(void);
-void test_devsrv_conn_io(void);
-void test_devsrv_conn_release(void);
-void test_devsrv_poster_exit_drains_backlog(void);
-void test_devsrv_srv_peer_identity(void);
-void test_devsrv_srv_peer_dead_peer(void);
-void test_devsrv_srv_peer_renderer_flag(void);
-void test_devsrv_srv_peer_gate(void);
-void test_devsrv_srv_peer_bad_args(void);
-void test_devsrv_seat_import_gates(void);
-void test_devsrv_srv_connect_gate_decides(void);
-void test_devsrv_srv_connect_gate(void);
-
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
@@ -411,7 +383,6 @@ static bool ends_row_counted(u32 principal, int pid, bool *counted) {
     return false;
 }
 
-void test_devsrv_conn_ends(void);
 void test_devsrv_conn_ends(void) {
     srv_registry_reset();
     struct Proc *server = make_marked_test_proc();

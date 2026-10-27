@@ -16,22 +16,6 @@
 #include <thylacine/types.h>
 #include <thylacine/syscall.h>
 
-// Defined in kernel/syscall.c; identity passed as scalars so this test needs
-// no kernel-internal struct spawn_identity. The trailing want_allowance
-// (Menagerie step 5) is the hardware-allowance bundle; these identity tests
-// pass NULL (the broad/inherit path), needing only a forward declaration.
-struct spawn_allowance;
-
-void test_proc_identity_kproc_is_system(void);
-void test_proc_identity_rfork_inherits(void);
-void test_proc_identity_apply_sets_fields(void);
-void test_proc_identity_spawn_set_rejected_without_cap(void);
-void test_proc_identity_spawn_set_accepted_with_cap(void);
-void test_proc_identity_set_rejects_reserved(void);
-void test_proc_identity_set_rejects_system_supp_gid(void);
-void test_proc_identity_peer_snapshot_by_stripes(void);
-void test_proc_identity_peer_snapshot_console_owner(void);
-
 static void drain_zombies(void) {
     int status = 0;
     while (wait_pid(&status) > 0) { /* drain */ }

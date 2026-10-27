@@ -53,27 +53,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-// R1 F1 fix: handler-side field-bound validation extracted as an
-// internal helper so tests can exercise the handler's distinctive
-// checks (unknown ext_flags bits, perm_flags & ~ALL, oversize fields) without
-// SVC instrumentation or a user-VA fixture.
-
-void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
-void test_sys_spawn_full_argv_golden_argc4(void);
-void test_sys_spawn_full_argv_rejects_argc_over_max(void);
-void test_sys_spawn_full_argv_rejects_data_len_over_max(void);
-void test_sys_spawn_full_argv_rejects_missing_trailing_nul(void);
-void test_sys_spawn_full_argv_rejects_nul_count_mismatch(void);
-void test_sys_spawn_full_argv_rejects_argc_with_zero_data_len(void);
-void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
-// R1 F1 + F11 fixes:
-void test_sys_spawn_full_argv_validate_req_golden(void);
-void test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits(void);
-void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
-void test_sys_spawn_full_argv_validate_req_pheno_flags(void);
-void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
-void test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags(void);
-
 static void drain_zombies(void) {
     int status = 0;
     while (wait_pid(&status) > 0) { /* drain */ }

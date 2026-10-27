@@ -15,7 +15,6 @@
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
 
-void test_gic_init_smoke(void);
 void test_gic_init_smoke(void) {
     // Autodetect landed as one of the two supported versions (DTB-driven;
     // v3 under run-vm.sh's default gic-version=3, v2 under THYLACINE_GIC=2).
@@ -44,7 +43,6 @@ void test_gic_init_smoke(void) {
 // account against the hardware's actual granule. That is what this test is for:
 // a target whose CWG outgrows the pad fails here, loudly, instead of quietly
 // resuming the false sharing the padding was added to stop.
-void test_gic_cpu_irq_counter_geometry(void);
 void test_gic_cpu_irq_counter_geometry(void) {
     // Alignment, not just size. Padding each slot to a granule separates the
     // slots from each other; only aligning the array keeps slot 0 out of the
@@ -90,7 +88,6 @@ void test_gic_cpu_irq_counter_geometry(void) {
     }
 }
 
-void test_gic_irq_barrier(void);
 void test_gic_irq_barrier(void) {
     TEST_ASSERT(!gic_synchronize_cpu(DTB_MAX_CPUS, 100000000ull), "invalid barrier CPU rejected");
     TEST_ASSERT(gic_barrier_send(DTB_MAX_CPUS) == 0, "invalid barrier CPU takes no ticket");
@@ -132,7 +129,6 @@ void test_gic_irq_barrier(void) {
 }
 
 #include "../../arch/arm64/gic_its.h"
-void test_gic_its_commands(void);
 void test_gic_its_commands(void) {
     TEST_ASSERT(gic_its_test_command_ring(), "ITS ring wrap, saturation, stalled/invalid reader and timeout");
 }

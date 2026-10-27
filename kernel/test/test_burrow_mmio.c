@@ -18,13 +18,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_burrow_mmio_create_basic(void);
-void test_burrow_mmio_create_null_rejected(void);
-void test_burrow_mmio_create_holds_kobj_ref(void);
-void test_burrow_mmio_unref_releases_kobj_ref(void);
-void test_burrow_mmio_acquire_mapping_works(void);
-void test_burrow_mmio_lifecycle_round_trip(void);
-
 // Synthetic PA range — chosen to NOT overlap any real MMIO region.
 // kobj_mmio_create only tracks the claim; it doesn't access memory.
 #define TEST_BURROW_PA   0x100050000ull

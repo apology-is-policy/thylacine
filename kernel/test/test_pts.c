@@ -70,18 +70,7 @@ static void pts_test_interaction_boundaries(void);
 static void pts_test_interaction_lifecycle(void);
 static void pts_test_interaction_ownership(void);
 static void pts_test_interaction_capacity(void);
-void test_pts_mint_bind_resolve_free(void);
-void test_pts_gen_guard_stale_id(void);
-void test_pts_authority_minting_server_only(void);
-void test_pts_binding_dedup_bounds_uniqueness(void);
-void test_pts_full_registry_torn_conn_gc(void);
-void test_pts_syscall_gates(void);
-void test_pts_tty_acquire_matrix(void);
-void test_pts_tty_set_get_fg_matrix(void);
-void test_pts_tty_signal_routing(void);
 
-
-// Test-harness hooks (the test_proc.c pattern).
 
 static struct SrvConn *pts_make_conn(struct Proc *owner) {
     return srvconn_create(proc_stripes(owner), owner->pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID,
@@ -645,7 +634,6 @@ void test_pts_tty_signal_routing(void) {
 // statics (the deliver cascade walks them; zeroed state = unlocked wait_lock
 // + no rendez -> the wakes no-op), the devproc fixture pattern.
 
-void test_pts_tty_tstp_stop_cont_seam(void);
 void test_pts_tty_tstp_stop_cont_seam(void) {
     struct Proc *srv = proc_alloc();
     TEST_ASSERT(srv != NULL, "proc_alloc srv");
@@ -772,7 +760,6 @@ void test_pts_tty_tstp_stop_cont_seam(void) {
 // the uncaught-hup terminate latch. The GC arm shares pts_teardown_fan with
 // FREE (one staging path), so the explicit-free proof covers the shape.
 
-void test_pts_teardown_hup_cont(void);
 void test_pts_teardown_hup_cont(void) {
     pts_test_interaction_lifecycle();
     struct Proc *srv = proc_alloc();

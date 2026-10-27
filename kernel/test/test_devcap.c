@@ -37,33 +37,6 @@
 
 #include "../../mm/slub.h"   // kfree (for the Walkqid allocated by devcap.walk)
 
-void test_devcap_registered(void);
-void test_devcap_walk_grant_use(void);
-void test_devcap_walk_unknown(void);
-void test_devcap_open_writeonly(void);
-void test_devcap_grant_gate_no_cap(void);
-void test_devcap_grant_gate_bad_args(void);
-void test_devcap_grant_replace(void);
-void test_devcap_grant_table_full(void);
-void test_devcap_use_gate_no_console(void);
-void test_devcap_use_no_pending(void);
-void test_devcap_use_basic(void);
-void test_devcap_use_one_shot(void);
-void test_devcap_use_mismatched_cap(void);
-void test_devcap_exit_clears_grant(void);
-// A-4a clearance grant/redeem (the legate-creation half).
-void test_devcap_clearance_grant_gate_no_cap(void);
-void test_devcap_clearance_grant_bad_args(void);
-void test_devcap_clearance_redeem_basic(void);
-void test_devcap_clearance_self_restriction(void);
-void test_devcap_clearance_redeem_beyond_grant(void);
-void test_devcap_clearance_one_shot(void);
-void test_devcap_clearance_cross_stripes(void);
-void test_devcap_clearance_valid_until(void);
-void test_devcap_clearance_kind_isolation(void);
-void test_devcap_clearance_audio_graph(void);
-void test_devcap_taint_refuses_hostowner_redeem(void);
-
 // Test-only Proc construction. proc_alloc() draws a fresh stripes, so
 // each test Proc has a unique tag. The console-attached + cap setup is
 // the test's responsibility — the harness deliberately tests both
@@ -673,11 +646,6 @@ void test_devcap_clearance_kind_isolation(void) {
 // grant form, the two redeem arms and the nest refusal. The rfork FLOW half
 // is test_caps.c's; the straggler close is test_proc.c's.
 // =============================================================================
-
-void test_devcap_imperium_grant_gate_and_bounds(void);
-void test_devcap_imperium_redeem_propagating(void);
-void test_devcap_imperium_nest_refused(void);
-void test_devcap_further_redeem_keeps_scope(void);
 
 void test_devcap_imperium_grant_gate_and_bounds(void) {
     cap_reset_table();

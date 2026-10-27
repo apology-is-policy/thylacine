@@ -322,7 +322,6 @@ static const struct viv_row g_viv_t1[] = {
 #ifdef KERNEL_TESTS
 // vivarium.t1_narrows_linux_widths checks each row's masks against Linux's
 // prototype and requires its list to be as long as the table.
-u32 vivarium_t1_count_for_test(void);
 u32 vivarium_t1_count_for_test(void) { return VIV_T1_COUNT; }
 #endif
 

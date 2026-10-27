@@ -34,26 +34,6 @@
 #include "../../arch/arm64/uart.h"
 #include <thylacine/types.h>
 
-void test_p9_closer_dying_close_delivers_tclunk(void);
-void test_p9_closer_exit_close_hands_off_tclunk(void);
-void test_p9_closer_dying_close_hands_off_staged_run(void);
-void test_p9_closer_forced_exit_close_hands_off_flush(void);
-void test_p9_closer_kthread_close_hands_off_staged_run(void);
-void test_p9_closer_close_job_retries_a_refused_write(void);
-void test_p9_closer_first_kill_forces_exits_close(void);
-void test_p9_closer_kill_in_final_close_keeps_exit(void);
-void test_p9_closer_kill_at_final_close_start_forces_it(void);
-void test_p9_closer_loom_register_flushes_staged_run(void);
-void test_p9_closer_stalled_session_holds_one_closer(void);
-void test_p9_closer_flushed_walk_fid_clunked(void);
-void test_p9_closer_failed_spawn_retried_by_hand_off(void);
-void test_p9_closer_hand_off_inside_failed_spawn_retried(void);
-void test_p9_closer_hand_off_inside_spawn_no_duplicate(void);
-void test_p9_closer_clunk_killed_while_self_pumping(void);
-void test_p9_closer_orphan_oom_on_dead_session_quiet(void);
-
-// test_9p_client.c: the shared canned 9P2000.L replies.
-
 static struct p9_closer_stats closer_now(void) {
     struct p9_closer_stats st;
     p9_closer_stats(&st);

@@ -28,12 +28,6 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
-void test_vdso_page_populated(void);
-void test_vdso_publish_updates(void);
-void test_vdso_mono_matches_timer(void);
-void test_vdso_maps_ro_read(void);
-void test_vdso_maps_ro_write_faults(void);
-
 #define TEST_VA   0x20000000ull        // 512 MiB; well within the user half
 
 // The kernel VA of the shared clock page (NULL if vdso_init OOM'd at boot).

@@ -53,21 +53,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-void test_srvconn_create_destroy(void);
-void test_srvconn_roundtrip(void);
-void test_srvconn_ring_capacity(void);
-void test_srvconn_recv_blocks_then_wakes(void);
-void test_srvconn_recv_deadline_timeout(void);
-void test_srvconn_teardown_eofs(void);
-void test_srvconn_teardown_wakes_blocked(void);
-void test_srvconn_server_send_blocks_then_drain_wakes(void);
-void test_srvconn_ctl_counters(void);
-void test_srvconn_bulk_ring_class(void);
-void test_srvconn_role_park_second_writer(void);
-void test_srvconn_role_park_second_reader(void);
-void test_srvconn_client_send_blocking_backpressure(void);
-void test_srvconn_client_send_blocking_poll_edge(void);
-
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
@@ -1256,7 +1241,6 @@ static void test_srvconn_private_progress(void) {
 
 // Discriminates poll-ready from write-all-ready: only three bytes remain, yet
 // a 16-byte nonblocking write must return three without parking the seat loop.
-void test_srvconn_nonblocking_backpressure(void);
 void test_srvconn_nonblocking_backpressure(void) {
     struct SrvConn *cn = srvconn_create(123, 11, PRINCIPAL_INVALID, false, 456, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "nonblocking connection");

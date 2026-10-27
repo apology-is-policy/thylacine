@@ -19,20 +19,6 @@
 #include <thylacine/virtio.h>
 #include <thylacine/vma.h>
 
-void test_virtio_mmio_probe(void);
-void test_virtio_magic_value(void);
-void test_virtio_version_modern(void);
-void test_virtio_rng_present(void);
-void test_virtio_negotiate_features_smoke(void);
-void test_virtio_virtqueue_alloc_destroy(void);
-void test_virtio_find_by_device_id(void);
-void test_virtio_reset_in_range_no_match(void);
-void test_virtio_vq_size_for(void);
-void test_virtio_proc_death_quiesces_device(void);
-void test_virtio_proc_death_quiesces_vma_only_device(void);
-void test_virtio_exec_quiesces_devices(void);
-void test_virtio_last_unref_quiesces_mapped_device(void);
-
 // =============================================================================
 // Tests.
 // =============================================================================
@@ -309,7 +295,6 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
 // exec'ing thread), three execs in a row over one device claim: a shared old space
 // (frees nothing, so resets nothing), the claim on an fd with the space ours alone
 // (exec's walk a), then the claim on a mapping only (walk b, in the drain).
-
 static struct {
     u64 page;
     struct Proc *sharer;

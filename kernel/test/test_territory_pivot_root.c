@@ -84,26 +84,6 @@
 
 #include "../../mm/slub.h"       // kmalloc: a point-only union_snap
 
-
-void test_territory_pivot_root_smoke(void);
-void test_territory_pivot_root_rejects_no_initial_root(void);
-void test_territory_pivot_root_idempotent_same_spoor(void);
-void test_territory_pivot_root_null_source_rejected(void);
-void test_territory_pivot_root_keeps_reachable_mount(void);
-void test_territory_shed_pivot_drops_unreachable(void);
-void test_territory_shed_chroot_drops_unreachable(void);
-void test_territory_shed_keeps_transitive(void);
-void test_territory_shed_per_walker_dev_matched_on_dc(void);
-void test_territory_shed_same_root_is_a_noop(void);
-void test_territory_shed_preserves_union_order(void);
-void test_territory_shed_clone_before_pivot_unaffected(void);
-void test_territory_shed_union_root_keeps_point_entries(void);
-void test_territory_shed_drops_nested_orphan(void);
-void test_territory_shed_full_table_boundary(void);
-void test_territory_shed_releases_mp_path_once(void);
-void test_territory_shed_initial_chroot_and_root_as_source(void);
-void test_territory_shed_covered_shares_fate(void);       // Plan 9 unions
-
 // =============================================================================
 // pivot_root_smoke
 // =============================================================================

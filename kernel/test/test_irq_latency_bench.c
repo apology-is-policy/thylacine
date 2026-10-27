@@ -77,9 +77,6 @@
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uart.h"
 
-void test_irq_latency_bench(void);
-void test_irq_latency_bench_failure(void);
-
 // Shared-region user-VA — pinned in lockstep with usr/irq-bench's
 // SHARED_USER_VA. Mapped at this VA in the child's address space
 // by the exec thunk via burrow_map.

@@ -33,19 +33,6 @@
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 
-void test_vmo_map_proc_smoke(void);
-void test_vmo_map_proc_constraints(void);
-void test_vmo_map_proc_overlap_rejected(void);
-void test_vmo_map_proc_user_va_top_boundary(void);
-void test_vmo_unmap_proc_smoke(void);
-void test_vmo_unmap_proc_no_match(void);
-
-// Weft-2 / I-37: cross-Proc Burrow share (burrow_share_into).
-void test_burrow_share_into_cross_proc(void);
-void test_burrow_share_into_alive_while_either_maps(void);
-void test_burrow_share_into_frees_on_last_drop(void);
-void test_burrow_share_into_constraints(void);
-
 #define TEST_VA   0x10000000ull           // 256 MiB; well inside user-VA
 #define ONE_PAGE  PAGE_SIZE
 #define TWO_PAGES (2ull * PAGE_SIZE)

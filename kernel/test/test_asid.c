@@ -27,11 +27,6 @@
 
 #include <thylacine/types.h>
 
-void test_asid_width_valid(void);
-void test_asid_resolve_reuse(void);
-void test_asid_distinct_active(void);
-void test_asid_rollover_preserves(void);
-
 void test_asid_width_valid(void) {
     unsigned bits = asid_bits();
     TEST_ASSERT(bits == 8u || bits == 16u, "asid_bits() must be 8 or 16");

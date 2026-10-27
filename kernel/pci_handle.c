@@ -669,7 +669,6 @@ bool kobj_pci_intx_asserted(struct KObj_PCI *k) {
 #ifdef KERNEL_TESTS
 // Only the regression suite can request this hook; it has no syscall or
 // userspace control. The real MMIO write/read still occurs before failure.
-void pci_test_msix_fail(struct KObj_PCI *k, u32 stages);
 void pci_test_msix_fail(struct KObj_PCI *k, u32 stages) {
     irq_state_t f = spin_lock_irqsave(&k->cfg_lock);
     struct pci_backing *b = pci_backing(k);

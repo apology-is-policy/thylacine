@@ -1,3 +1,7 @@
+// /proc (devproc.c): the per-Proc file server. Its Dev is declared with the
+// others in dev.h; the two predicates below are the visibility policy /ctl/procs
+// shares with it.
+
 #ifndef THYLACINE_DEVPROC_H
 #define THYLACINE_DEVPROC_H
 
@@ -7,10 +11,12 @@ struct Proc;
 struct Spoor;
 struct Thread;
 
-// Called from kernel/devctl.c (no header held it before).
+// Plan 9's nonone(): true when `caller` runs as none and `target` is another
+// Proc. CAP_HOSTOWNER buys through it; a NULL caller is a kernel-internal read.
 bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 
-// Called from kernel/devctl.c (no header held it before).
+// `caller` is `target`, its owner (same principal, never none), or a
+// CAP_HOSTOWNER holder. The caller holds g_proc_table_lock.
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 
 #ifdef KERNEL_TESTS

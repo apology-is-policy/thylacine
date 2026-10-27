@@ -41,13 +41,6 @@
 #include "../../arch/arm64/exception.h"
 #include "../../arch/arm64/uaccess.h"
 
-void test_fork_frame_init(void);
-void test_fork_rfork_arg_rejection(void);
-void test_fork_table_copy(void);        // (these two had no prototype and
-void test_fork_vfork_release(void);     //  warned; not L-5's, fixed in passing)
-
-// The real handler (the sys_pci_claim_handler pattern in test_allowance.c).
-
 // A recognisable non-zero pattern per field, so a copy that silently drops or
 // transposes one is visible rather than plausible.
 static void fill_frame(struct exception_context *f) {

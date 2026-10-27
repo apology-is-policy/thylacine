@@ -17,21 +17,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-void test_env_set_get(void);
-void test_env_create_idempotent(void);
-void test_env_overwrite_truncate(void);
-void test_env_unset_monotonic(void);
-void test_env_iter_order(void);
-void test_env_bounds(void);
-void test_env_render_environ(void);              // VIVARIUM V-4b-6
-void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
-void test_env_clone_deep_independent(void);
-void test_env_free_null_tolerant(void);
-void test_devenv_bestiary(void);
-void test_devenv_walk_reuse_nc(void);
-void test_devenv_walk_read(void);
-void test_devenv_stat_native_shapes(void);
-
 // proc_alloc gives a fresh Proc with a NULL (empty) env; ZOMBIE + proc_free
 // releases it (env_free runs in proc_free). Mirrors test_allowance.c::amk/adrop.
 static struct Proc *emk(void) { return proc_alloc(); }

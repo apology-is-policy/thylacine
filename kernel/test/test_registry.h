@@ -1348,6 +1348,7 @@ void test_devcap_exit_clears_grant(void);
 void test_devcap_clearance_grant_gate_no_cap(void);
 void test_devcap_clearance_grant_bad_args(void);
 void test_devcap_clearance_redeem_basic(void);
+void test_devcap_clearance_audio_graph(void);
 void test_devcap_clearance_self_restriction(void);
 void test_devcap_clearance_redeem_beyond_grant(void);
 void test_devcap_clearance_one_shot(void);

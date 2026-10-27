@@ -31,21 +31,6 @@
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
-void test_trivial_devs_bestiary_smoke(void);
-void test_null_attach_open_close(void);
-void test_null_read_returns_eof(void);
-void test_null_write_consumes(void);
-void test_zero_read_fills_zeroes(void);
-void test_zero_write_consumes(void);
-void test_full_attach_open_close(void);
-void test_full_read_fills_zeroes(void);
-void test_full_write_returns_minus1(void);
-void test_random_read_serves_bytes(void);
-void test_random_read_produces_nonzero_bytes(void);
-void test_random_read_varies_across_calls(void);
-void test_cons_write_advances(void);
-void test_trivial_devs_devnull_10k_no_leak(void);
-
 // =============================================================================
 // Helpers — shared lifecycle pattern: dev->attach, dev->open, ..., spoor_clunk.
 // =============================================================================

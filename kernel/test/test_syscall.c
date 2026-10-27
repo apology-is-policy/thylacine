@@ -38,17 +38,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-
-void test_syscall_dispatch_unknown(void);
-void test_syscall_native_gap_unassigned(void);
-void test_syscall_dispatch_puts_smoke(void);
-void test_syscall_dispatch_exits_ok(void);
-void test_syscall_dispatch_exits_fail(void);
-void test_syscall_dispatch_exit_group_code(void);
-void test_syscall_dispatch_args_in_x0_to_x5(void);
-void test_syscall_dispatch_set_tid_address(void);
-void test_syscall_opath_walkonly_no_byte_io(void);
-
 void test_syscall_dispatch_unknown(void) {
     struct exception_context ctx;
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;

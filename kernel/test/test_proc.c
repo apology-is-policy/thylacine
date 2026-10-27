@@ -55,40 +55,6 @@
 #include <thylacine/torpor.h>         // PTY-4e #19: the preserved-wait probe
 #include <thylacine/devctl.h>
 
-void test_proc_rfork_basic_smoke(void);
-void test_proc_rfork_exits_status(void);
-void test_proc_rfork_stress_1000(void);
-void test_proc_cascading_rfork_wait_smoke(void);
-void test_proc_cascading_rfork_stress(void);
-void test_proc_orphan_reparent_smoke(void);
-void test_proc_orphan_diag_uses_cons_path(void);
-void test_proc_orphan_reparent_to_init(void);
-void test_proc_console_attached_smoke(void);
-void test_proc_stripes_smoke(void);
-void test_proc_legate_scope_teardown(void);
-void test_proc_legate_teardown_except_and_zero(void);
-void test_proc_legate_teardown_from_zombie_chokepoint(void);
-void test_proc_orphan_reparent_zombie_to_init(void);
-void test_proc_group_terminate_smoke(void);
-void test_proc_wait_pid_for_no_match(void);
-void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
-void test_proc_wait_pid_for_selects_target(void);
-void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void);
-void test_proc_wait_pid_for_pgrp_selectors(void);
-void test_proc_wait_pid_for_report_not_reap(void);
-void test_proc_wait_pid_syscall_untraced_flag(void);
-void test_proc_wait_packed_signalled(void);
-void test_proc_group_claim_decides_signal(void);
-void test_proc_wait_pid_syscall_packed_flag(void);
-void test_proc_rfork_refused_while_terminating(void);
-void test_proc_walk_deep_chain(void);
-void test_proc_walk_preorder_and_early_exit(void);
-
-// Test-harness hooks (kept out of proc.h; no production caller). The legate
-// teardown walk + the synthetic-Proc table splice let the test verify the walk
-// flags every scope member -- the actual death fires at the EL0 die-check,
-// which kernel test threads (EL1) never reach, so the flag is the observable.
-
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
 static volatile u32 g_grandchild_ran;
@@ -1814,7 +1780,6 @@ static u32 js_note_count(struct Proc *p, const char *name) {
 // BOTH clear. A resume that cleared the other owner's flag is exactly the
 // BUGGY_DOUBLE_STOP counterexample (a tty:cont running a debugger-stopped
 // thread); this is its deterministic regression.
-void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_owner_algebra(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1902,7 +1867,6 @@ static void js_sleeper_thunk(void *arg) {
     exits("ok");
 }
 
-void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_park_report_cont_live(void) {
     __atomic_store_n(&g_js_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_js_sleeper_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
@@ -1962,7 +1926,6 @@ void test_proc_job_stop_park_report_cont_live(void) {
 // unpinned. Deterministic regression: after a full stop/report/cont/report
 // round, a SECOND TSTP fan must stop the group again (fresh park, fresh
 // latch, fresh report), and a second cont must release it to a clean exit.
-void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_recycle(void) {
     __atomic_store_n(&g_js_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_js_sleeper_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
@@ -2051,7 +2014,6 @@ static void tsp_sleeper_thunk(void *arg) {
     exits("ok");
 }
 
-void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_preserves_torpor_wait(void) {
     __atomic_store_n(&g_tsp_done, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_tsp_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
@@ -2143,7 +2105,6 @@ static void js_anchor_thunk(void *arg) {
 // notes_proc_has_live_handler both load ->sigtab with a bare acquire and no lock
 // exec holds, and notes_post targets ANOTHER Proc on every call, so freeing here
 // is a use-after-free. That is what this pins.
-void test_proc_exec_reset_dispositions(void);
 void test_proc_exec_reset_dispositions(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -2233,7 +2194,6 @@ void test_proc_exec_reset_dispositions(void) {
     proc_free(p);
 }
 
-void test_proc_job_stop_orphan_rule(void);
 void test_proc_job_stop_orphan_rule(void) {
     // Each leg records, releases its fixture, then asserts: a failing assert
     // returns, and a fixture left linked holds every later drain of kproc's
@@ -2379,8 +2339,6 @@ void test_proc_job_stop_orphan_rule(void) {
         "its running member got no hup");
 }
 
-void test_proc_dying_takes_no_stop(void);
-
 static bool dts_is_stopped(const char *s) {
     const char *w = "STOPPED";
     while (*s && *s == *w) { s++; w++; }
@@ -2441,9 +2399,6 @@ void test_proc_dying_takes_no_stop(void) {
     TEST_ASSERT(live_col, "/ctl/procs shows the job-stopped live Proc STOPPED");
     TEST_ASSERT(!dying_col, "/ctl/procs does not show a dying Proc STOPPED");
 }
-
-void test_proc_exec_drops_image_note_state(void);
-void test_proc_kill_forces_final_close(void);
 
 // #247: a successful exec must drop every note-side thing that names the OLD
 // image -- including the in-handler LATCH, which the reset missed.

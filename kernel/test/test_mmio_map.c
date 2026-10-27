@@ -29,16 +29,10 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_mmio_map_install_vma(void);
-void test_mmio_map_overlap_rejected(void);
-void test_mmio_map_proc_free_releases_kobj(void);
-
 // Synthetic MMIO range; chosen to not overlap any real device.
 #define MMIO_MAP_PA      0x100060000ull
 #define MMIO_MAP_SIZE    0x1000ull
 #define USER_VA_MMIO     0x40000000ull        // 1 GiB into user-VA
-
-// Forward decls for proc helpers (defined in proc.c — exposed via test).
 
 // burrow_create_mmio + burrow_map installs a VMA reachable via
 // vma_lookup. Verifies the integration pipeline at the kernel API

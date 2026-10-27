@@ -50,118 +50,6 @@
 // loop), for explicit A/B parity assertions; the g_fix_*_calls counters prove
 // which path engaged (non-vacuity).
 
-// Forward declarations (registered in kernel/test/test.c).
-void test_stalk_err_codes(void);
-void test_stalk_long_component_bound(void);
-void test_stalk_resolve_multi(void);
-void test_stalk_resolve_deep(void);
-void test_stalk_leading_and_double_slash(void);
-void test_stalk_dot_noop(void);
-void test_stalk_dotdot_pop(void);
-void test_stalk_dotdot_containment(void);
-void test_stalk_xsearch_deny(void);
-void test_stalk_missing_component(void);
-void test_stalk_notdir(void);                  // #79
-void test_stalk_dot_notdir(void);              // #81
-void test_stalk_dot_notdir_mount(void);        // #81 (uncrossed-tip choice)
-void test_stalk_dot_xsearch(void);             // #84
-void test_stalk_trailing_slash(void);          // #82
-void test_stalk_trailing_slash_mount(void);    // #82 (crossed-quarry choice)
-void test_stalk_opath_no_open(void);
-void test_stalk_open_root(void);
-void test_stalk_open_replace(void);
-void test_stalk_depth_cap(void);
-void test_stalk_lifetime_no_leak(void);
-// stalk-2 cross-mount (Plan 9 domount).
-void test_stalk_cross_mount(void);
-void test_stalk_cross_mount_final_quarry(void);
-void test_stalk_cross_mount_xsearch_deny(void);
-void test_stalk_mount_amode_no_cross(void);
-void test_stalk_cross_mount_chain(void);
-void test_stalk_cross_mount_no_leak(void);
-// UM (union mounts): the union walk over the real resolver.
-void test_stalk_union_walk(void);
-void test_stalk_union_order(void);
-void test_stalk_union_xskip(void);
-void test_stalk_union_readdir(void);            // UM-5: merge + dedup first-wins
-void test_stalk_union_readdir_paginate(void);   // UM-5: ordinal-cursor resume
-void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagged)
-void test_stalk_union_create(void);             // UM-5a: MCREATE member selected
-void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
-void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
-void test_stalk_union_one_member_creates_alike(void); // shed r4 F5: one member is not a union
-void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
-void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
-void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
-void test_stalk_union_opath_base(void);          // UM-8c/R2-F2: O_PATH base carries the point
-void test_stalk_union_zero_component(void);      // UM-8c/R2-F3: "." off a union base keeps it
-void test_stalk_union_dissolved_degrades(void);  // ARCH 9.6.10: never the covered directory
-void test_stalk_dotdot_crossed_base_floor(void); // '..' never pops a crossed base
-void test_stalk_union_live_dotdot_walks_unopened(void); // shed r3 F2
-void test_stalk_union_dissolved_point_unreachable(void); // shed r3 F2 (the point cannot clone)
-void test_stalk_mount_names_crossed_union_base(void); // shed r4 F4
-void test_stalk_remove_parent_reports_union_point(void); // shed r3 F3
-void test_stalk_mount_names_crossed_base(void);          // shed r3 F4
-void test_stalk_union_dissolved_helper(void);            // shed r3 F5
-void test_stalk_union_covered_walk(void);   // Plan 9 unions
-void test_stalk_union_covered_after(void);   // Plan 9 unions
-void test_stalk_union_covered_readdir(void);   // Plan 9 unions
-void test_stalk_union_covered_create(void);   // Plan 9 unions
-void test_stalk_union_covered_unmount(void);   // Plan 9 unions
-void test_stalk_union_covered_dissolved(void);   // Plan 9 unions
-void test_stalk_union_covered_holder(void);   // Plan 9 unions
-void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
-// #66: namespace-name accumulation through the real resolver.
-void test_stalk_path_accumulate(void);
-void test_stalk_path_dotdot(void);
-void test_stalk_path_cross_transplant(void);
-void test_stalk_path_adopt_transplant(void);   // #66 F2 (owed from #66a)
-// POUNCE: the batched fast path + stalk_stat (docs/POUNCE-DESIGN.md).
-void test_stalk_pounce_engaged(void);
-void test_stalk_pounce_acces_masks_noent(void);
-void test_stalk_pounce_parity_nowa(void);
-void test_stalk_pounce_full_walk_past_mount(void);
-void test_stalk_stat_query(void);
-void test_stalk_stat_mount_leaf(void);
-void test_sys_stat_for_proc(void);
-void test_stalk_pounce_unsupported_fallback(void);
-
-// FID-LIFECYCLE cached-open: the resolver arm (engagement, mode gate,
-// fail-ordering post-scan, mount discard-and-fallback).
-void test_stalk_cached_open_arm(void);
-void test_stalk_cached_open_denials(void);
-void test_stalk_cached_open_mount_fallback(void);
-
-// D-1: symlink expansion (DISTRO.md section 4; the I-28 refinement).
-void test_stalk_symlink_follow(void);
-void test_stalk_symlink_bounds(void);
-void test_stalk_symlink_nofollow(void);
-void test_stalk_symlink_stat_vs_lstat(void);
-void test_stalk_symlink_pounce_split(void);
-void test_stalk_symlink_lifetime(void);
-void test_stalk_landed_name(void);             // STALK-DESIGN 4.3: chdir's physical name
-void test_stalk_dir_landed_name(void);         // STALK-DESIGN 4.3: the shared chdir/spawn-cwd resolver
-
-// DISTRO 4.6: a served link resolves beneath the mount that served it.
-void test_stalk_served_contain(void);
-void test_stalk_served_contain_nowa(void);
-void test_stalk_served_union(void);
-void test_stalk_served_dirfd_and_refusal(void);
-void test_stalk_served_pheno(void);
-void test_stalk_served_lifetime(void);
-void test_stalk_served_handle_base(void);
-void test_stalk_served_handle_popped(void);
-void test_stalk_served_same_session(void);
-
-// #50: SYS_OPEN_CREATE over the fixture (the create overlay).
-void test_stalk_open_create_cwd_parity(void);
-void test_stalk_open_create_open_if_present(void);
-void test_stalk_open_create_mkdir_and_nest(void);
-void test_stalk_open_create_leaf_rows(void);
-void test_stalk_open_create_containment_and_denials(void);
-void test_stalk_landed_roots(void);
-void test_stalk_landed_identity(void);
-
 // =============================================================================
 // The fixture Dev.
 // =============================================================================
@@ -1939,14 +1827,13 @@ void test_stalk_union_xskip(void) {
 // =============================================================================
 // UM (union mounts) -- union READDIR merge/dedup/pagination (UM-5).
 //
-// The merge logic lives in kernel/syscall.c (union_readdir_run, non-static like
+// The merge logic lives in kernel/syscall.c (union_readdir_run, visible to the tests like
 // viv_dirent64_encode_run so the byte-level behavior is unit-testable). These
 // tests build a real union over the fixture (fix_readdir emits each member's
 // children as 9P2000.L dirents), open it through the real resolver (which tags
 // union_snap), and assert the merged stream: dedup first-member-wins, member
 // declared order, 1-based ordinal cookies, and correct paginated resume.
 // =============================================================================
-
 
 // Parse the idx-th 9P2000.L dirent in buf[0..len). Returns its byte span (> 0)
 // or 0 if idx is past the last complete entry. Fills qid_path / cookie / name.
@@ -2140,8 +2027,7 @@ void test_stalk_union_readdir_nontagged(void) {
 
 // The #50 create-driver helpers are defined lower in this file (the
 // SYS_OPEN_CREATE battery); forward-declare them for the two e2e create tests
-// here. A static forward decl matching the later static definition is legal;
-// the extern matches the identical decl at the #50 section head.
+// here.
 static struct Proc *ocp_proc(const char *dot);
 static void ocp_teardown(struct Proc *p);
 
@@ -3554,7 +3440,6 @@ void test_stalk_stat_mount_leaf(void) {
 
 // SYS_STAT's testable inner (the #37 *_for_proc shape; kernel path + kernel
 // t_stat -- the handler's uaccess staging wraps it).
-
 void test_sys_stat_for_proc(void) {
     struct Proc p;
     struct Spoor *root = cross_setup(&p);   // synthetic Proc + fresh Territory
@@ -4625,7 +4510,6 @@ void test_stalk_served_same_session(void) {
 // generic -1 by design).
 // =============================================================================
 
-
 // One heap Proc with a Territory rooted in the fixture + a cwd. proc_free
 // tears the whole thing down (handles -> clunks; territory_unref -> root).
 static struct Proc *ocp_proc(const char *dot) {
@@ -5090,8 +4974,6 @@ void test_stalk_landed_identity(void) {
 // openat onto (vault dec-2026-10-14-descriptor-slot-reservation): a kept Spoor
 // installs nothing, O_DIRECTORY refuses a non-directory before any install,
 // and close-on-exec lands in the install itself.
-
-void test_stalk_open_finish_policy(void);
 void test_stalk_open_finish_policy(void) {
     fixmade_reset();
     struct Proc *p = ocp_proc(NULL);
@@ -5149,7 +5031,6 @@ void test_stalk_open_finish_policy(void) {
 // The directory resolver SYS_CHDIR and a spawn's cwd tail share (STALK-DESIGN
 // 4.3): the landed name, and each refusal's errno -- never the bare -1 that
 // pouch and Go read as EPERM.
-
 void test_stalk_dir_landed_name(void) {
     char joined[SYS_OPEN_PATH_MAX + 1];
     char n_abs[SYS_OPEN_PATH_MAX + 1], n_root[SYS_OPEN_PATH_MAX + 1];

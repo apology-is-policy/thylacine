@@ -80,21 +80,6 @@
 //     completely untouched -- no half-flagged VMAs, no gratuitously dropped PTEs
 //     -- which is why the flag/write-protect pass runs only on success.
 
-void test_cow_set_sole_never_inherits(void);
-void test_cow_get_put_reports_last_holder(void);
-void test_cow_break_decide_is_sole(void);
-void test_burrow_lazy_free_is_conditional_on_share(void);
-void test_cow_burrow_clone_shares_resident_pages(void);
-void test_cow_addrspace_clone_shares_and_writeprotects(void);
-void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
-void test_cow_clone_shares_readonly_eager_anon(void);
-void test_cow_break_read_then_write_copies(void);
-void test_cow_break_sole_holder_takes_in_place(void);
-void test_cow_break_copy_pins_the_original_until_replaced(void);
-void test_cow_read_queued_behind_break_is_handled(void);
-void test_cow_break_copy_releases_the_share_on_a_failed_replace(void);
-void test_cow_break_copy_last_share_frees_after_the_replace(void);
-
 // One page's worth of Burrow -- enough for every property here, and it keeps
 // the filepages[] allocation identical between the two differential runs.
 #define COW_ONE_PAGE  4096ull

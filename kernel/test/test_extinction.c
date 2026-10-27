@@ -46,9 +46,6 @@
 #include "../../arch/arm64/timer.h"
 #include <thylacine/types.h>
 
-void test_extinction_claim_word_exactly_one_winner(void);
-void test_extinction_console_unclaimed_on_clean_boot(void);
-
 void test_extinction_claim_word_exactly_one_winner(void) {
     uint32_t word = 0;
 
@@ -96,12 +93,6 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 // Like the claim test these are sequential: they pin each side's decision, not
 // the Dekker race between them. The race is tools/test-fault.sh's
 // extinction_peer_chatter variant, which tears the banner without the gate.
-
-void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
-void test_extinction_tx_gate_counts_nested_bytes(void);
-void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void);
-void test_extinction_tx_exit_takes_a_pending_preempt(void);
-void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
     volatile uint8_t busy = 0;

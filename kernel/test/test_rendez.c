@@ -48,7 +48,6 @@ static int cond_always_true(void *arg) {
     return 1;
 }
 
-void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_sleep_immediate_cond_true(void) {
     struct Rendez r = RENDEZ_INIT;
 
@@ -99,7 +98,6 @@ static void handoff_consumer_entry(void) {
     // trampoline halts on entry-return.
 }
 
-void test_rendez_basic_handoff(void);
 void test_rendez_basic_handoff(void) {
     g_handoff_cond    = 0;
     g_handoff_run_cnt = 0;
@@ -217,7 +215,6 @@ static void death_consumer_entry(void) {
     test_kthread_park_terminal(&g_death_exited);
 }
 
-void test_rendez_death_interrupts_sleep(void);
 void test_rendez_death_interrupts_sleep(void) {
     g_death_run_cnt  = 0;
     g_death_sleep_rc = 0x7fffffff;               // sentinel: sleep never returned
@@ -291,7 +288,6 @@ void test_rendez_death_interrupts_sleep(void) {
 // rendez.wakeup_no_waiter
 // ---------------------------------------------------------------------------
 
-void test_rendez_wakeup_no_waiter(void);
 void test_rendez_wakeup_no_waiter(void) {
     struct Rendez r = RENDEZ_INIT;
 
@@ -335,7 +331,6 @@ static void intr_consumer_entry(void) {
 // `interrupt` (arms the latch -- fresh Proc, no handler, not self-managing)
 // and runs the REAL wake walk under g_proc_table_lock. The consumer resumes,
 // its resume-path thread_die_pending check fires, sleep returns SLEEP_INTR.
-void test_rendez_intr_terminate_interrupts_sleep(void);
 void test_rendez_intr_terminate_interrupts_sleep(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -390,7 +385,6 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
 // wait_lock, undoes the registration, and returns SLEEP_INTR -- with NO wake
 // call at all (the waker ran before the sleeper registered; the walk found
 // nothing; the post-register check is what closes the race).
-void test_rendez_intr_terminate_register_observe(void);
 void test_rendez_intr_terminate_register_observe(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -438,7 +432,6 @@ static void intr_masked_consumer_entry(void) {
     test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
-void test_rendez_intr_terminate_masked_sleeps_through(void);
 void test_rendez_intr_terminate_masked_sleeps_through(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -505,7 +498,6 @@ static void intr_tsleep_consumer_entry(void) {
     test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
-void test_rendez_intr_terminate_interrupts_tsleep(void);
 void test_rendez_intr_terminate_interrupts_tsleep(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -607,7 +599,6 @@ static void intr_yield_window(void) {
 // re-checks and sleeps again. A woken thread is switched in, so its stamp moves
 // (monotonic, unlike its state, which reads SLEEPING again once it re-sleeps).
 // Group death then returns it.
-void test_rendez_death_only_absorbs_latch(void);
 void test_rendez_death_only_absorbs_latch(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -655,7 +646,6 @@ void test_rendez_death_only_absorbs_latch(void) {
 // The latch is armed before the thread sleeps. sleep() returns at once for that
 // (rendez.intr_terminate_register_observe); the death-only sleep parks, and
 // group death still ends it.
-void test_rendez_death_only_sleeps_past_latch(void);
 void test_rendez_death_only_sleeps_past_latch(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -702,7 +692,6 @@ static void intr_job_stop_sleeper(struct Rendez *r) {
 // sleep is stopped and detours to park on its own debug_rendez. A latch lands:
 // the thread stays stopped. Once the stop clears, the ordinary sleep re-checks,
 // and its own die-check unwinds for the latch.
-void test_rendez_stopped_sleeper_holds_latch(void);
 void test_rendez_stopped_sleeper_holds_latch(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
@@ -852,14 +841,12 @@ static void skip_stop_park_run(bool (*walk)(void), const char *armed_msg) {
     TEST_EXPECT_EQ(rc_control, SLEEP_INTR, "group death returned the control");
 }
 
-void test_rendez_latch_wake_skips_stop_park(void);
 void test_rendez_latch_wake_skips_stop_park(void) {
     skip_stop_park_run(skip_walk_latch, "premise: the post armed the terminate latch");
 }
 
 // A second stop changes nothing a stop park waits on, so the stop cascade's
 // sleeper walk passes it over too.
-void test_rendez_stop_wake_skips_stop_park(void);
 void test_rendez_stop_wake_skips_stop_park(void) {
     skip_stop_park_run(skip_walk_stop, "premise: the debugger's stop was delivered");
 }
@@ -915,7 +902,6 @@ static void exit_close_setup(void) {
 
 // A closer in a dying group, with a job stop pending, sleeps in its close: the
 // stop does not park it, and the close's own wake returns it.
-void test_rendez_exit_close_ignores_stop(void);
 void test_rendez_exit_close_ignores_stop(void) {
     exit_close_setup();
     g_intr_proc = proc_alloc();
@@ -952,7 +938,6 @@ void test_rendez_exit_close_ignores_stop(void) {
 // A closer whose group still lives honours a stop: it parks. The group then
 // dies, and the death cascade's wake ends the park -- the closer sleeps on in
 // its close, and the close's own wake returns it.
-void test_rendez_exit_close_park_ends_on_death(void);
 void test_rendez_exit_close_park_ends_on_death(void) {
     exit_close_setup();
     g_intr_proc = proc_alloc();
@@ -1040,7 +1025,6 @@ static void rf_tsleep_entry(void) {
     test_kthread_park_terminal(&g_rf_exited);
 }
 
-void test_rendez_reader_recv_unwinds_death(void);
 void test_rendez_reader_recv_unwinds_death(void) {
     g_rf_run_cnt  = 0;
     g_rf_sleep_rc = 0x7fffffff;
@@ -1091,7 +1075,6 @@ static void rf_sleep_entry(void) {
     test_kthread_park_terminal(&g_rf_exited);
 }
 
-void test_rendez_reader_recv_unwinds_death_sleep(void);
 void test_rendez_reader_recv_unwinds_death_sleep(void) {
     g_rf_run_cnt  = 0;
     g_rf_sleep_rc = 0x7fffffff;
@@ -1147,7 +1130,6 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
 // must leave the sleeper asleep. A leg releases and joins its sleeper before
 // the test asserts anything, so a RED run leaks no parked thread.
 // ---------------------------------------------------------------------------
-
 
 static volatile u32  g_cw_run;
 static volatile int  g_cw_rc;
@@ -1224,7 +1206,6 @@ static void cw_post_orphan(void *arg) { proc_test_orphan_rule((struct Proc *)arg
 // A child's exit posts child_exit to its parent (proc_exit_notify_parent_locked,
 // the exit path's own code). A SIGCHLD handler must interrupt the parent's
 // blocked slow call -- viv-pheno-probe L305 end to end.
-void test_rendez_caught_wake_child_exit(void);
 void test_rendez_caught_wake_child_exit(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *par = cw_linux_proc();
@@ -1341,7 +1322,6 @@ static struct rcn_leg rcn_run_leg(bool reader) {
     return r;
 }
 
-void test_rendez_reader_recv_unwinds_caught_note(void);
 void test_rendez_reader_recv_unwinds_caught_note(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct rcn_leg ctl = rcn_run_leg(false);
@@ -1362,7 +1342,6 @@ void test_rendez_reader_recv_unwinds_caught_note(void) {
 
 // ^Z's fan (proc_job_stop_pgrp) posts tty:susp to a member that catches it
 // instead of stopping it; the handler must run now.
-void test_rendez_caught_wake_tty_susp(void);
 void test_rendez_caught_wake_tty_susp(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *m = cw_linux_proc();
@@ -1397,7 +1376,6 @@ void test_rendez_caught_wake_tty_susp(void) {
 }
 
 // The tty:cont fan (proc_job_cont_pgrp) to a member with a SIGCONT handler.
-void test_rendez_caught_wake_tty_cont(void);
 void test_rendez_caught_wake_tty_cont(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *m = cw_linux_proc();
@@ -1430,7 +1408,6 @@ void test_rendez_caught_wake_tty_cont(void) {
 // The stopped member is a SECOND, threadless Proc: a sleeper whose own Proc is
 // stopped parks in the stop park instead of the wait under test, and the
 // resume would wake it whether or not the note did.
-void test_rendez_caught_wake_orphan_hup_cont(void);
 void test_rendez_caught_wake_orphan_hup_cont(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *dying = proc_alloc();
@@ -1519,7 +1496,6 @@ static bool c2_asleep(struct Thread *const t[2], u32 i) {
 }
 static u32 c2_unwound(void) { return (g_c2_run[0] >= 2u) + (g_c2_run[1] >= 2u); }
 
-void test_rendez_caught_note_one_unwind(void);
 void test_rendez_caught_note_one_unwind(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *par = cw_linux_proc();
@@ -1618,7 +1594,6 @@ void test_rendez_caught_note_one_unwind(void) {
 // The claim ends at the claimant's EL0-return tail (VIV-EINTR round-2 F1).
 // ---------------------------------------------------------------------------
 
-
 // The EL0-return tail of the call that just returned, run on this kernel
 // thread. The sp passes the tail's own checks but sits below a Linux signal
 // frame, so a handler is refused before any store and its note stays queued.
@@ -1665,7 +1640,6 @@ static void c3_entry(void) {
     test_kthread_park_terminal(&g_c3_exited);
 }
 
-void test_rendez_caught_note_tail_discards_and_releases(void);
 void test_rendez_caught_note_tail_discards_and_releases(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *par = cw_linux_proc();
@@ -1804,7 +1778,6 @@ static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *j
     return parked;
 }
 
-void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_tail_parks_for_the_stop_it_applies(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     bool early_c, stopped_c, joined_c;
@@ -1865,7 +1838,6 @@ static bool c4_asleep(struct Thread *const t[2], u32 i) {
     return g_c4_run[i] == 1u && t[i]->state == THREAD_SLEEPING;
 }
 
-void test_rendez_caught_note_release_wakes_peer(void);
 void test_rendez_caught_note_release_wakes_peer(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Proc *par = cw_linux_proc();
@@ -2125,14 +2097,12 @@ static bool nt_teardown(struct Thread *t[2]) {
     return true;
 }
 
-
 // rendez.caught_note_prefers_awake -- the walk prefers a thread that is not
 // blocked: main, awake, is designated and the peer asleep in an unwinding wait
 // is not woken (the L285 shape). Main then enters an unwinding wait and unwinds
 // at once, its designation turned into its claim. The control, one variable
 // away: once main's claim is released, the walk reaches the peer, so the peer's
 // stillness was the pick's doing.
-void test_rendez_caught_note_prefers_awake(void);
 void test_rendez_caught_note_prefers_awake(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2172,7 +2142,6 @@ void test_rendez_caught_note_prefers_awake(void) {
 // rendez.caught_note_poster_first -- the walk prefers the posting thread. The
 // same two awake threads; only the poster differs. Posted from outside the
 // Proc, the note goes to main; posted by the peer, to the peer.
-void test_rendez_caught_note_poster_first(void);
 void test_rendez_caught_note_poster_first(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2221,7 +2190,6 @@ static void nt_handoff_leg(u32 main_step, u32 peer_step, int peer_rc, bool *ok,
     *down = nt_teardown(t);
 }
 
-void test_rendez_caught_note_handoff(void);
 void test_rendez_caught_note_handoff(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     static const char *const why[3] = {
@@ -2252,7 +2220,6 @@ void test_rendez_caught_note_handoff(void) {
 // the THREAD_EXITING commit, and the walk goes on to a thread that can take the
 // note. Main, awake and designated, exits through thread_exit_self; the peer,
 // asleep in an unwinding wait, is designated and unwinds.
-void test_rendez_caught_note_exit_drop(void);
 void test_rendez_caught_note_exit_drop(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2283,7 +2250,6 @@ void test_rendez_caught_note_exit_drop(void) {
 // queued. A second interrupt finds the family claimed,
 // so no thread is picked: only the walk's re-wake of the holder ends main's
 // wait (caught_target.tla BUGGY_NO_REKICK).
-void test_rendez_caught_note_holder_rewake(void);
 void test_rendez_caught_note_holder_rewake(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2351,7 +2317,6 @@ static void nt_native_leg(bool linux_pheno, bool main_awake, struct nt_native *o
     o->down = nt_teardown(t);
 }
 
-void test_rendez_caught_note_native_kicks_only(void);
 void test_rendez_caught_note_native_kicks_only(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct nt_native nat, lin, nat_awake, lin_awake;
@@ -2383,7 +2348,6 @@ void test_rendez_caught_note_native_kicks_only(void) {
 // threads sleep in unwinding waits; the stale picks are forced. The control,
 // one variable away, forces one stale pick fewer: the last re-pick designates
 // main, which unwinds alone while the peer sleeps on.
-
 struct nt_repick {
     bool ok, down;
     u32  left;          // forced stale picks the walk did not consume
@@ -2433,7 +2397,6 @@ static void nt_repick_leg(u32 stale, struct nt_repick *o) {
     o->down = nt_teardown(t);
 }
 
-void test_rendez_caught_note_repick_fallback(void);
 void test_rendez_caught_note_repick_fallback(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     const u32 n = caught_repicks_for_test();
@@ -2507,7 +2470,6 @@ static struct test_caught_leg cwt_leg(bool linux_pheno, bool *kid_kept) {
     return leg;
 }
 
-void test_rendez_caught_note_ends_wait4(void);
 void test_rendez_caught_note_ends_wait4(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     bool kept = false, ctl_kept = false;

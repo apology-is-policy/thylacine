@@ -45,76 +45,6 @@
 #include <thylacine/devctl.h>
 #include <thylacine/devproc.h>
 
-void test_devproc_bestiary_smoke(void);
-void test_devproc_attach_returns_dir(void);
-void test_devproc_walk_root_to_kproc_dir(void);
-void test_devproc_walk_unknown_pid_misses(void);
-void test_devproc_walk_to_status_file(void);
-void test_devproc_walk_dotdot_to_root(void);
-void test_devproc_read_status_format(void);
-void test_devproc_read_cmdline_kproc(void);
-void test_devproc_read_ns_format(void);
-void test_devproc_read_ctl_returns_zero(void);
-void test_devproc_write_ctl_rejects(void);
-void test_devproc_read_dir_returns_neg1(void);
-void test_devproc_read_partial_offset(void);
-// A-4b: cross-process kill via /proc/<pid>/ctl.
-void test_devproc_kill_authorized_predicate(void);
-void test_devproc_none_owns_nothing(void);    // IDENTITY-DESIGN reserved ids: Plan 9's nonone
-void test_devproc_none_walled(void);
-void test_devproc_stat_native_ctl_owner(void);
-void test_devproc_write_ctl_kill_dispatch(void);
-void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
-// 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
-void test_devproc_debug_authorized_predicate(void);
-void test_devproc_debug_cap_cover_predicate(void);
-void test_devproc_debug_cap_cover_attach(void);
-void test_devproc_debug_attach_detach_lifecycle(void);
-void test_devproc_debug_stop_start_resume(void);
-void test_devproc_debug_birth_hold_ctl(void);
-void test_devproc_debug_mem(void);
-void test_devproc_debug_regs(void);
-void test_devproc_debug_kregs_kstack_wait(void);
-void test_devproc_debug_kstack_settled(void);
-void test_devproc_debug_step_cancel_on_stop(void);
-void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
-void test_devproc_read_cwd(void);            // VIVARIUM V-4b-1
-void test_devproc_maps(void);                // VIVARIUM V-4b-2
-void test_devproc_environ(void);             // VIVARIUM V-4b-6
-// prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
-void test_devproc_sched_gate_predicate(void);
-void test_devproc_sched_read_gated(void);
-void test_devproc_read_sched_format(void);
-// #133: the settled-park decision (a stale park must not read as stopped).
-void test_devproc_park_state_settled(void);
-// IM-2: /proc/<pid>/imperium (the legate scope; owner-or-CAP_HOSTOWNER).
-void test_devproc_imperium_read_gated(void);
-void test_devproc_read_imperium_format(void);
-void test_devproc_dump_seal_predicate(void);
-void test_devproc_dump_seal_disclosure(void);
-void test_devproc_dump_seal_scope(void);
-void test_devproc_debug_exitkill_terminates_on_close(void);
-void test_devproc_maps_code_visible(void);
-void test_devproc_maps_code_redacted(void);
-void test_devproc_maps_code_truncated(void);
-void test_devproc_maps_code_trimmed(void);
-void test_devproc_maps_code_budget_stop(void);
-void test_devproc_debug_cover_weighs_departed(void);
-void test_devproc_seal_outlives_its_holder(void);
-void test_devproc_taint_outlives_its_holder(void);
-void test_devproc_zombie_records_departure(void);
-void test_devproc_exec_records_departure(void);
-void test_devproc_image_cover_join(void);
-void test_devproc_image_seal_join(void);
-void test_proc_seal_stamps_the_image(void);
-void test_proc_elevation_ignores_a_zombie_sharer(void);
-void test_proc_debug_taint_refuses_elevation(void);
-void test_proc_debug_taint_crosses_fork(void);
-void test_devproc_zombie_status_signal(void);
-
-// A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
-// (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
-
 // =============================================================================
 // Helpers.
 // =============================================================================
@@ -387,7 +317,6 @@ void test_devproc_read_status_format(void) {
 //   (a) proc_set_name extracts the basename correctly, and
 //   (b) the ctx-switch run_ns accounting is LIVE: kproc's cpu_ns accrues
 //       after forced yields and never decreases.
-void test_proc_cpu_ns_accounting(void);
 void test_proc_cpu_ns_accounting(void) {
     // (a) proc_set_name basename extraction -- pure, on a stack Proc (only
     // p->name is touched, so no other field need be valid).
@@ -433,7 +362,6 @@ void test_proc_cpu_ns_accounting(void) {
 // substrate. Drives the SAME forced-yield vehicle as the run_ns test above: a
 // yield switches the running thread OUT then a peer/idle switches it back IN, so
 // nsched grows; the burned slice guarantees a real switch rather than a no-op.
-void test_sched_prowl_counters(void);
 void test_sched_prowl_counters(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t != NULL, "current thread present");
@@ -1844,7 +1772,6 @@ static void birth_hold_target_free(struct Proc *p) {
 // the proc table stalls whichever later test walks it.
 #define BHC_UNSEEN 0xDEADu
 
-
 static u32 bhc_hold(struct Proc *p) {
     return __atomic_load_n(&p->debug_birth_hold, __ATOMIC_ACQUIRE);
 }
@@ -2272,7 +2199,6 @@ void test_devproc_debug_stop_start_resume(void) {
 // whole-Proc stop does (8a-2c F1): left armed, the head's step trap would stop
 // the target for whoever attached next, before it asked. A zeroed stack Thread
 // carries the armed step; the target is linked so its ctl resolves.
-void test_devproc_debug_release_cancels_step(void);
 void test_devproc_debug_release_cancels_step(void) {
     struct Thread *tt = current_thread();
     TEST_ASSERT(tt && tt->proc, "test thread has a proc");
@@ -3242,7 +3168,6 @@ void test_devproc_maps_code_visible(void) {
     TEST_ASSERT(self_notrace, "B-2b: but a Proc always sees its own code addresses");
     TEST_ASSERT(!nobody, "B-2b: a reader with no Proc sees none");
 }
-
 
 // "0x<hex>-": how a maps row starting at `va` begins (fmt_hex's format).
 static void maps_va_prefix(u64 va, char out[24]) {

@@ -90,28 +90,6 @@
 #include <thylacine/vivarium.h>
 #include <thylacine/vma.h>
 
-void test_protect_reserve_mints_exactly(void);
-void test_protect_reserve_refusals(void);
-void test_protect_raise_and_write_keeps_contents(void);
-void test_protect_x_refused_before_lookup(void);
-void test_protect_ceiling_bounds_raise(void);
-void test_protect_seal_lowers_ceiling(void);
-void test_protect_split_three_way_then_merge(void);
-void test_protect_grow_ladder_stays_two_vmas(void);
-void test_protect_refusals_change_nothing(void);
-void test_protect_multi_vma_and_hole(void);
-void test_protect_pte_uninstalled_then_reinstalled_at_prot(void);
-void test_protect_cow_split_then_break(void);
-void test_cow_clone_dedupes_split_pieces(void);
-void test_cow_clone_refuses_eager_anon_with_writable_ceiling(void);
-void test_sys_burrow_detach_piece_frees_only_its_pages(void);
-void test_protect_range_walk_is_linear(void);
-void test_protect_uninstall_range_skips_absent_subtrees(void);
-void test_protect_noop_protect_needs_no_headroom(void);
-void test_sys_mmap_fixed_anon_w_alone_maps_rw(void);
-
-// The non-static inners of the SVC handlers (kernel/syscall.c).
-
 #define P            PAGE_SIZE
 #define PR_NONE      ((u64)BURROW_PROT_NONE)
 #define PR_R         ((u64)BURROW_PROT_READ)

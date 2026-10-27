@@ -50,28 +50,6 @@
 #include "../../mm/slub.h"       // #140: kmalloc for the oversize-env probe
 #include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
 
-void test_exec_setup_smoke(void);
-void test_exec_setup_segment_data_copied(void);
-void test_exec_setup_constraints(void);
-void test_exec_setup_multi_segment(void);
-void test_exec_setup_lifecycle_round_trip(void);
-void test_exec_user_stack_guard(void);
-void test_exec_setup_auxv(void);
-void test_exec_setup_auxv_no_phdr_segment(void);
-void test_exec_from_spoor_rodata_dispatch(void);
-void test_exec_setup_env_frame(void);            // #140
-void test_exec_stage_env_bounds(void);           // #140
-void test_exec_unaligned_stays_off_image_cache(void);
-void test_exec_from_spoor_aliased_window_distinct(void);
-void test_exec_unaligned_segment_loads(void);
-void test_exec_unaligned_lazy_segment_loads(void);
-void test_exec_shared_page_segments_refused(void);
-void test_exec_setup_bss_tail_icache_synced(void);
-void test_exec_from_spoor_bss_only_text_icache_synced(void);
-void test_exec_writable_segment_is_sparse(void);
-void test_exec_stack_is_sparse(void);
-void test_exec_interp_argv_shape(void);
-
 #define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
 // 16-byte alignment for safety (struct Elf64_Ehdr alignment fits inside).
@@ -815,7 +793,6 @@ void test_exec_setup_auxv(void) {
 // Vote 18: a refused AT_RANDOM draw fails the exec; the image never runs on
 // zeros. The boot refuses userspace on an unseeded pool, so only the hook can
 // make the draw refuse here.
-void test_exec_at_random_refusal_fails_exec(void);
 void test_exec_at_random_refusal_fails_exec(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1180,13 +1157,6 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
 // as about where the VMAs landed.
 // =============================================================================
 
-void test_execve_load_into_detached(void);
-void test_execve_load_into_rejects_dirty(void);
-void test_execve_load_refuses_nomem_at_the_pool_edge(void);
-void test_execve_load_refuses_nomem_on_the_frame(void);
-void test_execve_failed_load_leaves_target_drainable(void);
-void test_exec_native_rejects_dynamic_linux(void);
-
 // B-1a' audit F15: a refused allocation inside the load is a resource refusal
 // (-T_E_NOMEM), not a malformed binary (-1, which sys_execve_core reports as
 // EINVAL); the syscall reports the one the load returns.
@@ -1481,7 +1451,6 @@ void test_exec_native_rejects_dynamic_linux(void) {
 // 13.10.6) -- under either field value, since B-1d took the phenotype out of the
 // load. Both field values are driven, so a loader that reset the field to either
 // one would fail the other leg.
-void test_exec_load_failure_leaves_phenotype(void);
 void test_exec_load_failure_leaves_phenotype(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1540,7 +1509,6 @@ void test_exec_load_failure_leaves_phenotype(void) {
 // "the signal mask is inherited"). Read the field instead and a Linux git
 // exec'ing the native nora keeps git's blocked-note mask across the exec.
 // The hook must also never write the field itself (only the commit does).
-void test_exec_reset_follows_decided_phenotype(void);
 void test_exec_reset_follows_decided_phenotype(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1627,7 +1595,6 @@ void test_exec_reset_follows_decided_phenotype(void) {
 // it; now it loads the interpreter. The CONTROL is the same fixture with no
 // namespace, which disables the rewrite, so a pass cannot come from a loader
 // that ignores PT_INTERP altogether.
-void test_exec_interp_dispatch_every_phenotype(void);
 void test_exec_interp_dispatch_every_phenotype(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");

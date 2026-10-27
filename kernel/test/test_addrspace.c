@@ -60,8 +60,6 @@
 #include <thylacine/proc.h>
 #include <thylacine/vma.h>
 
-// Existing KERNEL_TESTS-only process-table fixtures.
-
 // A payer's charge record, read WITHOUT settling it: the kernel has no
 // stand-alone claim (AS-R9), so a test peeks under the record's leaf lock.
 static u32 charge_held(struct Burrow *v, const struct AddrSpace *as) {
@@ -70,14 +68,6 @@ static u32 charge_held(struct Burrow *v, const struct AddrSpace *as) {
     spin_unlock(&v->lock);
     return held;
 }
-
-void test_addrspace_alloc_shape(void);
-void test_addrspace_refcount(void);
-void test_addrspace_kproc_has_none(void);
-void test_addrspace_charge_helpers_refuse_without_as(void);
-void test_addrspace_share_drains_at_last_ref(void);
-void test_addrspace_proc_alloc_in_shares(void);
-void test_proc_rfork_rfmem_refuses_without_addrspace(void);
 
 void test_addrspace_alloc_shape(void) {
     struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());

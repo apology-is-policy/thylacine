@@ -15,13 +15,6 @@
 #include <thylacine/random.h>
 #include <thylacine/virtio.h>
 
-void test_chacha20_block_vector(void);
-void test_chacha20_keystream_continuity(void);
-void test_kern_random_two_reads_differ(void);
-void test_kern_random_large_read_nonzero(void);
-void test_kern_random_virtio_reseed(void);
-void test_kern_random_virtio_deadline_ticks(void);
-
 static bool bytes_eq(const u8 *a, const u8 *b, u32 n) {
     for (u32 i = 0; i < n; i++) if (a[i] != b[i]) return false;
     return true;

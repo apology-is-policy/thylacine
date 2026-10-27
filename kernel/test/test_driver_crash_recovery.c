@@ -68,8 +68,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_driver_crash_recovery(void);
-
 // QEMU virt's virtio-mmio bank constants — mirror the userspace driver.
 // SPI base = 32 + 16 = 48; slot stride = 0x200; slot index derives from
 // (pa - VIRTIO_MMIO_BASE_PA) / VIRTIO_MMIO_SLOT_STRIDE.

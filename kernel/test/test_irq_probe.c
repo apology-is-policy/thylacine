@@ -97,8 +97,6 @@
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
 
-void test_irq_probe_rfork_with_caps(void);
-
 // The kernel selects a synthetic SPI and passes it as argv[1]. The userspace
 // probe has no platform/vector constant that can drift from MSI reservations.
 

@@ -50,34 +50,6 @@
 #include <thylacine/types.h>
 #include <thylacine/devproc.h>
 
-
-struct spawn_allowance;
-
-// A-5b #827b: the per-bit grant gate, exported so the decision can be driven
-// directly on synthetic Procs (decoupled from the heavyweight spawn body).
-
-// LS-5: the perm-application helper (the bit->action mapping both spawn thunks
-// run) + the console-owner accessor, exported so the owner-set WIRING can be
-// driven deterministically — a real spawn races the child's fast exit clearing
-// g_console_owner, so the wiring is unobservable through a full spawn.
-
-void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
-void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
-void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
-void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
-void test_sys_spawn_with_perms_holder_delegates_may_post(void);
-void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
-void test_sys_spawn_with_perms_console_owner_grant_gate(void);
-void test_sys_spawn_with_perms_console_owner_set_wiring(void);
-void test_sys_spawn_with_perms_seat_roles(void);
-void test_sys_spawn_with_perms_renderer_gate(void);
-void test_sys_spawn_with_perms_seal_blocks_debug_and_dump(void);
-
-// (U) F1: the I-39 debug-authority predicate, so the NOTRACE arm can assert the
-// CONSEQUENCE of the stamp and not merely that a bit landed in a word.
-// The seal's one-way setters (kernel/syscall.c); the test drives their re-enable
-// refusal directly (devproc's image gate is pinned in test_devproc.c).
-
 static void drain_zombies(void) {
     int status = 0;
     while (wait_pid(&status) > 0) { /* drain */ }

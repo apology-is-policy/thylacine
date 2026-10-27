@@ -16,7 +16,6 @@
 #include "../../arch/arm64/timer.h"
 #include <thylacine/types.h>
 
-void test_timer_tick_increments(void);
 void test_timer_tick_increments(void) {
     TEST_ASSERT(timer_get_freq() > 0,
         "timer_get_freq is zero (timer_init didn't run?)");
@@ -38,7 +37,6 @@ void test_timer_tick_increments(void) {
 // The ns -> counter conversion is exact while the counter value fits, and
 // saturates past it: a counter above 1 GHz (CNTFRQ is 32 bits) must not wrap a
 // far deadline to a near one.
-void test_timer_ns_to_counter_saturates(void);
 void test_timer_ns_to_counter_saturates(void) {
     const u64 max = ~0ull;
     TEST_EXPECT_EQ(timer_ns_to_counter_at(1000000000ull, 62500000ull), 62500000ull,
@@ -56,7 +54,6 @@ void test_timer_ns_to_counter_saturates(void) {
     TEST_EXPECT_EQ(timer_ns_to_counter_at(max, 0), 0ull, "no counter yet");
 }
 
-void test_timer_oneshot_tval_clamps(void);
 void test_timer_oneshot_tval_clamps(void) {
     u64 now = 1000000;
 
@@ -95,7 +92,6 @@ void test_timer_oneshot_tval_clamps(void) {
 // undisturbed (NO behavior change at TI-1 -- no production path arms a one-shot
 // yet; this drives the primitive directly). Runs on cpu0 (the test CPU), where
 // g_ticks advances.
-void test_timer_arm_oneshot_restores(void);
 void test_timer_arm_oneshot_restores(void) {
     u64 now = timer_get_counter();
     timer_arm_oneshot_cnt(now + (u64)timer_get_freq());   // ~1 s out

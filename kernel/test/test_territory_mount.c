@@ -57,37 +57,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-
-void test_territory_mount_smoke(void);
-void test_territory_mount_idempotent_same_source(void);
-void test_territory_mount_idempotent_converges_flags(void);  // #219
-void test_territory_mount_mrepl_replaces(void);
-void test_territory_mount_unmount_missing_returns_error(void);
-void test_territory_mount_table_full(void);
-void test_territory_mount_clone_bumps_refs(void);
-void test_territory_mount_destroy_drops_all_refs(void);
-void test_territory_mount_devno_disambiguates(void);
-void test_territory_mount_devno_full_width(void);
-void test_territory_mount_devno_minter_crosses_2_32(void);
-void test_territory_mount_noexec_covers(void);       // #217
-void test_territory_mount_rejects_cycle(void);
-void test_territory_mount_mp_path_lifecycle(void);   // #66
-void test_territory_mount_format_ns(void);           // #66
-void test_territory_mount_union_keeps_covered(void);           // Plan 9 unions
-void test_territory_mount_no_covered_unless_fresh(void);       // Plan 9 unions
-void test_territory_mount_covered_file_point_stays_plain(void); // Plan 9 unions
-void test_territory_mount_covered_reposition(void);            // Plan 9 unions
-void test_territory_mount_covered_leaves_with_last(void);      // Plan 9 unions
-void test_territory_mount_covered_needs_two_slots(void);       // Plan 9 unions
-void test_territory_mount_covered_self_mount_refused(void);    // Plan 9 unions
-void test_territory_mount_covered_clone(void);                 // Plan 9 unions
-void test_territory_mount_covered_noexec_scoped(void);         // Plan 9 unions
-void test_territory_mount_covered_format_ns(void);             // Plan 9 unions
-void test_territory_mount_mrepl_existing_replaces_group(void);
-void test_territory_mount_mbefore_moves_existing(void);
-void test_territory_mount_lookup_ref_survives_unmount(void);
-void test_territory_root_ref_survives_pivot(void);
-
 // Mint a mount-point Spoor with a distinct identity (devnone dc '-', devno 0,
 // the given qid.path). The mount table keys on (dc, devno, qid.path), so a
 // distinct qid.path = a distinct mount point. A directory, as mount points are:

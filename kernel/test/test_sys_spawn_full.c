@@ -35,13 +35,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-
-void test_sys_spawn_full_happy_path_fds_and_caps(void);
-void test_sys_spawn_full_zero_count_zero_mask_succeeds(void);
-void test_sys_spawn_full_rejects_oversize_fd_count(void);
-void test_sys_spawn_full_rejects_bad_fd(void);
-void test_sys_spawn_full_rejects_missing_binary(void);
-
 static void drain_zombies(void) {
     int status = 0;
     while (wait_pid(&status) > 0) { /* drain */ }

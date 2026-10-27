@@ -12,48 +12,6 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/types.h>
 
-void test_9p_wire_primitives_round_trip(void);
-void test_9p_wire_primitives_overflow(void);
-void test_9p_wire_str_round_trip(void);
-void test_9p_wire_qid_round_trip(void);
-void test_9p_wire_header_peek(void);
-void test_9p_wire_tversion_round_trip(void);
-void test_9p_wire_tattach_round_trip(void);
-void test_9p_wire_twalk_round_trip(void);
-void test_9p_wire_twalk_zero_names_clone(void);
-void test_9p_wire_tclunk_round_trip(void);
-void test_9p_wire_tflush_round_trip(void);
-void test_9p_wire_tweft_round_trip(void);
-void test_9p_wire_tweftio_round_trip(void);
-void test_9p_wire_rlerror_parse(void);
-void test_9p_wire_rmsg_size_mismatch_rejected(void);
-void test_9p_wire_rmsg_wrong_type_rejected(void);
-void test_9p_wire_rwalk_count_cap_enforced(void);
-void test_9p_wire_pack_str_overflow(void);
-void test_9p_wire_tlopen_round_trip(void);
-void test_9p_wire_tlcreate_round_trip(void);
-void test_9p_wire_tread_round_trip(void);
-void test_9p_wire_twrite_round_trip(void);
-void test_9p_wire_rread_data_cap_enforced(void);
-void test_9p_wire_rread_size_mismatch_rejected(void);
-void test_9p_wire_rlopen_vs_rlcreate_type_strict(void);
-void test_9p_wire_tgetattr_round_trip(void);
-void test_9p_wire_tsetattr_round_trip(void);
-void test_9p_wire_treaddir_round_trip(void);
-void test_9p_wire_dirent_unpack(void);
-void test_9p_wire_tstatfs_round_trip(void);
-void test_9p_wire_tfsync_round_trip(void);
-void test_9p_wire_rreaddir_data_cap_enforced(void);
-void test_9p_wire_tsymlink_round_trip(void);
-void test_9p_wire_tmknod_round_trip(void);
-void test_9p_wire_trename_round_trip(void);
-void test_9p_wire_treadlink_round_trip(void);
-void test_9p_wire_tlink_round_trip(void);
-void test_9p_wire_tmkdir_round_trip(void);
-void test_9p_wire_trenameat_round_trip(void);
-void test_9p_wire_tunlinkat_round_trip(void);
-void test_9p_wire_twalkgetattr_round_trip(void);
-
 // 4 KiB scratch buffer; every message we build at v1.0 fits in this
 // (Tattach with full-length uname+aname stays under 600 bytes;
 // Twalk with 16 names of 255 bytes each tops out at ~4128 bytes — just

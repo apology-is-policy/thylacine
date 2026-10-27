@@ -319,7 +319,6 @@ static void reserve_kernel_range(u64 pa, size_t size, const char *what) {
     uart_puts(" size="); uart_puthex64((u64)size); uart_puts("\n");
 }
 #ifdef KERNEL_TESTS
-bool kobj_mmio_test_reservation_union(void);
 bool kobj_mmio_test_reservation_union(void) {
     struct mmio_claim claims[KOBJ_MMIO_MAX];
     for (size_t i = 0; i < sizeof(claims); i++) ((volatile u8 *)claims)[i] = 0;

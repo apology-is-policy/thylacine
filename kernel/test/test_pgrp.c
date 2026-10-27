@@ -42,16 +42,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-void test_pgrp_defaults_and_inherit(void);
-void test_pgrp_setsid_semantics(void);
-void test_pgrp_setpgid_rule_matrix(void);
-void test_pgrp_zombie_reads_alive_mutations(void);
-void test_tty_note_post_gate(void);
-void test_tty_pgrp_fanout_exactly_once(void);
-void test_tty_terminate_class_gate(void);
-
-// Test-harness hooks (the test_proc.c pattern).
-
 static volatile u32 g_child_sid;
 static volatile u32 g_child_pgid;
 static volatile int g_child_setsid_rv;

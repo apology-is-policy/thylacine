@@ -20,14 +20,6 @@
 #include <thylacine/types.h>
 #include <thylacine/devctl.h>
 
-void test_p9_attached_create_destroy(void);
-void test_p9_attached_handshake_failure_returns_null(void);
-void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
-void test_p9_attached_root_spoor_walk_read(void);
-void test_p9_attached_query_helpers(void);
-void test_p9_attached_walked_outlives_root_no_uaf(void);
-void test_p9_attached_ctl_registry(void);
-
 // File-scope storage for the loopback's response buffer. The attached
 // struct heap-allocates everything else (client + recv_buf).
 static struct p9_loopback g_loopback;
@@ -359,8 +351,6 @@ static int f1_64char_responder(void *ctx, const u8 *req, size_t req_len,
     }
     return attach_responder(ctx, req, req_len, resp, resp_cap);
 }
-
-void test_sys_walk_open_max_length_name_nul_terminated(void);
 
 void test_sys_walk_open_max_length_name_nul_terminated(void) {
     g_f1_captured_name_len = 0;

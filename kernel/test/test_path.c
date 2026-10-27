@@ -19,15 +19,6 @@
 #include <thylacine/syscall.h>   // SYS_OPEN_PATH_MAX
 #include <thylacine/types.h>
 
-void test_path_make_root(void);
-void test_path_addelem_forms(void);
-void test_path_parent_forms(void);
-void test_path_addelem_overflow_null(void);
-void test_path_ref_balance(void);
-void test_path_spoor_clone_shares(void);
-void test_path_spoor_extend(void);
-void test_path_spoor_transplant(void);
-
 // streq -- a NUL-terminated compare (no libc in the kernel test env).
 static bool streq(const char *a, const char *b) {
     if (!a || !b) return a == b;

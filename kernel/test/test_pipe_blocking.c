@@ -77,17 +77,6 @@ static long dev_read(struct Spoor *c, void *buf, long n) {
 }
 
 // =============================================================================
-// Forward decls.
-// =============================================================================
-
-void test_pipe_blocking_write_wakes_sleeping_reader(void);
-void test_pipe_blocking_read_wakes_sleeping_writer(void);
-void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
-void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
-void test_pipe_blocking_hangup_wakes_reader_with_eof(void);
-void test_pipe_blocking_hangup_wakes_writer_with_epipe(void);
-
-// =============================================================================
 // Consumer entries. Each: do one blocking op; publish the result (RELEASE, after
 // the buffer it describes); park TERMINALLY. A trailing bare sched() was a
 // yield: the helper stayed RUNNABLE, an idle peer could steal and run it, and
@@ -372,7 +361,6 @@ void test_pipe_blocking_hangup_wakes_writer_with_epipe(void) {
 //     drain re-walks the list, so under wake-one the drain re-wakes the next,
 //     and the bug hides behind the cascade. Only the no-cascade EOF edge with
 //     two waiters distinguishes it.)
-void test_pipe_blocking_multi_readers_share_one_empty_pipe(void);
 void test_pipe_blocking_multi_readers_share_one_empty_pipe(void) {
     g_rd = NULL;
     g_wr = NULL;
@@ -435,7 +423,6 @@ void test_pipe_blocking_multi_readers_share_one_empty_pipe(void) {
 // re-sample full + re-sleep), and wake-all (closing the READ end is one edge
 // with two writers still asleep -> both return -T_E_PIPE; a wake-one bug
 // strands one on the full ring forever).
-void test_pipe_blocking_multi_writers_share_one_full_pipe(void);
 void test_pipe_blocking_multi_writers_share_one_full_pipe(void) {
     g_rd = NULL;
     g_wr = NULL;
@@ -517,7 +504,6 @@ static void caught_pipe_feed(void *arg) {
     (void)dev_write(g_wr, &byte, 1L);
 }
 
-void test_pipe_blocking_caught_note_ends_read(void);
 void test_pipe_blocking_caught_note_ends_read(void) {
     g_rd = NULL;
     g_wr = NULL;
@@ -559,7 +545,6 @@ static void caught_pipe_take_one(void *arg) {
     (void)dev_read(g_rd, &b, 1L);
 }
 
-void test_pipe_blocking_caught_note_ends_write(void);
 void test_pipe_blocking_caught_note_ends_write(void) {
     g_rd = NULL;
     g_wr = NULL;
@@ -616,7 +601,6 @@ static long caught_pipe_recv(void *arg) {
     return r;
 }
 
-void test_pipe_blocking_caught_note_scoped_to_reader_recv(void);
 void test_pipe_blocking_caught_note_scoped_to_reader_recv(void) {
     g_rd = NULL;
     g_wr = NULL;

@@ -21,13 +21,6 @@
 #include "../../arch/arm64/timer.h" // TIMER_INTID_EL1_VIRT (R9 F142 test)
 #include "../../arch/arm64/gic.h"   // gic_max_intid (R12-gic-edge F205 test)
 
-void test_handle_hw_mmio_dup_rejected(void);
-void test_handle_hw_irq_dup_rejected(void);
-void test_handle_hw_mmio_close_releases_claim(void);
-void test_handle_hw_irq_close_releases_intid(void);
-void test_handle_hw_irq_kernel_reserved_rejected(void);
-void test_handle_hw_irq_out_of_range_rejected(void);
-
 #define TEST_PA_C   0x100020000ull
 #define TEST_PA_D   0x100030000ull
 

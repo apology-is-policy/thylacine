@@ -22,9 +22,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-
-void test_namespace_layout_proc_ctl_cross(void);
-
 // A synthetic SYSTEM Proc carrying a real Territory (stalk needs p->territory
 // for mount-crossing; test_stalk's fixtures use a NULL territory and so never
 // exercise a cross).

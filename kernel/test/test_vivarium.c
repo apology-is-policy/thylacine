@@ -48,23 +48,6 @@
 #include <thylacine/errno.h>
 #include <thylacine/thread.h>
 
-void test_vivarium_t1_renumbers(void);
-void test_vivarium_t1_narrows_linux_widths(void);
-void test_vivarium_t2_shells_narrow_linux_widths(void);
-
-void test_vivarium_rejects_are_deliberate(void);
-void test_vivarium_unknown_forwards(void);
-void test_vivarium_fails_closed(void);
-void test_vivarium_no_wide_alias(void);
-void test_vivarium_openat_domain(void);
-void test_vivarium_openat_at_fdcwd(void);
-void test_vivarium_openat_build(void);
-void test_vivarium_stat_to_linux(void);
-void test_vivarium_fstatat_domain(void);
-void test_vivarium_mmap_domain(void);
-void test_vivarium_clone_domain(void);
-void test_vivarium_wait4_domain(void);
-
 // A recognisable argument vector: every word distinct and non-zero, so a
 // dropped, duplicated, or reordered word is visible rather than accidentally
 // correct (0 would pass a memset bug; equal values would pass a swap bug).
@@ -251,7 +234,6 @@ static void viv_t1_regs_child(void *arg) {
     exits(bad ? "fail" : "ok");
 }
 
-void test_vivarium_t1_keeps_guest_registers(void);
 void test_vivarium_t1_keeps_guest_registers(void) {
     int pid = rfork(RFPROC, viv_t1_regs_child, NULL);
     TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");
@@ -447,7 +429,6 @@ void test_vivarium_unknown_forwards(void) {
                    (int)VIV_TIER2, "gettid is classified (N-3) -- no longer a forward");
 }
 
-void test_vivarium_git_chunk_rows(void);
 void test_vivarium_git_chunk_rows(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;
@@ -487,7 +468,6 @@ void test_vivarium_git_chunk_rows(void) {
                 "readlinkat(78) collides with SYS_PCI_INFO -- AT_FDCWD gate refuses it");
 }
 
-void test_vivarium_faccessat_gate(void);
 void test_vivarium_faccessat_gate(void) {
     // The shared AT_FDCWD gate (faccessat/fchmodat/readlinkat all route through
     // vivarium_faccessat_decide). It is BOTH the "only the cwd form is
@@ -1063,7 +1043,6 @@ void test_vivarium_mmap_domain(void) {
 // shape we thought reasonable -- and each decline is named, because this arm
 // hands a guest a mapping of a FILE and a widening here is an I-36 question, not
 // a fidelity one.
-void test_vivarium_mmap_file_domain(void);
 void test_vivarium_mmap_file_domain(void) {
     const u64 priv = (u64)VIV_MAP_PRIVATE;
     const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
@@ -1149,7 +1128,6 @@ void test_vivarium_mmap_file_domain(void) {
 
 // The two MAP_FIXED argument domains (DISTRO D-3b). Measured off map_library's
 // overlay calls, so each admitted case is asserted as THE CALL STOCK LDSO MAKES.
-void test_vivarium_mmap_fixed_domain(void);
 void test_vivarium_mmap_fixed_domain(void) {
     const u64 pf   = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED);
     const u64 pfa  = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS);
@@ -1250,7 +1228,6 @@ void test_vivarium_mmap_fixed_domain(void) {
 // were admitted by two arms, the order would silently decide which semantics a
 // guest receives, and D-3b's arms differ in whether the guest gets shared
 // demand-paged file bytes or a private eager copy.
-void test_vivarium_mmap_arms_disjoint(void);
 void test_vivarium_mmap_arms_disjoint(void) {
     // Sweep the cross product of every prot/flag/fd/offset value either arm
     // reasons about. Cheap and exhaustive over the interesting space -- far more
@@ -1504,7 +1481,6 @@ void test_vivarium_clone_domain(void) {
 // Dropping REQUEUE is the one that ships a green single-waiter demo and then
 // deadlocks pthread_cond_broadcast (>=2 waiters on a default mutex), so it is
 // pinned SERVED here -- a regression to ENOSYS on op 3 fails this test.
-void test_vivarium_futex_decide(void);
 void test_vivarium_futex_decide(void) {
     enum viv_futex_op op;
 
@@ -1704,7 +1680,6 @@ void test_vivarium_wait4_domain(void) {
 // UNMAPPED set is asserted just as explicitly: those are decisions (no note
 // carries them), not gaps, and collapsing them into "default" would lose that.
 // -----------------------------------------------------------------------------
-void test_vivarium_signal_map(void);
 void test_vivarium_signal_map(void) {
     // Every mapped row, checked individually.
     TEST_ASSERT(viv_signal_note(VIV_SIGINT)   == VIV_SIGNOTE_INTERRUPT,
@@ -1758,7 +1733,6 @@ void test_vivarium_signal_map(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigaction_domain — the rt_sigaction argument domain (V-6, §6.22).
 // -----------------------------------------------------------------------------
-void test_vivarium_sigaction_domain(void);
 void test_vivarium_sigaction_domain(void) {
     const u64 H = 0x400000;   // a plausible handler VA
     const u64 R = VIV_SA_RESTORER;
@@ -1847,7 +1821,6 @@ void test_vivarium_sigaction_domain(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigset_to_notemask — the mask decode (V-6, §6.22).
 // -----------------------------------------------------------------------------
-void test_vivarium_sigset_to_notemask(void);
 void test_vivarium_sigset_to_notemask(void) {
     // The real NOTE_BIT_* numbering, passed in so vivarium.c stays free of
     // kernel headers. These values are notes.h's.
@@ -1918,7 +1891,6 @@ void test_vivarium_sigset_to_notemask(void) {
 // rt_sigreturn puts the pre-handler mask back (notes.phenotype_sigreturn_
 // restores_mask covers that half; the probe's L237-L244 the wiring).
 // -----------------------------------------------------------------------------
-void test_vivarium_handler_mask(void);
 void test_vivarium_handler_mask(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
@@ -1971,7 +1943,6 @@ void test_vivarium_handler_mask(void) {
 // honouring the request silences a second signal the guest said nothing about.
 // This is also what makes the REVERSE direction (note -> signal) well-defined,
 // which is what the notes_post discard needs.
-void test_vivarium_signal_exclusivity(void);
 void test_vivarium_signal_exclusivity(void) {
     // Every mapped signal owns its note outright. V-6b made this universal by
     // evicting SIGTERM from `interrupt`; before that, SIGINT failed here -- and
@@ -2013,7 +1984,6 @@ void test_vivarium_signal_exclusivity(void) {
 // MEASURED against notes.c, not assumed: g_known_notes holds interrupt / kill /
 // pipe / child_exit / tty:*, and NOT snare:*. proc_fault_terminate calls
 // exits(name) directly, so a fault never reaches notes_post at all.
-void test_vivarium_signote_deliverable(void);
 void test_vivarium_signote_deliverable(void) {
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_INTERRUPT),  "interrupt");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TERM),       "term");
@@ -2050,7 +2020,6 @@ static bool kd_is(u64 sig, enum viv_kill_kind want, const char *name) {
     }
 }
 
-void test_vivarium_kill_decide(void);
 void test_vivarium_kill_decide(void) {
     TEST_ASSERT(kd_is(0, VIV_KILL_PROBE, NULL), "signal 0 probes");
     TEST_ASSERT(kd_is(VIV_SIGINT,  VIV_KILL_POST, NOTE_NAME_INTERRUPT), "SIGINT posts interrupt");
@@ -2080,7 +2049,6 @@ void test_vivarium_kill_decide(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigtab — the disposition table + the note-name reverse map (V-6b).
 // -----------------------------------------------------------------------------
-void test_vivarium_sigtab(void);
 void test_vivarium_sigtab(void) {
     // The reverse map ROUND-TRIPS against the forward one for every deliverable
     // signal. Driving it from the forward map means a future edit to either
@@ -2206,7 +2174,6 @@ void test_vivarium_sigtab(void) {
 // -----------------------------------------------------------------------------
 // vivarium.notemask_to_sigset — reporting a mask back honestly (V-6b).
 // -----------------------------------------------------------------------------
-void test_vivarium_notemask_to_sigset(void);
 void test_vivarium_notemask_to_sigset(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
@@ -2262,7 +2229,6 @@ void test_vivarium_notemask_to_sigset(void) {
 // the point where the V-6b exclusivity rule stops being tidiness and becomes
 // load-bearing: without it there would be no single answer to give.
 // -----------------------------------------------------------------------------
-void test_vivarium_signote_reverse(void);
 void test_vivarium_signote_reverse(void) {
     // Every signal that owns its note exclusively must round-trip through both
     // directions. Driven from viv_signal_note itself so a future row cannot be
@@ -2305,7 +2271,6 @@ void test_vivarium_signote_reverse(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigframe — the Tier-1 frame the guest reads (V-6c).
 // -----------------------------------------------------------------------------
-void test_vivarium_sigframe(void);
 void test_vivarium_sigframe(void) {
     // The layout constants ARE the ABI. These are the numbers the aarch64
     // target compiler produces for musl's own declarations; the host compiler
@@ -2384,7 +2349,6 @@ void test_vivarium_sigframe(void) {
 // command builder, the connection-number parse, and the table.
 // =============================================================================
 
-void test_vivarium_socket_domain(void);
 void test_vivarium_socket_domain(void) {
     enum viv_net_proto proto = (enum viv_net_proto)0xff;
     s32 err = 0;
@@ -2438,7 +2402,6 @@ void test_vivarium_socket_domain(void) {
     TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_UDP)[0] == 'u', "udp dir");
 }
 
-void test_vivarium_getsockopt_domain(void);
 void test_vivarium_getsockopt_domain(void) {
     s32 err = -1;
 
@@ -2465,7 +2428,6 @@ void test_vivarium_getsockopt_domain(void) {
     TEST_ASSERT(!vivarium_getsockopt_decide(1, 4, NULL), "NULL err -> false");
 }
 
-void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sendrecv_domain(void) {
     s32 err = -1;
     const u8 CONN = 2;   // VIV_SOCK_CONNECTED
@@ -2541,7 +2503,6 @@ void test_vivarium_sendrecv_domain(void) {
     TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 0, false, NULL), "NULL err -> false");
 }
 
-void test_vivarium_sockaddr(void);
 void test_vivarium_sockaddr(void) {
     u8  ip[4];
     u16 port = 0;
@@ -2568,7 +2529,6 @@ void test_vivarium_sockaddr(void) {
     TEST_ASSERT(!vivarium_sockaddr_in_parse(NULL, 16, ip, &port), "NULL refused");
 }
 
-void test_vivarium_net_cmd(void);
 void test_vivarium_net_cmd(void) {
     char buf[48];
     u8   ip[4] = { 10, 0, 2, 2 };
@@ -2594,7 +2554,6 @@ void test_vivarium_net_cmd(void) {
     TEST_ASSERT(vivarium_net_cmd_ipport(NULL, 48, "connect", ip, 80) == 0, "NULL -> 0");
 }
 
-void test_vivarium_conn_n(void);
 void test_vivarium_conn_n(void) {
     u32 n = 0xffffffffu;
     TEST_ASSERT(vivarium_parse_conn_n("0", 1, &n) && n == 0, "connection 0 is valid");
@@ -2617,7 +2576,6 @@ void test_vivarium_conn_n(void) {
 // The socktab is thread-safe since N-3 (peer threads share Proc.socktab). Its
 // API is snapshot-read (get) + identity-guarded keyed writes -- a returned entry
 // pointer no longer exists -- so these drive it through that surface.
-void test_vivarium_socktab(void);
 void test_vivarium_socktab(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2673,7 +2631,6 @@ void test_vivarium_socktab(void) {
 // control one variable away: a sibling row survives the replace; the epoch
 // stays monotonic across the reset so a keyed write from before it lands
 // nowhere.
-void test_vivarium_socktab_reset(void);
 void test_vivarium_socktab_reset(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2731,7 +2688,6 @@ void test_vivarium_socktab_reset(void) {
 // next fd-creating syscall gets that index back, and a later connect() finds a
 // stale entry -- writing a dial verb to a STRANGER'S connection. That is the
 // failure this asserts is impossible once drop has run.
-void test_vivarium_socktab_close_hook(void);
 void test_vivarium_socktab_close_hook(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2768,7 +2724,6 @@ void test_vivarium_socktab_close_hook(void) {
 // V-5b: the bind fields are part of the recycled-slot contract too. A slot that
 // kept the previous socket's port would let listen() announce a port THIS
 // socket never asked for -- the close-hook bug wearing a different hat.
-void test_vivarium_socktab_bind_fields(void);
 void test_vivarium_socktab_bind_fields(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2840,7 +2795,6 @@ static bool socktab_commit(struct viv_socktab *tab, s32 fd, u64 epoch,
 // recycled socket. The epoch key must refuse it: a fresh claim takes a strictly
 // greater monotonic epoch. A test that recycled to a DIFFERENT n would pass on
 // the broken n-key too, and prove nothing.
-void test_vivarium_socktab_keyed_write_identity(void);
 void test_vivarium_socktab_keyed_write_identity(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2903,7 +2857,6 @@ void test_vivarium_socktab_keyed_write_identity(void) {
 // and connect()'s success records the peer and CONNECTED from either. Each
 // writer refuses a row in the wrong state and a stale epoch, one variable away
 // from the write it allows.
-void test_vivarium_socktab_connecting(void);
 void test_vivarium_socktab_connecting(void) {
     static struct viv_socktab tab;
     tab.lock = SPIN_LOCK_INIT;
@@ -2954,7 +2907,6 @@ void test_vivarium_socktab_connecting(void) {
                 "still CONNECTED");
 }
 
-void test_vivarium_listen_decide(void);
 void test_vivarium_listen_decide(void) {
     s32 err = -1;
 
@@ -3003,7 +2955,6 @@ void test_vivarium_listen_decide(void) {
 // V-5c: the ppoll timeout conversion. The rounding direction is the whole test
 // -- truncating a sub-millisecond wait to 0 turns a poll into a spin, and a
 // spin is the failure a poll loop would never notice and never stop paying for.
-void test_vivarium_timespec_to_ms(void);
 void test_vivarium_timespec_to_ms(void) {
     s32 ms = -99, err = -1;
 
@@ -3046,7 +2997,6 @@ void test_vivarium_timespec_to_ms(void) {
 // V-5c: the ppoll argument domain. Two of the three refusals are ENOSYS rather
 // than EINVAL, and that distinction is the point -- the arguments are valid
 // Linux, and it is this kernel that cannot serve them.
-void test_vivarium_ppoll_decide(void);
 void test_vivarium_ppoll_decide(void) {
     s32 err = -1;
 
@@ -3089,7 +3039,6 @@ void test_vivarium_ppoll_decide(void) {
 }
 
 // V-5c-2: the pselect6 argument domain + the nfds clamp.
-void test_vivarium_pselect6_decide(void);
 void test_vivarium_pselect6_decide(void) {
     s32 err = -1;
     u32 n   = 99;
@@ -3139,7 +3088,6 @@ void test_vivarium_pselect6_decide(void) {
 }
 
 // V-5c-2: FDS_BYTES -- how much of an fd_set covers the low nfds bits.
-void test_vivarium_fdset_bytes(void);
 void test_vivarium_fdset_bytes(void) {
     // Rounded up to whole 8-byte longs, which is what Linux's get_fd_set and
     // set_fd_set touch. Copying more could fault on a caller that sized its
@@ -3156,7 +3104,6 @@ void test_vivarium_fdset_bytes(void) {
 }
 
 // V-5c-2: the forward conversion, three fd_sets -> a pollfd array.
-void test_vivarium_fdset_to_pollfds(void);
 void test_vivarium_fdset_to_pollfds(void) {
     u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
     struct pollfd out[POLL_MAX_NFDS];
@@ -3245,7 +3192,6 @@ void test_vivarium_fdset_to_pollfds(void) {
 }
 
 // V-5c-2: the reverse conversion -- the asymmetric mapping and the BIT count.
-void test_vivarium_pollfds_to_fdset(void);
 void test_vivarium_pollfds_to_fdset(void) {
     u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
     struct pollfd pfds[4];
@@ -3330,7 +3276,6 @@ void test_vivarium_pollfds_to_fdset(void) {
 // V-5b: the announce builder. The wildcard/concrete split is load-bearing --
 // netd migrates an EXPLICIT 127.x listener onto its loopback stack while a `*`
 // listener stays on the NIC, so these two reach different listeners.
-void test_vivarium_announce_cmd(void);
 void test_vivarium_announce_cmd(void) {
     char buf[48];
 
@@ -3360,7 +3305,6 @@ void test_vivarium_announce_cmd(void) {
 // V-5b: the endpoint parser -- the inverse of the ipport builder, reading
 // netd's `remote` file for accept()'s peer address. A garbled endpoint must
 // never become a plausible-looking address.
-void test_vivarium_parse_ipport(void);
 void test_vivarium_parse_ipport(void) {
     u8  ip[4];
     u16 port = 0;
@@ -3402,7 +3346,6 @@ void test_vivarium_parse_ipport(void) {
 
 // V-5b: the peer-address builder. accept() writes this into guest memory, so
 // the byte layout is a Linux ABI, not an internal choice.
-void test_vivarium_sockaddr_build(void);
 void test_vivarium_sockaddr_build(void) {
     u8 sa[16];
     for (u32 i = 0; i < 16; i++) sa[i] = 0xAA;
@@ -3431,7 +3374,6 @@ void test_vivarium_sockaddr_build(void) {
 // V-5b: bind()'s parse accepts what connect()'s refuses. 0.0.0.0:0 is an
 // ordinary bind and a malformed dial, so the two callers need different
 // strictness over the same bytes.
-void test_vivarium_sockaddr_parse_any(void);
 void test_vivarium_sockaddr_parse_any(void) {
     u8  sa[16] = {0};
     u8  ip[4];
@@ -3475,7 +3417,6 @@ void test_vivarium_sockaddr_parse_any(void) {
 //
 // If this test fails, the fix is NOT to delete the line. It is to extend the
 // close hook to the newly-served number, in the same commit.
-void test_vivarium_fd_freeing_rows_stay_unserved(void);
 void test_vivarium_fd_freeing_rows_stay_unserved(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;
@@ -3565,7 +3506,6 @@ static bool viv_str_eq(const char *a, const char *b) {
 // fail a test rather than pass silently. The tier split is the interesting part
 // -- getuid and getgid have exact native twins and matching arity and are still
 // T2, so "it renumbers cleanly" is visibly not the criterion.
-void test_vivarium_startup_batch_rows(void);
 void test_vivarium_startup_batch_rows(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;
@@ -3650,7 +3590,6 @@ void test_vivarium_startup_batch_rows(void) {
 }
 
 // B-1a: the mprotect domain is the prot word alone.
-void test_vivarium_mprotect_domain(void);
 void test_vivarium_mprotect_domain(void) {
     const u64 a = 0x10000ull, l = 0x1000ull;
     TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)VIV_PROT_NONE),
@@ -3682,7 +3621,6 @@ void test_vivarium_mprotect_domain(void) {
 
 // B-1b: the madvise domain is the advice word alone, sorted into a release,
 // a hint, or a decline.
-void test_vivarium_madvise_domain(void);
 void test_vivarium_madvise_domain(void) {
     enum viv_madvise_kind k;
     k = (enum viv_madvise_kind)77;
@@ -3728,7 +3666,6 @@ void test_vivarium_madvise_domain(void) {
 // and the deadline verdict, which decides the race a running kernel cannot be
 // made to hit on demand (a note landing after the deadline, before the sleeper
 // runs).
-void test_vivarium_nanosleep_domain(void);
 void test_vivarium_nanosleep_domain(void) {
     u64  clk = 77;
     bool abs = true;
@@ -3830,7 +3767,6 @@ void test_vivarium_nanosleep_domain(void) {
                    "a death at the deadline: the expiry wins");
 }
 
-void test_vivarium_writev_domain(void);
 void test_vivarium_writev_domain(void) {
     u32 count = 0xFFFFFFFFu;
 
@@ -3891,7 +3827,6 @@ void test_vivarium_writev_domain(void) {
     TEST_EXPECT_EQ((int)vivarium_writev_accumulate(NULL, 1), 0, "a NULL total fails closed");
 }
 
-void test_vivarium_uname_fill(void);
 void test_vivarium_uname_fill(void) {
     struct viv_linux_utsname uts;
 
@@ -3941,7 +3876,6 @@ void test_vivarium_uname_fill(void) {
     vivarium_uname_fill(NULL);
 }
 
-void test_vivarium_identity_map(void);
 void test_vivarium_identity_map(void) {
     // The sentinel. Passed through raw, PRINCIPAL_SYSTEM reads to a Linux guest
     // as (uid_t)-2 -- historically "nobody", the number meaning LEAST
@@ -3985,7 +3919,6 @@ void test_vivarium_identity_map(void) {
 // #151. The fcntl classifier. The served set is MEASURED (busybox issues exactly
 // F_SETFD(FD_CLOEXEC) and F_DUPFD_CLOEXEC(10) at startup), so both of those get
 // their own case here spelled with the values the guest actually sends.
-void test_vivarium_fcntl_domain(void);
 void test_vivarium_fcntl_domain(void) {
     enum viv_fcntl_op op;
     bool cx;
@@ -4093,7 +4026,6 @@ void test_vivarium_fcntl_domain(void) {
 // request classifier -- the decode that lands before the shell (the V-6a
 // pattern). isatty()'s gate is TIOCGWINSZ, so its classification is the
 // load-bearing row; the three TCSETS* forms must collapse to one op.
-void test_vivarium_ioctl_decide(void);
 void test_vivarium_ioctl_decide(void) {
     enum viv_ioctl_op op;
 
@@ -4158,7 +4090,6 @@ void test_vivarium_ioctl_decide(void) {
 // four call sites through musl's pipe() with a hardcoded `mov x1, #0`, and two
 // through pipe2() with `mov w1, #0x80000`. Everything else declines.
 // -----------------------------------------------------------------------------
-void test_vivarium_pipe2_domain(void);
 void test_vivarium_pipe2_domain(void) {
     bool cx;
 
@@ -4214,7 +4145,6 @@ void test_vivarium_pipe2_domain(void) {
                    "NULL cloexec_out -> FORWARD");
 }
 
-void test_vivarium_dup3_domain(void);
 void test_vivarium_dup3_domain(void) {
     bool cx;
 
@@ -4279,7 +4209,6 @@ void test_vivarium_dup3_domain(void) {
 // legs L217-L228 drive them through a real fork + execve). Each leg names the
 // row that would read wrong under the OLD behaviour (a full zero at exec; no
 // copy at fork).
-void test_vivarium_sigtab_fork_exec_rule(void);
 void test_vivarium_sigtab_fork_exec_rule(void) {
     struct viv_sigtab *tab =
         (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
@@ -4402,7 +4331,6 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
 //
 // Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
 // exception frame, which the FCNTL case never reads).
-void test_vivarium_fcntl_dupfd_errnos(void);
 void test_vivarium_fcntl_dupfd_errnos(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4468,7 +4396,6 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
 // (which sets CNONBLOCK directly); THIS covers the fcntl -> handle-helper -> Spoor
 // leg, which otherwise only the SKIPpable git-workflow E2E exercises. Also pins F2
 // (a pipe write end reports OWRITE, not a misleading OREAD).
-void test_vivarium_fcntl_nonblock_roundtrip(void);
 void test_vivarium_fcntl_nonblock_roundtrip(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4512,7 +4439,6 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
 // and the source row is untouched. (Until this vote landed the arm DECLINED a
 // socket source with ENOSYS.) The EBADF/EMFILE split itself rides the identical
 // handle_dup_posix primitive proven in test_vivarium_fcntl_dupfd_errnos above.
-void test_vivarium_dup_arm(void);
 void test_vivarium_dup_arm(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4597,7 +4523,6 @@ static void socktab_fork_hook_witness(void *arg) {
     viv_socktab_fork_snapshot(&w->f);
 }
 
-void test_vivarium_socktab_clone_into(void);
 void test_vivarium_socktab_clone_into(void) {
     struct Proc *parent = proc_alloc();
     struct Proc *child  = proc_alloc();
@@ -4693,7 +4618,6 @@ void test_vivarium_socktab_clone_into(void) {
 // precedes the install); a REFUSED dup3 (a closed source -> EBADF; old == new
 // -> EINVAL) leaves the live row at the target number alone; and F_DUPFD of a
 // socket mints the alias row (fresh epoch) at the number the arm chose.
-void test_vivarium_socktab_arm_refusals(void);
 void test_vivarium_socktab_arm_refusals(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4760,7 +4684,6 @@ void test_vivarium_socktab_arm_refusals(void) {
 
 // The alias rule's table op, directly: copy-with-fresh-epoch, replace-on-claim
 // at the target, the non-socket no-op, and the full-table refusal.
-void test_vivarium_socktab_alias(void);
 void test_vivarium_socktab_alias(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -4810,7 +4733,6 @@ void test_vivarium_socktab_alias(void) {
 // The alias rule AT THE dup3 ARM (the inetd idiom, dup2(connfd, 0)): a socket
 // source's row is copied onto the target number; a non-socket source onto a
 // socket number DROPS that number's row (the fd-freeing obligation).
-void test_vivarium_dup3_alias(void);
 void test_vivarium_dup3_alias(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4855,7 +4777,6 @@ void test_vivarium_dup3_alias(void) {
 //   - a plain (kept) socket        -> SURVIVES (a sweep that over-drops fails);
 //   - a stale entry at a CLOSED fd -> SURVIVES (handle_get_cloexec == -1; a sweep
 //     written `!= 0` instead of `== 1` would wrongly drop it).
-void test_vivarium_exec_drops_cloexec_sockets(void);
 void test_vivarium_exec_drops_cloexec_sockets(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4941,7 +4862,6 @@ static int viv_ready_refs(struct Spoor *sp) {
 // drop, claim's replace, the alias's replace, the reset, the free -- releases
 // that row's reference exactly once. Results are taken first and asserted after
 // the teardown, so a failing leg still frees the table.
-void test_vivarium_socktab_ready_cache(void);
 void test_vivarium_socktab_ready_cache(void) {
     struct viv_socktab *tab = (struct viv_socktab *)kzalloc(sizeof(*tab), 0);
     TEST_ASSERT(tab != NULL, "socktab alloc");
@@ -5125,7 +5045,6 @@ void test_vivarium_socktab_ready_cache(void) {
 // cloexec socket's Spoor is released, a kept socket's is not), and exit (the
 // rest goes with the fds, in the at-exit close -- not at reap, so a zombie pins
 // no netd fid).
-void test_vivarium_socktab_ready_release_paths(void);
 void test_vivarium_socktab_ready_release_paths(void) {
     struct Proc *parent = proc_alloc();
     struct Proc *child  = proc_alloc();
@@ -5206,7 +5125,6 @@ void test_vivarium_socktab_ready_release_paths(void) {
 // buffer receiving 0/4 -- needs a live EL0 mapping the kernel unit harness
 // cannot stage; it is the curl-demo E2E's job, where verifyconnect reads a 0
 // and the fetch completes.)
-void test_vivarium_getsockopt_shell_guards_uaccess(void);
 void test_vivarium_getsockopt_shell_guards_uaccess(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5315,7 +5233,6 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 // F2 witness through the real handle_alloc geometry: BOTH arms read UDP, the
 // bug arm because replace-on-claim evicted the stale row). Two negatives, each
 // with its positive one variable away.
-void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void);
 void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     // ---- ARM 1: WITH the sweep (the fix). ----
     struct Proc *pf = proc_alloc();
@@ -5397,7 +5314,6 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
 // test_dev9p.c (loopback errno legs).
 // =============================================================================
 
-void test_vivarium_openat_create_domain(void);
 void test_vivarium_openat_create_domain(void) {
     u32 omode = 0, perm = 0;
     bool cx = false;
@@ -5473,7 +5389,6 @@ void test_vivarium_openat_create_domain(void) {
                 "S_IFREG|setuid still declines -- the mask spares 07000");
 }
 
-void test_vivarium_mkdirat_domain(void);
 void test_vivarium_mkdirat_domain(void) {
     u32 perm = 0;
     const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
@@ -5512,7 +5427,6 @@ void test_vivarium_mkdirat_domain(void) {
                 "S_IFDIR|sticky (the rootfs /tmp shape) still declines");
 }
 
-void test_vivarium_unlinkat_domain(void);
 void test_vivarium_unlinkat_domain(void) {
     u32 tf = 0xdeadbeefu;
     const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
@@ -5530,7 +5444,6 @@ void test_vivarium_unlinkat_domain(void) {
                 "a real dirfd declines");
 }
 
-void test_vivarium_renameat_domain(void);
 void test_vivarium_renameat_domain(void) {
     const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
     const u64 FDCWD_ZX = 0x00000000FFFFFF9Cull;
@@ -5550,7 +5463,6 @@ void test_vivarium_renameat_domain(void) {
 // a PURE byte transform (the format row a real busybox `ls` stands on; the
 // E2E witnesses the whole shell, this pins the layout math).
 // =============================================================================
-
 
 // Append one 9P2000.L dirent (qid.type/qid.path + cookie + d_type + name) at
 // *pos; qid.version is zeroed (the encode never reads it).
@@ -5575,7 +5487,6 @@ static u64 gd_rd64(const u8 *b) {
     return v;
 }
 
-void test_vivarium_dirent64_encode(void);
 void test_vivarium_dirent64_encode(void) {
     u8 src[256]; u64 sl = 0;
     // "notes" (5 chars) exercises the WORST alignment case (align8(20+5)=32,
@@ -5623,7 +5534,6 @@ void test_vivarium_dirent64_encode(void) {
 // it). Driven through the REAL arm (viv_getdents64_for_test -> viv_tier2), the
 // same shape as the getsockopt uaccess-guard test. The guard runs before the
 // fd lookup, so this needs no live directory -- the FAULT is the buffer check.
-void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_getdents64_guards_uaccess(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5674,8 +5584,6 @@ void test_vivarium_getdents64_guards_uaccess(void) {
 // fixup gate (fi.vaddr < UACCESS_USER_VA_TOP) is false -> extinction, so the
 // harness dies rather than returning. The EFAULT here pins the guard's presence;
 // the count==0 control isolates it (same kern_va, EBADF not EFAULT).
-
-void test_vivarium_readv_writev_guard_iovec_array(void);
 void test_vivarium_readv_writev_guard_iovec_array(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5732,7 +5640,6 @@ void test_vivarium_readv_writev_guard_iovec_array(void) {
 // Linux register and bit; ONLCR pulls OPOST (Linux translates NL only under it);
 // the c_cflag baseline + the c_cc control chars are present (a zero c_cflag reads
 // as B0/hang-up, and a zero VMIN/VINTR would break single-char input).
-void test_vivarium_ioctl_termios_map(void);
 void test_vivarium_ioctl_termios_map(void) {
     struct viv_linux_termios tio;
 
@@ -5777,7 +5684,6 @@ void test_vivarium_ioctl_termios_map(void) {
 // termios, turned into grammar, and applied back must reproduce the five flags --
 // so get->map->grammar->set composes. Plus the ONLCR-requires-OPOST gate, tested
 // by its effect on the applied mode (no string parsing).
-void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_grammar_roundtrip(void) {
     struct viv_linux_termios tio;
     char g[64];
@@ -5837,7 +5743,6 @@ void test_vivarium_ioctl_grammar_roundtrip(void) {
 // classify done before the fd lookup, the unknown request would answer ENOTTY on
 // a bad fd; EBADF must beat ENOTTY (Linux checks the fd first). The full cons
 // serve (a real cons fd) is the in-guest E2E's job.
-void test_vivarium_ioctl_dispatch_ebadf(void);
 void test_vivarium_ioctl_dispatch_ebadf(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5861,7 +5766,6 @@ void test_vivarium_ioctl_dispatch_ebadf(void) {
 // value pass through. getpgid/getsid are pure renumbers (no remap; the native
 // SYS_GETPGID/GETSID handlers + the E2E cover them). This drives the two shells
 // on an explicit Proc whose session/group state is staged to hit each contour.
-void test_vivarium_session_errno_remap(void);
 void test_vivarium_session_errno_remap(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5909,7 +5813,6 @@ void test_vivarium_session_errno_remap(void) {
 // (the global-mode flip) is gated on the caller's session OWNING the console, so
 // a non-owner-session / post-SAK proc is refused -- while reads (isatty's
 // TIOCGWINSZ) stay ungated for any cons-fd holder.
-void test_vivarium_ioctl_cons_identity_and_gate(void);
 void test_vivarium_ioctl_cons_identity_and_gate(void) {
     // F1: spoor_is_console by device identity (spoor_is_console only reads
     // sp->dev + sp->qid.path -- a zeroed stack Spoor is a valid probe).
@@ -5965,7 +5868,6 @@ void test_vivarium_ioctl_cons_identity_and_gate(void) {
 // Design D (VIVARIUM 13.10.1): THE phenotype decision, the one function the
 // three spawn thunks and execve's commit share. The full truth table, so a
 // future 'simplification' to either input alone fails here.
-void test_vivarium_phenotype_decide(void);
 void test_vivarium_phenotype_decide(void) {
     TEST_EXPECT_EQ((u64)phenotype_decide(false, false), (u64)PHENO_NATIVE,
                    "no crossing + no declaration -> native (rule 3, the fail-safe)");
@@ -5979,7 +5881,6 @@ void test_vivarium_phenotype_decide(void) {
 
 // ARCH 8.8.3 (signal(7)'s list): the pure half of the rule. Each class is
 // asserted by name, so a row moving between classes is a visible diff here.
-void test_vivarium_intr_class(void);
 void test_vivarium_intr_class(void) {
     u64 a[VIV_NARGS] = { 0, 0, 0, 0, 0, 0 };
 
@@ -6042,7 +5943,6 @@ void test_vivarium_intr_class(void) {
 // the Dev's stat and cached on the Spoor. A stat that fails answers "not slow"
 // and is NOT cached, so a stat cut short by a group exit cannot pin a
 // fork-shared pts as uninterruptible for the Proc that survives.
-
 static int g_intr_stat_calls = 0;
 static int g_intr_stat_fail  = 0;
 static u32 g_intr_stat_mode  = 0;
@@ -6067,7 +5967,6 @@ static hidx_t intr_install(struct Proc *p) {
     return handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, s);
 }
 
-void test_vivarium_fd_is_slow_cached(void);
 void test_vivarium_fd_is_slow_cached(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -6156,7 +6055,6 @@ static u32 viv_row_count(const struct viv_socktab *tab) {
     return n;
 }
 
-void test_vivarium_unwinds_publish_nothing(void);
 void test_vivarium_unwinds_publish_nothing(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -6315,7 +6213,6 @@ static void viv_close_reserved_child(void *arg) {
     exits(bad ? "fail" : "ok");
 }
 
-void test_vivarium_close_keeps_a_reserved_row(void);
 void test_vivarium_close_keeps_a_reserved_row(void) {
     int pid = rfork(RFPROC, viv_close_reserved_child, NULL);
     TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");

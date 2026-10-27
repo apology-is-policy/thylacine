@@ -20,7 +20,6 @@
 
 #define KMEM_SMOKE_SMALL_N 1500
 
-void test_slub_kmem_smoke(void);
 void test_slub_kmem_smoke(void) {
     static void *smalls[KMEM_SMOKE_SMALL_N];
 
@@ -74,7 +73,6 @@ void test_slub_kmem_smoke(void) {
 // primitive that also defeated kcalloc's own n*size guard (size==1
 // admits exactly this range). Each leg below returns non-NULL on the
 // pre-fix code, failing the assert.
-void test_slub_kmalloc_overflow_guard(void);
 void test_slub_kmalloc_overflow_guard(void) {
     size_t size_max = ~(size_t)0;
 
@@ -104,7 +102,6 @@ void test_slub_kmalloc_overflow_guard(void) {
 // F-S3 verifies an alignment too large for a single-page slab is rejected
 // at create (pre-fix it built a cache with objects_per_slab == 0 whose
 // first alloc NULL-deref'd the empty freelist).
-void test_slub_cache_destroy_guards(void);
 void test_slub_cache_destroy_guards(void) {
     u64 baseline = phys_free_pages();
 
@@ -151,7 +148,6 @@ void test_slub_cache_destroy_guards(void) {
 //
 // Test runs in <50 ms on QEMU virt; well within the 10-s test
 // timeout.
-void test_slub_leak_10k(void);
 void test_slub_leak_10k(void) {
     u64 baseline = phys_free_pages();
 

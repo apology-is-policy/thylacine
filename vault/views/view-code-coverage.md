@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**690 owned · 48 unowned · 738 files (93% owned) · ~11225 unswept lines.**
+**690 owned · 48 unowned · 738 files (93% owned) · ~11240 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **92 files, ~44083 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 12 | 17 | 2725 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 186 | 15 | 1521 |
+| kernel | 186 | 15 | 1536 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
 | arch | 41 | 3 | 184 |
@@ -168,14 +168,14 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
+| kernel/include/thylacine/devproc.h | 44 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | arch/arm64/sections.h | 38 |
-| kernel/include/thylacine/devproc.h | 38 |
 | kernel/include/thylacine/types.h | 30 |
+| kernel/include/thylacine/devctl.h | 23 |
 | usr/tapestryd/src/lib.rs | 21 |
-| kernel/include/thylacine/devctl.h | 19 |
 | kernel/include/thylacine/visibility.h | 17 |
-| kernel/include/thylacine/fault_test.h | 9 |
+| kernel/include/thylacine/fault_test.h | 14 |
 | usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

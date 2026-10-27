@@ -38,27 +38,6 @@
 #include "../../arch/arm64/exception.h"
 #include "../../mm/slub.h"
 
-
-void test_vivsock_accept_wait_is_over(void);
-void test_vivsock_connect_tcp_holds_the_dial(void);
-void test_vivsock_connect_udp_never_waits(void);
-void test_vivsock_connect_keeps_a_reused_number(void);
-void test_vivsock_socket_unwind_publishes_nothing(void);
-void test_vivsock_connect_eintr_then_retry(void);
-void test_vivsock_connect_connecting_resumes(void);
-void test_vivsock_connect_failure_verdicts(void);
-void test_vivsock_send_recv_finish_connect(void);
-void test_vivsock_read_write_finish_connect(void);
-void test_vivsock_sendto_recvfrom_narrow_fd(void);
-void test_vivsock_so_error_reports_the_dial(void);
-void test_vivsock_positioned_io_finishes_connect(void);
-void test_vivsock_so_error_needs_no_descriptor(void);
-void test_vivsock_ctl_verbs_need_their_ctl(void);
-void test_vivsock_ctl_verbs_meet_a_racing_peer(void);
-void test_vivsock_ctl_identity_travels_with_the_fd(void);
-void test_vivsock_connect_finished_by_a_peer(void);
-void test_vivsock_connect_commits_a_realiased_row(void);
-
 // ---------------------------------------------------------------------------
 // The /net stub: net/{tcp,udp}/<n>/{ctl,data,listen,remote,status}. A qid
 // path's low byte is the node's kind, so a test can read what an fd names off

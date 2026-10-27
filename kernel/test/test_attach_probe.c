@@ -69,8 +69,6 @@
 
 #include <thylacine/9p_wire.h>
 
-void test_attach_probe_round_trip(void);
-
 // attach-probe ≈ 15 KiB at the current libt + inline-stub footprint.
 // 32 KiB cap matches the /pipe-probe headroom.
 #define ATTACH_PROBE_BLOB_MAX 32768

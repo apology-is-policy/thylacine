@@ -43,8 +43,6 @@
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
 
-void test_virtio_input_probe_rfork_with_caps(void);
-
 // 16 KiB blob cap. P4-K landed `-z max-page-size=4096` in
 // usr/.cargo/config.toml, which closed rust-lld's 64-KiB
 // MAXPAGESIZE-driven file gap; the virtio-input release ELF now lives

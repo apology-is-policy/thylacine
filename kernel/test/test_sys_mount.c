@@ -84,23 +84,6 @@
 #include <thylacine/types.h>
 #include <thylacine/syscall.h>
 
-
-// Inner SVC handlers (extern; defined in kernel/syscall.c) -- stalk-2 Spoor-keyed.
-
-void test_sys_mount_happy_path_grafts_pipe_spoor(void);
-void test_sys_mount_idempotent_on_duplicate(void);
-void test_sys_mount_rejects_bad_fd(void);
-void test_sys_mount_rejects_missing_right_read(void);
-void test_sys_mount_rejects_invalid_flags(void);
-void test_sys_mount_rejects_null_territory(void);
-void test_sys_unmount_removes_entry_and_drops_ref(void);
-void test_sys_unmount_rejects_nonexistent_target(void);
-void test_sys_mount_caller_close_keeps_mount_alive(void);
-void test_sys_mount_refuses_a_type_mismatch(void);
-void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
-void test_sys_mount_type_check_reads_only_qtdir(void);
-void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
-
 // Mint a synthetic mount-point Spoor with a distinct identity (devnone dc '-',
 // devno 0, the given qid.path). The mount table keys on (dc, devno, qid.path).
 static struct Spoor *mkmp(u64 qid_path) {

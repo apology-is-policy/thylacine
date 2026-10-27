@@ -44,35 +44,6 @@
 #include "../../mm/slub.h"          // V-2: kmalloc/kfree/KP_ZERO
 #include <thylacine/syscall.h>
 
-void test_weft_share_register_claim(void);
-void test_weft_share_full(void);
-void test_weft_share_owner_gc(void);
-void test_weft_hostmem_share(void);
-void test_weft_syscall_share(void);
-void test_weft_map_binding_lifetime(void);
-void test_weft_share_cap_gate(void);
-void test_weft_share_rejects_plain_dma(void);
-void test_weft_weave_share_and_claim(void);
-void test_weft_gpu_bo_share_and_claim(void);
-void test_weft_unshare_disarm(void);
-void test_weft_shared_map_budget_cap(void);
-void test_weft_weave_clunk_unmap_guard(void);
-void test_weft_reap_orphan_reclaimed(void);
-void test_weft_reap_unlocks_the_space_it_locked(void);
-void test_weft_reap_skips_an_exit_closing_proc(void);
-void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
-void test_weft_reap_live_session_untouched(void);
-void test_weft_reap_close_unregisters(void);
-void test_weft_reap_live_sweep_leaves_test_bindings(void);
-
-
-// Non-static syscall inner (kernel/syscall.c). ring_va (x0), ring_size (x1).
-
-void test_weft_sharer_charge_released_at_detach(void);
-void test_weft_reap_kproc_pid_survives_walk(void);
-void test_weft_hostmem_refcount(void);
-void test_weft_hostmem_resolve(void);
-
 #define WEFT_TEST_VA 0x12000000ull
 
 static struct Proc *make_proc(void) {

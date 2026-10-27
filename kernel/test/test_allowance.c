@@ -23,25 +23,6 @@
 #include <thylacine/virtio.h>       // VIRTIO_DEVICE_ID_RNG
 #include <thylacine/syscall.h>
 
-void test_allowance_null_is_broad(void);
-void test_allowance_mmio_containment(void);
-void test_allowance_irq_membership(void);
-void test_allowance_dma_cap(void);
-void test_allowance_revoked_permits_nothing(void);
-void test_allowance_confer_rejects_overcap(void);
-void test_allowance_handle_alloc_broad(void);
-void test_allowance_handle_alloc_revoked_aborts(void);
-void test_allowance_clone_inherit(void);
-void test_allowance_free_null_tolerant(void);
-void test_allowance_pci_membership(void);
-void test_allowance_pci_claim_handler_gate(void);
-void test_allowance_confer_within_parent(void);
-
-// The SYS_PCI_CLAIM handler is not header-declared (a syscall handler); the
-// F2 regression drives it directly (the established test-TU extern pattern).
-void test_allowance_revoke_on_group_terminate(void);
-void test_allowance_narrowed_proc_cannot_spawn(void);
-
 // Mirror the test_handle.c proc make/drop: proc_alloc gives a fresh Proc with
 // an empty handle table + a NULL (broad) allowance; test_proc_drop ZOMBIEs +
 // proc_free's it (which allowance_free's any conferred allowance).

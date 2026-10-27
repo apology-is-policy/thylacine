@@ -34,9 +34,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_userspace_ramfs_hello(void);
-void test_userspace_ramfs_hello_rs(void);
-
 // The cpio newc format aligns data to 4 bytes; the kernel ELF loader
 // requires 8-byte alignment for the Ehdr cast (UBSan -fsanitize=alignment
 // would otherwise trap; see R5-G F61). Copy into an 8-aligned static

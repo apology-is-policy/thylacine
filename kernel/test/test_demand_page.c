@@ -58,45 +58,6 @@
 #include <thylacine/image.h>         // B-1a' audit F8: the cache's reclaim
 #include <thylacine/syscall.h>
 
-void test_pgtable_install_user_pte_smoke(void);
-void test_pgtable_install_user_pte_constraints(void);
-void test_pgtable_install_user_pte_idempotent(void);
-void test_demand_page_smoke(void);
-void test_demand_page_no_vma(void);
-void test_demand_page_permission_denied(void);
-void test_demand_page_lifecycle_round_trip(void);
-// REVENANT R-2: BURROW_TYPE_FILE demand-page fault arm.
-void test_demand_page_file_smoke(void);
-void test_demand_page_file_pagein_not_note_interruptible(void);
-void test_demand_page_file_pages_charge_the_holder(void);
-void test_demand_page_idle_image_reclaimed_under_pressure(void);
-void test_demand_page_reclaim_asks_for_the_shortfall(void);
-void test_demand_page_alignment_abort_is_bus_not_handled(void);
-void test_demand_page_file_rodata_prot(void);
-void test_demand_page_file_read_error_snare_bus(void);
-void test_demand_page_file_read_error_dying_is_death(void);
-void test_demand_page_file_multi_page(void);
-// REVENANT R-5 audit SA-F1: the slow path must LOOP over a short-returning read.
-void test_demand_page_file_short_read_fills_page(void);
-// Overcommit / I-32 (ARCH section 6.5): the BURROW_TYPE_ANON_LAZY demand-zero arm.
-void test_demand_page_lazy_zero_fill(void);
-void test_demand_page_lazy_decommit_refault(void);
-void test_demand_page_lazy_charge_on_fault_oom(void);
-void test_demand_page_lazy_detach_uncharges_resident(void);
-void test_pgtable_install_user_pte_attr_index(void);
-void test_demand_page_file_geometry_shift_bails(void);
-void test_demand_page_file_geometry_shift_bails_single(void);
-void test_demand_page_file_read_revoked_latch_is_dying(void);
-void test_demand_page_file_cluster_short_read(void);
-void test_demand_page_file_eof_tail_zero(void);
-void test_mmap_eager_copy_charge_pairing(void);
-void test_demand_page_file_past_limit_bus(void);
-void test_demand_page_file_partial_page_zero_with_limit(void);
-void test_demand_page_file_cluster_clamps_at_limit(void);
-
-// The lazy attach/detach _for_proc inners (non-static cores in kernel/syscall.c),
-// driven directly -- the same pattern test_sys_burrow / test_resource use.
-
 #define USER_VA   0x10000000ull           // 256 MiB; well within user-half
 #define ONE_PAGE  PAGE_SIZE
 #define FOUR_PAGES (4ull * PAGE_SIZE)
@@ -814,7 +775,6 @@ void test_demand_page_file_geometry_shift_bails_single(void) {
 // are the Burrow's), so a raise back to R resolves from the slot with no
 // second read. Single-path twin (a ONE-page Burrow degrades the cluster fill
 // to the single fill -- the same knob the geometry-shift pair uses).
-void test_protect_file_pagein_racing_protect_bails_single(void);
 void test_protect_file_pagein_racing_protect_bails_single(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -866,7 +826,6 @@ void test_protect_file_pagein_racing_protect_bails_single(void) {
 // The cluster-path twin (a two-page Burrow takes the read-ahead fill). The two
 // install paths carry SEPARATE copies of the admission re-check, as they do of
 // the geometry check, so one test cannot cover both.
-void test_protect_file_pagein_racing_protect_bails_cluster(void);
 void test_protect_file_pagein_racing_protect_bails_cluster(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -1559,7 +1518,6 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
 // The POSITIVE control comes first and is what stops this passing vacuously: a
 // test that only watched the failure path would pass identically against a
 // mmap_eager_copy that charged nothing at all.
-
 void test_mmap_eager_copy_charge_pairing(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");

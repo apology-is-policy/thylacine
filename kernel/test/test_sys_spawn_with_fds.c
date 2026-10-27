@@ -41,16 +41,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-
-void test_sys_spawn_with_fds_rejects_oversize_fd_count(void);
-void test_sys_spawn_with_fds_rejects_bad_fd(void);
-void test_sys_spawn_with_fds_rejects_non_spoor_fd(void);
-void test_sys_spawn_with_fds_rejects_missing_binary(void);
-void test_sys_spawn_with_fds_zero_count_succeeds(void);
-void test_sys_spawn_with_fds_child_rights_subset_of_parent(void);
-void test_sys_spawn_killed_child_delivers_pipe_eof_before_reap(void);
-void test_sys_spawn_joined_multithread_child_delivers_pipe_eof_before_reap(void);
-
 static void drain_zombies(void) {
     int status = 0;
     while (wait_pid(&status) > 0) { /* drain */ }
