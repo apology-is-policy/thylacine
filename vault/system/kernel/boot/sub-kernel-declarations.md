@@ -148,16 +148,18 @@ function, passes rule (c).
   `THYLACINE_NO_TICKLESS` compile code the two main configurations do not; a
   census that ignores them would have moved 21 functions wrongly. A
   check-decls run covers only the configuration its build directory holds.
-- **Nothing builds the production kernel routinely.** `tools/build.sh`
-  builds the tests kernel unless asked for `--production`, and
-  `tools/check-production.sh` is the gate that builds the other. Xa guarded
+- **One gate builds the production kernel.** `tools/build.sh` builds the
+  tests kernel unless asked for `--production`, and until 2026-10-27 nothing
+  built the `KERNEL_TESTS=OFF` kernel at all: `tools/check-production.sh`,
+  which every `tools/test.sh` runs, built only joey's lean shape. Xa guarded
   `proc_test_console_renderer`'s definition with `KERNEL_TESTS` while
   `spawn_perm_grant_check` called it from production, and kept its prototype
   visible. Every syntax-only compile of both configurations passed. The
   first production link failed. 52 more hooks had the same visible prototype
   and no production caller, and `main.c` included the test registry
-  unguarded (2124 declarations). Rule (d) on a production build names all of
-  them.
+  unguarded (2124 declarations). check-production now builds and links that
+  kernel and runs check-decls on it, so rule (d) sees the production
+  configuration on every `tools/test.sh`.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

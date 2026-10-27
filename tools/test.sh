@@ -181,7 +181,8 @@ fi
 # was not that --production was broken -- it was that NOTHING BUILT IT, so it
 # stayed broken silently for weeks while every gate stayed green. A Makefile
 # target nobody remembers to run does not fix that; putting it in the loop that
-# actually runs does. It costs ~2 s and does not touch the tree (scratch dir).
+# actually runs does. It costs under 30 s (joey twice, then the KERNEL_TESTS=OFF
+# kernel and its check-decls) and does not touch the tree (scratch dirs).
 #
 # Skipped, not failed, when its input is absent: the generated headers are a
 # product of `build.sh userspace`, and a kernel-only iteration legitimately has

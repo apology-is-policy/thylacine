@@ -167,6 +167,37 @@ if [[ "$SIZE_B" -le "$SIZE_A" ]]; then
 fi
 echo "  ok -- joey builds lean+loginnable; provision_dev_accounts compiled in ($SIZE_A -> $SIZE_B B, +$((SIZE_B - SIZE_A)))"
 
+# The kernel's lean shape (KERNEL_TESTS=OFF) is the same disease one directory
+# over: nothing else builds it. A test hook compiled only under KERNEL_TESTS
+# whose prototype production can still see compiles in both configurations and
+# fails only at this link -- the kernel-declarations series shipped one for a
+# day (2026-10-27). check-decls rule (d) then names every prototype this
+# configuration sees but never defines, before a production caller exists.
+# Kernel only, in its own directory; no image.
+KOUT="$REPO_ROOT/build/prodcheck-kernel"
+echo "== check-production: the kernel at KERNEL_TESTS=OFF =="
+rm -rf "$KOUT"
+if ! cmake -S "$REPO_ROOT" -B "$KOUT" \
+        -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake" \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DKERNEL_TESTS=OFF > "$KOUT.cmake.log" 2>&1; then
+    echo "check-production: FAIL -- kernel cmake configure (KERNEL_TESTS=OFF) failed; see $KOUT.cmake.log" >&2
+    exit 1
+fi
+if ! cmake --build "$KOUT" --parallel > "$KOUT.build.log" 2>&1; then
+    echo "check-production: FAIL -- the kernel does not build or link with KERNEL_TESTS=OFF." >&2
+    echo "    An undefined symbol here is production code calling a function compiled" >&2
+    echo "    only for the tests: give production its own function, or stop guarding it." >&2
+    grep -E "error:|undefined symbol|referenced by" "$KOUT.build.log" | sed "s|$REPO_ROOT/||" | head -20 >&2
+    exit 1
+fi
+if ! python3 "$REPO_ROOT/tools/check-decls.py" --build-dir "$KOUT" > "$KOUT.decls.log" 2>&1; then
+    echo "check-production: FAIL -- check-decls on the KERNEL_TESTS=OFF kernel:" >&2
+    sed "s|$REPO_ROOT/||" "$KOUT.decls.log" | tail -20 >&2
+    exit 1
+fi
+echo "  ok -- the kernel builds and links with KERNEL_TESTS=OFF; check-decls $(tail -1 "$KOUT.decls.log" | sed 's/^check-decls: //' | cut -d';' -f1)"
+
 if (( do_all )); then
     echo "== check-production: the full lean image build (--config production) =="
     if ! "$REPO_ROOT/tools/build.sh" all --config production > "$OUT.full.log" 2>&1; then
