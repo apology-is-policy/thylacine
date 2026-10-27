@@ -1267,6 +1267,10 @@ _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 // Proc is terminating even when nothing set group_exit_msg (an exits()): a kill
 // that finds it forces the close. Set once, never cleared.
 #define PROC_FLAG_EXIT_CLOSING       (1u << 31)
+// The Proc's first thread has taken the pid as its tid (thread_id_for, ARCH
+// 7.3.4): every later thread draws a fresh id. Set once, by the first thread
+// create; never cleared (an exec moves the pid to the execer explicitly).
+#define PROC_FLAG_MAIN_TID           (1u << 12)
 _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
@@ -1309,7 +1313,7 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
      PROC_FLAG_MAY_RAISE_PAGE_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING | \
      PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
      PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
-     PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING)
+     PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1323,7 +1327,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_PIPE_TERMINATE_PENDING) +
     __builtin_popcount(PROC_FLAG_SESSION_HANGUP) + __builtin_popcount(PROC_FLAG_SEAT_MANAGER) +
     __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +
-    __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING),
+    __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
+    __builtin_popcount(PROC_FLAG_MAIN_TID),
     "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
@@ -1552,6 +1557,18 @@ struct Proc *proc_alloc(void);
 // reason: the ~10 existing proc_alloc callers all want a fresh space and stay
 // untouched, while the one caller that does not says so explicitly.
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget);
+
+// One id space for Procs and threads (thread-model C6, ARCH 7.3.4). A Proc
+// draws its pid here and its first thread takes the pid as its tid, so a main
+// thread's tid is its pid; every later thread draws its own. Ids are never
+// reused, except that an exec moves the pid to the execer. -1 once the space
+// is spent: ids end at PROC_ID_LAST, below 2^31, and a refusal is the caller's
+// to report, never an extinction (I-32). 0 is kproc's and its boot thread's,
+// PROC_ID_INIT is init's (rfork_init); the draws start after it.
+#define PROC_ID_INIT 1
+#define PROC_ID_LAST 0x7fffffffu
+int  proc_id_alloc(void);
+bool proc_id_space_spent(void);
 
 // Release a Proc descriptor. Caller must ensure thread_count == 0
 // (no live threads) and state == ZOMBIE (or post-reap path). Extincts
@@ -1791,6 +1808,12 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 // is published already marked BIRTH_HOLD_UNBORN. The SPAWN_DEBUG_HELD spawn's
 // fork. Same return contract as rfork_with_caps.
 int rfork_spawn_held(void (*entry)(void *), void *arg, caps_t caps_mask);
+
+// rfork_with_caps(RFPROC, ...) for init: the child takes PROC_ID_INIT as its
+// pid, so init is pid 1 however many kernel threads boot started before it
+// (Unix and Plan 9 both keep init at 1; daemons test getppid() == 1). Once
+// per boot: a second call extincts.
+int rfork_init(void (*entry)(void *), void *arg, caps_t caps_mask);
 
 // The held spawn's synchronous return: park the calling thread until its child
 // `child_pid` is no longer UNBORN (parked at birth, or released), is no longer
@@ -2422,8 +2445,9 @@ struct Thread *proc_main_thread_locked(struct Proc *p);
 //         (raw, or WAIT_STATUS_EXITED(code) when a PTY-1e flag was
 //         passed); for a report, the packed stop/continue status.
 //   0   : WAIT_WNOHANG set and a matching child is alive with nothing to
-//         report. 0 is never a valid child pid (g_next_pid starts at 1),
-//         so it is an unambiguous "not ready" sentinel.
+//         report. 0 is never a valid child pid (it is kproc's; the id
+//         space hands out PROC_ID_INIT and up), so it is an unambiguous
+//         "not ready" sentinel.
 //   -1  : no matching child (none at all, or none with want_pid), OR the
 //         caller's Proc is group-terminating (#811 SLEEP_INTR).
 //   WAIT_PID_NOTEINTR : a caught note ended the wait (ARCH 8.8.3); nothing

@@ -5246,13 +5246,10 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
 // invalid tidptr causes the syscall to return -1 (caller likely buggy)
 // rather than silently accepting it and faulting at exit time.
 //
-// At v1.0 a Thread's tid equals its kernel struct Thread.tid (per
-// thread_create's monotonic g_next_tid). For the MAIN thread of a Proc
-// this is NOT the pid in general — the main thread's tid is whatever
-// g_next_tid was at proc_alloc-time-spawn (tid 1 for joey, etc.). The
-// older returned-pid pattern (single-threaded Procs) was an aliasing
-// approximation; sub-chunk 9 swaps to the real per-Thread tid, which is
-// the value pthread_self / pthread_join expects to compare against.
+// Returns the calling Thread's tid, the value pthread_self / pthread_join
+// compare against. Procs and threads share one id space and a Proc's first
+// thread takes the pid, so the MAIN thread's tid is the pid, as Linux programs
+// assume; an exec from another thread moves the pid to it (ARCH 7.3.4).
 static s64 sys_set_tid_address_handler(u64 tidptr_raw) {
     struct Thread *t = current_thread();
     if (!t)         return -1;
@@ -5356,7 +5353,7 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
     struct Thread *nt = thread_alloc_user(p, entry_va, sp_va, arg_va, tls_va);
-    if (!nt) return thread_tid_space_spent() ? -T_E_AGAIN : -T_E_NOMEM;
+    if (!nt) return proc_id_space_spent() ? -T_E_AGAIN : -T_E_NOMEM;
     // The gate (ARCH 7.3.1): the claim and the cap again, and the link, in one
     // threads_lock hold -- so the cap is exact and no thread joins a group
     // whose claim is set (specs/thread_reap.tla Admit).
@@ -5505,7 +5502,7 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // CLONE_THREAD rather than a fork: shared address space, one pid, one ASID
     // (I-31).
     struct Thread *nt = thread_alloc_forked(p, ctx, child_sp, child_tls);
-    if (!nt) return thread_tid_space_spent() ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
+    if (!nt) return proc_id_space_spent() ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
     if (!proc_thread_admit(p, nt)) {
         thread_free_unlinked(nt);
         return -(s64)T_E_AGAIN;
@@ -15038,8 +15035,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
 
     case VIV_LINUX_GETTID: {
         // gettid(void) -> the per-Thread tid. getpid stays per-Proc (Proc.pid,
-        // shared by all CLONE_THREAD peers); gettid is the separate per-Thread
-        // counter (alloc_next_tid). No native twin exists and adding one would be
+        // shared by all CLONE_THREAD peers); the main thread's tid is the pid and
+        // each peer's its own id (ARCH 7.3.4). No native twin exists and adding one would be
         // a syscall-interface change for a Linux-only need, so it reads the field
         // directly. current_thread() is never NULL on a phenotype dispatch (a
         // syscall is executing on this Thread), but guard it -- a defensive NULL

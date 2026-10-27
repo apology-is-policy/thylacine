@@ -57,10 +57,17 @@
 //   proc.spawn_refused_in_dying_proc      -- a dying Proc refuses a new
 //                                            thread -EAGAIN.
 //   thread.tid_and_pid_spaces_refuse_when_spent
-//                                          -- the last tid and pid are handed
-//                                            out; past them a create is
+//                                          -- the last id is handed out; past
+//                                            it a thread create or a Proc is
 //                                            refused and a spawn answers
 //                                            EAGAIN, never an extinction.
+//   proc.ids_are_one_space                -- a Proc's first thread takes the
+//                                            pid as its tid, every later one
+//                                            draws its own id; kproc's threads
+//                                            never share one.
+//   proc.exec_from_a_peer_takes_the_pid   -- an exec from a thread other than
+//                                            main leaves the execer holding
+//                                            the pid as its tid, alone.
 //   proc.exec_claim_dooms_every_other_thread
 //                                          -- a held exec claim reads as death
 //                                            for every thread but the execer,
@@ -150,6 +157,8 @@ void test_proc_exec_waits_for_exiting_peer(void);
 void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
+void test_proc_ids_are_one_space(void);
+void test_proc_exec_from_a_peer_takes_the_pid(void);
 void test_proc_exec_claim_dooms_every_other_thread(void);
 void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
 void test_proc_exec_claim_abandoned_on_group_death(void);
@@ -963,8 +972,7 @@ void test_proc_sqpoll_charge_after_finished_workers(void) {
 // ---------------------------------------------------------------------------
 
 // Test hooks (the *_for_test convention; absent from the headers).
-u32  thread_tid_counter_swap_for_test(u32 v);
-u32  proc_pid_counter_swap_for_test(u32 v);
+u64  proc_id_counter_swap_for_test(u64 v);
 void proc_exit_tail_test_set_hook(void (*fn)(void));
 u64  proc_exec_peer_waits_for_test(void);
 s64  sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
@@ -1326,7 +1334,7 @@ static void srd_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
     g_srd_exempt    = proc_resource_exempt(p);
-    g_srd_tid_spent = thread_tid_space_spent();
+    g_srd_tid_spent = proc_id_space_spent();
     irq_state_t s = proc_table_lock_acquire();
     proc_group_terminate(p, 0, "c0-dying");
     proc_table_lock_release(s);
@@ -1416,22 +1424,20 @@ static void tps_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
     g_tps_exempt = proc_resource_exempt(p);
-    // Parked one short of the end: one create fits, then the space is spent.
-    // Nothing between the swaps sleeps, so the window stays short.
-    u32 saved = thread_tid_counter_swap_for_test(0x7ffffffeu);
+    // Parked at the last id: one create fits, then the space is spent for
+    // threads and Procs alike (they share it). Nothing between the swaps
+    // sleeps, so the window stays short.
+    u64 saved = proc_id_counter_swap_for_test(PROC_ID_LAST);
     struct Thread *last    = thread_create_with_arg(p, c0_never_entry, NULL);
-    g_tps_spent            = thread_tid_space_spent();
+    g_tps_spent            = proc_id_space_spent();
     struct Thread *refused = thread_create_with_arg(p, c0_never_entry, NULL);
     g_tps_spawn_rc         = sys_thread_spawn_for_test(C0_USER_ENTRY, C0_USER_SP, 0, 0, 0);
-    thread_tid_counter_swap_for_test(saved);
+    struct Proc *q         = proc_alloc();
+    proc_id_counter_swap_for_test(saved);
     g_tps_tid     = last ? last->tid : -1;
     g_tps_refused = refused == NULL;
     if (last)    thread_free(last);
     if (refused) thread_free(refused);
-
-    u32 saved_pid = proc_pid_counter_swap_for_test(0x7fffffffu);
-    struct Proc *q = proc_alloc();
-    proc_pid_counter_swap_for_test(saved_pid);
     g_tps_pid_refused = q == NULL;
     if (q) {
         q->state = PROC_STATE_ZOMBIE;
@@ -1449,13 +1455,164 @@ void test_thread_tid_and_pid_spaces_refuse_when_spent(void) {
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
-    TEST_EXPECT_EQ(g_tps_tid, 0x7ffffffe, "the last tid in the space is handed out");
+    TEST_EXPECT_EQ(g_tps_tid, (int)PROC_ID_LAST, "the last id in the space is handed out");
     TEST_ASSERT(g_tps_spent, "the space reads spent once its last tid is out");
     TEST_ASSERT(g_tps_refused, "a create past the last tid is refused");
     TEST_ASSERT(g_tps_exempt, "the child is exempt, so the thread cap cannot refuse");
     TEST_EXPECT_EQ(g_tps_spawn_rc, (s64)-T_E_AGAIN,
         "a spawn past the last tid answers EAGAIN, a system limit, not ENOMEM");
     TEST_ASSERT(g_tps_pid_refused, "a Proc past the last pid is refused");
+}
+
+// ---------------------------------------------------------------------------
+// One id space (ARCH 7.3.4, thread-model C6; specs/thread_reap.tla PidNamesOne).
+// ---------------------------------------------------------------------------
+
+// How many threads on p's list hold the pid as their tid, and (if `holder`)
+// the last such one: the lookup a tgkill of the pid makes.
+static int pid_holders(struct Proc *p, struct Thread **holder) {
+    int n = 0;
+    irq_state_t s = proc_threads_lock(p);
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->tid == p->pid) {
+            n++;
+            if (holder) *holder = x;
+        }
+    proc_threads_unlock(p, s);
+    return n;
+}
+
+static volatile int  g_ios_pid, g_ios_main, g_ios_a, g_ios_b, g_ios_q_pid, g_ios_qa, g_ios_qb;
+static volatile bool g_ios_kproc_distinct;
+
+static void ios_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_ios_pid  = p->pid;
+    g_ios_main = current_thread()->tid;
+    // Both create arms, in this Proc and in a fresh one with no thread yet.
+    struct Thread *a  = thread_create_with_arg(p, c0_never_entry, NULL);
+    struct Thread *b  = thread_alloc_user(p, C0_USER_ENTRY, C0_USER_SP, 0, 0);
+    struct Proc   *q  = proc_alloc();
+    struct Thread *qa = q ? thread_create_with_arg(q, c0_never_entry, NULL) : NULL;
+    struct Thread *qb = q ? thread_alloc_user(q, C0_USER_ENTRY, C0_USER_SP, 0, 0) : NULL;
+    g_ios_a     = a  ? a->tid  : -1;
+    g_ios_b     = b  ? b->tid  : -1;
+    g_ios_q_pid = q  ? q->pid  : -1;
+    g_ios_qa    = qa ? qa->tid : -1;
+    g_ios_qb    = qb ? qb->tid : -1;
+    if (a)  thread_free(a);
+    if (b)  thread_free_unlinked(b);
+    if (qa) thread_free(qa);
+    if (qb) thread_free_unlinked(qb);
+    if (q) {
+        q->state = PROC_STATE_ZOMBIE;
+        proc_free(q);
+    }
+    // kproc's 0 is its boot thread's: a kernel thread that took kproc's "pid"
+    // would share it.
+    bool distinct = true;
+    struct Proc *k = kproc();
+    irq_state_t s = proc_threads_lock(k);
+    for (struct Thread *x = k->threads; x; x = x->next_in_proc)
+        for (struct Thread *y = x->next_in_proc; y; y = y->next_in_proc)
+            if (x->tid == y->tid) distinct = false;
+    proc_threads_unlock(k, s);
+    g_ios_kproc_distinct = distinct;
+    exits("ok");
+}
+
+void test_proc_ids_are_one_space(void) {
+    g_ios_pid = g_ios_main = g_ios_a = g_ios_b = g_ios_q_pid = g_ios_qa = g_ios_qb = 0;
+    g_ios_kproc_distinct = false;
+    int child_pid = rfork(RFPROC, ios_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_ASSERT(child_pid > PROC_ID_INIT, "a Proc never draws init's pid");
+    TEST_EXPECT_EQ(g_ios_pid, child_pid, "the child read its own pid");
+    TEST_EXPECT_EQ(g_ios_main, child_pid, "a Proc's first thread takes the pid as its tid");
+    TEST_ASSERT(g_ios_a > child_pid && g_ios_b > g_ios_a,
+        "a later thread, of either create arm, draws a fresh id");
+    TEST_ASSERT(g_ios_q_pid > g_ios_b, "a Proc draws its pid from the same space");
+    TEST_EXPECT_EQ(g_ios_qa, g_ios_q_pid, "a fresh Proc's first thread takes its pid");
+    TEST_ASSERT(g_ios_qb > g_ios_q_pid, "its second thread draws");
+    TEST_ASSERT(g_ios_kproc_distinct, "no two kernel threads share an id");
+}
+
+static volatile int  g_xp_pid, g_xp_main_tid, g_xp_peer_tid, g_xp_tid_after, g_xp_claim_rc;
+static volatile int  g_xp_count_after, g_xp_holders_before, g_xp_holders_after;
+static volatile bool g_xp_holder_was_main, g_xp_holder_is_self, g_xp_main_left;
+
+static void xp_peer_entry(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    struct Proc *p = self->proc;
+    g_xp_peer_tid = self->tid;
+    struct Thread *holder = NULL;
+    g_xp_holders_before  = pid_holders(p, &holder);
+    g_xp_holder_was_main = holder != NULL && holder != self;
+    struct AddrSpace *nas = addrspace_alloc(p->page_budget);
+    int rc = nas ? proc_exec_claim(p) : -1;
+    g_xp_claim_rc = rc;
+    if (rc != 0) {
+        // Main is still live, so this thread leaves alone.
+        if (nas) addrspace_unref(nas);
+        thread_exit_self();
+    }
+    proc_exec_replace(p, nas, p->phenotype);
+    holder = NULL;
+    g_xp_holders_after  = pid_holders(p, &holder);
+    g_xp_holder_is_self = holder == self;
+    g_xp_tid_after      = self->tid;
+    irq_state_t s = proc_threads_lock(p);
+    g_xp_count_after = p->thread_count;
+    proc_threads_unlock(p, s);
+    exits("ok");
+}
+
+static void xp_main_entry(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    struct Proc *p = self->proc;
+    g_xp_pid      = p->pid;
+    g_xp_main_tid = self->tid;
+    struct Thread *peer = thread_create_with_arg(p, xp_peer_entry, NULL);
+    if (!peer) exits("setup");
+    ready(peer);
+    // The peer's claim dooms this thread, which meets it at the die-check an
+    // EL0 thread takes on its way back to user mode and leaves alone there.
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (timer_now_ns() < deadline) {
+        el0_return_die_check();
+        sched();
+    }
+    g_xp_main_left = true;
+    thread_exit_self();
+}
+
+void test_proc_exec_from_a_peer_takes_the_pid(void) {
+    g_xp_pid = g_xp_main_tid = g_xp_peer_tid = g_xp_tid_after = g_xp_claim_rc = -1;
+    g_xp_count_after = g_xp_holders_before = g_xp_holders_after = -1;
+    g_xp_holder_was_main = g_xp_holder_is_self = g_xp_main_left = false;
+    int child_pid = rfork(RFPROC, xp_main_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(g_xp_pid, child_pid, "the child read its own pid");
+    TEST_EXPECT_EQ(g_xp_main_tid, child_pid, "main's tid is the pid");
+    TEST_ASSERT(g_xp_peer_tid > 0 && g_xp_peer_tid != child_pid, "the peer has its own tid");
+    // The control for the lines after the swap: the walk finds the pid at all.
+    TEST_EXPECT_EQ(g_xp_holders_before, 1, "before the exec the pid names one thread");
+    TEST_ASSERT(g_xp_holder_was_main, "and that thread is main");
+    TEST_EXPECT_EQ(g_xp_claim_rc, 0, "the peer's claim held the Proc");
+    TEST_ASSERT(!g_xp_main_left, "the claim doomed main before its deadline");
+    TEST_EXPECT_EQ(g_xp_count_after, 1, "the new image starts as the execer alone");
+    TEST_EXPECT_EQ(g_xp_tid_after, child_pid, "the execer took the pid as its tid");
+    TEST_EXPECT_EQ(g_xp_holders_after, 1, "the pid names one thread on the list");
+    TEST_ASSERT(g_xp_holder_is_self, "and that thread is the execer");
+    TEST_EXPECT_EQ(status, 0, "the new image exited cleanly");
 }
 
 // ---------------------------------------------------------------------------

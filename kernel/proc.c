@@ -85,21 +85,18 @@ static struct Proc       *g_kproc;
 // the lock-free accessor proc_init_proc() pairs acquire with the
 // store-release.
 static struct Proc       *g_init_proc;
-// R6-A F107: u32 (was int). Signed-overflow on `int` atomic_fetch_add at
-// INT_MAX is UB per C11 5.1.2.4; u32 has defined modular wrap. Cast to
-// int at p->pid assignment with an INT_MAX guard so the public PID type
-// stays signed (sentinel -1 for errors). v1.0 doesn't approach overflow
-// (test PIDs reach low thousands), but the discipline future-proofs
-// against long-running systems and uniformly with R5-H F90's u32-wrap-
-// correct-but-type-fragile concern for g_try_steal_rotate.
-static u32                g_next_pid = 0;
+// The one id space Procs and threads draw from (proc_id_alloc). 64 bits, so
+// no number of refused draws past the end can wrap it back into ids that live
+// Procs or threads still hold.
+static u64                g_next_id;
+static bool               g_init_id_taken;
 static u64                g_proc_created;
 static u64                g_proc_destroyed;
 
 // P5-corvus-srv: monotonic source of per-Proc `stripes` identity tags.
 // A u64 — incremented once per Proc creation, it cannot wrap in any
-// physically realizable runtime (unlike g_next_pid's u32, which carries
-// an explicit INT_MAX guard). Value 0 is never handed out: stripes == 0
+// physically realizable runtime (unlike the pid, which must fit an int and
+// so ends at PROC_ID_LAST). Value 0 is never handed out: stripes == 0
 // is the reserved fail-closed sentinel. proc_init seeds it to 1.
 static u64                g_next_stripes;
 
@@ -282,7 +279,8 @@ void proc_init(void) {
     // load side (proc_total_created) may be observed from secondary CPUs
     // post-bring-up; using atomic ops uniformly avoids torn-read hazards.
     __atomic_fetch_add(&g_proc_created, 1u, __ATOMIC_RELAXED);
-    g_next_pid = 1u;       // R6-A F107: u32 (was int).
+    // 0 is kproc's and its boot thread's; 1 waits for init (rfork_init).
+    __atomic_store_n(&g_next_id, (u64)PROC_ID_INIT + 1u, __ATOMIC_RELAXED);
 
     // P5-corvus-srv: seed the stripes counter at 1 (0 is the reserved
     // fail-closed sentinel) and stamp kproc with the first tag. kproc
@@ -368,30 +366,38 @@ struct Proc *proc_alloc(void) {
 u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
 u32 proc_page_budget_hard_max(void) { return capacity_pool_pages(); }
 
-// The next pid, or -1 once the space is spent. Pids are never recycled
-// (session_hangup_cb's isolation leans on it), so the counter is cumulative
-// and a spawn loop walks it toward INT_MAX; spent is a refusal, never an
-// extinction (I-32). Saturating instead of wrapping keeps -1 the sentinel and
-// every pid unique.
-static int alloc_next_pid(void) {
-    u32 cur = __atomic_load_n(&g_next_pid, __ATOMIC_RELAXED);
-    do {
-        if (cur >= 0x7fffffffu) return -1;
-    } while (!__atomic_compare_exchange_n(&g_next_pid, &cur, cur + 1u, true,
-                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-    return (int)cur;
+// Ids are never recycled (a stale pid or tid never names another Proc or
+// thread; session_hangup_cb's isolation leans on it), so the counter is
+// cumulative and a spawn or create/join loop walks it toward the end of the
+// positive ints in hours; spent is a refusal the creator reports, never an
+// extinction (I-32).
+int proc_id_alloc(void) {
+    u64 id = __atomic_fetch_add(&g_next_id, 1u, __ATOMIC_RELAXED);
+    return id > PROC_ID_LAST ? -1 : (int)id;
+}
+
+bool proc_id_space_spent(void) {
+    return __atomic_load_n(&g_next_id, __ATOMIC_RELAXED) > PROC_ID_LAST;
 }
 
 #ifdef KERNEL_TESTS
 // Test hook (the *_for_test convention; absent from the header): replace the
-// pid counter, returning the old value.
-u32 proc_pid_counter_swap_for_test(u32 v);
-u32 proc_pid_counter_swap_for_test(u32 v) {
-    return __atomic_exchange_n(&g_next_pid, v, __ATOMIC_RELAXED);
+// id counter, returning the old value, so a test can park it at the end of
+// the space and restore it afterwards.
+u64 proc_id_counter_swap_for_test(u64 v);
+u64 proc_id_counter_swap_for_test(u64 v) {
+    return __atomic_exchange_n(&g_next_id, v, __ATOMIC_RELAXED);
 }
 #endif
 
+static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id);
+
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
+    return proc_alloc_id(share, page_budget, 0);
+}
+
+// `id` 0 draws the pid from the id space; PROC_ID_INIT is init's, taken once.
+static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
@@ -496,9 +502,9 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     // other state.
     //
     // R6-A F107: the public PID type stays signed (`int`) so -1 remains the
-    // error sentinel. A spent pid space is a refusal through the same rollback
-    // as any other failure here (alloc_next_pid saturates; it never wraps).
-    int pid = alloc_next_pid();
+    // error sentinel. A spent id space is a refusal through the same rollback
+    // as any other failure here.
+    int pid = id ? id : proc_id_alloc();
     if (pid < 0) {
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
@@ -1487,7 +1493,7 @@ static void rfork_rollback_unpublished(struct Proc *child, struct Thread *ct) {
 
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                           caps_t caps_mask, const struct fork_context *fc,
-                          bool birth_hold) {
+                          bool birth_hold, bool init) {
     // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
     // -- RFNAMEG, RFFDG, RFCRED, RFNOTEG, RFNOWAIT, RFREND, RFENVG -- still
     // extinct: each shares a different per-Proc structure and each arrives with
@@ -1600,8 +1606,8 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // (addrspace_clone) and a shared one keeps its own (the RFMEM argument),
     // so the parameter only governs the case that would otherwise be wrong.
     struct Proc *child =
-        proc_alloc_in(cloned ? cloned : ((flags & RFMEM) ? parent->as : NULL),
-                      parent->page_budget);
+        proc_alloc_id(cloned ? cloned : ((flags & RFMEM) ? parent->as : NULL),
+                      parent->page_budget, init ? PROC_ID_INIT : 0);
     if (cloned) addrspace_unref(cloned);   // hand sole ownership to the child
     if (!child) return -1;
 
@@ -2057,12 +2063,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
 }
 
 int rfork(unsigned flags, void (*entry)(void *), void *arg) {
-    return rfork_internal(flags, entry, arg, CAP_NONE, NULL, false);
+    return rfork_internal(flags, entry, arg, CAP_NONE, NULL, false, false);
 }
 
 int rfork_forked(unsigned flags, const struct fork_context *fc) {
     if (!fc) extinction("rfork_forked with NULL fork_context");
-    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc, false);
+    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc, false, false);
 }
 
 // The caps-bearing fork: identical to rfork_forked but with an explicit
@@ -2078,16 +2084,22 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
 int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
                            caps_t caps_mask) {
     if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
-    return rfork_internal(flags, NULL, NULL, caps_mask, fc, false);
+    return rfork_internal(flags, NULL, NULL, caps_mask, fc, false, false);
 }
 
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
-    return rfork_internal(flags, entry, arg, caps_mask, NULL, false);
+    return rfork_internal(flags, entry, arg, caps_mask, NULL, false, false);
 }
 
 int rfork_spawn_held(void (*entry)(void *), void *arg, caps_t caps_mask) {
-    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, true);
+    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, true, false);
+}
+
+int rfork_init(void (*entry)(void *), void *arg, caps_t caps_mask) {
+    if (__atomic_exchange_n(&g_init_id_taken, true, __ATOMIC_RELAXED))
+        extinction("rfork_init: init's pid is already taken");
+    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, false, true);
 }
 
 // =============================================================================
@@ -3868,8 +3880,9 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     if (m == g_kproc)      return 0;
     // ISOLATION DEPENDENCY (arm-6 F1): sid == leader-pid identifies EXACTLY the
     // leader's genuine fork-descendants ONLY because pids never recycle
-    // (g_next_pid is strictly monotonic + saturates at INT_MAX, where proc_alloc
-    // refuses, rather than wrapping). A member's sid is set only to its own pid (setsid)
+    // (the id space is strictly monotonic and ends at PROC_ID_LAST, where
+    // proc_alloc refuses, rather than wrapping; an exec moves a pid between
+    // threads of one Proc, never to another). A member's sid is set only to its own pid (setsid)
     // or inherited from its parent (rfork), so the value leader-pid propagates
     // solely down the leader's subtree. If pid recycling is ever introduced (a
     // free-list / a wrap), a stale sid on an orphaned member of a DEFUNCT
@@ -5197,8 +5210,15 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         bool alone = p->live_threads == 1 &&
                      __atomic_load_n(&p->thread_count, __ATOMIC_RELAXED) == 1;
         // The claim ends with the old image: nothing is left for it to doom,
-        // and the new image may spawn.
-        if (alone) __atomic_store_n(&p->exec_task, NULL, __ATOMIC_RELEASE);
+        // and the new image may spawn. The new image's main thread is this
+        // one, so it takes the pid as its tid (ARCH 7.3.4); its old tid is
+        // retired. The old main is freed by now (thread_count is 1), so the
+        // pid names one thread on the list, and every reader of a peer's tid
+        // walks the list under this lock (thread_reap.tla PidNamesOne).
+        if (alone) {
+            __atomic_store_n(&p->exec_task, NULL, __ATOMIC_RELEASE);
+            self->tid = p->pid;
+        }
         proc_threads_unlock(p, ts);
         if (!alone) {
             spin_unlock_irqrestore(&g_proc_table_lock, s);

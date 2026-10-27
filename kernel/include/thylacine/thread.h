@@ -775,8 +775,9 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top);
 // trampoline which then blr's `entry`. Adds to proc->threads list.
 //
 // Returns NULL on OOM (Thread alloc fail or kstack alloc fail; cleanup
-// is internal), or when the tid space is spent (thread_tid_space_spent: a
-// permanent refusal, not a retryable one).
+// is internal), or when the id space is spent (proc_id_space_spent: a
+// permanent refusal, not a retryable one). A Proc's first thread takes the pid
+// as its tid; every later one draws a fresh id (ARCH 7.3.4).
 //
 // `entry` takes no argument. For arg-passing (P2-D rfork), use
 // thread_create_with_arg below.
@@ -813,7 +814,7 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
 // user-mode extinction for the misbehaving Proc, not a kernel issue).
 //
 // Returns the new Thread on success, NULL on OOM (Thread cache or
-// kstack alloc fail) or a spent tid space (thread_tid_space_spent).
+// kstack alloc fail) or a spent id space (proc_id_space_spent).
 struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_entry_va,
                                   u64 user_sp_va,
@@ -905,10 +906,6 @@ struct Thread *thread_alloc_forked(struct Proc *proc,
 // current (current_thread() != t). An exited user thread is thread_reap_dead's.
 // Extincts on violation.
 void thread_free(struct Thread *t);
-
-// True once the tid space is spent (alloc_next_tid refuses). A create that
-// failed then reports EAGAIN, a system limit, rather than ENOMEM.
-bool thread_tid_space_spent(void);
 
 // The thread list's link (ARCH 7.3.1), under the caller's hold of the Proc's
 // threads_lock; it counts the thread live. thread_free_unlinked frees a thread

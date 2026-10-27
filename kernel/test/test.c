@@ -1013,6 +1013,8 @@ void test_directmap_guard_toggle_invalidates_a_warm_entry(void);
 void test_thread_kstack_create_free_cost(void);
 void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
+void test_proc_ids_are_one_space(void);
+void test_proc_exec_from_a_peer_takes_the_pid(void);
 void test_proc_exec_claim_dooms_every_other_thread(void);
 void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
 void test_proc_exec_claim_abandoned_on_group_death(void);
@@ -3300,6 +3302,8 @@ struct test_case g_tests[] = {
     { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },
     { "proc.spawn_refused_in_dying_proc",       test_proc_spawn_refused_in_dying_proc,       false, NULL },
     { "thread.tid_and_pid_spaces_refuse_when_spent", test_thread_tid_and_pid_spaces_refuse_when_spent, false, NULL },
+    { "proc.ids_are_one_space",                test_proc_ids_are_one_space,                false, NULL },
+    { "proc.exec_from_a_peer_takes_the_pid",   test_proc_exec_from_a_peer_takes_the_pid,   false, NULL },
     { "proc.exec_claim_dooms_every_other_thread", test_proc_exec_claim_dooms_every_other_thread, false, NULL },
     { "proc.exec_claim_kills_sleeping_and_running_peers", test_proc_exec_claim_kills_sleeping_and_running_peers, false, NULL },
     { "proc.exec_claim_abandoned_on_group_death", test_proc_exec_claim_abandoned_on_group_death, false, NULL },

@@ -389,7 +389,7 @@ struct weft_binding {
     // WEAVE clunk-unmap: dev9p_close unmaps only when the closing Proc's pid
     // matches (an inherited-fd closer in another Proc leaves the mapping to
     // the mapper's own vma_drain -- the ring precedent). Sound as a bare pid:
-    // g_next_pid is a monotonic u32 (no reuse within any realizable runtime,
+    // pids are drawn once from the id space and never reused (proc_id_alloc,
     // the proc.c precedent), so a matched pid IS the mapping Proc.
     u32            map_pid;
     // Weft-6b-2: the kernel's PRIVATE trusted geometry of this ring (computed

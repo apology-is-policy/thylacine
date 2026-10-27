@@ -3242,6 +3242,13 @@ unsafe fn run_linux() -> ! {
     let parent_tid = svc3(NR_GETTID, 0, 0, 0);
     leg!(rep, THREAD_CHILD_TID.load(Ordering::SeqCst) == ttid as u64, b"L167\n");
     leg!(rep, THREAD_CHILD_TID.load(Ordering::SeqCst) != parent_tid as u64, b"L167b\n");
+    // L167c: the parent is this Proc's main thread, whose tid IS the pid, as
+    // Linux programs assume (ARCH 7.3.4: one id space, the first thread takes
+    // the pid).
+    {
+        const NR_GETPID: u64 = 172;
+        leg!(rep, parent_tid == svc3(NR_GETPID, 0, 0, 0), b"L167c\n");
+    }
 
     // CLONE_PARENT_SETTID: the kernel published the new tid into *ptid before the
     // thread was made runnable (the parent sees it after the RAN handshake).
