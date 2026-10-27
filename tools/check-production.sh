@@ -198,6 +198,48 @@ if ! python3 "$REPO_ROOT/tools/check-decls.py" --build-dir "$KOUT" > "$KOUT.decl
 fi
 echo "  ok -- the kernel builds and links with KERNEL_TESTS=OFF; check-decls $(tail -1 "$KOUT.decls.log" | sed 's/^check-decls: //' | cut -d';' -f1)"
 
+# Three diagnostic knobs select kernel code that no other build compiles:
+# VIV_TRACE (a source define, syscall.c), THYLACINE_NO_TICKLESS (sched.c) and
+# THYLACINE_PRIVATE_ASYNC_QUALIFICATION (the loom service and its tests). A
+# -Werror break, a lying declaration or a deleted callee there would fail only
+# when someone next turned the knob on. The three touch disjoint files, so one
+# kernel per configuration with all three on compiles each knob's code once.
+for kt in OFF ON; do
+    KK="$REPO_ROOT/build/knobcheck-kernel-tests-$kt"
+    echo "== check-production: the diagnostic knobs at KERNEL_TESTS=$kt =="
+    rm -rf "$KK"
+    if ! cmake -S "$REPO_ROOT" -B "$KK" \
+            -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DKERNEL_TESTS="$kt" \
+            -DTHYLACINE_NO_TICKLESS=ON \
+            -DTHYLACINE_PRIVATE_ASYNC_QUALIFICATION=ON \
+            -DCMAKE_C_FLAGS=-DVIV_TRACE=1 > "$KK.cmake.log" 2>&1; then
+        echo "check-production: FAIL -- knob kernel cmake configure (KERNEL_TESTS=$kt) failed; see $KK.cmake.log" >&2
+        exit 1
+    fi
+    # A knob that does not reach the compile line leaves this leg building the
+    # default kernel a second time, green and checking nothing.
+    kflags="$KK/kernel/CMakeFiles/thylacine.elf.dir/flags.make"
+    for def in -DVIV_TRACE=1 -DTHYLACINE_NO_TICKLESS -DLOOM_PRIVATE_QUALIFICATION; do
+        if ! grep -q -e "$def" "$kflags"; then
+            echo "check-production: FAIL -- $def is not on the knob kernel's compile line ($kflags)" >&2
+            exit 1
+        fi
+    done
+    if ! cmake --build "$KK" --parallel > "$KK.build.log" 2>&1; then
+        echo "check-production: FAIL -- the kernel does not build or link with the diagnostic knobs on (KERNEL_TESTS=$kt):" >&2
+        grep -E "error:|undefined symbol|referenced by" "$KK.build.log" | sed "s|$REPO_ROOT/||" | head -20 >&2
+        exit 1
+    fi
+    if ! python3 "$REPO_ROOT/tools/check-decls.py" --build-dir "$KK" > "$KK.decls.log" 2>&1; then
+        echo "check-production: FAIL -- check-decls on the knob kernel (KERNEL_TESTS=$kt):" >&2
+        sed "s|$REPO_ROOT/||" "$KK.decls.log" | tail -20 >&2
+        exit 1
+    fi
+    echo "  ok -- VIV_TRACE + NO_TICKLESS + PRIVATE_ASYNC_QUALIFICATION build and link at KERNEL_TESTS=$kt; check-decls $(tail -1 "$KK.decls.log" | sed 's/^check-decls: //' | cut -d';' -f1)"
+done
+
 if (( do_all )); then
     echo "== check-production: the full lean image build (--config production) =="
     if ! "$REPO_ROOT/tools/build.sh" all --config production > "$OUT.full.log" 2>&1; then

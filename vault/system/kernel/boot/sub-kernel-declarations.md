@@ -158,9 +158,11 @@ function, passes rule (c).
   so check-decls runs on every one; its first run after this rule stopped
   `wxe_violation` at rule (b) on a local `extern char _kernel_start[]` that
   only that variant compiles, which the syntax-only variant census had
-  passed. `VIV_TRACE`, `LOOM_PRIVATE_QUALIFICATION` and
-  `THYLACINE_NO_TICKLESS` are built by no routine gate, so nothing checks
-  their code between the runs that ask for them.
+  passed. `tools/check-production.sh`, which every `tools/test.sh` runs,
+  builds one kernel per configuration with `VIV_TRACE`,
+  `LOOM_PRIVATE_QUALIFICATION` and `THYLACINE_NO_TICKLESS` all on (their
+  code sits in disjoint files), checks that each define reached the compile
+  line, links it, and runs check-decls on it.
 - **One gate builds the production kernel.** `tools/build.sh` builds the
   tests kernel unless asked for `--production`, and until 2026-10-27 nothing
   built the `KERNEL_TESTS=OFF` kernel at all: `tools/check-production.sh`,

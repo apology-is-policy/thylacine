@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-10-27 -- two build knobs that changed nothing, retired (vote 25; corona)
+## 2026-10-27 -- two build knobs that changed nothing, retired; a mirror out of quota; the diagnostic knobs built (vote 25; corona)
 
 **What started it.** The kernel-declarations arc's self-audit of
 check-production's kernel leg compared a Release configure with a Debug one
@@ -69,6 +69,30 @@ commit: `THYLACINE_DEBUG_BUILD` retired with them; the frozen
 `docs/reference/150-build-config.md` left untouched; the build dossier's
 `updated:` date left at 2026-10-13 because `tools/build.sh` has 349
 undocumented lines since then.
+
+**The second mirror refused the push.** Codeberg answered d37eb05f7 with
+"Forgejo: Quota exceeded"; GitHub took it. The operator asked what in the
+tree takes 700 MB. Measured: everything reachable from Codeberg's 12 heads
+packs to 208.8 MiB here (4.4 GiB raw, of which `docs/JOURNAL.md` -- this file,
+894 versions -- is 1.25 GiB), and GitHub's API reports 142118 KiB for the same
+repository with 16 heads, against Codeberg's 717722 KiB. So the history is not
+the 700 MB; Codeberg's storage of it is. Why is a hypothesis I could not test
+from here (its packs are not visible): a push's thin pack is completed with full
+copies of its delta bases and kept, and nothing repacks. Shown that, the
+operator chose "GitHub only for now": GitHub is the push, a Codeberg refusal is
+reported as "behind", never as a failure, and nothing on Codeberg is touched.
+main and aux were told by yip; the rule is in the shared push memory.
+
+**The diagnostic knobs, built.** The P3 the decls arc had left open:
+`VIV_TRACE`, `THYLACINE_NO_TICKLESS` and the private-async qualification
+select code no routine build compiled. check-production now builds one kernel
+per configuration with all three on (their files are disjoint, measured),
+refuses to run if any define failed to reach `flags.make` -- a knob that
+silently does not apply would make the leg rebuild the default kernel, green
+-- links it, and runs check-decls on it. Cost 54 s of check-production's 76 s.
+Four sabotages, each red on its own line, the production leg staying ok in
+each; the loom one is caught only at `KERNEL_TESTS=ON`, which is why both
+configurations are built.
 
 ## 2026-10-26/27 -- one checked declaration per cross-file kernel name (votes 19-24; corona)
 

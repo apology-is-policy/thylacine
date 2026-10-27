@@ -769,13 +769,17 @@ boot shape**, flipping two CMake options in lockstep:
 called helpers that only exist inside it — joey failed with 11 errors. Nothing
 noticed, because nothing builds it: not `tools/test.sh`, not the SMP gate, not
 the interactive harness, not any Makefile default. **`tools/check-production.sh`
-(~2 s, no boot) guards it**; `--all` runs the full production build too.
+(no boot) guards it**; `--all` runs the full production build too.
 
 **Since #229 it is no longer a target you have to remember: `tools/test.sh`
 builds the lean shape before booting the dev one**, and fails the run if it does
 not compile. That is the actual fix for "nothing builds this shape" — a
-`make` target guards nothing on the iterations where nobody types it. It costs
-~2 s, uses a scratch build dir, and SKIPS (loudly, as *not* coverage) when
+`make` target guards nothing on the iterations where nobody types it. Since
+2026-10-27 the same run also builds and links the `KERNEL_TESTS=OFF` kernel and
+one kernel per configuration with the three diagnostic knobs on (`VIV_TRACE`,
+`THYLACINE_NO_TICKLESS`, `THYLACINE_PRIVATE_ASYNC_QUALIFICATION`), each
+followed by check-decls. It costs 76 s (measured 2026-10-27: joey's two shapes
+and the production kernel 22 s, the knob kernels 54 s), uses scratch build dirs, and SKIPS (loudly, as *not* coverage) when
 `build/generated` is absent, since a kernel-only iteration legitimately has no
 generated headers.
 
