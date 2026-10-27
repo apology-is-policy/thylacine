@@ -21,7 +21,7 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="thread_reap:5894"
+CLEAN="thread_reap:9494"
 
 # buggy: cfg, invariant that must be the one reported ("~Name" = a temporal
 # property, which TLC reports in its own words)
