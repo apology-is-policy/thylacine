@@ -3679,6 +3679,50 @@ void test_9p_client_loom_multi_inflight_e2e(void) {
     p9_mq_loopback_destroy(&g_mq);
 }
 
+// Vote 13 (specs/poll_defer.tla): a transport walk a client op reaches under
+// c->lock runs after the release. The mq transport's send stages its reply and
+// walks the ready list; with more hooks listed than one batch holds, the batch
+// hook runs between two batches and sees whether c->lock is held.
+#define CL_DEFER_HOOKS (POLL_WAKE_BATCH + 4u)
+static struct Rendez      g_cl_defer_r[CL_DEFER_HOOKS];
+static struct poll_waiter g_cl_defer_pw[CL_DEFER_HOOKS];
+static u32  g_cl_defer_batches;
+static bool g_cl_defer_locked;
+
+static void cl_defer_batch(struct poll_waiter_list *l) {
+    if (l != &g_mq.ready_list) return;
+    g_cl_defer_batches++;
+    if (__atomic_load_n(&g_client.lock.value, __ATOMIC_RELAXED)) g_cl_defer_locked = true;
+}
+
+void test_9p_client_transport_walk_runs_after_the_client_lock(void) {
+    TEST_EXPECT_EQ(p9_mq_loopback_init(&g_mq, canonical_responder, NULL), 0, "mq loopback init");
+    TEST_EXPECT_EQ(p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                                  p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf)),
+                   0, "client init over mq transport");
+    for (u32 i = 0; i < CL_DEFER_HOOKS; i++) {
+        rendez_init(&g_cl_defer_r[i]);
+        poll_waiter_init(&g_cl_defer_pw[i], &g_cl_defer_r[i]);
+        poll_waiter_list_register(&g_mq.ready_list, &g_cl_defer_pw[i]);
+    }
+    g_cl_defer_batches = 0;
+    g_cl_defer_locked  = false;
+    g_poll_wake_batch_hook = cl_defer_batch;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    int rc = p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0);
+    g_poll_wake_batch_hook = NULL;
+    TEST_EXPECT_EQ(rc, 0, "handshake over mq transport");
+    TEST_ASSERT(g_cl_defer_batches > 0, "the sends' walks ran in batches (the probe saw them)");
+    TEST_ASSERT(!g_cl_defer_locked, "and every batch ran with c->lock released");
+    u32 reached = 0;
+    for (u32 i = 0; i < CL_DEFER_HOOKS; i++) reached += g_cl_defer_pw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, CL_DEFER_HOOKS, "every listed hook was reached");
+    for (u32 i = 0; i < CL_DEFER_HOOKS; i++) poll_waiter_list_unregister(&g_cl_defer_pw[i]);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
 // N READ ops in flight at once, each into a distinct slice of ONE registered
 // buffer. The queueing transport replies Rread("hello") to each; the elected
 // reader copies each payload into its op's pinned slice at completion. Drives the

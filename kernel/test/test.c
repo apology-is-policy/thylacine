@@ -1956,6 +1956,7 @@ void test_9p_client_loom_create_gid(void);
 void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
+void test_9p_client_transport_walk_runs_after_the_client_lock(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
 void test_9p_client_full_pool_sync_op_gets_a_tag(void);
@@ -4484,6 +4485,8 @@ struct test_case g_tests[] = {
                                        test_9p_client_pump_ready_never_waits_inside_a_frame, false, NULL },
     { "9p_client.loom_quiesce_drains_the_late_reply",
                                        test_9p_client_loom_quiesce_drains_the_late_reply, false, NULL },
+    { "9p_client.transport_walk_runs_after_the_client_lock",
+      test_9p_client_transport_walk_runs_after_the_client_lock, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
