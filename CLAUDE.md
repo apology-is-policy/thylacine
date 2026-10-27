@@ -272,7 +272,7 @@ At every resting point, whether or not you yield (full text in `docs/agent/SESSI
 - **Direct statements.** State results and decisions plainly. During long work, give the user a one-line note when you start a long-running step, change direction, or find something that changes the plan.
 - **No backwards-compat shims** without explicit need. Delete dead code; don't leave re-exports with `// removed` comments.
 - **Avoid comments that reference the author's intent** ("I chose X because..."). The reason goes in the commit message; the code stands on its own.
-- **C99 idiomatic style** (kernel) — `struct Foo` not `Foo_t`; lowercase function names; explicit types; no `#define` magic; no GNU extensions. Plan 9 dialect tendencies are *not* used (no `auto`, no nested functions, no channel keywords).
+- **C99 idiomatic style** (kernel) — `struct Foo` not `Foo_t`; lowercase function names; explicit types; no `#define` magic (the one sanctioned storage-class macro, `VISIBLE_IF_KERNEL_TESTS`, and the cross-file declaration rule are in `.claude/rules/kernel-code.md`); no GNU extensions. Plan 9 dialect tendencies are *not* used (no `auto`, no nested functions, no channel keywords).
 - **Rust idiomatic style** (userspace) — standard rustfmt + clippy clean.
 
 ---
