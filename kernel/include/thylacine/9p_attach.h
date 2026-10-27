@@ -270,7 +270,6 @@ struct p9_closer_stats {
 };
 #ifdef KERNEL_TESTS
 void p9_closer_stats(struct p9_closer_stats *out);
-#endif // KERNEL_TESTS
 
 // Tests: the next `n` closer spawns, or closer queue nodes, fail as an
 // allocation failure would. Each returns how many were still to fail.
@@ -282,7 +281,6 @@ u32 p9_closer_fail_nodes_for_test(u32 n);
 void p9_closer_hold_spawn_for_test(bool hold);
 bool p9_closer_spawn_held_for_test(void);
 
-#ifdef KERNEL_TESTS
 // #210: relabel a registered attached for /ctl/9p-sessions (label is
 // copied, truncated to the ctl_label field; id is free-form — the /srv
 // path stamps the conn's peer pid). Safe any time between create and the

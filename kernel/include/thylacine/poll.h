@@ -444,7 +444,6 @@ u64 poll_total_resleeps(void);
 // bounded by the retry timer instead.
 u64 poll_total_snap_failsafes(void);
 u64 poll_total_arm_retries(void);
-#endif // KERNEL_TESTS
 
 // Test hook: run the snapshot fail-safe after `bound_ns` instead of
 // POLL_SNAP_BOUND_NS, counted but NOT printed (a test that makes it fire must
@@ -455,6 +454,7 @@ void poll_test_set_snap_bound_ns(u64 bound_ns);
 // whether a test left its own set -- a quiet bound left behind would hide every
 // later fail-safe from the gates.
 bool poll_test_snap_bound_release(void);
+#endif // KERNEL_TESTS
 
 
 #endif // THYLACINE_POLL_H

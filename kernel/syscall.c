@@ -9587,7 +9587,7 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     // claim-under-lock in the child thunk).
     if (perm_flags & SPAWN_PERM_CONSOLE_RENDERER) {
         if (!proc_is_console_attached(p))                          return -1;
-        if (proc_test_console_renderer() != NULL)                  return -1;
+        if (proc_console_renderer_held())                          return -1;
     }
     // CL-5: MAY_RAISE_PAGE_BUDGET takes the MAY_POST_SERVICE one-hop shape
     // (console-attached OR an existing holder), so joey -> login -> shell ->

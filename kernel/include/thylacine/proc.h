@@ -2642,11 +2642,18 @@ int proc_set_console_renderer(struct Proc *p);
 // g_proc_table_lock). Fail-closed on NULL.
 bool proc_is_console_renderer(const struct Proc *p);
 
+// proc_console_renderer_held — true iff some Proc holds the role. The spawn
+// grant gate's single-holder pre-check; the claim under lock in
+// proc_set_console_renderer is what decides a race.
+bool proc_console_renderer_held(void);
+
+#ifdef KERNEL_TESTS
 // proc_test_console_renderer — test-only: read g_console_renderer.
 struct Proc *proc_test_console_renderer(void);
 
 // proc_test_clear_console_renderer — test-only: release the role + flag.
 void proc_test_clear_console_renderer(void);
+#endif // KERNEL_TESTS
 
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under
@@ -2678,9 +2685,11 @@ bool proc_console_sak(void);
 // covers gate + act, so the ZOMBIE chokepoint cannot interleave. 0 / -1.
 int proc_console_episode(struct Proc *p, u32 op);
 
+#ifdef KERNEL_TESTS
 // Test-only readers: the saved pre-SAK owner / the trusted pointer.
 struct Proc *proc_test_console_owner_pre_sak(void);
 struct Proc *proc_test_console_trusted(void);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.

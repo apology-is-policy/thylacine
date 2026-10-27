@@ -2999,7 +2999,6 @@ enum {
 // returning the byte count (g needs >= 64 bytes).
 void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out);
 int  viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g);
-#endif // KERNEL_TESTS
 
 // C2-k1b test shim: drive the ioctl shell without a phenotype dispatch. Mirrors
 // viv_readv_for_test -- the shell entry the test suite calls.
@@ -3009,6 +3008,7 @@ s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp);
 // real viv_tier2 arm, so the ACCES->PERM errno remap is exercised on an explicit
 // Proc. linux_num is VIV_LINUX_SETSID or VIV_LINUX_SETPGID; a0/a1 are pid/pgid.
 s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1);
+#endif // KERNEL_TESTS
 
 // -----------------------------------------------------------------------------
 // uname (#150). A fabrication -- there is no underlying Thylacine call -- so the

@@ -218,12 +218,12 @@ u64 dev9p_co_budget_used(void);
 // Diagnostics: bytes currently held by live staged-run buffers (the global
 // wb budget's occupancy). Tests assert the charge/uncharge balance.
 u64 dev9p_wb_budget_used(void);
-#endif // KERNEL_TESTS
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth
 // of live runs. Balanced add/subtract pairs only; never in production paths.
 void dev9p_wb_budget_bias_for_test(s64 n);
+#endif // KERNEL_TESTS
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian
 
@@ -365,6 +365,7 @@ void dev9p_poll_pump_main(void);
 // readiness Tread -- and drops the priv's poll-state ref.
 void dev9p_poll_priv_release(struct dev9p_priv *p);
 
+#ifdef KERNEL_TESTS
 // Test accessors (test_dev9p): the arm registry's length, and the snapshots still
 // linked. Let a test assert a teardown (a count back to its baseline) without
 // exposing the static registries.
@@ -374,6 +375,7 @@ u32 dev9p_poll_snap_count_for_test(void);
 // Test accessor: the poll-pump kthread is asleep on its park (so it is pumping no
 // client). A test waits for it before destroying a client the kthread served.
 bool dev9p_poll_parked_for_test(void);
+#endif // KERNEL_TESTS
 
 // Test hook: the poll collector's mode. dev9p_poll_test_gc_release is the
 // runner's release after every test (back to RUN; whether it was left set).
@@ -382,8 +384,10 @@ enum dev9p_poll_test_gc_mode {
     DEV9P_POLL_GC_SKIP = 1,   // leave them for a close to cancel
     DEV9P_POLL_GC_HOLD = 2,   // stop between the collect and the frees
 };
+#ifdef KERNEL_TESTS
 void dev9p_poll_test_gc(enum dev9p_poll_test_gc_mode mode);
 bool dev9p_poll_gc_held_for_test(void);
 bool dev9p_poll_test_gc_release(void);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_DEV9P_H

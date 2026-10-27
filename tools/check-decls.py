@@ -14,7 +14,12 @@ declarations"). This parses every kernel TU with the build's own flags (clang
       translation unit does not define, at file or block scope -- such a name
       belongs in a header;
   (c) a struct or union tag defined at file scope in more than one file -- two
-      layouts kept equal by hand, which nothing compares.
+      layouts kept equal by hand, which nothing compares;
+  (d) a non-static function or object declared where this configuration can
+      see it but defined in none of its C files, its assembly (.global/.globl)
+      or its linker script -- a prototype that outlived its definition, or a
+      test hook's declared outside #ifdef KERNEL_TESTS, which a production
+      caller would reach only to fail at the link.
 
 Types are compared after typedefs are expanded, `_Bool` is read as `bool`, and
 array bounds are dropped (an `extern T a[]` declares the same object as its
@@ -114,22 +119,24 @@ def decls_of(tu, cmd):
         # inside a macro's header (`bool` is stdbool.h's), the name cannot.
         if cur and os.path.realpath(cur) == main:
             local.add(name)
-    return [(n, canonical(t, typedefs), t) for n, t in found], local - defined, tags
+    return [(n, canonical(t, typedefs), t) for n, t in found], local - defined, tags, defined
 
 
-def check(tus, cmd, jobs):
+def check(tus, cmd, jobs, external=frozenset()):
     seen = collections.defaultdict(lambda: collections.defaultdict(list))
-    foreign, tag_files = {}, collections.defaultdict(set)
+    foreign, tag_files, defined = {}, collections.defaultdict(set), set(external)
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        for tu, (decls, undefined, tags) in zip(tus, ex.map(lambda t: decls_of(t, cmd), tus)):
+        for tu, (decls, undefined, tags, here) in zip(tus, ex.map(lambda t: decls_of(t, cmd), tus)):
             for name, canon, spelled in decls:
                 seen[name][canon].append((tu, spelled))
             if undefined:
                 foreign[tu] = sorted(undefined)
             for tag, f in tags:
                 tag_files[tag].add(f)
+            defined |= here
     dup_tags = {tag: sorted(fs) for tag, fs in tag_files.items() if len(fs) > 1}
-    return {n: v for n, v in seen.items() if len(v) > 1}, foreign, len(seen), dup_tags
+    orphans = {n: sorted({tu for sites in seen[n].values() for tu, _ in sites}) for n in seen if n not in defined}
+    return {n: v for n, v in seen.items() if len(v) > 1}, foreign, len(seen), dup_tags, orphans
 
 
 def build_inputs(build_dir):
@@ -159,6 +166,19 @@ def build_inputs(build_dir):
     return srcs, cmd
 
 
+def external_names(build_dir):
+    """What C may declare without defining: the globals of the configuration's
+    assembly sources and the symbols its linker script assigns."""
+    d = os.path.join(build_dir, "kernel", "CMakeFiles", "thylacine.elf.dir")
+    names = set()
+    for s in set(re.findall(r"(\S+\.S)$", open(os.path.join(d, "build.make")).read(), re.M)):
+        s = s if os.path.isabs(s) else os.path.join(build_dir, s)
+        names |= set(re.findall(r"^\s*\.glob(?:a)?l\s+([A-Za-z_][A-Za-z_0-9]*)", open(s).read(), re.M))
+    for ld in re.findall(r"-T\s*(\S+\.ld)", open(os.path.join(d, "link.txt")).read()):
+        names |= set(re.findall(r"(?:^|[;{\s])([A-Za-z_][A-Za-z_0-9]*)\s*=", open(ld).read()))
+    return names
+
+
 ROOT = None
 
 
@@ -168,7 +188,12 @@ def short(path):
     return "kernel/" + path.split("/kernel/", 1)[1] if "/kernel/" in path else path
 
 
-def report(conflicts, foreign, dup_tags):
+def report(conflicts, foreign, dup_tags, orphans):
+    for name in sorted(orphans):
+        tus = orphans[name]
+        print(f"check-decls: {name} is declared but defined in no TU, assembly source or linker "
+              f"script of this configuration (seen in {len(tus)} TU(s): "
+              f"{', '.join(short(t) for t in tus[:3])}{' ...' if len(tus) > 3 else ''})")
     for tag in sorted(dup_tags):
         print(f"check-decls: {tag} is defined in {len(dup_tags[tag])} files: "
               f"{', '.join(short(f) for f in dup_tags[tag])}")
@@ -185,7 +210,9 @@ def report(conflicts, foreign, dup_tags):
 
 def self_test():
     """The detector must go red on a seeded mismatch and stay green on its absence."""
-    # (a.c, b.c, names rule (a) must report, names rule (b) must report in b.c).
+    # (a.c, b.c, names rule (a) must report, names rule (b) must report in b.c
+    # [, tags rule (c) must report [, names rule (d) must report [, the names the
+    # configuration's assembly or linker script defines]]]).
     # Every case has a header h.h that both files may include.
     hdr = "long hf(int x);\nextern int hv;\nstruct T { int t; };\n"
     cases = {
@@ -210,7 +237,11 @@ def self_test():
         "struct-twice": ("struct S { int x; };\nint f(struct S *s) { return s->x; }\n",
                          "struct S { int x; long y; };\nlong g(struct S *s) { return s->y; }\n", set(), set(), {"struct S"}),
         "struct-header": ('#include "h.h"\nint f(struct T *p) { return p->t; }\n',
-                          '#include "h.h"\nint g(struct T *p) { return p->t; }\n', set(), set(), set()),
+                          '#include "h.h"\nint g(struct T *p) { return p->t; }\n', set(), set(), set(), {"hf", "hv"}),
+        "orphan": ('#include "h.h"\nlong hf(int x) { return x; }\n',
+                   '#include "h.h"\nlong g(void) { return hf(hv); }\n', set(), set(), set(), {"hv"}),
+        "orphan-external": ('#include "h.h"\nlong hf(int x) { return x; }\n',
+                            '#include "h.h"\nlong g(void) { return hf(hv); }\n', set(), set(), set(), set(), {"hv"}),
         "struct-local": ("int f(void) { struct L { int a; } l = { 1 }; return l.a; }\n",
                          "int g(void) { struct L { long b; } l = { 2 }; return (int)l.b; }\n", set(), set(), set()),
         "builtin": ("long f(int x) { return x; }\n",
@@ -223,18 +254,19 @@ def self_test():
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         open(os.path.join(tmp, "h.h"), "w").write(hdr)
-        for case, (a, b, want_a, want_b, *want_c) in cases.items():
+        for case, (a, b, want_a, want_b, *rest) in cases.items():
+            want_c, want_d, external = (rest + [set(), set(), frozenset()][len(rest):])[:3]
             pa, pb = os.path.join(tmp, f"{case}_a.c"), os.path.join(tmp, f"{case}_b.c")
             open(pa, "w").write(a)
             open(pb, "w").write(b)
-            got, foreign, _, tags = check([pa, pb], [clang, "-std=c99", "-I" + tmp], 2)
+            got, foreign, _, tags, orphans = check([pa, pb], [clang, "-std=c99", "-I" + tmp], 2, external)
             got_b = set(foreign.get(pb, []))
             ok = set(got) == want_a and got_b == want_b and pa not in foreign and \
-                set(tags) == (want_c[0] if want_c else set())
+                set(tags) == want_c and set(orphans) == want_d
             bad += not ok
             print(f"check-decls self-test {case}: {'ok' if ok else 'WRONG'} "
                   f"(a: {sorted(got) or 'nothing'}; b: {sorted(got_b) or 'nothing'}; a.c: {foreign.get(pa) or 'nothing'}; "
-                  f"c: {sorted(tags) or 'nothing'})")
+                  f"c: {sorted(tags) or 'nothing'}; d: {sorted(orphans) or 'nothing'})")
     return bad
 
 
@@ -247,15 +279,17 @@ def main():
     if a.self_test:
         sys.exit(1 if self_test() else 0)
     srcs, cmd = build_inputs(a.build_dir)
-    conflicts, foreign, names, dup_tags = check(srcs, cmd, a.jobs)
-    if conflicts or foreign or dup_tags:
-        report(conflicts, foreign, dup_tags)
+    conflicts, foreign, names, dup_tags, orphans = check(srcs, cmd, a.jobs, external_names(a.build_dir))
+    if conflicts or foreign or dup_tags or orphans:
+        report(conflicts, foreign, dup_tags, orphans)
         print(f"check-decls: FAIL -- {len(conflicts)} of {names} names declared with more than one type; "
               f"{len(foreign)} .c file(s) declare {sum(len(v) for v in foreign.values())} name(s) they do not define; "
-              f"{len(dup_tags)} struct/union tag(s) defined in more than one file; {len(srcs)} TUs")
+              f"{len(dup_tags)} struct/union tag(s) defined in more than one file; "
+              f"{len(orphans)} name(s) declared but defined nowhere in this configuration; {len(srcs)} TUs")
         sys.exit(1)
     print(f"check-decls: ok -- {names} non-static names, one type each, every one declared where it is "
-          f"defined or in a header; every struct/union tag defined once; {len(srcs)} TUs")
+          f"defined or in a header and defined somewhere in this configuration; every struct/union tag "
+          f"defined once; {len(srcs)} TUs")
 
 
 if __name__ == "__main__":

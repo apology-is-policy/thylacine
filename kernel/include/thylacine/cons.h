@@ -223,6 +223,7 @@ bool cons_diag_line_emit(struct cons_diag_line *l);                  // one push
 bool cons_kernel_writer_begin(void);
 void cons_kernel_writer_end(void);
 
+#ifdef KERNEL_TESTS
 // #75 test hooks (test-only). The RING needs no dedicated test -- every byte of
 // console output on every boot goes through it, so a ring bug means no boot at
 // all. The ROLE does: it is what makes a write call-atomic, and its absence is
@@ -256,6 +257,7 @@ u32  cons_test_tx_room_waits(void);
 bool cons_test_tx_armed(void);
 u32  cons_test_tx_ring_capacity(void);
 u64  cons_test_tx_room_wait_ns(void);
+#endif // KERNEL_TESTS
 
 // #174/#129 backpressure PRE-check: true iff the RX ring has room for the
 // worst-case push one more admitted byte could cause. The PL011 RX drain
@@ -366,6 +368,7 @@ bool cons_episode_begin(void);
 bool cons_episode_end(void);
 bool cons_episode_abandon(void);
 
+#ifdef KERNEL_TESTS
 // IM-1 test hooks. cons_test_sak_dispatch drives console_mgr's SAK arm
 // EXACTLY (proc_console_sak -> cons_episode_begin). cons_test_reader_busy /
 // _episode_parked / _line_len are non-blocking observables: the reader slot,
@@ -378,7 +381,6 @@ void cons_test_sak_dispatch(void);
 bool cons_test_reader_busy(void);
 u32  cons_test_episode_parked(void);
 u32  cons_test_line_len(void);
-#ifdef KERNEL_TESTS
 void cons_test_set_window_hook(void (*fn)(void));
 #endif
 
@@ -509,6 +511,7 @@ void console_mgr_main(void);
 // harness cannot inject UART RX -- IDENTITY-DESIGN.md section 9.8 test note).
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // Reset the console input ring + flags + reader-busy to the empty state.
 void cons_test_reset(void);
 
@@ -583,6 +586,7 @@ void cons_test_force_full(bool on);
 u32  cons_test_drain_count(void);
 u32  cons_test_drain_overflow(void);
 bool cons_test_drain_pollwake_pending(void);
+#endif // KERNEL_TESTS
 
 // #130-R2 F2: the harness backstop. Each bit names a piece of console state a
 // test arms for a window and must release; a failing assert inside the window
@@ -603,6 +607,8 @@ bool cons_test_drain_pollwake_pending(void);
 // the login prompt); armed, a real BREAK would open one behind a synthetic,
 // by then freed, authority.
 #define CONS_TEST_OWNED_EPISODE       (1u << 6)
+#ifdef KERNEL_TESTS
 u32  cons_test_release_owned_state(void);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_CONS_H

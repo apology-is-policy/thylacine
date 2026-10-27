@@ -2375,6 +2375,13 @@ bool proc_is_console_renderer(const struct Proc *p) {
     return yes;
 }
 
+bool proc_console_renderer_held(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool held = (g_console_renderer != NULL);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return held;
+}
+
 #ifdef KERNEL_TESTS
 struct Proc *proc_test_console_renderer(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);

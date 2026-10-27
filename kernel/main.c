@@ -28,7 +28,9 @@
 #include "../mm/magazines.h"
 #include "../mm/phys.h"
 #include "../mm/slub.h"
+#ifdef KERNEL_TESTS
 #include "test/test.h"
+#endif
 
 #include <thylacine/pci_irq.h>
 #include <thylacine/canary.h>

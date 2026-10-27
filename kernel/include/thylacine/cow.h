@@ -94,8 +94,10 @@ bool cow_page_put(struct page *pg);
 //          caller calls cow_page_put only once the copy is DONE.
 bool cow_page_break_is_sole(struct page *pg);
 
+#ifdef KERNEL_TESTS
 // Read the count. FOR TESTS AND DIAGNOSTICS ONLY -- a read that is acted upon
 // is the race cow_page_break_is_sole and cow_page_put exist to prevent.
 u32 cow_page_share_for_test(const struct page *pg);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_COW_H

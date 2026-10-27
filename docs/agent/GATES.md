@@ -150,8 +150,11 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 # FATAL, no skip switch, self-test first. One name, one type across every TU of
 # the kernel ELF (kernel/, arch/, mm/, lib/, generated); no .c declares a name it
 # does not define, at file or block scope; a struct/union tag is defined in one
-# file. The compiler cannot see any of the three: it compares a declaration with
-# its definition only inside one TU. Run it by hand on another build directory:
+# file; every name a TU sees is defined in the configuration (C, .S globals or
+# the linker script -- a test hook's prototype left outside #ifdef KERNEL_TESTS
+# fails this on a production build, not the link). The compiler cannot see any
+# of the four: it compares a declaration with its definition only inside one
+# TU. Run it by hand on another build directory:
 tools/check-decls.py --build-dir build/kernel    # 0 ok; non-zero on a violation or a tree it cannot read
 tools/check-decls.py --self-test                 # each rule turns red on a seeded case
 
