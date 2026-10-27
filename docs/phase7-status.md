@@ -2529,3 +2529,40 @@ aux-3-c5. Replaces L-2a's refusal, in which an execve from a process with live p
   model change), 8 buggy red; death_wake clean at 1422 + buggy NoLostDeathWake as claimed. SMP gate 50/50, 0 corruption (default at 1, 4 and 8
   CPUs, UBSan at 4 and 8). `--config ci` re-bake clean. The docs and the comment fix after e8f1a5ef4 leave syscall.o
   byte-identical. Not run: the userspace pthreads stress beyond exec-probe's legs.
+
+## Thread-model C6: one id space, a thread's kernel memory in the pool, a per-Proc thread budget — 2026-10-27
+
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`, C6; operator votes 2-4 and 7 of 2026-10-21,
+10 and 11 of 2026-10-27). Identity went spec-first: c6a 3362606b0 (`specs/thread_reap.tla` PidNamesOne, ARCH 7.3.4)
+before the code, on aux-3-c6.
+
+- **One id space.** Procs and threads draw from one 64-bit counter (`proc_id_alloc`); ids end at `PROC_ID_LAST`
+  (2^31 - 1), are never reused, and a draw past the end is refused, never an extinction. Draws start at 2; init takes
+  pid 1 by name (`rfork_init`, once). A Proc's first thread takes the pid (`PROC_FLAG_MAIN_TID`), so a main thread's
+  tid is its pid; an exec from a peer moves the pid to the execer at the swap. The last 2^20 ids are the TCB's (vote
+  10, audit F1): a user's draw stops at `PROC_ID_USER_LAST` and a refused draw leaves the counter where it was, so no
+  user's churn can spend the ids init and login spawn with.
+- **A thread's kernel memory is pool memory.** `thread_new` charges a user thread's stack block and slot
+  (`THREAD_POOL_PAGES` = 9) to the user pool at create, payer-attributed: the Proc, or the owner of an SQPOLL poller
+  that lives in kproc (`thread_create_kthread_for`). kproc pays nothing; an exempt payer is counted, never refused. The
+  reaper returns the charge before the unlink, so a waiter never reads the pool still holding it.
+- **A per-Proc thread budget.** `PROC_THREAD_MAX` (256) is gone: `Proc.thread_budget`, default min(4096, hard max),
+  hard max = pool pages / 9; inherited by rfork; set at spawn by a `SPAWN_EXT_THREADS` tail (after the cwd tail);
+  lowering is free, raising needs `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (one-hop, like the page budget's), past the
+  hard max is refused, never clamped. `/proc/<pid>/status` reports it as `threadcap:`.
+- **Tests.** proc.ids_are_one_space, proc.exec_from_a_peer_takes_the_pid (with a reading inside the claim window, F3),
+  thread.kernel_memory_charged_to_the_pool (with the reap-order watch), thread.pool_refuses_users_keeps_tcb,
+  spawn_cwd.thread_budget_resolves (with an rfork-inheritance leg), thread.id_space_keeps_a_tcb_tail; resource/loom
+  cap tests read the budget; joey's probe_thread_budget drives both tail offsets through the real ABI; usr/go-threads
+  (300 locked Ms as a user) passes under the default and dies naming the refused create under a budget of 256.
+- **Verification.** Lease 1 (60d81ba5c): ci bake; suite 2047/2047 with both joey markers; nine sabotage builds, eight
+  red exactly where predicted and T4's reds a subset explained by two room-only tests; regreen bit-identical;
+  thread_reap TLC clean 9494 with all 14 buggy cfgs as named; check-production PASS; SMP gate 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption. Lease 2
+  (79f886762, the round-1 fixes): suite 2048/2048 with both joey markers; six sabotage builds (T8b, T10-T14; T10 is the runtime
+  twin of BUGGY_PID_AT_CLAIM) each red exactly where predicted; regreen bit-identical; check-production PASS; the SMP
+  gate on this tip queued behind corona's lease (2b).
+- **Audit.** Round 1 Fable 5.1 (start == end): 0 P0 / 0 P1 / 1 P2 / 2 P3 + 1 pre-existing observation, all fixed
+  (cfbf765fd) or enqueued (exec does not reset clear_child_tid: OPEN-BUGS, owner aux). Not dirty.
+- **Still open, owned.** The poll_waiter_list hook bound (OPEN-BUGS P2; C6 raised its per-Proc factor 16x): aux's
+  next chunk by vote 11. A refused first create burns the main tid only in a hand-built test Proc (rfork frees the
+  Proc on failure).
