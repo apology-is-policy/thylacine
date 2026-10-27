@@ -57,12 +57,12 @@ and vote 23 (file-local functions), written down in
   `kernel/`, `arch/`, `mm/`, `lib/` and the generated `halls_symtab.c`:
   - (a) one name, one type, across all TUs (`_Bool` and `bool` equal; an
     unsized array matches a sized one);
-  - (b) no `.c` declares a non-static function or object it does not define,
-    at file or block scope;
+  - (b) no `.c` declares a non-static function or object it does not define
+    (in C, or in its own file-scope asm's `.globl`), at file or block scope;
   - (c) one definition per struct tag;
   - (d) every non-static function or object a TU of the configuration can see
-    is defined in one of its TUs, in an assembly source (`.global`/`.globl`)
-    or in the linker script. On a production build this is what holds a test
+    is defined in one of its TUs (in C or in that TU's file-scope asm), in an
+    assembly source (`.global`/`.globl`) or in the linker script. On a production build this is what holds a test
     hook's prototype inside `#ifdef KERNEL_TESTS`: one left outside compiles
     for a production caller and fails only at the link.
 - **Host fixtures take the tests build's shape.** A host checker that compiles
@@ -119,13 +119,15 @@ TU, in parallel).
 ## Prosecution
 
 Every rule was witnessed red on a seeded case before it was trusted, and the
-seeds are the 21 `--self-test` cases. Rule (a) is red on a parameter mismatch,
+seeds are the 23 `--self-test` cases. Rule (a) is red on a parameter mismatch,
 an object type mismatch and a block-scope extern of the wrong type; rule (b) on
 a local extern, a bare prototype, block-scope externs of a function and of an
 object, and a declaration whose range begins in a macro (`bool`); rule (c) on a
 second definition of a struct tag; rule (d) on a header prototype that no file
 defines, alone and beside a used one. Rule (d) stays green when the same
-name comes from the assembly or the linker script. The controls stay green where they must: a
+name comes from the assembly or the linker script, and rule (b) when a file's
+own file-scope asm `.globl`s the name it declares (and red when that asm
+defines a different name). The controls stay green where they must: a
 typedef'd equal type and an unsized array against a sized one pass rule (a)
 (rule (b) still refuses both declarations); a header declaration, a file's own
 prototype, block-scope locals, compiler builtins and same-named statics in two
@@ -148,6 +150,13 @@ function, passes rule (c).
   `THYLACINE_NO_TICKLESS` compile code the two main configurations do not; a
   census that ignores them would have moved 21 functions wrongly. A
   check-decls run covers only the configuration its build directory holds.
+  `tools/test-fault.sh` builds each fault variant through `tools/build.sh`,
+  so check-decls runs on every one; its first run after this rule stopped
+  `wxe_violation` at rule (b) on a local `extern char _kernel_start[]` that
+  only that variant compiles, which the syntax-only variant census had
+  passed. `VIV_TRACE`, `LOOM_PRIVATE_QUALIFICATION` and
+  `THYLACINE_NO_TICKLESS` are built by no routine gate, so nothing checks
+  their code between the runs that ask for them.
 - **One gate builds the production kernel.** `tools/build.sh` builds the
   tests kernel unless asked for `--production`, and until 2026-10-27 nothing
   built the `KERNEL_TESTS=OFF` kernel at all: `tools/check-production.sh`,

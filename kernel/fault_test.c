@@ -67,7 +67,7 @@ static char provoke_canary_smash(void) {
 // ---------------------------------------------------------------------------
 
 #ifdef THYLACINE_FAULT_TEST_wxe_violation
-extern char _kernel_start[];
+#include "../arch/arm64/sections.h"
 
 __attribute__((noinline))
 __attribute__((no_stack_protector))

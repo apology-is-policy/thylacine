@@ -11,13 +11,13 @@ declarations"). This parses every kernel TU with the build's own flags (clang
   (a) a non-static function or object declared with two different types
       anywhere in the kernel;
   (b) a .c file declaring a non-static function or object that the same
-      translation unit does not define, at file or block scope -- such a name
-      belongs in a header;
+      translation unit does not define, in C or in its own file-scope asm
+      (.globl), at file or block scope -- such a name belongs in a header;
   (c) a struct or union tag defined at file scope in more than one file -- two
       layouts kept equal by hand, which nothing compares;
   (d) a non-static function or object declared where this configuration can
-      see it but defined in none of its C files, its assembly (.global/.globl)
-      or its linker script -- a prototype that outlived its definition, or a
+      see it but defined in none of its C files (or their file-scope asm), its
+      assembly (.global/.globl) or its linker script -- a prototype that outlived its definition, or a
       test hook's declared outside #ifdef KERNEL_TESTS, which a production
       caller would reach only to fail at the link.
 
@@ -50,6 +50,9 @@ LOC = re.compile(r"(?<![A-Za-z0-9_])(?:(/[^\s:<>,]+|<scratch space>|<built-in>):
 TYPEDEF = re.compile(r"TypedefDecl 0x[0-9a-f]+ .* ([A-Za-z_][A-Za-z_0-9]*) '([^']*)'")
 NAME_TYPE = re.compile(r" ([A-Za-z_][A-Za-z_0-9]*) '([^']*)'(?::'[^']*')?(.*)$")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+TOP_ASM = re.compile(r"^[|`]-FileScopeAsmDecl ")
+ASM_STRING = re.compile(r"^[| ] [|`]-StringLiteral ")
+ASM_GLOBAL = re.compile(r"\.glob(?:a)?l\s+([A-Za-z_][A-Za-z_0-9]*)")
 
 
 def canonical(t, typedefs, depth=0):
@@ -74,10 +77,14 @@ def decls_of(tu, cmd):
     if r.returncode != 0:
         raise RuntimeError(f"{tu}: clang failed:\n{r.stderr[-2000:]}")
     typedefs, found, defined, local, tags = {}, [], set(), set(), set()
-    main, cur, pending = os.path.realpath(tu), None, None
+    main, cur, pending, in_asm = os.path.realpath(tu), None, None, False
     for line in r.stdout.split("\n"):
         if pending and not TOP_DECL.match(line) and CHILD_BODY.match(line):
             defined.add(pending)
+        # A file-scope asm's .globl defines its symbol in this TU, as a .S would.
+        if in_asm and ASM_STRING.match(line):
+            defined.update(ASM_GLOBAL.findall(line))
+        in_asm = bool(TOP_ASM.match(line))
         for tok in LOC.finditer(QUOTED.sub("''", line)):
             if tok.group(1):
                 cur = tok.group(1)
@@ -249,6 +256,12 @@ def self_test():
                     set(), set()),
         "static": ("static int h(void) { return 0; }\nint k(void) { return h(); }\n",
                    "static long h(void) { return 0; }\nlong m(void) { return h(); }\n", set(), set()),
+        "asm-defined": ("long f(int x) { return x; }\n",
+                        '__asm__(".globl af\\naf: ret\\n");\nextern void af(void);\nvoid g(void) { af(); }\n',
+                        set(), set()),
+        "asm-other-name": ("long f(int x) { return x; }\n",
+                           '__asm__(".globl af\\naf: ret\\n");\nextern void ag(void);\nvoid g(void) { ag(); }\n',
+                           set(), {"ag"}, set(), {"ag"}),
     }
     clang = os.environ.get("CC", "clang")
     bad = 0
