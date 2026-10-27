@@ -11,7 +11,8 @@ declarations"). This parses every kernel TU with the build's own flags (clang
   (a) a non-static function or object declared with two different types
       anywhere in the kernel;
   (b) a .c file declaring a non-static function or object that the same
-      translation unit does not define -- such a name belongs in a header.
+      translation unit does not define, at file or block scope -- such a name
+      belongs in a header.
 
 Types are compared after typedefs are expanded, `_Bool` is read as `bool`, and
 array bounds are dropped (an `extern T a[]` declares the same object as its
@@ -34,6 +35,7 @@ import sys
 import tempfile
 
 TOP_DECL = re.compile(r"^[|`]-(FunctionDecl|VarDecl) 0x[0-9a-f]+ (.*)$")
+NESTED_DECL = re.compile(r"^[| ]+[|`]-(FunctionDecl|VarDecl) 0x[0-9a-f]+ (.*)$")
 CHILD_BODY = re.compile(r"^[| ] [|`]-CompoundStmt ")
 QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 LOC = re.compile(r"(?<![A-Za-z0-9_])(?:(/[^\s:<>,]+|<scratch space>|<built-in>):\d+:\d+|line:\d+:\d+|col:\d+|<invalid sloc>)")
@@ -79,6 +81,16 @@ def decls_of(tu, cmd):
         if not m:
             if line.startswith(("|-", "`-")):
                 pending = None
+            # A block-scope `extern` object or any block-scope function
+            # declaration names an external entity: it is a declaration like a
+            # top-level one, never a definition.
+            n = NESTED_DECL.match(line)
+            nt = n and NAME_TYPE.search(n.group(2))
+            if nt and not re.search(r"\bimplicit\b", n.group(2)[:nt.start()]) and \
+                    (n.group(1) == "FunctionDecl" or re.search(r"\bextern\b", nt.group(3))):
+                found.append((nt.group(1), nt.group(2)))
+                if cur and os.path.realpath(cur) == main:
+                    local.add(nt.group(1))
             continue
         pending = None
         nt = NAME_TYPE.search(m.group(2))
@@ -177,6 +189,12 @@ def self_test():
         "own-object": ("int k;\n", "extern int v;\nint v = 3;\n", set(), set()),
         "macro-first": ("#include <stdbool.h>\nbool f(int x) { return x; }\n",
                         "#include <stdbool.h>\nbool f(int x);\nbool g(void) { return f(1); }\n", set(), {"f"}),
+        "block-extern": ("long f(int x) { return x; }\n",
+                         "long g(void) { extern long f(int x); return f(1); }\n", set(), {"f"}),
+        "block-mismatch": ("long f(int x) { return x; }\n",
+                           "long g(void) { extern long f(long x); return f(1); }\n", {"f"}, {"f"}),
+        "block-object": ("int v;\n", "int g(void) { extern int v; return v; }\n", set(), {"v"}),
+        "block-locals": ("int k;\n", "int g(void) { static int s; int a = 0; return s + a; }\n", set(), set()),
         "builtin": ("long f(int x) { return x; }\n",
                     "long g(long *p) { return __atomic_fetch_add(p, 1, __ATOMIC_RELAXED) + __builtin_ctzll(8); }\n",
                     set(), set()),
