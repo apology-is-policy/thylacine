@@ -159,6 +159,13 @@ static struct pipe_endpoint *priv_of(struct Spoor *c) {
     return p;
 }
 
+#ifdef KERNEL_TESTS
+u32 pipe_poll_hooks_for_test(struct Spoor *end) {
+    struct pipe_endpoint *p = priv_of(end);
+    return p ? poll_waiter_list_count_for_test(&p->ring->poll_list) : 0u;
+}
+#endif
+
 static void devpipe_reset(void)    { /* no-op */ }
 static void devpipe_shutdown(void) { /* no-op */ }
 static void devpipe_init_noop(void) { /* registration via pipe_init */ }

@@ -136,6 +136,7 @@ void poll_waiter_init(struct poll_waiter *pw, struct Rendez *r) {
     pw->rendez = r;
     pw->list   = NULL;
     pw->next   = NULL;
+    pw->prev   = NULL;
 }
 
 void poll_waiter_list_init(struct poll_waiter_list *l) {
@@ -158,10 +159,25 @@ void poll_waiter_list_register(struct poll_waiter_list *l,
     if (pw->list != NULL)                     extinction("pw_register: double register");
 
     irq_state_t s = spin_lock_irqsave(&l->lock);
+    pw->prev = NULL;
     pw->next = l->head;
+    if (l->head) l->head->prev = pw;
     pw->list = l;
     l->head  = pw;
     spin_unlock_irqrestore(&l->lock, s);
+}
+
+// Unlink `pw` (a hook or a bookmark) from `l`, whose lock the caller holds.
+static void poll_list_unlink(struct poll_waiter_list *l, struct poll_waiter *pw) {
+    if (pw->prev ? pw->prev->next != pw : l->head != pw)
+        extinction("pw_unregister: the hook's predecessor does not lead to it (corruption)");
+    if (pw->next && pw->next->prev != pw)
+        extinction("pw_unregister: the hook's successor does not lead back to it (corruption)");
+    if (pw->prev) pw->prev->next = pw->next;
+    else          l->head        = pw->next;
+    if (pw->next) pw->next->prev = pw->prev;
+    pw->next = NULL;
+    pw->prev = NULL;
 }
 
 void poll_waiter_list_unregister(struct poll_waiter *pw) {
@@ -169,27 +185,13 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
     struct poll_waiter_list *l = pw->list;
     if (!l) return;   // already unregistered — idempotent no-op.
 
+    // No concurrent unregister of this pw is possible (it belongs to the
+    // calling poller); its neighbours may be anyone's, a walk's bookmark
+    // included, and the unlink checks both point back at it.
     irq_state_t s = spin_lock_irqsave(&l->lock);
-    // Re-check under lock: a concurrent unregister on this pw isn't
-    // possible (pw belongs to the calling poller), but the list could
-    // have been modified by other pollers' register/unregister against
-    // their own hooks. Walk for pw; remove if found.
-    struct poll_waiter **slot = &l->head;
-    while (*slot) {
-        if (*slot == pw) {
-            *slot    = pw->next;
-            pw->next = NULL;
-            pw->list = NULL;
-            spin_unlock_irqrestore(&l->lock, s);
-            return;
-        }
-        slot = &(*slot)->next;
-    }
-    // Not on the list — pw->list was non-NULL on entry but pw is gone.
-    // That's a corruption: the unregister-on-NULL idempotency check
-    // above already covered the legitimate "already gone" case.
+    poll_list_unlink(l, pw);
+    pw->list = NULL;
     spin_unlock_irqrestore(&l->lock, s);
-    extinction("pw_unregister: pw->list set but pw not on list (corruption)");
 }
 
 // Whether the list currently has no registered hooks. Under the list lock (a
@@ -198,33 +200,89 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
 // readiness op is stranded (no poller cares) -- so the check + the unlink + the
 // ps->op clear are one critical section vs a concurrent reuse that registers its
 // hook BEFORE taking g_dev9p_poll_lock.
+// Bookmarks are skipped: a list holding only parked walks has no hook.
 bool poll_waiter_list_empty(struct poll_waiter_list *l) {
     if (!l) return true;
     irq_state_t s = spin_lock_irqsave(&l->lock);
-    bool empty = (l->head == NULL);
+    struct poll_waiter *pw = l->head;
+    while (pw && pw->magic == POLL_MARK_MAGIC) pw = pw->next;
+    bool empty = (pw == NULL);
     spin_unlock_irqrestore(&l->lock, s);
     return empty;
 }
 
+#ifdef KERNEL_TESTS
+void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
+
+bool poll_test_wake_hook_release(void) {
+    bool left = g_poll_wake_batch_hook != NULL;
+    g_poll_wake_batch_hook = NULL;
+    return left;
+}
+
+u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l) {
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    u32 n = 0;
+    for (struct poll_waiter *pw = l->head; pw; pw = pw->next)
+        if (pw->magic != POLL_MARK_MAGIC) n++;
+    spin_unlock_irqrestore(&l->lock, s);
+    return n;
+}
+#endif
+
+// specs/poll_walk.tla Batch: each hold of the lock reaches up to
+// POLL_WAKE_BATCH hooks from the head (the first) or from the element after
+// the bookmark (every later one), stepping over other walks' bookmarks. Past
+// the last hook the walk is over; otherwise the bookmark goes back in right
+// behind the last hook reached.
 void poll_waiter_list_wake(struct poll_waiter_list *l) {
     if (!l) return;
 
-    irq_state_t s = spin_lock_irqsave(&l->lock);
-    for (struct poll_waiter *pw = l->head; pw; pw = pw->next) {
-        if (pw->magic != POLL_WAITER_MAGIC) {
-            // The walker mid-iteration found a corrupted link. A
-            // stack-lifetime'd hook leaked past its poll call's
-            // return would dereference clobbered stack memory here.
-            extinction("pw_wake: corrupted waiter magic (stale hook / UAF)");
+    struct poll_waiter mark = { .magic = POLL_MARK_MAGIC };
+    bool parked = false;
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        struct poll_waiter *pw = l->head;
+        if (parked) {
+            pw = mark.next;
+            poll_list_unlink(l, &mark);
+            parked = false;
         }
-        // Order matters: write `ready` FIRST, then call `wakeup`.
-        // wakeup acquires the rendez's lock — the release/acquire pair
-        // makes pw->ready=true visible to the woken poller's cond
-        // re-check (which runs under the same rendez lock).
-        pw->ready = true;
-        (void)wakeup(pw->rendez);
+        struct poll_waiter *last = NULL;
+        u32 reached = 0;
+        for (; pw; pw = pw->next) {
+            if (pw->magic == POLL_MARK_MAGIC) continue;
+            if (pw->magic != POLL_WAITER_MAGIC) {
+                // The walker mid-iteration found a corrupted link. A
+                // stack-lifetime'd hook leaked past its poll call's
+                // return would dereference clobbered stack memory here.
+                extinction("pw_wake: corrupted waiter magic (stale hook / UAF)");
+            }
+            if (reached == POLL_WAKE_BATCH) {
+                // A hook is left: park the walk right behind `last`.
+                mark.prev = last;
+                mark.next = last->next;
+                last->next->prev = &mark;
+                last->next = &mark;
+                parked = true;
+                break;
+            }
+            // Order matters: write `ready` FIRST, then call `wakeup`.
+            // wakeup acquires the rendez's lock — the release/acquire pair
+            // makes pw->ready=true visible to the woken poller's cond
+            // re-check (which runs under the same rendez lock).
+            pw->ready = true;
+            (void)wakeup(pw->rendez);
+            last = pw;
+            reached++;
+        }
+        spin_unlock_irqrestore(&l->lock, s);
+        if (!parked) return;
+#ifdef KERNEL_TESTS
+        void (*hook)(struct poll_waiter_list *) = g_poll_wake_batch_hook;
+        if (hook) hook(l);
+#endif
     }
-    spin_unlock_irqrestore(&l->lock, s);
 }
 
 // =============================================================================
@@ -371,6 +429,22 @@ static void poll_scan_one(struct Proc *p, struct pollfd *pfd, struct Spoor *pre,
     }
 }
 
+// One hook per list per call (vote 12): every wake re-samples every fd, so a
+// second hook of this call on a list it is already on only lengthens the
+// producers' walk. The earlier hook went on before this one's sample (or its
+// arm), so every walk of a mutation the sample did not see reaches it. The
+// flag this one may have caught stays readable: the cond reads every slot.
+static void poll_hook_once(struct poll_waiter *waiters, u64 i) {
+    struct poll_waiter_list *l = waiters[i].list;
+    if (!l) return;
+    for (u64 j = 0; j < i; j++) {
+        if (waiters[j].list == l) {
+            poll_waiter_list_unregister(&waiters[i]);
+            return;
+        }
+    }
+}
+
 // Take every hook off its list, THEN drop every retained object ref, then
 // clear each hook (specs/poll.tla Rearm). The order is load-bearing (RW-2
 // 2C-F1): a final handle_put may run an object's close hook against its
@@ -495,6 +569,7 @@ static bool poll_arm_remote(struct pollfd *kfds, struct poll_waiter *waiters,
         if (!snaps[i].remote) continue;
         struct Spoor *sp = (struct Spoor *)held[i].obj;
         if (!sp->dev->poll_arm(sp, kfds[i].events, &waiters[i])) covered = false;
+        poll_hook_once(waiters, i);
     }
     return covered;
 }
@@ -566,6 +641,7 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
         for (u64 i = 0; i < nfds; i++) {
             poll_scan_one(p, &kfds[i], pre ? pre[i] : NULL,
                           expired ? NULL : &waiters[i], &held[i], &snaps[i]);
+            poll_hook_once(waiters, i);
             if (snaps[i].remote) any_remote = true;
         }
 

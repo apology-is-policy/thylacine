@@ -57,6 +57,7 @@ void test_poll_ready_immediately_pollout(void);
 void test_poll_timeout_zero_not_ready(void);
 void test_poll_timeout_positive_fires(void);
 void test_poll_block_then_wake_pollin(void);
+void test_poll_cons_deferred_block_then_wake(void);
 void test_poll_pollhup_on_close_write_end(void);
 void test_poll_multi_fd_one_ready(void);
 void test_poll_bad_fd_revents_pollnval(void);
@@ -1985,4 +1986,188 @@ void test_poll_caught_note_ends_pause(void) {
     TEST_ASSERT(forever.on_post && forever.joined,
         "a caught note ends pause() itself, which has no deadline to end it");
     TEST_EXPECT_EQ(forever.rc, -(long)T_E_INTR, "no timeout: EINTR");
+}
+
+// =============================================================================
+// The walk in batches (vote 12; specs/poll_walk.tla). Hooks on a private list,
+// each with its own Rendez nobody sleeps on, so a reach is only its flag.
+// =============================================================================
+
+#define TPW_N (3u * POLL_WAKE_BATCH + 5u)
+static struct poll_waiter_list g_tpw_list;
+static struct Rendez           g_tpw_r[TPW_N + 1];
+static struct poll_waiter      g_tpw[TPW_N + 1];   // [TPW_N] is a spare, never listed at setup
+static u32  g_tpw_batches;
+static u32  g_tpw_hooks_seen;
+static bool g_tpw_ok;
+
+static void tpw_setup(u32 n) {
+    poll_waiter_list_init(&g_tpw_list);
+    for (u32 i = 0; i <= TPW_N; i++) {
+        rendez_init(&g_tpw_r[i]);
+        poll_waiter_init(&g_tpw[i], &g_tpw_r[i]);
+    }
+    for (u32 i = 0; i < n; i++) poll_waiter_list_register(&g_tpw_list, &g_tpw[i]);
+    g_tpw_batches = 0;
+    g_tpw_hooks_seen = 0;
+    g_tpw_ok = true;
+}
+
+static void tpw_teardown(void) {
+    g_poll_wake_batch_hook = NULL;
+    for (u32 i = 0; i <= TPW_N; i++) poll_waiter_list_unregister(&g_tpw[i]);
+}
+
+static void tpw_count_batch(struct poll_waiter_list *l) {
+    g_tpw_batches++;
+    g_tpw_hooks_seen = poll_waiter_list_count_for_test(l);
+    if (l != &g_tpw_list || poll_waiter_list_empty(l)) g_tpw_ok = false;
+}
+
+void test_poll_wake_reaches_every_hook_in_batches(void);
+void test_poll_wake_reaches_every_hook_in_batches(void) {
+    tpw_setup(TPW_N);
+    g_poll_wake_batch_hook = tpw_count_batch;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_N, "the walk reached every listed hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH,
+        "it dropped the lock between every two batches of POLL_WAKE_BATCH");
+    TEST_EXPECT_EQ(g_tpw_hooks_seen, TPW_N,
+        "between batches every hook stays listed and the bookmark is not counted");
+    TEST_ASSERT(g_tpw_ok, "between batches the list is the walked one and reads non-empty");
+    TEST_EXPECT_EQ(poll_waiter_list_count_for_test(&g_tpw_list), TPW_N,
+        "the bookmark left with the walk");
+    tpw_teardown();
+}
+
+// Hooks are pushed at the head, so the first batch reaches g_tpw[n-1] down to
+// g_tpw[n-POLL_WAKE_BATCH] and g_tpw[0] comes last.
+#define TPW_M (2u * POLL_WAKE_BATCH + 3u)
+
+static void tpw_churn_once(struct poll_waiter_list *l) {
+    if (g_tpw_batches++ != 0) return;
+    // A hook the walk owes leaves before it is reached: it is owed nothing.
+    poll_waiter_list_unregister(&g_tpw[0]);
+    // A hook registered after the walk began sampled for itself.
+    poll_waiter_list_register(l, &g_tpw[TPW_N]);
+    // A reached hook comes back (a re-arm): a new registration, owed nothing.
+    poll_waiter_list_unregister(&g_tpw[TPW_M - 1]);
+    g_tpw[TPW_M - 1].ready = false;
+    poll_waiter_list_register(l, &g_tpw[TPW_M - 1]);
+}
+
+void test_poll_wake_batches_owe_only_older_hooks(void);
+void test_poll_wake_batches_owe_only_older_hooks(void) {
+    tpw_setup(TPW_M);
+    g_poll_wake_batch_hook = tpw_churn_once;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_EXPECT_EQ(g_tpw_batches, 2u, "the walk took three batches");
+    TEST_ASSERT(!g_tpw[0].ready, "a hook that left before its reach was not reached");
+    TEST_ASSERT(!g_tpw[TPW_N].ready, "a hook registered mid-walk was not reached (NoStray)");
+    TEST_ASSERT(!g_tpw[TPW_M - 1].ready, "a re-registered hook was not reached twice");
+    u32 reached = 0;
+    for (u32 i = 1; i < TPW_M - 1; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_M - 2u, "every other hook it owed was reached (Covered)");
+    tpw_teardown();
+}
+
+static u32 g_tpw_depth;
+
+static void tpw_nested_walk(struct poll_waiter_list *l) {
+    if (g_tpw_depth != 0) return;
+    if (g_tpw_batches++ != 0) return;
+    for (u32 i = 0; i < TPW_M; i++) g_tpw[i].ready = false;
+    g_tpw_depth = 1;
+    poll_waiter_list_wake(l);       // steps over the outer walk's bookmark
+    g_tpw_depth = 0;
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_M; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    if (reached != TPW_M) g_tpw_ok = false;
+}
+
+void test_poll_wake_steps_over_another_walks_bookmark(void);
+void test_poll_wake_steps_over_another_walks_bookmark(void) {
+    tpw_setup(TPW_M);
+    g_tpw_depth = 0;
+    g_poll_wake_batch_hook = tpw_nested_walk;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(g_tpw_batches >= 1u, "the outer walk parked at least once");
+    TEST_ASSERT(g_tpw_ok, "a walk begun while another was parked reached every hook");
+    TEST_EXPECT_EQ(poll_waiter_list_count_for_test(&g_tpw_list), TPW_M,
+        "both bookmarks left with their walks");
+    tpw_teardown();
+}
+
+static void tpw_drain_all(struct poll_waiter_list *l) {
+    if (g_tpw_batches++ != 0) return;
+    for (u32 i = 0; i < TPW_M; i++) poll_waiter_list_unregister(&g_tpw[i]);
+    // Only the walk's own bookmark is left.
+    if (!poll_waiter_list_empty(l)) g_tpw_ok = false;
+    if (poll_waiter_list_count_for_test(l) != 0) g_tpw_ok = false;
+}
+
+void test_poll_wake_bookmark_alone_reads_empty(void);
+void test_poll_wake_bookmark_alone_reads_empty(void) {
+    tpw_setup(TPW_M);
+    g_poll_wake_batch_hook = tpw_drain_all;
+    poll_waiter_list_wake(&g_tpw_list);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_EXPECT_EQ(g_tpw_batches, 1u, "the walk parked once, then found the list drained");
+    TEST_ASSERT(g_tpw_ok, "a list holding only a bookmark reads empty");
+    TEST_ASSERT(poll_waiter_list_empty(&g_tpw_list), "and the bookmark left with the walk");
+    tpw_teardown();
+}
+
+// One hook per list per call: the same fd twice parks with one hook on the
+// ring's list, and both entries report the readiness.
+static void consumer_poll_twice_entry(void) {
+    struct pollfd pfds[2] = {
+        { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
+        { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_pollee_proc, pfds, 2, -1);
+    g_poll_revents = (s16)(pfds[0].revents & pfds[1].revents);
+    __atomic_store_n(&g_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_poll_exited);
+}
+
+void test_poll_one_hook_per_list_per_call(void);
+void test_poll_one_hook_per_list_per_call(void) {
+    struct Proc *p = make_test_proc();
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    hidx_t hrd = install_spoor(p, rd, RIGHT_READ);
+    hidx_t hwr = install_spoor(p, wr, RIGHT_WRITE);
+    TEST_ASSERT(hrd >= 0 && hwr >= 0, "fds installed");
+
+    g_pollee_proc  = p;
+    g_pollee_fd    = hrd;
+    g_poll_result  = -999; g_poll_exited = false;
+    g_poll_revents = 0;
+    struct Thread *consumer = thread_create(kproc(), consumer_poll_twice_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "consumer SLEEPING in poll");
+    TEST_EXPECT_EQ(pipe_poll_hooks_for_test(rd), 1u,
+        "one hook on the ring's list for two entries of one call");
+
+    static const u8 payload = 0x5A;
+    TEST_EXPECT_EQ(wr->dev->write(wr, &payload, 1, 0), 1L, "boot writes 1 byte");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    TEST_EXPECT_EQ(g_poll_result, 2L, "both entries report ready");
+    TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "each entry's revents = POLLIN");
+    TEST_EXPECT_EQ(pipe_poll_hooks_for_test(rd), 0u, "the call left no hook");
+
+    test_kthread_join_free(consumer, &g_poll_exited);
+    drop_test_proc(p);
 }

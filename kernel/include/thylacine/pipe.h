@@ -82,4 +82,9 @@ long pipe_read_now(struct Spoor *read_end, void *buf, long n);
 u64 pipe_total_allocated(void);
 u64 pipe_total_freed(void);
 
+#ifdef KERNEL_TESTS
+// Tests only: the hooks on the ring's wait-list, `end` either end of the pipe.
+u32 pipe_poll_hooks_for_test(struct Spoor *end);
+#endif
+
 #endif  // THYLACINE_PIPE_H

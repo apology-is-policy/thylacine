@@ -2269,6 +2269,11 @@ void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
 void test_poll_pre_resolved_spoor(void);                            // NP-5
+void test_poll_wake_reaches_every_hook_in_batches(void);
+void test_poll_wake_batches_owe_only_older_hooks(void);
+void test_poll_wake_steps_over_another_walks_bookmark(void);
+void test_poll_wake_bookmark_alone_reads_empty(void);
+void test_poll_one_hook_per_list_per_call(void);
 void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -4765,6 +4770,11 @@ struct test_case g_tests[] = {
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
     { "poll.pre_resolved_spoor",                test_poll_pre_resolved_spoor,                false, NULL },
+    { "poll.wake_reaches_every_hook_in_batches", test_poll_wake_reaches_every_hook_in_batches, false, NULL },
+    { "poll.wake_batches_owe_only_older_hooks", test_poll_wake_batches_owe_only_older_hooks, false, NULL },
+    { "poll.wake_steps_over_another_walks_bookmark", test_poll_wake_steps_over_another_walks_bookmark, false, NULL },
+    { "poll.wake_bookmark_alone_reads_empty", test_poll_wake_bookmark_alone_reads_empty, false, NULL },
+    { "poll.one_hook_per_list_per_call", test_poll_one_hook_per_list_per_call, false, NULL },
     { "poll.sleep_for_waits",                   test_poll_sleep_for_waits,                   false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
@@ -5257,11 +5267,12 @@ void test_run_all(void) {
         // stops every later stranded arm's teardown.
         bool knob_bound = poll_test_snap_bound_release();
         bool knob_gc    = dev9p_poll_test_gc_release();
-        if (knob_bound || knob_gc) {
+        bool knob_walk  = poll_test_wake_hook_release();
+        if (knob_bound || knob_gc || knob_walk) {
             uart_puts("POLL-KNOB(");
-            if (knob_bound) uart_puts("snap-bound");
-            if (knob_bound && knob_gc) uart_puts(",");
-            if (knob_gc) uart_puts("gc-mode");
+            if (knob_bound) uart_puts("snap-bound,");
+            if (knob_gc) uart_puts("gc-mode,");
+            if (knob_walk) uart_puts("wake-hook,");
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left a poll test knob set (see POLL-KNOB)");

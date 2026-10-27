@@ -62,7 +62,8 @@
 //   (and the sample sees the mutation directly).
 //
 //   `poll_waiter_list_unregister(pw)` takes ONLY the list lock — no
-//   object lock. Lock order globally:
+//   object lock — and is O(1): the list is doubly linked, so a poller's
+//   re-arm costs it nothing per hook of anyone else's. Lock order globally:
 //     object → list → g_timerwait → rendez → cpu_sched
 //   The list lock is taken IRQSAVE by every operation (register,
 //   unregister, wake, empty). No IRQ handler enters it, but it nests
@@ -78,6 +79,30 @@
 //   inversion. The hook stores a back-pointer `pw->list` set at register
 //   time so the kernel-side unregister sweep knows which list each hook
 //   is on without consulting the Dev.
+//
+// THE WALK GOES IN BATCHES (operator vote 12, 2026-10-27; specs/poll_walk.tla)
+//
+//   Nothing bounds how many hooks one list carries: every poll call and
+//   every multi-waiter of every thread that can reach the object. So the
+//   wake reaches at most POLL_WAKE_BATCH hooks per hold of the list lock.
+//   Between holds it leaves a BOOKMARK -- a poll_waiter of its own, on the
+//   producer's stack, magic POLL_MARK_MAGIC, owned by no poller -- behind
+//   the last hook it reached, drops the lock (IRQs back on; preemptible
+//   when the caller holds nothing else) and goes on from the bookmark.
+//   Other walks step over it, and so does poll_waiter_list_empty. A walk
+//   owes only the hooks listed when it began: register pushes at the HEAD
+//   and the walk goes head to tail, so every hook past its bookmark is
+//   older than the walk, the walk never meets a newer one, and it ends
+//   (poll_walk.tla Covered / NoStray / WalkEnds). A hook that leaves and
+//   comes back is a new registration with a new sample, owed nothing.
+//   specs/poll.tla's Walk + Reach split the reach from the mutation.
+//
+//   ONE HOOK PER LIST PER CALL. Every wake re-samples every fd of the
+//   call, so a second hook of the same call on the same list (the same
+//   fd twice, two fds of one object) only lengthens the producers' walk:
+//   sys_poll_for_proc drops it right after it goes on. The earlier hook
+//   went on before the dropped one's sample, so every walk of a mutation
+//   that sample did not see reaches it.
 //
 // REGISTERED-OBJECT LIFETIME (multi-thread-Proc safe -- RW-2 2C-F1)
 //
@@ -255,14 +280,19 @@ struct poll_waiter_list;
 // currently on `*list`"; the kernel-side unregister sweep uses this
 // back-pointer to find each hook's home without a Dev vtable op.
 struct poll_waiter {
-    u32                       magic;   // POLL_WAITER_MAGIC
+    u32                       magic;   // POLL_WAITER_MAGIC (POLL_MARK_MAGIC: a walk's bookmark)
     bool                      ready;   // set under list->lock by a producer
     struct Rendez            *rendez;  // back-ref to the poller's private Rendez
     struct poll_waiter_list  *list;    // non-NULL while listed; NULL otherwise
-    struct poll_waiter       *next;    // singly-linked; valid only while listed
+    struct poll_waiter       *next;    // valid only while listed
+    struct poll_waiter       *prev;    // valid only while listed; NULL at the head
 };
 
 #define POLL_WAITER_MAGIC  0x504F4C57u   // "POLW" little-endian
+#define POLL_MARK_MAGIC    0x504F4C4Du   // "POLM": a wake's bookmark, never a hook
+
+// Hooks one wake reaches per hold of the list lock.
+#define POLL_WAKE_BATCH    32u
 
 // A pollable object embeds one of these — `struct pipe_ring` at v1.0,
 // `struct SrvService` + `struct SrvConn` at P5-poll-b. The list lock
@@ -272,7 +302,7 @@ struct poll_waiter {
 // list — see this header's preamble.
 struct poll_waiter_list {
     spin_lock_t         lock;
-    struct poll_waiter *head;     // singly-linked; NULL when empty
+    struct poll_waiter *head;     // doubly linked; NULL when empty
 };
 
 // Initialize a poll_waiter for one poll call. Sets `magic`, `rendez`,
@@ -296,14 +326,19 @@ void poll_waiter_list_init(struct poll_waiter_list *l);
 void poll_waiter_list_register(struct poll_waiter_list *l,
                                struct poll_waiter *pw);
 
-// Unregister `pw` from its list. Takes `pw->list->lock` internally;
-// requires NO outer lock. Idempotent: a hook that is already
+// Unregister `pw` from its list, in O(1). Takes `pw->list->lock`
+// internally; requires NO outer lock. Idempotent: a hook that is already
 // unregistered (`pw->list == NULL`) is a no-op. Used by every
-// `sys_poll_for_proc` re-arm pass and by its return sweep.
+// `sys_poll_for_proc` re-arm pass and by its return sweep. Extincts when
+// the hook's neighbours do not point back at it (a corrupted list).
 void poll_waiter_list_unregister(struct poll_waiter *pw);
 
-// Wake every registered poller: walk `l` (under `l->lock`), set each
-// hook's `ready` flag, then signal each hook's `rendez`.
+// Wake every registered poller: walk `l`, set each hook's `ready` flag,
+// then signal each hook's `rendez` -- POLL_WAKE_BATCH hooks per hold of
+// `l->lock`, behind a bookmark between holds (THE WALK GOES IN BATCHES
+// above). A caller holding a spinlock across the call keeps its own
+// masking and its own non-preemptibility between the batches, so the
+// sites walk after dropping their object lock.
 //
 // THE CONTRACT is an ORDER, not a lock: the walk must FOLLOW the
 // readiness mutation's becoming visible under the lock the Dev's
@@ -319,7 +354,8 @@ void poll_waiter_list_unregister(struct poll_waiter *pw);
 // Extincts on a corrupted `pw->magic` mid-walk (UAF on a stale hook).
 void poll_waiter_list_wake(struct poll_waiter_list *l);
 
-// Whether `l` has no registered hooks (a momentary snapshot under l->lock). Used
+// Whether `l` has no registered hooks (a momentary snapshot under l->lock;
+// a walk's bookmark is not a hook). Used
 // by the dev9p_poll GC (net-6b-2b) to detect a stranded readiness op (no poller
 // cares) while holding g_dev9p_poll_lock -- so the check is atomic with the
 // op unlink vs a concurrent poller that registers its hook before reusing the op.
@@ -466,6 +502,17 @@ void poll_test_set_snap_bound_ns(u64 bound_ns);
 // whether a test left its own set -- a quiet bound left behind would hide every
 // later fail-safe from the gates.
 bool poll_test_snap_bound_release(void);
+
+#ifdef KERNEL_TESTS
+// Tests only: run between two batches of a wake, with the list lock dropped
+// and the walk's bookmark listed; NULL runs nothing.
+extern void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
+// The test runner's release, after every test: clears the hook and says
+// whether a test left it set -- every later wake would run it.
+bool poll_test_wake_hook_release(void);
+// Tests only: the hooks on `l` (bookmarks not counted), under its lock.
+u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l);
+#endif
 
 
 #endif // THYLACINE_POLL_H
