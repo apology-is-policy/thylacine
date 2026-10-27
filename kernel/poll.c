@@ -360,22 +360,26 @@ struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
     return l;
 }
 
-// The holder of a bookmark here is between two batches of a walk the owner's
-// table lock no longer covers, and it may be preempted: spin with IRQs and
-// preemption as the caller has them, which on the free path is both on.
-void poll_waiter_list_await_unmarked(struct poll_waiter_list *l) {
+// The holder of a bookmark here is between two batches of a walk no lock of
+// the owner's covers, and it may be preempted: spin with IRQs and preemption
+// as the caller has them, which on a free path is both on.
+static void poll_list_await_no_mark(struct poll_waiter_list *l, bool hook_fatal) {
     for (;;) {
         bool marked = false;
         irq_state_t s = spin_lock_irqsave(&l->lock);
         for (struct poll_waiter *pw = l->head; pw; pw = pw->next) {
-            if (pw->magic != POLL_MARK_MAGIC)
+            if (pw->magic == POLL_MARK_MAGIC) marked = true;
+            else if (hook_fatal)
                 extinction("pw_await: a hook outlived its list's owner");
-            marked = true;
         }
         spin_unlock_irqrestore(&l->lock, s);
         if (!marked) return;
         __asm__ __volatile__("yield" ::: "memory");
     }
+}
+
+void poll_waiter_list_await_unmarked(struct poll_waiter_list *l) {
+    poll_list_await_no_mark(l, true);
 }
 
 // =============================================================================
@@ -467,8 +471,10 @@ void poll_deferred_await(struct poll_deferred *d) {
         __asm__ __volatile__("yield" ::: "memory");
     }
     // Off every chain, so each walk owed to it has its bookmark listed or is
-    // over (the drain clears `chain` and lists the bookmark in one hold).
-    poll_waiter_list_await_unmarked(l);
+    // over (the drain clears `chain` and lists the bookmark in one hold). Its
+    // hooks are the owner's to account for (specs/poll_defer.tla Free waits on
+    // the record and the bookmarks only).
+    poll_list_await_no_mark(l, false);
 }
 
 // =============================================================================
