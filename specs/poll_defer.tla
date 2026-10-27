@@ -344,10 +344,15 @@ Spec == Init /\ [][Next]_vars
 
 \* A hold of a lock ends, and a drain makes progress (I-8); a free whose
 \* wait is over goes ahead. Nothing else is fair: hooks churn, events, closes
-\* and detaches happen or not.
+\* and detaches happen or not. The outermost release is STRONGLY fair: weak
+\* fairness on Unlock alone admits a thread that re-takes the inner lock
+\* forever inside one outer hold (depth 1, 2, 1, 2, ...), which no code path
+\* does -- the poll lock's collector takes c->lock once per op of a finite
+\* list.
 Fairness ==
     /\ \A h \in Holders :
           /\ WF_vars(Unlock(h))
+          /\ SF_vars(depth[h] = 1 /\ Unlock(h))
           /\ WF_vars(OweSet(h))
           /\ WF_vars(Pop(h))
           /\ WF_vars(Begin(h))
