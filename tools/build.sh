@@ -363,6 +363,25 @@ build_kernel() {
     # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;
     # shared with tools/test-fault.sh so every dump path is symbolized).
     "$REPO_ROOT/tools/regen-halls-symtab.sh" "$KERNEL_BUILD" "$verbose"
+
+    # Cross-file declarations (.claude/rules/kernel-code.md; votes 19 + 20). C
+    # compares a declaration with its definition only inside one TU, so a name
+    # with two types across TUs, a .c declaring a name it does not define, or a
+    # struct laid out in two files passes every compile -- a 17-parameter call to
+    # a 16-parameter core did, for three months. This configuration's TUs, after
+    # the symtab regen so the generated one is final. Fatal, no skip switch, and
+    # the checker proves itself first (the floor check's argument in
+    # build_ramfs). Measured 2026-10-27: ~7 s production, ~17 s with the tests.
+    echo "==> cross-file declaration check"
+    local decls_self
+    decls_self="$(python3 "$REPO_ROOT/tools/check-decls.py" --self-test 2>&1)" \
+        || { echo "$decls_self" >&2
+             echo "==> check-decls cannot verify itself -- the build stops here" >&2
+             exit 1; }
+    python3 "$REPO_ROOT/tools/check-decls.py" --build-dir "$KERNEL_BUILD" \
+        || { echo "==> cross-file declaration check FAILED -- see .claude/rules/kernel-code.md," >&2
+             echo "    \"Cross-file declarations\"" >&2
+             exit 1; }
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
     ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
     ls -la "$KERNEL_BUILD/thylacine.elf"
