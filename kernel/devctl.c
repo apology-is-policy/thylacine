@@ -362,10 +362,9 @@ size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t
 // stops at the first touched word). A Proc's thread budget is 4096 by default
 // (ARCH 7.3.5), so an unbounded walk lets any Proc -- it needs no privilege to
 // spawn threads, only the READER is gated -- inflate that masked window without
-// limit. Bound the total
-// at 1 MiB of loads: a normal system (tens of threads, ~1750 words each) never
-// reaches it, and a hostile one truncates VISIBLY rather than silently
-// reporting a shallower peak than the truth.
+// limit. Bound the total at 1 MiB of loads: a normal system (tens of threads,
+// ~1750 words each) never reaches it, and a hostile one truncates VISIBLY
+// rather than silently reporting a shallower peak than the truth.
 enum { KSTACK_SCAN_BUDGET_WORDS = 131072u };
 
 struct kstack_fmt_state {

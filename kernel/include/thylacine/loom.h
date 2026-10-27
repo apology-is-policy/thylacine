@@ -647,9 +647,10 @@ void loom_sqpoll_hold_exit_for_test(bool hold);
 // kthread is a kproc() thread (the console_mgr precedent) that drains the SQ +
 // drives the elected reader. loom_start_sqpoll spawns + readies it, charged to
 // the user pool as l->sqpoll_owner's thread (set first; -1 if unset, or if the
-// pool refuses), and sets l->sqpoll on success; loom_free joins it. loom_sqpoll_main is the kthread
-// body (noreturn -- it exits via the EXITING terminal handshake, never returns
-// to its caller). Both touch only the still-allocated `struct Loom`.
+// pool refuses), and sets l->sqpoll on success; loom_free joins it.
+// loom_sqpoll_main is the kthread body (noreturn -- it exits via the EXITING
+// terminal handshake, never returns to its caller). Both touch only the
+// still-allocated `struct Loom`.
 void loom_sqpoll_main(void *arg);
 int  loom_start_sqpoll(struct Loom *l);
 
