@@ -580,10 +580,10 @@ static enum fault_result demand_page_locked(struct Proc *p,
         // (charged once), and each alias installs its leaf at its OWN vma->prot
         // (RW for the writer, RX for the exec alias). No PTE is ever W AND X
         // because no VMA is: vma_alloc refuses the pair, and this arm adds no
-        // code-specific install that could bypass it (make_user_pte_l3 would
-        // encode W|X faithfully if asked). A CODE mapping is never VMA_FLAG_COW
-        // (addrspace_clone refuses CODE), so the copy-on-write branch below is
-        // ANON_LAZY's alone.
+        // code-specific install that could bypass it (make_user_pte_l3's own
+        // check is a backstop that extincts, not the gate). A CODE mapping is
+        // never VMA_FLAG_COW (addrspace_clone refuses CODE), so the copy-on-write
+        // branch below is ANON_LAZY's alone.
         //
         // Overcommit / I-32 (ARCH §6.5; SYS_BURROW_ATTACH_LAZY): demand-ZERO. The
         // page is allocated, zero-filled, and installed RW/XN on first touch. The

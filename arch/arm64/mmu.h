@@ -95,12 +95,13 @@ struct AddrSpace;             // <thylacine/addrspace.h>: the user tree's owner 
 // W^X invariant (I-12) — composite attribute helpers.
 //
 // A "writable" PTE has AP[2:1] in {0b00, 0b01} (i.e., not 0b10/0b11).
-// An "executable-at-EL1" PTE has PXN = 0.
-// W^X forbids: writable AND executable-at-EL1.
+// An executable PTE has PXN = 0 (EL1) or UXN = 0 (EL0).
+// W^X forbids: writable AND executable at either EL.
 //
 // We supply four helpers — KERN_TEXT, KERN_RO, KERN_RW, DEVICE — that
-// guarantee the invariant by construction. Static asserts at the bottom
-// catch any future addition that violates the rule.
+// guarantee the invariant by construction. Static asserts in mmu.c catch any
+// future addition that violates the rule, and every leaf encoder checks the
+// value it builds (pte_violates_wxe).
 // ---------------------------------------------------------------------------
 
 #define PTE_KERN_TEXT \
@@ -238,11 +239,22 @@ void mmu_enable(u64 slide);
 // Idempotent within a CPU; the SCTLR.M OR-in is harmless when set.
 void mmu_program_this_cpu(void);
 
+#ifdef KERNEL_TESTS
 // Inspect a PTE for W^X compliance. Returns true iff the PTE is writable
 // AND executable at EITHER EL (PXN clear for EL1, or UXN clear for EL0) --
-// the forbidden combination (I-12). Used by the audit-trigger surface
-// verifier (and by tests at P1-I+).
+// the forbidden combination (I-12). Every leaf encoder in mmu.c asks it before
+// a table can hold the value, and extincts on a yes.
 bool pte_violates_wxe(u64 pte);
+#endif // KERNEL_TESTS
+
+#if defined(THYLACINE_FAULT_TEST_wxe_install_kernel) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_block) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_gib) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_user)
+// The I-12 encoder provoker (kernel/fault_test.c): have the variant's encoder
+// build a writable + executable leaf. Returns only if no check fired.
+void mmu_fault_test_wxe_install(void);
+#endif
 
 // P3-Bda: retire the TTBR0 identity map. Zeros every L2 entry in
 // l2_ttbr0[0..3] (the 4-GiB identity map) so any subsequent TTBR0 walk

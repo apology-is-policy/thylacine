@@ -151,6 +151,7 @@ set(KERNEL_SRCS
 set(KERNEL_TEST_SRCS
     test/test.c
     test/test_kaslr.c
+    test/test_mmu.c
     test/test_dtb.c
     test/test_phys.c
     test/test_slub.c

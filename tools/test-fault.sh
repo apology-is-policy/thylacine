@@ -68,7 +68,7 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter no_entropy"
+ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter no_entropy"
 
 # Launcher settings a variant boots under, word-split into run-vm.sh's
 # environment. Empty = the caller's own.
@@ -106,6 +106,10 @@ expected_for() {
     case "$1" in
         canary_smash)    echo "EXTINCTION: stack canary mismatch" ;;
         wxe_violation)   echo "EXTINCTION: PTE violates W^X" ;;
+        wxe_install_kernel) echo "EXTINCTION: PTE violates W^X at install (kernel page)" ;;
+        wxe_install_block)  echo "EXTINCTION: PTE violates W^X at install (kernel block)" ;;
+        wxe_install_gib)    echo "EXTINCTION: PTE violates W^X at install (kernel block)" ;;
+        wxe_install_user)   echo "EXTINCTION: PTE violates W^X at install (user page)" ;;
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
         kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;
         secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;

@@ -7,7 +7,7 @@ guards: [sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault, sub-kernel-elf, sub-k
 validated-by: [prose, gate-smp]
 strength: prose
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-27
 ---
 ## Statement
 
@@ -32,8 +32,8 @@ removes the destination.
 
 ## Enforcement, as it actually is
 
-Five mechanisms, and it is worth being precise about which does what, because
-the scripture's own list is not accurate (see Caveats).
+Six mechanisms, and it is worth being precise about which does what, because
+the scripture's list was not accurate for twelve weeks (see Caveats).
 
 **1. The VMA gate — the single user-side chokepoint.** `vma_alloc` rejects
 `WRITE|EXEC` outright, and it is the *only* place a user mapping is born:
@@ -45,8 +45,9 @@ AP encoding and a W-only request would silently map readable.
 
 **2. The kernel PTE composites.** `PTE_KERN_TEXT` (RO + PXN clear),
 `PTE_KERN_RO` and `PTE_KERN_RW` (both PXN set) are constructed so the
-combination cannot arise, and seven `_Static_assert`s pin the bits. A refactor
-that made kernel text writable fails the build.
+combination cannot arise, and twelve `_Static_assert`s pin the bits of all
+seven composites, `UXN` as well as `PXN`. A refactor that made kernel text
+writable fails the build.
 
 **3. The ELF loader.** A `PT_LOAD` segment requesting both W and X is rejected
 at load, so a hostile or broken binary cannot ask for it.
@@ -77,9 +78,24 @@ executable is still `CAP_JIT`'s dual map (I-42, the JIT capability). Witnesses:
 `noxcheck` sabotage (both refusals removed -> exactly the three X assertions
 fail and nothing else), and `/protect-probe`'s fifth leg.
 
+**6. The leaf check -- fail-closed, at both levels (operator vote 22,
+2026-10-27).** Every leaf descriptor the kernel builds, kernel or user, page or
+block, comes from one of four encoders in `arch/arm64/mmu.c`, and each passes
+its value through `pte_violates_wxe` before a table can hold it: writable with
+`PXN` or `UXN` clear is an extinction (`PTE violates W^X at install (kernel
+block)`, `(kernel page)` or `(user page)`). It is a backstop beneath the five
+above, not a gate -- nothing reaches it today -- and it is the one mechanism that
+inspects the bits actually written rather than the request that produced them,
+so a regression in any of the others stops the kernel instead of mapping the
+page. Witnesses: `mmu.wxe_predicate` (the predicate over every AP x PXN x UXN
+combination, written out), and `tools/test-fault.sh`'s four `wxe_install_*` variants, one per encoder,
+which have it build a W+X leaf and pass only on its extinction body. It holds by convention in one respect: a leaf composed by
+hand would skip it, and three were (block leaves from clean composites,
+converted in the same change; [[sub-kernel-mmu]] Seams).
+
 ## Caveats
 
-**The scripture credits a function that enforces nothing.** `pte_violates_wxe`
+**Until 2026-10-27 the scripture credited a function that enforced nothing.** `pte_violates_wxe`
 is a correct W^X predicate with **zero callers** anywhere in the tree. It is
 named first in `ARCHITECTURE.md`'s I-12 validation cell, counted as one of
 "3 legs" by the holotype consistency pass, described by
@@ -90,10 +106,15 @@ exist. A handoff document states it is used by `exception_sync_curr_el`; the
 kernel's actual W^X diagnostic is a permission-fault-plus-address-range test
 that never inspects a PTE.
 
-The invariant holds anyway, on the five mechanisms above. What is wrong is the
-**inventory**: an enforcement list that names a dormant function ahead of the
-`vma_alloc` line that is doing the work. See task #59, and
-[[chg-2026-08-03-mapping-core-sweep]] for the full chain.
+The invariant held anyway, on mechanisms 1 to 5. What was wrong was the
+**inventory**: an enforcement list that named a dormant function ahead of the
+`vma_alloc` line doing the work. The task filed for it (#59) lost its number to
+a later reuse and had no owner for twelve weeks; operator vote 22 chose to wire
+the function rather than delete it (mechanism 6), so the scripture cell,
+`12-hardening.md`'s "continues to enforce" and `03-mmu.md`'s error-path row are
+now true. The handoff's `exception_sync_curr_el` claim is still false: that
+path's W^X diagnostic is the permission-fault-plus-address-range test. Full
+chain: [[chg-2026-08-03-mapping-core-sweep]].
 
 **A sixth document names a syscall that did not exist.** `kernel/elf.c`'s file
 header calls the loader "one of three layers (PTE bits + mprotect + ELF
@@ -107,21 +128,23 @@ sentence omits `vma_alloc` — making [[sub-kernel-elf]] the sixth document to
 do so. Folded into task #59.
 
 The pattern across all six is worth stating once: **every document that
-enumerates this invariant's enforcement names something that cannot fire, and
-none names the single line that always does.** The enumerations were written
-from the design and never re-derived from the code.
+enumerated this invariant's enforcement named something that could not fire,
+and none named the single line that always does.** The enumerations were
+written from the design and never re-derived from the code.
 
-**The encoder translates faithfully; it does not judge.** `make_user_pte_l3`
-given `WRITE|EXEC` emits a writable, user-executable PTE. It is not a gate and
-was never meant to be one — but a comment on the JIT fault arm asserts that
-"the W^X decision therefore stays entirely in `make_user_pte_l3`", which is
-false in a place where it matters, since the JIT is the one surface that
-deliberately holds two mappings of one code region.
+**The encoders did not judge until vote 22.** `make_user_pte_l3` given
+`WRITE|EXEC` emitted a writable, user-executable PTE, while a comment on the
+JIT fault arm said "the W^X decision therefore stays entirely in
+`make_user_pte_l3`" -- false in the one place it mattered, since the JIT is the
+surface that deliberately holds two mappings of one code region (B-2a rewrote
+the comment to name `vma_alloc`). The encoder now extincts on that leaf
+(mechanism 6), but the decision is still `vma_alloc`'s: the check fires only on
+a request the gate should already have refused.
 
 ## Where it is enforced
 
 [[sub-kernel-vma]] (the gate, and the mechanism's refusal of X as a protect
-target) · [[sub-kernel-mmu]] (the encoders, the asserts, the patcher's alias) ·
+target) · [[sub-kernel-mmu]] (the encoders and their leaf check, the asserts, the patcher's alias) ·
 [[sub-kernel-fault]] (every install passes `vma->prot` through unchanged) ·
 [[sub-kernel-syscall-dispatch]] (the boundary's refusal of X, before any
 lookup).

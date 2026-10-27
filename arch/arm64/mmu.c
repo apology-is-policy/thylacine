@@ -55,6 +55,7 @@
 #include <thylacine/smp.h>          // g_secondary_boot_stacks (P5-secondary-stack-guard)
 #include <thylacine/spinlock.h>     // spin_lock_irqsave(NULL): bare IRQ mask (#806 BBM window)
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 // ---------------------------------------------------------------------------
 // Page table memory.
@@ -228,16 +229,7 @@ static inline u64 make_table_pte(const void *table) {
     return ((u64)(uintptr_t)table) | PTE_VALID | PTE_TYPE_TABLE;
 }
 
-// Build a 2 MiB block descriptor at L2 with the given attribute mask.
-static inline u64 make_block_pte_l2(paddr_t pa, u64 attrs) {
-    return (pa & ~(BLOCK_SIZE_L2 - 1)) | attrs;
-}
-
-// Build a 4 KiB page descriptor at L3 with the given attribute mask.
-static inline u64 make_page_pte_l3(paddr_t pa, u64 attrs) {
-    return (pa & ~(PAGE_SIZE - 1)) | attrs;
-}
-
+VISIBLE_IF_KERNEL_TESTS
 bool pte_violates_wxe(u64 pte) {
     if (!(pte & PTE_VALID)) return false;
     bool writable = !(pte & PTE_AP_RO_EL1);          // AP[2:1] != RO_EL1 / RO_ANY
@@ -254,11 +246,43 @@ bool pte_violates_wxe(u64 pte) {
     return writable && (exec_el1 || exec_el0);
 }
 
+// I-12 at the encoders. Every leaf descriptor this file builds -- kernel or
+// user, page or block -- comes from make_block_pte_l1, make_block_pte_l2,
+// make_page_pte_l3 or make_user_pte_l3, and each hands its value through here
+// before any table can hold it. A leaf composed by hand would bypass the check,
+// so none is. The attribute constants are W^X by construction (the static asserts
+// below) and the user encoder by its prot mapping; this is the leg that still
+// holds when either of those changes. It runs MMU-off inside build_page_tables
+// too, where a violation stops the boot before the MMU is enabled.
+static inline u64 pte_wxe_checked(u64 pte, const char *msg) {
+    if (pte_violates_wxe(pte)) extinction(msg);
+    return pte;
+}
+
+// Build a 1 GiB block descriptor at L1 with the given attribute mask.
+static inline u64 make_block_pte_l1(paddr_t pa, u64 attrs) {
+    return pte_wxe_checked((pa & ~(BLOCK_SIZE_L1 - 1)) | attrs,
+                           "PTE violates W^X at install (kernel block)");
+}
+
+// Build a 2 MiB block descriptor at L2 with the given attribute mask.
+static inline u64 make_block_pte_l2(paddr_t pa, u64 attrs) {
+    return pte_wxe_checked((pa & ~(BLOCK_SIZE_L2 - 1)) | attrs,
+                           "PTE violates W^X at install (kernel block)");
+}
+
+// Build a 4 KiB page descriptor at L3 with the given attribute mask.
+static inline u64 make_page_pte_l3(paddr_t pa, u64 attrs) {
+    return pte_wxe_checked((pa & ~(PAGE_SIZE - 1)) | attrs,
+                           "PTE violates W^X at install (kernel page)");
+}
+
 // ---------------------------------------------------------------------------
 // Static assertions on the PTE bit constants.
 //
 // W^X invariant I-12 is enforced at construction time by the PTE_KERN_*
-// helpers. The asserts below would catch a regression where someone
+// helpers, and checked again at runtime on every encoded leaf
+// (pte_wxe_checked). The asserts below would catch a regression where someone
 // changes the helpers and accidentally allows W+X.
 // ---------------------------------------------------------------------------
 
@@ -274,8 +298,20 @@ _Static_assert((PTE_KERN_RO & PTE_AP_RO_EL1) != 0,
                "PTE_KERN_RO must be RO at EL1");
 _Static_assert((PTE_KERN_RO & PTE_PXN) != 0,
                "PTE_KERN_RO must NOT allow EL1 execution");
-_Static_assert((PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
+_Static_assert((PTE_KERN_RW_BLOCK & PTE_PXN) != 0,
+               "PTE_KERN_RW_BLOCK must NOT allow EL1 execution");
+_Static_assert((PTE_KERN_RO_BLOCK & PTE_AP_RO_EL1) != 0,
+               "PTE_KERN_RO_BLOCK must be RO at EL1");
+_Static_assert((PTE_DEVICE_RW & PTE_PXN) != 0 && (PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
                "Device PTEs must NOT allow EL1 execution");
+// The EL0 leg: UXN clear makes a page executable at EL0 whatever its AP bits
+// say about EL0 data access, so every writable kernel attribute sets it.
+_Static_assert((PTE_KERN_RW & PTE_UXN) != 0,
+               "PTE_KERN_RW must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_RW_BLOCK & PTE_UXN) != 0,
+               "PTE_KERN_RW_BLOCK must NOT allow EL0 execution");
+_Static_assert((PTE_DEVICE_RW & PTE_UXN) != 0 && (PTE_DEVICE_RW_BLOCK & PTE_UXN) != 0,
+               "Device PTEs must NOT allow EL0 execution");
 
 // P1-H BTI guard-page invariant. A future PTE-bit refactor that moves
 // PTE_GP without updating PTE_KERN_TEXT would silently disable BTI on
@@ -518,8 +554,7 @@ static void build_page_tables(u64 slide) {
                 // kernel-image 2 MiB to a page-grain table.
                 for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
                     paddr_t block_pa = pa + ((paddr_t)i << BLOCK_SHIFT_L2);
-                    l2_directmap_kernel[i] =
-                        (block_pa & ~(BLOCK_SIZE_L2 - 1)) | PTE_KERN_RW_BLOCK;
+                    l2_directmap_kernel[i] = make_block_pte_l2(block_pa, PTE_KERN_RW_BLOCK);
                 }
 
                 // Build l3_directmap_kernel: mirror l3_kernel's per-
@@ -599,8 +634,7 @@ static void build_page_tables(u64 slide) {
                 l1_directmap[gib] = make_table_pte(l2_directmap_kernel);
             } else {
                 // Other GiBs: 1 GiB R/W + XN block.
-                l1_directmap[gib] =
-                    (pa & ~(BLOCK_SIZE_L1 - 1)) | PTE_KERN_RW_BLOCK;
+                l1_directmap[gib] = make_block_pte_l1(pa, PTE_KERN_RW_BLOCK);
             }
         }
     }
@@ -1096,7 +1130,7 @@ static u64 *directmap_walk_to_l2(paddr_t pa) {
     paddr_t gib_pa = (paddr_t)gib << BLOCK_SHIFT_L1;
     for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
         paddr_t block_pa = gib_pa + ((paddr_t)i << BLOCK_SHIFT_L2);
-        l2[i] = (block_pa & ~(BLOCK_SIZE_L2 - 1)) | PTE_KERN_RW_BLOCK;
+        l2[i] = make_block_pte_l2(block_pa, PTE_KERN_RW_BLOCK);
     }
 
     // Break-before-make on the L1 entry. Per ARM ARM B2.7.1, changing
@@ -1631,8 +1665,31 @@ static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, u32 mair_idx) {
     if (!(prot & VMA_PROT_EXEC)) {
         pte |= PTE_UXN;              // user cannot execute
     }
-    return pte;
+    return pte_wxe_checked(pte, "PTE violates W^X at install (user page)");
 }
+
+#if defined(THYLACINE_FAULT_TEST_wxe_install_kernel) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_block) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_gib) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_user)
+void mmu_fault_test_wxe_install(void) {
+    // One encoder per variant, each handed a writable attribute with an
+    // execute-never bit cleared. The user leg asks for prot W|X, which both
+    // install entries refuse before they encode: a regression that reached the
+    // encoder is what it stands in for.
+#if defined(THYLACINE_FAULT_TEST_wxe_install_user)
+    volatile u64 pte = make_user_pte_l3(0, VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC,
+                                        MAIR_IDX_NORMAL_WB);
+#elif defined(THYLACINE_FAULT_TEST_wxe_install_block)
+    volatile u64 pte = make_block_pte_l2(0, PTE_KERN_RW_BLOCK & ~PTE_UXN);
+#elif defined(THYLACINE_FAULT_TEST_wxe_install_gib)
+    volatile u64 pte = make_block_pte_l1(0, PTE_KERN_RW_BLOCK & ~PTE_PXN);
+#else
+    volatile u64 pte = make_page_pte_l3(0, PTE_KERN_RW & ~PTE_PXN);
+#endif
+    (void)pte;
+}
+#endif
 
 // Convenience wrapper preserving the original bool device-flag API: false ->
 // Normal-WB (cacheable RAM), true -> Device-nGnRnE (MMIO registers). Kept as

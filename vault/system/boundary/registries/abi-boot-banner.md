@@ -95,7 +95,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-10-26
+updated: 2026-10-27
 ---
 ## The surface
 
@@ -124,9 +124,13 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on eight of them.** `tools/test-fault.sh` runs ten
-variants (`ALL_VARIANTS`), and its `expected_for` case matches eight bodies:
-`EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, `... BTI fault`,
+that one gate depends on eleven of them.** `tools/test-fault.sh` runs fourteen
+variants (`ALL_VARIANTS`), and its `expected_for` case matches eleven bodies:
+`EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, and since
+2026-10-27 `... PTE violates W^X at install (kernel page)`, `... (kernel
+block)` (two variants: the L2 and the L1 encoder) and `... (user page)` (the
+four `wxe_install_*` variants, printed by `arch/arm64/mmu.c`'s leaf encoders;
+operator vote 22), `... BTI fault`,
 `... kernel stack overflow` (three provokers), `... recursive kernel fault`,
 `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
 guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:
@@ -472,7 +476,7 @@ That is the implementation track's call.
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
-  ten matched variants (eight bodies), which is not what "the prefix is the
+  fourteen matched variants (eleven bodies), which is not what "the prefix is the
   ABI" leads a reader to expect.
 - **Settled 2026-09-25** (the item the 2026-09 recount left open): the
   `el1_sync_runaway` body is already in the pinned set. `test-fault.sh` lists

@@ -283,6 +283,7 @@ static void test_harness_skip_line_composes_clean(void);   // beside the compose
 
 struct test_case g_tests[] = {
     { "kaslr.mix64_avalanche",         test_kaslr_mix64_avalanche,         false, NULL },
+    { "mmu.wxe_predicate",             test_mmu_wxe_predicate,             false, NULL },
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
     { "mmio.kernel_reservation_union", test_mmio_kernel_reservation_union, false, NULL },
     { "dtb.msi_map_bounds", test_dtb_msi_map_bounds, false, NULL },

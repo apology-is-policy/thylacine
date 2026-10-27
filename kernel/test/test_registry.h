@@ -10,6 +10,7 @@
 #include <thylacine/types.h>
 
 void test_kaslr_mix64_avalanche(void);
+void test_mmu_wxe_predicate(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
 void test_dtb_msi_map_bounds(void);

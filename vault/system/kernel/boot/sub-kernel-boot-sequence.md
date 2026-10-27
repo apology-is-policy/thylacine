@@ -139,7 +139,7 @@ the overwrite, and a compiler barrier forces the write to complete before
 lifetime. A frame that straddled the write would fail its own epilogue check on a
 stack it never smashed. `__stack_chk_fail` routes a detected smash to
 `extinction()`, the last-resort path any kernel invariant break takes; it is one
-of the nine `tools/test-fault.sh` provokers that prove the protection actually
+of the fourteen `tools/test-fault.sh` provokers that prove the protection actually
 *fires* rather than merely compiling in.
 
 **Those provokers are load-bearing precisely because they are fragile, and the
@@ -155,7 +155,12 @@ stores; `bti_fault` calls a non-guarded target through a function pointer, but
 clang devirtualizes `fp()` to a direct `bl`, which does not set `PSTATE.BTYPE`,
 so the BTI check never runs — a `volatile` on the pointer forces the `blr` that
 does. `wxe_violation` writes to `_kernel_start` (RX, no W) and the MMU raises the
-permission fault. `pac_mismatch` is deferred (forging a poisoned LR depends on
+permission fault. The four `wxe_install_*` variants (vote 22, 2026-10-27), one
+per leaf encoder, have `mmu.c` encode a writable and executable leaf -- a kernel
+page, an L2 and an L1 kernel block, each with an execute-never bit cleared, and
+a user page asked for `W|X` past the install entries' refusal -- and pass only
+on the encoder's own extinction body, which names the leaf kind, so the
+permission-fault path cannot satisfy them ([[sub-kernel-mmu]]). `pac_mismatch` is deferred (forging a poisoned LR depends on
 FEAT_FPAC specifics); v1.0 verifies PAC by asserting `SCTLR_EL1.EnIA` + a
 non-zero APIA key, code-reviewing `paciasp/autiasp` emission, and the ARM-mandated
 hardware enforcement. The matrix is only as good as its being *run*:

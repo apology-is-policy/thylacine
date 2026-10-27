@@ -12,6 +12,7 @@
 // Per ARCHITECTURE.md §24 (hardening) + ROADMAP §4.2 exit criteria
 // (deliberate-fault verification of canaries / W^X / BTI).
 
+#include "../arch/arm64/mmu.h"
 #include "../arch/arm64/uart.h"
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -75,6 +76,16 @@ static void provoke_wxe_violation(void) {
     *target = (char)0xCC;
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// wxe_install_{kernel,block,gib,user} — W^X at the leaf encoders, one variant
+// per encoder (L3 kernel page, L2 block, L1 block, L3 user page). The provoker
+// has mmu.c encode a writable + executable leaf; the encoder's check
+// (pte_wxe_checked) extincts before the value can reach a table, with
+// "PTE violates W^X at install (kernel page)", "(kernel block)" or
+// "(user page)". Without the check the encode returns, the FAIL line prints
+// and the boot goes on.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // bti_fault — indirect branch to a target without a `bti` landing pad.
@@ -379,6 +390,13 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking wxe_violation...\n");
     provoke_wxe_violation();
     uart_puts("FAIL: provoke_wxe_violation returned (W^X did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_wxe_install_kernel) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_block) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_gib) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_user)
+    uart_puts("  fault-test: invoking wxe_install...\n");
+    mmu_fault_test_wxe_install();
+    uart_puts("FAIL: a W+X leaf was encoded (the encoder check did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_bti_fault)
     uart_puts("  fault-test: invoking bti_fault...\n");
     provoke_bti_fault();

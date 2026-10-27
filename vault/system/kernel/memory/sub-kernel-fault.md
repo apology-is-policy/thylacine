@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -276,10 +276,11 @@ CL-7k-3 F1 invalidate, moved from create (which no longer allocates) to the
 commit ([[sub-kernel-mmu]]).
 
 **The arm's comment used to overstate where the safety comes from** (task #59).
-It said the W^X decision "stays entirely in `make_user_pte_l3`." The encoder
-does no such thing — handed `WRITE|EXEC` it emits a writable, user-executable
-PTE faithfully; the property holds because `vma_alloc` refuses to create such a
-VMA. B-2a rewrote the comment to name `vma_alloc` as the guard.
+It said the W^X decision "stays entirely in `make_user_pte_l3`." The decision is
+`vma_alloc`'s, which refuses to create such a VMA, and B-2a rewrote the comment
+to name it as the guard. Since operator vote 22 (2026-10-27) the encoder also
+extincts on a writable and executable leaf ([[sub-kernel-mmu]]) -- a backstop
+beneath the guard, not the guard -- and the comment says so.
 
 ## The COW break — a different axis, not a seventh row
 
