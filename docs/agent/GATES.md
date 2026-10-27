@@ -89,6 +89,16 @@ tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
 tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
 
+# Every host checker at once (tools/test-*.py, each with --mutants and --sanitize
+# where it takes them). They read the tree's own sources -- a kernel function
+# found by name, a header by a text anchor -- so a change ANYWHERE that renames,
+# moves or wraps that text breaks them; run this after any such change, not only
+# after one to the checker's own surface. An unbuilt series broke two of them on
+# 2026-10-27 with no failure anywhere. Host only; minutes. Logs default to
+# build/host-checkers/<stamp>/. Name checkers to run a subset.
+tools/test-host-checkers.sh
+tools/test-host-checkers.sh test-magazines test-sqpoll-ticket
+
 # The per-CPU magazines' host witness (vote 16, vault gate-magazines-tsan): the
 # actual mm/magazines.c bodies under ThreadSanitizer, three CPUs churning while
 # a fourth drains. --mutants adds three one-sided lock drops and the pre-lock
