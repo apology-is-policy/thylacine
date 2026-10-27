@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Session registry retirement
 
@@ -166,7 +166,7 @@ exit and a kill alike:
 
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
 waking, the parent could be reaped and freed by the *grandparent*'s
-`wait_pid`, and the wake would touch freed memory.
+`wait_pid_for`, and the wake would touch freed memory.
 
 **A peer Thread's own exit carries the pthread-join wakeup.** `thread_exit_self`
 runs `thread_clear_child_tid_handoff` before it departs: if the Thread registered
@@ -179,7 +179,7 @@ above). An unmapped or unwritable tidptr **silently skips** both the store and t
 wake — via the `uaccess_store_u32` fixup ([[sub-kernel-uaccess]]) — rather than
 extincting: a departing Thread must not be able to crash the box with a bad address
 it registered earlier. The departed Thread itself is freed later, by its Proc's next
-thread create or by `wait_pid` ([[sub-kernel-thread]], a thread's end of life).
+thread create or by `wait_pid_for` ([[sub-kernel-thread]], a thread's end of life).
 
 **The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
 `exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype
@@ -261,7 +261,7 @@ re-take, assert the determination held. Three properties make it sound:
 - `t` is still RUNNING, so a **sleep-capable** close hook (a 9P clunk's
   Tclunk/Rclunk wait) is legal — sleeping while EXITING trips `sched()`'s
   assert;
-- `p` is still ALIVE, so `wait_pid` cannot reap and `thread_free` the closer
+- `p` is still ALIVE, so `wait_pid_for` cannot reap and `thread_free` the closer
   mid-close;
 - `live_peers == 0` means every peer has committed EXITING (whose residual
   execution never touches the handle table) and no new peer can spawn

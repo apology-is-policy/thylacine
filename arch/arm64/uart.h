@@ -8,7 +8,7 @@
 // mapping) with a FIXME(I-15).
 //
 // At P1-B: the base defaults to the QEMU virt fallback so early prints
-// work before DTB parsing. After DTB parse, uart_set_base() updates it
+// work before DTB parsing. After DTB parse, uart_remap_to_vmalloc() updates it
 // to the discovered address. Invariant I-15 (DTB-driven discovery) is
 // satisfied for normal operation; the fallback exists only for the
 // pre-DTB-parse window plus a recovery path if the DTB is corrupt.
@@ -19,14 +19,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-// Update the PL011 base. Called by boot_main() after dtb_init() with
-// the address returned by dtb_get_compat_reg("arm,pl011", ...).
-//
-// If never called, the default base remains 0x09000000 (QEMU virt
-// fallback). Calling with 0 is a no-op (so callers can pass an
-// uninitialized variable without harm).
-void uart_set_base(uintptr_t base);
 
 // P3-Bca: map the PL011 region [pa, pa+size) into the kernel vmalloc
 // range and switch the active base to the returned kernel VA. Pre-
@@ -85,12 +77,6 @@ bool uart_rx_path_enabled(void);
 // the FIFO. TX is serviced first -- it is the cheap non-blocking arm, and
 // draining promptly is what keeps a blocked writer's room-wait short.
 void uart_irq_handler(uint32_t intid, void *arg);
-
-// #75 / P1-F. Enable the transmitter (CR.TXE) + clear stale TX raw-interrupt
-// state. TXIM stays MASKED -- the cons TX ring arms it only when it holds bytes
-// the FIFO could not take. Called from uart_rx_init (one bring-up, both
-// directions).
-void uart_tx_init(void);
 
 // #75 / P1-F. NON-BLOCKING single-byte FIFO push: writes DR iff the TX FIFO has
 // room, else returns false at once. NEVER spins, so unlike uart_putc it is safe

@@ -64,6 +64,7 @@ int loom_rpc_check_begin_locked(struct loom_service_operation *o,u64 now) {
     if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
     return 0;
 }
+static void loom_rpc_capture(struct p9_rpc *,int,struct p9_dispatch_result *);
 int loom_rpc_begin_locked(struct loom_service_operation *o,u64 now) {
     int rc=loom_rpc_check_begin_locked(o,now);if(rc)return rc;
     if(o->pool_stream && !o->pool_busy)return -T_E_BUSY;
@@ -72,7 +73,7 @@ int loom_rpc_begin_locked(struct loom_service_operation *o,u64 now) {
     o->rpc.on_complete=loom_rpc_capture;o->phase=LRPC_INFLIGHT;
     return 0;
 }
-void loom_rpc_capture(struct p9_rpc *rpc,int status,struct p9_dispatch_result *reply) {
+static void loom_rpc_capture(struct p9_rpc *rpc,int status,struct p9_dispatch_result *reply) {
     // Actual retained owner; callback runs only inside the sole driver. Never
     // touch Ll, CQ, allocator, client APIs or the list from this boundary.
     struct loom_service_operation *o=(void *)((u8 *)rpc-

@@ -105,7 +105,7 @@ static void drop_test_proc(struct Proc *p) {
     proc_free(p);
 }
 
-// A test Proc spliced into the process table so proc_caps_by_stripes
+// A test Proc spliced into the process table so proc_peer_snapshot_by_stripes
 // (the SYS_SRV_PEER live-caps scan) can find it — a bare proc_alloc'd
 // Proc is invisible to the kproc-rooted table walk.
 static struct Proc *make_linked_test_proc(void) {

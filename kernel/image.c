@@ -74,6 +74,8 @@ static u64 g_image_bypass;        // created un-cached (table full of live image
 static u64 g_image_reclaims;      // B-1a' audit F8: reclaim calls that freed a page
 static u64 g_image_reclaimed_pages;
 
+static u32 image_cache_reclaim(u32 want);
+
 void image_cache_init(void) {
     if (g_image_inited)
         extinction("image_cache_init called twice");
@@ -224,7 +226,19 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     return fresh;
 }
 
-u32 image_cache_reclaim(u32 want) {
+// B-1a' audit F8: the pool's reclaim step (mm/phys.h capacity_set_reclaim;
+// registered by image_cache_init). Strips IDLE images -- cached, mapped by no
+// one, holding resident pages -- of their pages, least recently used first,
+// until `want` pages are freed or no idle image holds a page -- each pick
+// strips only what is still wanted (B-1a' audit F14), so a refused allocation
+// costs the cache its own size and an image stripped in part yields the rest
+// on the next pick. The entry stays cached, and empty once every page has
+// gone; the next mapper pages it in again (the Plan 9 imagereclaim shape: the
+// Image outlives its pages). Returns the pages freed. Runs in the
+// allocating context under whatever that holds (as->lock for a fault or an
+// attach); takes g_image_lock -> v->lock -> the buddy, never the cache's own
+// allocation path, and allocates nothing.
+static u32 image_cache_reclaim(u32 want) {
     u32 freed = 0;
     spin_lock(&g_image_lock);
     while (freed < want) {

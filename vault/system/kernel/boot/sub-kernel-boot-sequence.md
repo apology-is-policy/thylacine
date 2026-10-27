@@ -10,6 +10,7 @@ code:
   - kernel/canary.c
   - kernel/include/thylacine/canary.h
   - kernel/fault_test.c
+  - kernel/include/thylacine/fault_test.h
   - tools/test-fault.sh
 audit: hard
 guarded-by: [inv-i15]
@@ -19,7 +20,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-10-26
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -82,7 +83,7 @@ behaviour, and exec init.
 - **The user pool sized after the physical allocator and before the first
   Proc** (B-1a', 2026-09-23). `capacity_init` reads `phys_total_pages()`
   immediately after `phys_init` to fix the TCB reserve and the pool, and
-  `proc_init`'s kproc and every later `proc_alloc` seed their budget from it
+  `proc_init`'s kproc and every later `proc_alloc_in` seed their budget from it
   -- a Proc created earlier would carry a zero budget and refuse every charge,
   and the pool refuses every non-exempt charge until it is sized
   (fail-closed). A second call extincts, as does a machine that leaves no pool

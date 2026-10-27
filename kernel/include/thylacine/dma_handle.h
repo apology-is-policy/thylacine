@@ -269,9 +269,8 @@ void kobj_dma_unref(struct KObj_DMA *k);
 void kobj_dma_destroy(struct KObj_DMA *k);
 #endif // KERNEL_TESTS
 
-// Diagnostic: cumulative create counter + currently-live count.
-u64 kobj_dma_total_created(void);
 #ifdef KERNEL_TESTS
+// Diagnostic: currently-live count.
 u64 kobj_dma_live_count(void);
 #endif // KERNEL_TESTS
 

@@ -6,7 +6,7 @@ kind: spin-irqsave (raw in sched(); trylock across CPUs)
 guards: "one CPU's run_tree[3] and vd_counter, the pending_release_lock and prev_to_clear_on_cpu handoff slots, and the wake-preempt decision (which reads current_thread() and cs->idle where they are stable)"
 orders-before: []
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-27
 ---
 ## Discipline
 
@@ -30,8 +30,8 @@ Three acquisition disciplines, deliberately different:
   sound because the hold is IRQ-masked from `sched()`'s entry mask
   through the release, so it is non-preemptible by masking rather than by
   counting.
-- **Own CPU, elsewhere** (`ready_on`, `sched_remove_if_runnable`,
-  `sched_in_cpu_tree`) — ordinary `spin_lock_irqsave`, counted.
+- **Own CPU, elsewhere** (`ready_on`, `sched_remove_if_runnable`, and the
+  tests' `sched_in_cpu_tree`) — ordinary `spin_lock_irqsave`, counted.
 - **A peer's CPU** — `spin_trylock` only, in `try_steal`. A peer
   mid-mutation is skipped, never waited on. The single exception is
   `sched_remove_if_runnable`, which takes each CPU's lock in turn with a

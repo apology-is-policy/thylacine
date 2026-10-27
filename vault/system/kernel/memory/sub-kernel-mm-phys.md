@@ -9,7 +9,7 @@ guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
 locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-27
 ---
 
 ## Shared-memory accounting review
@@ -67,8 +67,8 @@ table lists it as a trigger surface in its own right.
   — after which runtime kstack-guard flips only toggle present L3
   leaves, never a break-before-make, eliminating the #806 IRQ-during-
   BBM race for the buddy zone by construction.
-- Diagnostics: total/free/reserved pages, the #808 table-page cost,
-  `phys_zone_bounds`.
+- Diagnostics: total/free/reserved pages, the #808 table-page cost, and
+  the tests' `phys_zone_bounds`.
 
 ## Mechanism
 
@@ -112,7 +112,7 @@ the buddy lock is taken 8 times per boundary crossing, not once per
 batch. The bulk-op under one hold is the named lift
 ([[seam-buddy-bulk-op]]).
 
-`magazines_drain_all` drains every CPU's set, each under its own lock,
+`magazines_drain_all` (tests build only) drains every CPU's set, each under its own lock,
 so it is safe while peers allocate. It does not give a stable global
 count: a peer may refill its set the moment the drain lets go.
 

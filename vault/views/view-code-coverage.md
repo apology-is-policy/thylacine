@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**690 owned · 48 unowned · 738 files (93% owned) · ~11248 unswept lines.**
+**695 owned · 43 unowned · 738 files (94% owned) · ~11100 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **92 files, ~44083 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,10 +74,10 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 12 | 17 | 2725 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 186 | 15 | 1544 |
+| kernel | 190 | 11 | 1434 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
-| arch | 41 | 3 | 184 |
+| arch | 42 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 124 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
@@ -135,9 +135,9 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/pouch-hello/pouch-hello-signals.c | 497 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
-| kernel/include/thylacine/smp.h | 288 |
 | kernel/include/thylacine/spinlock.h | 287 |
 | usr/pouch-hello/pouch-hello.c | 277 |
+| kernel/include/thylacine/smp.h | 276 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/include/thylacine/context.h | 201 |
@@ -168,14 +168,9 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
-| kernel/include/thylacine/devproc.h | 44 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
-| arch/arm64/sections.h | 38 |
 | kernel/include/thylacine/types.h | 30 |
-| kernel/include/thylacine/devctl.h | 23 |
 | usr/tapestryd/src/lib.rs | 21 |
-| kernel/include/thylacine/visibility.h | 17 |
-| kernel/include/thylacine/fault_test.h | 14 |
 | usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

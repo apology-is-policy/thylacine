@@ -37,7 +37,7 @@
 //   - burrow_map(Proc, Burrow, vaddr, length, prot): public mapping entry —
 //     calls vma_alloc + vma_insert. Returns 0/-1.
 //   - burrow_unmap(Proc, vaddr, length): public unmap entry — calls
-//     vma_remove + vma_free. Returns 0/-1.
+//     vma_remove_in + vma_free. Returns 0/-1.
 //
 // At v1.0 P3-Db:
 //   - Anonymous VMOs only. alloc_pages(order, KP_ZERO) for the chunk.
@@ -191,6 +191,9 @@ struct Burrow *burrow_create_anon(size_t size, bool exempt) {
     return v;
 }
 
+static struct Burrow *burrow_create_mmio_range(struct KObj_MMIO *kobj_mmio,
+                                       u64 offset, size_t length);
+
 // P4-Ic1: Wrap a KObj_MMIO in a Burrow. Holds a reference on the
 // underlying KObj_MMIO so the PA claim survives the caller's eventual
 // handle_close. handle_count=1 is the "construction reference" pattern
@@ -200,7 +203,8 @@ struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio) {
     return burrow_create_mmio_range(kobj_mmio, 0, kobj_mmio->size);
 }
 
-struct Burrow *burrow_create_mmio_range(struct KObj_MMIO *kobj_mmio,
+// Subrange retains the entire parent MMIO claim (including protected holes).
+static struct Burrow *burrow_create_mmio_range(struct KObj_MMIO *kobj_mmio,
                                        u64 offset, size_t length) {
     if (!g_vmo_cache) extinction("burrow_create_mmio before burrow_init");
     if (!kobj_mmio) return NULL;
@@ -1116,9 +1120,9 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // before its first release, which is the same hardware argument (a PTE resolves
 // without as->lock, so it must be gone before the page or mapping it justified)
 // with no wasted teardown.
-int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
-                        struct Burrow *v, u64 vaddr, size_t length, u32 prot,
-                        u64 burrow_offset, struct Burrow **out_free) {
+static int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
+                               struct Burrow *v, u64 vaddr, size_t length, u32 prot,
+                               u64 burrow_offset, struct Burrow **out_free) {
     // F7 (re-audit round 3): out_free MANDATORY -- a NULL would leak the replaced
     // Burrows (vma_free_deferred does not free). Fail loud at entry, F6 parity.
     if (!out_free) extinction("burrow_map_fixed_in without out_free (would leak the replaced Burrow)");
@@ -1186,8 +1190,21 @@ int burrow_protect(struct Proc *p, u64 vaddr, size_t length, u32 prot, bool seal
     return burrow_protect_in(p->as, proc_resource_exempt(p), vaddr, length, prot, seal);
 }
 
-int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
-                           bool *out_freed, struct Burrow **out_free) {
+static int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
+                                     bool *out_freed, struct Burrow **out_free);
+
+// burrow_unmap, additionally reporting whether removing this mapping was the
+// drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed
+// is written on every path, including the -1 ones (false).
+// D-3c F1: `out_free`, when non-NULL, DEFERS the Burrow free: the function
+// removes the VMA + drops the mapping ref under the caller's as->lock but
+// returns the dead Burrow (or NULL) via *out_free instead of freeing it inline;
+// the caller frees it with burrow_free_deferred after the unlock (the FILE arm's
+// spoor_clunk may sleep). NULL keeps the inline free (non-sleeping ANON/CODE/DMA
+// callers via burrow_unmap). *out_free is written whenever it is non-NULL,
+// including the -1 paths (NULL).
+static int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
+                                  bool *out_freed, struct Burrow **out_free) {
     if (!p) {
         if (out_freed) *out_freed = false;
         if (out_free)  *out_free  = NULL;
@@ -1196,8 +1213,10 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
     return burrow_unmap_reporting_in(p->as, vaddr, length, out_freed, out_free);
 }
 
-int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
-                              bool *out_freed, struct Burrow **out_free) {
+// burrow_unmap_reporting against a named address space (burrow_unmap_in's
+// contract in burrow.h). Caller holds as->lock.
+static int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
+                                     bool *out_freed, struct Burrow **out_free) {
     if (out_freed) *out_freed = false;
     if (out_free)  *out_free  = NULL;
     if (!as) return -1;
@@ -1337,11 +1356,11 @@ u32 burrow_release_lazy_range_in(struct AddrSpace *as, const struct Vma *v,
 }
 
 // burrow_decommit_in: the madvise(MADV_DONTNEED) analog (SYS_BURROW_DECOMMIT).
-// See burrow.h for the contract. B-1a': the range may span the pieces a protect
+// See burrow_decommit in burrow.h for the contract. B-1a': the range may span the pieces a protect
 // cut, so it is walked as a range -- one scan from the head, then successors
 // (the B-1a audit's F2 shape) -- with every refusal decided before the first
 // PTE goes, so a refused call changes nothing.
-int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
+static int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
     if (!as)                         return -(int)T_E_INVAL;
     if (length == 0)                 return -(int)T_E_INVAL;
     if (vaddr & (PAGE_SIZE - 1))     return -(int)T_E_INVAL;

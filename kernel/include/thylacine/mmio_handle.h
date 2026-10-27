@@ -72,10 +72,6 @@ void kobj_mmio_init(void);
 // AND AFTER `dtb_init` (it walks DTB compatibles).
 void kobj_mmio_reserve_kernel_ranges(void);
 
-// Diagnostic: how many kernel-reserved slots are currently held.
-// Useful for boot banner observability + tests.
-int kobj_mmio_kernel_reserved_count(void);
-
 // Allocate a fresh KObj_MMIO claiming the PA range [pa, pa+size).
 // Returns NULL on:
 //   - pa or size not page-aligned (pa % PAGE_SIZE != 0; size % PAGE_SIZE != 0).
@@ -87,7 +83,7 @@ int kobj_mmio_kernel_reserved_count(void);
 //   - SLUB OOM.
 //
 // On success, the caller owns the returned reference (refcount=1);
-// balance with kobj_mmio_unref / kobj_mmio_destroy. The PA range stays
+// balance with kobj_mmio_unref. The PA range stays
 // claimed until the last unref drops the refcount to zero.
 struct KObj_MMIO *kobj_mmio_create(u64 pa, size_t size);
 
@@ -100,11 +96,6 @@ void kobj_mmio_ref(struct KObj_MMIO *k);
 //
 // NULL-safe.
 void kobj_mmio_unref(struct KObj_MMIO *k);
-
-// Convenience: drop the caller's reference + ensure the PA range is
-// released. Equivalent to kobj_mmio_unref when the caller holds the
-// only reference.
-void kobj_mmio_destroy(struct KObj_MMIO *k);
 
 #ifdef KERNEL_TESTS
 // Diagnostic: cumulative create counter + currently-live count.

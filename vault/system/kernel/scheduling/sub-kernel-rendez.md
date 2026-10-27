@@ -9,13 +9,13 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-27
 ---
 ## Purpose
 
 The one place a kernel thread blocks. Plan 9's Rendez: a waiter, a waker,
 and a caller-supplied condition. Every higher wait in the tree — poll,
-pipe, the 9P client, srvconn, the console, `wait_pid`, torpor — is built
+pipe, the 9P client, srvconn, the console, `wait_pid_for`, torpor — is built
 on `sleep`/`tsleep` and inherits their properties, including the ones
 that are not obvious.
 

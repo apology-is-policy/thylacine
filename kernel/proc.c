@@ -2327,14 +2327,6 @@ void proc_set_console_trusted(struct Proc *p) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
-bool proc_is_console_trusted(const struct Proc *p) {
-    if (!p) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    bool yes = (g_console_trusted_proc == p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
-    return yes;
-}
-
 // g_console_renderer is the single bound console RENDERER (G-4, the R2-F6
 // third console role): the Proc holding the /dev/consdrain + /dev/consfeed
 // pair (Aurora). Same lifetime discipline as g_console_owner: protected by
@@ -2867,7 +2859,10 @@ static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
         __atomic_fetch_or(&q->proc_flags, w->bits, __ATOMIC_RELAXED);
 }
 
-void proc_image_stamp_locked(struct Proc *p, u32 bits) {
+// OR `bits` into `p` AND into every other mapper of its address space (zombies
+// included) -- a restriction on the image binds every door to it. Caller holds
+// g_proc_table_lock.
+static void proc_image_stamp_locked(struct Proc *p, u32 bits) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_image_stamp_locked: NULL or corrupted Proc");
     __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
@@ -3707,14 +3702,6 @@ bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
     return c.found;
 }
 
-// proc_caps_by_stripes — caps-only wrapper over the richer snapshot. Keeps
-// the existing SYS_SRV_PEER + spec-mapped API (and its NULL-out rejection;
-// specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
-bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
-    if (!caps_out) return false;
-    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL, NULL, NULL);
-}
-
 // A-1a: proc_apply_identity — the single audited identity mutation site.
 // See <thylacine/proc.h> for the full contract. Called from the spawn
 // thunk in the CHILD's context before userland_enter, only after the
@@ -3950,7 +3937,12 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     return 0;   // visit every Proc
 }
 
-void proc_session_hangup_if_leader(struct Proc *p) {
+// arm-6 (IDENTITY-DESIGN §9.9.1) -- if `p` leads its own session (sid == pid)
+// armed with PROC_FLAG_SESSION_HANGUP, group-terminate every OTHER ALIVE Proc
+// sharing its sid. The session-lifecycle sibling of the legate teardown above
+// (same chokepoint, same held-lock contract, NOT I-26-gated). A non-armed Proc
+// or an armed non-leader is a no-op. PRECONDITION: caller holds g_proc_table_lock.
+static void proc_session_hangup_if_leader(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SESSION_HANGUP))
         return;
@@ -4034,6 +4026,8 @@ void proc_exit_notify_parent_locked(struct Proc *p) {
     // terminate wake: child_exit's default is ignore, which never arms it.
     proc_caught_note_wake(par);
 }
+
+static void proc_birth_hold_orphan_rule_locked(struct Proc *p);
 
 // Internal: common Proc-ZOMBIE transition body shared by exits() and
 // thread_exit_self(). MUST be called UNDER g_proc_table_lock. The Proc
@@ -5964,7 +5958,7 @@ void proc_birth_hold_mark_parked_locked(struct Proc *p) {
     proc_birth_hold_set_locked(p, BIRTH_HOLD_PARKED);
 }
 
-void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
+static void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     for (struct Proc *c = p->children; c; c = c->sibling) {
         if (c->state != PROC_STATE_ALIVE) continue;
@@ -6789,7 +6783,7 @@ int wait_pid(int *status_out) {
 // A production Proc is spliced into the kproc-rooted process table by
 // rfork (proc_link_child); a Proc the in-kernel test harness allocates
 // directly with proc_alloc is not. proc_for_each / proc_find_by_pid only
-// see linked Procs, so a test exercising proc_caps_by_stripes against a
+// see linked Procs, so a test exercising proc_peer_snapshot_by_stripes against a
 // bare proc_alloc'd Proc must link it first.
 
 #ifdef KERNEL_TESTS

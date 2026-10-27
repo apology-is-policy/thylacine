@@ -466,7 +466,10 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     return 0;
 }
 
-void srv_commit(struct SrvService *svc) {
+// srv_commit — phase 2 (success). RESERVING -> LIVE. Takes the registry
+// lock. `svc` must be a reservation from the reserve phase (srv_reserve_in,
+// the internal slot claim devsrv_post_listener drives).
+static void srv_commit(struct SrvService *svc) {
     if (!svc)                          extinction("srv_commit(NULL)");
     if (svc->magic != SRV_SERVICE_MAGIC)
         extinction("srv_commit: bad service magic (wild pointer / corruption)");
@@ -479,7 +482,9 @@ void srv_commit(struct SrvService *svc) {
     spin_unlock_irqrestore(&svc->reg->lock, s);
 }
 
-void srv_abort(struct SrvService *svc, enum srv_state prior) {
+// srv_abort — phase 2 (failure). RESERVING -> `prior` (the value the
+// reserve phase returned in *prior_out). Takes the registry lock.
+static void srv_abort(struct SrvService *svc, enum srv_state prior) {
     if (!svc)                          extinction("srv_abort(NULL)");
     if (svc->magic != SRV_SERVICE_MAGIC)
         extinction("srv_abort: bad service magic (wild pointer / corruption)");

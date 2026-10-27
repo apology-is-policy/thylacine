@@ -582,7 +582,22 @@ void sched_set_need_resched_for_test(unsigned cpu) {
 }
 #endif /* KERNEL_TESTS */
 
-void sched_set_idle_in_wfi(bool in_wfi) {
+// P3-G: WFI signaling for ready/wakeup wake-idle-peer (closes R5-H F78).
+//
+// `sched_set_idle_in_wfi(true)` is called by THIS CPU immediately before
+// entering `wfi` in per_cpu_main's idle loop; `false` is called immediately
+// after WFI exits. Peer CPUs read these flags via `sched_idle_in_wfi(idx)`
+// to identify wake targets; ready() / wakeup() send IPI_RESCHED to one
+// such target so it wakes from WFI and runs sched (which try_steals the
+// new work). Without this signaling, secondaries (no per-CPU timer at
+// v1.0) starve runnable threads while sitting in WFI.
+//
+// The boot CPU participates too: post-SMP-redesign cpu0 runs a per-CPU pinned
+// in-tree idle (`bootcpu_idle_main`, ARCH §8.4.2) that toggles this flag around
+// its own WFI exactly like a secondary's idle -- the old "boot CPU stays FALSE
+// forever / `_torpor` asm loop with no C hook" special case is retired with the
+// `g_bootcpu_idle` off-tree state. See ARCH §8.4.5 + scheduler.tla `EnterWFI`.
+static void sched_set_idle_in_wfi(bool in_wfi) {
     unsigned idx = smp_cpu_idx_self();
     if (idx >= DTB_MAX_CPUS) return;
     if (!g_cpu_sched[idx].initialized) return;
@@ -1726,7 +1741,7 @@ unsigned sched_runnable_count_band(unsigned band) {
 // a statistic-at-this-instant -- a few-ns-stale yes/no is exactly right for the
 // "was work queued when I parked" sample. SCHED_BAND_IDLE excluded (the per-CPU
 // idle threads are infrastructure, not pending work -- same rule as the count).
-bool sched_has_runnable_work(void) {
+static bool sched_has_runnable_work(void) {
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
         if (!cs->initialized) continue;

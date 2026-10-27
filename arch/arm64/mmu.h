@@ -504,39 +504,18 @@ int mmu_replace_user_pte_attr(struct AddrSpace *as, bool exempt,
 // such a leaf.
 bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec);
 
-// P6 hardening #2 / F1: clear a single leaf PTE at `vaddr` in `as`'s
-// TTBR0 tree AND issue tlbi vaae1is + dsb ish + isb to invalidate any cached
-// translation. Symmetric counterpart to mmu_install_user_pte's leaf install.
-// A clear that empties its L3 table reclaims the table -- unlinked from its
-// parent, invalidated, freed (the pool's charge returns), uncharged from `as`
-// -- and its ancestors if they empty too (B-1a' audit F1).
-//
-// Returns 0 in three cases (all benign):
-//   - PTE was VALID and is now cleared + TLB invalidated.
-//   - PTE was already not-VALID (idempotent).
-//   - The walk found an L1/L2/L3 sub-table not yet allocated (nothing
-//     mapped at vaddr -> nothing to clear).
-//
-// Returns -1 only on argument-validation failure (a NULL or rootless `as`,
-// misaligned vaddr, vaddr >> 47 != 0, or a malformed table descriptor
-// found mid-walk).
-//
-// Per audit F1 (P1): without this call from burrow_unmap (and any
-// future mmap-unmap path), SYS_BURROW_DETACH leaves stale PTEs in
-// the per-Proc tree AND stale TLB entries on the CPU. A later
-// user-mode access to the same VA (dangling pointer, overflow,
-// buddy-LIFO-returns-different-PA on re-attach) silently routes
-// to the recycled physical page -> content-sensitive heap
-// corruption that fires only under specific allocation patterns
-// (the suspected root cause of the AEGIS-256 / mallocng bug).
-int mmu_uninstall_user_pte(struct AddrSpace *as, u64 vaddr);
-
-// Range form: clear every leaf in [vaddr_start, vaddr_end) (half-open,
-// both page-aligned), walking by SUBTREE so an absent L0 / L1 / L2 entry
-// skips its whole span -- the cost is the pages present, never the range,
+// Clear every leaf PTE in [vaddr_start, vaddr_end) of `as`'s TTBR0 tree
+// (half-open, both page-aligned) and invalidate each cleared translation
+// (tlbi vaae1is + dsb ish + isb), walking by SUBTREE so an absent L0 / L1 / L2
+// entry skips its whole span -- the cost is the pages present, never the range,
 // which may be a whole reservation (up to the burrow window since B-1a').
+// Every unmap path runs this before the pages go back to the buddy: a stale
+// PTE or TLB entry would route a later access to the recycled page (P6
+// hardening #2 / audit F1).
 //
-// Tables the range empties are reclaimed as the single form reclaims them.
+// A clear that empties an L3 table reclaims it -- unlinked from its parent,
+// invalidated, freed (the pool's charge returns), uncharged from `as` -- and
+// its ancestors if they empty too (B-1a' audit F1).
 //
 // Returns the number of VALID leaves cleared (0 when nothing in the range was
 // mapped) -- what a caller attributing the pages to their holder refunds
@@ -556,10 +535,9 @@ long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
                                           u64 vaddr_start, u64 vaddr_end);
 
 #ifdef KERNEL_TESTS
-// Diagnostic (B-1a audit F2): leaf visits so far -- one per
-// mmu_uninstall_user_pte call, one per page visited inside a PRESENT table by
-// the range form -- the witness that the range form skips absent subtrees
-// instead of visiting pages.
+// Diagnostic (B-1a audit F2): leaf visits so far -- one per page visited
+// inside a PRESENT table by the range clear -- the witness that it skips
+// absent subtrees instead of visiting pages.
 u64 mmu_uninstall_pte_calls(void);
 #endif // KERNEL_TESTS
 

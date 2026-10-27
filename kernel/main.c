@@ -252,7 +252,7 @@ void boot_main(void) {
 
     // Phase 1: parse the DTB (early prints use the fallback PL011 base
     // 0x09000000 from uart.c; if the DTB places PL011 elsewhere,
-    // uart_set_base() below will update it before the banner prints).
+    // uart_remap_to_vmalloc() below will update it before the banner prints).
     bool dtb_ok = dtb_init((paddr_t)_saved_dtb_ptr);
 
     u64 mem_base = 0, mem_size = 0;

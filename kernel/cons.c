@@ -670,7 +670,7 @@ bool cons_tx_claimed_for_dump(void) {
 // FIFO or the ring is empty; uart_tx_drain_sync is itself bounded. Blocking-lock
 // is safe here -- the banner runs in the quiescing boot context (cpu0), the ring
 // is uncontended.
-void cons_tx_flush(void) {
+static void cons_tx_flush(void) {
     for (u32 i = 0; i < CONS_TX_RING_SIZE + 1u; i++) {
         irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
         cons_tx_drain_locked();          // ring -> FIFO (as much as fits) + TXIM re-eval

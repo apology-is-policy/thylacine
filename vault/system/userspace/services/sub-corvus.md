@@ -17,7 +17,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-10-01
+updated: 2026-10-27
 ---
 
 ## Administrative authority specification
@@ -538,11 +538,13 @@ AUTH attempts are bounded only by the cost of Argon2id itself.
   Two of the nineteen are in `main.rs` itself: the session-table comment and
   the file header, both using it to justify the same decision.
 
-  **"The live bound is a global 64" was wrong — there is no bound.**
-  `srvconn_create` is a plain `kmalloc` of a linked-list node with no cap of
-  any kind: no per-Proc limit, no global limit, no fixed table. corvus's own
-  `MAX_CONNS = 8` is the only ceiling anywhere on this path, and it is
-  corvus's. Where the 64 came from is unrecoverable; the nearest 64 in the
+  **"The live bound is a global 64" was wrong.** No 64 bounds this path.
+  `srvconn_create_in` reserves a connection's credits against three budgets
+  before it allocates — `SRV_CREDITS_GLOBAL` 256, `SRV_CREDITS_SESSIONS` 192,
+  `SRV_CREDITS_DOMAIN` 96; a default-class connection costs 1, a bulk one 4
+  ([[sub-kernel-srvconn]]) — and corvus's own `MAX_CONNS = 8` is corvus's.
+  (When this caveat was first written the create was a plain `kmalloc` with no
+  cap of any kind.) Where the 64 came from is unrecoverable; the nearest 64 in the
   header is `SRVCONN_PATH_MAX`, a *path length*. The shape is worth more
   than the number: **a stale constant does not stay in the note that quotes
   it — it gets reused as a premise next door**, where it names no constant

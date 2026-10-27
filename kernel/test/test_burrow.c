@@ -818,7 +818,7 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
 // is the probe for which it is the ONLY guard left -- a tail-aligned interior
 // page, whose want_end equals the VMA's own end, so the end-mismatch check
 // passes too. Delete the start check and this call stops refusing: it
-// uninstalls the tail page and then vma_remove()s the WHOLE two-page VMA, a
+// uninstalls the tail page and then vma_remove_in()s the WHOLE two-page VMA, a
 // partial unmap silently accepted as a full teardown, leaving the head page's
 // PTEs installed over a Burrow whose mapping reference is gone. That is why it
 // gets its own fixture: unlike the wrapped-end probe, which collapses onto the

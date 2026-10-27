@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 23.5"
   - "docs/TRUSTED-PATH.md"
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -47,11 +47,12 @@ crash dump by `uart_tx_drain_sync`, and probed empty by `uart_tx_fifo_empty`.
 
 The RX path is `uart_rx_init` (bring-up), `uart_irq_handler` (the GIC dispatch
 target for the shared PL011 SPI), `uart_rx_pump` (the reader-side backpressure
-resume), and `uart_rx_path_enabled` (the #943 regression predicate — RX is live
+resume), and `uart_rx_path_enabled` (tests build only; the #943 regression predicate — RX is live
 iff `UARTEN` and `RXE` are both set).
 
-The base is set by `uart_set_base` (from `boot_main` after the DTB parse),
-`uart_remap_to_vmalloc` (once the MMU maps MMIO), and read by `uart_get_base`.
+The base starts at the QEMU virt fallback (`0x09000000`), is set by
+`uart_remap_to_vmalloc` (from `boot_main` after the DTB parse, once the MMU
+maps MMIO), and read by `uart_get_base`.
 
 ## Mechanism
 

@@ -50,10 +50,6 @@ static u64  g_dma_created;
 static u64  g_dma_live;
 static bool g_dma_initialized;
 
-u64 kobj_dma_total_created(void) {
-    return __atomic_load_n(&g_dma_created, __ATOMIC_RELAXED);
-}
-
 #ifdef KERNEL_TESTS
 u64 kobj_dma_live_count(void) {
     return __atomic_load_n(&g_dma_live, __ATOMIC_RELAXED);

@@ -60,13 +60,8 @@
 // Diagnostics.
 // =============================================================================
 
-static u64 g_poll_calls;
 static u64 g_poll_slept;
 static u64 g_poll_resleeps;
-
-u64 poll_total_calls(void) {
-    return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
-}
 
 #ifdef KERNEL_TESTS
 // g_poll_slept counts callers that ENTERED the slow path — incremented
@@ -520,8 +515,6 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
     if (!p)                                   return -1;
     if (nfds == 0 || nfds > POLL_MAX_NFDS)    return -1;
     if (!kfds)                                return -1;
-
-    __atomic_fetch_add(&g_poll_calls, 1u, __ATOMIC_RELAXED);
 
     // The poller's private rendez and the per-fd arrays -- stack-allocated for
     // the lifetime of this call. With nfds <= POLL_MAX_NFDS (64): waiters[]

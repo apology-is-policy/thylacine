@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -32,8 +32,8 @@ Grouped by what they are for, since the file is long:
 |---|---|
 | bring-up | `mmu_enable`, `mmu_program_this_cpu`, `mmu_retire_ttbr0_identity` |
 | kernel views | `mmu_map_mmio`, `pa_to_kva` / `kva_to_pa` (in `page.h`) |
-| guard pages | `mmu_set_no_access[_range]`, `mmu_restore_normal[_range]`, `mmu_pagemap_directmap` |
-| per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_pte(as, ..)`, `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
+| guard pages | `mmu_set_no_access_range`, `mmu_restore_normal_range` (the single-page forms are the tests'), `mmu_pagemap_directmap` |
+| per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
 | self-modification | `mmu_patch_text`, `arch_icache_sync_range` |
 | cross-Proc | `mmu_cross_proc_read` / `_write` |
 | W^X | `pte_violates_wxe` — **and see Caveats: it has no callers** |
@@ -124,8 +124,8 @@ That is worth stating as a pattern: **the race was removed by making the
 dangerous transition impossible at runtime, not by locking it.**
 
 **Unmapping and the invalidate.** Clearing a user PTE is not enough; the stale
-translation must be flushed. `mmu_uninstall_user_pte` clears the leaf, then
-broadcasts an invalidate by address and waits for it. Skipping this was a real
+translation must be flushed. The range clear (`mmu_uninstall_user_range`)
+clears each leaf, then broadcasts an invalidate by address and waits for it. Skipping this was a real
 bug: detached memory kept working through cached translations, and when the
 allocator returned a *different* physical page for the same address on
 re-attach, writes went to the recycled page — content-dependent corruption that
@@ -354,7 +354,7 @@ reservation is the producer the chunk exists for, and the burrow window is
 malformed) L0 / L1 / L2 entry skips 512 GiB / 1 GiB / 2 MiB at once
 (`uninstall_next_block`, clamped to the range end; `v < 2^47` and the shift is
 at most 39, so the arithmetic cannot wrap), and only inside a PRESENT L3 table
-does each page go through `mmu_uninstall_user_pte`. So every valid leaf is
+is each page cleared and invalidated one by one. So every valid leaf is
 cleared with exactly the TLBI + DSB ISH it always got -- the load-bearing
 invariant (no stale cached translation observable when the call returns) is
 untouched, only the no-op iterations are gone -- and the per-leaf cost is
@@ -416,7 +416,7 @@ permission fault on it -- a user load, or the kernel's `LDTR` copy
 retry forever (B-1a' audit F13 -- the read
 arm's read-only install over the writable leaf a sibling's break had left was
 exactly such a mismatch, and it terminated the Proc; [[sub-kernel-fault]]). Each uninstall
-(`mmu_uninstall_user_pte`; the range form per page inside a present L3) drops
+(the range clear, per page inside a present L3) drops
 the L3's count for each valid leaf it clears (`table_occupancy_drop`: 0 -> -1
 is a miscount and extincts) and, when the L3 reaches 0, calls
 `user_tables_reclaim(as, va)` -- leaf upward, stopping at the first occupied

@@ -371,7 +371,6 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
 struct SrvDomain *srv_domain_create(int *err);
-void srv_domain_ref(struct SrvDomain *d);
 void srv_domain_unref(struct SrvDomain *d);
 // One coherent admission snapshot; NULL domain selects the boot counts.
 struct srv_admission_snapshot {

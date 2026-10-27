@@ -19,7 +19,7 @@ bool perm_identity_from_proc(const struct Proc *p, struct ProcAccessIdentity *ou
     return true;
 }
 
-bool perm_identity_in_group(const struct ProcAccessIdentity *id, u32 gid) {
+static bool perm_identity_in_group(const struct ProcAccessIdentity *id, u32 gid) {
     if (!id || gid == GID_INVALID) return false;
     if (gid == id->primary_gid) return true;
     u8 n = id->supp_gid_count;

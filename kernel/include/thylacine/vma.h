@@ -181,15 +181,6 @@ bool vma_free_freed(struct Vma *v);
 // event vma_free_freed's bool does. See burrow_free_deferred + deferred_free_next.
 struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
 
-// AS-R9: the settled form -- frees the Vma and drops its mapping ref through
-// burrow_release_mapping_settled_deferred, so the payer's I-32 charge is settled
-// in the SAME lock interval that decides whether the drop freed the region.
-// `payer` is the exact AddrSpace incarnation that paid, or NULL to settle
-// nothing; *out_refund is the pages to refund outside the Burrow's leaf lock
-// (the caller still holds as->lock), nonzero only when this drop qualified.
-// vma_free_deferred is this with no payer.
-struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
-                                         bool *out_freed, u32 *out_refund);
 
 #ifdef KERNEL_TESTS
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
@@ -202,10 +193,6 @@ struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *
 // documented as a trip-hazard when added.
 int vma_insert(struct Proc *p, struct Vma *v);
 #endif // KERNEL_TESTS
-
-// Remove `v` from Proc `p`'s VMA list. Caller still owns the Vma
-// after the remove (typically calls vma_free next).
-void vma_remove(struct Proc *p, struct Vma *v);
 
 // Look up the VMA covering `vaddr`. Returns the matching Vma * or
 // NULL. O(N) at v1.0 (sorted list walk; Phase 5+ RB-tree is O(log N)).
@@ -227,7 +214,7 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
 //
 // Caller must hold the serializing lock (Proc.vma_lock) across the
 // find AND the subsequent vma_insert — the same single-mutator
-// discipline vma_insert / vma_remove already assume.
+// discipline vma_insert / vma_remove_in already assume.
 int vma_find_gap(struct Proc *p, u64 length,
                  u64 window_start, u64 window_end, u64 *out_vaddr);
 

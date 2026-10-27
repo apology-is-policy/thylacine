@@ -39,7 +39,6 @@ bool proc_in_group(const struct Proc *p, u32 gid);
 // Caps are sampled atomically once. Capture each newly admitted operation, not
 // once for the lifetime of a ring; this is not a permanent cached capability.
 bool perm_identity_from_proc(const struct Proc *p, struct ProcAccessIdentity *out);
-bool perm_identity_in_group(const struct ProcAccessIdentity *id, u32 gid);
 int perm_check_identity(const struct ProcAccessIdentity *id,
                         const struct t_stat *st, unsigned want);
 

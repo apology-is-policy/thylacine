@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -72,7 +72,7 @@ table but is keyed by its indices (the vivarium's socket table) can only be
 snapshotted consistently with it there: the source lock is what stops a peer
 thread closing fd N and opening a different object at N between the two
 copies. The hook may take leaf locks (handle -> socktab nests) and must neither
-sleep nor allocate. `handle_table_copy_into` is the hooked copy with no hook.
+sleep nor allocate. `handle_table_copy_into` is the hooked copy with no hook, for the tests; fork calls `handle_table_copy_into_hooked`.
 
 `handle_snapshot_spoor(out, sp)` (NP-5, 2026-09-29) builds the same snapshot
 for a Spoor held **outside** any table — KOBJ_SPOOR, RIGHT_READ, its own
@@ -92,12 +92,14 @@ from, and whether the destination may already be occupied:
 
 | | source | destination |
 |---|---|---|
-| `handle_dup_posix` | a slot | first free ≥ `min_idx`; the index is an **output** |
-| `handle_replace` | a caller-held object | a fixed index that must be **live** and still name the caller's `expect`; outgoing released |
-| `handle_table_copy_into` | a slot in **another** table | the same fixed index, which must be free |
+| `handle_dup_posix` (tests build only; production reserves then `handle_dup_into_reserved`) | a slot | first free ≥ `min_idx`; the index is an **output** |
+| `handle_replace` (tests build only; connect calls `handle_replace_hooked`) | a caller-held object | a fixed index that must be **live** and still name the caller's `expect`; outgoing released |
+| `handle_table_copy_into` (tests build only; fork calls `_hooked`) | a slot in **another** table | the same fixed index, which must be free |
 | `handle_dup_to` | a slot | a fixed index, free **or** live; outgoing released if live |
 
-`min_idx` is why `handle_dup_posix` exists rather than being folded into
+`min_idx` is why `handle_dup_posix` (the tests' one-call form) and its
+production path -- `handle_reserve(p, min_fd)` then `handle_dup_into_reserved`,
+which `VIV_FCNTL_DUPFD` runs -- exist rather than being folded into
 `handle_dup`: a shell's `savefd()` asks for the lowest free descriptor **at
 or above 10**, precisely to move its bookkeeping out of the low range where
 a user redirection could collide with it. Returning the first free slot
@@ -133,7 +135,7 @@ latched before the reference drops. `handle_release_owner(kind, obj)` wraps
 first, then releases.
 
 IT IS SWAPPED INTO FOUR OF THE SIX RELEASE SITES, and the two it leaves alone
-are the interesting part. `handle_table_free`, `handle_close`, `handle_replace`
+are the interesting part. `handle_table_free`, `handle_close`, `handle_replace_hooked`
 and `handle_dup_to` each destroy a handle, so each may be destroying the last
 one. `handle_put` does not: it returns a BORROWED reference while the handle
 still exists, so latching there would mark a live ring closing on a mere borrow.
@@ -289,7 +291,7 @@ a second handle naming one object and faces the identical hazard. Its
 argued rather than assumed: the destination is being *closed*, and
 `handle_close` places no kind restriction on closing, so refusing here
 would invent a rule that dup2-onto-fd-N is less permitted than
-close(N)-then-dup. `handle_replace` refuses a non-Spoor outgoing for a
+close(N)-then-dup. `handle_replace_hooked` refuses a non-Spoor outgoing for a
 reason the header says does **not** transfer — its swap is internal to
 `connect()` and invisible to the guest, whereas a dup3 caller has
 explicitly named the fd it wants gone.
@@ -302,7 +304,7 @@ the flag, execve refuses unless it is the Proc's only live thread, and the
 caller **is** a live thread mid-syscall — so no exec can run between them.
 
 **Fork copies the table, and what it declines to copy is the interesting
-half.** `handle_table_copy_into` carries rights verbatim (POSIX fork gives
+half.** `handle_table_copy_into_hooked` carries rights verbatim (POSIX fork gives
 the child the parent's access; I-6 holds by non-increasing) and each copied
 slot takes its own reference, so the child's `handle_table_free` releases
 them and a failed fork's rollback is already correct. It cannot fail — no
@@ -394,8 +396,9 @@ counts objects ever installed (`handle_table_installs`). A reservation is not
 an install, which is how the tests show that a failed call published nothing.
 
 `handle_replace(p, h, expect, ...)` swaps only while the slot still names
-`expect`, an object the caller holds its own reference on. Its one kernel
-caller, connect (through the hooked form below), sleeps between taking the
+`expect`, an object the caller holds its own reference on. It is the tests'
+NULL-hook form; the one kernel caller, connect, calls the hooked form below
+directly, and sleeps between taking the
 socket's ctl Spoor and the swap. A number a
 peer closed and reused in that time names another object, so the swap is
 refused rather than releasing the peer's file. Pointer identity is enough
@@ -422,7 +425,7 @@ acquire of this table's lock goes through `table_lock`, which calls
 `spin_leaf_refuse` first, and every socket-table hold is marked with
 `spin_leaf_enter`/`spin_leaf_exit`. An inverted nesting extincts with "handle
 table lock taken under a leaf lock" the first time it runs, contended or not.
-`handle_replace` counts its swap in `installs`: it publishes a new object at
+`handle_replace_hooked` counts its swap in `installs`: it publishes a new object at
 the number.
 
 ## The hooked replace (2026-10-19, 17:09Z)

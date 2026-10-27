@@ -1,7 +1,11 @@
 #include <thylacine/loom_service_wire.h>
 #include <thylacine/errno.h>
 
-int loom_private_wire_build(struct p9_session *s,u8 *out,size_t cap,void *ctx) {
+// Exactly one session_send call under the actual client's lock. kind is an
+// internal program step: GETATTR precedes ordinary search/open DAC checks;
+// selecting WALK/LOPEN here does NOT establish that authority. Caller retains
+// exact FID claims, payload, creator image and absolute request deadline.
+static int loom_private_wire_build(struct p9_session *s,u8 *out,size_t cap,void *ctx) {
     struct loom_service_wire *w=ctx;
     if(!s || !out || !w || w->built || w->fid==P9_NOFID)return -T_E_INVAL;
     u32 msize=s->negotiated_msize?s->negotiated_msize:s->msize;

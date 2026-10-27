@@ -44,7 +44,7 @@ u32 virtio_mmio_read32(struct virtio_mmio_dev *dev, u32 off) {
     return *(volatile u32 *)((u8 *)dev->base + off);
 }
 
-void virtio_mmio_write32(struct virtio_mmio_dev *dev, u32 off, u32 val) {
+static void virtio_mmio_write32(struct virtio_mmio_dev *dev, u32 off, u32 val) {
     if (!dev || !dev->base) return;
     *(volatile u32 *)((u8 *)dev->base + off) = val;
 }
@@ -58,7 +58,7 @@ u32 virtio_get_status(struct virtio_mmio_dev *dev) {
     return virtio_mmio_read32(dev, VIRTIO_MMIO_STATUS);
 }
 
-void virtio_set_status(struct virtio_mmio_dev *dev, u32 status) {
+static void virtio_set_status(struct virtio_mmio_dev *dev, u32 status) {
     virtio_mmio_write32(dev, VIRTIO_MMIO_STATUS, status);
 }
 

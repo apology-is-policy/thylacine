@@ -432,11 +432,6 @@ s64 sys_poll_sleep_for(s32 timeout_ms);
 // Diagnostics.
 // =============================================================================
 
-// Monotonic counter of poll calls that returned (including timeout
-// returns at 0). Tests assert this increments to confirm the syscall
-// path executed.
-u64 poll_total_calls(void);
-
 #ifdef KERNEL_TESTS
 // Monotonic counter of poll calls that slept on tsleep. Distinguishes
 // the fast path (any fd ready at first scan) from the slow path.

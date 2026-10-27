@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -269,7 +269,7 @@ backref + `list` backpointer (set at register, cleared at unregister;
 the sweep's route home without a Dev vtable op) + `next`.
 `struct poll_waiter_list` — a spinlock + singly-linked head, embedded
 in the pollable object. `struct pollfd` — the 8-byte pinned ABI.
-Diagnostics: `poll_total_calls` / `poll_total_slept` — the latter
+Diagnostics, compiled only with the tests: `poll_total_slept`
 counts "committed to the slow path", not "actually parked" (a
 producer racing register-to-tsleep still increments it) —
 and `poll_total_resleeps`: wakes whose re-sample found nothing asked

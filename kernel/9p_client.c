@@ -2582,80 +2582,6 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
 // Mutation operations.
 // =============================================================================
 
-int p9_client_symlink(struct p9_client *c, u32 fid,
-                       const u8 *name, size_t name_len,
-                       const u8 *symtgt, size_t symtgt_len,
-                       u32 gid, struct p9_qid *out_qid) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
-    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_symlink(&c->session, c->out_buf,
-                                       c->out_buf_cap,
-                                       fid, name, name_len,
-                                       symtgt, symtgt_len, gid);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    if (out_qid) copy_qid(out_qid, &r.created_qid);
-    spin_unlock(&c->lock);
-    return 0;
-}
-
-int p9_client_mknod(struct p9_client *c, u32 dfid,
-                     const u8 *name, size_t name_len,
-                     u32 mode, u32 major, u32 minor, u32 gid,
-                     struct p9_qid *out_qid) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
-    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_mknod(&c->session, c->out_buf,
-                                     c->out_buf_cap,
-                                     dfid, name, name_len,
-                                     mode, major, minor, gid);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    if (out_qid) copy_qid(out_qid, &r.created_qid);
-    spin_unlock(&c->lock);
-    return 0;
-}
-
-int p9_client_rename(struct p9_client *c, u32 fid, u32 dfid,
-                      const u8 *name, size_t name_len) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
-    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_rename(&c->session, c->out_buf,
-                                      c->out_buf_cap,
-                                      fid, dfid, name, name_len);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    spin_unlock(&c->lock);
-    return 0;
-}
-
 int p9_client_readlink(struct p9_client *c, u32 fid,
                         u8 *out_target, u16 *out_target_len) {
     if (!c) return -P9_E_INVAL;
@@ -2682,28 +2608,6 @@ int p9_client_readlink(struct p9_client *c, u32 fid,
     for (u16 i = 0; i < to_copy; i++) out_target[i] = r.readlink_target[i];
     *out_target_len = r.readlink_target_len;
     if (r.readlink_target_len > cap) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    spin_unlock(&c->lock);
-    return 0;
-}
-
-int p9_client_link(struct p9_client *c, u32 dfid, u32 fid,
-                    const u8 *name, size_t name_len) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    spin_lock(&c->lock);
-    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_link(&c->session, c->out_buf,
-                                    c->out_buf_cap,
-                                    dfid, fid, name, name_len);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
     spin_unlock(&c->lock);
     return 0;
 }

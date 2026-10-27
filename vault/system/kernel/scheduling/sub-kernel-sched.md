@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -73,9 +73,10 @@ blocked (see Caveats).
 L-1 address-space extraction — the test was `pgtable_root != 0`, and the
 root now lives one indirection further out, so **the in-kernel test runner
 stays NORMAL because it has no AddrSpace**, not because its root is zero),
-and it never touches an IDLE thread. Its two callers each apply their own trust gate — `kobj_irq_wait`
-is implicitly `CAP_HW_CREATE`-gated by needing an IRQ kobj, and
-`devcons_read` gates on the trusted console session.
+and it never touches an IDLE thread. Its callers each apply their own trust gate — the IRQ waits
+(`kobj_irq_wait_timed`, `pci_irq_wait`) are implicitly `CAP_HW_CREATE`-gated by
+needing an IRQ kobj, and the console reads (`cons_input_read`,
+`cons_drain_read`) gate on the trusted console session.
 
 **The sort.** Each band is a doubly-linked list kept ascending by `vd_t`,
 so the head is the minimum. Ties insert *after* equal keys — FIFO within

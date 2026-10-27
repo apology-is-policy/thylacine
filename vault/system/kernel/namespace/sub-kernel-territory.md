@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -64,7 +64,7 @@ composes its own namespace with no privilege at all.
 Return codes (the C API; **the SVC layer collapses every failure to
 `-1`**, so the distinct codes serve the kernel callers and tests only):
 
-- `bind` — `0` / `-1` cycle / `-2` duplicate / `-3` table full / `-4` self-bind.
+- `bind` (tests build only) — `0` / `-1` cycle / `-2` duplicate / `-3` table full / `-4` self-bind.
 - `mount` — `0` (added OR idempotent no-op) / `-1` bad arg / `-2` table
   full (a union's first mount needs two free slots) / `-3` would create a
   mount cycle.
@@ -107,7 +107,11 @@ section below.
 
 **Two cycle checks, one modeled.** `would_create_cycle` guards the bind
 graph (fixed-point reachability over `binds[]`) — it is what
-`specs/territory.tla::NoCycle` proves. `would_create_mount_cycle` guards
+`specs/territory.tla::NoCycle` proves. No production code binds: `bind`,
+`unbind` and this check are compiled only with the in-kernel tests (since
+2026-10-27), so the model covers the graph the production kernel does not
+have, and the check production runs is the unmodeled one
+([[seam-mount-graph-unmodeled]]). `would_create_mount_cycle` guards
 the MOUNT identity graph with the identical algorithm over `(dc, devno,
 qid.path)` keys, rejecting a self-mount or a cross-tree oscillation with
 `-3`. It exists because [[fnd-stalk2-r1-f1]] falsified the claim that
@@ -282,7 +286,7 @@ keeps every pinned offset stable.
 
 `magic` sits at offset 0 deliberately — SLUB's freelist write on
 `kmem_cache_free` clobbers exactly that word, so a double-free is caught
-at the next `territory_ref`/`unref` rather than corrupting silently.
+at the next `territory_unref` or `territory_clone` rather than corrupting silently.
 `territory_clone` additionally range-checks `nbinds`/`nmounts` against
 their compile-time caps before the copy loops, so a torn count cannot
 walk past the arrays.
@@ -481,8 +485,8 @@ parent and writes only the child. RFNAMEG (cross-Proc sharing) does not
 exist at v1.0, so a Territory has exactly one Proc except for the peer
 Threads that share it.
 
-[[inv-i3]] — the DAG. Enforced twice: `would_create_cycle` on binds,
-`would_create_mount_cycle` on the mount identity graph. A union at a point is
+[[inv-i3]] — the DAG. Enforced in production by `would_create_mount_cycle` on
+the mount identity graph; `would_create_cycle` guards binds in the tests build. A union at a point is
 a SET of members at one identity, not a cycle: the cycle check keys on the
 mount identity, so stacking members at the same point adds no edge.
 
@@ -548,7 +552,7 @@ surfaced as `make: getcwd: I/O error`
 
 Both cycle checks are fixed-point reachability: O(N²) worst case at
 N = 8 binds (~64 inner iterations) and N = 20 mounts (~400). They run
-once per `bind`/`mount`, never on the resolution path.
+once per `mount` (and per the tests' `bind`), never on the resolution path.
 
 `mount_lookup` is a linear scan of up to 20 entries under a spinlock,
 and it runs at EVERY component descent in `stalk` — it is the hottest

@@ -274,9 +274,8 @@ bool kobj_pci_user_range(const struct KObj_PCI *k, u32 bar, u64 offset, u64 leng
 u32 kobj_pci_map_windows(const struct KObj_PCI *k,
                          struct pci_map_window out[PCI_MAP_WINDOW_MAX]);
 
-// Diagnostics — cumulative claim counter + currently-live count.
-u64 kobj_pci_total_created(void);
 #ifdef KERNEL_TESTS
+// Diagnostic: currently-live count.
 u64 kobj_pci_live_count(void);
 
 // The in-kernel tests' reach into pci_handle.c (.claude/rules/kernel-code.md,

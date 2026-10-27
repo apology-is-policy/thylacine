@@ -123,22 +123,6 @@ void bootcpu_idle_main(void);
 // sched_set_bootcpu_idle (which stored an off-tree deadlock-path pointer).
 void sched_install_bootcpu_idle(struct Thread *t);
 
-// P3-G: WFI signaling for ready/wakeup wake-idle-peer (closes R5-H F78).
-//
-// `sched_set_idle_in_wfi(true)` is called by THIS CPU immediately before
-// entering `wfi` in per_cpu_main's idle loop; `false` is called immediately
-// after WFI exits. Peer CPUs read these flags via `sched_idle_in_wfi(idx)`
-// to identify wake targets; ready() / wakeup() send IPI_RESCHED to one
-// such target so it wakes from WFI and runs sched (which try_steals the
-// new work). Without this signaling, secondaries (no per-CPU timer at
-// v1.0) starve runnable threads while sitting in WFI.
-//
-// The boot CPU participates too: post-SMP-redesign cpu0 runs a per-CPU pinned
-// in-tree idle (`bootcpu_idle_main`, ARCH §8.4.2) that toggles this flag around
-// its own WFI exactly like a secondary's idle -- the old "boot CPU stays FALSE
-// forever / `_torpor` asm loop with no C hook" special case is retired with the
-// `g_bootcpu_idle` off-tree state. See ARCH §8.4.5 + scheduler.tla `EnterWFI`.
-void sched_set_idle_in_wfi(bool in_wfi);
 #ifdef KERNEL_TESTS
 bool sched_idle_in_wfi(unsigned cpu_idx);
 
@@ -406,13 +390,6 @@ u64 sched_cpu_idle_ns(unsigned cpu);
 // across CPUs). READ-ONLY telemetry; no scheduling decision consults it. 0 for
 // an out-of-range or never-brought-up CPU.
 u64 sched_cpu_ctxt(unsigned cpu);
-
-// True iff any non-idle band on any CPU's run tree is non-empty (queued
-// runnable work exists somewhere). Reads ONLY the per-band head pointers
-// (never dereferences a Thread), so it is safe to call lock-free from the hot
-// idle-park path without risking a dangling runnable_next walk -- unlike
-// sched_runnable_count(), which follows the chains and is for the cold callers.
-bool sched_has_runnable_work(void);
 
 // SYS_YIELD (#33): voluntary yield. If another non-idle thread is queued
 // runnable on the calling CPU, requeue the caller (sched() with prev RUNNING

@@ -5,6 +5,7 @@ parent: moc-kernel-introspection
 title: "/ctl — machine-wide stats, two gated leaves, and counters with owners"
 code:
   - kernel/devctl.c
+  - kernel/include/thylacine/devctl.h
   - kernel/test/test_devctl.c
 audit: light
 guarded-by: []
@@ -13,7 +14,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-27
 ---
 ## Session transport accounting
 
@@ -64,6 +65,10 @@ from the end (`ps`, whose beacon table also carries one alignment per column)
 and one that checks the frame (coreutil-smoke); a column change moves all
 three in the same commit, while the leading-column readers (Halcyon's loaded
 systems, diorama) need nothing.
+
+**The header.** Nothing outside devctl.c calls into /ctl but the in-kernel
+tests, so `devctl.h` holds only their reach, under `#ifdef KERNEL_TESTS`
+([[sub-kernel-declarations]]); the Dev is declared with the others in `dev.h`.
 
 ## Mechanism
 
@@ -156,7 +161,7 @@ There are two owners:
 and every formatter takes it. A leaf that needs no gate says `(void)reader`;
 none lacks the means to ask. The principal and the capabilities are read with
 acquire loads, because other threads write both (`proc_apply_identity`,
-`proc_become_legate`).
+`proc_become_legate_locked`).
 
 A withheld value renders `-`, never `0`. Zero is a plausible reading (an idle
 CPU's interrupt delta, a new Proc's CPU time), so a consumer could not tell it

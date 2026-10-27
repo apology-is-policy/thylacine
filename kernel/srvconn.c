@@ -65,7 +65,7 @@ struct SrvDomain *srv_domain_create(int *err) {
     return d;
 }
 
-void srv_domain_ref(struct SrvDomain *d) {
+static void srv_domain_ref(struct SrvDomain *d) {
     if (d && __atomic_fetch_add(&d->ref, 1, __ATOMIC_RELAXED) <= 0)
         extinction("srv_domain_ref: dead domain");
 }

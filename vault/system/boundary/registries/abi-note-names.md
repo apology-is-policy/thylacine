@@ -18,7 +18,7 @@ mirrors:
   - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
   - "usr/lib/pouch/patches/0050-pouch-self-fault-signals-errnos.patch: raise/kill of self with SIGSEGV, SIGBUS, SIGILL or SIGFPE -> the snare:* self-post; kill's EACCES -> EPERM"
 created: 2026-08-02
-updated: 2026-10-14
+updated: 2026-10-27
 ---
 ## The surface
 
@@ -121,7 +121,7 @@ unified, and they are not.
 So a supervisor holding `CAP_KILL` kills through the filesystem, never
 through `SYS_POSTNOTE`. A target past `ALIVE` gets no post: a zombie has no
 consumer. Since 2026-10-14 the call still answers 0 for a dead child of the
-caller, as POSIX and Linux do for a zombie, rather than refusing it; `wait_pid`
+caller, as POSIX and Linux do for a zombie, rather than refusing it; `SYS_WAIT_PID`
 is the channel that reports the death. A `snare:*` name is never posted, but
 a self-post of `snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` or
 `snare:abort` ends the caller with it ([[dec-2026-10-14-self-death-snare]]).

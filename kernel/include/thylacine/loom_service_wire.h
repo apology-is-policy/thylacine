@@ -14,11 +14,6 @@ struct loom_service_wire {
     struct loom_service_reply_expect expect;
     bool built, local_again;
 };
-// Exactly one session_send call under the actual client's lock. kind is an
-// internal program step: GETATTR precedes ordinary search/open DAC checks;
-// selecting WALK/LOPEN here does NOT establish that authority. Caller retains
-// exact FID claims, payload, creator image and absolute request deadline.
-int loom_private_wire_build(struct p9_session *,u8 *,size_t,void *);
 // Sole scope driver only, outside Ll. Callback/container MUST remain alive
 // through this call and merely capture; it must never free its owner. Begin
 // must arm the callback before entry. Like submit_async, invalid arguments can

@@ -10,7 +10,7 @@ validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 
 ## Shared retention design review
@@ -46,9 +46,9 @@ stay on `Proc`.
 | Entry | Effect |
 |---|---|
 | `addrspace_alloc(page_budget)` | fresh L0 table, `ref = owners = 1`; **NULL on a 0 budget** |
-| `addrspace_ref(as)` | +1 owner and total lifetime; requires a live owner |
+| `addrspace_ref(as)` (tests build only; production takes `addrspace_try_ref`) | +1 owner and total lifetime; requires a live owner |
 | `addrspace_unref(as)` | -1 owner; last owner drains VMAs while retaining its total reference, then releases that reference |
-| `addrspace_pin/unpin(as)` | kernel descriptor lifetime only; final total drop destroys page tables and descriptor, never drains VMAs |
+| `addrspace_pin/unpin(as)` (tests build only) | kernel descriptor lifetime only; final total drop destroys page tables and descriptor, never drains VMAs |
 | `addrspace_clone(src, exempt)` | the COW fork; a fresh space, or NULL having freed everything |
 | `addrspace_owner_count(as)` | constructor/Proc ownership snapshot for sharing and last-driver predicates; not a lock |
 | `addrspace_ref_count(as)` | total lifetime including kernel pins; diagnostic only, not a mapping count |
@@ -165,7 +165,7 @@ and the rollover's per-CPU flush runs before that value can go live again
 ([[sub-kernel-asid]]). Each caller separately owes only "no CPU translates
 under this ASID *now*" — `proc_free` by having reaped and `on_cpu`-spun
 every thread, `proc_exec_replace` by writing the new TTBR0 (a *different*
-ASID) and `isb`-ing first. `vma_drain` issues **no TLBI at all**, measured
+ASID) and `isb`-ing first. `vma_drain_in` issues **no TLBI at all**, measured
 at L-2; an earlier claim that it did was fiction.
 
 **The clone is three phases, and the order is the whole safety argument.**

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Session posting ownership
 
@@ -80,7 +80,7 @@ spent a frame per level would carry any `/proc` lookup past the 16 KiB kernel
 stack. The links hold still across a walk because it runs under
 `g_proc_table_lock`, and they are written only by fork, the reap and a dying
 Proc's own exit, never from a walk callback (`proc_for_each`'s contract
-forbids a callback re-entering rfork, exits or wait_pid).
+forbids a callback re-entering rfork, exits or wait_pid_for).
 
 ## Contract
 
@@ -102,7 +102,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 
 | Surface | Shape |
 |---|---|
-| `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
+| `proc_alloc_in` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue (static in production: `rfork_internal` is its one caller; `proc_alloc` is the tests' wrapper); free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
 | `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
@@ -116,14 +116,14 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_mark_*` / `proc_is_*` | the one-way `proc_flags` stamps and their fail-closed readers |
 
 `proc_stripes` is the unforgeable per-Proc identity a `/srv` peer query
-resolves against — a fresh monotonic u64 per `proc_alloc`, never inherited,
+resolves against — a fresh monotonic u64 per `proc_alloc_in`, never inherited,
 `0` reserved as the fail-closed sentinel.
 
 ## Mechanism
 
 **Imperium scope flow (2026-09-17).** The `rfork_internal` capability carve
 and table-insertion race check now implement [[sub-kernel-caps#Contract]].
-`proc_become_legate` publishes the coherent scope block through the scope-id
+`proc_become_legate_locked` publishes the coherent scope block through the scope-id
 release store, refuses nested propagating scopes, and shortens an existing
 one-shot deadline rather than extending it. `proc_legate_teardown_if_root`
 marks every scoped member under the same process-table lock used by child
@@ -166,7 +166,7 @@ a ledger of three columns:
 
 - **Inherited** — identity (`principal_id`, `primary_gid`, `supp_gids`),
   session and group (`sid`, `pgid` — POSIX fork semantics, overwriting
-  `proc_alloc`'s own-session default), the legate scope tag, the hardware
+  `proc_alloc_in`'s own-session default), the legate scope tag, the hardware
   allowance (deep-cloned), the environment group (deep-copied), the
   phenotype, `exe_path`, and the CL-5 `page_budget`. A **PHENO_LINUX** fork
   additionally gives the child thread the calling thread's **note mask** (#127
@@ -197,7 +197,7 @@ note queue have all succeeded, so a rolled-back allocation never sparsifies
 either space (R5-H F89's discipline, extended to the tag space). The pid is
 claimed by a saturating compare-and-swap (`alloc_next_pid`): pids are never
 recycled (a session's identity leans on it), so at the end of the space
-`proc_alloc` refuses through the same rollback as any other failure, rather
+`proc_alloc_in` refuses through the same rollback as any other failure, rather
 than extincting or wrapping onto the -1 sentinel ([[inv-i32]]).
 
 **Wait.** `wait_pid_for` is one loop with a single authoritative scan under
@@ -358,7 +358,7 @@ creates one, so every peer is EXITING; but one can still be on another CPU betwe
 its exit commit and its last switch-out, and its tail stores its clear-child-tid
 word through this Proc's translation -- by a stale TLB entry into a page the drain
 below frees, or by a fault that demand-pages through `p->as` into the new image.
-The wait spins outside the lock, as `wait_pid`'s does, and a peer it found stays
+The wait spins outside the lock, as `wait_pid_for`'s does, and a peer it found stays
 allocated across it: while the Proc lives only a running thread of it frees a
 peer, and the exec'ing thread is the only one. It ends because an EXITING tail
 neither sleeps ([[seam-exiting-tails-never-sleep]]) nor is switched out at an
@@ -484,7 +484,7 @@ rather than growing the struct.
 
 The three lifecycle states are `INVALID(0)` / `ALIVE` / `ZOMBIE`, with
 `INVALID == 0` asserted so a zero-initialized Proc is detectably unusable.
-There is no REAPED state — by the time `wait_pid` returns the pid, the
+There is no REAPED state — by the time `wait_pid_for` returns the pid, the
 descriptor is freed and its magic clobbered.
 
 The top two bits are the final close's (2026-10-07, ARCH 7.9.1 part B,
@@ -565,7 +565,7 @@ accountant.
   `proc_default_page_budget()` = `proc_page_budget_hard_max()` =
   `capacity_pool_pages()` (RAM minus the TCB reserve, sized once at boot;
   [[sub-kernel-addrspace]]) -- seeded at `proc_init_fields` (the one
-  chokepoint: kproc and every `proc_alloc`, which matters because `KP_ZERO`
+  chokepoint: kproc and every `proc_alloc_in`, which matters because `KP_ZERO`
   would otherwise leave a zero budget that refuses every charge), copied by
   `rfork_internal`, and bounded by the same figure in
   `proc_spawn_budget_resolve` (over it is refused for everyone, never clamped;
@@ -592,7 +592,7 @@ accountant.
 
 ## Error paths
 
-`proc_alloc` returns NULL on any allocation failure (each rolling back
+`proc_alloc_in` returns NULL on any allocation failure (each rolling back
 through `proc_free`). `rfork_internal` returns `-1` uniformly: over the
 child cap, narrowed-allowance parent, or any allocation failure.
 `wait_pid_for` returns `-1` for no-match **and** for "this Proc is
@@ -616,7 +616,7 @@ The DFS walkers are O(procs) and run under a global IRQ-off lock, which is
 fine for the paths that use them (death, `/proc` reads, the pgrp fans) and
 would not be for a hot path — none exists. The orphan rule's walks are
 O(procs) *per candidate group*, explicitly justified in the code by death
-not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
+not being hot. `proc_alloc_in`'s fallible-first ordering costs nothing;
 `wait_pid_for`'s re-scan per wake is O(children), bounded by
 `PROC_CHILD_MAX`.
 

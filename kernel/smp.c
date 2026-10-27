@@ -137,7 +137,17 @@ static void ipi_resched_handler(u32 intid, void *arg) {
     }
 }
 
-void smp_cpu_ipi_init(unsigned cpu_idx) {
+// P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
+// secondary AFTER sched_init + g_cpu_alive flag is set. Performs the
+// per-CPU GIC redistributor + CPU interface init via gic_init_secondary,
+// attaches the IPI_RESCHED handler, enables SGI 0 at the source, and
+// unmasks DAIF.I so IRQs can be delivered. From this point on, the
+// secondary can receive IPIs.
+//
+// Must run BEFORE the secondary's idle loop enters its first WFI; the
+// loop body's `for(;;){sched();wfi;}` pattern relies on IRQs being
+// enabled to wake from WFI when an IPI arrives.
+static void smp_cpu_ipi_init(unsigned cpu_idx) {
     if (cpu_idx == 0) extinction("smp_cpu_ipi_init: cpu_idx 0 reserved for boot path");
     if (!gic_init_secondary(cpu_idx))
         extinction("smp_cpu_ipi_init: gic_init_secondary failed");

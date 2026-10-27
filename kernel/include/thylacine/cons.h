@@ -141,12 +141,6 @@ bool cons_tx_claim_core(spin_lock_t *l);
 bool cons_tx_claimed_for_dump(void);
 #endif // KERNEL_TESTS
 
-// #75-audit F3: bounded synchronous flush for a HEALTHY caller (blocking-lock,
-// waits the FIFO out). boot_mark_complete calls it before the direct-path
-// "Thylacine boot OK" banner so residual EL0 ring output cannot tear that
-// tooling-ABI line (TOOLING.md section 10).
-void cons_tx_flush(void);
-
 // The two kernel-side emit mechanisms below arrived on different branches and
 // serve DISJOINT contexts; read them as a pair.
 //

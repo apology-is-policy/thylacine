@@ -315,7 +315,8 @@ static void notes_name_copy(char *dst, const char *src) {
 // Lifecycle.
 // ---------------------------------------------------------------------------
 
-void notes_queue_init(struct NoteQueue *q) {
+// Initialize a NoteQueue in place, for notes_queue_alloc.
+static void notes_queue_init(struct NoteQueue *q) {
     spin_lock_init(&q->lock);
     q->head = 0;
     q->tail = 0;

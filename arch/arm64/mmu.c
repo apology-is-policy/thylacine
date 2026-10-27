@@ -1972,90 +1972,10 @@ bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec)
     return true;
 }
 
-// B-1a audit F2: leaf visits -- one per mmu_uninstall_user_pte call, one per
-// page visited inside a PRESENT table by the range form -- the diagnostic the
-// range form's subtree skip is pinned against (a test, not a gauge).
+// B-1a audit F2: leaf visits -- one per page visited inside a PRESENT table by
+// the range clear -- the diagnostic its subtree skip is pinned against (a test,
+// not a gauge).
 static u64 g_mmu_uninstall_pte_calls;
-
-// =============================================================================
-// P6 hardening #2 / audit F1 (P1): mmu_uninstall_user_pte
-// =============================================================================
-//
-// Symmetric counterpart to mmu_install_user_pte. Walks the per-Proc
-// TTBR0 tree to find the L3 leaf PTE at `vaddr`, clears it (writes 0),
-// and broadcasts tlbi vaae1is + dsb ish + isb to invalidate any
-// cached translation on this and all sibling CPUs.
-//
-// The walk is non-growing: any L1/L2/L3 sub-table that's not yet
-// allocated means nothing is mapped at `vaddr`, so there's nothing
-// to clear (return 0 idempotently). Same idempotence applies if the
-// L3 leaf PTE is already not-VALID.
-//
-// A clear that empties its L3 reclaims it, and its ancestors if they empty
-// too (B-1a' audit F1, above). This file used to keep every table until
-// proc_pgtable_destroy, arguing that deciding emptiness meant scanning 512
-// slots and that the pages went free at death anyway; the first reason is
-// gone (occupancy is a count) and the second was the hole -- a Proc whose
-// tables never return is a Proc whose footprint never shrinks. In the
-// rolling-ASID model (RW-1 B-F1) there is no per-Proc asid_free: the leaf
-// flush here covers the live unmap, and a dead Proc's remaining translations
-// need no flush at all -- every user PTE is non-global, so they are reachable
-// only under that address space's own ASID, which cannot go live again until
-// the rollover's per-CPU flush_pending has run. (The drain issues no TLBI --
-// measured at L-2; an earlier version of this comment said otherwise.)
-int mmu_uninstall_user_pte(struct AddrSpace *as, u64 vaddr) {
-    __atomic_add_fetch(&g_mmu_uninstall_pte_calls, 1, __ATOMIC_RELAXED);
-
-    if (!as || as->pgtable_root == 0)    return -1;
-    if (vaddr & (PAGE_SIZE - 1))         return -1;
-    // Mirror mmu_install_user_pte's VA bound: bit 47 must be 0 for
-    // the TTBR0 user-half. R10 F158 close.
-    if (vaddr >> 47)                     return -1;
-
-    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
-    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
-    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
-    u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
-
-    // L0 walk (no grow).
-    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
-    u64 e = l0[idx0];
-    if (!(e & PTE_VALID))                return 0;     // nothing mapped
-    if (!(e & PTE_TYPE_TABLE))           return -1;    // malformed
-    paddr_t l1_pa = e & ~0xFFFull;
-
-    // L1 walk (no grow).
-    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
-    e = l1[idx1];
-    if (!(e & PTE_VALID))                return 0;
-    if (!(e & PTE_TYPE_TABLE))           return -1;
-    paddr_t l2_pa = e & ~0xFFFull;
-
-    // L2 walk (no grow).
-    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
-    e = l2[idx2];
-    if (!(e & PTE_VALID))                return 0;
-    if (!(e & PTE_TYPE_TABLE))           return -1;
-    paddr_t l3_pa = e & ~0xFFFull;
-
-    // L3 leaf check + clear.
-    u64 *l3 = (u64 *)pa_to_kva(l3_pa);
-    u64 existing = l3[idx3];
-    if (!(existing & PTE_VALID))         return 0;     // already cleared
-
-    l3[idx3] = 0;
-
-    // Drain the store + broadcast invalidate by VA across the inner-
-    // shareable domain. Same shape as mmu_install_user_pte's tail:
-    // dsb ishst orders the PTE write before the tlbi; dsb ish waits
-    // for the tlbi to complete on all CPUs; isb flushes the local
-    // pipeline so any subsequent EL1 access sees the new mapping
-    // state.
-    user_tlbi_va(vaddr);
-    table_occupancy_drop(table_page(l3_pa));
-    if (table_page(l3_pa)->refcount == 0) user_tables_reclaim(as, vaddr);
-    return 0;
-}
 
 // The first VA past the `shift`-sized block containing `v`, clamped to `end`.
 // v < 2^47 and shift <= 39, so the shifted sum cannot wrap.
@@ -2065,7 +1985,11 @@ static u64 uninstall_next_block(u64 v, u32 shift, u64 end) {
 }
 
 // The range clear behind the two public forms: `reclaim` says whether a table
-// the clears empty goes back to the pool once its block is done.
+// the clears empty goes back to the pool once its block is done. The leaf flush
+// here covers a live unmap; a dead Proc's remaining translations need none. In
+// the rolling-ASID model (RW-1 B-F1) every user PTE is non-global, so it is
+// reachable only under its address space's own ASID, which cannot go live again
+// until the rollover's per-CPU flush_pending has run.
 static long uninstall_range(struct AddrSpace *as, u64 vaddr_start, u64 vaddr_end,
                             bool reclaim) {
     if (!as || as->pgtable_root == 0) return -1;

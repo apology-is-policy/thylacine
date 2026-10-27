@@ -6,7 +6,7 @@ kind: spin-irqsave
 guards: "children lists + sibling chains + parent pointers, ALIVE->ZOMBIE transitions, exit_status/exit_msg, the companion Thread's THREAD_EXITING commit, p->threads link/unlink + thread_count, sid/pgid, the PTY-1e report latches, the stop flags' set/clear walks, g_init_proc, and the three console-role pointers"
 orders-before: [lock-pts]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-27
 ---
 ## Discipline
 
@@ -44,7 +44,7 @@ making the wait predicate read one flag and nothing else.
 parent's `child_waiters` and posts the `child_exit` note **inside** the
 critical section. Releasing first would admit the R5-H F75 race: between the
 release and the wake, the parent can be reaped and freed by the
-grandparent's `wait_pid`, and the wake touches freed memory. Holding it
+grandparent's `wait_pid_for`, and the wake touches freed memory. Holding it
 pins the parent alive through the wake.
 
 **Never held across a sleep.** The two places that need to sleep under an
@@ -56,7 +56,7 @@ takes `torpor_lock` — neither of which composes with this lock.
 
 **Callback contract.** `proc_for_each` holds it across the whole DFS, so a
 callback must not re-enter `proc_find_by_pid` / `rfork` / `exits` /
-`wait_pid` / `proc_for_each`. Code already inside the lock uses the
+`wait_pid_for` / `proc_for_each`. Code already inside the lock uses the
 `_walk` variants (`proc_for_each_walk`, `proc_find_by_pid_walk`) — calling
 the locking form from a locked context deadlocks, which is why
 `proc_legate_teardown_if_root` documents its precondition explicitly and

@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-14
+updated: 2026-10-27
 ---
 ## Session factory handoff
 
@@ -386,7 +386,7 @@ event-driven; no timing constant appears in this path.
   it here.
 - The readiness read must keep draining, and the drainer must keep owning
   the pipe. A reader that stops reading wedges the FS.
-- `wait_pid` must not be reintroduced on the daemon path.
+- A blocking reap (`wait_pid_for`) must not be reintroduced on the daemon path.
 
 ## Seams
 

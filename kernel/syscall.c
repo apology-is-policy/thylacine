@@ -6303,7 +6303,7 @@ static s64 sys_note_mask_handler(u64 new_mask, u64 old_mask_out_va) {
 //
 // Both run their VMA-list work under p->vma_lock. At v1.0 Procs are single-
 // threaded so the lock is uncontended by construction; it is held so the
-// find-gap + vma_insert sequence (attach) and the lookup + vma_remove
+// find-gap + vma_insert sequence (attach) and the lookup + vma_remove_in
 // sequence (detach) are atomic once the pouch-threads sub-chunk makes Procs
 // multi-threaded. Plain spin_lock (not irqsave): no IRQ handler touches a
 // Proc's VMA list, and the critical section never sleeps — burrow_create_anon
@@ -9064,9 +9064,9 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // phenotype channel. The plain exec_resolve_from_namespace wrapper below passes
 // NULL, so its six non-declaring callers are untouched; only the
 // SYS_SPAWN_FULL_ARGV path (the sole fresh-phenotype declarer, ARCH I-43) reads it.
-struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
-                                             size_t name_len, size_t *size_out,
-                                             bool *pheno_out) {
+static struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
+                                                    size_t name_len, size_t *size_out,
+                                                    bool *pheno_out) {
     if (pheno_out) *pheno_out = false;
     if (!p || !name || !size_out)                  return NULL;
     *size_out = 0;

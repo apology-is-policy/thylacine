@@ -517,36 +517,6 @@ void slub_init(void) {
 // Diagnostics.
 // ---------------------------------------------------------------------------
 
-u64 slub_total_alloc(void) {
-    u64 total = 0;
-    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
-    for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
-        total += c->alloc_count;
-    }
-    spin_unlock_irqrestore(&g_cache_list_lock, s);
-    return total;
-}
-
-u64 slub_total_free(void) {
-    u64 total = 0;
-    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
-    for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
-        total += c->free_count;
-    }
-    spin_unlock_irqrestore(&g_cache_list_lock, s);
-    return total;
-}
-
-u64 slub_active_slabs(void) {
-    u64 total = 0;
-    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
-    for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
-        total += c->slabs_active;
-    }
-    spin_unlock_irqrestore(&g_cache_list_lock, s);
-    return total;
-}
-
 #ifdef KERNEL_TESTS
 // Live (currently-allocated) object count for one cache: the quantity the
 // RW-1 F-S1 destroy guard tests. A diagnostic snapshot (cumulative counters

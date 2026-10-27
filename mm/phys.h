@@ -117,7 +117,6 @@ u32 capacity_pool_unpark_all_for_test(void);
 // Public allocation API per ARCHITECTURE.md §6.3.
 struct page *alloc_pages(unsigned order, unsigned flags);
 void free_pages(struct page *p, unsigned order);
-struct page *alloc_pages_node(int node, unsigned order, unsigned flags);
 
 void *kpage_alloc(unsigned flags);   // single 4 KiB page; returns PA-as-void*
 void  kpage_free(void *p);

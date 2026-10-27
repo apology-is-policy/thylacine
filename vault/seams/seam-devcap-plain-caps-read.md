@@ -7,7 +7,7 @@ surface: [sub-kernel-caps]
 opened-by: chg-2026-08-02-authority-sweep
 tracker: "task #15"
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-27
 ---
 ## Owed
 
@@ -26,7 +26,7 @@ A census of every `->caps` read in the kernel finds these are the only two
 left. `syscall.c` (sixteen sites), `devproc.c` (four), `devctl.c`, `perm.c`
 (two) and `proc.c` (two) all use an acquire load, and most carry an explicit
 comment — "R9 F146", "RW-5 F2", "RW-5 R3-F4" — stating that a plain load is
-C11-racy now that `proc_become_legate` is a cross-thread writer of `p->caps`.
+C11-racy now that `proc_become_legate_locked` is a cross-thread writer of `p->caps`.
 
 The sharpest detail is that the fix and the miss are in the **same file**.
 RW-5 F1 hardened `cap_redeem_grant_for_writer`'s `__atomic_fetch_or`, and

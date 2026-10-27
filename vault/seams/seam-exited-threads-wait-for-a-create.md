@@ -7,12 +7,12 @@ surface: [sub-kernel-thread]
 opened-by: chg-2026-10-20-in-proc-reap
 tracker: "OPEN-BUGS 2026-10-20 (the multi-threading overhaul, chunk C1)"
 created: 2026-10-20
-updated: 2026-10-20
+updated: 2026-10-27
 ---
 ## Owed
 
 A thread that exits while its peers live is freed by its Proc's next thread
-create, Loom SQPOLL setup or exec (`proc_reap_exited_threads`), or by `wait_pid` once
+create, Loom SQPOLL setup or exec (`proc_reap_exited_threads`), or by `wait_pid_for` once
 the whole Proc is dead -- not as soon as it has left its CPU, which is when
 Plan 9 and Linux free it. Until then:
 
@@ -43,4 +43,4 @@ without the lock (test_thread_spawn.c) moved under it.
 
 Memory only, and bounded per user Proc inside the I-32 floor; a burst is
 unbounded only for the TCB, whose bursts are its own. No soundness risk: the
-free uses the terminal predicate `wait_pid` frees on.
+free uses the terminal predicate `wait_pid_for` frees on.

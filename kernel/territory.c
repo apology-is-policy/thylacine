@@ -208,12 +208,6 @@ struct Territory *territory_clone(struct Territory *parent) {
     return child;
 }
 
-void territory_ref(struct Territory *p) {
-    if (!p) return;
-    if (p->magic != PGRP_MAGIC)   extinction("territory_ref of corrupted Territory");
-    __atomic_fetch_add(&p->ref, 1, __ATOMIC_RELAXED);
-}
-
 void territory_unref(struct Territory *p) {
     if (!p) return;
     if (p->magic != PGRP_MAGIC)   extinction("territory_unref of corrupted Territory");
@@ -416,9 +410,6 @@ int territory_nmounts(struct Territory *p) {
     return p->nmounts;
 }
 #endif // KERNEL_TESTS
-
-u64 territory_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __ATOMIC_RELAXED); }
-u64 territory_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
 
 // =============================================================================
 // /proc/<pid>/ns rendering (#66). Tiny append helpers -- each returns false on

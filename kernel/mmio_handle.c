@@ -265,10 +265,6 @@ void kobj_mmio_unref(struct KObj_MMIO *k) {
     }
 }
 
-void kobj_mmio_destroy(struct KObj_MMIO *k) {
-    kobj_mmio_unref(k);
-}
-
 // =============================================================================
 // R10 F154 (P1) close: kernel-MMIO reservation.
 // =============================================================================
@@ -473,16 +469,6 @@ void kobj_mmio_reserve_kernel_ranges(void) {
     // accessed by the running kernel and a userspace claim would
     // produce real concurrent-access bugs (UART register clobber, GIC
     // configuration drift, ECAM enumeration interference).
-}
-
-int kobj_mmio_kernel_reserved_count(void) {
-    int n = 0;
-    irq_state_t s = spin_lock_irqsave(&g_mmio_lock);
-    for (int i = 0; i < KOBJ_MMIO_MAX; i++) {
-        if (g_mmio_claims[i].owner == KOBJ_MMIO_KERNEL_RESERVED) n++;
-    }
-    spin_unlock_irqrestore(&g_mmio_lock, s);
-    return n;
 }
 
 #ifdef KERNEL_TESTS

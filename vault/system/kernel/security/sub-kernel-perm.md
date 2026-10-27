@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 3.7.1", "docs/IDENTITY-DESIGN.md section 9.6"]
 created: 2026-08-02
-updated: 2026-10-04
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -132,7 +132,7 @@ None owned. Reads `Proc.principal_id`, `primary_gid`, `supp_gids[]`,
 ## Concurrency
 
 No locks. `p->caps` is read with an **acquire** load at both sites, because
-`proc_become_legate` is a cross-thread writer since A-4a and a plain load
+`proc_become_legate_locked` is a cross-thread writer since A-4a and a plain load
 would be C11-racy (RW-5 F2).
 
 The identity fields need no synchronisation: identity is immutable on a

@@ -171,15 +171,17 @@ void vma_free(struct Vma *v) { (void)vma_free_freed(v); }
 // D-3c F1: the deferred twin of vma_free_freed. Drops the mapping ref via
 // burrow_release_mapping_settled_deferred (which does NOT free, and settles
 // `payer`'s charge record in the same hold when the drop qualifies -- AS-R9),
-// frees the Vma struct,
-// and returns the Burrow that still owes a free (or NULL). The caller pushes it
+// frees the Vma struct, and returns the Burrow that still owes a free (or NULL). The caller pushes it
 // onto a local stack and frees it with burrow_free_deferred AFTER dropping
 // as->lock -- the FILE arm's spoor_clunk may sleep, and a sleeping free under a
 // spinlock is the lock-across-sleep extinction. *out_freed reports the same
 // event vma_free_freed's bool does, for the I-32 uncharge (which stays under
-// the lock -- only the physical free moves out).
-struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
-                                         bool *out_freed, u32 *out_refund) {
+// the lock -- only the physical free moves out). `payer` is the exact AddrSpace
+// incarnation that paid, or NULL to settle nothing (vma_free_deferred);
+// *out_refund is the pages to refund outside the Burrow's leaf lock (the caller
+// still holds as->lock), nonzero only when this drop qualified.
+static struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
+                                                bool *out_freed, u32 *out_refund) {
     if (out_freed)  *out_freed  = false;
     if (out_refund) *out_refund = 0;
     if (!v)                     extinction("vma_free(NULL)");
@@ -278,17 +280,12 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     return 0;
 }
 
-void vma_remove(struct Proc *p, struct Vma *v) {
-    if (!p) extinction("vma_remove(NULL)");
-    vma_remove_in(p->as, v);
-}
-
 void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     if (!as || !v)               extinction("vma_remove_in(NULL)");
-    if (v->magic != VMA_MAGIC)   extinction("vma_remove of corrupted Vma");
+    if (v->magic != VMA_MAGIC)   extinction("vma_remove_in of corrupted Vma");
     // A second remove of the same Vma would take the no-predecessor arm and wipe
     // the whole list head, and the clamp-safe uncharge below would hide it.
-    if (!vma_linked_in(as, v))   extinction("vma_remove of a Vma not linked in this address space");
+    if (!vma_linked_in(as, v))   extinction("vma_remove_in of a Vma not linked in this address space");
 
     if (v->prev) v->prev->next = v->next;
     else         as->vmas      = v->next;
@@ -298,7 +295,7 @@ void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     v->prev = NULL;
 
     // I-32: a removed VMA frees its slab slot -> uncharge the live-VMA count (pairs
-    // with the charge in vma_insert_in). Under as->lock (every vma_remove caller
+    // with the charge in vma_insert_in). Under as->lock (every vma_remove_in caller
     // holds it: detach / share teardown; vma_drain at proc_free is single-threaded).
     // Clamp-safe.
     addrspace_uncharge_vma(as);
@@ -861,10 +858,11 @@ void vma_drain(struct Proc *p) {
 }
 #endif // KERNEL_TESTS
 
-// LINEAGE L-2: drain by address space. Two callers with genuinely different
-// shapes -- proc_free's (through the wrapper above, on a Proc that is dying) and
-// proc_exec_replace's, which drains the OUTGOING address space of a Proc that
-// stays alive, and the DETACHED half-built one on the exec-failure rollback.
+// LINEAGE L-2: drain by address space, from addrspace_destroy on the last
+// reference's drop. Two shapes reach it -- a dying Proc's (proc_free ->
+// addrspace_unref) and proc_exec_replace's, which drops the OUTGOING address
+// space of a Proc that stays alive, and the DETACHED half-built one on the
+// exec-failure rollback.
 // Neither needs a Proc: the drain frees Vma structs and drops Burrow mapping
 // refs, and the I-32 uncharge it performs is pure arithmetic on this address
 // space's own counter.

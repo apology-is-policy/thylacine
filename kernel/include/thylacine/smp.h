@@ -245,18 +245,6 @@ unsigned smp_cpu_idx_self(void);
 extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
 #endif // KERNEL_TESTS
 
-// P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
-// secondary AFTER sched_init + g_cpu_alive flag is set. Performs the
-// per-CPU GIC redistributor + CPU interface init via gic_init_secondary,
-// attaches the IPI_RESCHED handler, enables SGI 0 at the source, and
-// unmasks DAIF.I so IRQs can be delivered. From this point on, the
-// secondary can receive IPIs.
-//
-// Must run BEFORE the secondary's idle loop enters its first WFI; the
-// loop body's `for(;;){sched();wfi;}` pattern relies on IRQs being
-// enabled to wake from WFI when an IPI arrives.
-void smp_cpu_ipi_init(unsigned cpu_idx);
-
 // #868: attach + enable IPI_RESCHED on the BOOT CPU (cpu0), making it a full
 // SMP scheduling peer -- a peer's sched_notify_idle_peer can wake cpu0's idle
 // immediately, not only via cpu0's timer. cpu0's GIC redistributor + interface

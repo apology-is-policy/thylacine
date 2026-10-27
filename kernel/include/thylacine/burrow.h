@@ -364,9 +364,6 @@ struct Burrow *burrow_create_anon(size_t size, bool exempt);
 // arch/arm64/fault.c (handling the MMIO PA + device-memory PTE attrs)
 // lands at P4-Ic2.
 struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio);
-// Subrange retains the entire parent MMIO claim (including protected holes).
-struct Burrow *burrow_create_mmio_range(struct KObj_MMIO *kobj_mmio,
-                                       u64 offset, size_t length);
 struct Burrow *burrow_create_pci_mmio(struct KObj_PCI *pci, u32 bar,
                                      u64 offset, size_t length);
 // V-2: wrap a subrange of a PCI hostmem BAR in a share-admissible Burrow.
@@ -757,9 +754,6 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // every return path. Caller holds as->lock, exactly as for burrow_map.
 int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
                      u32 prot, u64 burrow_offset, struct Burrow **out_free);
-int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
-                        struct Burrow *v, u64 vaddr, size_t length, u32 prot,
-                        u64 burrow_offset, struct Burrow **out_free);
 
 // B-1a: burrow_protect -- the permission ceiling's one mutation (ARCH 6.5;
 // SYS_BURROW_PROTECT). Move [vaddr, vaddr+length) to `prot` in {none, R, RW}
@@ -788,7 +782,7 @@ int burrow_protect_in(struct AddrSpace *as, bool exempt,
 #endif // KERNEL_TESTS
 
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
-// from Proc `p`. Calls vma_remove + vma_free (which calls
+// from Proc `p`. Calls vma_remove_in + vma_free (which calls
 // burrow_release_mapping; mapping_count--).
 //
 // At v1.0 P3-Db, the (vaddr, length) range must match an existing VMA
@@ -817,32 +811,17 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 #endif // KERNEL_TESTS
 
-// burrow_unmap, additionally reporting whether removing this mapping was the
-// drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed
-// is written on every path, including the -1 ones (false).
-// D-3c F1: `out_free`, when non-NULL, DEFERS the Burrow free: the function
-// removes the VMA + drops the mapping ref under the caller's as->lock but
-// returns the dead Burrow (or NULL) via *out_free instead of freeing it inline;
-// the caller frees it with burrow_free_deferred after the unlock (the FILE arm's
-// spoor_clunk may sleep). NULL keeps the inline free (non-sleeping ANON/CODE/DMA
-// callers via burrow_unmap). *out_free is written whenever it is non-NULL,
-// including the -1 paths (NULL).
-int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
-                           bool *out_freed, struct Burrow **out_free);
-
-// The same, against an address space the caller names rather than a Proc's
+// burrow_unmap against an address space the caller names rather than a Proc's
 // current one: a caller that resolved the space under g_proc_table_lock and
 // holds its lock keeps working on THAT space after an exec swaps the Proc's
 // pointer. Caller holds as->lock.
-int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
-                              bool *out_freed, struct Burrow **out_free);
 int burrow_unmap_in(struct AddrSpace *as, u64 vaddr, size_t length);
 
 // =============================================================================
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).
 // =============================================================================
 
-// burrow_decommit_in: release the resident pages backing [vaddr, vaddr+length)
+// burrow_decommit: release the resident pages backing [vaddr, vaddr+length)
 // WITHOUT removing any mapping — the madvise(MADV_DONTNEED) analog
 // (SYS_BURROW_DECOMMIT). B-1a': the range may span SEVERAL mappings (a protect
 // cuts a reservation into pieces, and Linux's madvise spans VMAs), and every
@@ -868,7 +847,6 @@ int burrow_unmap_in(struct AddrSpace *as, u64 vaddr, size_t length);
 // ANON_LAZY Burrow), so the take is race-free; free_pages runs under as->lock
 // (the established attach/unmap order), never under v->lock. Lock order
 // as->lock -> v->lock for the per-slot take.
-int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length);
 int burrow_decommit(struct Proc *p, u64 vaddr, size_t length);
 
 // The per-mapping half of the above, for vma.c's range detach: release the

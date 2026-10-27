@@ -7,7 +7,7 @@ surface: [sub-kernel-sched]
 opened-by: chg-2026-05-05-p2b-sched-dispatch
 tracker: "ARCH 8.4 design intent; Phase 7"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-27
 ---
 ## Owed
 
@@ -19,9 +19,9 @@ pick is O(1) per band.
 
 With realistic thread counts — tens, not thousands — the tree's O(log N)
 advantage is invisible, and the list is far easier to reason about in a
-structure that is walked lock-free by three diagnostics
-(`sched_runnable_count`, `sched_has_runnable_work`,
-`sched_dump_runnable`). The API does not change when it is replaced.
+structure that is walked lock-free by two diagnostics
+(`sched_runnable_count`, `sched_has_runnable_work`) and by the tests'
+failure dump (`sched_dump_runnable`). The API does not change when it is replaced.
 
 ## Cost of leaving it
 

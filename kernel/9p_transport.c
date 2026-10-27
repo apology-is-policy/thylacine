@@ -290,6 +290,8 @@ int p9_transport_progress_init(struct p9_transport_progress *p,
     return 0;
 }
 
+// Negotiation may shrink the limit only at a TX/RX frame boundary.
+VISIBLE_IF_KERNEL_TESTS
 int p9_transport_progress_limit(struct p9_transport_progress *p, size_t limit) {
     if (!progress_live(p) || p->tx || p->rx_have ||
         limit < P9_HDR_LEN || limit > p->frame_limit) return -1;

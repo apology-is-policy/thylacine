@@ -393,15 +393,6 @@ u64 srv_registry_total_destroyed(void);
 //   srv_commit()   — RESERVING -> LIVE (handle allocated; post succeeded).
 //   srv_abort()    — RESERVING -> prior (handle_alloc failed; rolled back).
 
-// srv_commit — phase 2 (success). RESERVING -> LIVE. Takes the registry
-// lock. `svc` must be a reservation from the reserve phase (srv_reserve_in,
-// the internal slot claim devsrv_post_listener drives).
-void srv_commit(struct SrvService *svc);
-
-// srv_abort — phase 2 (failure). RESERVING -> `prior` (the value the
-// reserve phase returned in *prior_out). Takes the registry lock.
-void srv_abort(struct SrvService *svc, enum srv_state prior);
-
 #ifdef KERNEL_TESTS
 // srv_lookup_in — find a service by name in an explicit `reg` (the devsrv
 // open=connect / walk internal lookup). The in-kernel test harness uses it

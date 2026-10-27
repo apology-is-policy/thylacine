@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-10-21
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -29,12 +29,13 @@ tearing it down.
 ## Contract
 
 `vma_alloc(start, end, prot, burrow, offset)` mints a descriptor and takes a
-**mapping** reference on the Burrow. `vma_free` drops it. `vma_insert` links
+**mapping** reference on the Burrow. `vma_free` drops it. `vma_insert_in` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
-round 4, F18); `vma_remove` unlinks, and extincts on a VMA its list does not
+round 4, F18); `vma_remove_in` unlinks, and extincts on a VMA its list does not
 hold (`vma_linked_in`, exact for a VMA in that list or in none);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
-to put a new one; `vma_drain` tears the whole list down at Proc death.
+to put a new one; `vma_drain_in` tears the whole list down when the address
+space's last owner drops it.
 
 DISTRO D-3 added three operations for file-backed phenotype mmap.
 `vma_replace_range_in` is the **MAP_FIXED replace** primitive -- since B-1a' the
@@ -106,7 +107,7 @@ page to fault; promoting at the one constructor keeps them so. The ceiling
 
 A **guard VMA** is the deliberate exception to the last: `prot == 0`, no
 Burrow, existing only to occupy address space. Two things follow from prot 0
-and both are wanted — `vma_insert`'s overlap rejection keeps anything else out
+and both are wanted — `vma_insert_in`'s overlap rejection keeps anything else out
 of the range, and the fault handler's permission check fails for read, write
 *and* instruction alike, so it returns before it can dereference the null
 Burrow. That is the unmapped page below the user stack: an overflow faults
@@ -120,7 +121,7 @@ interval tree would be more machinery than the problem has.
 
 The sortedness buys three things beyond insertion order. `vma_lookup` can stop
 early: once a node starts above the target, no later node can contain it.
-`vma_insert` finds its slot and detects overlap in the same single pass.
+`vma_insert_in` finds its slot and detects overlap in the same single pass.
 `vma_find_gap` is a single forward sweep carrying a candidate base that jumps
 past each blocking VMA — first-fit, lowest gap, one pass.
 
@@ -351,7 +352,7 @@ list rather than two views of it. [[lock-vma]] moved with it.
 
 **That lock serializes this list**, and every mutator holds it: the
 attach and share paths, the detach and share-teardown paths, and — since G-3 —
-`vma_drain` itself, which retired its lockless exemption when the weft reaper
+`vma_drain_in` itself, which retired its lockless exemption when the weft reaper
 gained a cross-Proc reclaim that holds a *target's* lock across a
 multi-millisecond unmap loop. The reaper is why draining now takes a lock it is
 otherwise uncontended on.
@@ -397,7 +398,7 @@ F5 caught the split's replace-free. It is latent today only because `/bin` execs
 come from the non-sleeping devramfs; it becomes live for a 9P-paged exec text
 Burrow (D-4/D-5).
 
-**The header does not say this, and the gap has widened.** `vma_insert`'s
+**The header does not say this, and the gap has widened.** `vma_insert_in`'s
 docblock still reads "Phase 5+ multi-thread Procs need a per-Proc lock around the
 list; documented as a trip-hazard when added" — while `vma_find_gap`'s docblock,
 twenty-five lines below it in the same file, instructs the caller to hold the lock
@@ -534,13 +535,13 @@ region survives on this Proc's own claim, and that a TRIMMED eager mapping
 refunds nothing; that the
 headroom formula counts the removals the range makes before the piece it adds
 (and the caller's `extra_vmas`), so `vma_replace_range_in`'s insert stays
-infallible; and that no caller loops the exact-match removers (`vma_remove` /
+infallible; and that no caller loops the exact-match removers (`vma_remove_in` /
 `burrow_unmap`) over a range -- they remain whole-mapping removers for the
 paths that own a whole mapping, and the range core is the only cutter.
 
 A separate rule governs the geometry-driven *removers* rather than this file's
 own arithmetic: **`vma_detach_range_in` removes by geometry alone (as
-`vma_remove` / `burrow_unmap` match by it), so any syscall that hands it a
+`vma_remove_in` / `burrow_unmap` match by it), so any syscall that hands it a
 user-supplied `(vaddr, length)` must decide that the caller is entitled to
 unmap what lies THERE before the range runs.**
 `SYS_BURROW_DETACH` decides it by **identity** (ARCH 6.5, operator-ratified

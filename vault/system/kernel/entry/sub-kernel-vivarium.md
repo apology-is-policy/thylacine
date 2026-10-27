@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Native ceiling 134
 
@@ -1166,7 +1166,7 @@ number first ([[sub-kernel-handle]]).
 - **dup3** answers EBUSY onto a reserved number.
 - **connect** takes the socket's ctl Spoor once, before it sleeps. The dial is
   written to it and its O_NONBLOCK bit is copied onto the private data Spoor,
-  and `handle_replace` swaps only while the number still names that ctl. Before,
+  and `handle_replace_hooked` swaps only while the number still names that ctl. Before,
   the dial was written by number, the swap took whatever Spoor the number named
   once the TCP handshake ended, and the bit was set by number afterwards. A
   peer that closed the socket during the handshake and opened its own file at

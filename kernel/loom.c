@@ -3833,7 +3833,7 @@ static void loom_private_executor_loop(struct Loom *l) {
     }
 }
 
-void loom_sqpoll_main(void *arg) {
+static void loom_sqpoll_main(void *arg) {
     struct Loom *l = (struct Loom *)arg;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     // The fan-in set and the CQ hook live on this stack, filed on the park

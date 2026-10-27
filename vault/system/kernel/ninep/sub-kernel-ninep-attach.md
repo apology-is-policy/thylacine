@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -43,7 +43,7 @@ Tclunk is sent.
 - `p9_attached_ref/unref` — the F236 refcount: construction ref = 1; every
   dev9p_priv derived from the session (root AND walks) holds one; the LAST
   unref runs `attached_destroy_inner`. `p9_attached_destroy` is a legacy
-  alias for unref. An unref past zero is swallowed (magic-guarded silent
+  alias for unref, compiled only with the tests. An unref past zero is swallowed (magic-guarded silent
   fail — the v1.0 disposition, noted in code).
 - `p9_attached_install_transport(a, adapter, tx, rx)` — first-call-wins
   transfer of adapter + transport-Spoor ownership INTO the attached, so the
@@ -61,7 +61,7 @@ Tclunk is sent.
   `p9_clunk_refused(fid, rc)`, the one producer of
   `9p: close: clunk of fid N refused rc R`, which `tools/test.sh` fails on.
   `p9_closer_start()` makes the first closer (boot, after the poll pump;
-  extinction on failure). `p9_closer_stats()` reports the pool.
+  extinction on failure). `p9_closer_stats()` (tests build only) reports the pool.
 - A close job (2026-10-07, ARCH 7.9.1 part C): `p9_attached_defer_close(a,
   fid, job)` queues the fid with a `struct p9_close_job {run, release}` the
   closer runs first -- `run(job, client, fid)`, which may wait, then the

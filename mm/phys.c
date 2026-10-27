@@ -449,11 +449,6 @@ void free_pages(struct page *p, unsigned order) {
     buddy_free(&g_zone0, p, order);
 }
 
-struct page *alloc_pages_node(int node, unsigned order, unsigned flags) {
-    (void)node;     // single zone at v1.0
-    return alloc_pages(order, flags);
-}
-
 // kpage_alloc returns a void * that's a kernel direct-map VA (P3-Bb).
 // Pre-P3-Bb this returned the cast load PA via TTBR0 identity; the
 // direct map at 0xFFFF_0000_* now provides a stable high-VA pointer

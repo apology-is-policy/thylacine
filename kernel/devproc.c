@@ -677,7 +677,7 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
     irq_state_t vs = spin_lock_irqsave(&p->as->lock);
     for (struct Vma *v = p->as->vmas; v; v = v->next) {
         // The house SLUB-clobber defense every vma.c list walker runs
-        // (vma_lookup / vma_insert / vma_remove / vma_find_gap). Not optional
+        // (vma_lookup / vma_insert / vma_remove_in / vma_find_gap). Not optional
         // here just because this is a diagnostic read: a freed entry's
         // `burrow` is a dangling pointer, and dereferencing it below would
         // copy freed slab bytes into a file EL0 reads -- an I-13 leak. Loud is

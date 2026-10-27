@@ -19,7 +19,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Session registry factory
 
@@ -1638,7 +1638,7 @@ Spoor its socktab row caches (resolved on the socket's first poll; polled via
 `sys_poll_for_proc_spoors`, [[sub-kernel-poll]]); its borrowed `pre[]` follows
 the V-5d F1 compaction while the owning `ready[]` array stays in caller order
 and is released on every return. `connect` resolves `data` privately and hands
-that reference to `handle_replace`. `accept` resolves `listen`, `remote` and
+that reference to `handle_replace_hooked`. `accept` resolves `listen`, `remote` and
 `data` privately and installs only `data`, with `handle_alloc` (a full table
 is EMFILE, as Linux answers it; it was ECONNABORTED). An unconnected UDP
 `sendto` and `recvmsg` resolve `data` per call (`viv_sock_resolve`) and move the
@@ -1956,7 +1956,7 @@ The pattern is reserve, do the work that can fail, install last.
 
 - **connect**: `viv_sock_connect_dial` takes the socket's ctl Spoor once and
   runs `viv_sock_connect_dial_on` on it. The dial is written to it, and
-  `handle_replace` swaps only while the number still names it
+  `handle_replace_hooked` swaps only while the number still names it
   ([[sub-kernel-vivarium]]). `viv_socket_for_test` drives the real socket arm
   through `viv_tier2`.
 - **The socket arms' row lookup** (`viv_sock_row`) refuses a number that is not

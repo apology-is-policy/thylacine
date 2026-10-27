@@ -5,6 +5,7 @@ parent: moc-kernel-introspection
 title: "/proc — per-process state and the debug control surface"
 code:
   - kernel/devproc.c
+  - kernel/include/thylacine/devproc.h
   - kernel/test/test_devproc.c
 audit: hard
 guarded-by: [inv-i26, inv-i39]
@@ -19,7 +20,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -91,7 +92,7 @@ owner axis stays unconditional, since killing a more-capable target destroys it 
 never USES its authority, while debugging one does. (2) **Nothing regresses for
 shell-spawned debugging**: fork-grantable caps only shrink ([[inv-i2]]), so a
 spawner's set always covers its children's. Both caps words are now ACQUIRE-loaded
-(`proc_become_legate` is a cross-thread writer of a running Proc's caps -- the RW-5
+(`proc_become_legate_locked` is a cross-thread writer of a running Proc's caps -- the RW-5
 F2 rule, which now applies to the TARGET's set too), sitting between the
 `principal_id` load and the seam load so the order above is preserved. Guards:
 `devproc.debug_cap_cover_predicate` (equal / superset / exact / one-cap-short /
@@ -102,7 +103,7 @@ verb, a SEPARATE test so a predicate regression cannot hide the real path's).
 **A self-read short-circuits BEFORE cover (audit F7).** `caller == target` sets
 the axis by construction rather than computing cover, because for a self-read the
 two sides are two separate ACQUIRE loads of the SAME word: a peer thread's
-`proc_become_legate` landing between them could refuse a Proc access to ITSELF,
+`proc_become_legate_locked` landing between them could refuse a Proc access to ITSELF,
 which is reachable since `kstack` and `wait` carry no stopped-only requirement.
 It cannot widen anything. The cross-Proc torn pair is sound in the other
 direction and deliberately so -- the caller is read first and caps on a live Proc
@@ -235,6 +236,13 @@ Dev keeps no per-Spoor state except the debug-attach flag.
 refuse. `.seekable = true`, because `mem` is VA-addressed and the register files
 are struct-offset-addressed; without it the positioned-I/O gate rejects them
 before the Dev is reached.
+
+**The header.** `devproc.h` declares the two visibility predicates `/ctl/procs`
+shares with `/proc`: `devproc_none_walled` (Plan 9's `nonone()`) and
+`devproc_owner_or_hostowner` (the caller holds `g_proc_table_lock`). Everything
+else it declares sits under `#ifdef KERNEL_TESTS` -- the tests' reach into
+devproc.c ([[sub-kernel-declarations]]). The Dev itself is declared with the
+others in `dev.h`.
 
 ## Mechanism
 

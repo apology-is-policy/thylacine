@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-08
+updated: 2026-10-27
 ---
 ## Registry creation is a role, not an Imperium capability
 
@@ -153,7 +153,7 @@ written by the very commit that moved the seal out of it (seal round 3, F1).
 is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains
 reserved for audio); it is absent from CAP_ALL, present in CAP_ELEVATION_ONLY
 and CAP_GRANTABLE_CLEARANCE. `sys_cap_grant_imperium_core` accepts only the
-propagating flag and this subset. `proc_become_legate` rejects nested
+propagating flag and this subset. `proc_become_legate_locked` rejects nested
 propagating redemption. During `rfork_internal`, only the parent's scoped
 `legate_caps` can survive the elevation strip, intersected with actual parent
 caps and the requested child mask. Ordinary clearance still does not flow.
@@ -207,7 +207,7 @@ fork even by asking to.
 
 The parent's caps are read under an **acquire** load, because the child's
 ceiling is bounded by what the parent observably holds *now* and
-`proc_become_legate` is a cross-thread writer.
+`proc_become_legate_locked` is a cross-thread writer.
 
 **The grant is two-phase, and the two phases are gated on different
 parties.** The `cap` device (`dc='k'`) exposes two write-only files:
@@ -240,7 +240,7 @@ a stale discriminator behind.
 |---|---|---|
 | console-attached required | **yes** | no — auth was corvus-side |
 | requested vs granted mask | must be **equal** | must be a **subset** |
-| effect | OR into `caps` | `proc_become_legate` |
+| effect | OR into `caps` | `proc_become_legate_locked` |
 
 Equality for hostowner keeps the protocol explicit: a `/use` asking for a
 different cap is a bug or an attack, not a negotiation. Subset for clearance
@@ -248,7 +248,7 @@ is *self-restriction* — the Proc voluntarily narrows below its ceiling,
 which is I-2's shape. In both cases a failed gate does **not** consume the
 grant, so the legitimate holder can still redeem.
 
-**The legate is a scope, not an identity change.** `proc_become_legate` ORs
+**The legate is a scope, not an identity change.** `proc_become_legate_locked` ORs
 the caps atomically, leaves `principal_id` untouched, allocates a monotonic
 `scope_id`, and marks the Proc `LEGATE_ROOT`. The root flag is never
 inherited (no `proc_flags` are), so an `rfork` child is a scope *member*,

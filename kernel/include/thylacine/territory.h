@@ -328,12 +328,10 @@ struct Territory *territory_alloc(void);
 // OOM (parent unchanged). Models the spec's ForkClone action.
 struct Territory *territory_clone(struct Territory *parent);
 
-// Increment/decrement refcount. territory_unref frees the struct when
-// the last reference goes away; the final-release path FIRST calls
-// spoor_unref on every mount entry's source (releasing the per-entry
-// reference held since mount()), THEN kmem_cache_free's the struct.
-// Both are safe to call on NULL.
-void territory_ref(struct Territory *p);
+// Drop a reference; the last one frees the struct. The final-release path
+// FIRST calls spoor_unref on every mount entry's source (releasing the
+// per-entry reference held since mount()), THEN kmem_cache_free's the struct.
+// Safe to call on NULL.
 void territory_unref(struct Territory *p);
 
 // =============================================================================
@@ -666,8 +664,6 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source);
 int  territory_nbinds(struct Territory *territory);
 int  territory_nmounts(struct Territory *territory);
 #endif // KERNEL_TESTS
-u64  territory_total_created(void);
-u64  territory_total_destroyed(void);
 
 // territory_format_ns (#66): render the mount list + bind count into `buf`
 // (NUL-NOT-appended; the caller treats [0,len) as the content) for the

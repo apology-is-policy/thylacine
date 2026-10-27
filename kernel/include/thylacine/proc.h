@@ -179,7 +179,7 @@ u32 proc_page_budget_hard_max(void);   // = capacity_pool_pages()
 // The Linux vm.max_map_count analog. The eager attach path is already transitively
 // bounded (each VMA charges >=1 page, so the page budget caps eager VMAs), but a FREE
 // lazy reservation (SYS_BURROW_ATTACH_LAZY -- uncharged at attach) reopens a
-// VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove,
+// VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove_in,
 // both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
 // Vma slab is the per-Proc ceiling.
 #define PROC_VMA_MAX    65536u
@@ -556,7 +556,7 @@ struct Proc {
     // AddrSpace.vma_count -- it bounds the VMA slab, and the VMA list lives in
     // the address space. Reached as `p->as->vma_count`; the discipline is
     // unchanged -- ++ at vma_insert gated on PROC_VMA_MAX unless exempt, -- at
-    // vma_remove, both under the AS lock so the cap stays EXACT.)
+    // vma_remove_in, both under the AS lock so the cap stays EXACT.)
 
     // CL-5's page_peak (the high-water mark of page_count, the Linux
     // /proc/<pid>/status VmHWM analog) is NOT here. It went with page_count to
@@ -1593,7 +1593,7 @@ void proc_page_uncharge(struct Proc *p, u32 npages);
 #ifdef KERNEL_TESTS
 // proc_vma_charge / proc_vma_uncharge -- the live-VMA counter (I-32 FOURTH axis;
 //   the overcommit VMA-slab DoS bound). The CALLER MUST HOLD p->vma_lock (the
-//   vma_insert/vma_remove domain), so the check + charge is atomic against a
+//   vma_insert/vma_remove_in domain), so the check + charge is atomic against a
 //   sibling attach and the cap is EXACT. charge returns true (and ++vma_count) if
 //   the Proc is exempt OR vma_count < PROC_VMA_MAX; false (charging nothing) if it
 //   would exceed (the vma_insert caller rejects with -1, like an overlap) or the
@@ -2165,7 +2165,6 @@ void proc_birth_hold_release_locked(struct Proc *p);
 #ifdef KERNEL_TESTS
 void proc_birth_hold_mark_parked_locked(struct Proc *p);
 #endif // KERNEL_TESTS
-void proc_birth_hold_orphan_rule_locked(struct Proc *p);
 
 // =============================================================================
 // PTY-1f: the job-control stop (I-20 stop leg; PTY-DESIGN.md section 4;
@@ -2671,11 +2670,6 @@ void proc_test_clear_console_renderer(void);
 // `cons: SAK (<decision>)` diagnostic line per SAK -- the harness's witness.
 bool proc_console_sak(void);
 
-// proc_is_console_trusted — true iff `p` is the current trusted login
-// authority (compare-only under g_proc_table_lock; never dereferences).
-// Fail-closed on NULL.
-bool proc_is_console_trusted(const struct Proc *p);
-
 // proc_console_episode — the SYS_CONSOLE_EPISODE op core (IM-1). Gated on `p`
 // being the trusted login authority (the identity, not the attach bit: the
 // SAK attached it, and a relinquish ends the episode itself). ARM marks p an
@@ -2702,24 +2696,9 @@ struct Proc *proc_test_console_trusted(void);
 // nothing (never a stale or fabricated tag).
 u64 proc_stripes(const struct Proc *p);
 
-// proc_caps_by_stripes — the SYS_SRV_PEER live-caps lookup
-// (P5-corvus-srv-impl-a3c). Scan the process table for an ALIVE Proc
-// carrying `stripes` and snapshot its capability set into *caps_out.
-// Returns true iff such a Proc exists.
-//
-// Returns false — fail-closed, *caps_out untouched — when `stripes` is
-// the 0 sentinel, `caps_out` is NULL, or no ALIVE Proc matches (the peer
-// has exited / is a zombie / was reaped). The table scan and the caps
-// read run under g_proc_table_lock, so the result is a coherent snapshot
-// — never a torn read, never a use-after-free of a Proc being reaped.
-// The kernel half of specs/corvus.tla ConnOpPeerWasLive: a dead peer
-// authorizes nothing.
-bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
-
-// A-1a: the richer peer snapshot feeding SYS_SRV_PEER's srv_peer_info.
+// A-1a: the peer snapshot feeding SYS_SRV_PEER's srv_peer_info.
 // One walk under g_proc_table_lock snapshots caps + principal_id +
-// primary_gid for the ALIVE Proc carrying `stripes`. proc_caps_by_stripes
-// is now a thin wrapper over this (caps-only). Same fail-closed contract:
+// primary_gid for the ALIVE Proc carrying `stripes`. Fail-closed:
 // `stripes == 0` or no ALIVE match -> returns false, out-params untouched.
 // Any out-param may be NULL (the caller takes only what it needs). Only
 // VALUES escape — never the Proc pointer — so a peer reaped after the scan
@@ -2816,11 +2795,6 @@ struct ProcImageJoin {
 // Caller holds g_proc_table_lock.
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out);
 
-// OR `bits` into `p` AND into every other mapper of its address space (zombies
-// included) -- a restriction on the image binds every door to it. Caller holds
-// g_proc_table_lock.
-void proc_image_stamp_locked(struct Proc *p, u32 bits);
-
 // Stamp PROC_FLAG_DEBUG_TAINTED across the image. Caller holds g_proc_table_lock.
 void proc_mark_debug_tainted_locked(struct Proc *p);
 
@@ -2879,13 +2853,6 @@ int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
 // no-op. PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED walk).
 void proc_legate_teardown_if_root(struct Proc *p);
 #endif // KERNEL_TESTS
-
-// arm-6 (IDENTITY-DESIGN §9.9.1) -- if `p` leads its own session (sid == pid)
-// armed with PROC_FLAG_SESSION_HANGUP, group-terminate every OTHER ALIVE Proc
-// sharing its sid. The session-lifecycle sibling of the legate teardown above
-// (same chokepoint, same held-lock contract, NOT I-26-gated). A non-armed Proc
-// or an armed non-leader is a no-op. PRECONDITION: caller holds g_proc_table_lock.
-void proc_session_hangup_if_leader(struct Proc *p);
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.

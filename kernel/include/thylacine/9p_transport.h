@@ -275,8 +275,10 @@ int p9_transport_progress_init(struct p9_transport_progress *p,
                               struct p9_transport *t,
                               struct p9_transport_try_ops ops,
                               size_t frame_limit);
+#ifdef KERNEL_TESTS
 // Negotiation may shrink the limit only at a TX/RX frame boundary.
 int p9_transport_progress_limit(struct p9_transport_progress *p, size_t limit);
+#endif // KERNEL_TESTS
 // Queue one complete encoded frame, no I/O. Refuses while another TX is queued.
 int p9_transport_progress_queue(struct p9_transport_progress *p,
                                const u8 *msg, size_t len);

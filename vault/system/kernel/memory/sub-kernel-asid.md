@@ -9,7 +9,7 @@ guarded-by: [inv-i31]
 validated-by: [spec-asid, gate-smp]
 locks: [lock-asid]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -52,7 +52,7 @@ Its preconditions are load-bearing and unchecked except for one:
   rather than returning, because the per-CPU arrays are fixed-size and an
   out-of-range index would corrupt adjacent BSS.
 
-`asid_bits()`, `asid_generation_now()`, `asid_rollover_count()` are lockless
+The tests' readers `asid_bits()`, `asid_generation_now()`, `asid_rollover_count()` are lockless
 diagnostic snapshots.
 
 ## Mechanism

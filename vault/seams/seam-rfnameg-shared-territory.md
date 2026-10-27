@@ -7,7 +7,7 @@ surface: [sub-kernel-territory]
 opened-by: chg-2026-05-13-p5-attach-mount
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-27
 ---
 ## Owed
 
@@ -19,8 +19,9 @@ multi-holder case is the peer Threads of one Proc.
 
 ## What closes it
 
-Small at the mechanism (skip `territory_clone`, `territory_ref` the
-parent's, reserve the flag) and large at the consequences. Every place
+Small at the mechanism (skip `territory_clone`, take a reference on the
+parent's -- `territory_ref` was deleted unused on 2026-10-27, so the fix brings
+a ref op back -- and reserve the flag) and large at the consequences. Every place
 that reasons "one Territory, one Proc" gets a second holder class:
 [[inv-i1]]'s isolation stops being structural and becomes a real
 property to check; `specs/territory.tla` must model the sharing (its

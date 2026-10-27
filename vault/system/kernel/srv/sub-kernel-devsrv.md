@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## D7 implementation (October 1)
 
@@ -297,19 +297,13 @@ entry is unreachable and cannot be unmounted by name -- it holds its slot and
 its source ref until the namespace ends (B-1d-v audit round 3, F3; the general
 fix is a generation in the mount key, tracked in OPEN-BUGS).
 
-**open=connect** (`devsrv_open_connect`): global soft cap
-(`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
-per-service backlog under the lock) → resolve the service and capture
-`poster_stripes` + `poster_principal` + `mode` + `ring_msize` + `cape` under
-the registry lock ATOMICALLY with the LIVE check → `srvconn_create` (identity
-by value, the connector's principal and the poster's among it -- the conn's
-two ends in `/ctl/9p-sessions`, [[dec-2026-10-06-9p-sessions-ends]]; create
-ref 1) → byte-mode flag and cape mark if selected
 **open=connect** (`devsrv_open_connect`): resolve the service and capture
-`poster_stripes` + `mode` + `ring_msize` + `cape` under the registry
-lock ATOMICALLY with the LIVE check → enforce connect authority →
-`srvconn_create` (atomically reserve global capacity before allocation;
-identity by value; create ref 1) → byte-mode flag and cape mark if selected
+`poster_stripes` + `poster_principal` + `mode` + `ring_msize` + `cape` under
+the registry lock ATOMICALLY with the LIVE check → enforce connect authority →
+`srvconn_create_in` (atomically reserve global capacity before allocation;
+identity by value, the connector's principal and the poster's among it -- the
+conn's two ends in `/ctl/9p-sessions`, [[dec-2026-10-06-9p-sessions-ends]];
+create ref 1) → byte-mode flag and cape mark if selected
 (`srvconn_set_byte_mode` / `srvconn_set_cape`, both before publication)
 → +1 ref
 for the backlog slot → `srv_backlog_push_locked` (re-checks LIVE
@@ -466,7 +460,7 @@ What an auditor attacks here:
   captured INSIDE the registry-lock block that checks LIVE, beside mode and
   cape, because a tombstone-then-rebind could otherwise name a different
   service's posting authority than the one connected to. `p->caps` is read with
-  an ACQUIRE load (`proc_become_legate` is a cross-thread writer). The self-post
+  an ACQUIRE load (`proc_become_legate_locked` is a cross-thread writer). The self-post
   exemption keys on `stripes`, a FRESH PER-PROC tag, so it means exactly the
   same Proc -- prosecute any reading that would admit a child or a Proc group,
   and that `proc_stripes` fail-closing to 0 cannot match a LIVE service's

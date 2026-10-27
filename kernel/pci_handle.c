@@ -97,9 +97,6 @@ static u64  g_pci_bar64_base;
 static u64  g_pci_bar64_end;
 static u64  g_pci_bar64_next;
 
-u64 kobj_pci_total_created(void) {
-    return __atomic_load_n(&g_pci_created, __ATOMIC_RELAXED);
-}
 #ifdef KERNEL_TESTS
 u64 kobj_pci_live_count(void) {
     return __atomic_load_n(&g_pci_live, __ATOMIC_RELAXED);

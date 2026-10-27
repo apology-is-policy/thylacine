@@ -6,7 +6,7 @@ kind: spin-irqsave
 guards: "the per-order free lists, free_pages_per_order[], total_free_pages, and every struct-page flags/order transition through split/merge"
 orders-before: []
 created: 2026-08-01
-updated: 2026-10-21
+updated: 2026-10-27
 ---
 ## Discipline
 
@@ -17,7 +17,7 @@ any other lock: it is a **deep leaf**, which is exactly why so many
 chains may end on it:
 
 - [[lock-magazine-set]] → zone (magazine refill/drain — 8 separate
-  acquisitions per crossing, [[seam-buddy-bulk-op]]; a full
+  acquisitions per crossing, [[seam-buddy-bulk-op]]; the tests' full
   `magazines_drain_all` pass up to 32 per set)
 - [[lock-kmem-cache]] → zone (slab_new / slab_drain)
 - `vma_lock` → zone (demand paging; the documented tree-wide edge)

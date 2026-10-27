@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/9P-EXTENSIONS.md]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -30,15 +30,18 @@ Three layers of API, all in `9p_wire.h`:
 
 - **Primitives**: `p9_pack_u8/u16/u32/u64/qid/str` and the matching
   `p9_unpack_*`; `p9_peek_header` (size/type/tag without consuming the body);
-  `p9_unpack_dirent` (one record out of an Rreaddir stream).
+  `p9_unpack_dirent` (one record out of an Rreaddir stream). `p9_pack_u8`,
+  `p9_pack_qid` and `p9_unpack_dirent` are compiled only with the tests.
 - **Builders** (`p9_build_t*`): version, attach, walk, clunk, flush, lopen,
   lcreate, read, write, getattr, setattr, readdir, statfs, fsync, the
   mutation family (symlink/mknod/rename/readlink/link/mkdir/renameat/
   unlinkat), and the extensions — `p9_build_twalkgetattr` (POUNCE),
   `p9_build_tweft`/`p9_build_rweft`, `p9_build_tweftio`/`p9_build_rweftio`
-  (Weft; both directions exist because netd builds the R-side).
+  (Weft; the kernel issues only the T-side -- the R-builders are compiled
+  only with the tests, which play the server).
 - **Parsers** (`p9_parse_r*`): one per R-message, plus `p9_parse_tweft`/
-  `p9_parse_tweftio` for the server side of the kernel-issued extension ops.
+  `p9_parse_tweftio`, the tests' server side of the kernel-issued extension
+  ops (tests build only).
 
 Error convention: non-negative = bytes written/consumed (0 = parser success);
 negative = refused (NULL out-param, buffer too small, malformed frame, wrong

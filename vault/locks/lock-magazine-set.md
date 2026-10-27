@@ -6,17 +6,18 @@ kind: spin-irqsave
 guards: "one CPU's two magazine stacks (count + entries[]) at orders 0 and 9"
 orders-before: [lock-buddy-zone]
 created: 2026-10-21
-updated: 2026-10-21
+updated: 2026-10-27
 ---
 ## Discipline
 
 One per CPU slot (`g_percpu[NCPUS]`, `mm/magazines.c`). The owner takes
 its own set's lock inside the IRQ mask on every `mag_alloc` and
 `mag_free`: the mask comes first because it is what makes `my_cpu()` name
-the set whose lock is taken. Any CPU may take a set's lock to drain it
-(`magazines_drain_all`, one set at a time, irqsave). Uncontended in
-steady state; contended only by a drain, or by two CPUs a clustered SoC
-folds onto one slot ([[seam-sparse-mpidr]]).
+the set whose lock is taken. In production only the owner takes it; the
+cross-CPU drain (`magazines_drain_all`, one set at a time, irqsave) is
+compiled only with the tests. Uncontended in steady state; contended only by
+two CPUs a clustered SoC folds onto one slot ([[seam-sparse-mpidr]]), or by
+that drain.
 
 Order: this lock, then [[lock-buddy-zone]] (refill and drain-on-full call
 `buddy_alloc`/`buddy_free` under it). No path holds two magazine locks,

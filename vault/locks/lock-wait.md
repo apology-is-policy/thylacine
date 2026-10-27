@@ -6,7 +6,7 @@ kind: spin-irqsave (carries the IRQ mask for the whole sleep, including across s
 guards: "t->rendez_blocked_on, and the serialization of a sleeper's register-then-observe against a waker's read-and-wake of the same Thread"
 orders-before: [lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-27
 ---
 ## Discipline
 
@@ -60,7 +60,7 @@ Acyclicity rests on a single fact: **only the owning Thread ever writes
   later tick will wake into a thread that is no longer sleeping.
 - **Nothing below this lock may take `lock-proc-table`.** The cascade
   holds the table lock and then this one; the reverse edge would close
-  the cycle. `wait_pid` drops the table lock before it sleeps for this
+  the cycle. `wait_pid_for` drops the table lock before it sleeps for this
   reason.
 - **The stop detour re-acquires in order.** It drops all held locks,
   parks on the thread's own `debug_rendez`, and re-takes

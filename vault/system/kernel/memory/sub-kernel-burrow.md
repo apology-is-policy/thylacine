@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -39,9 +39,12 @@ Burrow with `handle_count = 1, mapping_count = 0`:
 | `burrow_create_code` | anonymous, demand-zeroed — identical to lazy anon (B-2a, 2026-10-07; one contiguous chunk before) | **sparse** |
 
 **Refcounting** is four calls: `burrow_ref`/`burrow_unref` on the handle side,
-`burrow_acquire_mapping`/`burrow_release_mapping` on the mapping side. The
-mapping pair is not for general use — the VMA layer owns it — but is public so
-the lifecycle can be exercised in isolation against the model.
+`burrow_acquire_mapping` and the release on the mapping side — the VMA layer
+drops through `burrow_release_mapping_freed` and
+`burrow_release_mapping_settled_deferred`. The mapping calls are not for
+general use — the VMA layer owns them; the plain `burrow_release_mapping` is
+compiled only with the tests, which exercise the lifecycle in isolation against
+the model.
 
 **Mapping** is `burrow_map(p, v, vaddr, length, prot)` / `burrow_unmap`, which
 install and remove a VMA and take the mapping ref as a side effect.
@@ -70,7 +73,7 @@ release cannot apply to) for the phenotype `madvise` row and the Pouch wrapper
 -- the native `SYS_BURROW_DECOMMIT` still flattens to -1;
 `burrow_release_lazy_range_in(as, v, lo, hi)` is the per-mapping half the
 decommit and the range detach both loop over, returning the slots it released.
-`burrow_lazy_resident_count` is O(1) (the pagemap keeps the count) and
+`burrow_lazy_resident_count` (the tests' reader; production reads `burrow_lazy_footprint`) is O(1) (the pagemap keeps the count) and
 `burrow_lazy_footprint` adds the map's node pages to it.
 `burrow_image_resident_count(v)` / `burrow_image_strip(v, want)` are the FILE-side
 pair the Image cache's reclaim uses (the round-2 close, below): the resident

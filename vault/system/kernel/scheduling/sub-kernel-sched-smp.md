@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-08-14
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -106,7 +106,7 @@ unreachable rather than merely unused.
 cpu0's idle runs on `g_bootcpu_idle_stack` — a `struct secondary_stack`
 identical to a secondary's, with a leading guard page mapped no-access —
 because cpu0's `_boot_stack` belongs to `kthread`, which is suspended
-mid-`wait_pid` once init blocks.
+mid-`wait_pid_for` once init blocks.
 
 **`idle_in_wfi` accuracy (F7).** The flag means "this CPU's current
 thread is its idle", and it is maintained in two places: the idle loop

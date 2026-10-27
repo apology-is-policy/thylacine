@@ -21,7 +21,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -94,7 +94,7 @@ One function per op, `0` on success / `-errno` on failure:
   `struct p9_reader_hook` to learn when pumping could progress: a HELD role
   on `role_waiters_list`, a FREE role with nothing to read on the transport's
   readiness list, never both; dead -> `-EIO`, a frame on a free role -> 0 and
-  nothing filed, hooked -> 1), `p9_client_handoff_reader`, and
+  nothing filed, hooked -> 1), `p9_client_handoff_reader` (tests build only), and
   `p9_client_abandon_async`. The fan-in waiters -- the Loom `ENTER`, the
   SQPOLL kthread ([[sub-kernel-loom]]) and the dev9p poll kthread
   ([[sub-kernel-ninep-dev9p-poll]]) -- pump and hook every client they wait
@@ -430,7 +430,9 @@ its served endpoint → the consumer's rings EOF → its reader sees `recv 0` �
 in-flight Loom ops complete `-ENODEV`, the whole chain automatic with **no
 warden code on the consumer's client**. `p9_client_mark_devgone(c)` is the
 explicit secondary entry (a device-teardown hook that holds the client),
-idempotent — the first death's reason stands. The reason rides only the async
+idempotent — the first death's reason stands; no production code calls it
+yet, so it is compiled only with the tests, and production marks devgone only
+through the automatic chain. The reason rides only the async
 path because it is a Loom-completion (I-29) property the sync ABI does not
 expose; the audited #841 synchronous surface is untouched. Exactly-once holds
 by the demux dropping the registration **before** completing, so a reply and a

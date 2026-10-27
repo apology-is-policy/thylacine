@@ -27,7 +27,7 @@ def main():
  pieces={
   'IDENTITY_DECL':source('kernel/include/thylacine/proc.h','struct ProcAccessIdentity {','// Direct capture'),
   'PERMISSIONS':source('kernel/perm.c','bool perm_identity_from_proc','unsigned perm_want_for_omode'),
-  'SNAPSHOT':source('kernel/proc.c','bool proc_service_identity_snapshot','// proc_caps_by_stripes'),
+  'SNAPSHOT':source('kernel/proc.c','bool proc_service_identity_snapshot','// A-1a: proc_apply_identity'),
   'ADMISSION_DECL':source('kernel/include/thylacine/devsrv.h','struct SrvServiceTarget {','// F2 close (P5-corvus'),
   'AUTHORIZED':source('kernel/devsrv.c','bool devsrv_srv_connect_authorized','s64 devsrv_open_errno'),
   'ADMISSION':source('kernel/devsrv.c','struct srv_post_snapshot {','struct Spoor *devsrv_open_connect'),

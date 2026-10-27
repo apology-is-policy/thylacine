@@ -9,7 +9,7 @@ guarded-by: []
 validated-by: [gate-smp]
 locks: [lock-kmem-cache, lock-cache-list, lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -28,7 +28,7 @@ structs; requests above `SLUB_MAX_OBJECT_SIZE` (2048) bypass to
   page-rounding of an n within `PAGE_SIZE-1` of SIZE_MAX wrapped to a
   1-page success — which also defeated `kcalloc`'s n*size overflow
   check for size == 1 — now rejected before rounding.
-- `kzalloc` = `| KP_ZERO`; `kcalloc` overflow-checks n*size.
+- `kzalloc` = `| KP_ZERO`; `kcalloc` (tests build only) overflow-checks n*size.
 - `kfree(p)` — NULL no-op; slab pages validate **slot-boundary**
   (F32: an interior pointer would corrupt the freelist or deref the
   wrong slab metadata); large pages validate pointer ==
@@ -39,7 +39,7 @@ structs; requests above `SLUB_MAX_OBJECT_SIZE` (2048) bypass to
   (RW-1 F-S3 — pre-guard, an impossible geometry left an empty
   freelist that NULL-deref'd at first alloc). `KMEM_CACHE_PANIC_ON_FAIL`
   turns alloc OOM into extinction.
-- `kmem_cache_destroy(c)` — **caller-quiesce contract** (RW-1 F-S2:
+- `kmem_cache_destroy(c)` (tests build only) — **caller-quiesce contract** (RW-1 F-S2:
   no concurrent alloc/free on any CPU; the live-count read and the
   drain run without `c->lock`). A cache holding ANY live object
   extincts (RW-1 F-S1, [[fnd-rw1-fs1]]): `alloc_count - free_count`
@@ -101,9 +101,8 @@ live-object destroy, PANIC_ON_FAIL OOM.
 
 ## Performance
 
-Cache-hit alloc/free is a lock pair + a pointer pop/push. The
-diagnostics (`slub_total_alloc/free`, `slub_active_slabs`,
-`kmem_cache_live_count`) walk under the list lock; live-count is a
+Cache-hit alloc/free is a lock pair + a pointer pop/push. The one
+diagnostic, `kmem_cache_live_count` (compiled only with the tests), is a
 tolerated-stale lock-free read pair.
 
 ## Prosecution

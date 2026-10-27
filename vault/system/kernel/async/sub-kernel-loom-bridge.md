@@ -18,7 +18,7 @@ design:
   - "docs/ASYNC-SERVICE-ABI.md"
   - "docs/ASYNC-SERVICE-BUFFERS.md"
 created: 2026-10-12
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -84,7 +84,7 @@ refused setup charges nothing.
 
 ### Setup: everything the caller learns is read before the handle exists
 
-`loom_private_setup_for_proc` creates the ring with `loom_create_private_why`,
+`loom_private_setup_held_for_proc` creates the ring with `loom_create_private_why`,
 which charges the ring's pages with its metadata and records that charge on the
 ring Burrow. It then maps the ring and tags the VMA `VMA_FLAG_PRIVATE_RING` in
 one `as->lock` hold, so no clone can see the mapping untagged: fork omits a

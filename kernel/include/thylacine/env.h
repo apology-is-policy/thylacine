@@ -37,7 +37,7 @@ struct EnvEntry {
 
 struct Env {
     int              ref;           // 1 at v1.0 (RFENVG sharing deferred); accessed
-                                    // via __atomic_* (the territory_ref/unref pattern)
+                                    // via __atomic_* (the territory_unref pattern)
     spin_lock_t      lock;          // serializes every access
     u64              devno;         // Plan 9 Chan.dev for THIS Env (V-4b-5). Every
                                     // other Dev's qid namespace is global, so a

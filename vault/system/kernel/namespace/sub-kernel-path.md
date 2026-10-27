@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-03
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -35,7 +35,7 @@ struct Path *path_make_root(void);                     // "/" (ref == 1)
 struct Path *path_addelem(parent, name, namelen);      // COPY-on-walk append
 struct Path *path_parent(const struct Path *p);        // pop last element
 void path_ref(struct Path *p);  void path_unref(struct Path *p);  // NULL-safe
-u64 path_total_allocated(void); u64 path_total_freed(void);       // diagnostics
+u64 path_total_allocated(void); u64 path_total_freed(void);       // diagnostics (tests build only)
 ```
 
 - `path_addelem` NEVER mutates `parent` — it allocates a fresh Path

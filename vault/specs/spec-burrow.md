@@ -13,7 +13,7 @@ cfgs:
   - "burrow_buggy_claim_restore_ledger.cfg -- the same, judged on TypeOk + RefundExactlyOnce alone: RefundExactlyOnce"
 gate: "any change to the dual refcount, the free decision, the type-dispatched release arm, or where a drop claims the charge record"
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Abstraction
 
@@ -78,7 +78,7 @@ scheduling, so it is not recorded here.
 | `HandleOpen(v)` | `burrow_ref` — under the object's lock, with the both-counts-zero resurrection guard |
 | `HandleClose(v)` | `burrow_unref` → `burrow_unref_settled_in` — decrement, compute `should_free` and (given a payer) take the charge record in one lock hold; free outside it |
 | `MapVmo(v)` | `burrow_acquire_mapping` — the resurrection guard, the per-type liveness check, and the increment, all under the lock |
-| `UnmapVmo(v)` | `burrow_release_mapping` → `burrow_release_mapping_settled_deferred` — symmetric with `burrow_unref` |
+| `UnmapVmo(v)` | `burrow_release_mapping_freed` / `burrow_release_mapping_settled_deferred` — the VMA layer's two drops (the plain `burrow_release_mapping` is the tests' form), symmetric with `burrow_unref` |
 | the free transition | `burrow_free_internal` — outside the lock; re-asserts both counts zero, type-dispatches the release, clears the magic before returning the object |
 | `BuggyFreeOnHandleClose` / `BuggyFreeOnUnmap` / `BuggyNoFree*` | no sites — each is prevented by the dual check, and the re-assertion inside the free path is the tripwire for a caller that bypasses it |
 | `Settle(v, final)` | `burrow_charge_claim_locked` (static), inside those two holds; the caller refunds the returned pages outside the leaf lock |

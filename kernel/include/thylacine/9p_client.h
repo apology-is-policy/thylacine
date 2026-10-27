@@ -648,24 +648,8 @@ int  p9_client_weftio(struct p9_client *c, u32 fid,
 // Mutation operations.
 // =============================================================================
 
-int  p9_client_symlink(struct p9_client *c, u32 fid,
-                        const u8 *name, size_t name_len,
-                        const u8 *symtgt, size_t symtgt_len,
-                        u32 gid, struct p9_qid *out_qid);
-
-int  p9_client_mknod(struct p9_client *c, u32 dfid,
-                      const u8 *name, size_t name_len,
-                      u32 mode, u32 major, u32 minor, u32 gid,
-                      struct p9_qid *out_qid);
-
-int  p9_client_rename(struct p9_client *c, u32 fid, u32 dfid,
-                       const u8 *name, size_t name_len);
-
 int  p9_client_readlink(struct p9_client *c, u32 fid,
                          u8 *out_target, u16 *out_target_len);
-
-int  p9_client_link(struct p9_client *c, u32 dfid, u32 fid,
-                     const u8 *name, size_t name_len);
 
 int  p9_client_mkdir(struct p9_client *c, u32 dfid,
                       const u8 *name, size_t name_len,

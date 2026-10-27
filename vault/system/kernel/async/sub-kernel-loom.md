@@ -81,7 +81,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 
 ## Approved private service lifecycle
@@ -1084,7 +1084,7 @@ RELEASE IS PAIRED IN THE SOURCE, which is a weaker claim than witnessed and is
 recorded because it tells a reader chasing a guard leak where NOT to look. The
 production set is small enough to enumerate, and the enumeration is the whole
 value -- a negative over an uncounted set is a guess. `addrspace_private_begin`
-has ONE production call site, `loom_create_private`; `addrspace_private_end` has
+has ONE production call site, `loom_create_private_why`; `addrspace_private_end` has
 three, two of them that function's failure exits and one in
 `loom_private_destroy`. After a successful begin the creator has exactly three
 exits: the charge refusal, the layout-allocation failure, and success, after
@@ -1276,7 +1276,7 @@ THE LAYOUT-FAILURE UNWIND (2026-10-08; it RAN, see the end of this paragraph). T
 `addrspace_private_end`. Nothing in `kernel/` could make an allocation fail, so a
 test-only seam was added, with its scope reviewed first (astra, t71). It is a
 `KERNEL_TESTS` one-shot in `loom.c`: arm, disarm and armed accessors, taken as the
-FIRST statement of `loom_create_private`, so an early refusal cannot leave it armed.
+FIRST statement of `loom_create_private_why`, so an early refusal cannot leave it armed.
 It is compiled out of the production shape. It is sound only because the fixture
 is that function's only caller, and it must be rescoped before any concurrent or
 engine caller exists.
@@ -1328,7 +1328,7 @@ fault an unarmed boot-time caller. The only production caller of the
 constructors is `SYS_LOOM_SETUP` on a user thread, which can never match.
 
 The observer is the hard part. `struct Loom` is larger than 2048 bytes (a
-`_Static_assert` in `loom_create_private`), so it is a LARGE kmalloc, and `kfree`
+`_Static_assert` in `loom_create_private_why`), so it is a LARGE kmalloc, and `kfree`
 returns it through `free_pages` directly, never through `kmem_cache_free`. A
 freelist walk after the call races with reuse by another CPU, and no gauge is
 specific to one object, so slub gained a single-slot `KERNEL_TESTS` watch on the

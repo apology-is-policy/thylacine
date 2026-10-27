@@ -107,10 +107,6 @@ void *kcalloc(size_t n, size_t size, unsigned flags);
 #endif // KERNEL_TESTS
 void  kfree(void *p);
 
-// Diagnostic accessors used by the boot banner / future /ctl/mem.
-u64 slub_total_alloc(void);
-u64 slub_total_free(void);
-u64 slub_active_slabs(void);
 
 #ifdef KERNEL_TESTS
 // Live (currently-allocated) object count for one cache.

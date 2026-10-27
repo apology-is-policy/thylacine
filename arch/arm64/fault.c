@@ -799,7 +799,7 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
 // the vma_lock coverage the proc.h comment explicitly defers to "the
 // pouch-threads sub-chunk ... the page-fault vma_lookup reader" -- which the
 // threads lift never wired up. Pre-fix, the unlocked reader raced a sibling
-// thread's SYS_BURROW_DETACH (vma_remove + free_pages, under vma_lock): the
+// thread's SYS_BURROW_DETACH (vma_remove_in + free_pages, under vma_lock): the
 // walker could follow a half-unlinked list to a freed VMA and install a leaf
 // PTE aliasing a buddy page already recycled into kernel (or another Proc's)
 // memory -> a wild/kernel pointer in the faulting Proc's address space (the

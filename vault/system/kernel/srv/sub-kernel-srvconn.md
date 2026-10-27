@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Admission (October 1, D7)
 
@@ -61,7 +61,7 @@ connection also bounds object counts; the service's independent slot/handshake
 limits still apply. Compile-time assertions tie charges to both ring classes.
 
 `srv_domain_snapshot` samples counts, credits and retained domains under one
-admission lock. `srv_domain_counts` preserves its count-only interface. The
+admission lock. `srv_domain_counts` (tests build only) preserves its count-only interface; production reads `srv_domain_snapshot`. The
 connection captures `credit_charge`; final destruction copies it before freeing
 the object and returns it only after all transport storage is freed. Partial
 construction returns the identical reserved charge after rollback. Saturation
@@ -110,10 +110,13 @@ both consumers block instead of failing.
 
 Declarations in `kernel/include/thylacine/srvconn.h`.
 
-**Lifecycle** — `srvconn_create(peer_stripes, peer_pid, peer_principal,
-peer_console, server_stripes, server_principal, msize)` (born LIVE, ref 1; rejects any msize outside the
-two-point class set `{SRVCONN_MSIZE, SRVCONN_BULK_MSIZE}`; NULL on OOM
-with no partial state) · `srvconn_ref`/`srvconn_unref` (atomic; last
+**Lifecycle** — `srvconn_create_in(domain, err, peer_stripes, peer_pid,
+peer_principal, peer_console, server_stripes, server_principal, msize)` (born
+LIVE, ref 1; rejects any msize outside the two-point class set
+`{SRVCONN_MSIZE, SRVCONN_BULK_MSIZE}` (`-T_E_INVAL`); reserves the class's
+credits against the global, domain and session budgets before it allocates
+(`srvconn_reserve`, `-T_E_NOSPC`); NULL with `*err` set on any refusal or OOM,
+with no partial state; `srvconn_create` is the tests' domain-less wrapper) · `srvconn_ref`/`srvconn_unref` (atomic; last
 unref = teardown + magic-clobber + free the rings + the struct; extincts
 on underflow/corrupt magic) · `srvconn_teardown` (LIVE→TORN, idempotent;
 EOF both rings + wake everything) · `srvconn_is_live` ·
@@ -239,8 +242,9 @@ The per-chunk walk in both blocking sends is the [[fnd-cf3b-r1-f1]]
 argument applied symmetrically: the poller is the drainer the send may be
 about to park waiting for.
 
-**Diagnostics** — `srvconn_total_created`/`_freed` (the difference is
-the live count; [[sub-kernel-devsrv]]'s global soft cap reads it).
+**Diagnostics** — `srvconn_total_created`/`_freed`, compiled only with the
+tests (the difference is the live count). Admission does not read them: it is
+`srvconn_reserve`'s credits.
 
 ## Mechanism
 
@@ -449,7 +453,7 @@ blocking client send.
 
 ## Error paths
 
-The sentinel table under Contract is exhaustive; beyond it: `srvconn_create`
+The sentinel table under Contract is exhaustive; beyond it: `srvconn_create_in`
 returns NULL on OOM (struct or either ring — partial allocations freed)
 or a non-class msize; `srvconn_ref`/`unref`/`teardown`/`set_*` extinct
 on a NULL/corrupted conn (accessors and `is_live`/`msize`
@@ -487,7 +491,7 @@ What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed):
   all-or-nothing `send_frame` must never partial-write (desync) and its
   free-space bound must read `ch->cap`, never a compile-time constant
   (the freeb wedge class).
-- **The class policy**: `srvconn_create` rejects any msize outside the
+- **The class policy**: `srvconn_create_in` rejects any msize outside the
   two-point set — an arbitrary ring_msize is an arbitrary kernel-memory
   demand.
 - **Teardown atomicity**: the dual-lock EOF latch (a poller observing

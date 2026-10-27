@@ -57,19 +57,13 @@
 #define PL011_FR_TXFE     (1u << 7)    // TX FIFO empty
 
 // Active PL011 base. Defaults to QEMU virt fallback so prints work
-// during early boot (before DTB parsing). uart_set_base() updates this
+// during early boot (before DTB parsing). uart_remap_to_vmalloc() updates this
 // once the DTB is parsed.
 //
 // `volatile` is overkill here (the writer is single-threaded and runs
 // before any interrupts are enabled), but it documents that this is
 // shared state and prevents the compiler from caching it across calls.
 static volatile uintptr_t pl011_base = 0x09000000UL;
-
-void uart_set_base(uintptr_t base) {
-    if (base != 0) {
-        pl011_base = base;
-    }
-}
 
 void uart_remap_to_vmalloc(uintptr_t pa, size_t size) {
     if (pa == 0 || size == 0) return;
@@ -320,6 +314,8 @@ bool uart_selftest_tx_bounded(void) {
     return scratch[PL011_DR / 4] == 0xdeadu; // true iff the byte was dropped (DR untouched)
 }
 #endif // KERNEL_TESTS
+
+static void uart_tx_init(void);
 
 // A-4c-1: enable the PL011 RX path. QEMU's virt PL011 comes up in its reset
 // state (CR=0x300: TXE|RXE set, UARTEN clear) and is lenient about TX without
@@ -609,7 +605,7 @@ void uart_irq_handler(uint32_t intid, void *arg) {
 // TXIM itself stays MASKED here -- the ring arms it only when it actually has
 // bytes the FIFO could not take (uart_tx_irq_set_enabled). Called from
 // uart_rx_init so the one boot-time UART bring-up covers both directions.
-void uart_tx_init(void) {
+static void uart_tx_init(void) {
     uintptr_t base = pl011_base;
     uint32_t cr = mmio_read32(base, PL011_CR);
     mmio_write32(base, PL011_CR, cr | PL011_CR_UARTEN | PL011_CR_TXE);

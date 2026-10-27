@@ -197,14 +197,12 @@ struct virtio_mmio_dev *virtio_mmio_find_by_device_id(u32 device_id);
 #ifdef KERNEL_TESTS
 u32  virtio_mmio_read32(struct virtio_mmio_dev *dev, u32 off);
 #endif // KERNEL_TESTS
-void virtio_mmio_write32(struct virtio_mmio_dev *dev, u32 off, u32 val);
 
 // Status register helpers. Set, clear, and check status bits per the
 // VIRTIO 1.2 §2.1 driver state machine.
 #ifdef KERNEL_TESTS
 u32  virtio_get_status(struct virtio_mmio_dev *dev);
 #endif // KERNEL_TESTS
-void virtio_set_status(struct virtio_mmio_dev *dev, u32 status);
 void virtio_add_status(struct virtio_mmio_dev *dev, u32 bits);
 void virtio_reset(struct virtio_mmio_dev *dev);
 

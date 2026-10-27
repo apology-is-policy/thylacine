@@ -830,7 +830,6 @@ void loom_sqpoll_hold_exit_for_test(bool hold);
 // l->sqpoll on success); loom_free joins it. loom_sqpoll_main is the kthread
 // body (noreturn -- it exits via the EXITING terminal handshake, never returns
 // to its caller). Both touch only the still-allocated `struct Loom`.
-void loom_sqpoll_main(void *arg);
 int  loom_start_sqpoll(struct Loom *l);
 // Internal private executor admission. Caller retains l across the entire call.
 // Charges the original creator/image by permanent-stripes ticket. Not called by

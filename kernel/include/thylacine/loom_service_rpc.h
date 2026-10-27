@@ -15,7 +15,6 @@ int loom_rpc_enqueue_locked(struct loom_service_operation *,u64 now);
 int loom_rpc_check_begin_locked(struct loom_service_operation *,u64 now);
 int loom_rpc_rearm_read_locked(struct loom_service_operation *,u64 now);
 int loom_rpc_begin_locked(struct loom_service_operation *,u64 now);
-void loom_rpc_capture(struct p9_rpc *,int,struct p9_dispatch_result *);
 // Only after the client call has returned; no callback/parser reference escapes.
 // Use requeue for a next stat/open stage or a retryable no-wire AGAIN; the driver
 // must prove the protocol disposition, never reissue an ambiguous wire effect.
