@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -57,6 +57,16 @@ the word (libt, libthyla-rs, the pouch patch) and declare the tail (libt
 `T_SPAWN_EXT_CWD` + `struct t_sys_spawn_ext_cwd`; libthyla-rs `TSpawnExtCwd` and
 `Command::current_dir`); the fork needs no change until it sends one. What the
 tail does is [[sub-kernel-syscall-dispatch]]'s (STALK-DESIGN 4.3).
+`SPAWN_EXT_THREADS` (bit 1, thread-model C6) announces a `struct
+sys_spawn_ext_threads` after the cwd tail when bit 0 is set too, else at +104:
+`thread_budget` (u32, 1..the hard maximum; 0 is EINVAL) and `threads_flags`
+(u32, must be 0), 8 bytes. Mirrors: libt `T_SPAWN_EXT_THREADS` + `struct
+t_sys_spawn_ext_threads`, libthyla-rs `T_SPAWN_EXT_THREADS` +
+`TSpawnExtThreads`; no library helper sends it yet (joey builds the record by
+hand). The authority to raise it, `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit
+10), is in `SPAWN_PERM_ALL` and, like bit 4, mirrored in neither library: no
+native caller confers it. What the tail does is
+[[sub-kernel-syscall-dispatch]]'s (ARCH 7.3.5).
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
@@ -285,6 +295,9 @@ Every other record on this surface is pinned by nothing but its comments. Since
 2026-10-06 the same check holds the record's tails (`EXT_TAILS`): each kernel
 tail struct's offsets asserted, its 8-byte fields named `*_va`, and its in-tree
 mirrors matched by name, offset and size, with the same mutations proving it.
+The `_va` mutation is generic since thread-model C6: a tail with an address
+field has it renamed, and one without (the threads tail) gains an asserted,
+sized 8-byte field with no suffix, which the u64 rule must report.
 
 ### And the hazard is not only drift; it is concurrent allocation
 
@@ -599,6 +612,11 @@ be one 4 KiB staging buffer per round trip.
 ## Provenance
 
 [[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
+
+2026-10-27 (thread-model C6): `SPAWN_EXT_THREADS` + `sys_spawn_ext_threads`
+and `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit 10); `SYS_THREAD_SPAWN` answers
+ENOMEM when the user pool refuses the thread's kernel memory. No number
+changed; the record stays 104 bytes.
 
 2026-09-16: `SYS_BURROW_DETACH`'s documented `-1` list (syscall.h and the
 libthyla-rs `t_burrow_detach` mirror) now states the window refusal it always

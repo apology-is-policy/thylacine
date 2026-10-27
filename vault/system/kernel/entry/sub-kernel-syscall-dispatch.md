@@ -5,6 +5,8 @@ parent: moc-kernel-entry
 title: "The syscall dispatcher — argument marshalling, the staging tiers, and where a gate is allowed to live"
 code:
   - kernel/syscall.c
+  - kernel/test/test_spawn_cwd.c
+  - kernel/test/test_sys_spawn_full_argv.c
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
 validated-by: [prose, gate-smp, gate-interactive]
@@ -309,7 +311,9 @@ own environment.
 `SPAWN_PERM_*` bits the parent asks to stamp on the child — `MAY_POST_SERVICE`
 (the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
 `CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
-the I-32 `MAY_RAISE_PAGE_BUDGET` above, the arm-6 `SESSION_HANGUP` (below), and
+the I-32 `MAY_RAISE_PAGE_BUDGET` above and its thread twin
+`MAY_RAISE_THREAD_BUDGET` (bit 10, thread-model C6; the same one-hop gate, the
+thunk's `proc_mark_may_raise_thread_budget`), the arm-6 `SESSION_HANGUP` (below), and
 the (U) `SEAL` (bit 9; `NOTRACE` until the F5 widening) — which stamps
 `PROC_FLAG_NODUMP` and `PROC_FLAG_NOTRACE` through the same one-way setters
 `SYS_SET_DUMPABLE(0)` and `SYS_SET_TRACEABLE(0)` use. That keeps the SPAWN_PERM
@@ -517,6 +521,24 @@ carries `name`); the thunk installs it as the child's dot first, before it frees
 the args, and an allocation failure there ends the child (`fail-cwd`) with the
 thunk's other pre-EL0 failures. The spawner's own dot never moves: the child's
 Territory is rfork's clone.
+
+**The spawn's thread-budget tail (thread-model C6, ARCH 7.3.5).** When
+`ext_flags` carries `SPAWN_EXT_THREADS`, the handler reads the 8-byte
+`sys_spawn_ext_threads` tail (`thread_budget`, `threads_flags`) after the cwd
+tail when `SPAWN_EXT_CWD` is set too, else at the record's address + 104. It
+reads it before the cwd tail, as it allocates nothing: an unreadable tail is
+`T_E_FAULT`, a nonzero `threads_flags` -1 (the unknown-bits rule), a
+`thread_budget` of 0 `T_E_INVAL` (clear the bit to inherit). The gate site
+(`sys_spawn_full_argv_cwd_for_proc`, its trailing `req_threads`, 0 = inherit)
+resolves it with `proc_spawn_thread_budget_resolve` ([[sub-kernel-proc]]) and
+refuses -1 on a 0 answer; the args carry the decided budget and the thunk
+stores it in the child before EL0, while the thunk is the child's only thread,
+so no admission has read the value it replaces. A held spawn returns only
+after that stamp (it parks later), which is what lets a caller read the
+budget at once. Regressions: `spawn_cwd.thread_budget_resolves`
+(`kernel/test/test_spawn_cwd.c`, which holds the cwd tail's `spawn_cwd.*` too);
+the `sys_spawn_full_argv.*` validate legs (`kernel/test/test_sys_spawn_full_argv.c`); joey's `probe_thread_budget`
+([[sub-stratum-boot]]) drives the real ABI, both tails included.
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
@@ -934,9 +956,12 @@ its EXITING commit, and its joiner is woken only after that commit, so a Proc at
 the cap that has just joined a thread can start another at once, though the
 thread stays on the list until the resume path of its last switch-out frees it,
 at most one per CPU ([[inv-i48]], [[inv-i32]], [[sub-kernel-thread]]). A create
-that then fails on a spent tid space answers EAGAIN, a system limit, not ENOMEM.
-The Loom SQPOLL setup, the budget's third consumer, charges through
-`proc_sqpoll_charge` against the same count.
+that then fails on a spent id space answers EAGAIN, a system limit, not ENOMEM;
+one the user pool refuses (its stack and slot, [[sub-kernel-thread]]) answers
+ENOMEM. The cap is the Proc's `thread_budget` (thread-model C6; 4096 by
+default, was the fixed `PROC_THREAD_MAX` 256). The Loom SQPOLL setup, the
+budget's third consumer, charges through `proc_sqpoll_charge` against the same
+count.
 
 **[[inv-i34]]** — the three hardware-mint handlers carry the CreateBegin /
 CreateCommit pair described above. The allowance is what bounds them; this file
@@ -1223,6 +1248,10 @@ the poster's mark alone (the section above).
 [[chg-2026-10-22-thread-model-c1]]: the thread-create arms and the SQPOLL
 charge no longer free exited peers; the resume path of each one's last
 switch-out does.
+
+Thread-model C6 (2026-10-27): the `SPAWN_EXT_THREADS` tail and
+`SPAWN_PERM_MAY_RAISE_THREAD_BUDGET`; `SYS_SET_TID_ADDRESS` / VIV `gettid`
+answer a main thread's tid, which is now its pid.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 
@@ -1672,7 +1701,9 @@ three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
 - `target_tid` (> 0): the target is the Proc holding that thread, found with
   `proc_holds_tid`, which walks the candidate's threads under its thread lock
   ([[lock-proc-threads]]); a `tgkill` whose tgid is a different Proc names no
-  thread (`ESRCH`). Both spawn arms build the thread unlinked and admit it with
+  thread (`ESRCH`). Tids and pids are one id space (thread-model C6), so a tid
+  never equals another Proc's pid, and a main thread's tid is its pid, so
+  `tgkill(pid, pid)` names the main thread, as Linux programs assume. Both spawn arms build the thread unlinked and admit it with
   `proc_thread_admit` (the claim and the cap again, then the link, in one hold),
   after lockless pre-checks that spare a doomed spawn its allocation; each reads
   the new tid before `ready()`.

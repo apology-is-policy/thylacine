@@ -15,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -239,7 +239,8 @@ the caller's Proc).
   positive control that the reading sees the workers at all. exited-freed joins
   them and, creating nothing, waits up to 5 s for the count to read 1; a kernel
   that freed exited threads only at a create would leave all five. join-churn
-  starts and joins 300 workers one after another, past `PROC_THREAD_MAX`, and
+  starts and joins 300 workers one after another, past the old fixed cap of 256
+  (the budget is 4096 by default since thread-model C6), and
   requires 1..ncpu counted afterwards: main and at most one worker per other
   CPU still finishing. joey runs it as the system principal, which the cap
   exempts, so only the count shows a leak there; with no reap at all the leg

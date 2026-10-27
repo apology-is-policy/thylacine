@@ -5,7 +5,7 @@ title: "The Thread: context, kstack, and the on_cpu protocol"
 parent: moc-kernel-execution
 code: ["kernel/thread.c", "kernel/include/thylacine/thread.h", "kernel/test/test_thread_spawn.c"]
 audit: hard
-guarded-by: [inv-i21, inv-i31, inv-i44, inv-i48]
+guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
@@ -30,6 +30,7 @@ default), which several guards rely on.
 | `thread_create` / `thread_create_with_arg` | EL1 | `thread_trampoline` → `blr entry` | own 32 KiB alloc |
 | `thread_create_user` | EL0 | `thread_user_trampoline` → `eret` | own 32 KiB alloc |
 | `thread_create_forked` | EL0 | `thread_fork_trampoline` → the shared exception return | own 32 KiB alloc |
+| `thread_create_kthread_for` | EL1 (in kproc) | `thread_trampoline` → `blr entry` | own 32 KiB alloc, charged to `owner` |
 | `thread_init` (kthread) / `thread_init_per_cpu_idle` | EL1 | never (born RUNNING) | none — the boot stack |
 | `thread_create_bootcpu_idle` | EL1 | `thread_trampoline` | none — a dedicated BSS stack |
 
@@ -39,6 +40,29 @@ joiner) or of a thread that never ran (by its creator); the caller must ensure
 `thread_free` extincts on one. `thread_switch(next)` is the **test-only**
 direct-switch primitive — production multitasking is `sched()`.
 
+**Identity** (ARCH 7.3.4, thread-model C6). A tid comes from the one id space
+pids come from (`proc_id_alloc`, [[sub-kernel-proc]]). A Proc's first thread
+takes the pid as its tid, so a main thread's tid is its pid; every later
+thread draws. `thread_id_for` decides it with one `fetch_or` of
+`PROC_FLAG_MAIN_TID` on the Proc, so of two racing creates exactly one takes
+the pid. kproc's threads always draw (its 0 is the boot thread's). An exec
+moves the pid onto the execer ([[sub-kernel-proc]]): the one time a thread's
+tid changes. Its old tid is retired, never reused.
+
+**Cost** (ARCH 7.3.5). A thread of any Proc but kproc costs the user pool its
+stack block and its slot: `THREAD_POOL_PAGES` = 9, eight stack pages and the
+slot charged as a whole page though the slab packs two (both pinned by
+`_Static_assert`). `thread_new` is the one place every create takes, in order,
+the tid, the pool charge (`capacity_charge`, [[sub-kernel-mm-phys]]), the slot
+and the stack, undoing each on a later failure. The charge falls on a
+*payer*: the Proc itself for every constructor but
+`thread_create_kthread_for(owner, ...)`, whose thread lives in kproc and is
+charged to `owner` (the SQPOLL poller, [[sub-kernel-loom]]). kproc pays
+nothing, since its threads are reserve memory; an exempt payer is counted and
+never refused; a non-exempt one is refused at the pool's bound and the create
+returns NULL with nothing charged. The thread keeps the count in `pool_pages`
+and returns it exactly once.
+
 **A thread's end of life** (ARCH 7.3.2, [[inv-i48]]). A thread that exits
 (`thread_exit_self`, or `exits` for the last one) commits `THREAD_EXITING`
 under [[lock-proc-threads]] and `sched()`s away for good. For a user thread
@@ -47,7 +71,12 @@ under [[lock-proc-threads]] and `sched()`s away for good. For a user thread
 the same CPU, before anything else runs there. It reads EXITING while `on_cpu`
 still pins the thread, clears `on_cpu`, releases the run-queue lock and then,
 with IRQs still masked, calls `thread_reap_dead`. That scans the dead stack's
-depth before any lock (nothing writes a dead stack), takes the Proc's thread
+depth before any lock (nothing writes a dead stack) and returns the thread's
+pool charge, zeroing `pool_pages` so the free returns nothing more. The charge
+goes back before the unlink, not at the free: once `thread_count` reads 0 a
+`wait_pid` may free the Proc and return, and the pool its caller reads then
+must hold nothing of the child's; the memory follows a moment later, and the
+reserve covers that slack (one thread per CPU). It takes the Proc's thread
 lock once to fold `run_ns` and the depth into the Proc (so `proc_cpu_ns` and
 `proc_kstack_peak` never shrink), clear a debug focus that names it (the focus
 is validated by pointer, and a recycled slot would match) and unlink it, drops
@@ -55,7 +84,8 @@ the lock (its last touch of the Proc), and frees the stack and the slot. Each
 thread has exactly one final switch-out and nothing else frees a user thread,
 so no claim is needed. A CPU holds at most one exited thread not yet freed: the
 one running its tail, or the one its resume path is freeing. A kernel thread is
-freed by its joiner; a thread that never ran, by its creator.
+freed by its joiner; a thread that never ran, by its creator; either free
+returns the pool charge in `thread_destroy`.
 
 `thread_create_user` deliberately does **not** validate its four user-VA
 arguments; the syscall handler owns those bounds. A malformed address faults
@@ -76,7 +106,8 @@ invalidates ([[sub-kernel-mmu]]).
 
 **The stack cache.** A freed stack does not go straight back to the buddy.
 `kstack_free` pushes it on a bounded LIFO (`THREAD_KSTACK_CACHE_MAX`, 32
-blocks, 1 MiB of the TCB reserve) with its guard still no-access, and
+blocks, 1 MiB of the TCB reserve, charged to nobody: the pool charge belongs
+to a thread, not a block) with its guard still no-access, and
 `kstack_alloc` pops the most recent block before it asks the buddy. Past the
 bound a freed stack is released -- guard restored, `free_pages` -- as before.
 So a create that finds a block, and a free that finds room, write no PTE and
@@ -216,6 +247,8 @@ even the kill that forces a final close ([[sub-kernel-loom]]), and
 reap's last dev9p close hands a staged write-behind run to the closer instead
 of waiting on the server ([[sub-kernel-ninep-dev9p]]). `exit_close_active` has
 one setter again, the at-exit close. The struct size is unchanged at 1760.
+Since thread-model C6, `pool_pages` (a byte taken from the padding beside
+`in_handler`) holds the pool charge the thread returns; still 1760.
 `cpu_pinned` is the single
 clean unstealability predicate that replaced the old `kstack_base != NULL`
 gate — the #860 root cause was that `g_bootcpu_idle` owned a real kstack, so
@@ -298,17 +331,18 @@ walker could observe `p->threads = new_head` published before
 the new head and missing every pre-existing thread. The lock makes
 `(head, next_in_proc, thread_count)` one linearizable observation.
 
-`g_next_tid` is claimed by a saturating compare-and-swap (`alloc_next_tid`).
-A tid is never reused, so the counter is cumulative rather than a count of
-live threads, and an unprivileged create-and-join loop walks it toward
-INT_MAX; at the end of the space it answers -1 and stays there, never
-wrapping into the -1 sentinel or onto a tid a live thread may still hold. The
-three constructors claim the tid first, before anything is allocated, and
-return NULL on a spent space, which both spawn arms report as EAGAIN
-(`thread_tid_space_spent`), a system limit, rather than ENOMEM ([[inv-i32]]);
-only the boot idles, which cannot fail, still extinct. The pre-P6 non-atomic
-`++` could hand two peer spawns the same tid and break `pthread_self`
-uniqueness. `g_next_pid` saturates the same way ([[sub-kernel-proc]]).
+Tids and pids are one id space since thread-model C6: `proc_id_alloc`'s
+64-bit counter ([[sub-kernel-proc]]). An id is never reused, so the counter is
+cumulative rather than a count of live threads, and an unprivileged
+create-and-join loop walks it toward `PROC_ID_LAST` (2^31 - 1); past it every
+draw answers -1, and 64 bits mean no number of refused draws wraps it back
+onto an id a live Proc or thread holds. `thread_new` claims the tid first,
+before anything is allocated, and returns NULL on a spent space, which both
+spawn arms report as EAGAIN (`proc_id_space_spent`), a system limit, rather
+than the ENOMEM of a pool refusal or a short allocator ([[inv-i32]]); only the
+boot idles, which cannot fail, still extinct. A main thread's tid is not
+drawn but claimed (`PROC_FLAG_MAIN_TID`, above). The pre-P6 non-atomic `++`
+could hand two peer spawns the same tid and break `pthread_self` uniqueness.
 
 `thread_switch` masks IRQs across its entire mutate-switch-resume window.
 The `set_current_thread(next)`-before-`cpu_switch_context` sequence is a
@@ -336,23 +370,32 @@ restored when `prev` is switched back to.
   thread, run after its last switch-out completes. Under `KERNEL_TESTS`,
   `thread_commit_exiting_locked` extincts if a Proc's `thread_count` exceeds its
   `live_threads` by more than the online CPUs.
+- [[inv-i32]]'s pool half for threads: every non-kproc thread's kernel memory
+  is charged at create and returned exactly once (`thread_reap_dead` before its
+  unlink, else `thread_destroy`), so a thread bomb meets the pool's bound, not
+  the reserve's. `thread.kernel_memory_charged_to_the_pool` reads the pool
+  across each kind of create and free, and asserts the reaper's order through a
+  `KERNEL_TESTS` watch (`g_thread_reap_watch_pid`) that records the pool at the
+  reaper's entry and at its unlink; `thread.pool_refuses_users_keeps_tcb`
+  drives the pool's edge.
 
 ## Error paths
 
 Every constructor returns NULL on OOM with internal cleanup (descriptor
 freed; a fresh block whose guard could not be set goes back to the buddy),
-and on a spent tid space. Everything else extincts: `thread_free`
+on a spent id space, and when the pool refuses a non-exempt payer. Everything else extincts: `thread_free`
 of a corrupted/already-freed/RUNNING/current/uninitialized Thread, or of an
 exited user thread (a second reaper); `thread_reap_dead` of a corrupted,
 not-exited or kernel thread;
 `thread_switch` into a corrupted, uninitialized, EXITING, or `on_cpu`
 thread; `thread_unlink` on a list-head mismatch; a stack whose guard cannot
-be restored on its way back to the buddy (`kstack_release`); a spent tid
+be restored on its way back to the buddy (`kstack_release`); a spent id
 space at a boot idle's create.
 
 ## Performance
 
-Thread creation is one SLUB alloc + a stack from the cache (a leaf lock, a
+Thread creation is a pool charge (an atomic add; under pressure the Image
+cache's reclaim first, [[sub-kernel-mm-phys]]), one SLUB alloc + a stack from the cache (a leaf lock, a
 pop, the 16 KiB poison) or, on a miss, one order-3 buddy alloc + four leaf
 PTE writes + four by-VA invalidates + the poison. A free is a push, or past
 the bound the miss in reverse. Measured on the Mac under HVF (`--config ci`,
@@ -442,6 +485,11 @@ at the bottom of the deepest syscall chain (ARCH 8.12).
   `proc_holds_tid` (behind tkill and tgkill) walks the list under the lock, so it sees a
   worker that has committed EXITING and not yet switched out (at most one per
   CPU) and answers ESRCH once the resume path has freed it.
+- **A refused first create burns the pid as a tid.** `thread_id_for` claims the
+  pid before the pool charge, so a Proc whose first create is refused gives its
+  next thread a drawn tid. Every user-reachable first create is rfork's, whose
+  failure frees the Proc, so no live main thread is affected; a kernel test
+  that builds a Proc by hand can see it.
 
 ## Provenance
 
@@ -460,3 +508,7 @@ register-scrub dispositions, and the floating-point save's source.
 Thread-model C1 (2026-10-22): an exited user thread is freed by the resume path
 of its last switch-out (`thread_reap_dead`), replacing the free at the next
 create ([[seam-exited-threads-wait-for-a-create]], closed).
+
+Thread-model C6 (2026-10-27): one id space (a main thread's tid is the pid;
+exec moves it), the pool charge (`thread_new`, `THREAD_POOL_PAGES`,
+`thread_create_kthread_for`) and the reaper's early return of it.

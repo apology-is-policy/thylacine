@@ -436,7 +436,9 @@ hybrid split the orthodox 9P transport uses.
   permanently**, because the identifier was consumed but no binding installed and
   the idempotent return re-reports it.
 - **The mapping-Proc identity is a bare pid.** Sound while pids are monotonic and
-  unreused, which is the tree-wide precedent.
+  unreused, which is the tree-wide precedent: since thread-model C6 a pid is drawn
+  once from the id space Procs and threads share (`proc_id_alloc`) and never
+  reused.
 
 ## Caveats
 

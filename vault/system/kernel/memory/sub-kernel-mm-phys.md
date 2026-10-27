@@ -9,7 +9,7 @@ guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity]
 locks: [lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -46,6 +46,14 @@ table lists it as a trigger surface in its own right.
   parking test otherwise left the pool full for the rest of the boot. `capacity_set_reclaim(fn)`
   registers the reclaim step the allocator tries before refusing (the Image
   cache's `image_cache_reclaim`; the round-2 close, below).
+- `capacity_charge(npages, exempt)` / `capacity_uncharge(npages)` -- the
+  pool's charge alone, for user-owned kernel memory that is not a user page
+  (thread-model C6: a non-kproc thread's stack block and slot,
+  `THREAD_POOL_PAGES`, [[sub-kernel-thread]]). The same bound, the same
+  exempt rule and the same reclaim-then-refuse as `alloc_user_pages`, which
+  now calls it; false with nothing charged on a refusal. The owner keeps the
+  count and returns it exactly once. Same calling context as
+  `alloc_user_pages`.
 - `kpage_alloc`/`kpage_free` — single-page convenience returning a
   **direct-map KVA** (P3-Bb; `pa_to_kva`/`kva_to_pa` round-trip).
 - `phys_init()` — discover RAM, compute the FIVE reservations
@@ -268,11 +276,15 @@ fault (`FAULT_UNHANDLED_USER` -> `snare:segv`) of the Proc that asked,
 never a bystander. `/ctl/memory` publishes `reserve` / `pool` / `charged`
 ([[sub-kernel-devctl]]).
 
-**What the pool does not count**: kernel stacks (with at most 32 cached
-between threads, 1 MiB, [[sub-kernel-thread]]), slabs, the direct-map
+**What the pool does not count**: kproc's kernel stacks and the stacks cached
+between threads (at most 32, 1 MiB, [[sub-kernel-thread]]), slabs, the direct-map
 tables, DMA buffers ([[inv-i34]]'s allowance), the per-space L0 root
-(bounded by the Proc axes like a kernel stack) -- the kernel memory the
-reserve exists for. The Image cache's FILE pages ARE counted (they are user
+(bounded by the Proc axes) -- the kernel memory the reserve exists for. A user
+Proc's thread is NOT reserve memory since thread-model C6: its stack block and
+slot are charged through `capacity_charge` at create and returned at its
+reaper or its free (ARCH 7.3.5), so a thread bomb meets the pool's bound, not
+the reserve's; an exempt Proc's threads are counted and never refused, as
+its pages are. The Image cache's FILE pages ARE counted (they are user
 memory), and since the round-2 close they are also CHARGED -- to each
 address space that maps them, per leaf installed (`addrspace_charge_file`,
 [[sub-kernel-fault]]; refunded per leaf cleared, [[sub-kernel-vma]]), so a
@@ -295,7 +307,8 @@ used IDLE entries -- one handle (the cache's), no mapping, resident pages --
 of their pages (`burrow_image_strip`, [[sub-kernel-burrow]]) and leaves
 them cached and empty for the next mapper to page in again: Plan 9's
 `imagereclaim` when the page pool runs low, Linux's page cache giving way
-to anonymous demand. It runs in the allocating context, under whatever that
+to anonymous demand. A thread create reaches it too, through
+`capacity_charge`, holding no lock. It runs in the allocating context, under whatever that
 holds (`as->lock` for a fault or an attach), takes `g_image_lock` -> the
 victim's `v->lock` -> the buddy, and allocates nothing; no allocator caller
 holds any of those (the pagemap allocates its nodes outside `v->lock`; the
@@ -418,4 +431,6 @@ P3-Bb direct map / P3-Bda / P4-E initrd →
 [[chg-2026-08-16-page-cow-share]] (the pad spent, and the
 order-0 instrument trap) →
 [[chg-2026-09-23-b1a-prime-capacity]] (the user pool, physical:
-`alloc_user_pages`, `PG_USER`, the return at `free_pages`).
+`alloc_user_pages`, `PG_USER`, the return at `free_pages`) →
+thread-model C6, 2026-10-27 (`capacity_charge` / `capacity_uncharge`: user
+threads' kernel memory joins the pool).

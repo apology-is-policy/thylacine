@@ -3,7 +3,7 @@ id: sub-kernel-proc
 type: sub
 title: "The Proc: table, lineage, creation, and wait"
 parent: moc-kernel-execution
-code: ["kernel/proc.c", "kernel/include/thylacine/proc.h"]
+code: ["kernel/proc.c", "kernel/include/thylacine/proc.h", "kernel/test/test_resource.c"]
 audit: hard
 guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44, inv-i48]
 validated-by: [gate-smp]
@@ -92,8 +92,11 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 
 | Surface | Shape |
 |---|---|
-| `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
+| `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a pid drawn from the id space + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
+| `rfork_init` | `RFPROC` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
+| `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1; nothing is reused |
+| `proc_spawn_thread_budget_resolve` | the spawn's thread budget (ARCH 7.3.5): 0 inherits the parent's; past `proc_thread_budget_hard_max()` refused; at or below the parent's own allowed; above it only with `PROC_FLAG_MAY_RAISE_THREAD_BUDGET`. 0 means refused |
 | `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
@@ -159,7 +162,8 @@ a ledger of three columns:
   session and group (`sid`, `pgid` — POSIX fork semantics, overwriting
   `proc_alloc`'s own-session default), the legate scope tag, the hardware
   allowance (deep-cloned), the environment group (deep-copied), the
-  phenotype, `exe_path`, and the CL-5 `page_budget`. A **PHENO_LINUX** fork
+  phenotype, `exe_path`, the CL-5 `page_budget` and the thread budget
+  (`thread_budget`, thread-model C6). A **PHENO_LINUX** fork
   additionally gives the child thread the calling thread's **note mask** (#127
   — POSIX fork's signal-mask inheritance; a native fork keeps the zero mask, the
   rfork rule) and preserves the handler-execution snapshot, so a `fork()` issued
@@ -186,10 +190,14 @@ rolls back through `state = ZOMBIE; proc_free(child)`, which is why
 `stripes` tag are consumed **last**, after the handle table, pgtable and
 note queue have all succeeded, so a rolled-back allocation never sparsifies
 either space (R5-H F89's discipline, extended to the tag space). The pid is
-claimed by a saturating compare-and-swap (`alloc_next_pid`): pids are never
-recycled (a session's identity leans on it), so at the end of the space
-`proc_alloc` refuses through the same rollback as any other failure, rather
-than extincting or wrapping onto the -1 sentinel ([[inv-i32]]).
+drawn from the id space Procs and threads share (`proc_id_alloc`, thread-model
+C6: a main thread's tid is its pid, [[sub-kernel-thread]]), a 64-bit
+fetch-add whose draws past `PROC_ID_LAST` answer -1, so no number of refused
+draws wraps it back. Ids are never recycled (a session's identity leans on
+it), so at the end of the space `proc_alloc` refuses through the same
+rollback as any other failure, rather than extincting or wrapping onto the -1
+sentinel ([[inv-i32]]). Draws start at 2: init takes 1 through `rfork_init`,
+once, so joey is pid 1 however many kernel threads drew before it.
 
 **Wait.** `wait_pid_for` is one loop with a single authoritative scan under
 the table lock. Per iteration it walks `p->children` once, applying the
@@ -366,8 +374,14 @@ process with no group death (`thread_reap_buggy_exec_perthread`,
 DoomedNeverLast). No stop parks the claim's wait: `proc_stop_requested` reads
 false while a claim is held ([[sub-kernel-jobctl]]). A refused claim drops the
 new image -- space and program file -- in `exec_claim_or_drop`
-([[sub-kernel-syscall-dispatch]]). The swap clears the claim. Regressions: the
-`proc.exec_claim_*` family in `kernel/test/test_thread_spawn.c`.
+([[sub-kernel-syscall-dispatch]]). The swap clears the claim, and the execer
+takes the pid as its tid in the same hold (ARCH 7.3.4): the new image's main
+thread is the execer, and its old tid is retired. The old main is freed by
+then (`thread_count` is 1), so the pid names one thread on the list
+(`thread_reap.tla` PidNamesOne; `thread_reap_buggy_pid_at_claim` moves it at
+the claim instead and violates it). Regressions: the `proc.exec_claim_*`
+family and `proc.exec_from_a_peer_takes_the_pid` in
+`kernel/test/test_thread_spawn.c`.
 
 **Before the swap, exec waits until it is the only thread on the list**
 (`proc_exec_wait_alone`: `thread_count == 1` under the thread lock), and the
@@ -482,7 +496,9 @@ socket table and a ring-poll field, 408 with IM-2's propagating legate scope,
 and 424 with the reaper's folds: `reaped_run_ns`, `reaped_kstack_peak`,
 `reaped_kstack_tid`, zeroed at allocation and never inherited by rfork, which
 `proc_cpu_ns` and `proc_kstack_peak` start from; 432 with thread-model C3's
-`threads_lock` and `live_threads`; 456 with C5's `exec_task` and `exec_rendez`). Worth naming because the struct is
+`threads_lock` and `live_threads`; 456 with C5's `exec_task` and `exec_rendez`,
+and still 456 with C6's `thread_budget`, in the pad after `page_budget` at
+offset 364). Worth naming because the struct is
 otherwise grown strictly by appending, with **every** load-bearing offset
 individually `_Static_assert`ed and each assert carrying the reason its field
 landed where it did. `magic` is at offset 0 so SLUB's
@@ -522,7 +538,11 @@ flag, and a `_Static_assert` that the popcount of their union equals the sum
 of their popcounts proves them disjoint at compile time. Membership in that
 list is by hand, so the build's guard is `tools/check-flag-words.py`, which
 derives every `PROC_FLAG_*` define from the header and fails on a shared bit
-(after S-2 it reads bits 12..17 and 22..28 free).
+(after S-2 it read bits 12..17 and 22..28 free). Thread-model C6 took bit 12
+for `PROC_FLAG_MAIN_TID` (the first thread has taken the pid as its tid; set
+once by `thread_id_for`, never cleared) and bit 13 for
+`PROC_FLAG_MAY_RAISE_THREAD_BUDGET` (the thread budget's raise authority,
+OR-only like its page twin); free now 14..17 and 22..28.
 
 `proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
 (bit 29), stamped by the test link helpers (`proc_test_link`,
@@ -545,9 +565,11 @@ thread list, `thread_count`, `live_threads`, `loom_sqpoll_count`, every
 claim is written under both, so a reader under either is exact; so is exec's
 claim (`exec_task`), which the death predicates also read lock-free with
 ACQUIRE. A spawn admits its new thread in one hold of the thread lock
-(`proc_thread_admit`: the group claim, the exec claim, the cap, the link), so
-`PROC_THREAD_MAX` is exact and no thread joins a group whose claim is set or
-that an exec holds.
+(`proc_thread_admit`: the group claim, the exec claim, the budget, the link),
+so the thread budget is exact and no thread joins a group whose claim is set
+or that an exec holds. Every charge against the budget goes through one
+predicate, `proc_thread_room_locked` (exempt, or `live_threads +
+loom_sqpoll_count < thread_budget`).
 
 Everything else on a Proc is either (a) written once before the Proc runs at
 EL0 and read plainly thereafter (identity, `stripes`), (b) an atomic RMW
@@ -563,9 +585,11 @@ across check-then-charge it makes the bound exact against another charge on the
 same address space, and charges from outside it can overshoot by at most the
 smaller. A floor, not an accountant.
 
-The child and thread caps are the deliberate exceptions: they read under the
-table lock and the increment happens at a later, separate hold, so they
-carry a bounded TOCTOU overshoot of at most `ncpus-1` concurrent spawners.
+The child cap is the deliberate exception: it reads under the table lock and
+the increment happens at a later, separate hold, so it carries a bounded
+TOCTOU overshoot of at most `ncpus-1` concurrent spawners. (The thread
+budget's own early check, before a spawn allocates, is only a fast refusal;
+admission decides it exactly, above.)
 That is stated in the code as acceptable *for a floor* — a bound, not an
 accountant.
 
@@ -600,6 +624,20 @@ accountant.
   floor is the pool, shared by every non-exempt Proc. Two names for one
   figure because they are two decisions -- what a Proc starts with, and what a
   spawn may raise it to -- that happen to coincide.
+  The thread axis (thread-model C6, ARCH 7.3.5) has the same shape:
+  `thread_budget`, defaulting to `proc_default_thread_budget()` = min(4096,
+  `proc_thread_budget_hard_max()` = `capacity_pool_pages() /
+  THREAD_POOL_PAGES`), seeded at `proc_init_fields` (after `capacity_init`,
+  so the pool is sized), copied by `rfork_internal`, decided at spawn by
+  `proc_spawn_thread_budget_resolve` and stamped by the spawn thunk before
+  EL0 ([[sub-kernel-syscall-dispatch]]), enforced by
+  `proc_thread_room_locked`. `PROC_THREAD_MAX` (256) no longer exists. The
+  budget confines threads per Proc; the memory they cost is the pool's
+  ([[sub-kernel-thread]]). `kernel/test/test_resource.c` holds the per-axis
+  floor tests (`resource.*`: the exemption, the page, child and thread caps,
+  the spawn budgets). Regressions: `resource.thread_cap_ok`,
+  `resource.thread_admit_exact`, `spawn_cwd.thread_budget_resolves` (its
+  rfork leg pins the inheritance).
 - The I-2 capability strip — `& ~CAP_ELEVATION_ONLY` on every fork, the Linux
   `clone` included (`rfork_forked_with_caps` with `caps_mask = CAP_ALL`): a clone
   inherits the parent's full set, but the elevation bits are stripped
@@ -710,8 +748,8 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   not yet been completed and freed ([[sub-kernel-thread]]), at most one per CPU
   ([[inv-i48]]), so a Proc can briefly show `thread_count > 1` with zero live
   peers. Mistaking one for the other was #68 round-2 F2 ([[fnd-68-r2-f2]]), and
-  the other way round it let exited peers fill `PROC_THREAD_MAX` while they
-  waited for a reaper: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19 15:03Z).
+  the other way round it let exited peers fill the thread cap (then
+  `PROC_THREAD_MAX`, 256) while they waited for a reaper: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19 15:03Z).
   The cap charges `live_threads`, not `thread_count` (vote 7, 2026-10-22): a
   joiner is woken right after the exit commit, before the free, so a Proc at
   the cap that joined a thread can start another at once ([[inv-i32]]). The live count is `proc_count_live_peers_locked`. Main, the oldest
@@ -747,6 +785,8 @@ note-mask inheritance (#127), and Design D's phenotype commit in
 [[chg-2026-10-05-signal7-list]] made `wait_pid_for`'s park end for a caught
 note to a Linux `wait4` (`WAIT_PID_NOTEINTR`; witness
 `rendez.caught_note_ends_wait4`).
+Thread-model C6 (2026-10-27): one id space for pids and tids (`proc_id_alloc`,
+`rfork_init`, exec moves the pid) and the per-Proc thread budget.
 
 ## proc_free and the phenotype's socket cache (2026-09-29, NP-5)
 

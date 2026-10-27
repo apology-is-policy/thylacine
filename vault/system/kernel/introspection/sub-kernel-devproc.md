@@ -273,6 +273,11 @@ read whitelist and the file resolves fine and reads `-1` forever. The prior
 The dispatch above says *how* a field is served; several fields also pin *what
 the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
 
+- **`threadcap:` is the thread budget** (thread-model C6, ARCH 7.3.5): the
+  Proc's `thread_budget`, on its own line after `threads:`. Not `tbudget:`:
+  readers match a key as a substring (joey's `proc_status_field` does), and
+  `budget:` is the page budget's, so a key ending in it would be read for the
+  wrong line.
 - **`cpu_ns` is cumulative and monotonic** — the sum of every thread's `run_ns`
   plus what the Proc's freed threads left (`proc_cpu_ns`, under
   [[lock-proc-threads]]; `thread_reap_dead` folds a thread's time in the same

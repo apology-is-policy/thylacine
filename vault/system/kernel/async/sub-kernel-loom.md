@@ -6,6 +6,7 @@ title: "Loom — the io_uring inversion over 9P"
 code:
   - kernel/loom.c
   - kernel/include/thylacine/loom.h
+  - kernel/test/test_loom.c
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i32]
 validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-role, gate-smp]
@@ -15,7 +16,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -309,6 +310,16 @@ still counted, so the uncharge is unconditional either way.
 The uncharge keys on a **flag**, not on the thread pointer: a setup that
 charged and then failed to start the thread still owes the refund, and keying
 on "is there a thread" would silently keep it.
+
+Its kernel memory is the creator's too (thread-model C6, ARCH 7.3.5):
+`loom_start_sqpoll` creates it with `thread_create_kthread_for(l->sqpoll_owner,
+...)`, so the stack and slot are charged to the user pool as that Proc's
+thread although it lives in kproc ([[sub-kernel-thread]]); a refused charge
+fails the setup -1 through the same unwind as any start failure. The start
+refuses -1 when `sqpoll_owner` is unset, so no SQPOLL thread is ever charged to
+nobody. The joiner's free (`loom_free`) returns the charge.
+`kernel/test/test_loom.c` holds the `loom.*` suite; `loom.sqpoll_charges_thread_budget`
+pins the budget charge at the Proc's own `thread_budget`.
 
 ### Who paid — the I-32 ledger
 

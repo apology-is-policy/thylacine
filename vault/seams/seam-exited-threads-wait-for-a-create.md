@@ -25,7 +25,8 @@ the whole Proc is dead -- not as soon as it has left its CPU, which is when
 Plan 9 and Linux free it. Until then:
 
 - **Size.** Each exited peer keeps its descriptor and its 32 KiB kstack.
-- **Payer.** The Proc. The dead count against its own `PROC_THREAD_MAX`, so a
+- **Payer.** The Proc. The dead count against its own `PROC_THREAD_MAX` (then
+  256; a per-Proc thread budget since thread-model C6), so a
   user Proc holds at most 255 (about 8 MiB). A system-principal Proc, which the
   cap exempts, holds a whole burst: one that starts and joins 1000 workers and
   then creates nothing keeps about 32 MiB until it creates again or exits.

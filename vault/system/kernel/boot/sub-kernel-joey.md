@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 5.1"
   - "docs/CORVUS-DESIGN.md section 3"
 created: 2026-09-06
-updated: 2026-09-25
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -90,7 +90,11 @@ stays I-27-gated at the front door regardless of namespace reachability.
 
 ### The trust roots are stamped in the child's own context, before exec
 
-joey is rforked with `rfork_with_caps(CAP_ALL)` — plain `rfork` would give it
+joey is rforked with `rfork_init(joey_thunk, &args, CAP_ALL)` (thread-model C6),
+which takes `PROC_ID_INIT` -- pid 1, held back from the id space for init and
+granted once -- so joey is pid 1 however many kernel threads drew ids before it
+(ported daemons test `getppid() == 1`); `joey_run` extincts if the answer is not
+1. The mask is `CAP_ALL` because plain `rfork` would give it
 `CAP_NONE`, and then a spawn-with-caps AND would zero every child grant, so init
 is deliberately the full-ceiling delegate that hands each child its role's
 subset (I-2 is preserved structurally: the AND only reduces). Inside
@@ -142,7 +146,7 @@ Territory has a single boot-time mutator.
 ## Invariants enforced
 
 **I-2** (fork-grantable caps monotonically reduce; no vault note yet, referenced
-here in prose) — joey is the capability delegate root: `rfork_with_caps(CAP_ALL)`
+here in prose) — joey is the capability delegate root: `rfork_init(..., CAP_ALL)`
 gives it the full ceiling so it can grant each child its subset, and the AND in
 the grant path only reduces. The `may-post-service` bit it holds is a perm-flag,
 never rfork-propagated, so it confers nothing automatically.

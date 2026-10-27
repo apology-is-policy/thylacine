@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-14
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -115,6 +115,28 @@ and an unknown `ext_flags` bit -1; joey's own cwd stays `/`. Each child is
 killed through its ctl and reaped. Boot-fatal. Probe83's chdir legs ask the
 errno too: `f/..` -20, `nope/..` -2, and `f` named whole -20 (the resolver's own
 directory check, not the walk's).
+
+**The thread budget, through the real ABI (thread-model C6, ARCH 7.3.5).**
+`probe_thread_budget` runs after the cwd probe. It reads joey's own budget from
+its `/proc/<pid>/status` `threadcap:` line, then spawns `/bin/hello` held: with
+no tail the child inherits joey's budget; a lone `SPAWN_EXT_THREADS` tail
+(`struct sthr_record`, tail at +104) lowers it by one with no authority; both
+tails (`struct sboth_record`, threads tail at +120) set budget 3 and cwd
+`/bin` together, which pins the kernel reading the threads tail after the cwd
+tail; a raise by one, a budget past the hard maximum (0xFFFFFFFF), a zero
+budget (-22) and an unknown `threads_flags` bit (-1) are refused -- joey holds
+no raise authority, as for the page budget. Each child is killed and reaped.
+Boot-fatal.
+
+**go-threads, the budget against Go's M model.** Inside the go-goroutines
+success branch, `go_threads_run` spawns `/bin/go-threads` (300 goroutines,
+each locked to its own M at once) as principal 1000, so the budget applies
+(joey is exempt), its output on a pipe drained to EOF before `reap_bounded`.
+Under the inherited default budget it must exit 0 with no refused create;
+under a 256 budget set by the tail it must die with the Go runtime's
+"failed to create new OS thread" -- the control that the first run reached
+past 256. Either failing returns joey 1. Absent only if the Go fork was absent
+at build, like go-goroutines.
 
 **The readiness wire, read directly (#98 NP-3b, 2026-09-28).** Before its
 net-6b polls, joey reads the udp connection's `ready` file with `t_pread`, and

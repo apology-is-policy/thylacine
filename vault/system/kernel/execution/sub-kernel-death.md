@@ -113,7 +113,9 @@ exit and a kill alike:
   its mount ref at its own exit). It is kernel-driven session-*lifecycle*
   termination, not a userspace cross-Proc kill — login lacks CAP_KILL by design,
   so I-26 is untouched. Its isolation (only genuine session members match) rests
-  on pids never recycling (`g_next_pid` is monotonic + extincts at INT_MAX); the
+  on pids never recycling (`proc_id_alloc`'s one id space is monotonic and
+  refuses past `PROC_ID_LAST`; an exec moves a pid between threads of one Proc,
+  never to another, [[sub-kernel-proc]]); the
   legate it mirrors keys on a dedicated non-reusable `legate_scope_id` instead —
   an implicit-vs-local dependency recorded at `session_hangup_cb` (arm-6 audit F1);
 - clearing `g_console_owner`, `g_console_trusted_proc`, `g_console_renderer`
