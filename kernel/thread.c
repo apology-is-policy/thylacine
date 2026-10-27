@@ -473,6 +473,60 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
     return t;
 }
 
+// What a thread's kernel memory costs the user pool (ARCH 7.3.5): its stack
+// block and its slot, the slot as a whole page though the slab packs two.
+_Static_assert(sizeof(struct Thread) <= PAGE_SIZE, "a thread's slot is charged as one page");
+_Static_assert(THREAD_POOL_PAGES <= 255, "Thread.pool_pages is a u8");
+
+// A new thread of `proc` whose kernel memory `payer` is charged for, with the
+// fields every create shares set: the tid, the pool charge, the slot and the
+// stack, in that order, each undone if a later one fails. NULL when the id
+// space is spent, the pool refuses `payer`, or memory is short. kproc pays
+// nothing (its threads are the reserve's); an exempt payer is counted, never
+// refused, as in alloc_user_pages.
+static struct Thread *thread_new(struct Proc *proc, struct Proc *payer) {
+    // The tid first: a spent id space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = thread_id_for(proc);
+    if (tid < 0) return NULL;
+
+    u32 pool = (payer == kproc()) ? 0u : THREAD_POOL_PAGES;
+    if (pool && !capacity_charge(pool, proc_resource_exempt(payer))) return NULL;
+
+    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    if (!t) {
+        if (pool) capacity_uncharge(pool);
+        return NULL;
+    }
+
+    // P2-Dc / P3-Bca: the guard pages below the stack are no-access in the
+    // direct map; kstack_alloc hands the block out guarded and poisoned.
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
+        kmem_cache_free(g_thread_cache, t);
+        if (pool) capacity_uncharge(pool);
+        return NULL;
+    }
+
+    // KP_ZERO leaves every field 0/NULL; only the non-zero-default
+    // values get explicit setters. EEVDF defaults: weight=1, band=
+    // NORMAL, vd_t=0 (caller can ready() to insert into run tree;
+    // ready picks up the current vd_t — fresh threads at vd_t=0 sort
+    // ahead of long-running threads whose vd_t has advanced via
+    // sched() yields).
+    t->magic       = THREAD_MAGIC;
+    t->tid         = tid;
+    t->state       = THREAD_RUNNABLE;
+    t->proc        = proc;
+    t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
+    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
+    t->weight      = 1;
+    t->band        = SCHED_BAND_NORMAL;
+    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    t->pool_pages  = (u8)pool;
+    return t;
+}
+
 // Internal: shared body of thread_create + thread_create_with_arg.
 // `entry_void` is the entry pointer (no arg or void* arg form — the
 // trampoline doesn't distinguish; x0 is loaded from x20 unconditionally).
@@ -500,6 +554,7 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
 // retires TTBR0 identity entirely so the direct-map form is the durable
 // one. The PA is recovered via kva_to_pa for free + guard restore.
 static struct Thread *thread_create_internal(struct Proc *proc,
+                                             struct Proc *payer,
                                              void *entry_void,
                                              void *arg) {
     if (!g_thread_cache) extinction("thread_create before thread_init");
@@ -507,38 +562,12 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     if (!entry_void)     extinction("thread_create with NULL entry");
     if (proc->magic != PROC_MAGIC)
         extinction("thread_create with corrupted proc");
+    if (!payer || payer->magic != PROC_MAGIC)
+        extinction("thread_create with a NULL or corrupted payer");
 
-    // The tid first: a spent id space refuses before anything is allocated
-    // (one a later failure burns is skipped, never reused).
-    int tid = thread_id_for(proc);
-    if (tid < 0) return NULL;
-
-    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    struct Thread *t = thread_new(proc, payer);
     if (!t) return NULL;
-
-    // P2-Dc / P3-Bca: the guard pages below the stack are no-access in the
-    // direct map; kstack_alloc hands the block out guarded and poisoned.
-    void *kalloc_base = kstack_alloc();
-    if (!kalloc_base) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-
-    // KP_ZERO leaves every field 0/NULL; only the non-zero-default
-    // values get explicit setters. EEVDF defaults: weight=1, band=
-    // NORMAL, vd_t=0 (caller can ready() to insert into run tree;
-    // ready picks up the current vd_t — fresh threads at vd_t=0 sort
-    // ahead of long-running threads whose vd_t has advanced via
-    // sched() yields).
-    t->magic       = THREAD_MAGIC;
-    t->tid         = tid;
-    t->state       = THREAD_RUNNABLE;
-    t->proc        = proc;
-    t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
-    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    t->weight      = 1;
-    t->band        = SCHED_BAND_NORMAL;
-    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    void *kalloc_base = t->kstack_base;
 
     // Lay out the initial saved context so the first cpu_switch_context
     // into this thread lands at thread_trampoline, which blr's entry.
@@ -574,13 +603,19 @@ static struct Thread *thread_create_internal(struct Proc *proc,
 }
 
 struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
-    return thread_create_internal(proc, (void *)(uintptr_t)entry, NULL);
+    return thread_create_internal(proc, proc, (void *)(uintptr_t)entry, NULL);
 }
 
 struct Thread *thread_create_with_arg(struct Proc *proc,
                                       void (*entry)(void *),
                                       void *arg) {
-    return thread_create_internal(proc, (void *)(uintptr_t)entry, arg);
+    return thread_create_internal(proc, proc, (void *)(uintptr_t)entry, arg);
+}
+
+struct Thread *thread_create_kthread_for(struct Proc *owner,
+                                         void (*entry)(void *),
+                                         void *arg) {
+    return thread_create_internal(kproc(), owner, (void *)(uintptr_t)entry, arg);
 }
 
 // P6-pouch-threads (sub-chunk 9): create a Thread that on first dispatch
@@ -620,29 +655,9 @@ struct Thread *thread_alloc_user(struct Proc *proc,
     if (proc->magic != PROC_MAGIC)
         extinction("thread_alloc_user with corrupted proc");
 
-    // The tid first: a spent id space refuses before anything is allocated
-    // (one a later failure burns is skipped, never reused).
-    int tid = thread_id_for(proc);
-    if (tid < 0) return NULL;
-
-    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    struct Thread *t = thread_new(proc, proc);
     if (!t) return NULL;
-
-    void *kalloc_base = kstack_alloc();
-    if (!kalloc_base) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-
-    t->magic       = THREAD_MAGIC;
-    t->tid         = tid;
-    t->state       = THREAD_RUNNABLE;
-    t->proc        = proc;
-    t->kstack_base = kalloc_base;
-    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    t->weight      = 1;
-    t->band        = SCHED_BAND_NORMAL;
-    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    void *kalloc_base = t->kstack_base;
 
     // Park the four user-mode args in callee-saved ctx slots.
     t->ctx.x19 = user_sp_va;
@@ -702,29 +717,9 @@ struct Thread *thread_alloc_forked(struct Proc *proc,
         extinction("thread_alloc_forked with corrupted proc");
     if (!frame)          extinction("thread_alloc_forked with NULL frame");
 
-    // The tid first: a spent id space refuses before anything is allocated
-    // (one a later failure burns is skipped, never reused).
-    int tid = thread_id_for(proc);
-    if (tid < 0) return NULL;
-
-    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    struct Thread *t = thread_new(proc, proc);
     if (!t) return NULL;
-
-    void *kalloc_base = kstack_alloc();
-    if (!kalloc_base) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-
-    t->magic       = THREAD_MAGIC;
-    t->tid         = tid;
-    t->state       = THREAD_RUNNABLE;
-    t->proc        = proc;
-    t->kstack_base = kalloc_base;
-    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    t->weight      = 1;
-    t->band        = SCHED_BAND_NORMAL;
-    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    void *kalloc_base = t->kstack_base;
 
     // Carve the child's EL0 frame off the TOP of its own fresh kernel stack --
     // the exact address KERNEL_ENTRY would have put it at had the child taken a
@@ -787,9 +782,11 @@ static void thread_release(struct Thread *t, bool unlink);
 
 // The last step of every free. Nothing can reach t any more.
 static void thread_destroy(struct Thread *t) {
+    u32 pool = t->pool_pages;
     if (t->kstack_base)
         kstack_free(t->kstack_base);
     kmem_cache_free(g_thread_cache, t);
+    if (pool) capacity_uncharge(pool);
     __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);
 }
 
@@ -805,6 +802,13 @@ void thread_reap_dead(struct Thread *t) {
     struct Proc *p = t->proc;
     if (!p || p == kproc())          extinction("thread_reap_dead of a kernel thread");
     u32 used = thread_kstack_used(t, NULL);
+    // The pool charge returns before the unlink, not at thread_destroy: once
+    // thread_count reads 0 a waiter frees the Proc and returns, and the pool
+    // it then reads must hold nothing of the child's. The memory follows a
+    // moment later; the reserve covers that slack (one thread per CPU).
+    u32 pool = t->pool_pages;
+    t->pool_pages = 0;
+    if (pool) capacity_uncharge(pool);
     irq_state_t s = proc_threads_lock(p);
     p->reaped_run_ns += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
     if (used > p->reaped_kstack_peak) {

@@ -123,6 +123,7 @@
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/timer.h"
 #include "../../arch/arm64/uart.h"
+#include "../../mm/phys.h"          // the user pool: a thread's kernel memory is charged to it
 
 #include <thylacine/addrspace.h>
 #include <thylacine/cons.h>
@@ -131,6 +132,7 @@
 #include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/image.h>
 #include <thylacine/loom.h>
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
@@ -159,6 +161,8 @@ void test_proc_spawn_refused_in_dying_proc(void);
 void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
 void test_proc_ids_are_one_space(void);
 void test_proc_exec_from_a_peer_takes_the_pid(void);
+void test_thread_kernel_memory_charged_to_the_pool(void);
+void test_thread_pool_refuses_users_keeps_tcb(void);
 void test_proc_exec_claim_dooms_every_other_thread(void);
 void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
 void test_proc_exec_claim_abandoned_on_group_death(void);
@@ -1613,6 +1617,161 @@ void test_proc_exec_from_a_peer_takes_the_pid(void) {
     TEST_EXPECT_EQ(g_xp_holders_after, 1, "the pid names one thread on the list");
     TEST_ASSERT(g_xp_holder_is_self, "and that thread is the execer");
     TEST_EXPECT_EQ(status, 0, "the new image exited cleanly");
+}
+
+// ---------------------------------------------------------------------------
+// A thread's kernel memory is the user pool's (ARCH 7.3.5, thread-model C6).
+//
+// Both run in an rfork'd child of the runner, which is exempt (the TCB); `A`
+// is a fresh Proc of no principal, so not. The pool is machine-wide and the
+// suite runs alone, so a delta read across one create is that create's.
+// ---------------------------------------------------------------------------
+
+static volatile u32  g_tkc_user, g_tkc_alloc_user, g_tkc_kproc, g_tkc_exempt, g_tkc_for, g_tkc_back;
+static volatile u32  g_tkc_pages_user, g_tkc_pages_kproc, g_tkc_pages_for;
+static volatile bool g_tkc_made, g_tkc_for_in_kproc;
+
+static void tkc_entry(void *arg) {
+    (void)arg;
+    struct Proc *S = current_thread()->proc;
+    struct Proc *A = proc_alloc();
+    g_tkc_made = A && !proc_resource_exempt(A) && proc_resource_exempt(S);
+    if (!g_tkc_made) exits("setup");
+    const u32 c0 = capacity_pool_charged();
+    struct Thread *a = thread_create_with_arg(A, c0_never_entry, NULL);
+    g_tkc_user = capacity_pool_charged() - c0;
+    struct Thread *b = thread_alloc_user(A, C0_USER_ENTRY, C0_USER_SP, 0, 0);
+    g_tkc_alloc_user = capacity_pool_charged() - c0;
+    struct Thread *k = thread_create_with_arg(kproc(), c0_never_entry, NULL);
+    g_tkc_kproc = capacity_pool_charged() - c0;
+    struct Thread *x = thread_create_with_arg(S, c0_never_entry, NULL);
+    g_tkc_exempt = capacity_pool_charged() - c0;
+    struct Thread *f = thread_create_kthread_for(A, c0_never_entry, NULL);
+    g_tkc_for = capacity_pool_charged() - c0;
+    g_tkc_pages_user   = a ? a->pool_pages : 0xFFu;
+    g_tkc_pages_kproc  = k ? k->pool_pages : 0xFFu;
+    g_tkc_pages_for    = f ? f->pool_pages : 0xFFu;
+    g_tkc_for_in_kproc = f && f->proc == kproc();
+    if (a) thread_free(a);
+    if (b) thread_free_unlinked(b);
+    if (k) thread_free(k);
+    if (x) thread_free(x);
+    if (f) thread_free(f);
+    g_tkc_back = capacity_pool_charged() - c0;
+    A->state = PROC_STATE_ZOMBIE;
+    proc_free(A);
+    exits("ok");
+}
+
+void test_thread_kernel_memory_charged_to_the_pool(void) {
+    g_tkc_user = g_tkc_alloc_user = g_tkc_kproc = g_tkc_exempt = g_tkc_for = g_tkc_back = 0xDEADu;
+    g_tkc_pages_user = g_tkc_pages_kproc = g_tkc_pages_for = 0xDEADu;
+    g_tkc_made = g_tkc_for_in_kproc = false;
+    int child_pid = rfork(RFPROC, tkc_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(g_tkc_made, "a user Proc beside the exempt child");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    const u32 T = THREAD_POOL_PAGES;
+    TEST_EXPECT_EQ(T, 9u, "a stack block of eight pages and a slot of one");
+    TEST_EXPECT_EQ(g_tkc_user, T, "a user Proc's kernel-entry thread costs the pool its stack and slot");
+    TEST_EXPECT_EQ(g_tkc_pages_user, T, "and keeps the count it returns");
+    TEST_EXPECT_EQ(g_tkc_alloc_user, 2u * T, "a user thread costs the same");
+    TEST_EXPECT_EQ(g_tkc_kproc, 2u * T, "a kproc thread costs the pool nothing: the reserve's");
+    TEST_EXPECT_EQ(g_tkc_pages_kproc, 0u, "and returns nothing");
+    TEST_EXPECT_EQ(g_tkc_exempt, 3u * T, "an exempt Proc's thread is counted");
+    TEST_EXPECT_EQ(g_tkc_for, 4u * T, "a kthread working for A is charged as A's");
+    TEST_EXPECT_EQ(g_tkc_pages_for, T, "and keeps its count");
+    TEST_ASSERT(g_tkc_for_in_kproc, "though it lives in kproc");
+    TEST_EXPECT_EQ(g_tkc_back, 0u, "every charge returns at the free, exactly once");
+}
+
+static volatile u32  g_tpr_edge, g_tpr_after_refusals, g_tpr_exempt, g_tpr_kproc, g_tpr_at_edge;
+static volatile bool g_tpr_made, g_tpr_user_refused, g_tpr_alloc_refused, g_tpr_for_refused;
+static volatile bool g_tpr_exempt_made, g_tpr_kproc_made, g_tpr_edge_made, g_tpr_full_refused;
+
+static void tpr_entry(void *arg) {
+    (void)arg;
+    struct Proc *S = current_thread()->proc;
+    struct Proc *A = proc_alloc();
+    g_tpr_made = A && !proc_resource_exempt(A);
+    if (!g_tpr_made) exits("setup");
+    const u32 T    = THREAD_POOL_PAGES;
+    const u32 pool = capacity_pool_pages();
+    const u32 room = pool - capacity_pool_charged();
+    if (room <= T) {
+        A->state = PROC_STATE_ZOMBIE;
+        proc_free(A);
+        exits("room");
+    }
+    // One page short of a thread machine-wide.
+    const u32 park = room - (T - 1u);
+    capacity_pool_park_for_test(park);
+    g_tpr_edge = capacity_pool_charged();
+    struct Thread *a = thread_create_with_arg(A, c0_never_entry, NULL);
+    struct Thread *b = thread_alloc_user(A, C0_USER_ENTRY, C0_USER_SP, 0, 0);
+    struct Thread *f = thread_create_kthread_for(A, c0_never_entry, NULL);
+    g_tpr_user_refused  = a == NULL;
+    g_tpr_alloc_refused = b == NULL;
+    g_tpr_for_refused   = f == NULL;
+    g_tpr_after_refusals = capacity_pool_charged();
+    struct Thread *x = thread_create_with_arg(S, c0_never_entry, NULL);
+    g_tpr_exempt_made = x != NULL;
+    g_tpr_exempt = capacity_pool_charged();
+    if (x) thread_free(x);
+    struct Thread *k = thread_create_with_arg(kproc(), c0_never_entry, NULL);
+    g_tpr_kproc_made = k != NULL;
+    g_tpr_kproc = capacity_pool_charged();
+    if (k) thread_free(k);
+    // The control one page away: with exactly a thread's room, A is served,
+    // so the refusals above were the pool's edge and nothing else.
+    capacity_pool_unpark_for_test(1u);
+    struct Thread *e = thread_create_with_arg(A, c0_never_entry, NULL);
+    g_tpr_edge_made = e != NULL;
+    g_tpr_at_edge   = capacity_pool_charged();
+    struct Thread *g = thread_create_with_arg(A, c0_never_entry, NULL);
+    g_tpr_full_refused = g == NULL;
+    if (g) thread_free(g);
+    if (e) thread_free(e);
+    if (a) thread_free(a);
+    if (b) thread_free_unlinked(b);
+    if (f) thread_free(f);
+    capacity_pool_unpark_for_test(park - 1u);
+    A->state = PROC_STATE_ZOMBIE;
+    proc_free(A);
+    exits("ok");
+}
+
+void test_thread_pool_refuses_users_keeps_tcb(void) {
+    // The pool's reclaim would otherwise strip the idle images earlier exec
+    // tests left cached and move the refusal point.
+    (void)image_cache_evict_idle_for_test();
+    g_tpr_edge = g_tpr_after_refusals = g_tpr_exempt = g_tpr_kproc = g_tpr_at_edge = 0;
+    g_tpr_made = g_tpr_user_refused = g_tpr_alloc_refused = g_tpr_for_refused = false;
+    g_tpr_exempt_made = g_tpr_kproc_made = g_tpr_edge_made = g_tpr_full_refused = false;
+    const u32 c0 = capacity_pool_charged();
+    int child_pid = rfork(RFPROC, tpr_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_ASSERT(g_tpr_made, "a user Proc");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly (else the pool had no room for the test)");
+    const u32 T    = THREAD_POOL_PAGES;
+    const u32 pool = capacity_pool_pages();
+    TEST_EXPECT_EQ(g_tpr_edge, pool - (T - 1u), "parked one page short of a thread");
+    TEST_ASSERT(g_tpr_user_refused, "a user Proc's kernel-entry thread is refused at the edge");
+    TEST_ASSERT(g_tpr_alloc_refused, "so is its user thread");
+    TEST_ASSERT(g_tpr_for_refused, "and a kthread that would work for it");
+    TEST_EXPECT_EQ(g_tpr_after_refusals, g_tpr_edge, "the refusals charged nothing");
+    TEST_ASSERT(g_tpr_exempt_made, "the TCB's thread is made past the edge");
+    TEST_EXPECT_EQ(g_tpr_exempt, pool + 1u, "counted, not refused");
+    TEST_ASSERT(g_tpr_kproc_made, "a kproc thread is made");
+    TEST_EXPECT_EQ(g_tpr_kproc, g_tpr_edge, "charging nothing");
+    TEST_ASSERT(g_tpr_edge_made, "with a thread's room, the user Proc is served");
+    TEST_EXPECT_EQ(g_tpr_at_edge, pool, "taking the pool to full");
+    TEST_ASSERT(g_tpr_full_refused, "and the next one is refused");
+    TEST_EXPECT_EQ(capacity_pool_charged(), c0, "everything returned, the park included");
 }
 
 // ---------------------------------------------------------------------------

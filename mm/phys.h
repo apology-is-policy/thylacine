@@ -68,11 +68,14 @@ void phys_zone_bounds(paddr_t *base, paddr_t *end);
 // The reserve is max(CAPACITY_RESERVE_MIN_PAGES, total / 8), clamped to half
 // the machine so a tiny guest still boots with a usable pool. 256 MiB is the
 // TCB's measured ceiling with headroom: the Larder caches at most 128 MiB
-// (LARDER_PAGE_ENTRIES), the DMA envelope 64 MiB, the slabs, kernel stacks and
-// the L0 root (one per thread / address space -- the thread and child axes --
-// plus at most THREAD_KSTACK_CACHE_MAX stacks cached between threads, 1 MiB),
-// DMA buffers (the warden's allowance, I-34), the direct map's tables. The
-// Image cache is NOT reserve memory: a cached file's pages are user pages,
+// (LARDER_PAGE_ENTRIES), the DMA envelope 64 MiB, the slabs, the L0 root (one
+// per address space -- the child axis), kproc's kernel stacks plus at most
+// THREAD_KSTACK_CACHE_MAX stacks cached between threads (1 MiB), DMA buffers
+// (the warden's allowance, I-34), the direct map's tables. A user Proc's
+// thread is NOT reserve memory: its kernel stack and slot are charged to the
+// pool (THREAD_POOL_PAGES, capacity_charge), so a thread bomb runs into the
+// pool's bound, never the reserve's (ARCH 7.3.5). Nor is the Image cache
+// reserve memory: a cached file's pages are user pages,
 // charged to the pool like every other, and they are what the pool reclaims
 // under pressure -- an idle image (cached, mapped by no one) is stripped of
 // its pages before a user allocation is refused, the way Plan 9's imagereclaim

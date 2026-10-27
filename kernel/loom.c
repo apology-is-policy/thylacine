@@ -2759,12 +2759,13 @@ void loom_sqpoll_main(void *arg) {
 }
 
 int loom_start_sqpoll(struct Loom *l) {
-    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (!l || l->magic != LOOM_MAGIC || !l->sqpoll_owner) return -1;
     // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
-    // group-terminates and its only exit is the stop-flag terminal above). Set
+    // group-terminates and its only exit is the stop-flag terminal above), its
+    // kernel memory charged to the user pool as the creator's (ARCH 7.3.5). Set
     // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free
     // would observe it; ready() then makes it runnable.
-    struct Thread *kt = thread_create_with_arg(kproc(), loom_sqpoll_main, l);
+    struct Thread *kt = thread_create_kthread_for(l->sqpoll_owner, loom_sqpoll_main, l);
     if (!kt) return -1;
     l->sqpoll = kt;
     ready(kt);

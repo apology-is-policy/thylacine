@@ -682,6 +682,10 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 #define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
 #define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
 
+// What a user Proc's thread costs the user pool (mm/phys.h, ARCH 7.3.5): the
+// stack block plus one page for its slot. kproc's threads cost it nothing.
+#define THREAD_POOL_PAGES          ((1u << THREAD_KSTACK_TOTAL_ORDER) + 1u)
+
 // Freed stacks kept with their guard still no-access, for the next create:
 // 1 MiB of the TCB reserve (phys.h) at most.
 #define THREAD_KSTACK_CACHE_MAX    32
@@ -780,9 +784,11 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top);
 // trampoline which then blr's `entry`. Adds to proc->threads list.
 //
 // Returns NULL on OOM (Thread alloc fail or kstack alloc fail; cleanup
-// is internal), or when the id space is spent (proc_id_space_spent: a
-// permanent refusal, not a retryable one). A Proc's first thread takes the pid
-// as its tid; every later one draws a fresh id (ARCH 7.3.4).
+// is internal), when the user pool refuses the thread's charge (a non-exempt
+// Proc's thread costs THREAD_POOL_PAGES, ARCH 7.3.5), or when the id space is
+// spent (proc_id_space_spent: a permanent refusal, not a retryable one). A
+// Proc's first thread takes the pid as its tid; every later one draws a fresh
+// id (ARCH 7.3.4).
 //
 // `entry` takes no argument. For arg-passing (P2-D rfork), use
 // thread_create_with_arg below.
@@ -800,6 +806,14 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void));
 struct Thread *thread_create_with_arg(struct Proc *proc,
                                       void (*entry)(void *),
                                       void *arg);
+
+// A kproc kthread that works for `owner` (a Loom's SQPOLL poller): it lives
+// and dies in kproc, but its kernel memory is charged to the user pool as
+// `owner`'s thread would be, refused when the pool refuses `owner`. The charge
+// needs nothing of `owner` after the create: it returns when the thread is freed.
+struct Thread *thread_create_kthread_for(struct Proc *owner,
+                                         void (*entry)(void *),
+                                         void *arg);
 
 // P6-pouch-threads (sub-chunk 9): create a USER-mode Thread in `proc`.
 // Sibling of thread_create_with_arg, but instead of running `entry` in
