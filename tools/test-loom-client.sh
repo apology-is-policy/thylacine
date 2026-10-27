@@ -137,9 +137,9 @@ run_profile optimized -std=c99 -O2 -ffreestanding -fno-builtin -DNDEBUG -- -O2
 # plus -Werror.
 FS="$OUT/freestanding"; mkdir -p "$FS"
 TARGET=(--target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common
-        -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection
+        -fno-omit-frame-pointer -fstack-protector-strong -Xclang -fstack-clash-protection
         -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes
-        -Wmissing-prototypes -Wno-unused-parameter -Wno-unused-command-line-argument
+        -Wmissing-prototypes -Wno-unused-parameter
         -Werror -std=c99 -O2 -g)
 fs_objs=()
 for c in $CORES native_kernel fatal; do

@@ -114,6 +114,9 @@ set(_pouch_c_flags
     "-fno-common"
     "-fno-omit-frame-pointer"
     "-fstack-protector-strong"
+    # Through -Xclang, as Toolchain-aarch64-thylacine.cmake explains: the driver
+    # drops -fstack-clash-protection for a non-Linux triple.
+    "-Xclang -fstack-clash-protection"
     "-mbranch-protection=pac-ret+bti"
 )
 string(JOIN " " CMAKE_C_FLAGS_INIT ${_pouch_c_flags})

@@ -105,7 +105,13 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    no_stack_protector to avoid checking
 #                                    a half-initialized cookie.
 #   -fstack-clash-protection       — probe stack guard pages on large
-#                                    function-frame allocations. Mostly
+#                                    function-frame allocations. Given to
+#                                    cc1 through -Xclang: the clang driver
+#                                    forwards it only for Linux and FreeBSD
+#                                    triples and drops it for
+#                                    aarch64-none-elf with an 'argument
+#                                    unused' warning, while the AArch64
+#                                    backend probes for any triple. Mostly
 #                                    inert in our codebase (boot stack is
 #                                    16 KiB, no large frames) but
 #                                    defense-in-depth + future-proof.
@@ -155,7 +161,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-mno-outline-atomics"
     "-fno-omit-frame-pointer"
     "-fstack-protector-strong"
-    "-fstack-clash-protection"
+    "SHELL:-Xclang -fstack-clash-protection"
     "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"
