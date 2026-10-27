@@ -109,12 +109,13 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 //                      as->lock so it is exact). B-1a' (ARCH 6.5 "Capacity, and
 //                      the I-32 default"): no longer a constant -- see
 //                      proc_default_page_budget below.
-//   PROC_THREAD_MAX -- live threads (an exited one stops counting at its
+//   thread budget   -- live threads (an exited one stops counting at its
 //                      EXITING commit; until its last switch-out frees it, it
-//                      is one of at most one per CPU) and SQPOLL kthreads.
-//                      Tighter than the others because a thread pins
-//                      THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel kstack
-//                      (256 threads -> 8 MiB kstacks).
+//                      is one of at most one per CPU) and SQPOLL kthreads,
+//                      against the Proc's own thread_budget (ARCH 7.3.5). A
+//                      thread's unswappable kernel stack and slot are charged
+//                      to the user pool (THREAD_POOL_PAGES), so the pool bounds
+//                      every Proc's threads together, as it bounds pages.
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
 //
 // B-1a': the DEFAULT anon budget a Proc is seeded with, and the hard maximum a
@@ -134,6 +135,14 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // a box extinction), and the TCB (exempt) keeps its reserve.
 u32 proc_default_page_budget(void);    // = capacity_pool_pages()
 u32 proc_page_budget_hard_max(void);   // = capacity_pool_pages()
+// The thread budget (ARCH 7.3.5, operator vote 4): seeded to
+// min(PROC_THREAD_BUDGET_DEFAULT, the hard max), inherited across rfork, and
+// set by a spawn exactly as the page budget is (SPAWN_EXT_THREADS; a raise past
+// the spawner's own needs SPAWN_PERM_MAY_RAISE_THREAD_BUDGET). The hard max is
+// derived, never pinned: as many threads as the user pool can hold.
+#define PROC_THREAD_BUDGET_DEFAULT 4096u
+u32 proc_default_thread_budget(void);  // = min(PROC_THREAD_BUDGET_DEFAULT, hard max)
+u32 proc_thread_budget_hard_max(void); // = capacity_pool_pages() / THREAD_POOL_PAGES
 // CF-3 A audit F1: per-Proc cap on TRANSIENT byte-I/O bounce heap (the
 // SYS_RW_MAX kmalloc tier in the read/write/pread/pwrite handlers).
 // 512 KiB = four concurrent 128-KiB bulk ops -- ample for the measured
@@ -143,7 +152,6 @@ u32 proc_page_budget_hard_max(void);   // = capacity_pool_pages()
 // 64x below the unbudgeted threads x SYS_RW_MAX. Over-budget ops degrade
 // to the 4-KiB stack tier -- shorter, never failed.
 #define PROC_BOUNCE_MAX (512u * 1024u)
-#define PROC_THREAD_MAX 256
 #define PROC_CHILD_MAX  256
 // PROC_VMA_MAX -- live VMAs (the I-32 FOURTH axis; overcommit, ARCH section 6.5).
 // The Linux vm.max_map_count analog. The eager attach path is already transitively
@@ -828,6 +836,12 @@ struct Proc {
     // exempt from the cap entirely (proc_resource_exempt), so the TCB's budget
     // is maintained but not consulted.
     u32                page_budget;
+    // The thread budget (ARCH 7.3.5): what live_threads + loom_sqpoll_count is
+    // admitted against (proc_thread_room_locked). Seeded to
+    // proc_default_thread_budget(), inherited across rfork, stamped by a spawn
+    // before EL0 within [1, proc_thread_budget_hard_max()]; never 0 on a live
+    // Proc. Atomic: devproc reads it lockless cross-Proc, as page_budget.
+    u32                thread_budget;
 
     // VIVARIUM V-6b: the per-Proc Linux signal disposition table, or NULL.
     //
@@ -923,7 +937,7 @@ struct Proc {
     // handle table was the only bound and the fid-lift audit (F1) showed a
     // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
     // kstacks. They are this Proc's workers in every meaningful sense, so
-    // they SHARE the PROC_THREAD_MAX budget: proc_thread_cap_ok and
+    // they SHARE the thread budget: proc_thread_cap_ok and
     // proc_sqpoll_charge both gate on live_threads + loom_sqpoll_count.
     // A SEPARATE field (not thread_count) because exit/teardown logic
     // drains thread_count and must never wait on a kthread the Proc does
@@ -1115,6 +1129,9 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // page_budget exceeds this Proc's own. One-hop delegable (a holder may confer
 // it), NOT propagated by rfork. See the SPAWN_PERM_* comment in syscall.h.
 #define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET (thread-model C6) -- the same authority for
+// the thread budget, stamped from SPAWN_PERM_MAY_RAISE_THREAD_BUDGET.
+#define PROC_FLAG_MAY_RAISE_THREAD_BUDGET (1u << 13)
 
 // The signal chunk's S-2: the TERM terminate-disposition latch -- the FOURTH
 // terminate family (interrupt, tty:quit/hup, pipe, term). Armed when
@@ -1254,7 +1271,7 @@ _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
     PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
-    PROC_FLAG_TERM_TERMINATE_PENDING |
+    PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED)) == 0,
     "the test-fixture mark must not overlap another flag");
@@ -1276,7 +1293,7 @@ _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTR
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
     PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
-    PROC_FLAG_TERM_TERMINATE_PENDING |
+    PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE)) == 0,
     "the forced-final-close mark must not overlap another flag");
@@ -1285,7 +1302,7 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
     PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
-    PROC_FLAG_TERM_TERMINATE_PENDING |
+    PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE |
     PROC_FLAG_EXIT_CLOSE_FORCED)) == 0,
@@ -1313,7 +1330,8 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
      PROC_FLAG_MAY_RAISE_PAGE_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING | \
      PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
      PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
-     PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID)
+     PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
+     PROC_FLAG_MAY_RAISE_THREAD_BUDGET)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1328,7 +1346,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_SESSION_HANGUP) + __builtin_popcount(PROC_FLAG_SEAT_MANAGER) +
     __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +
     __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
-    __builtin_popcount(PROC_FLAG_MAIN_TID),
+    __builtin_popcount(PROC_FLAG_MAIN_TID) +
+    __builtin_popcount(PROC_FLAG_MAY_RAISE_THREAD_BUDGET),
     "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
@@ -1495,6 +1514,9 @@ _Static_assert(__builtin_offsetof(struct Proc, page_budget) == 360,
                "the merge therefore pushed 360/368 -> 368/376 (sizeof 376 -> 384). "
                "Adding a field grows the SLUB cache; update the size assert "
                "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, thread_budget) == 364,
+               "thread-model C6 thread_budget fills the 4-byte pad after "
+               "page_budget -- no struct growth; the sizeof assert is the control.");
 _Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 424 &&
                __builtin_offsetof(struct Proc, live_threads) == 428,
                "thread-model C3: threads_lock and live_threads append after "
@@ -1652,7 +1674,7 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 
 // proc_thread_cap_ok -- the thread-spawn PRE-check, so a refused spawn
 //   usually allocates nothing. True if the Proc is exempt OR live_threads +
-//   loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL kthreads share the budget --
+//   loom_sqpoll_count < p->thread_budget (SQPOLL kthreads share the budget --
 //   fid-lift audit F1), read under p->threads_lock. Not the gate: a peer can
 //   spawn between it and the admit, which re-checks (proc_thread_admit).
 //   A thread stops counting at its EXITING commit, before its joiner is woken;
@@ -2921,6 +2943,10 @@ bool proc_may_post_service(const struct Proc *p);
 // NULL/corrupt.
 void proc_mark_may_raise_page_budget(struct Proc *p);
 bool proc_may_raise_page_budget(const struct Proc *p);
+// The thread budget's raise authority (thread-model C6): the same rules,
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET from SPAWN_PERM_MAY_RAISE_THREAD_BUDGET.
+void proc_mark_may_raise_thread_budget(struct Proc *p);
+bool proc_may_raise_thread_budget(const struct Proc *p);
 
 // arm-6 (IDENTITY-DESIGN §9.9.1): stamp PROC_FLAG_SESSION_HANGUP, from
 // SPAWN_PERM_SESSION_HANGUP in the spawn thunk (after proc_setsid makes the
@@ -2939,6 +2965,12 @@ void proc_arm_session_hangup(struct Proc *p);
 // at-or-below the parent's own budget with no authority (monotonic reduction --
 // the I-2 shape); require PROC_FLAG_MAY_RAISE_PAGE_BUDGET to exceed it.
 u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req);
+
+// proc_spawn_thread_budget_resolve -- the same decision for the thread budget
+// (SPAWN_EXT_THREADS; 0 = no tail, inherit): over proc_thread_budget_hard_max()
+// refused, at-or-below the parent's own allowed, above it only with
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET. Returns the child's budget, or 0 to refuse.
+u32 proc_spawn_thread_budget_resolve(const struct Proc *parent, u32 req);
 
 // =============================================================================
 // LS-5: the self-managing-notes mark (P2 default disposition, ARCH 8.8.2).

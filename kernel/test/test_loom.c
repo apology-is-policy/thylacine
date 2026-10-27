@@ -1218,8 +1218,8 @@ void test_loom_sqpoll_parks_on_cq_full(void) {
     test_proc_drop(p);
 }
 
-// Fid-lift audit F1: an SQPOLL kthread charges the CREATOR's PROC_THREAD_MAX
-// budget (I-32). The kthread runs under kproc (exempt), so pre-F1 an
+// Fid-lift audit F1: an SQPOLL kthread charges the CREATOR's thread budget
+// (I-32). The kthread runs under kproc (exempt), so pre-F1 an
 // unprivileged Proc could mint one 32-KiB-kstack kthread per ring, bounded only
 // by the handle table the fid lift just quadrupled. The budget is pre-loaded to
 // the boundary (the test_resource.c idiom) so only two real kthreads spawn:
@@ -1231,8 +1231,8 @@ void test_loom_sqpoll_charges_thread_budget(void) {
     p->principal_id = 1000u;                  // a real user -- NOT I-32 exempt
     u64 destroyed0 = loom_total_destroyed();
 
-    // The boundary without 255 real threads; the cap reads the live count.
-    p->thread_count = p->live_threads = PROC_THREAD_MAX - 1;
+    // The boundary without that many real threads; the cap reads the live count.
+    p->thread_count = p->live_threads = (int)p->thread_budget - 1;
 
     // At cap-1: one SQPOLL setup fits and takes the charge.
     struct loom_params kp;

@@ -547,6 +547,9 @@ pub const T_SPAWN_DEBUG_HELD: u32 = 1 << 0;
 // tail is a TSpawnExtCwd naming the cwd the child is born with, resolved by the
 // spawner as chdir resolves one (STALK-DESIGN 4.3).
 pub const T_SPAWN_EXT_CWD: u32 = 1 << 0;
+// T_SPAWN_EXT_THREADS: a TSpawnExtThreads sets the child's thread budget (ARCH
+// 7.3.5), after the cwd tail when both are set.
+pub const T_SPAWN_EXT_THREADS: u32 = 1 << 1;
 
 /// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
 /// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
@@ -559,6 +562,16 @@ pub struct TSpawnExtCwd {
 const _: () = assert!(core::mem::size_of::<TSpawnExtCwd>() == 16);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_len) == 8);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_flags) == 12);
+
+/// The T_SPAWN_EXT_THREADS tail (mirror `struct sys_spawn_ext_threads`;
+/// tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtThreads {
+    pub thread_budget: u32, // 0 — 1..the hard max; 0 is EINVAL
+    pub threads_flags: u32, // 4 — must be 0
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtThreads>() == 8);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtThreads, threads_flags) == 4);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
@@ -688,8 +701,8 @@ pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
 // kernel session hangup, so when that leader exits the kernel terminates the
 // rest of its session -- how /sbin/login reclaims the user's session (and its
 // per-user encrypted home) at logout. Gated like MAY_POST_SERVICE (login holds
-// it). Bit 5 matches SPAWN_PERM_SESSION_HANGUP (bits 3/4 -- RENDERER, RAISE --
-// are unused by native callers, so they are not mirrored here).
+// it). Bit 5 matches SPAWN_PERM_SESSION_HANGUP (bits 3/4/10 -- RENDERER and the
+// two RAISEs -- are unused by native callers, so they are not mirrored here).
 pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
 pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
 pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;

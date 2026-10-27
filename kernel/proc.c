@@ -218,6 +218,7 @@ static void proc_init_fields(struct Proc *p, int pid) {
     // fault in a single anon page. rfork_internal overwrites it with the
     // parent's.
     p->page_budget = proc_default_page_budget();
+    p->thread_budget = proc_default_thread_budget();   // likewise; 0 would admit no thread
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
     // (post-phys_init) installs a real pgtable_root and leaves context_id 0
@@ -365,6 +366,11 @@ struct Proc *proc_alloc(void) {
 // starts with, and what a spawn may raise it to -- that happen to coincide.
 u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
 u32 proc_page_budget_hard_max(void) { return capacity_pool_pages(); }
+u32 proc_thread_budget_hard_max(void) { return capacity_pool_pages() / THREAD_POOL_PAGES; }
+u32 proc_default_thread_budget(void) {
+    u32 max = proc_thread_budget_hard_max();
+    return max < PROC_THREAD_BUDGET_DEFAULT ? max : PROC_THREAD_BUDGET_DEFAULT;
+}
 
 // Ids are never recycled (a stale pid or tid never names another Proc or
 // thread; session_hangup_cb's isolation leans on it), so the counter is
@@ -1304,7 +1310,8 @@ void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
 static bool proc_thread_room_locked(struct Proc *p) {
     ASSERT_TL_HELD(p);
     return proc_resource_exempt(p) ||
-           p->live_threads + p->loom_sqpoll_count < PROC_THREAD_MAX;
+           (u32)p->live_threads + (u32)p->loom_sqpoll_count <
+               __atomic_load_n(&p->thread_budget, __ATOMIC_RELAXED);
 }
 
 bool proc_thread_cap_ok(struct Proc *p) {
@@ -1699,6 +1706,9 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // a raise from the build root down to cc1. A raise is a spawn-time decision
     // (sys_spawn_args.page_budget, authority-gated); rfork alone never widens it.
     child->page_budget    = parent->page_budget;
+    // The thread budget likewise (ARCH 7.3.5): a Go program a build driver
+    // spawned keeps the budget the driver was given.
+    child->thread_budget  = __atomic_load_n(&parent->thread_budget, __ATOMIC_RELAXED);
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
@@ -3225,6 +3235,34 @@ u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req) {
     if (req <= inherited) return req;           // reduction needs no authority
     if (proc_may_raise_page_budget(parent)) return req;
     return 0;                                   // raise without authority -> refuse
+}
+
+// The thread budget's decision, the page budget's rules (ARCH 7.3.5).
+u32 proc_spawn_thread_budget_resolve(const struct Proc *parent, u32 req) {
+    if (!parent) return 0;
+    u32 inherited = __atomic_load_n(&parent->thread_budget, __ATOMIC_RELAXED);
+    if (inherited == 0) inherited = proc_default_thread_budget();
+    if (req == 0) return inherited;
+    if (req > proc_thread_budget_hard_max()) return 0;   // refuse (never silently clamp)
+    if (req <= inherited) return req;                   // reduction needs no authority
+    if (proc_may_raise_thread_budget(parent)) return req;
+    return 0;
+}
+
+void proc_mark_may_raise_thread_budget(struct Proc *p) {
+    if (!p)                    extinction("proc_mark_may_raise_thread_budget(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_mark_may_raise_thread_budget on corrupted Proc");
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_may_raise_thread_budget on non-ALIVE Proc");
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MAY_RAISE_THREAD_BUDGET,
+                      __ATOMIC_RELAXED);
+}
+
+bool proc_may_raise_thread_budget(const struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_MAY_RAISE_THREAD_BUDGET) != 0;
 }
 
 // CL-5: the page-budget raise authority. Same one-way / atomic-RMW / never-

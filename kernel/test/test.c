@@ -1182,6 +1182,7 @@ void test_birth_hold_held_spawn_death_wins(void);
 void test_spawn_cwd_child_born_in_cwd(void);
 void test_spawn_cwd_image_joins_child_cwd(void);
 void test_spawn_cwd_refusals(void);
+void test_spawn_cwd_thread_budget_resolves(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -4869,6 +4870,7 @@ struct test_case g_tests[] = {
     { "spawn_cwd.child_born_in_cwd",           test_spawn_cwd_child_born_in_cwd,           false, NULL },
     { "spawn_cwd.image_joins_child_cwd",       test_spawn_cwd_image_joins_child_cwd,       false, NULL },
     { "spawn_cwd.refusals",                    test_spawn_cwd_refusals,                    false, NULL },
+    { "spawn_cwd.thread_budget_resolves",      test_spawn_cwd_thread_budget_resolves,      false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },

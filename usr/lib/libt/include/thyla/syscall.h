@@ -301,8 +301,8 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // T_SPAWN_PERM_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1): make the child a
 // NEW session leader + arm the kernel session hangup (on the leader's exit the
 // kernel terminates the rest of its session). Gated like MAY_POST_SERVICE. Bit
-// 5 matches SPAWN_PERM_SESSION_HANGUP; bit 4 (MAY_RAISE_PAGE_BUDGET) has no C
-// consumer and is not mirrored here. No native C caller uses this today (login
+// 5 matches SPAWN_PERM_SESSION_HANGUP; bits 4 and 10 (MAY_RAISE_PAGE_BUDGET,
+// MAY_RAISE_THREAD_BUDGET) have no C consumer and are not mirrored here. No native C caller uses this today (login
 // is Rust); mirrored for ABI lockstep.
 #define T_SPAWN_PERM_SESSION_HANGUP    (1u << 5)
 #define T_SPAWN_PERM_SEAT_MANAGER      (1u << 6)
@@ -346,6 +346,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // tail is a struct t_sys_spawn_ext_cwd naming the cwd the child is born with,
 // resolved by the spawner as chdir resolves one (STALK-DESIGN 4.3).
 #define T_SPAWN_EXT_CWD                (1u << 0)
+// T_SPAWN_EXT_THREADS: a struct t_sys_spawn_ext_threads sets the child's thread
+// budget (ARCH 7.3.5), after the cwd tail when both are set.
+#define T_SPAWN_EXT_THREADS            (1u << 1)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
@@ -460,6 +463,19 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_len) == 8,
                "t_sys_spawn_ext_cwd.cwd_len at ABI offset 8");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_flags) == 12,
                "t_sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
+
+// The T_SPAWN_EXT_THREADS tail (mirror struct sys_spawn_ext_threads;
+// tools/check-spawn-args-mirrors.py compares the two).
+struct t_sys_spawn_ext_threads {
+    unsigned int   thread_budget;    // 0  — 1..the hard max; 0 is EINVAL
+    unsigned int   threads_flags;    // 4  — must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_threads) == 8,
+               "t_sys_spawn_ext_threads must be 8 bytes (the kernel's tail)");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_threads, thread_budget) == 0,
+               "t_sys_spawn_ext_threads.thread_budget at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_threads, threads_flags) == 4,
+               "t_sys_spawn_ext_threads.threads_flags at ABI offset 4");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

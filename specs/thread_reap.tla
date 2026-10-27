@@ -56,7 +56,7 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS
     Threads,                    \* every Thread the Proc may ever hold
     Main,                       \* the Thread the Proc starts with
-    Cap,                        \* PROC_THREAD_MAX (counts live Threads)
+    Cap,                        \* the Proc's thread_budget, constant here (counts live Threads)
     NoThread,                   \* p->exec_task == NULL
     BUGGY_ADMIT_SPLIT,          \* the claim/cap check and the link are two holds
     BUGGY_COUNT_SPLIT,          \* the live-count read and its decrement are two holds

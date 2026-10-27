@@ -63,8 +63,9 @@ Read the process's status file:
 cat /proc/<pid>/status
 ```
 
-It reports `name`, `pid`, `state`, `threads`, `cpu_ns`, `ppid`, the owning
-`principal` and `gid`, then the memory lines: `pages` (the charge), `tables`,
+It reports `name`, `pid`, `state`, `threads`, `threadcap` (the most threads the
+process may run at once), `cpu_ns`, `ppid`, the owning `principal` and `gid`,
+then the memory lines: `pages` (the charge), `tables`,
 `file`, `children`, `peak` and `budget`. A zombie reports its final figures and
 an `exit` line with its exit status, and a process that died of a fault or a
 note adds a `signal` line with the number of the signal it died of. Every
@@ -108,6 +109,13 @@ with 2 GiB has a pool of 458752 pages and a reserve of 65536 pages.
 Every process's budget defaults to the whole pool. Processes of the kernel's own
 principal are charged but never refused. Before refusing an allocation the pool
 reclaims the pages of cached file images that no process maps.
+
+Each thread costs the pool 9 pages (36 KiB) for its kernel stack and its record,
+charged when the thread is created and returned when it is freed. A process may
+run 4096 threads at once (its `threadcap`), or as many as the pool can hold on a
+machine where that is fewer, and a child inherits its parent's limit. A thread
+past the limit is refused with `EAGAIN`, and one the pool cannot hold with
+`ENOMEM`. Processes of the kernel's own principal have no thread limit.
 
 Page tables are charged to the address space when they are installed and
 reclaimed when they empty. A file page is charged to each process that maps it.

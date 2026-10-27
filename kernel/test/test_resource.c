@@ -40,6 +40,7 @@
 #include <thylacine/vma.h>          // #122: vma_find_gap + VMA_PROT_RW
 
 #include "../include/thylacine/errno.h"
+#include "../../mm/phys.h"         // C6: the thread budget's hard max is the pool's
 
 // The _for_proc inners of the burrow SVC handlers (non-static cores in
 // kernel/syscall.c), driven directly -- the same pattern test_sys_burrow uses.
@@ -335,19 +336,35 @@ void test_resource_measured_compile_needs_raise(void) {
 void test_resource_thread_cap_ok(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
 
-    p->thread_count = p->live_threads = PROC_THREAD_MAX - 1;
+    // The budget a Proc is born with (ARCH 7.3.5): 4096, or fewer if the pool
+    // cannot hold that many threads.
+    const u32 max = proc_thread_budget_hard_max();
+    TEST_EXPECT_EQ(p->thread_budget,
+                   max < PROC_THREAD_BUDGET_DEFAULT ? max : PROC_THREAD_BUDGET_DEFAULT,
+                   "a Proc is seeded with min(4096, the hard max)");
+    TEST_EXPECT_EQ(max, capacity_pool_pages() / THREAD_POOL_PAGES,
+                   "the hard max is as many threads as the pool holds");
+    const int cap = (int)p->thread_budget;
+
+    p->thread_count = p->live_threads = cap - 1;
     TEST_ASSERT(proc_thread_cap_ok(p), "below the thread cap -> ok");
-    p->thread_count = p->live_threads = PROC_THREAD_MAX;
+    p->thread_count = p->live_threads = cap;
     TEST_ASSERT(!proc_thread_cap_ok(p), "at the thread cap -> refused");
-    p->thread_count = p->live_threads = PROC_THREAD_MAX + 5;
+    p->thread_count = p->live_threads = cap + 5;
     TEST_ASSERT(!proc_thread_cap_ok(p), "over the thread cap -> refused");
     // Exited threads awaiting their reapers stay on the list but do not count.
-    p->thread_count = PROC_THREAD_MAX + 3;
-    p->live_threads = PROC_THREAD_MAX - 1;
+    p->thread_count = cap + 3;
+    p->live_threads = cap - 1;
     TEST_ASSERT(proc_thread_cap_ok(p), "exited threads not yet freed are not charged");
+    // The cap is the Proc's own budget, read at each decision.
+    p->thread_budget = 7u;
+    p->thread_count = p->live_threads = 6;
+    TEST_ASSERT(proc_thread_cap_ok(p), "below a lowered budget -> ok");
+    p->thread_count = p->live_threads = 7;
+    TEST_ASSERT(!proc_thread_cap_ok(p), "at a lowered budget -> refused");
 
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
-    sys->thread_count = sys->live_threads = PROC_THREAD_MAX + 100;
+    sys->thread_count = sys->live_threads = (int)sys->thread_budget + 100;
     TEST_ASSERT(proc_thread_cap_ok(sys), "exempt is unbounded by the thread cap");
 
     TEST_ASSERT(!proc_thread_cap_ok(NULL), "NULL -> refused (fail-closed)");
@@ -371,8 +388,9 @@ void test_resource_thread_admit_exact(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
 
     // Cap: A and B both pre-check at cap-1; B is admitted, A is refused. The
-    // cap reads the live count, set at the boundary without 255 real threads.
-    p->thread_count = p->live_threads = PROC_THREAD_MAX - 1;
+    // cap reads the live count, set at the boundary without that many threads.
+    const int cap = (int)p->thread_budget;
+    p->thread_count = p->live_threads = cap - 1;
     struct Thread *a = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
     struct Thread *b = thread_alloc_user(p, 0x1000u, 0x2000u, 0u, 0u);
     TEST_ASSERT(a && b, "two unlinked threads built for p");
@@ -399,8 +417,8 @@ void test_resource_thread_admit_exact(void) {
     TEST_ASSERT(pre_a && pre_b, "premise: both pre-checks passed at cap-1");
     TEST_ASSERT(adm_b, "control: the first admit at cap-1 links");
     TEST_ASSERT(!adm_a, "the second admit at the cap is refused, whatever its pre-check said");
-    TEST_EXPECT_EQ(cap_count, PROC_THREAD_MAX, "exactly the cap is linked");
-    TEST_EXPECT_EQ(cap_live, PROC_THREAD_MAX, "exactly the cap is counted live");
+    TEST_EXPECT_EQ(cap_count, cap, "exactly the cap is linked");
+    TEST_EXPECT_EQ(cap_live, cap, "exactly the cap is counted live");
     TEST_ASSERT(pre_c, "premise: the pre-check read no claim");
     TEST_ASSERT(!adm_c, "an admit after the claim is refused, whatever its pre-check said");
     TEST_EXPECT_EQ(claim_count, 0, "nothing linked into the claimed Proc");

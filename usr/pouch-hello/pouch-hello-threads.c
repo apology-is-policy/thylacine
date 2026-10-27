@@ -75,7 +75,7 @@
 #define NTHREADS         5u
 #define ITER_PER_THREAD  1000u
 #define HELD_THREADS     4u
-#define CHURN_THREADS    300u    // past PROC_THREAD_MAX (256)
+#define CHURN_THREADS    300u    // past the old fixed cap of 256; the count is checked, not a cap
 #define FREED_WAIT_MS    5000u
 
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;

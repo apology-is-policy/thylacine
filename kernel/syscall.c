@@ -5344,7 +5344,7 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE)) return -T_E_AGAIN;
     if (__atomic_load_n(&p->exec_task, __ATOMIC_ACQUIRE))      return -T_E_AGAIN;
 
-    // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at PROC_THREAD_MAX is
+    // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at its thread budget is
     // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) -- bounding a thread
     // bomb (each thread pins unswappable kernel kstack). kproc is already
     // rejected above; the SYSTEM boot/service chain is exempt. The cap counts
@@ -7971,7 +7971,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // skipped the join there. The kthread immediately parks (no SQEs yet).
     if (flags & LOOM_SETUP_SQPOLL) {
         // The F1 thread-budget charge FIRST: the kthread counts against
-        // this Proc's PROC_THREAD_MAX (its worker, whoever runs it). A
+        // this Proc's thread budget (its worker, whoever runs it). A
         // refusal here is the I-32 floor working, same as the page charge
         // above. loom_unref -> loom_free settles the charge via
         // sqpoll_charged on every later path, including a start failure.
@@ -9268,6 +9268,10 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if ((perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
             && !proc_is_console_attached(p)
             && !proc_may_raise_page_budget(p))                     return -1;
+    // Thread-model C6: the thread budget's raise authority, the same shape.
+    if ((perm_flags & SPAWN_PERM_MAY_RAISE_THREAD_BUDGET)
+            && !proc_is_console_attached(p)
+            && !proc_may_raise_thread_budget(p))                   return -1;
     // arm-6: SESSION_HANGUP takes the MAY_POST_SERVICE one-hop shape (a
     // console-attached granter OR a holder of the post-service bit) -- login's
     // session-management authority, the same gate CONSOLE_OWNER uses. The
@@ -9315,6 +9319,9 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     }
     if (perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) {
         proc_mark_may_raise_page_budget(p);   // CL-5: the raise authority
+    }
+    if (perm_flags & SPAWN_PERM_MAY_RAISE_THREAD_BUDGET) {
+        proc_mark_may_raise_thread_budget(p); // C6: the thread budget's
     }
     if (perm_flags & SPAWN_PERM_SESSION_HANGUP) {
         // arm-6 (IDENTITY-DESIGN §9.9.1): become a NEW session leader, then arm
@@ -9598,6 +9605,9 @@ struct spawn_full_argv_args {
     // returns the inherited budget when the caller asked for none, and a 0 from
     // it means REFUSE, which fails the spawn before we ever get here.
     u32            page_budget;
+    // The RESOLVED thread budget (ARCH 7.3.5), as page_budget: the parent
+    // decided it, the thunk stamps it. Never 0.
+    u32            thread_budget;
     // VIVARIUM V-1b + Design D (section 13.10.3): the manifest declaration
     // (SPAWN_PHENO_LINUX) -- the thunk sets it on the CHILD's Territory
     // (territory_declare_linux) before EL0, and the child's image is then
@@ -9642,6 +9652,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     u32     argc          = sa->argc;
     struct spawn_identity identity = sa->identity;   // A-1a: copy before kfree
     u32     page_budget   = sa->page_budget;         // CL-5: copy before kfree
+    u32     thread_budget = sa->thread_budget;       // C6: copy before kfree
     struct spawn_allowance allowance;                // step 5: copy before kfree
     spawn_allowance_copy(&allowance, &sa->allowance);
     bool    pheno_manifest  = sa->pheno_manifest;    // V-1b/D: copy before kfree
@@ -9725,6 +9736,9 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // been decided against the value being replaced.
     if (p->as && __atomic_load_n(&p->as->ref, __ATOMIC_ACQUIRE) == 1)
         __atomic_store_n(&p->as->page_budget, page_budget, __ATOMIC_RELEASE);
+    // The thread budget (ARCH 7.3.5): this thunk is the Proc's only thread
+    // until it reaches EL0, so no admission has yet read the value replaced.
+    __atomic_store_n(&p->thread_budget, thread_budget, __ATOMIC_RELEASE);
     // VIVARIUM V-1b + Design D (section 13.10.3): the declaration, then the
     // decision -- BEFORE exec_setup and before EL0, where a plain store is
     // race-free (no peer thread yet; the identity/allowance set-once-before-
@@ -9823,7 +9837,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         const char *argv_data, u32 argv_data_len, u32 argc,
         caps_t cap_mask, u32 perm_flags,
         const u32 *fds, u32 fd_count,
-        u32 eff_budget,
+        u32 eff_budget, u32 eff_threads,
         const struct spawn_identity *id,
         const struct spawn_allowance *want_allowance,
         u32 pheno_flags, u32 debug_flags, const char *cwd) {
@@ -9929,6 +9943,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // KP_ZERO left allowance.set false -> the child inherits via rfork).
     if (want_allowance) spawn_allowance_copy(&sa->allowance, want_allowance);
     sa->page_budget   = eff_budget;   // CL-5: parent-resolved; the thunk stamps it
+    sa->thread_budget = eff_threads;  // C6: likewise
     // V-1b + Design D: carry the two channels SEPARATELY (13.10.3). The manifest
     // bit becomes the child Territory's declaration in the thunk; the mount
     // channel's verdict (exe_pheno_linux, seeded by THIS parent's Territory
@@ -9997,7 +10012,7 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const u32 *supp_gids, u32 supp_gid_count,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
-        const char *cwd, u32 cwd_len) {
+        const char *cwd, u32 cwd_len, u32 req_threads) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
     // V-1b: unknown pheno bits reject (forward-compat); the known bit needs
@@ -10013,6 +10028,9 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
     // only the parent's budget + flags decide it.
     u32 eff_budget = proc_spawn_budget_resolve(p, req_budget);
     if (eff_budget == 0)                                return -1;
+    // Thread-model C6: the thread budget, the same decision (0 == inherit).
+    u32 eff_threads = proc_spawn_thread_budget_resolve(p, req_threads);
+    if (eff_threads == 0)                               return -1;
 
     // Menagerie step 5: gate a conferred allowance as a NARROWING vs the
     // caller's OWN allowance (I-2's hardware-axis analog; allowance.tla). A
@@ -10072,6 +10090,7 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
                                                       argv_data, argv_data_len,
                                                       argc, cap_mask, perm_flags,
                                                       fds, fd_count, eff_budget,
+                                                      eff_threads,
                                                       eff_id, want_allowance,
                                                       pheno_flags, debug_flags,
                                                       landed);
@@ -10095,7 +10114,7 @@ int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
                                             principal_id, primary_gid, supp_gids,
                                             supp_gid_count, want_allowance,
                                             req_budget, pheno_flags, debug_flags,
-                                            /*cwd=*/NULL, 0u);
+                                            /*cwd=*/NULL, 0u, /*req_threads=*/0u);
 }
 
 // Back-compat entry: not held (debug_flags 0). Keeps the CL-5 / V-1b signature
@@ -10365,6 +10384,26 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             allow_kbuf.pci[i] = desc.pci[i];
     }
 
+    // SPAWN_EXT_THREADS: after the cwd tail when that bit is set too, else
+    // directly after the record. Read first, as it allocates nothing.
+    u32 req_threads = 0;                  // 0 == inherit
+    if (req.ext_flags & SPAWN_EXT_THREADS) {
+        u64 tail_va = req_va + sizeof(struct sys_spawn_args) +
+            ((req.ext_flags & SPAWN_EXT_CWD) ? sizeof(struct sys_spawn_ext_cwd) : 0u);
+        if (!sys_validate_user_buf(tail_va, sizeof(struct sys_spawn_ext_threads)))
+            return -(s64)T_E_FAULT;
+        struct sys_spawn_ext_threads ext;
+        u8 *edst = (u8 *)&ext;
+        for (u64 i = 0; i < sizeof(ext); i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(tail_va + i, &b) != 0) return -(s64)T_E_FAULT;
+            edst[i] = b;
+        }
+        if (ext.threads_flags != 0)                    return -1;   // the unknown-bits rule
+        if (ext.thread_budget == 0)                    return -(s64)T_E_INVAL;
+        req_threads = ext.thread_budget;
+    }
+
     // SPAWN_EXT_CWD: the tail directly after the record, read only when the
     // record announces it -- a caller that does not set the bit is never read
     // past its 104 bytes. Copied into a kmalloc'd buffer (the frame already
@@ -10432,7 +10471,8 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         req.page_budget,                  // CL-5: 0 == inherit
         req.pheno_flags,                  // V-1b: 0 == inherit
         req.debug_flags,                  // 5f: 0 == not held
-        cwd_kbuf, cwd_len);               // SPAWN_EXT_CWD: NULL == inherit
+        cwd_kbuf, cwd_len,                // SPAWN_EXT_CWD: NULL == inherit
+        req_threads);                     // SPAWN_EXT_THREADS: 0 == inherit
     if (argv_kbuf) kfree(argv_kbuf);
     if (cwd_kbuf) kfree(cwd_kbuf);
     return rc;

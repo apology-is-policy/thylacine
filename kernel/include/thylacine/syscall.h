@@ -770,8 +770,10 @@ enum {
     // syscall_ret.c decodes [-4095, -2]):
     //   -EINVAL  bad alignment / out-of-bound entry_va / out-of-bound
     //            sp_va / out-of-bound tls_va / bad ptid_va / caller is kproc
-    //   -EAGAIN  per-Proc thread cap (PROC_THREAD_MAX) reached (#65, I-32)
-    //   -ENOMEM  kstack alloc fail / Thread cache alloc fail
+    //   -EAGAIN  the Proc's thread budget reached (#65, I-32; ARCH 7.3.5),
+    //            or the id space spent
+    //   -ENOMEM  the user pool refused the thread's charge, or the kstack /
+    //            Thread cache alloc failed
     // The ptid publish is best-effort: a fault writing *ptid_va (a buggy
     // caller; the address passed align+bound but is unmapped) is tolerated
     // -- the spawn still succeeds and the tid is returned in x0 -- mirroring
@@ -799,7 +801,7 @@ enum {
     //
     // After-exit reaping: the Thread descriptor + kstack are freed by
     // the resume path of the thread's last switch-out (ARCH 7.3.2). It
-    // stops counting against PROC_THREAD_MAX at step 1's commit, before
+    // stops counting against the thread budget at step 1's commit, before
     // step 2 wakes a joiner.
     //
     // Never returns to userspace — userspace must treat any return as
@@ -2823,6 +2825,14 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // acquires a gate, this bit needs the same one or it becomes a bypass. NOT a cap
 // (rfork does not propagate proc_flags).
 #define SPAWN_PERM_SEAL              (1u << 9)
+// SPAWN_PERM_MAY_RAISE_THREAD_BUDGET (thread-model C6, ARCH 7.3.5) stamps
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET on the child: the authority to spawn a
+// child whose thread budget (SPAWN_EXT_THREADS) exceeds the spawner's own. The
+// page-budget bit's rules exactly: gated one-hop (a console-attached granter
+// or a holder), a raise still bounded by proc_thread_budget_hard_max(),
+// lowering needs no authority, NOT a cap (rfork does not propagate it) though
+// the budget itself is inherited.
+#define SPAWN_PERM_MAY_RAISE_THREAD_BUDGET (1u << 10)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
@@ -2832,7 +2842,8 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SEAT_MANAGER | \
                                       SPAWN_PERM_SEAT_SERVICE | \
                                       SPAWN_PERM_SEAT_CLIENT | \
-                                      SPAWN_PERM_SEAL)
+                                      SPAWN_PERM_SEAL | \
+                                      SPAWN_PERM_MAY_RAISE_THREAD_BUDGET)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id
@@ -2920,7 +2931,14 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // cwd fails the spawn with chdir's errno and no child exists. Ungated: the cwd
 // is a name, re-resolved under the child's own identity at every use.
 #define SPAWN_EXT_CWD                (1u << 0)
-#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD)
+// SPAWN_EXT_THREADS: a struct sys_spawn_ext_threads sets the child's thread
+// budget (ARCH 7.3.5), as page_budget sets its page budget, except that the
+// tail's presence is the request: a budget of 0 is EINVAL (clear the bit to
+// inherit). At or below the spawner's own needs no authority; above it needs
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET; over proc_thread_budget_hard_max() is
+// refused (-1), never clamped.
+#define SPAWN_EXT_THREADS            (1u << 1)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -3759,6 +3777,21 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_len) == 8,
                "sys_spawn_ext_cwd.cwd_len at ABI offset 8");
 _Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_flags) == 12,
                "sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
+
+// The SPAWN_EXT_THREADS tail, after the SPAWN_EXT_CWD tail when that bit is
+// set too, else directly after the record.
+struct sys_spawn_ext_threads {
+    u32 thread_budget;  // 1..proc_thread_budget_hard_max(); 0 -> T_E_INVAL
+    u32 threads_flags;  // must be 0 -> else -1, the unknown-bits rule
+};
+_Static_assert(sizeof(struct sys_spawn_ext_threads) == 8,
+               "struct sys_spawn_ext_threads is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "8 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, thread_budget) == 0,
+               "sys_spawn_ext_threads.thread_budget at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, threads_flags) == 4,
+               "sys_spawn_ext_threads.threads_flags at ABI offset 4");
 
 struct exception_context;
 

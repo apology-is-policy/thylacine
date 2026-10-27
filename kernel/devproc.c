@@ -253,6 +253,12 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
     n = fmt_str(buf, cap, off, "threads: ");      if (!n) return 0; off += n;
     n = fmt_sdec(buf, cap, off, tc);              if (!n && tc != 0) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
+    // The thread budget (ARCH 7.3.5). Not "tbudget:": readers match keys as
+    // substrings, and "budget:" is the page budget's.
+    u32 tbudget = __atomic_load_n(&p->thread_budget, __ATOMIC_ACQUIRE);
+    n = fmt_str(buf, cap, off, "threadcap:");     if (!n) return 0; off += n;
+    n = fmt_sdec(buf, cap, off, (int)tbudget);    if (!n && tbudget != 0) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     // prowl-1: cumulative on-CPU time (ns; the reader diffs it for %CPU) + the
     // parent pid + the owning principal/gid. cpu_ns is the owner's or a

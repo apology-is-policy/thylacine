@@ -627,8 +627,10 @@ void test_proc_note_death_with_live_peer_reaps_signalled(void) {
 //
 // An exited thread is freed by the resume path of its last switch-out (ARCH
 // 7.3.2, I-48). Nothing in these children spawns, execs or waits to free one:
-// a program that starts and joins workers must never reach PROC_THREAD_MAX with
-// a handful of live threads (OpenRCT2 froze at 256; libxml2's runtest failed).
+// a program that starts and joins workers must never reach its thread budget
+// with a handful of live threads (OpenRCT2 froze at 256; libxml2's runtest
+// failed). The children set their budget to CAP_TEST_BUDGET, small enough to
+// fill with real threads.
 // A worker is named by its tid, read before it is readied, and never touched
 // once it may have exited.
 // ---------------------------------------------------------------------------
@@ -909,6 +911,8 @@ void test_proc_threads_lock_slot(void) {
     TEST_ASSERT(after == NULL, "empty again at exit");
 }
 
+#define CAP_TEST_BUDGET 32
+
 static volatile int g_rsq_count_before, g_rsq_count_after, g_rsq_setup_rc;
 static volatile int g_rsq_sqpoll_after, g_rsq_close_rc, g_rsq_sqpoll_closed;
 static volatile bool g_rsq_exempt;
@@ -926,9 +930,10 @@ static void rsq_entry(void *arg) {
     proc_apply_identity(p, 1000u, 1000u, NULL, 0);
     g_rsq_exempt   = proc_resource_exempt(p);
     g_rsq_setup_rc = g_rsq_close_rc = -1;
+    __atomic_store_n(&p->thread_budget, (u32)CAP_TEST_BUDGET, __ATOMIC_RELEASE);
     // Created directly, not through a create arm, so the cap does not stop the
     // budget's worth of workers.
-    for (int i = 0; i < PROC_THREAD_MAX - 1; i++) {
+    for (int i = 0; i < CAP_TEST_BUDGET - 1; i++) {
         struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
         if (!w) extinction("rsq_entry: thread_create_with_arg failed");
         ready(w);
@@ -962,7 +967,7 @@ void test_proc_sqpoll_charge_after_finished_workers(void) {
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
     TEST_ASSERT(!g_rsq_exempt, "the child runs as a user, so the cap applies");
     TEST_EXPECT_EQ(g_rsq_count_before, 1,
-        "255 finished workers were freed as they finished: the budget is open");
+        "a budget's worth of finished workers were freed as they finished: the budget is open");
     TEST_EXPECT_EQ(g_rsq_setup_rc, 0, "an SQPOLL setup fits");
     TEST_EXPECT_EQ(g_rsq_count_after, 1, "only the caller is counted");
     TEST_EXPECT_EQ(g_rsq_sqpoll_after, 1, "the poller took its charge");
@@ -1150,7 +1155,7 @@ void test_proc_exec_waits_for_exiting_peer(void) {
 // raised), so this runs at any CPU count.
 // ---------------------------------------------------------------------------
 
-static struct Thread *g_ccl_held[PROC_THREAD_MAX];
+static struct Thread *g_ccl_held[CAP_TEST_BUDGET];
 static volatile bool  g_ccl_exempt, g_ccl_setup_failed, g_ccl_full_refused;
 static volatile bool  g_ccl_room, g_ccl_charge, g_ccl_admit;
 static volatile int   g_ccl_count, g_ccl_live;
@@ -1160,11 +1165,12 @@ static void ccl_entry(void *arg) {
     struct Proc *p = current_thread()->proc;
     proc_apply_identity(p, 1000u, 1000u, NULL, 0);   // a user, so the cap applies
     g_ccl_exempt = proc_resource_exempt(p);
+    __atomic_store_n(&p->thread_budget, (u32)CAP_TEST_BUDGET, __ATOMIC_RELEASE);
     int n = 0;
-    while (n < PROC_THREAD_MAX - 1 &&
+    while (n < CAP_TEST_BUDGET - 1 &&
            (g_ccl_held[n] = thread_create_with_arg(p, c0_never_entry, NULL)) != NULL)
         n++;
-    if (n != PROC_THREAD_MAX - 1) {
+    if (n != CAP_TEST_BUDGET - 1) {
         for (int i = 0; i < n; i++) thread_free(g_ccl_held[i]);
         g_ccl_setup_failed = true;
         exits("setup");
@@ -1208,10 +1214,10 @@ void test_proc_cap_counts_live_threads(void) {
     TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
     TEST_EXPECT_EQ(status, 0, "child exited cleanly");
     TEST_ASSERT(!g_ccl_exempt, "the child runs as a user, so the cap applies");
-    TEST_ASSERT(!g_ccl_setup_failed, "setup: 255 threads beside the caller");
+    TEST_ASSERT(!g_ccl_setup_failed, "setup: the budget's worth of threads beside the caller");
     TEST_ASSERT(g_ccl_full_refused, "control: with every slot live, the cap refuses");
-    TEST_EXPECT_EQ(g_ccl_count, PROC_THREAD_MAX, "the exited peer is still on the list");
-    TEST_EXPECT_EQ(g_ccl_live, PROC_THREAD_MAX - 1, "and no longer live");
+    TEST_EXPECT_EQ(g_ccl_count, CAP_TEST_BUDGET, "the exited peer is still on the list");
+    TEST_EXPECT_EQ(g_ccl_live, CAP_TEST_BUDGET - 1, "and no longer live");
     TEST_ASSERT(g_ccl_room, "a thread that committed its exit no longer counts, though unfreed");
     TEST_ASSERT(g_ccl_charge, "the executor charge sees the same room");
     TEST_ASSERT(g_ccl_admit, "and a create is admitted at once");

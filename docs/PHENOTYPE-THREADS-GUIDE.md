@@ -132,11 +132,11 @@ for free. You are not cloning any of that; you're refcounting into it, exactly
 as `SYS_THREAD_SPAWN` peers already do.
 
 **One lifetime subtlety to get right (and to have the auditor check):** the
-per-AddrSpace page budget (I-32) and the thread cap (`PROC_THREAD_MAX`). A new
+per-AddrSpace page budget (I-32) and the thread cap (the Proc's `thread_budget`). A new
 thread charges the same `AddrSpace.page_budget` as its peers (that's correct —
 sharing the address space shares the cap), and it must respect the per-Proc
 thread cap the way `sys_thread_spawn_handler` does (`kernel/syscall.c:4520-ish`
-— grep for the `PROC_THREAD_MAX` check and mirror it). Don't skip that check;
+— grep for `proc_thread_cap_ok` and mirror it). Don't skip that check;
 an unbounded `pthread_create` loop is a DoS otherwise.
 
 ---
@@ -509,7 +509,7 @@ you:
   does — `sys_torpor_wait_for_proc` already gets this right, so as long as you
   shell straight onto it and don't add your own pre-check, you inherit the
   correctness. Don't reimplement the wait loop in the shell.
-- **I-32 (resource floor).** Per-AddrSpace page budget + `PROC_THREAD_MAX`
+- **I-32 (resource floor).** Per-AddrSpace page budget + the thread budget
   (§2). A `pthread_create` storm must fail clean (`-EAGAIN`), never OOM the box.
 - **TLS / SP banking.** `SP_EL0` is the user stack (I-21); the kernel runs on
   `SP_ELx`. `thread_user_trampoline` installs `sp_el0` and `tpidr_el0` *at the
