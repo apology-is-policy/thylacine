@@ -22,6 +22,253 @@ needed the operator.
 
 
 ---
+## 2026-10-26/27 -- one checked declaration per cross-file kernel name (votes 19-24; corona)
+
+*What this run was for:* OPEN-BUGS "kernel warning census" (10-26 14:00Z).
+During the vote-18 close gate, a real compile of every kernel TU with the
+build's own flags printed 464 warnings with the tests and 96 without, and a
+signature census over every non-static declaration found one real mismatch:
+test_proc_identity.c declared sys_spawn_full_argv_identity_for_proc with 17
+parameters against syscall.c's 16 (V-1b 3434d6c0a, 2026-07-30). Undefined
+behaviour, harmless only because every call passed 0, and invisible to the
+compiler: C compares a declaration with its definition only inside one TU.
+
+- *The operator's votes (10-27):* 19 -- headers, static in production
+  (VISIBLE_IF_KERNEL_TESTS, Linux KUnit's VISIBLE_IF_KUNIT; declarations in
+  the module header under #ifdef KERNEL_TESTS; a function with no production
+  caller compiled only with the tests); 20 -- -Werror on both kernel builds,
+  announced to main and aux before it lands. Scripture 6cb53eaba. Later the
+  same day: 21 -- continue past the belay; 22 -- wire pte_violates_wxe into
+  the leaf encoders; 23 -- a file-local function becomes static and an
+  uncalled one is deleted; 24 -- the rule covers objects as well as
+  functions.
+- *Xa 56fbbf479 / 9acbd2f75* (UNBUILT): the 17-vs-16 UB fixed; 101 test
+  hooks out of production; 8 syscall.c statics; notes.h for notes_noted_*;
+  the dead dyz_start_clunk deleted; sign-compare and string-concat fixed.
+- *Xc 0ec01f05e / c3cd2caa1*: tools/check-decls.py. *Wrong claim, corrected
+  here:* its commit said "green on 4194 names"; that census read only
+  kernel/ (build_inputs kept '/kernel/' sources), so arch/, mm/, lib/ and
+  the generated halls_symtab.c were never checked. Found 10-27 when a
+  self-test case for an arch-side declaration stayed green; three more tool
+  gaps the same day, each witnessed red on a seeded case before its fix:
+  builtin declarations read as written ones; a declaration whose range
+  begins with a macro (`bool`) was placed in the header (a false negative);
+  block-scope externs were invisible to both rules. Rule (c), one definition
+  per struct tag, came from test_uaccess.c's "must mirror" copy of a kernel
+  struct.
+- *Xb-1..Xb-3 (71111ffb2, 2451d6807, 153d9fca7)*: test_registry.h; 190
+  names to module headers; linker and asm symbols to arch/arm64/sections.h.
+  *Planner lesson:* production cross-file users must come from position data,
+  not the AST `used` flag -- the first plan would have made fault_test_run
+  and thread_free_oncpu_waits static.
+- *Xb-4 a3144a8c5*: clang IGNORES -Wredundant-decls (a seeded same-file
+  duplicate compiled silently), so redundancy took an AST census; 2177 lines
+  deleted. *Wrong turn, caught before commit:* the first deletion run ate
+  code -- a prototype ending in a `//` comment never matched the `;` scan,
+  which ran on into test_exec_ns_resolve_absolute_ok's first two lines. 152
+  files restored from HEAD; the scan now strips comments and asserts each
+  span is exactly one declaration. *Found on the way:*
+  test_devcap_clearance_audio_graph had never run since 79076bb4e (09-06) --
+  defined, never registered.
+- *ce6e916ab*: -fstack-clash-protection had been a NO-OP since it was added.
+  The clang driver drops it for aarch64-none-elf with an "argument unused"
+  warning; the code was identical to no flag. Now -Xclang in the kernel,
+  userspace and Pouch toolchains (Pouch's list never had it, though its
+  comment said so); probe loops seen in the disassembly. It also blocked
+  vote 20: the plain form fails a .S compile under -Werror.
+- *Xb-5 a6d897319*: vote 19 also covers header-declared functions. A census
+  (production AST definitions x tests-build DeclRefExpr users x 13 variant
+  compiles x any .S/.ld mention) found 278 functions and 8 objects. *Lesson:*
+  the variants moved 21 functions out of the set (18 loom_private_*,
+  ready_on, thread_switch); a two-configuration census would have broken
+  those builds. 164 + 23 had no production caller (kcalloc and
+  kmem_cache_destroy among them).
+- *The host checkers nobody ran:* 19 tools/test-*.py read kernel source by
+  name or anchor. Base 19 pass; the series tip before Xb-5, 17 -- Xa's u32
+  counter broke the magazines model and Xb-2's syscall.h includes broke the
+  ABI header's standalone compile; Xb-5 broke five more. A recurrence of a
+  recorded lesson (run every host driver on the series tree before a lease).
+  Fixed in a6d897319; tools/test-host-checkers.sh runs them all.
+- *1a7c1796d*: check-decls in every build.sh kernel, fatal, self-test
+  first. *f4f8b23b1*: -Werror, after bounding the kstack_overflow fault
+  test's recursion (-Winfinite-recursion was the last source warning).
+- *Found, not this chunk's, enqueued:* ARCHITECTURE section 28's I-12 cell
+  still leads with pte_violates_wxe, which has no caller anywhere -- known
+  since 2026-08-03, filed under a session task number later reused, so
+  unowned for 12 weeks (OPEN-BUGS 10-27 08:58Z).
+
+- *The belay (10-27 09:2xZ):* the 400k self-compaction BELAYED -- corona's
+  checkout HEAD had not moved across two compactions because all progress
+  lived in the decls worktree. The operator's vote 21: continue; reset the
+  state; run later self-compactions from the tree where the progress lives.
+- *Votes 22-24 (operator, 10-27):* 22 -- wire pte_violates_wxe at the PTE
+  encoders (extinction on W+X at either EL, a regression red without it),
+  making ARCH section 28's I-12 cell true; 23 -- the 49 file-local
+  non-static functions: static, the dead deleted and listed; 24 -- keep
+  "function or object" in the Test reach rule.
+- *Xb-6:* measured by the compile, not the census. The census's "29 used in
+  their own file" counted vma_remove, whose only mention was the string in
+  its own extinction("vma_remove(NULL)"); the text census read a name in a
+  string as a use, and the production build's -Wunused-function, once the
+  others were static, named it dead. Comments that described deleted
+  functions as live were fixed where they stood: three said uart_set_base()
+  moves the PL011 base (uart_remap_to_vmalloc() does); a host checker,
+  test-service-admission, anchored its slice on the deleted
+  proc_caps_by_stripes comment.
+
+- *The user the kernel census could not see (c4c1acddc):* Xb-6 made
+  p9_transport_progress_limit static, and test-9p-progress stopped linking:
+  the host fixture tools/host-tests/9p-progress.c calls it. A census of
+  users has three classes -- kernel TUs, .S/.ld files, and host fixtures
+  (tools/host-tests/*.c and the C inside tools/test-*.py, which compile in
+  the tests build's shape) -- and mine had counted two. It became
+  VISIBLE_IF_KERNEL_TESTS; a grep of tools/ for all 49 names found no other.
+  The new runner (8b6faa34d) is what caught it, on its first run.
+- *The dossier pass (c4c1acddc):* a survey of 469 notes for the 189
+  tests-only and 21 deleted names found 75 sentences saying production calls
+  a function it does not, 14 naming deleted code and 49 listing test-only
+  functions as live API. Three were wrong in substance before this series:
+  I-3 "enforced twice" (production has no bind graph; would_create_mount_cycle
+  alone), sub-corvus "no bound of any kind" on srvconn creation (three credit
+  limits), and a duplicated devsrv connect path with a retired soft cap.
+- *Vote 22 (25c2ad06c):* my 10:30Z research said every leaf came from three
+  encoders. It was wrong: checking the claim the new comment made, a grep
+  for table writes found three block leaves composed by hand (the direct
+  map's 1 GiB blocks, the kernel GiB's 2 MiB blocks, the demote's), all
+  from a clean composite. They now go through make_block_pte_l2 and a new
+  make_block_pte_l1. One fault-test variant per encoder (four), because each
+  encoder is its own chokepoint and one variant proves only one. The
+  checked-in comment in fault.c ("make_user_pte_l3 would encode W|X
+  faithfully if asked") became false the moment the check landed; a grep
+  for "faithfully" found it and its two vault copies. The three composites
+  with no static assert (a recorded seam) got theirs.
+
+- *The production kernel did not link (11:40Z).* Every check so far had been
+  a syntax-only compile of both configurations, check-decls, and the host
+  checkers. The first production-shape LINK (a kernel-only cmake build with
+  KERNEL_TESTS=OFF, built to compare symbols with the base) failed:
+  proc_test_console_renderer, which Xa had guarded as a test hook, is the
+  single-holder pre-check in syscall.c's spawn_perm_grant_check. Its
+  prototype stayed visible, so production compiled the call. The census
+  that classified "101 test hooks" read the names and missed the caller; the
+  compile could not see it; only the link could, and nothing in the series
+  had linked production. An object census of the two configurations then
+  found 52 more hook prototypes visible to production (vote 19 puts them
+  under KERNEL_TESTS), and main.c's unguarded test/test.h made 2124 test
+  declarations visible there. New check-decls rule (d) -- declared but
+  defined nowhere in the configuration -- named the same 2176 on the
+  production build and 0 on the tests build. It matched the census exactly,
+  without the census's false hits on strings and the symbol table. The
+  routine-production-build gap is enqueued as a decision (OPEN-BUGS 11:49Z).
+
+- *check-production already ran (12:10Z).* e5c966a7d's message and the
+  OPEN-BUGS entry said tools/check-production.sh builds production "by
+  hand". Reading tools/test.sh to cost the decision I had queued showed
+  that every test.sh already runs it (#229), but it built only joey's lean
+  shape and never the kernel. So it was not a decision: 1bfeefed7 extends
+  #229's own guard to build and link the KERNEL_TESTS=OFF kernel in
+  build/prodcheck-kernel and run check-decls on it (1428 names), and
+  corrects the three sentences.
+- *Gates, 11:55-12:08Z (1bfeefed7's tree):* build-kernel 131 s (check-decls
+  4146 names, rule (d) live); tools/test.sh 2090/2090, mmu.wxe_predicate
+  PASS, boot-stack high-water 15504/16384 (the same as the base, 6cb53eaba);
+  UBSan build, then suite 2090/2090 with 0 UBSan lines; test-fault rc=2
+  after 2 of 14 variants.
+- *test-fault stopped at variant 2 (12:08Z).* wxe_violation's build failed
+  check-decls rule (b): `extern char _kernel_start[]` inside its #ifdef.
+  My "variant census" (21 compiles) had been -fsyntax-only on the variant
+  TUs, and a compile accepts a local extern. check-decls had run only on
+  the two main configurations, which never see that line, so no run of
+  the rule had covered code only a variant compiles. bti_fault had the same
+  shape, but there the declaration is right: the same file's file-scope asm
+  .globl's the name. check-decls did not know a C file can define a symbol
+  in assembly, so it would have stopped that build too. fc0a9acba: the
+  variant includes sections.h, and check-decls counts a TU's own asm
+  globals (two self-test cases, the positive one seen red without the
+  reading; 23/23). Then all four rules ran under every knob, both
+  configurations. I enumerated the knobs from every #if in the tree rather
+  than from memory: 17, plus LOOM_RECEIPT_HOST_OBSERVE, which does not
+  compile under kernel flags because tools/host-tests/loom-receipts.c
+  defines it with its own scaffolding. Result: 0 of 34 runs failing. With
+  the old extern put back, exactly wxe_violation failed, in both
+  configurations. Enqueued (OPEN-BUGS 10-27, after fc0a9acba): no routine gate compiles
+  VIV_TRACE, LOOM_PRIVATE_QUALIFICATION or THYLACINE_NO_TICKLESS.
+  Lesson: a check run on configurations A and B says nothing about code
+  only C compiles, and the census I had called "covering the variants" ran
+  a weaker check than the claim needed.
+
+- *The audit (Fable 5.1 reviewing Opus 5.5; MODEL start==end), on a frozen
+  copy at e5c966a7d: 0 P0, 0 P1, 0 P2, 7 P3.* It rebuilt and linked both
+  configurations itself and reproduced the stack-clash census (10 frames, all
+  probed). It read all 367 added KERNEL_TESTS guards outside kernel/test and
+  found none hiding production behaviour. The finding that mattered was F1:
+  my comments said the leaf check runs "at runtime on every encoded leaf",
+  and "stops the boot before the MMU is enabled". Every kernel caller passes a
+  constant composite, so the compiler folds the check away: `strings` on the
+  tests ELF shows only the "(user page)" body. Same lesson as the variant
+  census -- I described the source, not the binary. F2 followed from it: an
+  extinction with the MMU off takes extinction()'s console claim, an
+  exclusive pair on Device memory, which is IMPLEMENTATION DEFINED, so on
+  hardware it may hang with no line (enqueued). F3: kernel text's UXN was
+  pinned by nothing. F6: two variants shared one body, so they could not
+  tell the L1 encoder from the L2. All fixed in the audit close, each
+  sabotage seen to pass before the fix and fail after.
+
+- *Red runs (13:03-13:42Z, on 1828c2613).* Each check was broken on
+  purpose and its gate had to fail, naming the right thing:
+  - e5c966a7d's bug put back (visible prototype, KT-only definition,
+    production call): check-production fails at the kernel link,
+    `undefined symbol: proc_test_console_renderer`.
+  - A header prototype nothing defines: check-production and check-decls
+    on the tests build both fail, naming proc_decls_sabotage_orphan (1429
+    and 4147 names).
+  - The GiB provoker routed through the L2 encoder: the variant fails with
+    "wrong extinction message" (it printed "(kernel L2 block)"); before
+    the audit fix the same sabotage passed.
+  - Kernel text without UXN: mmu.c stops at the new assert; before the fix
+    it compiled.
+  After restoring: clean tree, rebuild, the four W^X variants pass (each
+  also with the provoker's FAIL line absent), check-production ok.
+- *The first W^X red run was hollow on one leg.* The sabotage replaced the
+  extinction with `(void)msg;`, leaving pte_violates_wxe -- static in
+  production -- unused. -Werror stopped the production build, so test.sh
+  failed at its check-production precondition before running a single
+  test: rc=1, the red I wanted, for the wrong reason. In the same run the
+  four variants failed on "kernel test suite failed" rather than on their
+  missing body, because both sabotages (the extinction and the predicate's
+  EL0 leg) were applied together: two causes, one reading. Split and
+  re-run: with the call kept and the extinction gone, each variant's guest
+  printed the provoker's FAIL line and no extinction, its suite passed
+  2090/2090, and the gate failed it (two by "provoker silent", two by the
+  60 s timeout while their userspace was still booting). With only the EL0
+  leg removed, test.sh failed 2089/2090. The guest log that names the one
+  failing test was overwritten by the next run before I read it, so that
+  leg was run once more, keeping the log.
+
+- *The last red leg, and a lapsed lease.* The EL0-leg run, repeated with
+  the guest log kept: test.sh 2089/2090, and the one `FAIL:` line in the
+  guest is mmu.wxe_predicate ("pte_violates_wxe disagrees with its AP x PXN
+  x UXN row"). Separately, my Mac lease expired at about 12:27Z and I did
+  not see it: lease_update sets phase and pids but does not renew, and the
+  session ran without channels, so the peers' release asks never reached
+  me. From 12:27Z to 14:22Z the reruns and red runs used cores I no longer
+  held. Re-taken at 14:22Z and announced to aux (queued behind, content to
+  wait); recorded in the yip memory.
+
+*Landing gate (1828c2613, 13:42-15:33Z):* tools/test.sh 2090/2090;
+tools/test-fault.sh 14/14; tools/ci-smp-gate.sh N=10 PASS on default-smp1,
+-smp4, -smp8, ubsan-smp4 and ubsan-smp8, 0 corruption. Earlier on the
+series: UBSan suite 2090/2090 with 0 UBSan lines (1bfeefed7's tree), host
+checkers 35/35, check-production green with the production kernel linked.
+Fast-forwarded onto corona/async-memory (an ancestor of the series, 6cb53eaba).
+
+*Open, owned (OPEN-BUGS):* an extinction before mmu_enable may hang on
+hardware (audit F2, needs a thyla-pi witness); three diagnostic knobs no
+routine gate compiles; the HARDENING_FULL and KASLR build options, which
+nothing reads (a vote is owed); at the join with aux-3, C5's three test
+hooks in the old local-prototype shape, and main's test_proc.c missing
+prototype.
+
 ## 2026-10-26 -- no userspace without a strong seed (vote 18; corona)
 
 *What this run was for:* OPEN-BUGS P2, found 10-22 in the skip-as-pass
