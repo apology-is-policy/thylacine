@@ -143,8 +143,10 @@ static void recurse_into_guard(unsigned depth) {
     volatile char buf[1024];
     buf[0] = (char)depth;
     buf[1023] = (char)~depth;
-    // Tail-call avoidance: use the local after the recursive call.
-    recurse_into_guard(depth + 1);
+    // Tail-call avoidance: use the local after the recursive call. The guard
+    // ends the descent near depth 16; the bound only gives the function a path
+    // that returns, without which -Winfinite-recursion proves it never does.
+    if (depth < (1u << 20)) recurse_into_guard(depth + 1);
     buf[0] ^= buf[1023];
     (void)buf[0];
 }

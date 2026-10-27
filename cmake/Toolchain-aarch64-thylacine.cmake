@@ -136,6 +136,15 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    never reused (dec-2026-09-28-t-stat-devno-
 #                                    u64); a u32 local or parameter would
 #                                    truncate it with no other symptom.
+#   -Werror                        — every warning fails the build, with the
+#                                    tests and without (operator vote 20,
+#                                    .claude/rules/kernel-code.md "Cross-file
+#                                    declarations"). A warning a merge or a
+#                                    toolchain upgrade brings in is fixed
+#                                    where it appears, never silenced for the
+#                                    file. It reaches the fault-test and
+#                                    sanitizer kernels too: they build from
+#                                    this list.
 #
 # DEFERRED to post-v1.0 (per CLAUDE.md "complexity is permitted only where
 # it is verified"):
@@ -165,6 +174,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"
+    "-Werror"
     "-Werror=return-type"
     "-Wstrict-prototypes"
     "-Wmissing-prototypes"
