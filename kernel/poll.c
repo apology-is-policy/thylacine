@@ -231,21 +231,18 @@ u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l) {
 #endif
 
 // specs/poll_walk.tla Batch: each hold of the lock reaches up to
-// POLL_WAKE_BATCH hooks from the head (the first) or from the element after
-// the bookmark (every later one), stepping over other walks' bookmarks. Past
-// the last hook the walk is over; otherwise the bookmark goes back in right
-// behind the last hook reached.
-void poll_waiter_list_wake(struct poll_waiter_list *l) {
-    if (!l) return;
-
-    struct poll_waiter mark = { .magic = POLL_MARK_MAGIC };
-    bool parked = false;
+// POLL_WAKE_BATCH hooks from the head (an unparked walk's first) or from the
+// element after the bookmark (every later one), stepping over other walks'
+// bookmarks. Past the last hook the walk is over; otherwise the bookmark goes
+// back in right behind the last hook reached.
+static void poll_walk(struct poll_waiter_list *l, struct poll_waiter *mark,
+                      bool parked) {
     for (;;) {
         irq_state_t s = spin_lock_irqsave(&l->lock);
         struct poll_waiter *pw = l->head;
         if (parked) {
-            pw = mark.next;
-            poll_list_unlink(l, &mark);
+            pw = mark->next;
+            poll_list_unlink(l, mark);
             parked = false;
         }
         struct poll_waiter *last = NULL;
@@ -260,10 +257,10 @@ void poll_waiter_list_wake(struct poll_waiter_list *l) {
             }
             if (reached == POLL_WAKE_BATCH) {
                 // A hook is left: park the walk right behind `last`.
-                mark.prev = last;
-                mark.next = last->next;
-                last->next->prev = &mark;
-                last->next = &mark;
+                mark->prev = last;
+                mark->next = last->next;
+                last->next->prev = mark;
+                last->next = mark;
                 parked = true;
                 break;
             }
@@ -282,6 +279,86 @@ void poll_waiter_list_wake(struct poll_waiter_list *l) {
         void (*hook)(struct poll_waiter_list *) = g_poll_wake_batch_hook;
         if (hook) hook(l);
 #endif
+    }
+}
+
+void poll_waiter_list_wake(struct poll_waiter_list *l) {
+    if (!l) return;
+    struct poll_waiter mark = { .magic = POLL_MARK_MAGIC };
+    poll_walk(l, &mark, false);
+}
+
+void poll_waiter_list_wake_from(struct poll_waiter_list *l,
+                                struct poll_waiter *mark) {
+    if (!l || !mark || mark->magic != POLL_MARK_MAGIC)
+        extinction("pw_wake_from: no bookmark to walk from");
+    poll_walk(l, mark, true);
+}
+
+// =============================================================================
+// Owed walks (specs/poll_owed.tla). Every function here but the wait runs
+// under the caller's lock, the one that serializes the chains and records.
+// =============================================================================
+
+void poll_owed_init(struct poll_owed *o, struct poll_waiter_list *l) {
+    if (!o || !l) extinction("poll_owed_init: NULL");
+    o->list  = l;
+    o->chain = NULL;
+    o->next  = NULL;
+    o->prev  = NULL;
+}
+
+void poll_owe(struct poll_owed_chain *c, struct poll_owed *o) {
+    if (o->chain) return;
+    o->prev = NULL;
+    o->next = c->head;
+    if (c->head) c->head->prev = o;
+    c->head  = o;
+    o->chain = c;
+}
+
+void poll_owed_cancel(struct poll_owed *o) {
+    struct poll_owed_chain *c = o->chain;
+    if (!c) return;
+    if (o->prev) o->prev->next = o->next;
+    else         c->head       = o->next;
+    if (o->next) o->next->prev = o->prev;
+    o->next  = NULL;
+    o->prev  = NULL;
+    o->chain = NULL;
+}
+
+struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
+                                         struct poll_waiter *mark) {
+    struct poll_owed *o = c->head;
+    if (!o) return NULL;
+    poll_owed_cancel(o);
+
+    struct poll_waiter_list *l = o->list;
+    *mark = (struct poll_waiter){ .magic = POLL_MARK_MAGIC };
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    mark->next = l->head;
+    if (l->head) l->head->prev = mark;
+    l->head = mark;
+    spin_unlock_irqrestore(&l->lock, s);
+    return l;
+}
+
+// The holder of a bookmark here is between two batches of a walk the owner's
+// table lock no longer covers, and it may be preempted: spin with IRQs and
+// preemption as the caller has them, which on the free path is both on.
+void poll_waiter_list_await_unmarked(struct poll_waiter_list *l) {
+    for (;;) {
+        bool marked = false;
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        for (struct poll_waiter *pw = l->head; pw; pw = pw->next) {
+            if (pw->magic != POLL_MARK_MAGIC)
+                extinction("pw_await: a hook outlived its list's owner");
+            marked = true;
+        }
+        spin_unlock_irqrestore(&l->lock, s);
+        if (!marked) return;
+        __asm__ __volatile__("yield" ::: "memory");
     }
 }
 

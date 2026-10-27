@@ -330,6 +330,7 @@ void notes_queue_init(struct NoteQueue *q) {
         q->ring[i].timestamp_ns = 0;
     }
     poll_waiter_list_init(&q->poll_list);
+    poll_owed_init(&q->owed, &q->poll_list);
 }
 
 struct NoteQueue *notes_queue_alloc(void) {
@@ -342,9 +343,10 @@ struct NoteQueue *notes_queue_alloc(void) {
 void notes_queue_free(struct NoteQueue *q) {
     if (!q) return;
     // Defense-in-depth: at free time the queue MUST be quiescent — no
-    // registered poll_waiter. proc_free's calling sequence guarantees
-    // this (ZOMBIE state set, all Threads EXITING, handles closed); a
-    // violation here would be a serious lifecycle bug.
+    // registered poll_waiter and no walk's bookmark. proc_free's calling
+    // sequence guarantees this (ZOMBIE state set, all Threads EXITING,
+    // handles closed, the bookmarks waited out); a violation here would
+    // be a serious lifecycle bug.
     if (q->poll_list.head != NULL) {
         extinction("notes_queue_free: poll_waiter still registered on "
                    "q->poll_list (poll caller leaked a hook?)");
@@ -736,10 +738,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
             // disposition too (a handler may have been installed since the
             // original post declined to arm it).
             notes_arm_caught_note_locked(p, name);
-            // Wake registered poll_waiters AND devnotes_read's pollers
-            // (same list at F3 close).
-            poll_waiter_list_wake(&q->poll_list);
             spin_unlock(&q->lock);
+            // Wake registered poll_waiters AND devnotes_read's pollers
+            // (same list at F3 close), as the enqueue below does.
+            proc_wake_or_owe(&q->owed);
             return 0;
         }
     }
@@ -780,22 +782,27 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // not-yet-sleeping thread reads this latch at its own register-then-observe.
     notes_arm_caught_note_locked(p, name);
 
-    // Wake every registered poll_waiter (including any devnotes_read
-    // parked on this list per F3 close) BEFORE we drop the queue lock.
-    // The register-then-observe discipline requires that any concurrent
-    // dev->poll's sample either happens-before our enqueue (and sees
-    // empty; the subsequent post wakes it) or after (and sees the new
-    // entry). poll_waiter_list_wake takes its own lock per the documented
-    // lock order (object → list).
-    poll_waiter_list_wake(&q->poll_list);
-
     spin_unlock(&q->lock);
+
+    // Wake every registered poll_waiter (including any devnotes_read
+    // parked on this list per F3 close) AFTER the enqueue is visible:
+    // a concurrent dev->poll registers and samples under q->lock, so it
+    // either sampled before our enqueue (and its hook is listed now) or
+    // after (and saw the entry) -- the poll.h contract is an order, not
+    // a lock. Unlocked, so the walk masks nothing; a poster holding
+    // g_proc_table_lock (most of them) owes it to the lock's release,
+    // which keeps `p` alive through it (proc_wake_or_owe).
+    proc_wake_or_owe(&q->owed);
     return 0;
 }
 
-// F5/F6 audit close: re-enqueue at head. Caller MUST hold q->lock.
-// Cannot fail at v1.0 since the caller just popped (so there is a free
-// slot). Pre-decrement head with wrap; the new entry is the next dequeue.
+// F5/F6 audit close: re-enqueue at head. Caller MUST hold q->lock, and
+// wakes q's hooks once it drops it (proc_wake_or_owe(&q->owed)): the
+// queue's readiness is back where the pop found it, but a consumer that
+// sampled the queue between a pop and this push in a separate hold may
+// have registered and parked. Cannot fail at v1.0 since the caller just
+// popped (so there is a free slot). Pre-decrement head with wrap; the new
+// entry is the next dequeue.
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n) {
     if (!q || !n) return -1;
     if (q->count >= NOTE_QUEUE_DEPTH) {
@@ -807,11 +814,6 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n) {
     q->head = (q->head + NOTE_QUEUE_DEPTH - 1) % NOTE_QUEUE_DEPTH;
     q->ring[q->head] = *n;
     q->count++;
-    // Caller has not changed the readiness state of the queue (a note
-    // popped and re-pushed is back where it started); we wake regardless
-    // so any consumer that was about to register-and-sleep finds the
-    // queue non-empty.
-    poll_waiter_list_wake(&q->poll_list);
     return 0;
 }
 
@@ -1895,6 +1897,7 @@ again:
             spin_lock(&q->lock);
             int re_rc = notes_reenqueue_head_locked(q, &kill_popped);
             spin_unlock(&q->lock);
+            proc_wake_or_owe(&q->owed);
             if (re_rc != 0) {
                 extinction("notes_deliver_at_el0_return: re-enqueue of "
                            "kill failed (queue full) -- N-2/N-4 violation; "
@@ -2112,6 +2115,7 @@ again:
         // handler, so the re-arm sets the bit (arm re-checks handler/self-mgmt).
         notes_arm_caught_note_locked(p, popped.name);
         spin_unlock(&q->lock);
+        proc_wake_or_owe(&q->owed);
         return false;
     }
 
@@ -2125,6 +2129,7 @@ again:
             (void)notes_reenqueue_head_locked(q, &popped);
             notes_arm_caught_note_locked(p, popped.name);  // item 11 (round F2)
             spin_unlock(&q->lock);
+            proc_wake_or_owe(&q->owed);
             return false;
         }
     }

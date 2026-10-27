@@ -247,6 +247,9 @@ struct NoteQueue {
     // stack-allocated poll_waiter; producers wake via poll_waiter_list_-
     // wake which is multi-waiter-safe. No per-queue single-waiter Rendez.
     struct poll_waiter_list  poll_list;   // register-then-observe hooks (devnotes_read AND SYS_POLL)
+    // The walk of `poll_list` a post under g_proc_table_lock owes
+    // (proc_wake_or_owe; specs/poll_owed.tla). Under g_proc_table_lock.
+    struct poll_owed         owed;
 };
 
 // `kill` recognition — the special-case non-catchable note. The constant is
@@ -417,7 +420,8 @@ struct NoteQueue *notes_queue_alloc(void);
 
 // Release a NoteQueue. Caller must ensure no thread is currently
 // registered on `q->poll_list` (handled by proc_free's ordering: ZOMBIE
-// state is set, all threads EXITING, no devnotes_read can be in flight).
+// state is set, all threads EXITING, no devnotes_read can be in flight)
+// and no walk's bookmark is on it (proc_free waits them out).
 void notes_queue_free(struct NoteQueue *q);
 
 // Post a note to `p->notes`. `name` is bounded to NOTE_NAME_MAX-1 chars +
@@ -441,7 +445,9 @@ void notes_queue_free(struct NoteQueue *q);
 // poster would revisit (e.g. reserve the head slot for interrupt/kill).
 //
 // Wakes every registered hook on q->poll_list (devnotes_read parkers AND
-// SYS_POLL pollers; multi-waiter via the poll_waiter_list mechanism).
+// SYS_POLL pollers; multi-waiter via the poll_waiter_list mechanism), after
+// dropping q->lock; a poster holding g_proc_table_lock owes the walk to the
+// lock's release instead (proc_wake_or_owe).
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic);
 
@@ -505,8 +511,9 @@ u32 notes_discard_name(struct Proc *p, const char *name);
 // and by notes_deliver_at_el0_return on user-stack-push failure to
 // preserve the N-2 (consumed exactly once) invariant — the note is put
 // back so the next consume can pick it up. Caller MUST hold
-// p->notes->lock. Returns 0 on success. Cannot fail at v1.0 since the
-// caller just popped (so there is space).
+// p->notes->lock, and wakes the queue's hooks after dropping it
+// (proc_wake_or_owe(&q->owed)): this does not. Returns 0 on success. Cannot
+// fail at v1.0 since the caller just popped (so there is space).
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 
 // LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate `p` at

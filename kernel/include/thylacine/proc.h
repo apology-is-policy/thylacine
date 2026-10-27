@@ -211,8 +211,8 @@ struct Proc {
     // P2-D / #344: parent's child-reap wait list. Every Thread that calls
     // wait_pid_for registers its OWN stack-local poll_waiter here and parks
     // on its OWN private Rendez; a child entering ZOMBIE (the wakeup edge)
-    // calls poll_waiter_list_wake under g_proc_table_lock, which wakes EVERY
-    // registered waiter. This is the #344 multi-waiter lift the old single-
+    // owes a walk of it under g_proc_table_lock (child_owed, below), which
+    // wakes EVERY registered waiter. This is the #344 multi-waiter lift the old single-
     // waiter `struct Rendez child_done` could not do: a 2nd concurrent waiter
     // tripped sleep's single-waiter assert (-> extinction), so the RW-2
     // 2B-F1/F2 `wait_active` guard had to REFUSE the 2nd caller (-1) rather
@@ -222,10 +222,10 @@ struct Proc {
     // (every following field keeps its pinned offset). The list is the
     // wake-RELAY only; the AUTHORITATIVE "is a matching zombie reapable"
     // decision is wait_pid_for's re-scan of `children` under g_proc_table_-
-    // lock (register-then-observe, the poll.c discipline). poll_waiter_list_-
-    // wake is called UNDER g_proc_table_lock (the established exits() order
-    // proc_table_lock -> list -> rendez), so the parent stays alive through
-    // the wake and no death-wake is lost (I-9).
+    // lock (register-then-observe, the poll.c discipline). The owed walk
+    // begins UNDER g_proc_table_lock, with a bookmark at the head that
+    // proc_free waits out, so the parent stays alive through the walk and no
+    // death-wake is lost (I-9).
     struct poll_waiter_list  child_waiters;
 
     // P2-Eb: territory (Plan 9 Territory). At v1.0 each Proc has its own
@@ -1029,6 +1029,11 @@ struct Proc {
     // The execer sleeps here until it is the only live thread. One sleeper at
     // most: only the claim's holder waits.
     struct Rendez      exec_rendez;
+
+    // The walk of `child_waiters` an event under g_proc_table_lock owes
+    // (specs/poll_owed.tla): chained on the lock holder's table_owed, begun
+    // and finished by its proc_table_lock_release. Under g_proc_table_lock.
+    struct poll_owed   child_owed;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1356,8 +1361,10 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 456,
- "struct Proc size: thread-model C5 appended exec_task (a pointer) + "
+_Static_assert(sizeof(struct Proc) == 488,
+ "struct Proc size: the poll hook chunk appended child_owed (a 32-byte "
+ "struct poll_owed): 456 -> 488. Before that: "
+ "thread-model C5 appended exec_task (a pointer) + "
  "exec_rendez (a 16-byte Rendez): 432 -> 456. Before that: "
  "thread-model C3 appended threads_lock (a u32 spinlock) + "
  "live_threads int: 424 -> 432. Before that: "
@@ -2358,9 +2365,20 @@ void el0_birth_park(struct exception_context *ctx);
 // The helpers wrap spin_lock_irqsave / spin_unlock_irqrestore so the
 // IRQ-state thread-through stays explicit at the call site (irq_state_t
 // is the public spinlock primitive's typedef from <thylacine/spinlock.h>,
-// already included above).
+// already included above). They are the ONLY way the lock is taken or
+// dropped, proc.c included: the release walks the hook lists the hold owed
+// (proc_wake_or_owe), and so may take the lock again before it returns. A
+// caller therefore never holds a lock ordered after this one across a
+// release.
 irq_state_t proc_table_lock_acquire(void);
 void        proc_table_lock_release(irq_state_t s);
+
+// Wake `o->list`'s hooks: when the calling thread holds g_proc_table_lock,
+// owe the walk to the lock's release instead (specs/poll_owed.tla). The lock
+// masks IRQs for as long as it is held and is what keeps the list's owner
+// alive, so the release begins each owed walk under it -- a bookmark at the
+// list's head, which proc_free waits out -- and finishes it unlocked.
+void proc_wake_or_owe(struct poll_owed *o);
 
 // p->threads_lock (thread-model C3, ARCH 7.3.1). Order: g_proc_table_lock ->
 // threads_lock -> {t->wait_lock, torpor_lock}. Never two threads_locks on one

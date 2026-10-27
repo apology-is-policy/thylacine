@@ -119,18 +119,23 @@ static u32                g_next_legate_scope;
 //
 // LOCK ORDER:
 //
-//   `exits()` holds proc_table_lock through the wake of parent's
-//   child_waiters — poll_waiter_list_wake takes the list lock (nested)
-//   then, for each registered waiter, sets pw->ready and signals that
-//   waiter's private rendez. Order: proc_table_lock → list → rendez.
+//   An event under proc_table_lock that wakes a child_waiters (a child's
+//   death, an adopted zombie, an exec's vfork release, a stop, a continue,
+//   a birth-hold change) does not walk the list there: the lock is IRQSAVE,
+//   so the walk would keep the CPU masked for as many hooks as the list
+//   holds, however poll_waiter_list_wake batches it. It OWES the walk
+//   (proc_wake_or_owe chains the list's child_owed on the holder's
+//   table_owed) and proc_table_lock_release walks it. Order: proc_table_lock
+//   → list for the walk's begin; list → rendez for the walk, unlocked.
 //
-//   This bracketing is REQUIRED to defeat a self-audit-found race:
-//   without it, between exits's release of proc_table_lock and exits's
-//   call to poll_waiter_list_wake(&parent->child_waiters), the parent
-//   could be reaped + freed by the grandparent's wait_pid (which also
-//   takes proc_table_lock — but acquires AFTER our release, blocking us
-//   not at all). Holding proc_table_lock through the wake ensures the
-//   parent stays alive until the wake completes.
+//   The walk used to run under the lock to defeat a self-audit-found race:
+//   between exits's release of proc_table_lock and its wake, the parent
+//   could be reaped + freed by the grandparent's wait_pid (which takes
+//   proc_table_lock AFTER our release, blocking us not at all). The owed
+//   walk's bookmark defeats it now (specs/poll_owed.tla): the release lists
+//   it at the head of the list while still holding the lock, the reap
+//   (proc_unlink_child, under the lock) cancels the Proc's owed walks, and
+//   proc_free waits for every bookmark to leave its lists.
 //
 //   #344 (the multi-waiter lift). wait_pid_for no longer sleeps on a
 //   single-waiter `child_done` Rendez with a `wait_pid_cond` that walks
@@ -141,10 +146,10 @@ static u32                g_next_legate_scope;
 //   design fought, on three grounds:
 //
 //     (1) Acyclic by construction. The register (poll_waiter_list_-
-//         register) and the wake (poll_waiter_list_wake) both run UNDER
-//         proc_table_lock and take the list lock nested inside it:
+//         register) and the owed walk's begin (poll_owed_begin) both run
+//         UNDER proc_table_lock and take the list lock nested inside it:
 //         proc_table_lock → list. The rendez lock is taken strictly
-//         INSIDE the list-locked wake (list → rendez) and, separately,
+//         INSIDE the list-locked walk (list → rendez) and, separately,
 //         by a parked Thread's own sleep cond-check (rendez only). NO
 //         path takes the rendez lock then acquires proc_table_lock, so
 //         proc_table_lock → list → rendez has no cycle. The old
@@ -165,8 +170,9 @@ static u32                g_next_legate_scope;
 //         discipline). The no-zombie scan AND the poll_waiter_list_-
 //         register run in ONE proc_table_lock critical section. A child
 //         that becomes ZOMBIE *after* that section must take proc_table_-
-//         lock (after our release), so it finds our already-registered
-//         waiter and sets pw->ready + wakes — the parked Thread re-scans
+//         lock (after our release), so the walk it owes begins behind our
+//         already-registered waiter, sets pw->ready + wakes — the parked
+//         Thread re-scans
 //         and reaps. A child that became ZOMBIE *before* our scan is seen
 //         by the scan directly. `pw->ready` is only the wake RELAY; the
 //         re-scan is the readiness truth, so a spurious/non-matching wake
@@ -185,18 +191,24 @@ static u32                g_next_legate_scope;
 // CASCADING-EXITS RACE (R5-H F75):
 //   Without this lock, parent A's `proc_reparent_children` walk could
 //   rewrite child B's `parent` pointer concurrently with B's `exits()`
-//   reading the same field at `poll_waiter_list_wake(&p->parent->child_-
-//   waiters)`. If B holds the stale (pre-reparent) pointer in a register
+//   reading the same field at `proc_wake_or_owe(&p->parent->child_-
+//   owed)`. If B holds the stale (pre-reparent) pointer in a register
 //   and A's subsequent ZOMBIE + parent-wake chain causes A to be reaped +
 //   freed before B's wake line fires, B accesses freed-A → UAF on the
-//   wait list. This lock serializes A's mutation with B's read; the
-//   wake-inside-lock structure additionally prevents the
-//   reaped-between-release-and-wake variant.
+//   wait list. This lock serializes A's mutation with B's read; the owed
+//   walk's bookmark, listed before the lock drops and awaited by
+//   proc_free, additionally prevents the reaped-between-release-and-wake
+//   variant.
 //
 // SPIN_LOCK_IRQSAVE used uniformly: at v1.0 P3-A, no IRQ handler
 // modifies Proc lineage state, but the discipline future-proofs against
 // notes/signals (Phase 5+) that may surface from IRQ context.
 static spin_lock_t g_proc_table_lock = SPIN_LOCK_INIT;
+// The lock's holder, written by the holder alone, inside the lock: a thread
+// that reads itself here holds it (proc_wake_or_owe). Only
+// proc_table_lock_acquire / _release take and drop the lock, so this stays
+// true; NULL for a holder with no thread (early boot).
+static struct Thread *g_proc_table_holder;
 
 // Initialize a freshly-allocated Proc descriptor. Caller has already
 // passed KP_ZERO to kmem_cache_alloc, so all fields are zero/NULL on
@@ -220,6 +232,7 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->page_budget = proc_default_page_budget();
     p->thread_budget = proc_default_thread_budget();   // likewise; 0 would admit no thread
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
+    poll_owed_init(&p->child_owed, &p->child_waiters);
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
     // (post-phys_init) installs a real pgtable_root and leaves context_id 0
     // for the rolling allocator to stamp at first switch; proc_init (kproc,
@@ -326,12 +339,12 @@ struct Proc *kproc(void) {
 // runs before proc_link_child publishes the child), so this cannot recurse.
 void proc_set_exe_path(struct Proc *p, struct Path *path) {
     if (!p) return;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Path *old = p->exe_path;
     path_ref(path);        // NULL-safe
     p->exe_path = path;
     path_unref(old);       // NULL-safe
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // 2B-F3: publish `p` as init (the orphan-adopter). Called once per boot
@@ -342,11 +355,11 @@ void proc_set_exe_path(struct Proc *p, struct Path *path) {
 void proc_publish_init(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_publish_init: NULL or corrupted Proc");
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     bool dup = (g_init_proc != NULL);
     if (!dup)
         __atomic_store_n(&g_init_proc, p, __ATOMIC_RELEASE);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     if (dup) extinction("proc_publish_init: init already published");
 }
 
@@ -784,6 +797,15 @@ void proc_free(struct Proc *p) {
     if (p->state != PROC_STATE_ZOMBIE)
         extinction("proc_free of non-ZOMBIE Proc (lifecycle violation)");
 
+    // specs/poll_owed.tla Free. The reap cancelled the walks owed to this
+    // Proc's lists (an unpublished Proc never owed one) and no event can reach
+    // it now; the walks begun before the reap keep a bookmark on its lists
+    // until they finish, and nothing below may run until then.
+    if (p->child_owed.chain || (p->notes && p->notes->owed.chain))
+        extinction("proc_free of a Proc still owed a hook walk (the reap did not cancel it)");
+    poll_waiter_list_await_unmarked(&p->child_waiters);
+    if (p->notes) poll_waiter_list_await_unmarked(&p->notes->poll_list);
+
     // RW-7 R3-F1: stop any virtio device this Proc drove BEFORE vma_drain /
     // handle_table_free free its KObj_DMA pages back to the buddy (a still-
     // armed device would DMA into recycled memory). No-op when p->handles is
@@ -948,9 +970,9 @@ static struct Proc *proc_find_by_pid_walk(struct Proc *root, int pid) {
 }
 
 struct Proc *proc_find_by_pid(int pid) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *p = proc_find_by_pid_walk(kproc(), pid);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return p;
 }
 
@@ -966,9 +988,9 @@ static int proc_for_each_walk(struct Proc *root,
 }
 
 int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     int rv = proc_for_each_walk(kproc(), callback, arg);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return rv;
 }
 
@@ -986,9 +1008,9 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
 // for the same case, so the sentinel needs no translation.
 int proc_parent_pid(struct Proc *p) {
     if (!p) return 0;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     int ppid = p->parent ? p->parent->pid : 0;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return ppid;
 }
 
@@ -1031,14 +1053,14 @@ static int pgrp_exists_cb(struct Proc *q, void *arg) {
 // the caller was its leader (wired at PTY-1d).
 int proc_setsid(struct Proc *p) {
     if (!p) return -1;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     if (p->pgid == (u32)p->pid) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         return -T_E_ACCES;              // POSIX EPERM: already a group leader
     }
     p->sid  = (u32)p->pid;
     p->pgid = (u32)p->pid;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return p->pid;
 }
 
@@ -1057,7 +1079,7 @@ int proc_setsid(struct Proc *p) {
 int proc_setpgid(struct Proc *self, int pid, int pgid) {
     if (!self) return -1;
     if (pgid < 0) return -T_E_INVAL;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *target = NULL;
     if (pid == 0 || pid == self->pid) {
         target = self;
@@ -1067,23 +1089,23 @@ int proc_setpgid(struct Proc *self, int pid, int pgid) {
         }
     }
     if (!target || target->state != PROC_STATE_ALIVE) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         return -T_E_SRCH;
     }
     if (target->sid != self->sid || (u32)target->pid == target->sid) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         return -T_E_ACCES;
     }
     u32 want = (pgid == 0) ? (u32)target->pid : (u32)pgid;
     if (want != (u32)target->pid) {
         struct pgrp_scan_ctx ctx = { .pgid = want, .sid = self->sid };
         if (!proc_for_each_walk(kproc(), pgrp_exists_cb, &ctx)) {
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             return -T_E_ACCES;          // POSIX EPERM: no such group in session
         }
     }
     target->pgid = want;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return 0;
 }
 
@@ -1096,19 +1118,19 @@ int proc_setpgid(struct Proc *self, int pid, int pgid) {
 // the same lock, so the deref is safe).
 int proc_getpgid(struct Proc *self, int pid) {
     if (!self) return -1;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *target = (pid == 0) ? self : proc_find_by_pid_walk(kproc(), pid);
     int rv = target ? (int)target->pgid : -T_E_SRCH;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return rv;
 }
 
 int proc_getsid(struct Proc *self, int pid) {
     if (!self) return -1;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *target = (pid == 0) ? self : proc_find_by_pid_walk(kproc(), pid);
     int rv = target ? (int)target->sid : -T_E_SRCH;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return rv;
 }
 
@@ -1146,6 +1168,10 @@ static void proc_unlink_child(struct Proc *parent, struct Proc *child) {
     }
     child->sibling = NULL;
     child->parent  = NULL;
+    // specs/poll_owed.tla Unlink: no walk begins on a reaped Proc. Its threads
+    // are gone, so the walks owed to its lists owe no hook anything.
+    poll_owed_cancel(&child->child_owed);
+    if (child->notes) poll_owed_cancel(&child->notes->owed);
     // #65 (I-32): keep child_count == list length. Guarded so a (corruption-
     // induced) zero never wraps to UINT32_MAX.
     if (__atomic_load_n(&parent->child_count, __ATOMIC_RELAXED) > 0)
@@ -1242,7 +1268,7 @@ static void proc_reparent_children(struct Proc *p) {
             adopted_zombie = true;
     }
     if (adopted_zombie)
-        poll_waiter_list_wake(&adopter->child_waiters);
+        proc_wake_or_owe(&adopter->child_owed);
 }
 
 // =============================================================================
@@ -1389,9 +1415,9 @@ void proc_sqpoll_uncharge(struct Proc *p) {
 bool proc_child_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     bool ok = p->child_count < PROC_CHILD_MAX;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return ok;
 }
 
@@ -1978,9 +2004,9 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // dies at this syscall's own return tail. Without the re-check the
     // v1.0 straggler was merely an unelevated Proc with a stale tag; with
     // caps propagating it is the escape TLC finds in four steps.
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     if (__atomic_load_n(&parent->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         rfork_rollback_unpublished(child, ct);
         return -1;
     }
@@ -2024,7 +2050,7 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                          __ATOMIC_RELEASE);
 
     proc_link_child(parent, child);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 
     // Capture the pid BEFORE the child can run, and do not dereference `child`
     // past this point. Once ready() has published the thread, a PEER THREAD of
@@ -2212,9 +2238,9 @@ static void proc_seat_fail_locked(void);
 
 
 void proc_set_console_owner(struct Proc *p) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     g_console_owner = p;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // proc_is_console_owner -- true iff `p` is the current g_console_owner (the
@@ -2228,9 +2254,9 @@ void proc_set_console_owner(struct Proc *p) {
 // foreground program OUT of the INTERACTIVE band (audit F1). Fail-closed on NULL.
 bool proc_is_console_owner(const struct Proc *p) {
     if (!p) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     bool yes = (g_console_owner == p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return yes;
 }
 
@@ -2254,10 +2280,10 @@ bool console_session_match(u32 owner_sid, u32 caller_sid) {
 // discipline, the g_console_owner header above).
 bool proc_console_owner_in_session(const struct Proc *p) {
     if (!p) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     u32 owner_sid = g_console_owner ? g_console_owner->sid : 0u;
     u32 caller_sid = p->sid;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return console_session_match(owner_sid, caller_sid);
 }
 
@@ -2283,7 +2309,7 @@ static void proc_console_owner_restore_locked(void) {
 }
 
 void proc_set_console_trusted(struct Proc *p) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *prev = g_console_trusted_proc;
     g_console_trusted_proc = p;
     // IM-1: the episode ARM is a property of the authority's IDENTITY -- a
@@ -2296,14 +2322,14 @@ void proc_set_console_trusted(struct Proc *p) {
         cons_episode_disarm();
         if (cons_episode_abandon()) proc_console_owner_restore_locked();
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 bool proc_is_console_trusted(const struct Proc *p) {
     if (!p) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     bool yes = (g_console_trusted_proc == p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return yes;
 }
 
@@ -2330,9 +2356,9 @@ int proc_set_console_renderer(struct Proc *p) {
         extinction("proc_set_console_renderer on corrupted Proc");
     if (p->state != PROC_STATE_ALIVE)
         extinction("proc_set_console_renderer on non-ALIVE Proc");
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     if (g_console_renderer != NULL) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         return -1;
     }
     g_console_renderer = p;
@@ -2340,7 +2366,7 @@ int proc_set_console_renderer(struct Proc *p) {
     // informational; the pointer under g_proc_table_lock is the authority the
     // gates compare against).
     __atomic_or_fetch(&p->proc_flags, PROC_FLAG_CONSOLE_RENDERER, __ATOMIC_RELAXED);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return 0;
 }
 
@@ -2349,16 +2375,16 @@ int proc_set_console_renderer(struct Proc *p) {
 // implies a live holder; never dereferences.
 bool proc_is_console_renderer(const struct Proc *p) {
     if (!p) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     bool yes = (g_console_renderer == p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return yes;
 }
 
 struct Proc *proc_test_console_renderer(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *r = g_console_renderer;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return r;
 }
 
@@ -2366,13 +2392,13 @@ struct Proc *proc_test_console_renderer(void) {
 // only via proc_become_zombie_locked; tests claim on the live test thread's
 // Proc / synthetic Procs and must restore boot state).
 void proc_test_clear_console_renderer(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     if (g_console_renderer != NULL) {
         __atomic_and_fetch(&g_console_renderer->proc_flags,
                            ~PROC_FLAG_CONSOLE_RENDERER, __ATOMIC_RELAXED);
     }
     g_console_renderer = NULL;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // Post the `interrupt` note (Ctrl-C) to the current console owner. Runs in the
@@ -2410,9 +2436,9 @@ int notes_post_pgrp(u32 pgid, const char *name, u32 arg) {
     if (pgid == 0 || !name) return 0;
     struct pgrp_post_ctx ctx = { .pgid = pgid, .name = name, .arg = arg,
                                  .posted = 0 };
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_for_each_walk(kproc(), pgrp_post_cb, &ctx);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return ctx.posted;
 }
 
@@ -2423,14 +2449,14 @@ int notes_post_pgrp(u32 pgid, const char *name, u32 arg) {
 int notes_post_pid(int pid, const char *name, u32 arg) {
     if (pid <= 0 || !name) return 0;
     int posted = 0;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *q = proc_find_by_pid_walk(kproc(), pid);
     if (q && q->state == PROC_STATE_ALIVE) {
         if (notes_post(q, name, arg, NULL, true) == 0) posted = 1;
         proc_interrupt_terminate_wake(q);
         proc_caught_note_wake(q);   // item 11: the caught-note twin
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return posted;
 }
 
@@ -2448,9 +2474,9 @@ static int pgrp_in_sid_cb(struct Proc *q, void *arg) {
 bool proc_pgrp_in_session(u32 pgid, u32 sid) {
     if (pgid == 0) return false;
     struct pgrp_in_sid_ctx ctx = { .pgid = pgid, .sid = sid, .found = false };
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_for_each_walk(kproc(), pgrp_in_sid_cb, &ctx);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return ctx.found;
 }
 
@@ -2464,7 +2490,7 @@ bool proc_pgrp_in_session(u32 pgid, u32 sid) {
 // a tty-signal target; the notes_post_pgrp precedent), so a bringup winch
 // posts nothing.
 void proc_console_post_winch(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *owner = g_console_owner;
     if (owner && owner->magic == PROC_MAGIC &&
         owner->state == PROC_STATE_ALIVE && owner->pgid != 0u) {
@@ -2473,11 +2499,11 @@ void proc_console_post_winch(void) {
                                      .arg = 0u, .posted = 0 };
         proc_for_each_walk(kproc(), pgrp_post_cb, &ctx);
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 void proc_console_post_interrupt(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *owner = g_console_owner;
     if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
         notes_post(owner, "interrupt", 0u, NULL, true);
@@ -2496,7 +2522,7 @@ void proc_console_post_interrupt(void) {
         // g_proc_table_lock is held, satisfying both wakes' contract.
         proc_caught_note_wake(owner);
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // A-5a (I-27 carry): `p` relinquishes its own console-attach. The attach-bit
@@ -2510,7 +2536,7 @@ void proc_console_post_interrupt(void) {
 // only the caller's Proc), so this never revokes another Proc.
 void proc_console_relinquish(struct Proc *p) {
     if (!p) return;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_revoke_console_attached(p);   // atomic AND on proc_flags
     if (g_console_owner == p) g_console_owner = NULL;
     // IM-1: a relinquish drops EVERY console role p holds, the saved pre-SAK
@@ -2528,7 +2554,7 @@ void proc_console_relinquish(struct Proc *p) {
         if (g_seat.phase != SEAT_NORMAL) proc_seat_fail_locked();
         if (cons_episode_abandon()) proc_console_owner_restore_locked();
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // A-4c-2: the SAK transition (I-27 trusted-path handoff). Called from the
@@ -2547,23 +2573,23 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
     // introduces no g_proc_table_lock -> g_cons.lock edge.
     bool        begin = false;
     const char *why;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     if (seat) {
         if (g_seat.service != seat || g_seat.generation != generation ||
                 g_seat.phase != SEAT_QUIESCING || timer_now_ns() >= g_seat.deadline) {
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             return false;
         }
         for (u32 i = 0; i < sizeof(g_seat.held); i++) {
             if (g_seat.held[i]) {
-                spin_unlock_irqrestore(&g_proc_table_lock, s);
+                proc_table_lock_release(s);
                 return false;
             }
         }
     } else if (g_seat.phase != SEAT_NORMAL) {
         // A serial BREAK cannot redirect a live/failed graphical episode into
         // a different medium. Recovery must first rebuild its trusted owner.
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         return false;
     }
     struct Proc *owner   = g_console_owner;
@@ -2661,7 +2687,7 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
         g_seat.phase = begin ? SEAT_EXCLUSIVE : SEAT_FAILED;
         g_seat.deadline = timer_now_ns() + 90000000000ull;
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 
     // One line per SAK, in the caller's process context, via the #126
     // non-spinning emitter: the harness's witness that a BREAK reached the
@@ -2737,23 +2763,23 @@ bool proc_console_sak(void) {
 #ifdef KERNEL_TESTS
 void proc_test_seat_reset(void);
 void proc_test_seat_reset(void) {
-    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t lock = proc_table_lock_acquire();
     seat_zero(&g_seat, sizeof(g_seat));
-    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    proc_table_lock_release(lock);
 }
 // The deadlines are 5 s and 90 s of wall clock; a test cannot wait them out.
 void proc_test_seat_expire(void);
 void proc_test_seat_expire(void) {
-    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t lock = proc_table_lock_acquire();
     g_seat.deadline = 0;
-    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    proc_table_lock_release(lock);
 }
 #endif
 
 bool proc_is_seat_service(struct Proc *p) {
-    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t lock = proc_table_lock_acquire();
     bool yes = p && g_seat.service == p;
-    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    proc_table_lock_release(lock);
     return yes;
 }
 bool proc_is_seat_manager(struct Proc *p) {
@@ -2919,13 +2945,13 @@ static void proc_seal_locked(struct Proc *p, u32 bits) {
 }
 void proc_seal(struct Proc *p, u32 bits) {
     if (!p) return;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_seal_locked(p, bits);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 int proc_set_seat_service(struct Proc *p) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     int rc = -1;
     if (p && !g_seat.service && !g_seat.client) {
         u64 generation = g_seat.generation;
@@ -2937,20 +2963,20 @@ int proc_set_seat_service(struct Proc *p) {
         proc_seal_locked(p, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE);
         rc = 0;
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return rc;
 }
 
 // Warden designates the normal compositor at spawn. It remains untrusted:
 // this role only admits broker requests, never physical input or private frames.
 int proc_set_seat_client(struct Proc *p) {
-    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t lock = proc_table_lock_acquire();
     int rc = -1;
     if (p && g_seat.service && !g_seat.client && g_seat.phase == SEAT_NORMAL) {
         g_seat.client = p;
         rc = 0;
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    proc_table_lock_release(lock);
     return rc;
 }
 
@@ -2981,7 +3007,7 @@ static bool seat_attention_held(void) {
 int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
     if (!p || !m) return -1;
     if (op == SEAT_ACK) return proc_console_sak_from(p, m->generation) ? 0 : -1;
-    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t lock = proc_table_lock_acquire();
     bool service = g_seat.service == p;
     bool corvus = g_console_trusted_proc == p;
     int rc = -1;
@@ -3116,7 +3142,7 @@ status:
         seat_copy(m->data, g_seat.frame, g_seat.frame_len);
     }
 done:
-    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    proc_table_lock_release(lock);
     return rc;
 }
 
@@ -3129,7 +3155,7 @@ done:
 int proc_console_episode(struct Proc *p, u32 op) {
     if (!p) return -1;
     int rc = -1;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     if (g_console_trusted_proc == p) {
         switch (op) {
         case SYS_CONSOLE_EPISODE_ARM:
@@ -3152,30 +3178,30 @@ int proc_console_episode(struct Proc *p, u32 op) {
             break;
         }
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return rc;
 }
 
 struct Proc *proc_test_console_owner_pre_sak(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *o = g_console_owner_pre_sak;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return o;
 }
 
 struct Proc *proc_test_console_trusted(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *t = g_console_trusted_proc;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return t;
 }
 
 // Test-only: read g_console_owner (the SAK-transition target assertion in
 // kernel/test/test_cons.c). Externed in the test (the proc_test_link pattern).
 struct Proc *proc_test_console_owner(void) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *o = g_console_owner;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return o;
 }
 
@@ -3840,10 +3866,10 @@ int proc_become_legate_locked(struct Proc *p, u64 caps_to_or, u32 session_id,
 // table, and calls the _locked form above.
 int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
                        u64 valid_until, u32 legate_flags) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     int rc = proc_become_legate_locked(p, caps_to_or, session_id, valid_until,
                                        legate_flags);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return rc;
 }
 
@@ -3960,10 +3986,41 @@ void proc_session_hangup_if_leader(struct Proc *p) {
 // locked's walk; the lock is `static` here so we expose helpers rather
 // than the symbol.
 irq_state_t proc_table_lock_acquire(void) {
-    return spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    __atomic_store_n(&g_proc_table_holder, current_thread(), __ATOMIC_RELAXED);
+    return s;
 }
+
+// specs/poll_owed.tla Release: each walk this hold owed begins here, under
+// the lock -- a bookmark at the head of its list, pinning the list's Proc --
+// and finishes after the drop, IRQs on and preemptible. Then the lock is
+// retaken for the next. Only this thread's own walks: another holder's events
+// chain on that holder.
 void proc_table_lock_release(irq_state_t s) {
+    struct Thread *t = current_thread();
+    if (__atomic_load_n(&g_proc_table_holder, __ATOMIC_RELAXED) != t)
+        extinction("proc_table_lock_release by a thread that did not take it through proc_table_lock_acquire");
+    if (t) {
+        struct poll_waiter mark;
+        struct poll_waiter_list *l;
+        while ((l = poll_owed_begin(&t->table_owed, &mark)) != NULL) {
+            __atomic_store_n(&g_proc_table_holder, NULL, __ATOMIC_RELAXED);
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            poll_waiter_list_wake_from(l, &mark);
+            s = spin_lock_irqsave(&g_proc_table_lock);
+            __atomic_store_n(&g_proc_table_holder, t, __ATOMIC_RELAXED);
+        }
+    }
+    __atomic_store_n(&g_proc_table_holder, NULL, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+void proc_wake_or_owe(struct poll_owed *o) {
+    struct Thread *t = current_thread();
+    if (t && __atomic_load_n(&g_proc_table_holder, __ATOMIC_RELAXED) == t)
+        poll_owe(&t->table_owed, o);
+    else
+        poll_waiter_list_wake(o->list);
 }
 
 #ifdef KERNEL_TESTS
@@ -4067,8 +4124,8 @@ void proc_exit_notify_parent_locked(struct Proc *p) {
     struct Proc *par = p->parent;
     if (!par) return;
     // #344 multi-waiter: every Thread of the parent waiting in wait_pid_for
-    // is woken to re-scan. Lock order: proc_table_lock -> list -> rendez.
-    poll_waiter_list_wake(&par->child_waiters);
+    // is woken to re-scan, by the walk this hold owes (proc_wake_or_owe).
+    proc_wake_or_owe(&par->child_owed);
     // P6-pouch-signals-impl (sub-chunk 13a): the synthetic `child_exit` note.
     // notes_post takes the queue lock + the poll_list.lock + (after dropping
     // the queue lock) the queue's Rendez lock -- all compose with
@@ -4372,9 +4429,9 @@ static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
     struct Territory *dead = p->territory;
     if (!dead) return;
     p->territory = NULL;                                  // detach UNDER the lock
-    spin_unlock_irqrestore(&g_proc_table_lock, *s);
+    proc_table_lock_release(*s);
     territory_unref(dead);                                // sleep-legal, lock dropped
-    *s = spin_lock_irqsave(&g_proc_table_lock);
+    *s = proc_table_lock_acquire();
 }
 
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
@@ -4640,7 +4697,7 @@ static void exits_term(int code, int sig, const char *msg) {
     // The EXITING commit runs under p->threads_lock nested in this hold, and
     // the ZOMBIE publish follows it in the same hold, so wait_pid's reap path
     // observes a consistent (p->state == ZOMBIE AND every thread EXITING).
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
 
     // A-4a (I-25) legate-root scope teardown is NOT inline here: it fires in
     // proc_become_zombie_locked (the shared ZOMBIE chokepoint), so a root that
@@ -4668,7 +4725,7 @@ static void exits_term(int code, int sig, const char *msg) {
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL ||
         proc_exec_dooms(p, t)) {
         proc_threads_unlock(p, ts);
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned for a thread leaving alone");
     }
@@ -4686,7 +4743,7 @@ static void exits_term(int code, int sig, const char *msg) {
         // first and never reaches here.
         proc_threads_unlock(p, ts);
         group_terminate(p, code, sig, msg, false);
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned after group terminate");
     }
@@ -4719,9 +4776,9 @@ static void exits_term(int code, int sig, const char *msg) {
     if (close)
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
     proc_threads_unlock(p, ts);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     proc_exit_last_out(p, close);
-    s = spin_lock_irqsave(&g_proc_table_lock);
+    s = proc_table_lock_acquire();
 
     // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit, not
     // reap, so a zombie stops pinning its inherited per-user home 9P mount.
@@ -4740,7 +4797,7 @@ static void exits_term(int code, int sig, const char *msg) {
 
     proc_become_zombie_locked(p, code, sig, msg);
 
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 
     // F3 audit close: the clear-child-tid handoff runs AFTER the EXITING
     // commit (and the ZOMBIE transition) so any joiner woken by the
@@ -4866,7 +4923,7 @@ void thread_exit_self(void) {
         // (idempotent: p->handles is NULLed by the close).
         proc_exit_last_out(p, p->handles != NULL);
 
-        irq_state_t g = spin_lock_irqsave(&g_proc_table_lock);
+        irq_state_t g = proc_table_lock_acquire();
         // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit
         // (detach-under-lock + unref-outside) BEFORE the zombie transition, so a
         // zombie stops pinning its inherited per-user home 9P mount. Same
@@ -4887,7 +4944,7 @@ void thread_exit_self(void) {
         // REAL exit byte, so a phenotype exit_group(N) reaches the parent's wait
         // as WEXITSTATUS == N; gcpark-b: and the claim's signal).
         proc_become_zombie_locked(p, zcode, zsig, zmsg);
-        spin_unlock_irqrestore(&g_proc_table_lock, g);
+        proc_table_lock_release(g);
     }
 
     exit_tail_test_hook();
@@ -4939,10 +4996,10 @@ void thread_exit_self(void) {
 // ACQUIRE pairing (allowance.c F4).
 struct Allowance *proc_allowance_install_locked(struct Proc *p, struct Allowance *na) {
     if (!p) return NULL;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Allowance *old = p->allowance;
     __atomic_store_n(&p->allowance, na, __ATOMIC_RELEASE);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return old;
 }
 
@@ -5250,7 +5307,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
 
     struct AddrSpace *old;
     {
-        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        irq_state_t s = proc_table_lock_acquire();
         // The single-thread precondition is re-checked HERE, inside the same
         // critical section as the swap, rather than trusted from the caller's
         // earlier probe. A peer cannot actually appear in between -- creating one
@@ -5273,7 +5330,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         }
         proc_threads_unlock(p, ts);
         if (!alone) {
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             extinction("proc_exec_replace: a peer thread appeared");
         }
         old   = p->as;
@@ -5286,16 +5343,17 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
         // here, in the same critical section, rather than anywhere later where
         // it could be reordered against the thing it reports.
         //
-        // Under the lock for proc_become_zombie_locked's reason: the parent
-        // cannot exit while we hold it, so it is alive through the wake and no
-        // wake is lost (I-9). Waking unconditionally rather than testing
+        // Owed under the lock for proc_become_zombie_locked's reason: the
+        // parent cannot exit while we hold it, and the release begins the walk
+        // before it drops the lock, so the parent stays alive through it and
+        // no wake is lost (I-9). Waking unconditionally rather than testing
         // whether anyone is suspended is deliberate -- a spurious wake costs a
         // re-scan, whereas a test would be a second place that has to agree
         // with the park about who is waiting.
         if (p->parent)
-            poll_waiter_list_wake(&p->parent->child_waiters);
+            proc_wake_or_owe(&p->parent->child_owed);
 
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
     }
 
     // Design D (VIVARIUM 13.10.4): the ONE store of the new image's phenotype,
@@ -5782,9 +5840,9 @@ void el0_birth_park(struct exception_context *ctx) {
     // thread is not yet registered on its rendez, so a debugger's stop can land
     // before it is; the stop's own wait covers that, because it waits for the
     // park to settle (5e).
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_birth_hold_mark_parked_locked(p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 
     // Group death never returns from the park, and a latched interrupt does not
     // end it: a held child stays held until it is released, or converted and
@@ -5961,7 +6019,7 @@ bool proc_debug_stop_deliver(struct Proc *p) {
 bool proc_debug_fault_stop(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return false;
     if (p == g_kproc) return false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     // The focus is threads_lock state, stored in the deliver's own hold.
     irq_state_t ts = proc_threads_lock(p);
     bool deliver = (p->debug_owner != NULL) && proc_debug_stop_deliver_locked(p);
@@ -5980,7 +6038,7 @@ bool proc_debug_fault_stop(struct Proc *p) {
             __atomic_store_n(&p->debug_focus_thread, ct, __ATOMIC_RELEASE);
     }
     proc_threads_unlock(p, ts);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return deliver;
 }
 
@@ -6039,7 +6097,7 @@ void proc_debug_resume(struct Proc *p) {
 static void proc_birth_hold_set_locked(struct Proc *p, u32 v) {
     __atomic_store_n(&p->debug_birth_hold, v, __ATOMIC_RELEASE);
     if (p->parent)
-        poll_waiter_list_wake(&p->parent->child_waiters);
+        proc_wake_or_owe(&p->parent->child_owed);
 }
 
 void proc_birth_hold_convert_locked(struct Proc *p) {
@@ -6130,7 +6188,7 @@ static bool proc_job_stop_one_locked(struct Proc *m) {
     // re-scans on any child_waiters wake (the latch was set above under the
     // SAME lock its re-scan takes -- register-then-observe holds exactly as
     // for the zombie wake).
-    if (m->parent) poll_waiter_list_wake(&m->parent->child_waiters);
+    if (m->parent) proc_wake_or_owe(&m->parent->child_owed);
     return true;
 }
 
@@ -6167,7 +6225,7 @@ static void proc_job_resume_one_locked(struct Proc *m) {
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
     proc_threads_unlock(m, ts);
-    if (m->parent) poll_waiter_list_wake(&m->parent->child_waiters);
+    if (m->parent) proc_wake_or_owe(&m->parent->child_owed);
 }
 
 // The tty:susp catchability gate (round-2 R2-F3; the LS-5
@@ -6370,7 +6428,7 @@ int proc_job_stop_pgrp(u32 pgid) {
     if (pgid == 0) return 0;
     struct job_stop_ctx ctx = { .pgid = pgid, .orphaned = false,
                                 .affected = 0, .any_stopped = false };
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     ctx.orphaned = pgrp_orphaned_locked(pgid, NULL);
     proc_for_each_walk(g_kproc, job_stop_cb, &ctx);
     // ONE group-global reschedule IPI after every member's job_stop_req is set
@@ -6379,7 +6437,7 @@ int proc_job_stop_pgrp(u32 pgid) {
     // needs no kick). Every stopped member's OWN sleepers were already woken
     // per-member inside proc_job_stop_one_locked.
     if (ctx.any_stopped) smp_resched_others();
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return ctx.affected;
 }
 
@@ -6406,7 +6464,7 @@ int proc_job_stop_pgrp(u32 pgid) {
 bool proc_job_stop_self(struct Proc *m) {
     if (!m || m->magic != PROC_MAGIC) return false;
     bool stopped = false;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     // #240: the SECOND premise. The orphan re-check below covers the shell-
     // DEATH variant of "nobody can resume this"; nothing covered carrier
     // loss, where the shell is alive and the terminal is gone. Both are the
@@ -6422,7 +6480,7 @@ bool proc_job_stop_self(struct Proc *m) {
     // only reaches its tail when something traps it. Sleeping peers were woken
     // inside the one_locked helper.
     if (stopped) smp_resched_others();
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return stopped;
 }
 
@@ -6441,9 +6499,9 @@ static int job_cont_cb(struct Proc *q, void *arg) {
 int proc_job_cont_pgrp(u32 pgid) {
     if (pgid == 0) return 0;
     struct job_cont_ctx ctx = { .pgid = pgid, .visited = 0 };
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_for_each_walk(g_kproc, job_cont_cb, &ctx);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return ctx.visited;
 }
 
@@ -6594,14 +6652,14 @@ static void await_child_release(struct Proc *p, int child_pid,
     poll_waiter_init(&pw, &self_rendez);
 
     for (;;) {
-        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        irq_state_t s = proc_table_lock_acquire();
 
         struct Proc *child = NULL;
         for (struct Proc *c = p->children; c; c = c->sibling) {
             if (c->pid == child_pid) { child = c; break; }
         }
         if (released(p, child)) {
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             break;
         }
 
@@ -6609,7 +6667,7 @@ static void await_child_release(struct Proc *p, int child_pid,
         // over from the previous iteration cannot make this park spin.
         poll_waiter_init(&pw, &self_rendez);
         poll_waiter_list_register(&p->child_waiters, &pw);
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
 
         int sl = sleep_death_only(&self_rendez, child_wait_ready_cond, &pw);
         poll_waiter_list_unregister(&pw);
@@ -6706,7 +6764,7 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         // same lock during their ZOMBIE transition, so we either see
         // the pre-transition state (no zombie yet → sleep) or the post-
         // transition state (zombie ready to reap).
-        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        irq_state_t s = proc_table_lock_acquire();
 
         // Single scan: find a MATCHING zombie to reap (exit outranks the
         // PTY-1e reports) + the first reportable latched child; also note
@@ -6755,7 +6813,7 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
 
         if (!any_match) {
             // No matching child (none at all, or none with want_pid).
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             ret = -1;
             goto out;
         }
@@ -6778,20 +6836,20 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             for (struct Thread *ct = zombie->threads; ct; ct = ct->next_in_proc) {
                 if (ct->state != THREAD_EXITING) {
                     proc_threads_unlock(zombie, zs);
-                    spin_unlock_irqrestore(&g_proc_table_lock, s);
+                    proc_table_lock_release(s);
                     extinction("wait_pid: zombie thread not in EXITING state");
                 }
             }
             if (zombie->live_threads != 0) {
                 proc_threads_unlock(zombie, zs);
-                spin_unlock_irqrestore(&g_proc_table_lock, s);
+                proc_table_lock_release(s);
                 extinction("wait_pid: zombie with live_threads != 0");
             }
             proc_threads_unlock(zombie, zs);
 
             proc_unlink_child(p, zombie);
 
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
 
             // wait_pid frees only the Proc, once its last thread is freed. A
             // zero read under the lock means the last reaper has dropped it,
@@ -6820,7 +6878,7 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             int pid = reportee->pid;
             if (report_cont) reportee->cont_report_pending = false;
             else             reportee->stop_report_pending = false;
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             if (status_out)
                 *status_out = report_cont ? WAIT_STATUS_CONTINUED
                                           : WAIT_STATUS_STOPPED;
@@ -6831,7 +6889,7 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         // A matching child is alive but not yet a zombie.
         if (nohang) {
             // WAIT_WNOHANG: report "not ready" without blocking.
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            proc_table_lock_release(s);
             ret = 0;
             goto out;
         }
@@ -6848,7 +6906,7 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         // cannot make this park spin.
         poll_waiter_init(&pw, &self_rendez);
         poll_waiter_list_register(&p->child_waiters, &pw);
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_table_lock_release(s);
 
         // Park on our OWN rendez; child_wait_ready_cond reads ONLY pw->ready.
         // On any wake we unregister + loop to re-scan under the lock -- the
@@ -6904,10 +6962,10 @@ int wait_pid(int *status_out) {
 void proc_test_link(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_test_link: NULL or corrupted Proc");
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     __atomic_fetch_or(&p->proc_flags, PROC_FLAG_TEST_FIXTURE, __ATOMIC_RELEASE);
     proc_link_child(kproc(), p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // proc_test_link_child -- link `p` as a child of `parent` (the PTY-1f
@@ -6920,19 +6978,19 @@ void proc_test_link(struct Proc *p) {
 void proc_test_link_child(struct Proc *parent, struct Proc *p) {
     if (!parent || !p || p->magic != PROC_MAGIC)
         extinction("proc_test_link_child: NULL or corrupted Proc");
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     __atomic_fetch_or(&p->proc_flags, PROC_FLAG_TEST_FIXTURE, __ATOMIC_RELEASE);
     proc_link_child(parent, p);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // proc_test_orphan_rule -- run the orphaned-pgrp rule for `dying` exactly as
 // its exit does (proc_become_zombie_locked), under g_proc_table_lock, without
 // the rest of the exit.
 void proc_test_orphan_rule(struct Proc *dying) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     proc_orphan_rule_locked(dying);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // proc_test_set_init — point g_init_proc at `p` (NULL restores the
@@ -6940,9 +6998,9 @@ void proc_test_orphan_rule(struct Proc *dying) {
 // so the 2B-F3 reparent-to-init test can simulate a live init during
 // the pre-joey test phase and restore afterward.
 void proc_test_set_init(struct Proc *p) {
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     __atomic_store_n(&g_init_proc, p, __ATOMIC_RELEASE);
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
 }
 
 // proc_test_unlink — remove `p` from its parent's children list (kproc for
@@ -6951,7 +7009,7 @@ void proc_test_set_init(struct Proc *p) {
 // so the table holds no dangling pointer.
 void proc_test_unlink(struct Proc *p) {
     if (!p) return;
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *par = p->parent ? p->parent : kproc();
     for (struct Proc **pp = &par->children; *pp; pp = &(*pp)->sibling) {
         if (*pp == p) {
@@ -6965,7 +7023,9 @@ void proc_test_unlink(struct Proc *p) {
     }
     p->parent  = NULL;
     p->sibling = NULL;
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    poll_owed_cancel(&p->child_owed);   // as proc_unlink_child
+    if (p->notes) poll_owed_cancel(&p->notes->owed);
+    proc_table_lock_release(s);
 }
 
 // proc_test_release_leaked -- the runner's backstop for fixtures a failing test
@@ -6983,7 +7043,7 @@ u32 proc_test_release_leaked(int *pids, u32 max);
 u32 proc_test_release_leaked(int *pids, u32 max) {
     u32 n = 0;
     struct Proc *kp = kproc();
-    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    irq_state_t s = proc_table_lock_acquire();
     for (struct Proc **pp = &kp->children; *pp; ) {
         struct Proc *c = *pp;
         if (!(__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_TEST_FIXTURE)) {
@@ -6998,7 +7058,7 @@ u32 proc_test_release_leaked(int *pids, u32 max) {
         if (n < max) pids[n] = c->pid;
         n++;
     }
-    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    proc_table_lock_release(s);
     return n;
 }
 

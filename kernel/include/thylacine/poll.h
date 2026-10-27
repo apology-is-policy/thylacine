@@ -361,6 +361,52 @@ void poll_waiter_list_wake(struct poll_waiter_list *l);
 // op unlink vs a concurrent poller that registers its hook before reusing the op.
 bool poll_waiter_list_empty(struct poll_waiter_list *l);
 
+// A walk owed to a hook list (operator vote 13; specs/poll_owed.tla). A
+// producer that must not walk where it stands -- under g_proc_table_lock,
+// which masks IRQs and is also what keeps the list's owner alive -- OWES the
+// walk instead: poll_owe chains the list's record on the producer's own
+// chain. The lock's release begins each owed walk while still holding it
+// (poll_owed_begin lists a bookmark at the list's head, and that bookmark
+// pins the owner: its free waits in poll_waiter_list_await_unmarked) and
+// finishes it after the drop (poll_waiter_list_wake_from). One lock -- the
+// caller's -- serializes every chain and every record; a record is on at
+// most one chain.
+struct poll_owed_chain;
+struct poll_owed {
+    struct poll_waiter_list *list;
+    struct poll_owed_chain  *chain;   // non-NULL while owed
+    struct poll_owed        *next;
+    struct poll_owed        *prev;    // NULL at the chain's head
+};
+struct poll_owed_chain {
+    struct poll_owed *head;
+};
+
+void poll_owed_init(struct poll_owed *o, struct poll_waiter_list *l);
+
+// Owe `o`'s walk on `c`. A record owed already, on any chain, stays where it
+// is: its walk has not begun, so it begins after this event and reaches every
+// hook listed now.
+void poll_owe(struct poll_owed_chain *c, struct poll_owed *o);
+
+// Take `o` off its chain, if it is on one. For the reap: the owner's threads,
+// and so its hooks, are gone.
+void poll_owed_cancel(struct poll_owed *o);
+
+// Pop one record off `c` and list `mark` at the head of its list; returns the
+// list, or NULL when nothing is owed. The walk owes every hook behind `mark`.
+struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
+                                         struct poll_waiter *mark);
+
+// Finish the walk poll_owed_begin began: from `mark` to the tail, in batches,
+// then `mark` comes off. The caller holds no lock.
+void poll_waiter_list_wake_from(struct poll_waiter_list *l,
+                                struct poll_waiter *mark);
+
+// Spin until no walk's bookmark is on `l`, before its owner is freed. The
+// owner's threads are gone, so a hook still listed would dangle: extinction.
+void poll_waiter_list_await_unmarked(struct poll_waiter_list *l);
+
 // =============================================================================
 // Remote readiness: the per-fd snapshot slot (see REMOTE READINESS above).
 // =============================================================================

@@ -16,6 +16,7 @@
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/rendez.h>   // 8a-1b-beta: embedded per-Thread debug_rendez
+#include <thylacine/poll.h>     // table_owed
 
 struct Proc;
 struct Rendez;
@@ -618,10 +619,18 @@ struct Thread {
     // _Alignas(16) is REQUIRED, not decorative: fp_save_area/fp_restore_area
     // reach it with STP/LDP (SIMD&FP) pair instructions.
     _Alignas(16) u8    note_saved_fp[FP_AREA_SIZE];
+
+    // The walks this thread owes while it holds g_proc_table_lock
+    // (proc_wake_or_owe), drained by its proc_table_lock_release before the
+    // release returns (specs/poll_owed.tla ChainDrained): empty whenever the
+    // thread is outside the lock. Under g_proc_table_lock.
+    struct poll_owed_chain table_owed;
 };
 
 _Static_assert(sizeof(struct Thread) == 1760,
-               "notetarget carved note_target + caught_wait (2 x u8) from "
+               "the poll hook chunk appended table_owed (a pointer) after "
+               "note_saved_fp, into the 8 bytes of tail pad -- NO size change. "
+               "Before that: notetarget carved note_target + caught_wait (2 x u8) from "
                "in_handler's explicit pad -- no size change. "
                "aux item 7 (2026-08-17) inserted note_saved_mask (u64) after "
                "note_saved_spsr: every later field moves +8 and the 8-byte "
