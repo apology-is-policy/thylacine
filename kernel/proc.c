@@ -4024,6 +4024,14 @@ void proc_wake_or_owe(struct poll_owed *o) {
 }
 
 #ifdef KERNEL_TESTS
+bool proc_table_held_for_test(void);
+bool proc_table_held_for_test(void) {
+    struct Thread *t = current_thread();
+    return t && __atomic_load_n(&g_proc_table_holder, __ATOMIC_RELAXED) == t;
+}
+#endif
+
+#ifdef KERNEL_TESTS
 // The one-threads_lock-per-CPU rule (ARCH 7.3.1), made checkable: the slot names
 // the Proc whose lock this CPU holds. Only the holding CPU touches its slot, and
 // only with IRQs masked, so the CPU cannot change under it.

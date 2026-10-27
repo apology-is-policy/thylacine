@@ -228,6 +228,15 @@ u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l) {
     spin_unlock_irqrestore(&l->lock, s);
     return n;
 }
+
+u32 poll_waiter_list_marks_for_test(struct poll_waiter_list *l) {
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    u32 n = 0;
+    for (struct poll_waiter *pw = l->head; pw; pw = pw->next)
+        if (pw->magic == POLL_MARK_MAGIC) n++;
+    spin_unlock_irqrestore(&l->lock, s);
+    return n;
+}
 #endif
 
 // specs/poll_walk.tla Batch: each hold of the lock reaches up to

@@ -558,6 +558,7 @@ extern void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
 bool poll_test_wake_hook_release(void);
 // Tests only: the hooks on `l` (bookmarks not counted), under its lock.
 u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l);
+u32 poll_waiter_list_marks_for_test(struct poll_waiter_list *l);
 #endif
 
 

@@ -27,6 +27,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
+#include <thylacine/notes.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
@@ -2170,4 +2171,181 @@ void test_poll_one_hook_per_list_per_call(void) {
 
     test_kthread_join_free(consumer, &g_poll_exited);
     drop_test_proc(p);
+}
+
+// =============================================================================
+// Walks owed under the table lock (vote 13; specs/poll_owed.tla).
+// =============================================================================
+
+bool proc_table_held_for_test(void);
+
+static struct poll_owed g_tpo;
+static bool g_tpo_irqs_were_on;
+
+// Between two batches of the owed walk: the table lock is not held (IRQs are
+// as they were before it was taken), and the walk's bookmark is listed -- the
+// pin proc_free waits out.
+static void tpo_check_batch(struct poll_waiter_list *l) {
+    g_tpw_batches++;
+    if (proc_table_held_for_test()) g_tpw_ok = false;
+    if (g_tpo_irqs_were_on && irqs_masked()) g_tpw_ok = false;
+    if (poll_waiter_list_marks_for_test(l) != 1u) g_tpw_ok = false;
+}
+
+void test_poll_owed_walk_runs_at_the_table_release(void);
+void test_poll_owed_walk_runs_at_the_table_release(void) {
+    tpw_setup(TPW_N);
+    poll_owed_init(&g_tpo, &g_tpw_list);
+    g_tpo_irqs_were_on = !irqs_masked();
+    TEST_ASSERT(g_tpo_irqs_were_on, "the test runs with IRQs on (else the IRQ check is empty)");
+    g_poll_wake_batch_hook = tpo_check_batch;
+
+    irq_state_t s = proc_table_lock_acquire();
+    proc_wake_or_owe(&g_tpo);
+    proc_wake_or_owe(&g_tpo);
+    bool owed = g_tpo.chain == &current_thread()->table_owed;
+    bool once = current_thread()->table_owed.head == &g_tpo && g_tpo.next == NULL;
+    u32 reached_held = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached_held += g_tpw[i].ready ? 1u : 0u;
+    proc_table_lock_release(s);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(owed, "an event under the table lock owes the walk to the holder");
+    TEST_ASSERT(once, "a second event owes nothing more (the record is chained once)");
+    TEST_EXPECT_EQ(reached_held, 0u, "nothing was walked under the lock");
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_N, "the release walked every hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH,
+        "one walk, in batches");
+    TEST_ASSERT(g_tpw_ok, "between batches: unlocked, IRQs on, the bookmark listed");
+    TEST_ASSERT(g_tpo.chain == NULL && current_thread()->table_owed.head == NULL,
+        "nothing is owed after the release (ChainDrained)");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u,
+        "the bookmark left with the walk");
+
+    // Without the lock the same call walks at once.
+    for (u32 i = 0; i < TPW_N; i++) g_tpw[i].ready = false;
+    proc_wake_or_owe(&g_tpo);
+    reached = 0;
+    for (u32 i = 0; i < TPW_N; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_N, "unlocked, the walk runs in the call");
+    TEST_ASSERT(g_tpo.chain == NULL, "and owes nothing");
+    tpw_teardown();
+}
+
+void test_poll_owed_records_chain_once_and_cancel(void);
+void test_poll_owed_records_chain_once_and_cancel(void) {
+    poll_waiter_list_init(&g_tpw_list);
+    struct poll_owed_chain c = { NULL }, c2 = { NULL };
+    struct poll_owed a, b, d;
+    poll_owed_init(&a, &g_tpw_list);
+    poll_owed_init(&b, &g_tpw_list);
+    poll_owed_init(&d, &g_tpw_list);
+
+    poll_owe(&c, &a);
+    poll_owe(&c, &b);
+    poll_owe(&c, &a);           // owed already: stays where it is
+    poll_owe(&c2, &a);          // even on another chain
+    TEST_ASSERT(c.head == &b && b.next == &a && a.prev == &b && a.next == NULL,
+        "a record is chained once");
+    TEST_ASSERT(a.chain == &c && c2.head == NULL, "a record owed elsewhere is not re-chained");
+
+    poll_owe(&c, &d);           // d, b, a
+    poll_owed_cancel(&b);       // the middle
+    TEST_ASSERT(c.head == &d && d.next == &a && a.prev == &d && b.chain == NULL,
+        "a cancel unlinks from the middle");
+    poll_owed_cancel(&b);       // idempotent
+    poll_owed_cancel(&d);       // the head
+    TEST_ASSERT(c.head == &a && a.prev == NULL, "a cancel unlinks the head");
+
+    struct poll_waiter mark;
+    struct poll_waiter_list *l = poll_owed_begin(&c, &mark);
+    TEST_ASSERT(l == &g_tpw_list && a.chain == NULL && c.head == NULL,
+        "begin pops the record and returns its list");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(l), 1u, "with the bookmark listed");
+    poll_waiter_list_wake_from(l, &mark);
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(l), 0u, "the finished walk unlisted it");
+    TEST_ASSERT(poll_owed_begin(&c, &mark) == NULL, "nothing owed: begin returns NULL");
+}
+
+void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void);
+void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void) {
+    tpw_setup(TPW_M);
+    struct poll_owed_chain c = { NULL };
+    poll_owed_init(&g_tpo, &g_tpw_list);
+    poll_owe(&c, &g_tpo);
+    struct poll_waiter mark;
+    struct poll_waiter_list *l = poll_owed_begin(&c, &mark);
+    // Registered after the walk began: in front of the bookmark.
+    poll_waiter_list_register(&g_tpw_list, &g_tpw[TPW_N]);
+    poll_waiter_list_wake_from(l, &mark);
+
+    u32 reached = 0;
+    for (u32 i = 0; i < TPW_M; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    TEST_EXPECT_EQ(reached, TPW_M, "every hook listed at the begin was reached");
+    TEST_ASSERT(!g_tpw[TPW_N].ready, "a hook registered after the begin was not (NoStray)");
+    TEST_EXPECT_EQ(poll_waiter_list_count_for_test(&g_tpw_list), TPW_M + 1u,
+        "every hook stays listed");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u, "the bookmark left");
+    tpw_teardown();
+}
+
+void test_poll_notes_post_under_the_table_lock_owes_its_walk(void);
+void test_poll_notes_post_under_the_table_lock_owes_its_walk(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL && p->notes != NULL, "proc_alloc with a notes queue");
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(&p->notes->poll_list, &pw);
+
+    irq_state_t s = proc_table_lock_acquire();
+    int rc = notes_post(p, "pipe", 1u, NULL, true);
+    bool owed = p->notes->owed.chain != NULL;
+    bool early = pw.ready;
+    proc_table_lock_release(s);
+    TEST_EXPECT_EQ(rc, 0, "the post landed");
+    TEST_ASSERT(owed, "a post under the table lock owes the queue's walk");
+    TEST_ASSERT(!early, "and walks nothing under it");
+    TEST_ASSERT(pw.ready, "the release walked it");
+    TEST_ASSERT(p->notes->owed.chain == NULL, "nothing is owed after");
+
+    pw.ready = false;
+    TEST_EXPECT_EQ(notes_post(p, "pipe", 2u, NULL, true), 0, "an unlocked post");
+    TEST_ASSERT(pw.ready && p->notes->owed.chain == NULL, "walks in the call");
+
+    poll_waiter_list_unregister(&pw);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// The child chains its own records on a chain no thread drains, then exits:
+// only the reap's cancel takes them off, and proc_free extincts on a record
+// still chained.
+static struct poll_owed_chain g_tpo_stray;
+static volatile u32 g_tpo_child_ran;
+
+static void tpo_child_owes_then_exits(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    irq_state_t s = proc_table_lock_acquire();
+    poll_owe(&g_tpo_stray, &self->child_owed);
+    poll_owe(&g_tpo_stray, &self->notes->owed);
+    proc_table_lock_release(s);
+    g_tpo_child_ran = 1;
+    exits("ok");
+}
+
+void test_poll_reap_cancels_the_walks_owed_to_a_proc(void);
+void test_poll_reap_cancels_the_walks_owed_to_a_proc(void) {
+    g_tpo_stray.head = NULL;
+    g_tpo_child_ran = 0;
+    int pid = rfork(RFPROC, tpo_child_owes_then_exits, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "the child was reaped and freed");
+    TEST_EXPECT_EQ(g_tpo_child_ran, 1u, "the child chained its records");
+    TEST_ASSERT(g_tpo_stray.head == NULL, "the reap took both off their chain");
 }
