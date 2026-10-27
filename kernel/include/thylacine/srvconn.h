@@ -614,7 +614,6 @@ short srvconn_poll(struct SrvConn *cn, bool client, short events,
 // Cumulative counters. (created - freed) == live SrvConn count.
 u64 srvconn_total_created(void);
 u64 srvconn_total_freed(void);
-u64 srvconn_total_freed(void);
 
 // #210: one live connection's counter snapshot for /ctl/9p-sessions.
 // Ring conservation: produced == consumed + buffered per direction; a

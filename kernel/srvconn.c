@@ -1120,10 +1120,6 @@ u64 srvconn_total_created(void) {
     return __atomic_load_n(&g_srvconn_created, __ATOMIC_RELAXED);
 }
 
-u64 srvconn_total_freed(void) {
-    return __atomic_load_n(&g_srvconn_freed, __ATOMIC_RELAXED);
-}
-
 // #210: walk every live conn for /ctl/9p-sessions. Registry lock held
 // across the walk (see srvconn_ctl_unlink for why that pins lifetimes);
 // each chan's counters snapshot under its own lock — registry -> ch->lock
