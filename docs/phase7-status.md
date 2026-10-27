@@ -2480,3 +2480,52 @@ aux-3-c1). Replaces the 2026-10-20 interim fix above, in which an exited thread 
   after a timed-out join, 14 + 25 sites). Not yet run: joey's exited-freed leg red under the no-reap sabotage (the
   kernel suite hangs first), the storm row (the run booted a Halcyon ramfs the SMP gate had re-baked), libxml2's
   thread test (main's b3) and OpenRCT2 for 8 hours (the demo deck).
+
+## Thread-model C5: exec with threads dooms its peers and waits to be alone — 2026-10-27
+
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`, C5; LINEAGE L-2b). Spec-first by operator vote
+(2026-10-21, decision 1): c5a cacb03e31 (`specs/thread_reap.tla`'s exec actions, ARCH 7.3.3) before the code, on
+aux-3-c5. Replaces L-2a's refusal, in which an execve from a process with live peers failed with EAGAIN.
+
+- **The claim.** A per-Proc `exec_task` (Linux's `group_exec_task`), taken in one `threads_lock` hold after the new
+  image is loaded and before the swap; refused while a group claim or another exec holds the process
+  (`exec_claim_or_drop` then drops the new space and the program file and returns EAGAIN, and the caller dies with the
+  group). Not LINEAGE's per-thread flag: `group_exit_msg` is set once, and two execers could doom each other
+  (`thread_reap_buggy_exec_perthread`, DoomedNeverLast).
+- **The doom.** `proc_exec_dooms(p, t)` -- a pointer compare -- sits beside `group_exit_msg` in every death predicate:
+  `thread_die_pending`, `thread_group_death_pending`, the EL0-return die-check, the stop park's death checks,
+  `caught_candidate`. Admission and both spawn arms refuse while a claim is held. A doomed thread leaves alone, at its
+  die-check or at its own exit: `exits_term` reads the claim like a group claim already made, and exit_group makes no
+  claim for a doomed caller (operator vote 8, 2026-10-26; Linux `do_group_exit`). What a death owes the registries
+  (`proc_exit_last_out`: /srv tombstones and /cap grants, the handle close, then the weft release) is the last live
+  thread's, on both exit paths. A doomed thread's fault line says "terminating thread (an exec holds the Proc)"
+  (operator vote 9, 2026-10-27; docs/ERRORS.md).
+- **The wait.** The claim wakes the doomed peers (`proc_death_wake_locked`, shared with group termination), kicks the
+  other CPUs, and sleeps death-only on `exec_rendez` until `live_threads == 1`; every decrement wakes it, the unlink
+  of a never-run thread included. Only group death abandons the exec; a terminate latch carries into the new image.
+  C1's swap re-check stands.
+- **No stop parks an exec** (SF-1, self-found): `proc_stop_requested` reads false while a claim is held, and devproc's
+  fully-stopped check refuses, so a debugger never reads a target whose doomed peers are still exiting.
+- **Tests.** `proc.exec_claim_dooms_every_other_thread`, `_kills_sleeping_and_running_peers`,
+  `_abandoned_on_group_death`, `_woken_by_an_abandoned_create`, `_does_not_hold_for_a_stop`, `_survives_a_doomed_exit`
+  (an exits(), a fault and an exit_group, the service left posted, the fault line captured), `_holds_through_a_terminate_latch`,
+  `_refused_drops_the_new_image`, `_kills_a_thread_readied_after_it`, `_wakes_a_vfork_parent`; devproc.debug_regs's
+  exec leg. exec-probe legs C/D (a multi-thread exec from userspace) run every boot.
+- **Audit.** Round 1, holotype-reviewer on Fable 5.1 reviewing Opus 5.5 (MODEL start == end): 0/0/0/3 + one
+  pre-existing observation. F1 (a doomed thread's own exit vetoed the exec) -> vote 8 and the departures move; F2
+  (missing witnesses) -> five tests and a devproc leg; F3 (a spec guard, two SPEC-TO-CODE errors) -> fixed. The
+  observation (a stop after the swap, before the trapframe rewrite) predates C5: OPEN-BUGS 10-26 08:10Z. Round 2
+  (delta, Fable 5.1, start == end): 0/0/2/5. P2-1 and P3-2 were found first by lease B1 and fixed (6a12aa45e,
+  95ea1c8d6); P3-1 withdrawn with the lease's evidence; P2-2 (a lapsed setup hung the suite: the never-run thread is
+  now taken by atomic exchange and readied after a kill -- not freed, which could take the live count to zero with
+  nobody to publish ZOMBIE), P3-3 (exit_group), P3-4 (weft after the close's quiesce, no witness), P3-5 (stale
+  comments, the fault line by vote 9) fixed in 1cab1a35d and e8f1a5ef4. Not dirty; no round 3. Self-found after the round: the exit_group
+  comment said the exec claim is written under the table lock; it is the thread lock (the code is sound: a claim
+  taken after the read is abandoned by the group death), fixed at the same line count in 48aa0d270.
+- **Posture.** Lease B2 (10-27 08:48-10:56Z) on e8f1a5ef4, the final code: suite 2041/2041 with exec-probe leg C and L-2's
+  E2E; regreen bit-identical (ELF ffed9775d4d99d67). Sixteen sabotage builds, each red exactly where predicted (S14b, the
+  fixture fix removed, hangs at the 300 s timeout as predicted). TLC: thread_reap clean 5894, 13 buggy as named;
+  pty_stop 2 clean + 2 buggy as named; corvus clean at 121,784,148 distinct (re-pinned: the table predated a 2026-05-20
+  model change), 8 buggy red; death_wake clean at 1422 + buggy NoLostDeathWake as claimed. SMP gate 50/50, 0 corruption (default at 1, 4 and 8
+  CPUs, UBSan at 4 and 8). `--config ci` re-bake clean. The docs and the comment fix after e8f1a5ef4 leave syscall.o
+  byte-identical. Not run: the userspace pthreads stress beyond exec-probe's legs.
