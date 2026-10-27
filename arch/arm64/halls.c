@@ -28,6 +28,7 @@
 
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 // Per-CPU live-exception-frame slot + re-entrancy guard. No atomics are needed:
 // each CPU's slot is written ONLY by that CPU's own exception wrappers
@@ -83,10 +84,13 @@ void halls_leave_frame(const struct exception_context *prev) {
     g_halls_frame[halls_cpu()] = prev;
 }
 
+#ifdef KERNEL_TESTS
 const struct exception_context *halls_current_frame(void) {
     return g_halls_frame[halls_cpu()];
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi) {
     if (fp & 0xfu)        return false;   // AAPCS64: frames are 16-aligned
     if (fp <= prev_fp)    return false;   // strictly increasing -> no cycles
@@ -95,6 +99,7 @@ bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi) {
     return true;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool halls_frame_is_live(u64 frame, u64 cur_sp) {
     return frame >= cur_sp && (frame - cur_sp) <= HALLS_LIVE_FRAME_SLACK;
 }
@@ -165,6 +170,7 @@ static void halls_puthex(u64 v) {
 // one). Returns the greatest entry with `off <= (link_va - base)`. Reads only
 // the .rodata table (no faulting stack reads) and is bounded by log2(count),
 // so it is safe to call from the dying-machine dump path.
+VISIBLE_IF_KERNEL_TESTS
 const char *halls_symbolize_table(const struct halls_sym *tab, u32 count,
                                   const char *names, u64 base,
                                   u64 link_va, u64 *out_off) {

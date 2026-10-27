@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**690 owned · 48 unowned · 738 files (93% owned) · ~11240 unswept lines.**
+**690 owned · 48 unowned · 738 files (93% owned) · ~11248 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **92 files, ~44083 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 12 | 17 | 2725 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 186 | 15 | 1536 |
+| kernel | 186 | 15 | 1544 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
 | arch | 41 | 3 | 184 |
@@ -135,8 +135,8 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/pouch-hello/pouch-hello-signals.c | 497 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
+| kernel/include/thylacine/smp.h | 288 |
 | kernel/include/thylacine/spinlock.h | 287 |
-| kernel/include/thylacine/smp.h | 286 |
 | usr/pouch-hello/pouch-hello.c | 277 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
@@ -144,7 +144,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/gnumake/generated/glob.h | 163 |
-| kernel/cpio.c | 152 |
+| kernel/cpio.c | 154 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
@@ -152,7 +152,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | kernel/include/thylacine/9p_transport_loopback.h | 99 |
 | kernel/include/thylacine/9p_transport_mq.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
-| kernel/include/thylacine/9p_spoor_transport.h | 85 |
+| kernel/include/thylacine/9p_spoor_transport.h | 87 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |
@@ -162,8 +162,8 @@ Excluded as harness and counted here rather than dropped: **92 files, ~44083 lin
 | kernel/vdso.c | 68 |
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
+| kernel/include/thylacine/cpio.h | 63 |
 | usr/bus-probe-child/src/main.rs | 63 |
-| kernel/include/thylacine/cpio.h | 61 |
 | usr/ports/rust/r1-hello/src/main.rs | 60 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |

@@ -19,6 +19,9 @@ from pathlib import Path
 LLVM_CC=Path(os.environ.get('LLVM_PREFIX','/opt/homebrew/opt/llvm'))/'bin/clang'
 TOOLING_EXIT=3
 SANITIZE=['-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-omit-frame-pointer','-g']
+# Kernel code a fixture compiles takes the tests build's shape: a fixture reaches what
+# the in-kernel tests reach, and VISIBLE_IF_KERNEL_TESTS is empty there (visibility.h).
+KERNEL_TESTS_SHAPE=['-DKERNEL_TESTS','-DVISIBLE_IF_KERNEL_TESTS=']
 PROBE_TIMEOUT=20
 # A sanitizer's own report, in either stream: a run that carries one is not a
 # result, whatever its exit status and whatever assertion it also printed.
@@ -58,6 +61,7 @@ def select(logs,sanitize=True):
             except subprocess.TimeoutExpired:_stop(logs,lines,f'{cc}: an empty sanitized program did not finish in {PROBE_TIMEOUT} s (runtime startup)')
             if ran.returncode:_stop(logs,lines,f'{cc}: an empty sanitized program exited {ran.returncode}: {ran.stderr.strip()[:400]}')
         lines.append('probe: an empty sanitized program ran and exited 0')
+    extra+=KERNEL_TESTS_SHAPE;lines.append('kernel shape: '+' '.join(KERNEL_TESTS_SHAPE))
     (logs/'compiler.txt').write_text('\n'.join(lines)+'\n')
     return cc,extra
 

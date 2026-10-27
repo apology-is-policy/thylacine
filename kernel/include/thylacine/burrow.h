@@ -594,6 +594,7 @@ void burrow_unref(struct Burrow *v);
 // burrow_map(Proc*, ...) entry point arrived.
 void burrow_acquire_mapping(struct Burrow *v);
 
+#ifdef KERNEL_TESTS
 // Decrement mapping_count (refcount-only — does NOT remove any VMA).
 // If both counts reach 0, free pages and the struct. Maps to spec's
 // UnmapVmo action. Internal helper used by the VMA layer (vma_free).
@@ -605,6 +606,7 @@ void burrow_acquire_mapping(struct Burrow *v);
 //
 // Was named `burrow_unmap` pre-P3-Db.
 void burrow_release_mapping(struct Burrow *v);
+#endif // KERNEL_TESTS
 
 // #130: the ref-drop primitives, reporting whether THIS drop freed the pages.
 //
@@ -619,7 +621,9 @@ void burrow_release_mapping(struct Burrow *v);
 //
 // The void-returning names above stay as wrappers for the many callers that
 // have no charge to settle.
+#ifdef KERNEL_TESTS
 bool burrow_unref_freed(struct Burrow *v);
+#endif // KERNEL_TESTS
 bool burrow_release_mapping_freed(struct Burrow *v);
 
 // D-3c F1: the DEFERRED free. A teardown under as->lock drops its mapping ref
@@ -778,8 +782,10 @@ int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
 // burrow_map. Any user mapping the precheck admits, in any region: RELRO lives
 // in the image, thread stacks in the burrow window.
 int burrow_protect(struct Proc *p, u64 vaddr, size_t length, u32 prot, bool seal);
+#ifdef KERNEL_TESTS
 int burrow_protect_in(struct AddrSpace *as, bool exempt,
                       u64 vaddr, size_t length, u32 prot, bool seal);
+#endif // KERNEL_TESTS
 
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls
@@ -804,10 +810,12 @@ int burrow_protect_in(struct AddrSpace *as, bool exempt,
 // PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` (a
 // `p->vmas` mutator; same discipline as burrow_map).
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
+#ifdef KERNEL_TESTS
 // SYS_BURROW_DETACH's inner (kernel/syscall.c): the CHARGE-SETTLING unmap of an
 // exact burrow-window range -- refunds the recorded payer iff this drop frees the
 // pages. burrow_unmap above settles nothing. 0, or -1 when nothing matched.
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+#endif // KERNEL_TESTS
 
 // burrow_unmap, additionally reporting whether removing this mapping was the
 // drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed
@@ -871,11 +879,13 @@ struct Vma;
 u32 burrow_release_lazy_range_in(struct AddrSpace *as, const struct Vma *v,
                                  u64 lo, u64 hi);
 
+#ifdef KERNEL_TESTS
 // burrow_lazy_resident_count: the number of resident (faulted-in, not-decommitted)
 // pages in a BURROW_TYPE_ANON_LAZY Burrow — O(1) since B-1a' (the pagemap keeps
 // the count). Read under v->lock (lock order as->lock -> v->lock; the caller
 // holds as->lock). Returns 0 for a NULL / corrupted / non-ANON_LAZY Burrow.
 u32 burrow_lazy_resident_count(struct Burrow *v);
+#endif // KERNEL_TESTS
 // burrow_lazy_footprint: resident pages PLUS the pagemap's node pages -- what a
 // clone charges its address space for (the nodes are real pages the address
 // space holds; they are uncharged again by the takes that empty them).
@@ -958,6 +968,7 @@ int    burrow_mapping_count(const struct Burrow *v);
 // snapshot, not two separately-ACQUIRE'd loads). Non-const: it locks.
 int    burrow_total_refs(struct Burrow *v);
 
+#ifdef KERNEL_TESTS
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:
 //   - burrow_total_created increments on every successful burrow_create_anon.
@@ -966,7 +977,6 @@ int    burrow_total_refs(struct Burrow *v);
 u64 burrow_total_created(void);
 u64 burrow_total_destroyed(void);
 
-#ifdef KERNEL_TESTS
 // REVENANT R-1 test hooks — exercise the FILE-Burrow lifecycle (the
 // resident-page free) in isolation, before the R-2 fault arm exists to
 // populate slots. Returns the FILE Burrow's page_count; extincts on a

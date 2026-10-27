@@ -47,12 +47,14 @@ uintptr_t uart_get_base(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 
+#ifdef KERNEL_TESTS
 // #67 regression helper (test-only). Proves uart_putc BOUNDS its TXFF spin --
 // it points the driver at a scratch region whose FR reads TX-full forever, IRQ-
 // masks the swap, calls uart_putc, and returns true iff it terminated AND dropped
 // the byte (a bounded, lossy TX beats an interrupt-dead CPU when the host serial
 // consumer stalls). An unbounded spin would hang the boot inside this call.
 bool uart_selftest_tx_bounded(void);
+#endif // KERNEL_TESTS
 
 // A-4c-1: kernel UART console RX.
 //
@@ -68,10 +70,12 @@ bool uart_selftest_tx_bounded(void);
 // then gic_attach(UART_INTID_PL011, uart_rx_handler, ...) + gic_enable_irq.
 void uart_rx_init(void);
 
+#ifdef KERNEL_TESTS
 // True iff the PL011 RX path is live (CR.UARTEN + CR.RXE both set). QEMU's
 // PL011 resets UARTEN clear, so this is false until uart_rx_init() runs --
 // the #943 regression guard for "the console silently never receives".
 bool uart_rx_path_enabled(void);
+#endif // KERNEL_TESTS
 
 // PL011 IRQ handler (GIC dispatch target; runs in IRQ context). The PL011 SPI
 // is ONE line shared by RX, RX-timeout and TX, so this dispatches on MIS.
@@ -110,6 +114,7 @@ void uart_tx_irq_set_enabled(bool en);
 // RX clear-first discipline #172 established.
 void uart_tx_irq_clear(void);
 
+#ifdef KERNEL_TESTS
 // #75-audit F2 (TEST-ONLY -- no production caller). Emulate a stalled host
 // serial consumer: uart_tx_try_putc returns false and TXIM arming is gated, so
 // the cons TX ring can never drain. This is how the room-wait park and the #67
@@ -118,6 +123,7 @@ void uart_tx_irq_clear(void);
 // console keeps working for kernel prints across the stalled window.
 void uart_test_tx_stall(bool on);
 bool uart_test_tx_stalled(void);
+#endif // KERNEL_TESTS
 
 // #75. Bounded wait for the TX FIFO to drain to the wire. The extinction /
 // Halls path calls this before its own direct-DR dump so pre-crash ring output
@@ -133,12 +139,14 @@ void uart_tx_drain_sync(void);
 // QEMU PL011 int_level re-fire (the #172 wedge trap). Runs in process context.
 void uart_rx_pump(void);
 
+#ifdef KERNEL_TESTS
 // #129-audit F2 (test-only): seed / inspect the 1-byte RX holdback and its
 // pause latch, so the lossless-refusal path is drivable without an SMP race.
 void uart_test_rx_force_hold(uint8_t b, bool brk);
 bool uart_test_rx_held(uint8_t *b, bool *brk);
 bool uart_test_rx_paused(void);
 bool uart_test_rx_release_hold(void);
+#endif // KERNEL_TESTS
 
 // Print an unsigned 64-bit integer in hexadecimal, prefixed with "0x" and
 // zero-padded to 16 hex digits (i.e. "0x0000000040080000"). Used for the

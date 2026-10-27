@@ -831,7 +831,7 @@ static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
 //
 // The core is separated from the current_thread() wrapper so the resolve +
 // type-gate + range logic is unit-testable with a synthetic Proc (the
-// hostmem_resolve_subrange precedent). NOT static: the test declares it.
+// hostmem_resolve_subrange precedent).
 VISIBLE_IF_KERNEL_TESTS
 s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
     if (!p || !p->as)       return -T_E_INVAL;
@@ -2514,8 +2514,9 @@ static inline s64 attach_err_to_ret(int aerr) {
 // NON-BLOCKING tx (CNBFRAME is honored by devpipe alone; a /srv byte-conn or a
 // dev9p file BLOCKS under the 9P client's held c->lock -> the #360 extinction).
 // EL0's only sound tx is a real pipe, so the handler admits pipe pairs ONLY.
-// Non-static + declared in syscall.h so the regression exercises the ACTUAL
-// predicate the handler gates on, not a re-derivation.
+// Visible to the tests, so the regression exercises the ACTUAL predicate the
+// handler gates on, not a re-derivation.
+VISIBLE_IF_KERNEL_TESTS
 bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx) {
     return tx && rx && tx->dev == &devpipe && rx->dev == &devpipe;
 }
@@ -3403,7 +3404,8 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
 // root) to `name` and returns 0, or a negative errno: T_E_NOENT, T_E_NOTDIR,
 // T_E_ACCES, T_E_INVAL (a malformed or over-long path, or a name the walk cannot
 // name back), or a failing stat's or re-walk's own errno (T_E_IO when it carries
-// none). `joined` is scratch; `name` may alias `path`, which only the join reads. Exported for the kernel tests (stalk.dir_landed_name).
+// none). `joined` is scratch; `name` may alias `path`, which only the join
+// reads. Visible to the tests (stalk.dir_landed_name).
 //
 // #83: the two cwd jobs, in this order. (1) JOIN verbatim, for the physical
 // check: "."/".."/a trailing separator survive so stalk gates them -- so
@@ -4334,6 +4336,7 @@ s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
 // transport, which is why the cape grants it nothing (IDENTITY-DESIGN 3.2); a
 // 9P-mode opener never does. DMSRVREMOTE is a label and grants nothing, so
 // either mode admits it (HAUL-DESIGN 4.8).
+VISIBLE_IF_KERNEL_TESTS
 bool sys_srv_post_perm_ok(u32 perm) {
     if (perm & ~(u32)SYS_WALK_CREATE_DMSRV_BITS) return false;
     return !(perm & SYS_WALK_CREATE_DMSRVCAPE) || (perm & SYS_WALK_CREATE_DMSRVBYTE);
@@ -6485,6 +6488,7 @@ static bool detach_is_hw_map_locked(struct Proc *p, u64 vaddr, u64 length) {
 // once, for every caller. The admission is unchanged: a span inside the burrow
 // window, or the exact geometry of a DMA / MMIO map wherever it sits (the
 // identity rule). The ABI stays 0 / -1; the phenotype row carries the errno.
+VISIBLE_IF_KERNEL_TESTS
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
     if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
@@ -8120,6 +8124,7 @@ static s64 sys_weft_map_handler(u64 data_fd_raw, u64 hint_va) {
 // SQE dispatch + the submit-time pin + the CQE post (SYS_LOOM_ENTER) are Loom-3.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
                                  struct loom_params *out, hidx_t *out_fd,
                                  struct Loom **out_l) {
@@ -8273,6 +8278,7 @@ int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd) {
     struct Loom *l = NULL;
@@ -8280,7 +8286,9 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     if (rc == 0) loom_unref(l);   // may free it, if the fd is already closed
     return rc;
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n) {
     if (!p)                            return -T_E_INVAL;
@@ -8332,6 +8340,7 @@ rollback:
     return rc;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n) {
     if (!p)                            return -T_E_INVAL;
@@ -8371,6 +8380,7 @@ bool sys_loom_ring_detach(struct Proc *p, struct Loom *l, u64 ring_va, u32 ring_
     return detached;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, struct Loom *l,
                              u64 ring_va, u32 ring_size) {
     (void)handle_close_obj(p, fd, KOBJ_LOOM, l);
@@ -8518,6 +8528,7 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
     return -T_E_INVAL;   // unknown register op
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
                             u32 min_complete, u32 flags) {
     if (!p) return -T_E_INVAL;
@@ -9047,7 +9058,7 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // old SYS_SPAWN_BLOB_MAX 1-MiB cap is gone; only EXEC_FILE_MAX sanity-bounds the
 // stat'd size). Runs in the parent's context (its Territory), like Unix exec.
 // Returns the pinned Spoor (caller spoor_clunks) + *size_out, or NULL on any
-// failure. Exported for the kernel-internal #58 tests.
+// failure.
 // _ex variant (VIVARIUM section 13): reports, via *pheno_out (OPTIONAL), whether
 // the binary's resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
 // phenotype channel. The plain exec_resolve_from_namespace wrapper below passes
@@ -13915,6 +13926,7 @@ static int viv_ioctl_emit_flag(char *out, const char *name, bool set) {
 // tcgetattr/modify/tcsetattr for the flags we implement. c_cc carries the Linux
 // INIT_C_CC baseline (asm-generic termbits indices) so a guest sees real
 // control chars; the rest stay 0.
+VISIBLE_IF_KERNEL_TESTS
 void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out) {
     if (!out) return;
     for (u64 i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;   // defined zeros
@@ -13946,6 +13958,7 @@ void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out) {
 // result FULLY determines the mode regardless of the current one. Returns the
 // byte count; g must hold >= 64 bytes (max 5*8=40). onlcr requires OPOST --
 // Linux translates NL only under OPOST, so native ONLCR is on iff both.
+VISIBLE_IF_KERNEL_TESTS
 int viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g) {
     int n = 0;
     n += viv_ioctl_emit_flag(g + n, "icanon", (tio->c_lflag & VIV_LINUX_ICANON) != 0u);
@@ -16376,9 +16389,11 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
 // many native handlers refuse with the same value.
 static u64 g_syscall_unknown;
 
+#ifdef KERNEL_TESTS
 u64 syscall_unknown_count(void) {
     return __atomic_load_n(&g_syscall_unknown, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 static void syscall_native_switch(struct exception_context *ctx) {
     u64 nr = ctx->regs[8];

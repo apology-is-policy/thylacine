@@ -188,11 +188,13 @@ struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st
     return ops;
 }
 
+#ifdef KERNEL_TESTS
 bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st) {
     if (!st)                                     return false;
     if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return false;
     return st->cn != NULL;
 }
+#endif // KERNEL_TESTS
 
 struct SrvConn *p9_srvconn_transport_conn(const struct p9_client *c) {
     if (!c) return NULL;

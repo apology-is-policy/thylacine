@@ -1,4 +1,3 @@
-#include <thylacine/seat.h>
 // Process descriptor management (P2-A) + rfork/exits/wait lifecycle (P2-D).
 //
 // Per ARCHITECTURE.md §7.2 + §7.4 + §7.9. P2-A established the bare
@@ -41,6 +40,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
+#include <thylacine/seat.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/syscall.h>     // IM-1: SYS_CONSOLE_EPISODE_ARM / _END (the op ABI)
@@ -48,6 +48,7 @@
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vivarium.h>  // viv_sigtab_reset -- exec resets dispositions in place
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
@@ -190,6 +191,9 @@ static u32                g_next_legate_scope;
 // modifies Proc lineage state, but the discipline future-proofs against
 // notes/signals (Phase 5+) that may surface from IRQ context.
 static spin_lock_t g_proc_table_lock = SPIN_LOCK_INIT;
+
+VISIBLE_IF_KERNEL_TESTS
+u32 proc_default_page_budget(void);
 
 // Initialize a freshly-allocated Proc descriptor. Caller has already
 // passed KP_ZERO to kmem_cache_alloc, so all fields are zero/NULL on
@@ -342,6 +346,7 @@ void proc_publish_init(struct Proc *p) {
     if (dup) extinction("proc_publish_init: init already published");
 }
 
+#ifdef KERNEL_TESTS
 // Lock-free accessor (tests, diagnostics). Acquire pairs with the
 // publish/clear store-release; NULL means "init not up" (pre-joey boot,
 // or init died -- both fall back to kproc as the orphan-adopter).
@@ -352,11 +357,12 @@ struct Proc *proc_init_proc(void) {
 struct Proc *proc_alloc(void) {
     return proc_alloc_in(NULL, proc_default_page_budget());
 }
+#endif // KERNEL_TESTS
 
 // B-1a' (ARCH 6.5 "Capacity, and the I-32 default"; proc.h): both figures are
 // the user pool. Two names because they are two decisions -- what a Proc
 // starts with, and what a spawn may raise it to -- that happen to coincide.
-u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
+VISIBLE_IF_KERNEL_TESTS u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
 u32 proc_page_budget_hard_max(void) { return capacity_pool_pages(); }
 
 // The next pid, or -1 once the space is spent. Pids are never recycled
@@ -380,6 +386,10 @@ u32 proc_pid_counter_swap_for_test(u32 v) {
 }
 #endif
 
+VISIBLE_IF_KERNEL_TESTS
+void proc_free(struct Proc *p);
+
+VISIBLE_IF_KERNEL_TESTS
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
@@ -653,6 +663,7 @@ int addrspace_quiesce_mapped_devices(struct AddrSpace *as) {
     return reset;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int proc_quiesce_owned_devices(struct Proc *p) {
     if (!p) return 0;
     int reset = quiesce_fd_devices(p->handles);
@@ -731,6 +742,7 @@ static void addrspace_record_holder(struct AddrSpace *as, const struct Proc *p) 
                       __ATOMIC_RELAXED);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void proc_free(struct Proc *p) {
     if (!p)                       extinction("proc_free(NULL)");
     // Magic check catches double-free and corrupt-Proc passes. SLUB's
@@ -879,7 +891,9 @@ void proc_free(struct Proc *p) {
 }
 
 u64 proc_total_created(void)   { return __atomic_load_n(&g_proc_created, __ATOMIC_RELAXED); }
+#ifdef KERNEL_TESTS
 u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P4-C: Proc lookup for devproc (by pid + iterate-all).
@@ -1261,6 +1275,7 @@ void proc_page_uncharge(struct Proc *p, u32 npages) {
     addrspace_uncharge_pages(p->as, npages);
 }
 
+#ifdef KERNEL_TESTS
 bool proc_vma_charge(struct Proc *p) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
     return addrspace_charge_vma(p->as, proc_resource_exempt(p));
@@ -1270,6 +1285,7 @@ void proc_vma_uncharge(struct Proc *p) {
     if (!p || !p->as) return;         // no address space: nothing to uncharge
     addrspace_uncharge_vma(p->as);
 }
+#endif // KERNEL_TESTS
 
 bool proc_shared_map_charge(struct Proc *p, u32 npages) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
@@ -1363,6 +1379,7 @@ void proc_sqpoll_ticket_release(struct ProcSqpollTicket *ticket) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool proc_child_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;
@@ -2166,6 +2183,7 @@ void proc_mark_console_attached(struct Proc *p) {
 // Atomic AND -- the bit is multi-writer (see proc_mark_console_attached). A
 // no-op on a NULL/corrupt Proc (fail-closed). The caller pins owner lifetime
 // (proc_console_sak holds g_proc_table_lock with the owner ALIVE-checked).
+VISIBLE_IF_KERNEL_TESTS
 void proc_revoke_console_attached(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CONSOLE_ATTACHED, __ATOMIC_RELAXED);
@@ -2247,6 +2265,7 @@ bool proc_is_console_owner(const struct Proc *p) {
 // PURE (no globals) so the gate logic is unit-testable. owner_sid==0 means "no
 // owner" (e.g. post-SAK, which sets g_console_owner=NULL) -> never a match, so a
 // session-less (sid 0) caller never spuriously matches a no-owner console.
+VISIBLE_IF_KERNEL_TESTS
 bool console_session_match(u32 owner_sid, u32 caller_sid) {
     return owner_sid != 0u && owner_sid == caller_sid;
 }
@@ -3819,6 +3838,7 @@ int proc_become_legate_locked(struct Proc *p, u64 caps_to_or, u32 session_id,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 // For callers that do NOT already hold g_proc_table_lock. The clearance redeem
 // is not one of them: it takes the lifecycle lock itself, before the grant
 // table, and calls the _locked form above.
@@ -3830,6 +3850,7 @@ int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return rc;
 }
+#endif // KERNEL_TESTS
 
 // Teardown walk context + callback. The callback group-terminates every Proc
 // carrying `scope_id` except `except` (the legate root on its own exit, which
@@ -3877,6 +3898,7 @@ static int legate_teardown_cb(struct Proc *m, void *arg) {
 // PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED proc_for_each_walk;
 // proc_for_each would re-take it -> deadlock). The flag read pairs (ACQUIRE) with
 // proc_become_legate's RELEASE store; legate_scope_id is its coherent companion.
+VISIBLE_IF_KERNEL_TESTS
 void proc_legate_teardown_if_root(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_LEGATE_ROOT))
@@ -3989,6 +4011,7 @@ static void proc_orphan_rule_locked(struct Proc *dying);
 
 // The parent's side of p's exit (proc.h). Everything here runs UNDER
 // g_proc_table_lock, which keeps the parent alive through it.
+VISIBLE_IF_KERNEL_TESTS
 void proc_exit_notify_parent_locked(struct Proc *p) {
     struct Proc *par = p->parent;
     if (!par) return;
@@ -5644,6 +5667,9 @@ void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp) {
     ctx->sp   = sp;      // SP_EL0
 }
 
+VISIBLE_IF_KERNEL_TESTS
+void proc_birth_hold_mark_parked_locked(struct Proc *p);
+
 void el0_birth_park(struct exception_context *ctx) {
     // The #713 guard, for the tail's reason: userland_enter_held masked before
     // entering the birth tail, which runs masked to KERNEL_EXIT; the notes leg
@@ -5930,6 +5956,7 @@ void proc_birth_hold_release_locked(struct Proc *p) {
     proc_birth_hold_set_locked(p, BIRTH_HOLD_NONE);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void proc_birth_hold_mark_parked_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (__atomic_load_n(&p->debug_birth_hold, __ATOMIC_RELAXED) != BIRTH_HOLD_UNBORN)
@@ -6424,6 +6451,7 @@ static int child_wait_ready_cond(void *arg) {
 //
 // Caller holds g_proc_table_lock: `state` and `as` are both written under it,
 // and the list walk that produced `child` needs it anyway.
+VISIBLE_IF_KERNEL_TESTS
 bool vfork_child_released(const struct Proc *parent, const struct Proc *child) {
     if (!parent || parent->magic != PROC_MAGIC)
         extinction("vfork_child_released: bad parent");
@@ -6491,6 +6519,7 @@ static void vfork_await_release(struct Proc *p, int child_pid) {
 // death wakes it through proc_become_zombie_locked as it does for vfork.
 // Not-found counts as released for vfork_child_released's reason: hanging a
 // parent that cannot recover is the worse of the two dispositions.
+VISIBLE_IF_KERNEL_TESTS
 bool spawn_birth_released(const struct Proc *parent, const struct Proc *child) {
     if (!parent || parent->magic != PROC_MAGIC)
         extinction("spawn_birth_released: bad parent");
@@ -6745,11 +6774,13 @@ out:
     return ret;
 }
 
+#ifdef KERNEL_TESTS
 // wait_pid — reap ANY zombie child, blocking. The pervasive (any,
 // blocking) case; thin wrapper over wait_pid_for. Plan 9 wait(2) shape.
 int wait_pid(int *status_out) {
     return wait_pid_for(-1, 0, status_out);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Test support: the process-table fixtures, compiled only with the tests.

@@ -65,8 +65,10 @@ int loom_pool_commit(struct loom_pool_bank *, const struct loom_pool *,
 // Peek does not consume; deliver is called only with reserved CQ capacity and
 // after copying BOTH CQE and receipt, before release publishing tail. There is
 // deliberately NO CQ-head/acknowledgement callback into this state machine.
+#ifdef KERNEL_TESTS
 int loom_pool_peek(const struct loom_pool_bank *, const struct loom_pool *, u32,
                    struct loom_pool_result *);
+#endif // KERNEL_TESTS
 int loom_pool_deliver(struct loom_pool_bank *, const struct loom_pool *,
                       const struct loom_service_buffer_receipt *);
 int loom_pool_return(struct loom_pool_bank *, const struct loom_pool *,

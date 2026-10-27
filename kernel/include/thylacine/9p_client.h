@@ -517,11 +517,13 @@ int  p9_client_walk(struct p9_client *c,
                      const u8 *const *names, const size_t *name_lens,
                      u16 *out_nwqid, struct p9_qid *out_qids);
 
+#ifdef KERNEL_TESTS
 // Convenience: walk a single component from `src_fid` to `new_fid`.
 int  p9_client_walk_one(struct p9_client *c,
                          u32 src_fid, u32 new_fid,
                          const u8 *name, size_t name_len,
                          struct p9_qid *out_qid);
+#endif // KERNEL_TESTS
 
 // Fused walk+getattr (POUNCE, Twalkgetattr 140; docs/POUNCE-DESIGN.md):
 // p9_client_walk's contract PLUS each walked component's full attribute
@@ -539,6 +541,7 @@ int  p9_client_walkgetattr(struct p9_client *c,
                            u16 *out_nwqid, struct p9_qid *out_qids,
                            struct p9_attr *out_attrs);
 
+#ifdef KERNEL_TESTS
 // Clunk (release) a fid, waiting for the Rclunk. Returns 0 once the Tclunk is
 // on the wire and answered -- or on the wire with its waiter dying or
 // interrupted, since a Tclunk is never flushed (FID-LIFECYCLE section 9): it
@@ -550,6 +553,7 @@ int  p9_client_walkgetattr(struct p9_client *c,
 // (its fids died with it) or the fid cannot be clunked here (unbound, the
 // root, a live op on it).
 int  p9_client_clunk(struct p9_client *c, u32 fid);
+#endif // KERNEL_TESTS
 
 // Fire-and-forget clunk (FID-LIFECYCLE async-clunk): send the Tclunk, do NOT
 // block on Rclunk. The fid unbinds at send (I-11; the number is never reused);
@@ -613,8 +617,10 @@ int  p9_client_setattr(struct p9_client *c, u32 fid,
                         const struct p9_setattr *attr);
 int  p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
                         u32 count, u8 *out_data, u32 *out_count);
+#ifdef KERNEL_TESTS
 int  p9_client_statfs(struct p9_client *c, u32 fid,
                        struct p9_statfs *out_statfs);
+#endif // KERNEL_TESTS
 int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 
 // =============================================================================
@@ -694,7 +700,9 @@ bool   p9_client_is_open(const struct p9_client *c);
 // fid is a real leak; on a dead session the fid died with it, and an unbound
 // fid has nothing to leak (or its Tclunk is already on the wire).
 bool   p9_client_fid_held(struct p9_client *c, u32 fid);
+#ifdef KERNEL_TESTS
 size_t p9_client_inflight(const struct p9_client *c);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Asynchronous (Loom) front-end (Loom-2b; the pluggable-completion seam).
@@ -762,10 +770,12 @@ enum p9_pump_result {
 // SQPOLL kthread, the dev9p poll kthread) or by whoever holds the role.
 int p9_client_reader_pump_ready(struct p9_client *c);
 
+#ifdef KERNEL_TESTS
 // Hand the elected-reader role to a pending SYNC op (async ops are skipped --
 // they have no thread to run the reader loop). Exposed for the handoff-skip
 // regression; the reader loop uses the internal locked form.
 void p9_client_handoff_reader(struct p9_client *c);
+#endif // KERNEL_TESTS
 
 // Hook `h` to learn when pumping `c` could make progress. Returns -P9_E_IO if
 // the session is dead or its transport closed, and 0 if a frame waits on a
@@ -792,6 +802,7 @@ void p9_client_reader_unhook(struct p9_client *c, struct p9_reader_hook *h);
 // reclaim). The caller must NOT touch the engine for `rpc` afterward.
 void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 
+#ifdef KERNEL_TESTS
 // Mark the whole session DEVICE-GONE (MENAGERIE.md section 10): latch it dead
 // and complete every in-flight ASYNC (Loom) op with a -P9_E_NODEV terminal CQE
 // -- the device-gone result, distinct from the generic -P9_E_IO a transport
@@ -804,6 +815,7 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 // (a no-op on an already-dead session: its in-flight slots are cleared). Under
 // c->lock internally. NULL / magic-mismatch safe.
 void p9_client_mark_devgone(struct p9_client *c);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Errno convention.

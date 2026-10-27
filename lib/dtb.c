@@ -10,6 +10,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/page.h>          // pa_to_kva (P3-Bda relocation)
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../mm/phys.h"              // alloc_pages / free_pages (P3-Bda)
 
@@ -588,6 +589,7 @@ bool dtb_has_compat(const char *compat) {
 // Generic named-property reader + PCI INTx routing / MMIO window (pci-1a).
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 bool dtb_get_compat_prop(const char *compat, const char *prop,
                          const uint8_t **out_data, uint32_t *out_len) {
     if (!g_dtb.ready || !compat || !prop || !out_data || !out_len) return false;
@@ -1295,6 +1297,7 @@ bool dtb_node_parent(u32 node_off, u32 *out_parent_off) {
     return false;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 u32 dtb_bootargs_scan_count(const u8 *args, u32 len, const char *token) {
     if (!args || !token) return 0;
     size_t toklen = k_strlen(token);
@@ -1316,10 +1319,13 @@ u32 dtb_bootargs_scan_count(const u8 *args, u32 len, const char *token) {
     return count;
 }
 
+#ifdef KERNEL_TESTS
 bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token) {
     return dtb_bootargs_scan_count(args, len, token) > 0;
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 u32 dtb_bootargs_count(const char *token) {
     static const char chosen[] = "chosen", bootargs[] = "bootargs";
     struct dtb_node_entry node, prop;
@@ -1470,6 +1476,7 @@ bool dtb_msi_controller_n(u32 index, struct dtb_pci_msi *out) {
         if (msi_controller(node, &r) && index-- == 0) { *out = r; return true; }
     }
 }
+VISIBLE_IF_KERNEL_TESTS
 bool dtb_msi_map_decode(const u8 *data, u32 length, u32 mask, u16 rid,
                         u32 *phandle, u32 *device_id) {
     if (!data || !phandle || !device_id || !length || length % 16 || mask > 0xffffu)

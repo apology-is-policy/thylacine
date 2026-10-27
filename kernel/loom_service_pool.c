@@ -154,6 +154,7 @@ int loom_pool_commit(struct loom_pool_bank *b, const struct loom_pool *p,
     c->phase = LMEMBER_PENDING;
     return 0;
 }
+#ifdef KERNEL_TESTS
 int loom_pool_peek(const struct loom_pool_bank *b, const struct loom_pool *p,
                    u32 ordinal, struct loom_pool_result *out) {
     if (p->phase != LPOOL_LIVE) return -T_E_NOENT;
@@ -165,6 +166,7 @@ int loom_pool_peek(const struct loom_pool_bank *b, const struct loom_pool *p,
         .user_data = c->user_data, .length = c->result, .more = c->more };
     return 0;
 }
+#endif // KERNEL_TESTS
 int loom_pool_deliver(struct loom_pool_bank *b, const struct loom_pool *p,
                       const struct loom_service_buffer_receipt *r) {
     struct loom_pool_cell *c;

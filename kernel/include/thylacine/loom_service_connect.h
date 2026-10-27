@@ -36,6 +36,8 @@ int loom_private_connect_abort(struct loom_service_protocol *, s32 reason);
 // This owner alone reaps its CONNECT request; generic CQ cleanup must not reap
 // it first, even after delivery. Reaps its request and drops its scope pin; consumes p. The RETIRED scope stays
 // for explicit metadata reap. A server-held endpoint retains native credits.
+#ifdef KERNEL_TESTS
 int loom_private_connect_release(struct loom_service_protocol *);
+#endif // KERNEL_TESTS
 int loom_private_connect_reap(struct Loom *, struct loom_service_ref scope);
 #endif

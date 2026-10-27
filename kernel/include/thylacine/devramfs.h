@@ -51,6 +51,7 @@ struct ramfs_table {
     bool                truncated;   // the archive named more than cap placeable entries
 };
 
+#ifdef KERNEL_TESTS
 // Load `blob` into `t` (whose e and cap the caller set). Returns
 // cpio_newc_iter's verdict: < 0 = a malformed archive, and t is then empty.
 int  ramfs_table_load(struct ramfs_table *t, const u8 *blob, size_t size);
@@ -62,5 +63,6 @@ long ramfs_table_read(const struct ramfs_table *t, u64 qid_path, void *buf, long
 long ramfs_table_readdir(const struct ramfs_table *t, u64 dir_path, void *buf, long n,
                          s64 off);
 int  ramfs_table_find_file(const struct ramfs_table *t, const char *path);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_DEVRAMFS_H

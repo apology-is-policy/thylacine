@@ -759,6 +759,7 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 u64 pipe_total_allocated(void) {
     return __atomic_load_n(&g_pipe_allocated, __ATOMIC_RELAXED);
 }
@@ -766,3 +767,4 @@ u64 pipe_total_allocated(void) {
 u64 pipe_total_freed(void) {
     return __atomic_load_n(&g_pipe_freed, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS

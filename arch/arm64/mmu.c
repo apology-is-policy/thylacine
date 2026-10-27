@@ -1244,6 +1244,7 @@ bool mmu_kva_readable_for_test(const void *kva) {
 }
 #endif
 
+#ifdef KERNEL_TESTS
 bool mmu_set_no_access(paddr_t pa) {
     if (pa & (PAGE_SIZE - 1)) return false;
 
@@ -1267,6 +1268,7 @@ bool mmu_restore_normal(paddr_t pa) {
     directmap_tlbi_pages(pa, 1);
     return true;
 }
+#endif // KERNEL_TESTS
 
 bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages) {
     if (pa & (PAGE_SIZE - 1)) return false;
@@ -1376,6 +1378,7 @@ void mmu_pagemap_directmap(paddr_t base, paddr_t end) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // #808 diagnostic / regression-test helper. Reports whether the 2 MiB block
 // containing `pa` is demoted to L3 page granularity in the direct map --
 // i.e. l1_directmap[gib] is a table descriptor AND the covering L2 entry is
@@ -1395,6 +1398,7 @@ bool mmu_directmap_is_pagemapped(paddr_t pa) {
     u64 l2e = l2[l2_idx];
     return (l2e & PTE_VALID) && (l2e & PTE_TYPE_TABLE);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P3-Bcb / P3-Db: per-Proc translation table allocator + recursive teardown.
@@ -2145,9 +2149,11 @@ long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
     return uninstall_range(as, vaddr_start, vaddr_end, false);
 }
 
+#ifdef KERNEL_TESTS
 u64 mmu_uninstall_pte_calls(void) {
     return __atomic_load_n(&g_mmu_uninstall_pte_calls, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // 8a-1b-gamma: cross-Proc user-memory access (I-39; docs/DEBUG-FS-DESIGN.md 4.5).

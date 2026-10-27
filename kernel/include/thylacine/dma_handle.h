@@ -262,13 +262,17 @@ void kobj_dma_ref(struct KObj_DMA *k);
 // NULL-safe.
 void kobj_dma_unref(struct KObj_DMA *k);
 
+#ifdef KERNEL_TESTS
 // Convenience: drop the caller's reference + ensure the PA range is
 // released. Equivalent to kobj_dma_unref when the caller holds the
 // only reference.
 void kobj_dma_destroy(struct KObj_DMA *k);
+#endif // KERNEL_TESTS
 
 // Diagnostic: cumulative create counter + currently-live count.
 u64 kobj_dma_total_created(void);
+#ifdef KERNEL_TESTS
 u64 kobj_dma_live_count(void);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_DMA_HANDLE_H

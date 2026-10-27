@@ -17,6 +17,7 @@
 #include <thylacine/page.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/uart.h"
@@ -37,6 +38,7 @@ static bool                   g_virtio_init_done;
 // MMIO register access.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 u32 virtio_mmio_read32(struct virtio_mmio_dev *dev, u32 off) {
     if (!dev || !dev->base) return 0;
     return *(volatile u32 *)((u8 *)dev->base + off);
@@ -51,6 +53,7 @@ void virtio_mmio_write32(struct virtio_mmio_dev *dev, u32 off, u32 val) {
 // Status helpers.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 u32 virtio_get_status(struct virtio_mmio_dev *dev) {
     return virtio_mmio_read32(dev, VIRTIO_MMIO_STATUS);
 }
@@ -173,6 +176,7 @@ void virtio_init(void) {
     uart_puts(" skipped due to magic mismatch or cap)\n");
 }
 
+#ifdef KERNEL_TESTS
 int virtio_mmio_dev_count(void) {
     return g_virtio_mmio_dev_count;
 }
@@ -181,6 +185,7 @@ struct virtio_mmio_dev *virtio_mmio_dev_get(int idx) {
     if (idx < 0 || idx >= g_virtio_mmio_dev_count) return NULL;
     return &g_virtio_mmio_devs[idx];
 }
+#endif // KERNEL_TESTS
 
 struct virtio_mmio_dev *virtio_mmio_find_by_device_id(u32 device_id) {
     for (int i = 0; i < g_virtio_mmio_dev_count; i++) {
@@ -237,6 +242,7 @@ _Static_assert(6u + 8u * VIRTIO_VQ_NUM_DEFAULT <= PAGE_SIZE,
 // Min(a, b) for u32.
 static u32 u32_min(u32 a, u32 b) { return a < b ? a : b; }
 
+VISIBLE_IF_KERNEL_TESTS
 u32 virtio_vq_size_for(u32 num_max) {
     if (num_max == 0) return 0;
     u32 size = u32_min(num_max, VIRTIO_VQ_NUM_DEFAULT);

@@ -52,6 +52,7 @@ void halls_dump(const struct exception_context *ctx);
 const struct exception_context *halls_enter_frame(const struct exception_context *ctx);
 void halls_leave_frame(const struct exception_context *prev);
 
+#ifdef KERNEL_TESTS
 // The current per-CPU live exception frame (NULL if none). For tests.
 const struct exception_context *halls_current_frame(void);
 
@@ -70,6 +71,7 @@ bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi);
 // at a freed/other-thread stack (gap huge or negative) and is rejected, so a
 // stale slot never produces a fabricated dump nor suppresses capture-current.
 bool halls_frame_is_live(u64 frame, u64 cur_sp);
+#endif // KERNEL_TESTS
 
 // Translate a runtime code address to its link-time address by removing the
 // KASLR slide (so `addr2line -e thylacine.elf <link-addr>` resolves it).

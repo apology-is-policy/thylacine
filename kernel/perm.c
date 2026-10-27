@@ -3,6 +3,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/syscall.h>
 #include <thylacine/handle.h>
+#include <thylacine/visibility.h>
 
 bool perm_identity_from_proc(const struct Proc *p, struct ProcAccessIdentity *out) {
     if (!out) return false;
@@ -28,6 +29,7 @@ bool perm_identity_in_group(const struct ProcAccessIdentity *id, u32 gid) {
     return false;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool proc_in_group(const struct Proc *p, u32 gid) {
     struct ProcAccessIdentity id;
     return perm_identity_from_proc(p, &id) && perm_identity_in_group(&id, gid);

@@ -129,6 +129,7 @@ void cons_tx_arm(void);
 // caller emits unserialized and reports the miss). Only extinction() calls it.
 bool cons_tx_claim_for_dump(void);
 
+#ifdef KERNEL_TESTS
 // The pure bounded try-spin, exported to run on a CALLER-SUPPLIED lock so a test
 // can exercise the bound and the return-holding contract WITHOUT touching the
 // live ring (a test that claimed the live ring would silence the console for
@@ -138,6 +139,7 @@ bool cons_tx_claim_core(spin_lock_t *l);
 // FALSE on a clean boot, and it must STAY false -- guarded by
 // `cons.ring_unclaimed_on_clean_boot`. A spurious claim is a dead console.
 bool cons_tx_claimed_for_dump(void);
+#endif // KERNEL_TESTS
 
 // #75-audit F3: bounded synchronous flush for a HEALTHY caller (blocking-lock,
 // waits the FIFO out). boot_mark_complete calls it before the direct-path
@@ -423,18 +425,22 @@ long cons_render_winsize(void *buf, long n);
 #define CONS_BEACON_CELLS  1u
 #define CONS_BEACON_RICH   2u
 
+#ifdef KERNEL_TESTS
 // Snapshot the current tier (one g_cons.lock hold internally).
 u32 cons_beacon_tier(void);
+#endif // KERNEL_TESTS
 
 // The standalone `beacon <tier>\n` line the ungated /dev/beacon leaf serves
 // (H-1 audit F1: the session shell cannot seek its inherited consctl fd nor
 // mint a fresh one -- the winsize-leaf precedent). Max 13 bytes.
 long cons_render_beacon(void *buf, long n);
 
+#ifdef KERNEL_TESTS
 // Diagnostic: count of CHANGED winsize applies (each corresponds to one
 // tty:winch post attempt). The iff-changed regression reads it -- an unchanged
 // rewrite must NOT advance it.
 u32 cons_winch_events(void);
+#endif // KERNEL_TESTS
 
 // #55: the is-a-cons qid contract (the ptsname PTS_FLAG precedent, pouch
 // 0021's client ABI). cons fds were STATLESS (fstat -1 -> pouch folded them

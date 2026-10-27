@@ -119,12 +119,14 @@ static int engine_collect(struct Loom *l, struct loom_service_ref ref, bool noti
     if (notify) engine_changed(l);
     return 0;
 }
+#ifdef KERNEL_TESTS
 int loom_engine_collect(struct Loom *l, struct loom_service_ref ref) {
     return engine_collect(l,ref,true);
 }
 int loom_engine_visit(struct Loom *l,u64 now) {
     return loom_engine_ready_visit(l,now);
 }
+#endif // KERNEL_TESTS
 static int engine_discard_closed(struct Loom *l, bool notify) {
     if (!l || !loom_is_private(l)) return -T_E_INVAL;
     struct loom_service_ref refs[LOOM_SERVICE_SLOT_COUNT];
@@ -180,9 +182,11 @@ bool loom_engine_empty(const struct loom_service_engine *t) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 int loom_engine_discard_closed(struct Loom *l) {
     return engine_discard_closed(l,true);
 }
+#endif // KERNEL_TESTS
 // Ll protects every protocol
 // observation; p->driving forbids reading its cursor while it is written
 // unlocked. The caller's entry pin retains the native poll-list lifetime.

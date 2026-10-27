@@ -68,6 +68,7 @@ u64 poll_total_calls(void) {
     return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 // g_poll_slept counts callers that ENTERED the slow path — incremented
 // just before `tsleep`. The counter is "slow path entered" rather than
 // "actually parked": if a producer races the first scan + register and
@@ -85,11 +86,13 @@ u64 poll_total_slept(void) {
 u64 poll_total_resleeps(void) {
     return __atomic_load_n(&g_poll_resleeps, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 static u64 g_poll_snap_failsafes;
 static u64 g_poll_arm_retries;
 static u64 g_poll_snap_bound_ns;    // 0 = POLL_SNAP_BOUND_NS; a test's bound is silent
 
+#ifdef KERNEL_TESTS
 u64 poll_total_snap_failsafes(void) {
     return __atomic_load_n(&g_poll_snap_failsafes, __ATOMIC_RELAXED);
 }
@@ -98,7 +101,6 @@ u64 poll_total_arm_retries(void) {
     return __atomic_load_n(&g_poll_arm_retries, __ATOMIC_RELAXED);
 }
 
-#ifdef KERNEL_TESTS
 void poll_test_set_snap_bound_ns(u64 bound_ns) {
     __atomic_store_n(&g_poll_snap_bound_ns, bound_ns, __ATOMIC_RELAXED);
 }

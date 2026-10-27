@@ -66,6 +66,7 @@ static void copy_attr(struct p9_attr *dst, const struct p9_attr *src) {
     dst->data_version = src->data_version;
 }
 
+#ifdef KERNEL_TESTS
 static void copy_statfs(struct p9_statfs *dst, const struct p9_statfs *src) {
     dst->type    = src->type;
     dst->bsize   = src->bsize;
@@ -77,6 +78,7 @@ static void copy_statfs(struct p9_statfs *dst, const struct p9_statfs *src) {
     dst->fsid    = src->fsid;
     dst->namelen = src->namelen;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Internal: error mapping.
@@ -1633,12 +1635,14 @@ int p9_client_reader_pump_ready(struct p9_client *c) {
     return ret;
 }
 
+#ifdef KERNEL_TESTS
 void p9_client_handoff_reader(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return;
     spin_lock(&c->lock);
     client_handoff_reader_locked(c, NULL);
     spin_unlock(&c->lock);
 }
+#endif // KERNEL_TESTS
 
 int p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h) {
     if (!c || c->magic != P9_CLIENT_MAGIC || !h) return -P9_E_INVAL;
@@ -1763,6 +1767,7 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
     spin_unlock(&c->lock);
 }
 
+#ifdef KERNEL_TESTS
 // Mark the session DEVICE-GONE (MENAGERIE.md section 10): the explicit entry
 // point for a holder of the client (a device-teardown / warden-removal hook)
 // to proactively fail every in-flight ASYNC (Loom) op with a -P9_E_NODEV
@@ -1777,6 +1782,7 @@ void p9_client_mark_devgone(struct p9_client *c) {
     client_mark_dead_locked(c, true);
     spin_unlock(&c->lock);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Lifecycle.
@@ -2050,6 +2056,7 @@ int p9_client_walk(struct p9_client *c,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int p9_client_walk_one(struct p9_client *c,
                         u32 src_fid, u32 new_fid,
                         const u8 *name, size_t name_len,
@@ -2064,6 +2071,7 @@ int p9_client_walk_one(struct p9_client *c,
     if (out_qid) copy_qid(out_qid, &qids[0]);
     return 0;
 }
+#endif // KERNEL_TESTS
 
 int p9_client_walkgetattr(struct p9_client *c,
                           u32 src_fid, u32 new_fid,
@@ -2112,6 +2120,7 @@ int p9_client_walkgetattr(struct p9_client *c,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
@@ -2139,6 +2148,7 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
     spin_unlock(&c->lock);
     return 0;
 }
+#endif // KERNEL_TESTS
 
 // Fire-and-forget clunk (FID-LIFECYCLE async-clunk; docs/FID-LIFECYCLE-DESIGN.md
 // section 3.1): send the Tclunk and return WITHOUT blocking on Rclunk, so the
@@ -2468,6 +2478,7 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int p9_client_statfs(struct p9_client *c, u32 fid,
                       struct p9_statfs *out_statfs) {
     if (!c) return -P9_E_INVAL;
@@ -2489,6 +2500,7 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
     spin_unlock(&c->lock);
     return 0;
 }
+#endif // KERNEL_TESTS
 
 int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     if (!c) return -P9_E_INVAL;
@@ -2816,6 +2828,7 @@ void p9_client_set_orphan_sink(struct p9_client *c, p9_orphan_sink_fn fn,
     spin_unlock(&c->lock);
 }
 
+#ifdef KERNEL_TESTS
 size_t p9_client_inflight(const struct p9_client *c) {
     if (!c) return 0;
     if (c->magic != P9_CLIENT_MAGIC) return 0;
@@ -2824,3 +2837,4 @@ size_t p9_client_inflight(const struct p9_client *c) {
     spin_unlock(&((struct p9_client *)c)->lock);
     return n;
 }
+#endif // KERNEL_TESTS

@@ -379,15 +379,19 @@ struct srv_admission_snapshot {
     u32 local_credits, session_credits, global_credits;
 };
 void srv_domain_snapshot(struct SrvDomain *d, struct srv_admission_snapshot *out);
+#ifdef KERNEL_TESTS
 void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
                        u32 *global, u32 *domains);
+#endif // KERNEL_TESTS
 struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
     u64 peer_stripes, int peer_pid, u32 peer_principal, bool peer_console,
     u64 server_stripes, u32 server_principal, u32 msize);
+#ifdef KERNEL_TESTS
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
                                u32 peer_principal, bool peer_console,
                                u64 server_stripes, u32 server_principal,
                                u32 msize);
+#endif // KERNEL_TESTS
 
 // srvconn_msize — the conn's 9P msize class (set at mint from the
 // service's ring class). Fail-closes to SRVCONN_MSIZE on a NULL /
@@ -504,11 +508,13 @@ u64 srvconn_server_stripes(const struct SrvConn *cn);
 // write ops route to (a3b).
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // srvconn_client_send — kernel client writes `n` bytes toward corvus
 // (the c2s ring). Returns bytes accepted (0..n; in correct single-
 // frame-in-flight operation always n), or -1 if the connection is torn
 // down or args are bad. Non-blocking.
 long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n);
+#endif // KERNEL_TESTS
 
 // srvconn_client_send_frame — ALL-OR-NOTHING send of one whole 9P frame
 // (#841). The pipelined kernel 9P client (ARCH §21.10) may have several frames
@@ -563,7 +569,9 @@ long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 // short progress when space/data is limited, read EOF=0 and write EOF=EPIPE.
 long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
                         void *buf, long n);
+#ifdef KERNEL_TESTS
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
+#endif // KERNEL_TESTS
 
 // srvconn_server_send_blocking — the BLOCKING server-side write (#348).
 //
@@ -625,9 +633,11 @@ short srvconn_poll(struct SrvConn *cn, bool client, short events,
 // Diagnostics.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // Cumulative counters. (created - freed) == live SrvConn count.
 u64 srvconn_total_created(void);
 u64 srvconn_total_freed(void);
+#endif // KERNEL_TESTS
 
 // #210: one live connection's counter snapshot for /ctl/9p-sessions.
 // Ring conservation: produced == consumed + buffered per direction; a

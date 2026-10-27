@@ -710,7 +710,9 @@ bool  p9_session_set_owner(struct p9_session *s, u32 tag, void *owner);
 // Count the active op under `tag` against the async share. Fail-soft on an
 // inactive, already-async or Tflush entry.
 void  p9_session_mark_async(struct p9_session *s, u16 tag);
+#ifdef KERNEL_TESTS
 size_t p9_session_n_bound_fids(const struct p9_session *s);
 size_t p9_session_n_reserved_slots(const struct p9_session *s);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_9P_SESSION_H

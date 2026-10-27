@@ -28,9 +28,11 @@ struct t_stat;
 #define PERM_W  2u
 #define PERM_R  4u
 
+#ifdef KERNEL_TESTS
 // proc_in_group — is `gid` one of p's groups (primary or supplementary)?
 // GID_INVALID is never a member.
 bool proc_in_group(const struct Proc *p, u32 gid);
+#endif // KERNEL_TESTS
 
 // Value-based form for admitted asynchronous work. `p` is lifetime-safe during
 // capture; the resulting immutable value holds no process/address-space pointer.

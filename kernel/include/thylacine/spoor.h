@@ -368,6 +368,7 @@ void spoor_clunk(struct Spoor *c);
 // negative error on the last drop (0 while another holder keeps the Spoor).
 int spoor_clunk_rc(struct Spoor *c);
 
+#ifdef KERNEL_TESTS
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:
 //   - spoor_total_allocated increments on every successful spoor_alloc /
@@ -376,6 +377,7 @@ int spoor_clunk_rc(struct Spoor *c);
 //   - At any state, (allocated - freed) == live Spoor count.
 u64 spoor_total_allocated(void);
 u64 spoor_total_freed(void);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Walkqid allocation (P4-C — devs that implement non-trivial walks).

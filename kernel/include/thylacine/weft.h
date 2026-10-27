@@ -162,6 +162,7 @@ struct weft_ring_view {
 // fallback (false)? The hybrid threshold (NET-THROUGHPUT.md section 4.8).
 bool weft_should_ring(u32 len);
 
+#ifdef KERNEL_TESTS
 // Compute the standard [hdr][desc[ring_entries]][payload] layout for a ring
 // Burrow of `size` bytes into `*rv` (base + the validated geometry + cons_head=0).
 // `ring_entries` must be a non-zero power of two <= WEFT_MAX_ENTRIES, and the
@@ -186,6 +187,7 @@ void weft_ring_init_hdr(const struct weft_ring_view *rv);
 // Single consumer per ring (the elected reader); cons_head is consumer-private.
 // Returns the count of validated descriptors in out[].
 int weft_ring_drain(struct weft_ring_view *rv, struct weft_desc *out, int max);
+#endif // KERNEL_TESTS
 
 // ---- Readiness ring (Weft-4) -- the netd<->guest single-cache-line poke. ----
 // Direction-agnostic: Weft-6 instantiates one channel per direction (netd->guest
@@ -193,6 +195,7 @@ int weft_ring_drain(struct weft_ring_view *rv, struct weft_desc *out, int max);
 // primitives; the live park (the Rendez sleep on a true arm_park) + the wake
 // (the Rendez wakeup on a true signal) are wired at Weft-6.
 
+#ifdef KERNEL_TESTS
 // Zero the readiness header (ready_seq / mask / wait_seq / wait_active = 0).
 // Called once at flow grant, alongside weft_ring_init_hdr.
 void weft_ready_init_hdr(const struct weft_ring_view *rv);
@@ -225,6 +228,7 @@ bool weft_ready_arm_park(struct weft_ring_view *rv, u32 last_seen);
 // deciding not to park). The consumer owns wait_active; the producer only reads
 // it. Called from the consumer's post-sleep path (Weft-6).
 void weft_ready_unpark(struct weft_ring_view *rv);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // F_NOTIF zero-copy-send completion contract (Weft-5) -- the two-CQE send +
@@ -277,6 +281,7 @@ struct weft_notif {
     u32 result_flags;   // WEFT_NOTIF_* for the result CQE
 };
 
+#ifdef KERNEL_TESTS
 // Arm the tracker for a ZERO-COPIED send: the page is in flight under `holders`
 // (a non-empty subset of WEFT_HOLDERS_ALL, typically all three) until the
 // notification-terminal. Clears result_flags (zero-copied, in flight). weft.tla
@@ -308,6 +313,7 @@ bool weft_notif_inflight(const struct weft_notif *n);
 // -- OR'd into the result CQE so userspace/netd knows whether the buffer is in
 // flight (the never-silently-wrong fallback indicator).
 u32 weft_notif_result_flags(const struct weft_notif *n);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Weft-6a-2: the per-flow EL0 delivery (grant-is-the-share). The kernel-scoped
@@ -584,10 +590,10 @@ void weft_reap_register(struct weft_binding *wb,
 // the guarantee no reaper sweep still holds wb.
 void weft_reap_unregister(struct weft_binding *wb);
 
+#ifdef KERNEL_TESTS
 // One sweep pass at `now_ns` (the kthread's body). Returns the number of
 // bindings force-reclaimed this pass.
 int weft_reap_sweep(u64 now_ns);
-#ifdef KERNEL_TESTS
 // A test's binding and a test's sweep. The kthread runs from boot, beside the
 // suite, on the real clock; a test's synthetic `now_ns` against a stamp the
 // kthread took (or the kthread reclaiming mid-test) would decide a test by

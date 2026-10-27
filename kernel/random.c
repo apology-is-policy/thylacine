@@ -31,6 +31,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/uart.h"
 #include "../mm/phys.h"
@@ -139,6 +140,7 @@ static u64 read_cntfrq(void) {
 // the unit test. NB: timer_init() (run before any pull) extincts on CNTFRQ==0,
 // so the live pull never observes freq==0 -- this leg is defensive (it covers
 // the unit test + any hypothetical caller ordered before timer_init).
+VISIBLE_IF_KERNEL_TESTS
 u64 kern_random_virtio_deadline_ticks(u64 freq) {
     return freq ? (freq / 1000u) * RNG_VIRTIO_POLL_MS : 0;
 }
@@ -476,9 +478,11 @@ size_t random_seed_from_virtio(void) {
     return random_reseed_strong(RNG_VIRTIO_PULL_TRIES);
 }
 
+#ifdef KERNEL_TESTS
 bool kern_random_virtio_contributed(void) {
     return __atomic_load_n(&g_rng_virtio_ok, __ATOMIC_ACQUIRE);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Public API (random.h) -- contracts unchanged from the RNDR-only baseline.
@@ -521,9 +525,11 @@ bool kern_random_seeded(void) {
     return __atomic_load_n(&g_rng_seeded, __ATOMIC_ACQUIRE);
 }
 
+#ifdef KERNEL_TESTS
 bool kern_random_rndr_available(void) {
     return __atomic_load_n(&g_rndr_available, __ATOMIC_ACQUIRE);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Dev bring-up + the Plan 9 /dev/random surface (thin wrapper over the API).

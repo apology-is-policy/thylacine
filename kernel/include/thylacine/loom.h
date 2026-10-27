@@ -605,6 +605,7 @@ _Static_assert(__builtin_offsetof(struct Loom, magic) == 0,
 // Returns NULL on bad args / OOM. `exempt` is the creator's I-32 exemption:
 // the ring is a user allocation, refused past the user pool unless exempt.
 struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt);
+#ifdef KERNEL_TESTS
 // Internal layout constructor for the private service owner. Geometry only:
 // no identity, charge, mapping, authority or public setup-feature activation.
 struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt);
@@ -615,6 +616,7 @@ struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exem
 // Caller retains p and its image throughout construction. No scopes, registered
 // buffers or worker are admitted until their private engine is qualified.
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts);
+#endif // KERNEL_TESTS
 // The same, reporting a refusal: -EINVAL (geometry/Proc), -EBUSY (address space
 // shared, or its private-ring guard count exhausted), -ENOMEM (budget or
 // allocation), -EAGAIN (the retirer is not up yet). *why is 0 on success.
@@ -681,8 +683,10 @@ void loom_exec_latch(struct Loom *l); // leaf only; caller retains the table own
 bool loom_is_private(const struct Loom *l);
 void loom_retire_init(void);
 void loom_retirer_main(void);
+#ifdef KERNEL_TESTS
 u64 loom_private_retired(void);
 u64 loom_private_created(void);
+#endif // KERNEL_TESTS
 
 
 // Refcount. loom_unref's last drop clunks every registered Spoor and
@@ -782,6 +786,7 @@ int loom_private_post_terminal(struct Loom *, struct loom_request_ref);
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 
+#ifdef KERNEL_TESTS
 // Post one completion into the CQ ring (the POST_CQE front-end's terminal
 // action; Loom-2b). Writes a loom_cqe {user_data, result, flags} at the kernel
 // cq_tail and publishes the bump with a release store (so a user-side
@@ -803,15 +808,18 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
 // pipe.c producer precedent) and does NOT sleep or re-enter p9_client_*, so it
 // composes with the c->lock the async-completion path holds (the seam contract).
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
+#endif // KERNEL_TESTS
 
 
 // KT-1.5: the KObj_Loom .poll hook (poll_scan_one's KOBJ_LOOM arm). Registers
 // pw on l->cq_waiters + reports POLLIN iff a CQE is ready. See loom.c.
 short loom_poll(struct Loom *l, short events, struct poll_waiter *pw);
 
+#ifdef KERNEL_TESTS
 // Diagnostics (tests).
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);
+#endif // KERNEL_TESTS
 
 // Tests: hold every SQPOLL kthread before its terminal until released.
 void loom_sqpoll_hold_exit_for_test(bool hold);
@@ -829,6 +837,7 @@ int  loom_start_sqpoll(struct Loom *l);
 // setup/syscall dispatch until the remaining private protocol gates qualify.
 int loom_private_start_executor(struct Loom *l);
 
+#ifdef KERNEL_TESTS
 // Test knob: a nonzero value caps a fan-in waiter's client set below
 // LOOM_MAX_REG_HANDLES, so a test can drive the partial set's timed rescan
 // with two clients. 0 in production.
@@ -858,10 +867,12 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
                                  struct loom_params *out, hidx_t *out_fd,
                                  struct Loom **out_l);
+#endif // KERNEL_TESTS
 // Detach the ring mapping a setup made, through the charge-settling core, only
 // while the mapping at ring_va is still exactly l's ring; true if it did.
 // Caller holds a reference on l.
 bool sys_loom_ring_detach(struct Proc *p, struct Loom *l, u64 ring_va, u32 ring_size);
+#ifdef KERNEL_TESTS
 // Undo a successful held setup (legacy or private) whose params never reached
 // the caller: close fd only while it still names l, detach only l's own ring
 // mapping, then drop the caller's reference -- which can be the Loom's last,
@@ -883,6 +894,7 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
 // registration and returns that call's errno.
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n);
+#endif // KERNEL_TESTS
 
 // Loom-3 batch-enter core. Consume up to `to_submit` SQEs from the SQ index ring
 // (in SQ-index order), copy each to kernel memory (ring TOCTOU), and dispatch:
@@ -915,10 +927,12 @@ void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
 void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
 #endif
 
+#ifdef KERNEL_TESTS
 // Testable enter inner. Resolves `loom_fd` -> KObj_Loom in `p` (holding a loom
 // ref for the call), runs loom_enter, and returns its result. -1 on a bad fd /
 // wrong kind. The SVC handler is a thin current_thread() wrapper.
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
                             u32 min_complete, u32 flags);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_LOOM_H

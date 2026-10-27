@@ -78,8 +78,10 @@ bool pipe_hangup_write(struct Spoor *write_end);
 // the kernel's to set. -T_E_BADF for anything but a pipe's read end.
 long pipe_read_now(struct Spoor *read_end, void *buf, long n);
 
+#ifdef KERNEL_TESTS
 // Diagnostic counters (ring-level; one ring per pipe pair).
 u64 pipe_total_allocated(void);
 u64 pipe_total_freed(void);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_PIPE_H

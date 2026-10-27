@@ -196,11 +196,13 @@ int p9_attached_install_transport(struct p9_attached *a,
                                    struct Spoor *tx,
                                    struct Spoor *rx);
 
+#ifdef KERNEL_TESTS
 // Legacy alias: equivalent to p9_attached_unref. Retained because callers
 // who construct an attached + tear it down with no walks ever existing
 // (tests, attach-create failure paths) read more naturally as "destroy."
 // Drop in a future refactor once no caller depends on the name.
 void p9_attached_destroy(struct p9_attached *a);
+#endif // KERNEL_TESTS
 
 // Query: is this attached's session OPEN?
 bool p9_attached_is_open(const struct p9_attached *a);
@@ -266,7 +268,9 @@ struct p9_closer_stats {
     u64 reaped;
     u64 live_refusals;   // p9_clunk_refused lines, from every caller
 };
+#ifdef KERNEL_TESTS
 void p9_closer_stats(struct p9_closer_stats *out);
+#endif // KERNEL_TESTS
 
 // Tests: the next `n` closer spawns, or closer queue nodes, fail as an
 // allocation failure would. Each returns how many were still to fail.
@@ -278,12 +282,14 @@ u32 p9_closer_fail_nodes_for_test(u32 n);
 void p9_closer_hold_spawn_for_test(bool hold);
 bool p9_closer_spawn_held_for_test(void);
 
+#ifdef KERNEL_TESTS
 // #210: relabel a registered attached for /ctl/9p-sessions (label is
 // copied, truncated to the ctl_label field; id is free-form — the /srv
 // path stamps the conn's peer pid). Safe any time between create and the
 // last unref.
 void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
                                int id);
+#endif // KERNEL_TESTS
 
 // Stamp the session's ends for /ctl/9p-sessions: `attacher` is the attaching
 // Proc's principal, `server` the server's when the kernel knows it, else

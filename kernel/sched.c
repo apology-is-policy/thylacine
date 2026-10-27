@@ -39,6 +39,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <atomic_lse.h>   // t_atomic_fetch_add_relaxed_u32 (W1.5 LSE-patchable)
 
 #include "../arch/arm64/asid.h"     // RW-1 B-F1: asid_resolve (context-switch ASID pre-hook).
@@ -316,10 +317,12 @@ void sched_init(unsigned cpu_idx) {
     cs->initialized  = true;
 }
 
+#ifdef KERNEL_TESTS
 struct Thread *sched_idle_thread(unsigned cpu_idx) {
     if (cpu_idx >= DTB_MAX_CPUS) return NULL;
     return g_cpu_sched[cpu_idx].idle;
 }
+#endif // KERNEL_TESTS
 
 // ============================================================================
 // HMP foundation (#864, ARCH §8.4.4): per-CPU capacity + capacity-aware
@@ -336,6 +339,7 @@ struct Thread *sched_idle_thread(unsigned cpu_idx) {
 // the prev CPU and ready() behaves exactly as it did before #864.
 // ============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps) {
     if (!raw_dmips || !out_caps || n == 0) return false;
 
@@ -367,6 +371,7 @@ bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps) {
     return false;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 unsigned sched_place_by_capacity(u32 util, unsigned prev_cpu,
                                  const u32 *caps, unsigned n, bool hetero) {
     // Homogeneous topology: the placement is the identity -- keep the prev/
@@ -501,6 +506,7 @@ static inline bool thread_may_run_on(const struct Thread *t, unsigned cpu) {
     return true;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     if (!t) return prev_cpu;
     // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
@@ -543,6 +549,7 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     return tgt;
 }
 
+#ifdef KERNEL_TESTS
 bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
     if (cpu >= DTB_MAX_CPUS || !t) return false;
     struct CpuSched *cs = &g_cpu_sched[cpu];
@@ -553,7 +560,6 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
     return present;
 }
 
-#ifdef KERNEL_TESTS
 // Test-support accessors (gated by KERNEL_TESTS, #61): the unit suite reads
 // need_resched_pending() to observe the same-CPU wake-preempt path (RW-11
 // SA-1b) and clears it to establish a clean baseline. Production code never
@@ -583,11 +589,13 @@ void sched_set_idle_in_wfi(bool in_wfi) {
     g_cpu_sched[idx].idle_in_wfi = in_wfi;
 }
 
+#ifdef KERNEL_TESTS
 bool sched_idle_in_wfi(unsigned cpu_idx) {
     if (cpu_idx >= DTB_MAX_CPUS) return false;
     if (!g_cpu_sched[cpu_idx].initialized) return false;
     return g_cpu_sched[cpu_idx].idle_in_wfi;
 }
+#endif // KERNEL_TESTS
 
 // SMP redesign (ARCH 8.4.2): install cpu0's idle thread. cpu0's idle is an
 // ordinary in-tree pinned thread (thread_create_bootcpu_idle), retiring the old
@@ -822,6 +830,7 @@ void sched_kick_thread(struct Thread *t) {
 // highest-priority band with runnable threads" ON THE WAKE PATH: without it a
 // newly-runnable higher-band thread waited up to a full slice for the next
 // tick-driven preempt.
+VISIBLE_IF_KERNEL_TESTS
 bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle) {
     if (cur_is_idle) return true;
     return woken_band < cur_band;
@@ -1029,10 +1038,12 @@ static void sched_record_space(struct AddrSpace *as) {
     __asm__ __volatile__("dsb ish" ::: "memory");
 }
 
+#ifdef KERNEL_TESTS
 const struct AddrSpace *sched_cpu_space(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return NULL;
     return __atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // Checks of an outstanding ticket between offers of the CPU. An IPI round trip
 // is microseconds; the kernel is not preemptible in a syscall (ARCH 8.12), so
@@ -1691,6 +1702,7 @@ unsigned sched_runnable_count(void) {
     return n;
 }
 
+#ifdef KERNEL_TESTS
 unsigned sched_runnable_count_band(unsigned band) {
     if (band >= SCHED_BAND_COUNT) return 0;
     unsigned n = 0;
@@ -1703,6 +1715,7 @@ unsigned sched_runnable_count_band(unsigned band) {
     }
     return n;
 }
+#endif // KERNEL_TESTS
 
 // TI-4d: is there ANY queued non-idle runnable work anywhere? Reads ONLY each
 // band's HEAD pointer (a stable slot in g_cpu_sched[]) and tests it for NULL --
@@ -1797,6 +1810,7 @@ u64 sched_cpu_ctxt(unsigned cpu) {
     return __atomic_load_n(&g_cpu_sched[cpu].nctxt, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 // Best-effort snapshot of every runnable thread across ALL CPUs' run trees
 // (every band, INCLUDING idle -- the dump shows everything so a quiescence
 // failure can be fingerprinted), with enough identity (cpu / tid / band /
@@ -1827,6 +1841,7 @@ void sched_dump_runnable(const char *tag) {
         }
     }
 }
+#endif // KERNEL_TESTS
 
 // ============================================================================
 // Plan 9 wait/wake protocol — sleep + wakeup over Rendez (P2-Bb).
@@ -1923,6 +1938,7 @@ static void timerwait_unlink(struct Thread *t) {
 // nothing), and a mid-switch sleeper's near deadline still needs covering. A
 // deadline already in the past is returned as-is: the one-shot clamp fires it
 // ASAP, which is correct for an overdue sleeper.
+VISIBLE_IF_KERNEL_TESTS
 u64 timerwait_earliest_deadline(void) {
     u64 earliest = 0;
     bool found = false;
@@ -2534,6 +2550,7 @@ static void timerwait_tick(void) {
 // per_cpu_main (smp.c) reach it via the sched.h declaration.
 // ===========================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt) {
     // now_cnt + backstop_cnt cannot overflow on v1.0 targets (a 62.5 MHz CNTVCT
     // has a ~300,000-year horizon before u64 wrap). If it ever did, the wrapped

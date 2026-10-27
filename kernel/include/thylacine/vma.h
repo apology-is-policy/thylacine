@@ -191,6 +191,7 @@ struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
 struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
                                          bool *out_freed, u32 *out_refund);
 
+#ifdef KERNEL_TESTS
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
 // any existing VMA in the list. Returns 0 on success, -1 on overlap
 // (caller must vma_free the rejected VMA themselves; this function
@@ -200,6 +201,7 @@ struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *
 // Phase 5+ multi-thread Procs need a per-Proc lock around the list;
 // documented as a trip-hazard when added.
 int vma_insert(struct Proc *p, struct Vma *v);
+#endif // KERNEL_TESTS
 
 // Remove `v` from Proc `p`'s VMA list. Caller still owns the Vma
 // after the remove (typically calls vma_free next).
@@ -236,11 +238,13 @@ int vma_find_gap(struct Proc *p, u64 length,
 int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
                          u64 window_start, u64 window_end, u64 *out_vaddr);
 
+#ifdef KERNEL_TESTS
 // Walk every VMA in Proc `p`'s list and free it. Used at proc_free
 // to release all VMAs (and decrement their VMOs' mapping counts).
 // Caller (proc_free) calls this BEFORE handle_table_free — handle
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // B-1a' (ARCH 6.5 "Range detach"): remove [vaddr, vaddr+length) from the
 // address space, whatever it cuts -- the Linux munmap shape, and the primitive
@@ -331,10 +335,12 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
 // built FOR. Passing it in rather than a Proc keeps this layer free of identity.
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
+#ifdef KERNEL_TESTS
 // True iff v sits in as's list, by its links and the head -- for a Vma in as's
 // list or in none; one interior to another space's list reads linked.
 // vma_remove_in extincts on a Vma for which this is false. Caller holds as->lock.
 bool        vma_linked_in(const struct AddrSpace *as, const struct Vma *v);
+#endif // KERNEL_TESTS
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 
 // #199: lowest-addressed VMA overlapping [lo, hi), or NULL. Caller holds
@@ -414,9 +420,11 @@ bool vma_reprotect_is_noop_in(struct AddrSpace *as, u64 vaddr, u64 length,
 int  vma_reprotect_headroom_in(struct AddrSpace *as, bool exempt, u64 vaddr,
                               u64 length);
 
+#ifdef KERNEL_TESTS
 // Diagnostic accessors.
 u64      vma_total_allocated(void);
 u64      vma_total_freed(void);
 u64      vma_scan_steps(void);      // nodes visited by vma_next_overlap_in (audit F2)
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_VMA_H

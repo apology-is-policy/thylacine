@@ -37,10 +37,13 @@
 #ifndef THYLACINE_SYSCALL_H
 #define THYLACINE_SYSCALL_H
 
-#include <thylacine/caps.h>       // caps_t, in the tests' declarations below
 #include <thylacine/errno.h>
-#include <thylacine/handle.h>     // hidx_t, likewise
 #include <thylacine/types.h>
+
+#ifdef KERNEL_TESTS
+#include <thylacine/caps.h>       // caps_t, in the tests' declarations below
+#include <thylacine/handle.h>     // hidx_t, likewise
+#endif
 
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
 enum {
@@ -3850,6 +3853,9 @@ struct exception_context;
 // or sooner a peer's thread create).
 void syscall_dispatch(struct exception_context *ctx);
 
+struct Spoor;
+
+#ifdef KERNEL_TESTS
 // Calls that reached the native switch's unknown arm (defined in syscall.c).
 // A test tells "no native handler" from a handler that also answers -1 by it.
 u64 syscall_unknown_count(void);
@@ -3858,14 +3864,13 @@ u64 syscall_unknown_count(void);
 // admits pipe pairs ONLY -- the spoor transport is sound solely over a
 // non-blocking tx, and CNBFRAME is honored by devpipe alone (a /srv byte-conn or
 // a dev9p file tx BLOCKS under the 9P client's held c->lock, the #360 lock-
-// across-sleep extinction). Non-static so the regression (test_pipe.c) exercises
-// the ACTUAL predicate the handler gates on, not a re-derivation.
-struct Spoor;
+// across-sleep extinction). The regression (test_pipe.c) exercises the ACTUAL
+// predicate the handler gates on, not a re-derivation.
 bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
+#endif // KERNEL_TESTS
 
 // The identity cape's and the remote declaration's two admission predicates
-// (defined in syscall.c; non-static so the regressions exercise the handlers'
-// own rules):
+// (defined in syscall.c; the regressions exercise the handlers' own rules):
 //   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE and
 //     SYS_ATTACH_9P_REMOTE (`srv` false); SYS_ATTACH_9P_SRV takes
 //     SYS_ATTACH_9P_LOOSE only;
@@ -3873,7 +3878,9 @@ bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx
 //     bits only, and DMSRVCAPE only beside DMSRVBYTE (DMSRVREMOTE with
 //     either mode).
 bool sys_attach_9p_flags_ok(u64 flags, bool srv);
+#ifdef KERNEL_TESTS
 bool sys_srv_post_perm_ok(u32 perm);
+#endif // KERNEL_TESTS
 
 struct AddrSpace;
 struct Burrow;

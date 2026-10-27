@@ -132,6 +132,7 @@ void srv_domain_snapshot(struct SrvDomain *d, struct srv_admission_snapshot *out
     spin_unlock(&g_srv_admission_lock);
 }
 
+#ifdef KERNEL_TESTS
 void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
                        u32 *global, u32 *domains) {
     struct srv_admission_snapshot s;
@@ -141,6 +142,7 @@ void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
     if (global) *global = s.global_count;
     if (domains) *domains = s.domains;
 }
+#endif // KERNEL_TESTS
 
 // #210: the /ctl/9p-sessions registry — every live SrvConn, singly linked
 // through cn->ctl_next. A zeroed spin_lock_t is the unlocked form (the
@@ -512,6 +514,7 @@ struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
     return cn;
 }
 
+#ifdef KERNEL_TESTS
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
                                u32 peer_principal, bool peer_console,
                                u64 server_stripes, u32 server_principal,
@@ -519,6 +522,7 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     return srvconn_create_in(NULL, NULL, peer_stripes, peer_pid, peer_principal,
                              peer_console, server_stripes, server_principal, msize);
 }
+#endif // KERNEL_TESTS
 
 void srvconn_ref(struct SrvConn *cn) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
@@ -733,6 +737,7 @@ u64 srvconn_server_stripes(const struct SrvConn *cn) {
 // Raw byte transport.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
@@ -747,6 +752,7 @@ long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n) {
     }
     return put;
 }
+#endif // KERNEL_TESTS
 
 long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
@@ -889,6 +895,7 @@ long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n) {
     return ret;
 }
 
+#ifdef KERNEL_TESTS
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
@@ -898,6 +905,7 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (put > 0) poll_waiter_list_wake(&cn->poll_list);
     return put;
 }
+#endif // KERNEL_TESTS
 
 // srvconn_server_send_blocking — #348. The BLOCKING s2c producer: deliver
 // the WHOLE buffer, parking on s2c.wrendez when the ring is full until the
@@ -1228,9 +1236,11 @@ short srvconn_poll(struct SrvConn *cn, bool client, short events,
 // Diagnostics.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 u64 srvconn_total_created(void) {
     return __atomic_load_n(&g_srvconn_created, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // #210: walk every live conn for /ctl/9p-sessions. Registry lock held
 // across the walk (see srvconn_ctl_unlink for why that pins lifetimes);
@@ -1279,6 +1289,8 @@ void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
     spin_unlock(&g_srvconn_ctl_lock);
 }
 
+#ifdef KERNEL_TESTS
 u64 srvconn_total_freed(void) {
     return __atomic_load_n(&g_srvconn_freed, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS

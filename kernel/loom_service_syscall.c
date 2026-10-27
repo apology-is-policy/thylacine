@@ -45,6 +45,7 @@ u32 loom_private_record_size(u32 op) {
     }
 }
 
+#ifdef KERNEL_TESTS
 int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                                 struct loom_params *out, hidx_t *out_fd) {
     struct Loom *l = NULL;
@@ -52,6 +53,7 @@ int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     if (rc == 0) loom_unref(l);
     return rc;
 }
+#endif // KERNEL_TESTS
 
 #ifndef LOOM_PRIVATE_QUALIFICATION
 

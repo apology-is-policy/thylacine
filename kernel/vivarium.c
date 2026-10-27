@@ -15,6 +15,7 @@
 #include <thylacine/spoor.h>            // NP-5: the socktab's readiness cache
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/timer.h"       // the sleep rows: both clocks + the step list
 #include "../mm/slub.h"              // the fork-time sigtab clone (kzalloc)
@@ -1534,6 +1535,7 @@ enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
     return VIV_TRANSLATED;
 }
 
+#ifdef KERNEL_TESTS
 bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
                                  u64 fd, u64 offset) {
     int admitted = 0;
@@ -1547,6 +1549,7 @@ bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
         admitted++;
     return admitted <= 1;
 }
+#endif // KERNEL_TESTS
 
 // -----------------------------------------------------------------------------
 // TIER 2 — mprotect (B-1a; ARCH 6.5 "The permission ceiling"). See the header.
@@ -1816,6 +1819,7 @@ enum viv_signote viv_signal_note(u64 signum) {
     }
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool viv_signal_owns_note_exclusively(u64 signum) {
     enum viv_signote mine = viv_signal_note(signum);
     if (mine == VIV_SIGNOTE_NONE) return false;
@@ -1830,6 +1834,7 @@ bool viv_signal_owns_note_exclusively(u64 signum) {
     return true;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool viv_signote_is_deliverable(enum viv_signote note) {
     switch (note) {
     // In `g_known_notes` (notes.c), so `notes_post` accepts them and the
@@ -3864,6 +3869,7 @@ bool vivarium_sleep_req_ns(s64 tv_sec, s64 tv_nsec, u64 *ns_out) {
 // lives on and must not read a short sleep as a full one. A timeout that
 // arrives with the clock still short of the deadline (tsleep rounds the
 // deadline down to a counter value) or a wall-clock step means sleep again.
+VISIBLE_IF_KERNEL_TESTS
 s64 vivarium_sleep_verdict(int ts, u64 deadline, u64 now, u64 *rem_ns) {
     if (deadline <= now) return 0;
     if (ts == TSLEEP_NOTEINTR || ts == TSLEEP_INTR) {

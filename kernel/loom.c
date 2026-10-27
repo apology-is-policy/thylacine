@@ -43,6 +43,7 @@
 #include <thylacine/syscall.h>    // T_WSTAT_GID (the create-gid rule)
 #include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vma.h>        // vma_lookup / VMA_PROT_* (Loom-6 registered buffers)
 #include <thylacine/weft.h>       // weft_binding / weft_binding_validate_rw (Weft-6c)
 
@@ -190,8 +191,10 @@ _Static_assert((LOOM_MAX_ENTRIES & (LOOM_MAX_ENTRIES - 1u)) == 0,
 static u64 g_loom_created;
 static u64 g_loom_destroyed;
 
+#ifdef KERNEL_TESTS
 u64 loom_total_created(void)   { return __atomic_load_n(&g_loom_created, __ATOMIC_RELAXED); }
 u64 loom_total_destroyed(void) { return __atomic_load_n(&g_loom_destroyed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS
 
 static u32 align_up_u32(u32 x, u32 a) { return (x + (a - 1u)) & ~(a - 1u); }
 
@@ -343,9 +346,11 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     return loom_create_layout(sq_entries, cq_entries, exempt, false);
 }
 
+#ifdef KERNEL_TESTS
 struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt) {
     return loom_create_layout(sq_entries, cq_entries, exempt, true);
 }
+#endif // KERNEL_TESTS
 
 // The intrusive queue is bounded by already charged rings. Its lock never
 // encloses ring cleanup; an idle owner parks indefinitely rather than polling.
@@ -368,6 +373,7 @@ void loom_retire_init(void) {
 
 bool loom_is_private(const struct Loom *l) { return l && l->service_as != NULL; }
 
+#ifdef KERNEL_TESTS
 u64 loom_private_retired(void) {
     return __atomic_load_n(&service_retired_count, __ATOMIC_ACQUIRE);
 }
@@ -378,7 +384,6 @@ u64 loom_private_created(void) {
     return __atomic_load_n(&service_created_count, __ATOMIC_ACQUIRE);
 }
 
-#ifdef KERNEL_TESTS
 static bool g_loom_private_layout_fault;
 static bool g_loom_private_slots_fault;
 static bool g_loom_private_pools_fault;
@@ -490,9 +495,11 @@ static inline bool loom_private_nodes_fault_take(void) { return false; }
 static inline bool loom_private_requests_fault_take(void) { return false; }
 #endif
 
+#ifdef KERNEL_TESTS
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
     return loom_create_private_why(p, sq, cq, receipts, NULL);
 }
+#endif // KERNEL_TESTS
 
 struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receipts,
                                      int *why) {
@@ -1772,6 +1779,7 @@ static void loom_drive_moved_locked(struct Loom *l) {
     __atomic_store_n(&l->drive_gen, l->drive_gen + 1u, __ATOMIC_RELEASE);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
     if (flags & LOOM_CQE_SERVICE_BUFFER) return -1;
@@ -3162,9 +3170,9 @@ static int loom_cqw_cond(void *arg) {
 #define LOOM_FANIN_MAX        LOOM_MAX_REG_HANDLES
 #define LOOM_FANIN_RESCAN_NS  (10ull * 1000ull * 1000ull)   // 10 ms
 
-u32 g_loom_fanin_test_cap;
-volatile u32 g_loom_fanin_test_stall;
-volatile u32 g_loom_fanin_test_stalled;
+VISIBLE_IF_KERNEL_TESTS u32 g_loom_fanin_test_cap;
+VISIBLE_IF_KERNEL_TESTS volatile u32 g_loom_fanin_test_stall;
+VISIBLE_IF_KERNEL_TESTS volatile u32 g_loom_fanin_test_stalled;
 
 // The test's window between an ENTER's client hooks and its CQ register
 // (g_loom_fanin_test_stall). A voluntary yield, so a test on one CPU runs.

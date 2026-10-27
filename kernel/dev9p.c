@@ -20,12 +20,16 @@
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
+#include <thylacine/visibility.h>
 #include <thylacine/weft.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
 
 _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
+
+// The Dev table closes the file; the constructor and dev9p_init name it first.
+VISIBLE_IF_KERNEL_TESTS struct Dev dev9p;
 
 // Clunk a fid nobody uses any more (docs/FID-LIFECYCLE-DESIGN.md section 9).
 // The Tclunk goes out without waiting for its Rclunk. One the caller cannot
@@ -281,11 +285,13 @@ static void co_budget_uncharge(u64 n) {
     __atomic_fetch_sub(&g_co_budget_used, n, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 // Diagnostics accessor (tests + a future /ctl exposure): the bytes currently
 // held by live cached-open snapshots.
 u64 dev9p_co_budget_used(void) {
     return __atomic_load_n(&g_co_budget_used, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // Word-wise copy for the snapshot serve (the larder_pagecopy shape; the kernel
 // links no memcpy).
@@ -330,11 +336,11 @@ static void wb_budget_uncharge(u64 n) {
     __atomic_fetch_sub(&g_wb_budget_used, n, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 u64 dev9p_wb_budget_used(void) {
     return __atomic_load_n(&g_wb_budget_used, __ATOMIC_RELAXED);
 }
 
-#ifdef KERNEL_TESTS
 void dev9p_wb_budget_bias_for_test(s64 n) {
     __atomic_fetch_add(&g_wb_budget_used, (u64)n, __ATOMIC_RELAXED);
 }
@@ -2495,7 +2501,7 @@ void dev9p_init(void) {
 // Dev struct.
 // =============================================================================
 
-struct Dev dev9p = {
+VISIBLE_IF_KERNEL_TESTS struct Dev dev9p = {
     // #217 F1: serves real file content -- may back executable pages.
     .may_back_exec = true,
     .dc       = DEV9P_DC,

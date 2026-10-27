@@ -328,6 +328,7 @@ _Static_assert(((EXEC_INIT_STRUCTURED(0, 0) + 15ull) & ~15ull)
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
 
+#ifdef KERNEL_TESTS
 // exec_setup_with_argv — extended entry that threads argv through to the
 // initial-stack layout (P6-pouch-stratumd-boot sub-chunk 16b-alpha). Same
 // contract as exec_setup but the System V frame carries argc + argv[]
@@ -354,6 +355,7 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
 int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
                          const char *argv_data, u32 argv_data_len, u32 argc,
                          u64 *entry_out, u64 *sp_out);
+#endif // KERNEL_TESTS
 
 // REVENANT R-4: bounds for the file-backed exec path (exec_setup_from_spoor).
 //
@@ -470,6 +472,7 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 #define EXEC_ARGV_MAX       512u
 #define EXEC_ARGV_DATA_MAX  65536u
 
+#ifdef KERNEL_TESTS
 // exec_interp_argv -- the DISTRO D-4 argv block for the interpreter route:
 //
 //     [interp, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
@@ -489,6 +492,7 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
                        const char *path, u32 path_len,
                        const char *argv_data, u32 argv_data_len, u32 argc,
                        u32 *out_len, u32 *out_argc);
+#endif // KERNEL_TESTS
 
 // exec_resolve_from_namespace (#58 / REVENANT R-4) -- resolve `name` in `p`'s
 // namespace and PIN the resulting executable Spoor (the ref transfers to the

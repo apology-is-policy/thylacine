@@ -65,9 +65,11 @@ struct Path;               // the session root's origin name (path.h)
 // characters (-, c, 0, z, r, p, C, m).
 #define DEV9P_DC  '9'
 
+#ifdef KERNEL_TESTS
 // The dev9p Dev struct (vtable). Registered in the bestiary by
 // dev9p_init (called from dev_init's startup sequence).
 extern struct Dev dev9p;
+#endif // KERNEL_TESTS
 
 // Per-Spoor private state. Allocated by dev9p_attach_client and by
 // dev9p_walk; freed by dev9p_close.
@@ -192,9 +194,11 @@ struct dev9p_priv {
 #define DEV9P_CO_MAX_SIZE  (128u * 1024u)
 #define DEV9P_CO_BUDGET    (8u * 1024u * 1024u)
 
+#ifdef KERNEL_TESTS
 // Diagnostics: bytes currently held by live cached-open snapshots (the global
 // budget's occupancy). Tests assert the charge/uncharge balance.
 u64 dev9p_co_budget_used(void);
+#endif // KERNEL_TESTS
 
 // Write-behind bounds (F1, LARDER-DESIGN section 12; the DEV9P_CO_* class).
 // Per-run buffer cap: two msize payloads -- steady-state staging turns the
@@ -210,9 +214,11 @@ u64 dev9p_co_budget_used(void);
 #define DEV9P_WB_STAGE_MAX  (32u * 1024u)
 #define DEV9P_WB_BUDGET     (8u * 1024u * 1024u)
 
+#ifdef KERNEL_TESTS
 // Diagnostics: bytes currently held by live staged-run buffers (the global
 // wb budget's occupancy). Tests assert the charge/uncharge balance.
 u64 dev9p_wb_budget_used(void);
+#endif // KERNEL_TESTS
 
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth

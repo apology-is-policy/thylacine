@@ -86,10 +86,12 @@ bool hwdebug_wp_add(struct debug_hw *hw, u64 va, u32 len, u8 flags);  // false: 
 bool hwdebug_wp_remove(struct debug_hw *hw, u64 va);                  // false: not present
 void hwdebug_wp_clear_all(struct debug_hw *hw);                       // wp_count = 0
 
+#ifdef KERNEL_TESTS
 // Encode a watchpoint into DBGWVR/DBGWCR (EL0-only, the requested LSC, BAS covering
 // [va, va+len) within the doubleword). Exposed for the EL1 unit test of the
 // register math (the E2E proves DELIVERY; this proves the ENCODING).
 void hwdebug_wp_encode(u64 va, u32 len, u8 flags, u64 *vr_out, u64 *cr_out);
+#endif // KERNEL_TESTS
 
 // The context-switch install/clear hook. Loads next's Proc breakpoints onto THIS
 // CPU (or clears them + MDE if next is not a debugged Proc and this CPU had them

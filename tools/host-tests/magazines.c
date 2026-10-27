@@ -7,12 +7,14 @@
 // argument excludes. Not a model of ARM weak memory or of guest timing.
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define NCPUS 4
 #define PG_KERNEL 0x4u
 /* MAGAZINE_DEFINES */
+typedef uint32_t u32;
 typedef int irq_state_t;
 typedef struct { pthread_mutex_t m; } spin_lock_t;
 // Inline (and a macro for init, which -Wunused-function still reports when

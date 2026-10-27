@@ -28,6 +28,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 #include <thylacine/vdso.h>     // vdso_clock_burrow (map the RO clock page, #343)
@@ -935,6 +936,7 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                                entry_out, sp_out);
 }
 
+#ifdef KERNEL_TESTS
 int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
                          const char *argv_data, u32 argv_data_len, u32 argc,
                          u64 *entry_out, u64 *sp_out) {
@@ -942,6 +944,7 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
                                argv_data, argv_data_len, argc,
                                entry_out, sp_out);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // REVENANT R-4: the file-backed production exec path.
@@ -1191,6 +1194,7 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
 // Build the rewritten block. Returns a kmalloc'd buffer (caller frees) with
 // *out_len / *out_argc set, or NULL if it does not fit the argv bounds or the
 // allocation fails. Pure: touches no Proc and no address space.
+VISIBLE_IF_KERNEL_TESTS
 char *exec_interp_argv(const char *interp, u32 interp_len,
                        const char *path, u32 path_len,
                        const char *argv_data, u32 argv_data_len, u32 argc,

@@ -317,8 +317,10 @@ void territory_init(void);
 // Accessor for kproc's initial Territory.
 struct Territory *kpgrp(void);
 
+#ifdef KERNEL_TESTS
 // SLUB-allocate a fresh empty Territory with ref=1. Returns NULL on OOM.
 struct Territory *territory_alloc(void);
+#endif // KERNEL_TESTS
 
 // Allocate a new Territory and deep-copy parent's bindings + mounts into
 // it. For every cloned mount entry, spoor_ref(source) is called — each
@@ -382,6 +384,7 @@ int cwd_join(const char *dot, const char *input, u64 inlen,
 // Bind (path-to-path).
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // bind: add the edge `dst -> src` to `territory`'s bind graph. Walking
 // `dst` in this territory will subsequently produce `src`. Cycle-checked:
 // rejects if adding the edge would create a cycle.
@@ -404,6 +407,7 @@ int bind(struct Territory *territory, path_id_t src, path_id_t dst);
 // (Renamed from `unmount` at P5-attach-mount — `unmount` is now the
 // mount-table primitive below.)
 int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Mount (graft-a-Spoor-at-a-path).
@@ -657,9 +661,11 @@ int territory_chroot(struct Territory *territory, struct Spoor *source);
 //        source is NULL.
 int territory_pivot_root(struct Territory *territory, struct Spoor *source);
 
+#ifdef KERNEL_TESTS
 // Diagnostic.
 int  territory_nbinds(struct Territory *territory);
 int  territory_nmounts(struct Territory *territory);
+#endif // KERNEL_TESTS
 u64  territory_total_created(void);
 u64  territory_total_destroyed(void);
 

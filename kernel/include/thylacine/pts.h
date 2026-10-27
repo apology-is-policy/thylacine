@@ -110,6 +110,7 @@ int pts_bind_slave(struct Proc *server, struct SrvConn *cn, u64 slave_qid,
 // malformed id), -T_E_ACCES (not the minting server).
 int pts_free(struct Proc *server, u64 pts_id);
 
+#ifdef KERNEL_TESTS
 // Resolve a (connection, qid) to its live pts_id, or -T_E_NOENT. Pure
 // registry scan -- `cn` is only pointer-compared against ref-held bindings,
 // never dereferenced, so any candidate pointer is safe. `is_master_out`
@@ -117,6 +118,7 @@ int pts_free(struct Proc *server, u64 pts_id);
 // SLAVE binding (POSIX acquisition happens at slave open), while tcgetpgrp
 // is legal from either end.
 s64 pts_resolve_conn_qid(struct SrvConn *cn, u64 qid, bool *is_master_out);
+#endif // KERNEL_TESTS
 
 // Resolve an fd's Spoor to its pts: dev9p Spoor -> the kernel 9P client ->
 // the underlying SrvConn (srvconn-transport downcast; NULL for loopback /

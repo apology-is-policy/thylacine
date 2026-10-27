@@ -78,9 +78,11 @@ bool addrspace_try_ref(struct AddrSpace *as) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 void addrspace_ref(struct AddrSpace *as) {
     if (!addrspace_try_ref(as)) extinction("addrspace_ref bypassed private-ring refusal");
 }
+#endif // KERNEL_TESTS
 
 bool addrspace_private_begin(struct AddrSpace *as) {
     if (!as) return false;
@@ -96,9 +98,11 @@ bool addrspace_private_begin(struct AddrSpace *as) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 void addrspace_pin(struct AddrSpace *as) {
     addrspace_lifetime_get(as);
 }
+#endif // KERNEL_TESTS
 
 int addrspace_owner_count(const struct AddrSpace *as) {
     return as ? __atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) : 0;
@@ -219,9 +223,11 @@ void addrspace_destroy(struct AddrSpace *as) {
     addrspace_lifetime_put(as);
 }
 
+#ifdef KERNEL_TESTS
 void addrspace_unpin(struct AddrSpace *as) {
     addrspace_lifetime_put(as);
 }
+#endif // KERNEL_TESTS
 
 void addrspace_private_end(struct AddrSpace *as) {
     if (!as) extinction("addrspace_private_end(NULL)");

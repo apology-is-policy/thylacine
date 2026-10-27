@@ -29,6 +29,7 @@
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
 #include <thylacine/vdso.h>     // vdso_publish_wall (mirror the wall offset)
+#include <thylacine/visibility.h>
 
 // Compile-time sanity: PPI 11 → INTID 27 (architectural per ARMv8 ARM
 // D11.2.4). Catches a regression to GIC_PPI_TO_INTID's offset.
@@ -152,6 +153,7 @@ void timer_arm_this_cpu(void) {
 // TI-2, so nothing here changes behavior yet.
 // ---------------------------------------------------------------------------
 
+VISIBLE_IF_KERNEL_TESTS
 u32 timer_oneshot_tval(u64 target_cnt, u64 now_cnt) {
     u64 delta = (target_cnt > now_cnt) ? (target_cnt - now_cnt) : 0;
     if (delta < TIMER_MIN_RELOAD) delta = TIMER_MIN_RELOAD;
@@ -217,6 +219,7 @@ u64 timer_now_ns(void) {
          + (cnt % g_freq) * 1000000000ull / g_freq;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 u64 timer_ns_to_counter_at(u64 ns, u64 freq_hz) {
     if (freq_hz == 0) return 0;
     u64 sec = ns / 1000000000ull;
@@ -243,6 +246,7 @@ u64 timer_ns_to_counter(u64 ns) {
 // ---------------------------------------------------------------------------
 static u64 g_wallclock_offset_ns;   // CLOCK_REALTIME = timer_now_ns() + this
 
+#ifdef KERNEL_TESTS
 u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns) {
     u64 epoch_ns = epoch_seconds * 1000000000ull;
     // Fail-soft on a 0 epoch (no RTC), AND on the implausible case epoch_ns <
@@ -254,6 +258,7 @@ u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns) {
         return 0;
     return epoch_ns - mono_now_ns;
 }
+#endif // KERNEL_TESTS
 
 // Publish a fresh wall-clock offset from a full-nanosecond epoch. The boot
 // anchor (write-once before smp_init) and the runtime re-anchor

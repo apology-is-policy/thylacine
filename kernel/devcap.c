@@ -458,6 +458,7 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
 // Bookkeeping.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 int cap_pending_count(void) {
     int n = 0;
     u64 now = timer_now_ns();
@@ -469,6 +470,7 @@ int cap_pending_count(void) {
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
     return n;
 }
+#endif // KERNEL_TESTS
 
 void cap_proc_exit_notify(struct Proc *p) {
     if (!p) return;
@@ -495,11 +497,13 @@ void cap_cancel_imperium_pending(u64 stripes, u32 session_id) {
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
 }
 
+#ifdef KERNEL_TESTS
 void cap_reset_table(void) {
     irq_state_t s = spin_lock_irqsave(&g_cap_grants.lock);
     for (u32 i = 0; i < CAP_GRANT_MAX; i++) cap_clear_locked(&g_cap_grants.entries[i]);
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Dev vtable.

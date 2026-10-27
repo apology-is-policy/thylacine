@@ -312,6 +312,7 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size,
     return c;
 }
 
+#ifdef KERNEL_TESTS
 void kmem_cache_destroy(struct kmem_cache *c) {
     if (!c) return;
 
@@ -360,6 +361,7 @@ void kmem_cache_destroy(struct kmem_cache *c) {
     // Return the cache descriptor itself.
     kmem_cache_free(&g_meta_cache, c);
 }
+#endif // KERNEL_TESTS
 
 // ---------------------------------------------------------------------------
 // kmalloc / kfree / kzalloc / kcalloc.
@@ -404,12 +406,12 @@ void *kzalloc(size_t n, unsigned flags) {
     return kmalloc(n, flags | KP_ZERO);
 }
 
+#ifdef KERNEL_TESTS
 void *kcalloc(size_t n, size_t size, unsigned flags) {
     if (n != 0 && size > (~(size_t)0) / n) return NULL;     // overflow check
     return kzalloc(n * size, flags);
 }
 
-#ifdef KERNEL_TESTS
 #include <thylacine/thread.h>
 
 static const void *g_kfree_large_watch;
@@ -545,6 +547,7 @@ u64 slub_active_slabs(void) {
     return total;
 }
 
+#ifdef KERNEL_TESTS
 // Live (currently-allocated) object count for one cache: the quantity the
 // RW-1 F-S1 destroy guard tests. A diagnostic snapshot (cumulative counters
 // are u64; a lock-free read may be momentarily stale under concurrent
@@ -553,3 +556,4 @@ u64 kmem_cache_live_count(const struct kmem_cache *c) {
     if (!c) return 0;
     return c->alloc_count - c->free_count;
 }
+#endif // KERNEL_TESTS

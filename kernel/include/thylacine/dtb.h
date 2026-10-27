@@ -126,6 +126,7 @@ bool dtb_has_compat(const char *compat);
 typedef int (*dtb_compat_cb)(u32 match_idx, u64 reg_base, u64 reg_size, void *arg);
 u32 dtb_for_each_compat_reg(const char *compat, dtb_compat_cb cb, void *arg);
 
+#ifdef KERNEL_TESTS
 // Read a named property's raw bytes from the FIRST node whose "compatible"
 // contains `compat`. Returns the property data pointer + length via
 // *out_data / *out_len (pointing into the DTB blob, valid for the kernel's
@@ -134,6 +135,7 @@ u32 dtb_for_each_compat_reg(const char *compat, dtb_compat_cb cb, void *arg);
 // property within the node (depth-stack walk). (pci-1a.)
 bool dtb_get_compat_prop(const char *compat, const char *prop,
                          const u8 **out_data, u32 *out_len);
+#endif // KERNEL_TESTS
 
 // PCI INTx -> GIC INTID routing (pci-1a, the virtio-PCI transport).
 //
@@ -272,10 +274,12 @@ bool dtb_pci_msi_route(u16 requester_id, struct dtb_pci_msi *out);
 bool dtb_msi_controller_n(u32 index, struct dtb_pci_msi *out);
 // Validate that the MSI node belongs to the initialized distributor.
 bool dtb_msi_parent_matches(u32 controller_node, u64 distributor_pa);
+#ifdef KERNEL_TESTS
 // Decode the PCI binding's four-cell map. Exposed for hostile-input tests;
 // accepts byte-aligned data, validates every row and rejects ambiguous matches.
 bool dtb_msi_map_decode(const u8 *data, u32 length, u32 mask, u16 rid,
                         u32 *phandle, u32 *device_id);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Tree-walk API (Menagerie devhw — the DTB published as a walkable tree).
@@ -343,13 +347,17 @@ bool dtb_node_parent(u32 node_off, u32 *out_parent_off);
 // are read. The launcher's boot-time declarations arrive here (QEMU turns
 // -append into /chosen/bootargs), one word per device instance it attached;
 // the DTB is the trusted bootloader's and nothing at runtime alters it.
+#ifdef KERNEL_TESTS
 u32 dtb_bootargs_count(const char *token);
+#endif // KERNEL_TESTS
 bool dtb_bootargs_has_token(const char *token);
 
+#ifdef KERNEL_TESTS
 // The word test both apply, over `len` bytes of a bootargs string: never a
 // substring (serial-sak=10 does not answer serial-sak=1), and a NUL ends the
 // string within `len`.
 u32 dtb_bootargs_scan_count(const u8 *args, u32 len, const char *token);
 bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_DTB_H

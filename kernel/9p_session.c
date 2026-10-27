@@ -1649,6 +1649,7 @@ void p9_session_mark_async(struct p9_session *s, u16 tag) {
     s->n_async++;
 }
 
+#ifdef KERNEL_TESTS
 size_t p9_session_n_bound_fids(const struct p9_session *s) {
     if (!s) return 0;
     if (s->magic != P9_SESSION_MAGIC) return 0;
@@ -1660,3 +1661,4 @@ size_t p9_session_n_reserved_slots(const struct p9_session *s) {
     if (s->magic != P9_SESSION_MAGIC) return 0;
     return s->n_reserved_slots;
 }
+#endif // KERNEL_TESTS

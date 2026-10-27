@@ -82,6 +82,7 @@ void timer_arm_this_cpu(void);
 // lands at TI-2.
 void timer_arm_oneshot_cnt(u64 target_cnt);
 
+#ifdef KERNEL_TESTS
 // Pure clamp helper behind timer_arm_oneshot_cnt: the CNTV_TVAL reload that
 // fires at absolute counter `target_cnt` given the current counter `now_cnt`.
 // CNTV_TVAL counts DOWN, so the reload is the delta (target - now), clamped to
@@ -91,6 +92,7 @@ void timer_arm_oneshot_cnt(u64 target_cnt);
 // loop re-arms; the tickless backstop keeps real arms well inside range).
 // Split out so the clamp is unit-testable without touching the live timer.
 u32 timer_oneshot_tval(u64 target_cnt, u64 now_cnt);
+#endif // KERNEL_TESTS
 
 // IRQ handler. Signature matches gic_irq_handler_t. Increments the tick
 // counter and reloads CNTV_TVAL_EL0. Caller wires this via gic_attach.
@@ -131,9 +133,11 @@ u64 timer_now_ns(void);
 // reached, instead of wrapping to a near one.
 u64 timer_ns_to_counter(u64 ns);
 
+#ifdef KERNEL_TESTS
 // The conversion at a given frequency; timer_ns_to_counter is it at CNTFRQ.
 // Pure, so a test can drive any frequency.
 u64 timer_ns_to_counter_at(u64 ns, u64 freq_hz);
+#endif // KERNEL_TESTS
 
 // Spin-wait until at least N ticks have elapsed. Used at boot to
 // observe the timer firing before printing the tick count. WFI inside
@@ -149,6 +153,7 @@ void timer_busy_wait_ticks(u64 n);
 // same fast counter without ever re-reading the slow RTC. See ARCH §22.6.
 // ---------------------------------------------------------------------------
 
+#ifdef KERNEL_TESTS
 // Compute the wall-clock offset (epoch_ns - mono_now_ns) the realtime clock adds
 // to the monotonic clock. `epoch_seconds` == 0 (no RTC) yields 0 -- the
 // fail-soft case where CLOCK_REALTIME == CLOCK_MONOTONIC (1970 + uptime). Pure
@@ -156,6 +161,7 @@ void timer_busy_wait_ticks(u64 n);
 // mutating the live clock. For any plausible epoch, epoch_ns (~1.6e18) dominates
 // mono_now_ns (boot-early), so the subtraction never underflows.
 u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns);
+#endif // KERNEL_TESTS
 
 // Set the wall-clock anchor from the boot RTC read. WRITE-ONCE on the boot CPU,
 // before smp_init (the g_freq discipline): the offset is a single aligned u64,

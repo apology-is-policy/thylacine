@@ -43,6 +43,7 @@ int loom_engine_adopt(struct loom_service_protocol *, u64 now);
 int loom_engine_get(struct Loom *, struct loom_service_ref, struct loom_service_protocol **);
 int loom_engine_put(struct Loom *, struct loom_service_ref, struct loom_service_protocol *);
 int loom_engine_abort(struct Loom *, struct loom_service_ref, s32 reason);
+#ifdef KERNEL_TESTS
 // One round-robin scope visit (one bounded client step, at most one CQ post).
 // Readiness-aware alias of ready_visit; returns 1 on progress, 0 if idle.
 // The executor must still register native poll interest and recheck before sleep.
@@ -54,6 +55,7 @@ int loom_engine_collect(struct Loom *, struct loom_service_ref);
 // retired, no entry/install/parser/fixed borrows. Then discard retained terminals
 // and collect their storage, independent of CQ room. No native peer wait.
 int loom_engine_discard_closed(struct Loom *);
+#endif // KERNEL_TESTS
 // One close quantum: 0 blocked on external local holders, 1 immediate work,
 // 2 complete (index/request/fixed ownership empty after consumer detach).
 // Drains operations even after local retirement, before global detach/collection.

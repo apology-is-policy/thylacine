@@ -18,6 +18,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/syscall.h>   // the TTY_SIG_* class ABI
+#include <thylacine/visibility.h>
 
 struct pts_binding {
     bool            used;
@@ -298,6 +299,7 @@ int pts_free(struct Proc *server, u64 pts_id) {
     return ret;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 s64 pts_resolve_conn_qid(struct SrvConn *cn, u64 qid, bool *is_master_out) {
     if (!cn || qid == 0) return -T_E_INVAL;
 

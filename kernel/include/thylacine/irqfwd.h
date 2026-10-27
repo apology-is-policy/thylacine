@@ -100,6 +100,7 @@ void kobj_irq_ref(struct KObj_IRQ *k);
 // `k` is INVALID.
 void kobj_irq_unref(struct KObj_IRQ *k);
 
+#ifdef KERNEL_TESTS
 // Convenience: drop the caller's reference + ensure the IRQ stops
 // firing. Equivalent to kobj_irq_unref when the caller holds the only
 // reference.
@@ -114,6 +115,7 @@ void kobj_irq_destroy(struct KObj_IRQ *k);
 // Spurious wake from a non-IRQ source is ABSENT — sleep's cond loop
 // guarantees we only return when pending_count > 0.
 u32 kobj_irq_wait(struct KObj_IRQ *k);
+#endif // KERNEL_TESTS
 
 // Like kobj_irq_wait, bounded by `timeout_ns` (relative nanoseconds;
 // 0 == wait forever, i.e. exactly kobj_irq_wait). On a timeout the return
@@ -124,10 +126,12 @@ u32 kobj_irq_wait(struct KObj_IRQ *k);
 // forever on a never-delivered interrupt. kobj_irq_wait is this with 0.
 u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns);
 
+#ifdef KERNEL_TESTS
 // Diagnostic: cumulative IRQ counter (every fire ever observed) +
 // live KObj_IRQ count.
 u64 kobj_irq_total_fires(void);
 u64 kobj_irq_live_count(void);
+#endif // KERNEL_TESTS
 
 // Diagnostic: is `intid` currently claimed (by a live KObj_IRQ OR by
 // kernel-reserved pre-claim from irqfwd_init)? Used by

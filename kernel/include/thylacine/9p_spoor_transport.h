@@ -79,7 +79,9 @@ void p9_spoor_transport_destroy(struct p9_spoor_transport *st);
 // Adapter MUST outlive the transport that uses these ops.
 struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st);
 
+#ifdef KERNEL_TESTS
 // Query: is the adapter live (magic valid + at least tx_spoor present)?
 bool p9_spoor_transport_is_open(const struct p9_spoor_transport *st);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_9P_SPOOR_TRANSPORT_H

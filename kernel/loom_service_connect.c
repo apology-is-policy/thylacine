@@ -280,6 +280,7 @@ int loom_private_connect_release_retiring(struct loom_service_protocol *p) {
     spin_unlock(&l->lock);
     return loom_private_protocol_release_retired(p);
 }
+#ifdef KERNEL_TESTS
 int loom_private_connect_release(struct loom_service_protocol *p) {
     if (!p || !p->owner) return -T_E_INVAL;
     struct Loom *l=p->owner;
@@ -289,6 +290,7 @@ int loom_private_connect_release(struct loom_service_protocol *p) {
     loom_unref(l);
     return rc;
 }
+#endif // KERNEL_TESTS
 int loom_private_connect_reap(struct Loom *l, struct loom_service_ref scope) {
     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
     spin_lock(&l->lock);

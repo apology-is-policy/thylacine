@@ -8,6 +8,7 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/types.h>
 #include <thylacine/errno.h>
+#include <thylacine/visibility.h>
 
 // =============================================================================
 // Compile-time invariants.
@@ -197,6 +198,7 @@ int p9_transport_send(struct p9_transport *t,
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_transport_recv(struct p9_transport *t) {
     if (!t) return -1;
     if (t->magic != P9_TRANSPORT_MAGIC) return -1;
@@ -208,6 +210,7 @@ int p9_transport_recv(struct p9_transport *t) {
     return rc;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_transport_round_trip(struct p9_transport *t,
                               const u8 *request, size_t request_len) {
     int rc = p9_transport_send(t, request, request_len);
@@ -229,6 +232,7 @@ int p9_transport_exchange(struct p9_transport *t,
 // Query helpers.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 bool p9_transport_is_open(const struct p9_transport *t) {
     if (!t) return false;
     if (t->magic != P9_TRANSPORT_MAGIC) return false;
@@ -240,6 +244,7 @@ size_t p9_transport_last_recv_len(const struct p9_transport *t) {
     if (t->magic != P9_TRANSPORT_MAGIC) return 0;
     return t->last_recv_len;
 }
+#endif // KERNEL_TESTS
 
 bool p9_transport_recv_ready(struct p9_transport *t, struct poll_waiter *pw) {
     if (!t || t->magic != P9_TRANSPORT_MAGIC) return true;

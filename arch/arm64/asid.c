@@ -262,6 +262,7 @@ u64 asid_resolve(u64 *context_id, unsigned cpu) {
     return cid & g_asid_val_mask;
 }
 
+#ifdef KERNEL_TESTS
 unsigned asid_bits(void) { return g_asid_bits; }
 
 u64 asid_generation_now(void) {
@@ -271,3 +272,4 @@ u64 asid_generation_now(void) {
 u64 asid_rollover_count(void) {
     return __atomic_load_n(&g_asid_rollovers, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS

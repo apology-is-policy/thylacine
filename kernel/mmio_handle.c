@@ -41,6 +41,7 @@ static u64               g_mmio_created;
 static u64               g_mmio_live;
 static bool              g_mmio_initialized;
 
+#ifdef KERNEL_TESTS
 u64 kobj_mmio_total_created(void) {
     return __atomic_load_n(&g_mmio_created, __ATOMIC_RELAXED);
 }
@@ -48,6 +49,7 @@ u64 kobj_mmio_total_created(void) {
 u64 kobj_mmio_live_count(void) {
     return __atomic_load_n(&g_mmio_live, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Init.
@@ -483,6 +485,7 @@ int kobj_mmio_kernel_reserved_count(void) {
     return n;
 }
 
+#ifdef KERNEL_TESTS
 bool kobj_mmio_pa_claimed(u64 pa, size_t size) {
     if (size == 0) return false;
     if (size > (u64)-1 - pa) return false;  // overflow ⇒ caller mis-use
@@ -491,3 +494,4 @@ bool kobj_mmio_pa_claimed(u64 pa, size_t size) {
     spin_unlock_irqrestore(&g_mmio_lock, s);
     return claimed;
 }
+#endif // KERNEL_TESTS

@@ -705,10 +705,12 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 
 u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
 
+#ifdef KERNEL_TESTS
 // How many freed stacks the cache holds, and release every one of them to the
 // buddy (answers how many it released).
 u32  thread_kstack_cache_count(void);
 u32  thread_kstack_cache_drain(void);
+#endif // KERNEL_TESTS
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the
@@ -820,6 +822,7 @@ struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_arg,
                                   u64 user_tls_va);
 
+#ifdef KERNEL_TESTS
 // LINEAGE L-3b: build the child's EL0 frame for a forked Thread.
 //
 // The DECISION half of thread_create_forked, split out because it is the part
@@ -847,6 +850,7 @@ struct Thread *thread_create_user(struct Proc *proc,
 void fork_frame_init(struct exception_context *dst,
                      const struct exception_context *src,
                      u64 child_sp);
+#endif // KERNEL_TESTS
 
 // LINEAGE L-3b: create a USER-mode Thread that RESUMES a saved EL0 frame
 // rather than entering at a fresh entry point.
@@ -921,6 +925,7 @@ void thread_free_unlinked(struct Thread *t);
 // was written when preemption-via-IRQ did not yet exist.
 void thread_switch(struct Thread *next);
 
+#ifdef KERNEL_TESTS
 // #101 regression hook (test-only; 0 in production). thread_switch busy-spins
 // this many ns inside its torn window when nonzero, forcing a preempt to land
 // there -> a deterministic guard for the IRQ-mask discipline. Set/reset by
@@ -930,6 +935,7 @@ extern volatile u64 g_thread_switch_test_window_ns;
 // Diagnostic.
 u64 thread_total_created(void);
 u64 thread_total_destroyed(void);
+#endif // KERNEL_TESTS
 
 // How many thread_free calls waited out an in-flight switch away from their
 // victim (#788); boot_main reports a non-zero count.

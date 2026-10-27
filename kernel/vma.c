@@ -17,6 +17,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 #include <thylacine/errno.h>     // B-1a: vma_reprotect_* report -T_E_*
@@ -210,10 +211,12 @@ static inline bool ranges_overlap(u64 a, u64 b, u64 c, u64 d) {
     return a < d && c < b;
 }
 
+#ifdef KERNEL_TESTS
 int vma_insert(struct Proc *p, struct Vma *v) {
     if (!p) extinction("vma_insert(NULL)");
     return vma_insert_in(p->as, proc_resource_exempt(p), v);
 }
+#endif // KERNEL_TESTS
 
 // A Vma is in as's list exactly when both of its links agree: its predecessor
 // points at it (or, for the first mapping, the list head does), and its successor
@@ -222,6 +225,7 @@ int vma_insert(struct Proc *p, struct Vma *v) {
 // a Vma that is in as's list or in none; one linked into ANOTHER space reads
 // unlinked only when it is that space's head, so a caller names the space it
 // found the Vma in, not a Proc's current one (an exec can swap it between).
+VISIBLE_IF_KERNEL_TESTS
 bool vma_linked_in(const struct AddrSpace *as, const struct Vma *v) {
     if (v->prev ? v->prev->next != v : as->vmas != v) return false;
     return !v->next || v->next->prev == v;
@@ -847,6 +851,7 @@ rollback:
     return -(int)T_E_NOMEM;
 }
 
+#ifdef KERNEL_TESTS
 void vma_drain(struct Proc *p) {
     if (!p) return;
     // LINEAGE L-1: no address space means no VMA list to drain -- a kernel-only
@@ -854,6 +859,7 @@ void vma_drain(struct Proc *p) {
     // path proc_free reaches with a partially-built Proc).
     vma_drain_in(p->as);
 }
+#endif // KERNEL_TESTS
 
 // LINEAGE L-2: drain by address space. Two callers with genuinely different
 // shapes -- proc_free's (through the wrapper above, on a Proc that is dying) and
@@ -905,6 +911,7 @@ void vma_drain_in(struct AddrSpace *as) {
 // Diagnostics
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 u64 vma_total_allocated(void) {
     return __atomic_load_n(&g_vma_allocated, __ATOMIC_RELAXED);
 }
@@ -916,3 +923,4 @@ u64 vma_total_freed(void) {
 u64 vma_scan_steps(void) {
     return __atomic_load_n(&g_vma_scan_steps, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS

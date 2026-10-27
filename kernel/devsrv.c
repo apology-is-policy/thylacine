@@ -238,6 +238,7 @@ static void srv_registry_drain(struct SrvRegistry *reg) {
     }
 }
 
+VISIBLE_IF_KERNEL_TESTS
 struct SrvRegistry *srv_registry_create(void) {
     struct SrvRegistry *reg = kmalloc(sizeof(*reg), KP_ZERO);
     if (!reg) return NULL;
@@ -303,8 +304,10 @@ struct SrvRegistry *srv_boot_registry(void) {
     return g_boot_srv_registry;
 }
 
+#ifdef KERNEL_TESTS
 u64 srv_registry_total_created(void)   { return __atomic_load_n(&g_srv_registry_created, __ATOMIC_RELAXED); }
 u64 srv_registry_total_destroyed(void) { return __atomic_load_n(&g_srv_registry_destroyed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Registry API — the reserve / commit / abort two-phase post.
@@ -587,6 +590,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // srv_lookup_in — find a service by name in `reg`. Internal to the devsrv
 // open=connect / walk paths; also the in-kernel test harness's name-based
 // probe against the boot registry (srv_boot_registry()).
+VISIBLE_IF_KERNEL_TESTS
 struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
                                  const char *name, u8 name_len) {
     if (!reg)                                              return NULL;
@@ -676,6 +680,7 @@ void srv_proc_exit_notify(struct Proc *p) {
     }
 }
 
+#ifdef KERNEL_TESTS
 static int srv_registry_count_in(struct SrvRegistry *reg) {
     if (!reg) return 0;
     int n = 0;
@@ -698,6 +703,7 @@ int srv_backlog_depth(struct SrvService *svc) {
     spin_unlock_irqrestore(&svc->reg->lock, s);
     return n;
 }
+#endif // KERNEL_TESTS
 
 // srv_registry_reset — TEST SUPPORT ONLY. Drain the BOOT registry to
 // all-FREE, tearing down every pending connection first. No production
@@ -1060,6 +1066,7 @@ static int devsrv_stat_native(struct Spoor *c, struct t_stat *out) {
 //     already holds the listener and serves every request; dialling itself adds
 //     nothing. `stripes` is a fresh per-Proc tag, so this is exactly "the same
 //     Proc" -- not its children, not its Proc group.
+VISIBLE_IF_KERNEL_TESTS
 bool devsrv_srv_connect_authorized(bool byte_mode, bool cap_posted,
                                    bool self_post, caps_t caps) {
     if (!byte_mode) return true;
@@ -1225,6 +1232,7 @@ void devsrv_connect_release(struct SrvConnectAdmission *a) {
     *a = (struct SrvConnectAdmission){0};
 }
 
+VISIBLE_IF_KERNEL_TESTS
 struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     (void)omode;
     if (!p || !c || c->dc != 's' || !c->aux ||

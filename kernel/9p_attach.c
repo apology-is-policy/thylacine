@@ -21,6 +21,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/timer.h"
 #include "../mm/slub.h"
@@ -93,6 +94,7 @@ static void attached_ctl_unlink(struct p9_attached *a) {
     a->ctl_next = NULL;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
                                int id) {
     if (!a || a->magic != P9_ATTACHED_MAGIC) return;
@@ -321,11 +323,13 @@ void p9_attached_unref(struct p9_attached *a) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // Legacy public name — unref-equivalent semantics for callers that hold
 // the single construction ref and never spawned walked privs.
 void p9_attached_destroy(struct p9_attached *a) {
     p9_attached_unref(a);
 }
+#endif // KERNEL_TESTS
 
 bool p9_attached_is_open(const struct p9_attached *a) {
     if (!a) return false;
@@ -918,6 +922,7 @@ int p9_closer_start(void) {
     return closer_spawn() ? 0 : -1;
 }
 
+#ifdef KERNEL_TESTS
 void p9_closer_stats(struct p9_closer_stats *out) {
     if (!out) return;
     spin_lock(&g_closer_lock);
@@ -931,3 +936,4 @@ void p9_closer_stats(struct p9_closer_stats *out) {
         out->runq++;
     spin_unlock(&g_closer_lock);
 }
+#endif // KERNEL_TESTS

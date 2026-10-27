@@ -269,6 +269,7 @@ bool pte_violates_wxe(u64 pte);
 // dsb_ish, isb).
 void mmu_retire_ttbr0_identity(void);
 
+#ifdef KERNEL_TESTS
 // P3-Bca: per-thread kstack guard pages — direct map flavor.
 //
 // `mmu_set_no_access(pa)` makes the 4 KiB page at PA unreadable +
@@ -305,6 +306,7 @@ void mmu_retire_ttbr0_identity(void);
 // is outside the direct-map range (PA < 1 GiB or PA >= 9 GiB at v1.0).
 bool mmu_set_no_access(paddr_t pa);
 bool mmu_restore_normal(paddr_t pa);
+#endif // KERNEL_TESTS
 
 // Batched variants for callers protecting / unprotecting a contiguous
 // run of pages within a single 2 MiB L2 block (the common case for
@@ -343,12 +345,14 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
 // 8 GiB reach by phys.c. Blocks outside [1 GiB, 9 GiB) are skipped.
 void mmu_pagemap_directmap(paddr_t base, paddr_t end);
 
+#ifdef KERNEL_TESTS
 // #808 diagnostic: true iff the 2 MiB direct-map block containing `pa` is
 // demoted to a page-grain L3 table (both the L1 and the covering L2 entry
 // are table descriptors). When true, the runtime kstack-guard poke takes the
 // fast path with no block->table break-before-make. Non-mutating. False for
 // PAs outside the direct-map range. Used by the boot-pass regression test.
 bool mmu_directmap_is_pagemapped(paddr_t pa);
+#endif // KERNEL_TESTS
 
 // P3-Bdb: PA of the kernel-only TTBR0 page table (l0_ttbr0). Used as the
 // pgtable_root for kproc threads (which have proc->pgtable_root = 0).
@@ -551,11 +555,13 @@ long mmu_uninstall_user_range(struct AddrSpace *as,
 long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
                                           u64 vaddr_start, u64 vaddr_end);
 
+#ifdef KERNEL_TESTS
 // Diagnostic (B-1a audit F2): leaf visits so far -- one per
 // mmu_uninstall_user_pte call, one per page visited inside a PRESENT table by
 // the range form -- the witness that the range form skips absent subtrees
 // instead of visiting pages.
 u64 mmu_uninstall_pte_calls(void);
+#endif // KERNEL_TESTS
 
 // 8a-1b-gamma (I-39; docs/DEBUG-FS-DESIGN.md 4.5): read-only, non-growing
 // cross-Proc user-memory access for /proc/<pid>/mem. Walk `pgtable_root` (the

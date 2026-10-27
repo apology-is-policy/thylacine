@@ -17,7 +17,7 @@ MUTANTS=[
 def main():
  p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
  s=(ROOT/'kernel/proc.c').read_text();body=s[s.index('struct sqpoll_ticket_ctx {'):s.index('bool proc_child_cap_ok(')]
- s=(ROOT/'kernel/include/thylacine/proc.h').read_text();decl=s[s.index('struct ProcSqpollTicket {'):s.index('// proc_child_cap_ok')]
+ s=(ROOT/'kernel/include/thylacine/proc.h').read_text();decl=s[s.index('struct ProcSqpollTicket {'):s.index('#ifdef KERNEL_TESTS\n// proc_child_cap_ok')]
  cc,cc_extra=sanitizer_cc.select(a.logs)
  fixture=(ROOT/'tools/host-tests/sqpoll-ticket.c').read_text().replace('/* ACTUAL_DECL */',decl).replace('/* ACTUAL_BODY */',body)
  with tempfile.TemporaryDirectory(prefix='sqpoll-ticket-') as tmp:

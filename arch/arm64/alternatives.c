@@ -12,11 +12,12 @@
 #include "alternatives.h"
 #include <thylacine/types.h>
 #include <thylacine/extinction.h>
+#include <thylacine/visibility.h>
 #include "hwfeat.h"
 #include "mmu.h"                   // mmu_patch_text
 
-u32 g_alt_total;
-u32 g_alt_applied;
+VISIBLE_IF_KERNEL_TESTS u32 g_alt_total;
+VISIBLE_IF_KERNEL_TESTS u32 g_alt_applied;
 
 #define A64_NOP   0xD503201Fu   // `nop` (little-endian word)
 

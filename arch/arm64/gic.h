@@ -103,8 +103,10 @@ u64 gic_redist_pa(void);
 // Validate the currently supported redistributor layout and CPU affinity.
 // Refuses VLPI/extra-frame or mismatched firmware layouts before LPI setup.
 bool gic_redist_for_cpu(unsigned cpu, u64 *va, u64 *pa, u64 *typer);
+#ifdef KERNEL_TESTS
 // True only for the kernel-supported wired or LPI dispatch namespace.
 bool gic_intid_dispatchable(u32 intid);
+#endif // KERNEL_TESTS
 // Thread-context barrier after source/controller quiescence. An IPI observed
 // on the target proves that a previously acknowledged IRQ has finished its
 // handler/EOI (IRQ handlers do not nest). Never call with a domain lock held.
@@ -115,8 +117,10 @@ bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns);
 // gic_barrier_reached is true once `cpu` took an interrupt after that send.
 u64  gic_barrier_send(unsigned cpu);
 bool gic_barrier_reached(unsigned cpu, u64 ticket);
+#ifdef KERNEL_TESTS
 // Tickets ever taken on `cpu` (tests: proves a CPU was not sent one).
 u64  gic_barrier_requests(unsigned cpu);
+#endif // KERNEL_TESTS
 
 // GICv2 CPU-interface (GICC) KVA + PA. Both zero on v3 (the CPU interface is
 // the ICC_* system registers, not MMIO) and before gic_init runs.
@@ -150,9 +154,11 @@ bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg);
 bool gic_enable_irq(u32 intid);
 bool gic_disable_irq(u32 intid);
 
+#ifdef KERNEL_TESTS
 // Read-only query of the ISENABLER bit: true = `intid` is enabled (unmasked).
 // The mirror of enable/disable; used to observe the F-A1 level mask+ack cycle.
 bool gic_intid_enabled(u32 intid);
+#endif // KERNEL_TESTS
 
 // Acknowledge the highest-priority pending INTID. On v3 reads ICC_IAR1_EL1
 // (returns the INTID portion, lower 24 bits); on v2 reads GICC_IAR (returns
@@ -187,11 +193,13 @@ void gic_dispatch(u32 intid);
 // 0 for an out-of-range CPU.
 u64 gic_cpu_irq_count(unsigned cpu);
 
+#ifdef KERNEL_TESTS
 // Address of `cpu`'s counter slot; NULL if out of range. Exists solely so
 // gic.cpu_irq_counter_geometry can check the V-4c-3 F5 padding against the
 // coherency granule the hardware actually reports -- the pad is a compile-time
 // constant and this is the only way to hold it to account at runtime.
 const void *gic_cpu_irq_count_slot_addr(unsigned cpu);
+#endif // KERNEL_TESTS
 
 // P2-Cdc: per-CPU GIC bring-up for secondaries. On v3: wakes this CPU's
 // redistributor (clear ProcessorSleep, wait ChildrenAsleep), configures

@@ -83,9 +83,11 @@ void asid_init(void);
 // is lockless); the caller need not hold any lock.
 u64 asid_resolve(u64 *context_id, unsigned cpu);
 
+#ifdef KERNEL_TESTS
 // Diagnostics (atomic/seqlock-free snapshots; exact under g_asid_lock writers).
 unsigned asid_bits(void);              // 8 or 16
 u64      asid_generation_now(void);    // current generation value
 u64      asid_rollover_count(void);    // number of rollovers since boot
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_ARM64_ASID_H

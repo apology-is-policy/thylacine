@@ -122,6 +122,7 @@ static bool        g_rx_held_valid;
 static uint8_t     g_rx_held_byte;
 static bool        g_rx_held_break;
 
+#ifdef KERNEL_TESTS
 // #136-audit F2: TEST-OWNED, and only ever set by uart_test_rx_force_hold.
 // The #133 leaked-state backstop must key on this and NOT on g_rx_held_valid ||
 // g_rx_paused, because BOTH of those are ordinary PRODUCTION state: g_rx_paused
@@ -131,6 +132,7 @@ static bool        g_rx_held_break;
 // keystroke discarded by the sweep. Contrast g_uart_tx_test_stalled, which
 // production never sets -- that one is correctly test-owned as-is.
 static bool        g_rx_test_armed;
+#endif // KERNEL_TESTS
 
 // Mask or unmask the PL011 RX + RX-timeout interrupts. Caller holds
 // g_uart_rx_lock. Masking (not clearing ICR) is what makes resumption
@@ -214,6 +216,7 @@ bool uart_tx_try_putc(char c) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 // #75-audit F2 test hook -- see g_uart_tx_test_stalled. Stalling forces TXIM OFF
 // before gating the arm, so the suppressed window can never leave the TX line
 // asserted. Unstalling only clears the gate: it deliberately does NOT re-arm,
@@ -235,6 +238,7 @@ void uart_test_tx_stall(bool on) {
 bool uart_test_tx_stalled(void) {
     return __atomic_load_n(&g_uart_tx_test_stalled, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // True once the TX FIFO has fully drained to the wire.
 bool uart_tx_fifo_empty(void) {
@@ -284,6 +288,7 @@ void uart_putc(char c) {
     extinction_tx_exit(token);
 }
 
+#ifdef KERNEL_TESTS
 // #67 regression (test-only; production callers never touch this). Proves
 // uart_putc BOUNDS its TXFF spin: point the driver at a scratch region whose FR
 // (offset PL011_FR) always reads TXFF-set, IRQ-mask the swap window (so the boot
@@ -314,6 +319,7 @@ bool uart_selftest_tx_bounded(void) {
     spin_unlock_irqrestore(NULL, s);
     return scratch[PL011_DR / 4] == 0xdeadu; // true iff the byte was dropped (DR untouched)
 }
+#endif // KERNEL_TESTS
 
 // A-4c-1: enable the PL011 RX path. QEMU's virt PL011 comes up in its reset
 // state (CR=0x300: TXE|RXE set, UARTEN clear) and is lenient about TX without
@@ -332,6 +338,7 @@ void uart_rx_init(void) {
     uart_tx_init();   // #75 / P1-F: same bring-up covers the TX direction
 }
 
+#ifdef KERNEL_TESTS
 // Regression guard (#943): the RX path is live iff the UART is master-enabled
 // (CR.UARTEN) AND receive-enabled (CR.RXE). QEMU's PL011 resets with UARTEN
 // clear; before uart_rx_init set it, the console silently never received.
@@ -339,6 +346,7 @@ bool uart_rx_path_enabled(void) {
     uint32_t cr = mmio_read32(pl011_base, PL011_CR);
     return (cr & PL011_CR_UARTEN) != 0u && (cr & PL011_CR_RXE) != 0u;
 }
+#endif // KERNEL_TESTS
 
 // Max bytes drained per RX IRQ. BOUNDED to break the freeze (#172): an
 // unbounded `while (!RXFE)` drain livelocked the CPU under sustained input.
@@ -433,6 +441,7 @@ static bool uart_rx_pause_and_recheck(void) {
     return true;                                     // lifted -- keep draining
 }
 
+#ifdef KERNEL_TESTS
 // #129-audit F2 (test-only; production never calls these). The 1-byte holdback
 // is the mechanism that makes a refusal LOSSLESS for the serial producer, and it
 // is entered only when a peer producer takes the room between the lockless
@@ -495,6 +504,7 @@ bool uart_test_rx_release_hold(void) {
 bool uart_test_rx_paused(void) {
     return __atomic_load_n(&g_rx_paused, __ATOMIC_ACQUIRE);
 }
+#endif // KERNEL_TESTS
 
 static bool uart_rx_drain_locked(void) {
     uintptr_t base = pl011_base;

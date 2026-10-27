@@ -156,6 +156,7 @@ bool mag_free(struct page *p, unsigned order) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 // Drains EVERY CPU's set back to the buddy, each under its own lock (one
 // at a time, IRQs masked), so it is safe while peers allocate: the owner's
 // fast path holds the same lock. What it cannot give is a stable global
@@ -175,3 +176,4 @@ void magazines_drain_all(void) {
         spin_unlock_irqrestore(&pc->lock, s);
     }
 }
+#endif // KERNEL_TESTS

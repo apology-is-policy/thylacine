@@ -25,6 +25,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio_pci.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/uart.h"
 #include "../arch/arm64/mmu.h"
@@ -99,9 +100,11 @@ static u64  g_pci_bar64_next;
 u64 kobj_pci_total_created(void) {
     return __atomic_load_n(&g_pci_created, __ATOMIC_RELAXED);
 }
+#ifdef KERNEL_TESTS
 u64 kobj_pci_live_count(void) {
     return __atomic_load_n(&g_pci_live, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 void kobj_pci_init(void) {
     if (__atomic_exchange_n(&g_pci_initialized, true, __ATOMIC_ACQ_REL)) {
@@ -247,8 +250,9 @@ static u64 bar_claim_size(u64 size) {
 // unimplemented BAR (mask all-zero) or a full-width (2^N) absurdity the caller
 // rejects. The inversion is WIDTH-CORRECT: a 32-bit BAR's mask occupies only the
 // low 32 bits and is inverted in 32-bit width -- inverting it as 64-bit would
-// set the upper 32 bits and yield a multi-exabyte bogus size. Non-static +
-// header-declared so a deterministic unit test pins the vectors.
+// set the upper 32 bits and yield a multi-exabyte bogus size. Visible to the
+// tests, so a deterministic unit test pins the vectors.
+VISIBLE_IF_KERNEL_TESTS
 u64 pci_bar_decode_size(u32 lo_mask, u32 hi_rb, bool is64) {
     if (is64) {
         u64 combined = ((u64)hi_rb << 32) | (u64)lo_mask;
@@ -350,6 +354,7 @@ static int pci_assign_bars(struct KObj_PCI *k, struct virtio_pci_dev *d) {
 
 // Parse before publishing the claim. Capabilities are untrusted: each extent
 // must fit conventional config space, and a repeated pointer is a hard error.
+VISIBLE_IF_KERNEL_TESTS
 int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
     u16 status = virtio_pci_cfg_read16(d, PCI_CFG_STATUS);
     if (!(status & PCI_STATUS_CAP_LIST)) return 0;

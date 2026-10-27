@@ -62,9 +62,11 @@ struct Path *path_make_root(void);
 // it need not be NUL-terminated.
 struct Path *path_addelem(const struct Path *parent, const char *name, u64 namelen);
 
+#ifdef KERNEL_TESTS
 // path_parent: allocate a NEW Path = `p` with its last element popped (the ".."
 // case, factored for spoor_path_extend). NULL -> NULL.
 struct Path *path_parent(const struct Path *p);
+#endif // KERNEL_TESTS
 
 // path_ref / path_unref: atomic refcount. unref frees the storage at 0. Both
 // NULL-safe (a NULL Path == "unknown name", a valid state). Extinct on a <= 0
@@ -72,9 +74,11 @@ struct Path *path_parent(const struct Path *p);
 void path_ref(struct Path *p);
 void path_unref(struct Path *p);
 
+#ifdef KERNEL_TESTS
 // Cumulative diagnostic counters (test discipline, mirroring spoor's):
 // (allocated - freed) == the live Path count at any quiescent point.
 u64 path_total_allocated(void);
 u64 path_total_freed(void);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_PATH_H

@@ -136,6 +136,7 @@ void irqfwd_init(void) {
 static u64 g_irq_total_fires;
 static u64 g_kobj_irq_live;
 
+#ifdef KERNEL_TESTS
 u64 kobj_irq_total_fires(void) {
     return __atomic_load_n(&g_irq_total_fires, __ATOMIC_RELAXED);
 }
@@ -143,6 +144,7 @@ u64 kobj_irq_total_fires(void) {
 u64 kobj_irq_live_count(void) {
     return __atomic_load_n(&g_kobj_irq_live, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 bool kobj_irq_intid_claimed(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
@@ -322,9 +324,11 @@ void kobj_irq_unref(struct KObj_IRQ *k) {
     }
 }
 
+#ifdef KERNEL_TESTS
 void kobj_irq_destroy(struct KObj_IRQ *k) {
     kobj_irq_unref(k);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Wait.
@@ -418,11 +422,11 @@ u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns) {
     return count;
 }
 
+#ifdef KERNEL_TESTS
 u32 kobj_irq_wait(struct KObj_IRQ *k) {
     return kobj_irq_wait_timed(k, 0);
 }
 
-#ifdef KERNEL_TESTS
 void irqfwd_test_dispatch(u32 intid, void *untrusted_arg) {
     kobj_irq_dispatch(intid, untrusted_arg);
 }

@@ -27,6 +27,7 @@
 
 #include <thylacine/9p_wire.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 // =============================================================================
 // Compile-time invariants — pin the wire-format constants against drift.
@@ -93,12 +94,15 @@ _Static_assert(sizeof(struct p9_qid) >= P9_QID_LEN, "p9_qid fields too small");
 // Primitive packers.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 int p9_pack_u8(u8 *out, size_t cap, u8 v) {
     if (cap < 1) return -1;
     out[0] = v;
     return 1;
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_pack_u16(u8 *out, size_t cap, u16 v) {
     if (cap < 2) return -1;
     out[0] = (u8)(v       & 0xff);
@@ -106,6 +110,7 @@ int p9_pack_u16(u8 *out, size_t cap, u16 v) {
     return 2;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_pack_u32(u8 *out, size_t cap, u32 v) {
     if (cap < 4) return -1;
     out[0] = (u8)(v        & 0xff);
@@ -115,6 +120,7 @@ int p9_pack_u32(u8 *out, size_t cap, u32 v) {
     return 4;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_pack_u64(u8 *out, size_t cap, u64 v) {
     if (cap < 8) return -1;
     for (int i = 0; i < 8; i++) {
@@ -123,6 +129,7 @@ int p9_pack_u64(u8 *out, size_t cap, u64 v) {
     return 8;
 }
 
+#ifdef KERNEL_TESTS
 int p9_pack_qid(u8 *out, size_t cap, const struct p9_qid *q) {
     if (cap < P9_QID_LEN) return -1;
     if (!q) return -1;
@@ -137,7 +144,9 @@ int p9_pack_qid(u8 *out, size_t cap, const struct p9_qid *q) {
     }
     return P9_QID_LEN;
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_pack_str(u8 *out, size_t cap, const u8 *s, size_t slen) {
     // u16 prefix bounds string length.
     if (slen > 0xFFFFu) return -1;
@@ -155,13 +164,16 @@ int p9_pack_str(u8 *out, size_t cap, const u8 *s, size_t slen) {
 // Primitive unpackers.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 int p9_unpack_u8(const u8 *in, size_t remaining, u8 *out) {
     if (remaining < 1) return -1;
     if (!out) return -1;
     *out = in[0];
     return 1;
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_unpack_u16(const u8 *in, size_t remaining, u16 *out) {
     if (remaining < 2) return -1;
     if (!out) return -1;
@@ -169,6 +181,7 @@ int p9_unpack_u16(const u8 *in, size_t remaining, u16 *out) {
     return 2;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_unpack_u32(const u8 *in, size_t remaining, u32 *out) {
     if (remaining < 4) return -1;
     if (!out) return -1;
@@ -179,6 +192,7 @@ int p9_unpack_u32(const u8 *in, size_t remaining, u32 *out) {
     return 4;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_unpack_u64(const u8 *in, size_t remaining, u64 *out) {
     if (remaining < 8) return -1;
     if (!out) return -1;
@@ -190,6 +204,7 @@ int p9_unpack_u64(const u8 *in, size_t remaining, u64 *out) {
     return 8;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_unpack_qid(const u8 *in, size_t remaining, struct p9_qid *q) {
     if (remaining < P9_QID_LEN) return -1;
     if (!q) return -1;
@@ -206,6 +221,7 @@ int p9_unpack_qid(const u8 *in, size_t remaining, struct p9_qid *q) {
     return P9_QID_LEN;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int p9_unpack_str(const u8 *in, size_t remaining,
                   const u8 **out_ptr, u16 *out_len) {
     if (remaining < 2) return -1;
@@ -874,6 +890,7 @@ int p9_parse_rreaddir(const u8 *in, size_t len,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 // Dirent record (within a Rreaddir data stream):
 //   [qid: 13][offset: u64][type: u8][name: str]
 int p9_unpack_dirent(const u8 *in, size_t remaining,
@@ -893,6 +910,7 @@ int p9_unpack_dirent(const u8 *in, size_t remaining,
     if (rc < 0) return -1; off += (size_t)rc;
     return (int)off;
 }
+#endif // KERNEL_TESTS
 
 // Tstatfs body: [fid: u32]
 int p9_build_tstatfs(u8 *out, size_t cap, u16 tag, u32 fid) {
@@ -1198,6 +1216,7 @@ int p9_build_tweft(u8 *out, size_t cap, u16 tag, u32 fid) {
     return (int)total;
 }
 
+#ifdef KERNEL_TESTS
 int p9_parse_tweft(const u8 *in, size_t len, u16 *tag, u32 *fid) {
     if (!tag || !fid) return -1;
     int hdr = validate_rmsg_header(in, len, P9_TWEFT, tag);
@@ -1224,6 +1243,7 @@ int p9_build_rweft(u8 *out, size_t cap, u16 tag,
     rc = p9_pack_u32(out + off, cap - off, geom->ring_entries); if (rc < 0) return -1; off += (size_t)rc;
     return (int)off;
 }
+#endif // KERNEL_TESTS
 
 int p9_parse_rweft(const u8 *in, size_t len,
                    u16 *tag, struct p9_weft_geom *out) {
@@ -1266,6 +1286,7 @@ int p9_build_tweftio(u8 *out, size_t cap, u16 tag,
     return (int)o;
 }
 
+#ifdef KERNEL_TESTS
 int p9_parse_tweftio(const u8 *in, size_t len, u16 *tag,
                      u32 *fid, u32 *off, u32 *xfer_len, u32 *dir) {
     if (!tag || !fid || !off || !xfer_len || !dir) return -1;
@@ -1291,6 +1312,7 @@ int p9_build_rweftio(u8 *out, size_t cap, u16 tag, u32 count) {
     if (rc < 0) return -1;
     return (int)total;
 }
+#endif // KERNEL_TESTS
 
 int p9_parse_rweftio(const u8 *in, size_t len, u16 *tag, u32 *count) {
     if (!tag || !count) return -1;

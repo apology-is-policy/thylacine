@@ -65,6 +65,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/smp.h>     // smp_cpu_count / smp_cpu_idx_self for per-CPU bring-up + IPI range check
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 // ---------------------------------------------------------------------------
 // GICv3 distributor register offsets (relative to dist base).
@@ -219,6 +220,7 @@ static struct gic_irq_slot g_lpi_handlers[GIC_LPI_COUNT];
 static u64 g_barrier_req[DTB_MAX_CPUS];
 static u64 g_barrier_done[DTB_MAX_CPUS];
 
+VISIBLE_IF_KERNEL_TESTS
 bool gic_intid_dispatchable(u32 id) {
     return id < GIC_NUM_INTIDS ||
         (g_version == GIC_VERSION_V3 && id >= GIC_LPI_MIN &&
@@ -258,10 +260,12 @@ u64 gic_barrier_send(unsigned cpu) {
     if (!gic_send_ipi(cpu, IPI_IRQ_BARRIER)) return 0;
     return ticket;
 }
+#ifdef KERNEL_TESTS
 u64 gic_barrier_requests(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return 0;
     return __atomic_load_n(&g_barrier_req[cpu], __ATOMIC_ACQUIRE);
 }
+#endif // KERNEL_TESTS
 bool gic_barrier_reached(unsigned cpu, u64 ticket) {
     if (cpu >= DTB_MAX_CPUS) return false;
     return __atomic_load_n(&g_barrier_done[cpu], __ATOMIC_ACQUIRE) >= ticket;
@@ -837,12 +841,14 @@ u64 gic_cpu_irq_count(unsigned cpu) {
     return __atomic_load_n(&g_cpu_irq_count[cpu].n, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 // Test hook (gic.cpu_irq_counter_geometry): the padding above is a compile-time
 // constant, so it can only be validated against the hardware at runtime.
 const void *gic_cpu_irq_count_slot_addr(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return 0;
     return &g_cpu_irq_count[cpu];
 }
+#endif // KERNEL_TESTS
 
 void gic_dispatch(u32 intid) {
     struct gic_irq_slot *slot = irq_slot(intid);
@@ -1019,6 +1025,9 @@ void gic_set_spi_level_triggered(u32 intid) {
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
+VISIBLE_IF_KERNEL_TESTS
+bool gic_intid_enabled(u32 intid);
+
 bool gic_drain_spi(u32 intid) {
     if (intid < GIC_SPI_MIN || intid > g_max_intid || intid >= GIC_NUM_INTIDS)
         return false;
@@ -1082,6 +1091,7 @@ bool gic_disable_irq(u32 intid) {
 // (SGI/PPI); the mirror of gic_enable_irq / gic_disable_irq's write. Lets a
 // test observe the level mask+ack: a level SPI reads DISABLED after
 // kobj_irq_dispatch masks it and ENABLED after kobj_irq_wait re-arms.
+VISIBLE_IF_KERNEL_TESTS
 bool gic_intid_enabled(u32 intid) {
     if (intid >= GIC_LPI_MIN) return gic_its_enabled(intid);
     if (intid >= GIC_NUM_INTIDS) return false;

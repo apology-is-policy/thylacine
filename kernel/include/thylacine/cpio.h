@@ -51,9 +51,11 @@ struct cpio_entry {
 int cpio_newc_iter(const u8 *blob, size_t blob_size,
                    int (*cb)(const struct cpio_entry *, void *), void *arg);
 
+#ifdef KERNEL_TESTS
 // Convenience: count entries in the archive (excluding the trailer).
 // Returns -1 on parse error.
 int cpio_newc_count(const u8 *blob, size_t blob_size);
+#endif // KERNEL_TESTS
 
 // Quick presence test — does the blob start with the newc magic?
 bool cpio_newc_is_valid(const u8 *blob, size_t blob_size);

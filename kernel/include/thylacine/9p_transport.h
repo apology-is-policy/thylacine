@@ -196,11 +196,13 @@ int  p9_transport_close(struct p9_transport *t);
 int  p9_transport_send(struct p9_transport *t,
                         const u8 *msg, size_t len);
 
+#ifdef KERNEL_TESTS
 // Receive one complete framed Rmsg into t->recv_buf. Returns the
 // frame length on success (also stored in t->last_recv_len), -1 on
 // error (truncation, frame > recv_cap, backend failure). Transitions
 // to ERROR on backend failure.
 int  p9_transport_recv(struct p9_transport *t);
+#endif // KERNEL_TESTS
 
 // The backend's recv_ready. A CLOSED transport is ready: its next recv fails
 // at once. Touches no state machine, so the frame-aware reader that bypasses
@@ -212,12 +214,14 @@ bool p9_transport_recv_ready(struct p9_transport *t, struct poll_waiter *pw);
 // same c->lock the hangup runs under, so the two never overlap.
 void p9_transport_hangup(struct p9_transport *t);
 
+#ifdef KERNEL_TESTS
 // Convenience: send a request, then receive the response. Equivalent
 // to p9_transport_send + p9_transport_recv. Returns the response
 // length on success, -1 on error. The response bytes are in
 // t->recv_buf[0..return_value).
 int  p9_transport_round_trip(struct p9_transport *t,
                               const u8 *request, size_t request_len);
+#endif // KERNEL_TESTS
 
 // Compose with session: take a built Tmsg + run send + recv + session
 // dispatch in one call. The session must have already produced
@@ -233,8 +237,10 @@ int  p9_transport_exchange(struct p9_transport *t,
 // Query helpers.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 bool   p9_transport_is_open(const struct p9_transport *t);
 size_t p9_transport_last_recv_len(const struct p9_transport *t);
+#endif // KERNEL_TESTS
 
 // Private-service progress (ASYNC-SERVICE-LIFECYCLE, AS-1). These callbacks
 // MUST NOT sleep. They return a positive partial byte count, EAGAIN (-11) for

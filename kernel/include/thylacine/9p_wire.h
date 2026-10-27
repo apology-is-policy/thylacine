@@ -256,6 +256,7 @@ _Static_assert((P9_POLL_SNAPSHOT & P9_POLL_MASK) == 0,
 // -1 if cap is insufficient. Each is a thin shift-and-byte-store.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 int p9_pack_u8 (u8 *out, size_t cap, u8  v);
 int p9_pack_u16(u8 *out, size_t cap, u16 v);
 int p9_pack_u32(u8 *out, size_t cap, u32 v);
@@ -267,12 +268,14 @@ int p9_pack_qid(u8 *out, size_t cap, const struct p9_qid *q);
 // success, -1 on overflow OR slen > UINT16_MAX. Caller responsible for
 // enforcing per-spec caps (e.g., P9_NAME_MAX = 255 for path components).
 int p9_pack_str(u8 *out, size_t cap, const u8 *s, size_t slen);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Primitive unpackers — read from `in`, advance, return bytes consumed,
 // or -1 on underflow. Caller short-circuits on negative.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 int p9_unpack_u8 (const u8 *in, size_t remaining, u8  *out);
 int p9_unpack_u16(const u8 *in, size_t remaining, u16 *out);
 int p9_unpack_u32(const u8 *in, size_t remaining, u32 *out);
@@ -285,6 +288,7 @@ int p9_unpack_qid(const u8 *in, size_t remaining, struct p9_qid *q);
 // before consuming *out_ptr.
 int p9_unpack_str(const u8 *in, size_t remaining,
                   const u8 **out_ptr, u16 *out_len);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Header peek: extract size + type + tag without consuming the body.
@@ -624,6 +628,7 @@ int p9_parse_rreaddir(const u8 *in, size_t len,
                       u16 *tag, u32 *count,
                       const u8 **data_ptr, u32 data_cap);
 
+#ifdef KERNEL_TESTS
 // Unpack one 9P2000.L dirent record from the dirent stream.
 //   record: [qid: 13][offset: u64][type: u8][name: str]
 // `out_name_ptr` points INTO `in` (zero-copy); caller copies if needed.
@@ -632,6 +637,7 @@ int p9_unpack_dirent(const u8 *in, size_t remaining,
                      struct p9_qid *out_qid, u64 *out_offset,
                      u8 *out_type,
                      const u8 **out_name_ptr, u16 *out_name_len);
+#endif // KERNEL_TESTS
 
 // Tstatfs: filesystem statistics for `fid`.
 int p9_build_tstatfs(u8 *out, size_t cap, u16 tag, u32 fid);
@@ -782,12 +788,14 @@ struct p9_weft_geom {
 // Tweft: request a zero-copy ring for the flow bound to `fid`.
 int p9_build_tweft(u8 *out, size_t cap, u16 tag, u32 fid);
 
+#ifdef KERNEL_TESTS
 // Tweft parse (server / test side): extract the target fid.
 int p9_parse_tweft(const u8 *in, size_t len, u16 *tag, u32 *fid);
 
 // Rweft: the server's ring grant -- share_id + geometry.
 int p9_build_rweft(u8 *out, size_t cap, u16 tag,
                    const struct p9_weft_geom *geom);
+#endif // KERNEL_TESTS
 
 // Rweft parse (client side): extract share_id + geometry.
 int p9_parse_rweft(const u8 *in, size_t len,
@@ -816,12 +824,14 @@ int p9_parse_rweft(const u8 *in, size_t len,
 int p9_build_tweftio(u8 *out, size_t cap, u16 tag,
                      u32 fid, u32 off, u32 len, u32 dir);
 
+#ifdef KERNEL_TESTS
 // Tweftio parse (server / test side): extract the descriptor + direction.
 int p9_parse_tweftio(const u8 *in, size_t len, u16 *tag,
                      u32 *fid, u32 *off, u32 *xfer_len, u32 *dir);
 
 // Rweftio: the count of payload bytes the consumer actually moved.
 int p9_build_rweftio(u8 *out, size_t cap, u16 tag, u32 count);
+#endif // KERNEL_TESTS
 
 // Rweftio parse (client side): extract the moved-byte count.
 int p9_parse_rweftio(const u8 *in, size_t len, u16 *tag, u32 *count);

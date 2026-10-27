@@ -180,24 +180,30 @@ struct virtio_virtqueue {
 // mapping uses the kernel direct map which is set up earlier).
 void virtio_init(void);
 
+#ifdef KERNEL_TESTS
 // Number of MMIO devices probed (whether or not they have an attached
 // device — slots with DeviceID=0 are still present in the count).
 int virtio_mmio_dev_count(void);
 
 // Get the idx-th probed MMIO device. Returns NULL if idx out of range.
 struct virtio_mmio_dev *virtio_mmio_dev_get(int idx);
+#endif // KERNEL_TESTS
 
 // Find the first MMIO device with the given DeviceID, or NULL.
 struct virtio_mmio_dev *virtio_mmio_find_by_device_id(u32 device_id);
 
 // MMIO register read/write helpers. Memory-mapped IO is volatile; the
 // helpers use volatile loads/stores to defeat compiler reordering.
+#ifdef KERNEL_TESTS
 u32  virtio_mmio_read32(struct virtio_mmio_dev *dev, u32 off);
+#endif // KERNEL_TESTS
 void virtio_mmio_write32(struct virtio_mmio_dev *dev, u32 off, u32 val);
 
 // Status register helpers. Set, clear, and check status bits per the
 // VIRTIO 1.2 §2.1 driver state machine.
+#ifdef KERNEL_TESTS
 u32  virtio_get_status(struct virtio_mmio_dev *dev);
+#endif // KERNEL_TESTS
 void virtio_set_status(struct virtio_mmio_dev *dev, u32 status);
 void virtio_add_status(struct virtio_mmio_dev *dev, u32 bits);
 void virtio_reset(struct virtio_mmio_dev *dev);
@@ -229,6 +235,7 @@ int virtio_mmio_reset_in_range(u64 pa, size_t size);
 bool virtio_negotiate_features(struct virtio_mmio_dev *dev,
                                 u32 want_features_lo);
 
+#ifdef KERNEL_TESTS
 // Negotiated split-virtqueue size for a device-reported QueueNumMax:
 // min(num_max, VIRTIO_VQ_NUM_DEFAULT), rejected to 0 when num_max is 0 or
 // the clamped result is not a power of two. The split-ring index
@@ -237,6 +244,7 @@ bool virtio_negotiate_features(struct virtio_mmio_dev *dev,
 // unsupported rather than armed (RW-7 R3-F6). virtio_virtqueue_create
 // returns NULL when this returns 0.
 u32 virtio_vq_size_for(u32 num_max);
+#endif // KERNEL_TESTS
 
 // Allocate + register a virtqueue at queue index `qidx`. Steps:
 //   1. Write QUEUE_SEL = qidx

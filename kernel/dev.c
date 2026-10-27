@@ -90,6 +90,7 @@ int dev_register(struct Dev *d) {
     return idx;
 }
 
+#ifdef KERNEL_TESTS
 struct Dev *dev_lookup_by_dc(int dc) {
     for (int i = 0; i < g_dev_count; i++) {
         if (bestiary[i]->dc == dc) return bestiary[i];
@@ -108,6 +109,7 @@ struct Dev *dev_lookup_by_name(const char *name) {
 int dev_count(void) {
     return g_dev_count;
 }
+#endif // KERNEL_TESTS
 
 // Helper for dev_init's banner — print a small unsigned without going
 // through uart_putdec's u64 widening (cheap enough at boot, but this

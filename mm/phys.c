@@ -274,10 +274,12 @@ u64 phys_directmap_table_pages(void) {
     return g_directmap_table_pages;
 }
 
+#ifdef KERNEL_TESTS
 void phys_zone_bounds(paddr_t *base, paddr_t *end) {
     if (base) *base = g_zone_base;
     if (end)  *end  = g_zone_end;
 }
+#endif // KERNEL_TESTS
 
 // ---------------------------------------------------------------------------
 // B-1a': the user pool (phys.h). Sized once at capacity_init; charged by every
@@ -336,6 +338,7 @@ static void pool_uncharge(u32 npages) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // What the tests have parked and not yet given back. The runner releases it
 // after every test: a parking test unparks on its last line, and a failing
 // assertion returns before that line with the pool full for every test after.
@@ -360,6 +363,7 @@ u32 capacity_pool_unpark_all_for_test(void) {
         pool_uncharge(n);
     return n;
 }
+#endif // KERNEL_TESTS
 
 static capacity_reclaim_fn g_capacity_reclaim;
 void capacity_set_reclaim(capacity_reclaim_fn fn) { g_capacity_reclaim = fn; }

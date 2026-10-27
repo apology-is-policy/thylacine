@@ -12,6 +12,7 @@
 #include <thylacine/smp.h>
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/halls.h"
 #include "../arch/arm64/timer.h"
@@ -79,13 +80,16 @@ static u8 g_extinction_owner[DTB_MAX_CPUS];
 
 // The pure core (see extinction.h). Split out so a test can exercise the
 // exactly-one-winner property WITHOUT touching the live console word.
+VISIBLE_IF_KERNEL_TESTS
 int extinction_claim_word(uint32_t *word) {
     return __atomic_exchange_n(word, 1u, __ATOMIC_ACQ_REL) == 0u;
 }
 
+#ifdef KERNEL_TESTS
 int extinction_console_claimed(void) {
     return __atomic_load_n(&g_extinction_console, __ATOMIC_RELAXED) != 0u;
 }
+#endif // KERNEL_TESTS
 
 // The THIRD tearing source: a peer's DIRECT write (uart_putc -- the kernel test
 // runner, the boot diagnostics, every uart_puts), which never touches the TX ring
@@ -105,6 +109,10 @@ static volatile u8 g_extinction_tx_busy[DTB_MAX_CPUS];
 #define EXTINCTION_TX_WAIT_MAX_NS    (50ull * 1000ull * 1000ull)
 #define EXTINCTION_TX_WAIT_MAX_ITERS (1u << 24)
 
+VISIBLE_IF_KERNEL_TESTS
+void extinction_tx_exit_core(volatile u8 *busy);
+
+VISIBLE_IF_KERNEL_TESTS
 int extinction_tx_gate_core(volatile u8 *busy, const uint32_t *word, u8 owner) {
     (void)__atomic_fetch_add(busy, 1u, __ATOMIC_SEQ_CST);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -113,10 +121,12 @@ int extinction_tx_gate_core(volatile u8 *busy, const uint32_t *word, u8 owner) {
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void extinction_tx_exit_core(volatile u8 *busy) {
     (void)__atomic_fetch_sub(busy, 1u, __ATOMIC_RELEASE);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) {
     u32 iters = 0;
     u64 t0 = 0;

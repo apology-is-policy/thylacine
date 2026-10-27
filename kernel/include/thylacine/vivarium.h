@@ -1087,6 +1087,7 @@ enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
 enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
                                                  u64 fd, u64 offset);
 
+#ifdef KERNEL_TESTS
 // True iff no argument tuple is admitted by more than ONE mmap arm. Pure; exists
 // so the disjointness the arms' comments CLAIM is a checked fact rather than a
 // set of assertions that agree with each other. Covers all four arms pairwise --
@@ -1095,6 +1096,7 @@ enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
 // those equalities into a mask test.
 bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
                                  u64 fd, u64 offset);
+#endif // KERNEL_TESTS
 
 // -----------------------------------------------------------------------------
 // TIER 2 — mprotect (B-1a; ARCH 6.5 "The permission ceiling"). A translated row
@@ -1260,6 +1262,7 @@ enum viv_signote viv_signal_note(u64 signum);
 // One past the last real note kind -- the array bound for a per-note table.
 #define VIV_SIGNOTE_COUNT ((u32)VIV_SIGNOTE_TTY_CONT + 1u)
 
+#ifdef KERNEL_TESTS
 // Does `signum` EXCLUSIVELY own its note -- is it the ONLY Linux signal this
 // map routes there? PURE.
 //
@@ -1292,6 +1295,7 @@ bool viv_signal_owns_note_exclusively(u64 signum);
 // what already happens) but can NEVER be caught or ignored. A guest that installs a
 // SIGSEGV handler is told so, rather than discovering it at the first fault.
 bool viv_signote_is_deliverable(enum viv_signote note);
+#endif // KERNEL_TESTS
 
 // The kill family (kill 129, tkill 130, tgkill 131; VIVARIUM 6.22): what a
 // signal number asks of the shell. PURE.
@@ -2986,7 +2990,8 @@ enum {
     VIV_LINUX_CREAD  = 0x00000080u,
 };
 
-// C2-k1b PURE translation helpers (non-static for the unit tests, the
+#ifdef KERNEL_TESTS
+// C2-k1b PURE translation helpers (split out for the unit tests, the
 // getdents64-transform precedent): the error-prone flag/grammar logic, isolated
 // from the fd + uaccess glue. viv_cons_to_linux_termios maps the cons 5-flag
 // word to a Linux termios (TCGETS content); viv_linux_termios_to_grammar builds
@@ -2994,9 +2999,10 @@ enum {
 // returning the byte count (g needs >= 64 bytes).
 void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out);
 int  viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g);
+#endif // KERNEL_TESTS
 
 // C2-k1b test shim: drive the ioctl shell without a phenotype dispatch. Mirrors
-// viv_readv_for_test -- the non-static shell entry the test suite calls.
+// viv_readv_for_test -- the shell entry the test suite calls.
 s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp);
 
 // C2-k2 test shim: drive a session/pgrp TIER2 shell (SETSID/SETPGID) through the
@@ -3136,12 +3142,14 @@ s32 vivarium_clock_nanosleep_decide(u64 linux_clk_id, u64 flags,
 // length in ns, saturated at U64_MAX.
 bool vivarium_sleep_req_ns(s64 tv_sec, s64 tv_nsec, u64 *ns_out);
 
+#ifdef KERNEL_TESTS
 // What ended a sleep's wait means, in Linux's do_nanosleep order: `ts` is the
 // TSLEEP_* outcome; `deadline` and `now` are on one clock. 0 once now has
 // reached the deadline, whatever ended the wait -- the expiry wins over a
 // note; 0 for death; -T_E_INTR for a caught note before the deadline, with what
 // was left in *rem_ns when rem_ns is not NULL; 1 to sleep again.
 s64 vivarium_sleep_verdict(int ts, u64 deadline, u64 now, u64 *rem_ns);
+#endif // KERNEL_TESTS
 
 // The sleep under both rows (the shells in syscall.c do the uaccess). `wall`
 // picks CLOCK_REALTIME, which matters only to an absolute sleep: a relative one

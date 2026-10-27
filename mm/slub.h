@@ -82,10 +82,12 @@ void slub_init(void);
 struct kmem_cache *kmem_cache_create(const char *name, size_t size,
                                      size_t align, unsigned flags);
 
+#ifdef KERNEL_TESTS
 // Drain the cache's partial slabs back to the buddy and release the
 // cache descriptor. Caller's responsibility to ensure no live objects
 // remain (we don't track per-object liveness across destroy).
 void kmem_cache_destroy(struct kmem_cache *c);
+#endif // KERNEL_TESTS
 
 // Allocate / free a single object from a cache.
 void *kmem_cache_alloc(struct kmem_cache *c, unsigned flags);
@@ -100,7 +102,9 @@ void  kmem_cache_free(struct kmem_cache *c, void *obj);
 // overflow).
 void *kmalloc(size_t n, unsigned flags);
 void *kzalloc(size_t n, unsigned flags);
+#ifdef KERNEL_TESTS
 void *kcalloc(size_t n, size_t size, unsigned flags);
+#endif // KERNEL_TESTS
 void  kfree(void *p);
 
 // Diagnostic accessors used by the boot banner / future /ctl/mem.
@@ -108,10 +112,10 @@ u64 slub_total_alloc(void);
 u64 slub_total_free(void);
 u64 slub_active_slabs(void);
 
+#ifdef KERNEL_TESTS
 // Live (currently-allocated) object count for one cache.
 u64 kmem_cache_live_count(const struct kmem_cache *c);
 
-#ifdef KERNEL_TESTS
 // Single-slot observer on kfree's validated large-allocation path: it records
 // ENTRY to that free for the one armed pointer, by the ARMING THREAD only, never
 // the buddy outcome. Arming and disarming both clear the fired flag.

@@ -198,10 +198,12 @@ _Static_assert(sizeof(struct AddrSpace) == 88,
 // narrowing of this Proc, and its default is the pool itself.)
 struct AddrSpace *addrspace_alloc(u32 page_budget);
 
+#ifdef KERNEL_TESTS
 // Take a constructor/Proc owner reference and its lifetime reference. Caller
 // already holds an owner reference; a kernel-only pin must not resurrect an
 // ownerless address space. RFMEM takes this reference before publishing a child.
 void addrspace_ref(struct AddrSpace *as);
+#endif // KERNEL_TESTS
 // As above, but return false if private rings forbid another process owner.
 // Caller already owns the AS. Sharing and private_begin serialize under as->lock;
 // do not call either while already holding that lock. The void ref is a checked
@@ -216,6 +218,7 @@ bool addrspace_private_begin(struct AddrSpace *as);
 void addrspace_private_end(struct AddrSpace *as);
 
 
+#ifdef KERNEL_TESTS
 // Kernel-only lifetime pins: no execution or process-sharing authority. Caller
 // holds a live owner or pin across pin acquisition. Unpin is NULL-safe; the last
 // total ref alone frees the descriptor/page tables. The last OWNER drains
@@ -223,6 +226,7 @@ void addrspace_private_end(struct AddrSpace *as);
 // No Proc pointer is needed or permitted after its owner's lifetime ends.
 void addrspace_pin(struct AddrSpace *as);
 void addrspace_unpin(struct AddrSpace *as);
+#endif // KERNEL_TESTS
 
 // Constructor/Proc owner count, excluding kernel pins. Use for process sharing
 // and last-process device quiescence, with the existing publication/exit proof.

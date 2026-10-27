@@ -56,6 +56,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>        // REVENANT: spoor_ref/clunk + SPOOR_MAGIC + qid for BURROW_TYPE_FILE
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 #include <thylacine/pagemap.h>   // B-1a': the charged sparse slot table
@@ -830,6 +831,7 @@ void burrow_ref(struct Burrow *v) {
 // cannot drift between the settled and unsettled spellings. A charge-settling
 // caller wants the settled form directly; this one exists for the callers that
 // hold no charge record.
+VISIBLE_IF_KERNEL_TESTS
 bool burrow_unref_freed(struct Burrow *v) {
     return burrow_unref_settled_in(v, NULL, NULL);
 }
@@ -920,7 +922,9 @@ bool burrow_release_mapping_freed(struct Burrow *v) {
     return dead != NULL;
 }
 
+#ifdef KERNEL_TESTS
 void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
+#endif // KERNEL_TESTS
 
 // D-3c F1: free a Burrow the caller took off a deferred-free stack. Runs the
 // same burrow_free_internal every unref/release-mapping funnels into -- but at
@@ -1143,6 +1147,7 @@ int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
 
 // B-1a: the permission ceiling's mutation. See burrow.h for the contract and
 // vma.h for the all-or-nothing argument.
+VISIBLE_IF_KERNEL_TESTS
 int burrow_protect_in(struct AddrSpace *as, bool exempt,
                       u64 vaddr, size_t length, u32 prot, bool seal) {
     if (!as)                            return -(int)T_E_INVAL;
@@ -1379,6 +1384,7 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
     return burrow_decommit_in(p->as, vaddr, length);
 }
 
+#ifdef KERNEL_TESTS
 // burrow_lazy_resident_count: O(1) since B-1a' -- the pagemap keeps the count.
 // Read under v->lock (caller holds as->lock; order as->lock -> v->lock). NOT
 // const-qualified: it TAKES v->lock (a logically-const observation that
@@ -1392,6 +1398,7 @@ u32 burrow_lazy_resident_count(struct Burrow *v) {
     spin_unlock(&v->lock);
     return n;
 }
+#endif // KERNEL_TESTS
 
 u32 burrow_lazy_footprint(struct Burrow *v) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
@@ -1678,10 +1685,10 @@ int burrow_total_refs(struct Burrow *v) {
     return refs;
 }
 
+#ifdef KERNEL_TESTS
 u64 burrow_total_created(void)    { return g_vmo_created; }
 u64 burrow_total_destroyed(void)  { return g_vmo_destroyed; }
 
-#ifdef KERNEL_TESTS
 // REVENANT R-1 test hooks — let test_burrow.c exercise the FILE-Burrow
 // resident-page free path before the R-2 fault arm exists to populate slots.
 size_t burrow_file_page_count_for_test(const struct Burrow *v) {

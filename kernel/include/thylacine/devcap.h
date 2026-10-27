@@ -161,9 +161,11 @@ extern struct Dev devcap;
 // Internal API exposed for tests + the proc-exit notify hook. The
 // production paths go through the Dev's write op (devcap_write).
 
+#ifdef KERNEL_TESTS
 // cap_pending_count — number of non-FREE entries in the pending-grant
 // table. Tests + diagnostics; takes the table lock.
 int cap_pending_count(void);
+#endif // KERNEL_TESTS
 
 // cap_proc_exit_notify — called from exits() for every exiting Proc.
 // Drops any pending grant targeting `p` (matched by stripes). A Proc
@@ -180,9 +182,11 @@ void cap_proc_exit_notify(struct Proc *p);
 // table lock; callers may hold g_proc_table_lock (the established exit ordering).
 void cap_cancel_imperium_pending(u64 stripes, u32 session_id);
 
+#ifdef KERNEL_TESTS
 // cap_reset_table — drop all pending grants. Test-only; takes the
 // table lock. Production paths never call this.
 void cap_reset_table(void);
+#endif // KERNEL_TESTS
 
 // cap_register_grant_for_writer — the /grant write core. Validates the
 // writer holds CAP_GRANT_HOSTOWNER and the cap_mask is a subset of

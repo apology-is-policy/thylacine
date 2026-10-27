@@ -48,6 +48,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../mm/slub.h"
 
@@ -93,6 +94,7 @@ struct Territory *kpgrp(void) {
     return g_kpgrp;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 struct Territory *territory_alloc(void) {
     if (!g_pgrp_cache) extinction("territory_alloc before territory_init");
     struct Territory *p = kmem_cache_alloc(g_pgrp_cache, KP_ZERO);
@@ -403,6 +405,7 @@ int territory_setdot(struct Territory *p, const char *cleaned) {
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int territory_nbinds(struct Territory *p) {
     if (!p) return 0;
     return p->nbinds;
@@ -412,6 +415,7 @@ int territory_nmounts(struct Territory *p) {
     if (!p) return 0;
     return p->nmounts;
 }
+#endif // KERNEL_TESTS
 
 u64 territory_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __ATOMIC_RELAXED); }
 u64 territory_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
@@ -568,6 +572,7 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
 // bind / unbind.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // Path-in-set helper. Linear scan; PGRP_MAX_BINDS+1 is the worst-case
 // `reachable[]` size, so this is at most ~33 comparisons.
 static bool path_in(const path_id_t *arr, int n, path_id_t p) {
@@ -659,6 +664,7 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst) {
     spin_unlock(&territory->ns_lock);
     return -1;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // mount / unmount.

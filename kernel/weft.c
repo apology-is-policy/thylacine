@@ -19,6 +19,7 @@
 // guest<->netd wiring (under a 9P Tread/Twrite) + the EL0 share delivery is
 // Weft-6 (SYS_WEFT_SHARE/MAP, keyed on the /net data fid).
 
+#include <thylacine/visibility.h>
 #include <thylacine/weft.h>
 #include <thylacine/addrspace.h>    // the reaper locks the target's address space
 #include <thylacine/thread.h>       // current_thread: the test window's owner
@@ -50,6 +51,7 @@ bool weft_should_ring(u32 len) {
     return len >= WEFT_HYBRID_THRESHOLD;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int weft_ring_layout(u8 *base, size_t size, u32 ring_entries,
                      struct weft_ring_view *rv) {
     if (!base || !rv) return -1;
@@ -81,6 +83,7 @@ int weft_ring_layout(u8 *base, size_t size, u32 ring_entries,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 void weft_ring_init_hdr(const struct weft_ring_view *rv) {
     struct weft_ring_hdr *h = (struct weft_ring_hdr *)rv->base;
     h->magic        = WEFT_MAGIC;
@@ -131,6 +134,7 @@ int weft_ring_drain(struct weft_ring_view *rv, struct weft_desc *out, int max) {
     __atomic_store_n(&h->cons_head, rv->cons_head, __ATOMIC_RELEASE);
     return n;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Readiness ring (Weft-4) -- the netd<->guest single-cache-line poke. The
@@ -146,6 +150,7 @@ int weft_ring_drain(struct weft_ring_view *rv, struct weft_desc *out, int max) {
 // wakeup, wired at Weft-6, not a write of wait_active).
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 static struct weft_ready_hdr *weft_ready_of(struct weft_ring_view *rv) {
     return (struct weft_ready_hdr *)(rv->base + rv->ready_off);
 }
@@ -213,6 +218,7 @@ void weft_ready_unpark(struct weft_ring_view *rv) {
     struct weft_ready_hdr *rh = weft_ready_of(rv);
     __atomic_store_n(&rh->wait_active, 0u, __ATOMIC_SEQ_CST);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // F_NOTIF zero-copy-send completion contract (Weft-5). The kernel-private
@@ -234,6 +240,7 @@ void weft_ready_unpark(struct weft_ring_view *rv) {
 // (the loom_async_op the live tracker rides at Weft-6); no shared memory.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 void weft_notif_arm(struct weft_notif *n, u32 holders) {
     // Mask to the valid holder domain (a degenerate over-wide/empty argument
     // cannot manufacture a phantom holder; an empty result is a no-op send,
@@ -268,6 +275,7 @@ bool weft_notif_inflight(const struct weft_notif *n) {
 u32 weft_notif_result_flags(const struct weft_notif *n) {
     return n->result_flags;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // share_id registry (Weft-6a-2) -- the netd<->kernel join key for the per-flow
@@ -782,6 +790,7 @@ static int weft_reap_sweep_in(u64 now_ns, bool test_only) {
     return reclaimed;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int weft_reap_sweep(u64 now_ns) {
     return weft_reap_sweep_in(now_ns, false);
 }

@@ -23,6 +23,7 @@
 #include <thylacine/syscall.h>               // #55: struct t_stat (cons_stat_native_fill)
 #include <thylacine/thread.h>                // RW-11 SA-1b: current_thread
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/timer.h"              // #75: the TX room-wait deadline
 #include "../arch/arm64/uart.h"
@@ -616,6 +617,7 @@ static bool g_cons_tx_claimed_for_dump;
 // lock it already holds and then reporting a miss it did not have.
 static u8 g_cons_tx_claim_owner[DTB_MAX_CPUS];
 
+VISIBLE_IF_KERNEL_TESTS
 bool cons_tx_claim_core(spin_lock_t *l) {
     u32 iters = 0;
     u64 t0 = 0;   // anchored lazily on the FIRST miss (0 = unset / pre-init -> backstop governs)
@@ -650,11 +652,13 @@ bool cons_tx_claim_for_dump(void) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 // The clean-boot witness (see the test): FALSE unless an extinction claimed the
 // live ring, and it must STAY false -- a spurious claim is a dead console.
 bool cons_tx_claimed_for_dump(void) {
     return __atomic_load_n(&g_cons_tx_claimed_for_dump, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // #75-audit F3: a bounded SYNCHRONOUS flush for a HEALTHY caller (unlike
 // cons_tx_claim_for_dump's raw try-spin, which is for the dying machine). #75 buffers
@@ -2878,6 +2882,9 @@ u32 cons_termios_get(void) {
     return cons_termios_load();
 }
 
+VISIBLE_IF_KERNEL_TESTS
+u32 cons_beacon_tier(void);
+
 long cons_render_mode(void *buf, long n) {
     if (!buf || n < 0) return 0;
     u16 wc, wr;
@@ -2933,6 +2940,7 @@ void cons_winsize_get(u16 *cols, u16 *rows) {
 }
 
 // H-1: the Beacon tier snapshot (ARCH 23.5.4; the cons_winsize_get shape).
+VISIBLE_IF_KERNEL_TESTS
 u32 cons_beacon_tier(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     u32 bt = g_cons.beacon_tier;
@@ -2983,12 +2991,14 @@ long cons_render_beacon(void *buf, long n) {
     return off;
 }
 
+#ifdef KERNEL_TESTS
 u32 cons_winch_events(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     u32 v = g_cons.winch_events;
     spin_unlock_irqrestore(&g_cons.lock, s);
     return v;
 }
+#endif // KERNEL_TESTS
 
 // #55: the shared is-a-cons t_stat fill (ARCH 23.5.3) -- devcons (the
 // SYS_CONSOLE_OPEN fd, the std-fd inheritance chain) + devdev's /dev/cons

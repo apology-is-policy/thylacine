@@ -51,6 +51,7 @@
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
+#include <thylacine/visibility.h>
 
 #include "../mm/slub.h"
 
@@ -69,11 +70,13 @@ static inline void table_lock(struct HandleTable *t) {
 // Type classifiers — implement the spec's TxKObjs / HwKObjs partition.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 bool kobj_kind_is_transferable(enum kobj_kind k) {
     if (k <= KOBJ_INVALID || k >= KOBJ_KIND_COUNT) return false;
     return ((1u << (unsigned)k) & KOBJ_KIND_TRANSFERABLE_MASK) != 0;
 }
 
+#ifdef KERNEL_TESTS
 bool kobj_kind_is_hw(enum kobj_kind k) {
     if (k <= KOBJ_INVALID || k >= KOBJ_KIND_COUNT) return false;
     return ((1u << (unsigned)k) & KOBJ_KIND_HW_MASK) != 0;
@@ -83,6 +86,7 @@ bool kobj_kind_is_srv(enum kobj_kind k) {
     if (k <= KOBJ_INVALID || k >= KOBJ_KIND_COUNT) return false;
     return ((1u << (unsigned)k) & KOBJ_KIND_SRV_MASK) != 0;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // HandleTable lifecycle.
@@ -360,6 +364,7 @@ void handle_table_free(struct HandleTable *t) {
     kfree(t);
 }
 
+#ifdef KERNEL_TESTS
 int handle_table_count(const struct HandleTable *t) {
     if (!t) return 0;
     int n = 0;
@@ -368,6 +373,7 @@ int handle_table_count(const struct HandleTable *t) {
     }
     return n;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Handle ops.
@@ -553,6 +559,7 @@ void handle_install_reserved(struct Proc *p, hidx_t h, enum kobj_kind kind,
     spin_unlock(&t->lock);
 }
 
+#ifdef KERNEL_TESTS
 u64 handle_table_installs(struct Proc *p) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     table_lock(t);
@@ -569,6 +576,7 @@ bool handle_is_reserved(struct Proc *p, hidx_t h) {
     spin_unlock(&t->lock);
     return r;
 }
+#endif // KERNEL_TESTS
 
 bool handle_locked_unless_reserved(struct Proc *p, hidx_t h,
                                    void (*fn)(void *), void *arg) {
@@ -634,6 +642,7 @@ int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
     return handle_close_matching(p, h, KOBJ_INVALID, NULL, close_rc);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int handle_close(struct Proc *p, hidx_t h) {
     int close_rc;
     return handle_close_matching(p, h, KOBJ_INVALID, NULL, &close_rc);
@@ -645,6 +654,7 @@ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *
     return handle_close_matching(p, h, kind, obj, &close_rc);
 }
 
+#ifdef KERNEL_TESTS
 // VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in
 // place. The header carries the rationale + the invariant argument; this body
 // is close's capture-under-lock followed by an install into the SAME slot,
@@ -653,6 +663,7 @@ int handle_replace(struct Proc *p, hidx_t h, const void *expect,
                    enum kobj_kind kind, rights_t rights, void *obj) {
     return handle_replace_hooked(p, h, expect, kind, rights, obj, NULL, NULL);
 }
+#endif // KERNEL_TESTS
 
 int handle_replace_hooked(struct Proc *p, hidx_t h, const void *expect,
                           enum kobj_kind kind, rights_t rights, void *obj,
@@ -802,6 +813,7 @@ static bool handle_slot_may_alias(const struct Handle *s) {
     return true;
 }
 
+#ifdef KERNEL_TESTS
 // LINEAGE L-3c: copy `src`'s handle table into `dst`, PRESERVING slot indices.
 // The header carries the contract; this body is `handle_dup`'s capture-acquire-
 // install repeated per slot, with two differences that are the whole of it:
@@ -812,6 +824,7 @@ static bool handle_slot_may_alias(const struct Handle *s) {
 int handle_table_copy_into(struct Proc *dst, struct Proc *src) {
     return handle_table_copy_into_hooked(dst, src, NULL, NULL);
 }
+#endif // KERNEL_TESTS
 
 int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
                                   void (*under_src_lock)(void *arg), void *arg) {
@@ -981,10 +994,12 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
                              /*min_idx=*/0, /*cloexec=*/false, /*into=*/-1);
 }
 
+#ifdef KERNEL_TESTS
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) {
     return handle_dup_common(p, h, RIGHT_NONE, /*inherit_rights=*/true,
                              min_idx, cloexec, /*into=*/-1);
 }
+#endif // KERNEL_TESTS
 
 int handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec) {
     if (h < 0 || h >= PROC_HANDLE_MAX)
@@ -1211,5 +1226,7 @@ int handle_close_on_exec(struct Proc *p) {
     return closed;
 }
 
+#ifdef KERNEL_TESTS
 u64 handle_total_allocated(void) { return __atomic_load_n(&g_handle_allocated, __ATOMIC_RELAXED); }
 u64 handle_total_freed(void)     { return __atomic_load_n(&g_handle_freed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS

@@ -87,11 +87,13 @@ _Static_assert(sizeof(struct alt_instr) == 12, "alt_instr wire layout");
 extern const struct alt_instr _alt_instructions_start[];
 extern const struct alt_instr _alt_instructions_end[];
 
+#ifdef KERNEL_TESTS
 // Counters the pass records, for the unit test: g_alt_total = entries seen;
 // g_alt_applied = entries whose feature was present and were patched. On
 // LSE hardware (every entry is FEAT_LSE at W1.5) applied == total; on a
 // non-LSE core applied == 0.
 extern u32 g_alt_total;
 extern u32 g_alt_applied;
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_ARM64_ALTERNATIVES_H

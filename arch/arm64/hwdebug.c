@@ -13,6 +13,7 @@
 #include <thylacine/proc.h>     // 8a-2b: struct Proc + proc_debug_stop_deliver (bp-fire -> stop)
 #include <thylacine/thread.h>   // 8a-2b: current_thread() in the EC handler
 #include <thylacine/smp.h>      // 8a-2b: smp_cpu_idx_self() -- the per-CPU install key
+#include <thylacine/visibility.h>
 #include "../../mm/slub.h"      // 8a-2b: kfree (hwdebug_free)
 
 // DBGBCR<n>_EL1 for an enabled, EL0-only, full-instruction breakpoint:
@@ -89,6 +90,7 @@ static void hwdebug_set_mdscr(bool mde, bool ss) {
 // EL0), LSC (bits 4:3 -> 0b01 load / 0b10 store / 0b11 both), BAS (bits 12:5 ->
 // the watched bytes within the DBGWVR doubleword), HMC=0, SSC=0, MASK=0 (no
 // address masking -- a single doubleword). DBGWVR = va aligned down to 8.
+VISIBLE_IF_KERNEL_TESTS
 void hwdebug_wp_encode(u64 va, u32 len, u8 flags, u64 *vr_out, u64 *cr_out) {
     u32 nbytes = (len == 0u) ? 1u : (len > 8u ? 8u : len);
     u32 first  = (u32)(va & 7ull);

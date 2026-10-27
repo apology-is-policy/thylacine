@@ -54,9 +54,11 @@ u64 kobj_dma_total_created(void) {
     return __atomic_load_n(&g_dma_created, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 u64 kobj_dma_live_count(void) {
     return __atomic_load_n(&g_dma_live, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Init.
@@ -374,6 +376,8 @@ void kobj_dma_unref(struct KObj_DMA *k) {
     }
 }
 
+#ifdef KERNEL_TESTS
 void kobj_dma_destroy(struct KObj_DMA *k) {
     kobj_dma_unref(k);
 }
+#endif // KERNEL_TESTS

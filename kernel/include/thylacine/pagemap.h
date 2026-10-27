@@ -133,9 +133,11 @@ size_t pagemap_take_next(struct pagemap *pm, spin_lock_t *lock, size_t from,
                          size_t hi, struct AddrSpace *as, struct page **out_pg,
                          struct page **freed, u32 *nfreed);
 
+#ifdef KERNEL_TESTS
 // Diagnostics: node entries visited by pagemap_take_next since boot -- the
 // witness of the bound above (the vma_scan_steps shape).
 u64  pagemap_walk_steps(void);
+#endif // KERNEL_TESTS
 
 // Replace the page in slot `idx` iff it is still `expect` (the COW break's
 // commit). Occupancy is unchanged (one page for one page). Takes `lock`.

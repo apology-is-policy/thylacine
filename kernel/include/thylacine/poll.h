@@ -437,6 +437,7 @@ s64 sys_poll_sleep_for(s32 timeout_ms);
 // path executed.
 u64 poll_total_calls(void);
 
+#ifdef KERNEL_TESTS
 // Monotonic counter of poll calls that slept on tsleep. Distinguishes
 // the fast path (any fd ready at first scan) from the slow path.
 u64 poll_total_slept(void);
@@ -448,6 +449,7 @@ u64 poll_total_resleeps(void);
 // bounded by the retry timer instead.
 u64 poll_total_snap_failsafes(void);
 u64 poll_total_arm_retries(void);
+#endif // KERNEL_TESTS
 
 // Test hook: run the snapshot fail-safe after `bound_ns` instead of
 // POLL_SNAP_BOUND_NS, counted but NOT printed (a test that makes it fire must

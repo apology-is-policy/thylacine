@@ -17,6 +17,7 @@
 #include <thylacine/spinlock.h>      // R7 F128: irq_state_t + irqsave/restore
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/gic.h"
 #include "../arch/arm64/hwdebug.h"     // 8a-2: hwdebug_init_cpu (per-PE OS-Lock unlock)
@@ -106,7 +107,7 @@ void *smp_bootcpu_idle_stack_top(void) {
 // P2-Cdc: IPI_RESCHED receive counter per CPU. Incremented by the
 // IPI handler on every receive; tests read to verify cross-CPU
 // IPI delivery.
-volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
+VISIBLE_IF_KERNEL_TESTS volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
 
 unsigned smp_cpu_idx_self(void) {
     u64 mpidr;

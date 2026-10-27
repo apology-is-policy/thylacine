@@ -237,11 +237,13 @@ unsigned smp_cpu_idx_self(void);
 // #define IPI_HALT       2u    // SGI 2 — P2-Cd2+ shutdown
 // #define IPI_GENERIC    3u    // SGI 3 — generic callback delivery
 
+#ifdef KERNEL_TESTS
 // P2-Cdc: IPI_RESCHED hit count per CPU. Set by the IPI handler each
 // time a CPU receives an IPI_RESCHED. Tests use this to verify cross-
 // CPU IPI delivery (boot sends to secondary; secondary's slot
 // increments). Read by anyone; only the receiving CPU writes its slot.
 extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
+#endif // KERNEL_TESTS
 
 // P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
 // secondary AFTER sched_init + g_cpu_alive flag is set. Performs the

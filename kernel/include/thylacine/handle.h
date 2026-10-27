@@ -279,7 +279,9 @@ void   handle_install_reserved(struct Proc *p, hidx_t h, enum kobj_kind kind,
                                rights_t rights, void *obj, bool cloexec);
 int    handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec);
 void   handle_unreserve(struct Proc *p, hidx_t h);
+#ifdef KERNEL_TESTS
 bool   handle_is_reserved(struct Proc *p, hidx_t h);
+#endif // KERNEL_TESTS
 // Runs fn(arg) under the table lock unless `h` is a reservation, and says
 // whether it ran. A reservation cannot be taken while fn runs, so fn's answer
 // holds against every reserving call. Any lock fn takes must be a leaf
@@ -287,6 +289,7 @@ bool   handle_is_reserved(struct Proc *p, hidx_t h);
 bool   handle_locked_unless_reserved(struct Proc *p, hidx_t h,
                                      void (*fn)(void *), void *arg);
 
+#ifdef KERNEL_TESTS
 // Release a handle. Returns 0 on success, -1 if the slot is empty
 // (already-closed or never-allocated) or out-of-range. The slot is zeroed
 // under the table lock; the object's release (a Spoor's clunk, which may
@@ -294,6 +297,7 @@ bool   handle_locked_unless_reserved(struct Proc *p, hidx_t h,
 //
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
+#endif // KERNEL_TESTS
 
 // handle_close that also returns, in *close_rc, what the object's last close
 // reported: 0, or a Dev close hook's negative error (close(2)'s EIO).
@@ -307,6 +311,7 @@ int handle_close_report(struct Proc *p, hidx_t h, int *close_rc);
 // A guarded HandleClose(p, h): it adds no transition the spec lacks.
 int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj);
 
+#ifdef KERNEL_TESTS
 // Swap what a LIVE handle denotes, in place, keeping the same slot index, and
 // only while the slot still names `expect` -- an object the caller holds its
 // OWN reference on, so its address cannot be freed and handed to a newcomer.
@@ -350,6 +355,7 @@ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *
 // above applied by whoever called it.
 int handle_replace(struct Proc *p, hidx_t h, const void *expect,
                    enum kobj_kind kind, rights_t rights, void *obj);
+#endif // KERNEL_TESTS
 
 // The same swap with a hook run INSIDE its hold -- after the slot names `obj`,
 // before the lock drops, and only when the swap happened. For state beside the
@@ -408,6 +414,7 @@ void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp);
 // Maps to specs/handles.tla::HandleDup(p, h, new_rights).
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 
+#ifdef KERNEL_TESTS
 // LINEAGE L-3c: copy `src`'s handle table into `dst` -- the fd inheritance a
 // forked child gets and a spawned child does not. Called from rfork_internal
 // on the FORK shape only; `dst` must be a freshly-allocated, still-unpublished
@@ -444,6 +451,7 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 // the same size. Returns the number of slots copied (a diagnostic, and what
 // the regression tests assert on).
 int handle_table_copy_into(struct Proc *dst, struct Proc *src);
+#endif // KERNEL_TESTS
 
 // The same copy with a hook run INSIDE the source-lock hold -- after every
 // slot is copied, before either lock drops. For state that lives BESIDE the
@@ -457,6 +465,7 @@ int handle_table_copy_into(struct Proc *dst, struct Proc *src);
 int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
                                   void (*under_src_lock)(void *arg), void *arg);
 
+#ifdef KERNEL_TESTS
 // #151: dup with the parent's rights carried VERBATIM, installing at the lowest
 // free index >= min_idx, and with the new descriptor's close-on-exec flag set to
 // `cloexec`. This is POSIX dup / F_DUPFD / F_DUPFD_CLOEXEC; handle_dup above is
@@ -477,6 +486,7 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // slot, non-transferable kind, devsrv Spoor, table full) plus an out-of-range
 // min_idx.
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
+#endif // KERNEL_TESTS
 
 // #157: dup `old` onto the SPECIFIC index `new_h`, closing whatever was there.
 // This is POSIX dup2 / Linux dup3, and it is a genuinely new combination rather
@@ -555,6 +565,7 @@ int handle_get_status_flags(struct Proc *p, hidx_t h,
 // second reason.
 int handle_close_on_exec(struct Proc *p);
 
+#ifdef KERNEL_TESTS
 // Type classifiers. Map to specs/handles.tla's TxKObjs / HwKObjs /
 // SrvKObjs partitions. kobj_kind_is_transferable returns true for
 // Process / Thread / BURROW / Spoor; kobj_kind_is_hw for MMIO / IRQ /
@@ -575,6 +586,7 @@ u64 handle_table_installs(struct Proc *p);
 // Diagnostics — cumulative cache statistics.
 u64 handle_total_allocated(void);
 u64 handle_total_freed(void);
+#endif // KERNEL_TESTS
 
 // Infallible exec commit, before the image swap. Leaf latches only; descriptor
 // removal and wakes follow outside the process-table lock through

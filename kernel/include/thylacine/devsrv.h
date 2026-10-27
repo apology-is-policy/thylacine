@@ -339,10 +339,12 @@ extern struct Dev devsrv;
 // one registry ref, released on close/put (poll puts only after its sweep).
 // The registry is freed at the last srv_registry_unref.
 
+#ifdef KERNEL_TESTS
 // srv_registry_create — allocate a fresh registry (ref = 1; stamps each
 // entry's permanent magic + poll_list + reg back-pointer). Returns NULL on
 // OOM. The caller owns the initial reference.
 struct SrvRegistry *srv_registry_create(void);
+#endif // KERNEL_TESTS
 
 // srv_registry_ref / srv_registry_unref — refcount. The last unref drains
 // every pending connection (the srv_registry_reset teardown discipline)
@@ -372,10 +374,12 @@ struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg);
 // cores + srv_registry_reset. NULL before devsrv_init.
 struct SrvRegistry *srv_boot_registry(void);
 
+#ifdef KERNEL_TESTS
 // Cumulative registry lifecycle counters (tests verify drain-on-last-unref
 // without dereferencing a freed registry). (created - destroyed) == live.
 u64 srv_registry_total_created(void);
 u64 srv_registry_total_destroyed(void);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Service registry.
@@ -398,12 +402,14 @@ void srv_commit(struct SrvService *svc);
 // reserve phase returned in *prior_out). Takes the registry lock.
 void srv_abort(struct SrvService *svc, enum srv_state prior);
 
+#ifdef KERNEL_TESTS
 // srv_lookup_in — find a service by name in an explicit `reg` (the devsrv
 // open=connect / walk internal lookup). The in-kernel test harness uses it
 // against srv_boot_registry() now that the name-only SYS_POST_SERVICE /
 // SYS_SRV_CONNECT path is retired (stalk-3c). Takes the registry lock.
 struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
                                  const char *name, u8 name_len);
+#endif // KERNEL_TESTS
 
 // srv_proc_exit_notify — called from exits() for every exiting Proc. Any
 // LIVE service whose poster is `p` (matched by stripes) is TOMBSTONED:
@@ -412,9 +418,11 @@ struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
 // ServiceTombstone.
 void srv_proc_exit_notify(struct Proc *p);
 
+#ifdef KERNEL_TESTS
 // srv_registry_count — number of non-FREE registry entries. Tests +
 // diagnostics; takes the registry lock.
 int srv_registry_count(void);
+#endif // KERNEL_TESTS
 
 // devsrv_post_listener — the create=post path (stalk-3b, STALK-DESIGN.md §5.3
 // / D2). A SYS_WALK_CREATE against a /srv directory (a devsrv root Spoor) is a
@@ -457,6 +465,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // SrvConn, <thylacine/srvconn.h>). The kernel mints + owns all transport
 // (invariant C-23). CORVUS-DESIGN.md §6.2.
 
+#ifdef KERNEL_TESTS
 // devsrv_open_connect — the open=connect core (stalk-3b-β; STALK-DESIGN.md §5.2).
 // `c` is a /srv/<name> service-ref Spoor (devsrv_walk's product); mint a SrvConn
 // for `p`, enqueue it on the poster's accept backlog, and return the connection
@@ -465,7 +474,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // Returns NULL on bad-Spoor / no-LIVE-service / cap / OOM / handshake failure.
 //
 // The Dev.open vtable slot (devsrv_open) calls this with current_thread()->proc;
-// it is non-static so the test harness can drive it with an explicit Proc.
+// the tests drive it with an explicit Proc.
 struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
 
 // devsrv_srv_connect_authorized -- (U) the connect gate's DECISION, extracted
@@ -484,6 +493,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
 //   caps          the connector's live capability word.
 bool devsrv_srv_connect_authorized(bool byte_mode, bool cap_posted,
                                    bool self_post, caps_t caps);
+#endif // KERNEL_TESTS
 
 // devsrv_open_errno -- the cause a refused connect left on the service-ref
 // Spoor `c` (the devsrv twin of dev9p_open_errno; read through
@@ -515,9 +525,11 @@ struct Spoor *devsrv_make_conn_spoor(struct SrvConn *conn);
 // endpoint handle to its SrvConn through here.
 struct SrvConn *devsrv_conn_of(struct Spoor *c);
 
+#ifdef KERNEL_TESTS
 // srv_backlog_depth — current accept-backlog depth of `svc`. Tests +
 // diagnostics; takes the registry lock.
 int srv_backlog_depth(struct SrvService *svc);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // poll — readiness probe on a KObj_Srv handle (P5-poll-b).

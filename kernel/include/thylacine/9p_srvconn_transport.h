@@ -142,8 +142,10 @@ void p9_srvconn_transport_destroy(struct p9_srvconn_transport *st);
 // Adapter MUST outlive the transport that uses these ops.
 struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st);
 
+#ifdef KERNEL_TESTS
 // Query: is the adapter live (magic valid + inner SrvConn present)?
 bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st);
+#endif // KERNEL_TESTS
 
 // The SrvConn wrapped by a client's transport, or NULL when the client's
 // backend is not this adapter (loopback / spoor / mq clients carry no

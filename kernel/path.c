@@ -14,6 +14,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/syscall.h>    // SYS_OPEN_PATH_MAX
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <atomic_lse.h>           // t_atomic_fetch_{add,sub}_acqrel_int
 
 #include "../mm/slub.h"
@@ -43,6 +44,7 @@ struct Path *path_make_root(void) {
     return p;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 struct Path *path_parent(const struct Path *p) {
     if (!p) return NULL;
     // Paths always begin with '/', so there is at least the leading separator.
@@ -125,5 +127,7 @@ void path_unref(struct Path *p) {
     }
 }
 
+#ifdef KERNEL_TESTS
 u64 path_total_allocated(void) { return g_path_allocated; }
 u64 path_total_freed(void)     { return g_path_freed; }
+#endif // KERNEL_TESTS

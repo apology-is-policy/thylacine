@@ -37,6 +37,7 @@ extern const u32               halls_symtab_count;
 extern const struct halls_sym  halls_symtab[];
 extern const char              halls_symtab_names[];
 
+#ifdef KERNEL_TESTS
 // Pure lookup over an EXPLICIT table (unit-testable). `tab` MUST be sorted
 // ascending by `.off`, `count` entries; `names` is the NUL-separated blob;
 // `base` is the link VA the offsets are relative to. Returns the name of the
@@ -47,6 +48,7 @@ extern const char              halls_symtab_names[];
 const char *halls_symbolize_table(const struct halls_sym *tab, u32 count,
                                   const char *names, u64 base,
                                   u64 link_va, u64 *out_off);
+#endif // KERNEL_TESTS
 
 // Wrapper over the linked-in global table.
 const char *halls_symbolize(u64 link_va, u64 *out_off);

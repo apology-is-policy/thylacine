@@ -67,11 +67,13 @@ struct page *mag_alloc(unsigned order);
 // (caller should fall through to buddy_free).
 bool mag_free(struct page *p, unsigned order);
 
+#ifdef KERNEL_TESTS
 // Drain ALL per-CPU magazines back to the buddy, each set under its own
 // lock, so it is safe at any time: a peer allocating concurrently sees its
 // set before or after the drain, never during. Used by the in-kernel suite
 // for clean accounting; in production this is also useful for memory
 // pressure responses (Phase 2+).
 void magazines_drain_all(void);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_MM_MAGAZINES_H

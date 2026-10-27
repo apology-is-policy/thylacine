@@ -95,6 +95,7 @@ void sched_activate_addrspace(struct Thread *t);
 // wait yields. Returns the mask of CPUs interrupted. Thread context, IRQs on.
 struct AddrSpace;
 u64 sched_sync_space(const struct AddrSpace *as);
+#ifdef KERNEL_TESTS
 // The address space `cpu` last installed at a switch (NULL: a kernel thread,
 // or the CPU never switched). A snapshot, for tests and diagnostics.
 const struct AddrSpace *sched_cpu_space(unsigned cpu);
@@ -104,6 +105,7 @@ const struct AddrSpace *sched_cpu_space(unsigned cpu);
 // idle). NULL if sched_init has not yet been called for cpu_idx, or
 // cpu_idx is out of range.
 struct Thread *sched_idle_thread(unsigned cpu_idx);
+#endif // KERNEL_TESTS
 
 // SMP redesign (ARCH §8.4.2): the boot CPU's idle-loop entry. cpu0's idle
 // thread (thread_create_bootcpu_idle) runs this loop, dispatched by the
@@ -137,6 +139,7 @@ void sched_install_bootcpu_idle(struct Thread *t);
 // forever / `_torpor` asm loop with no C hook" special case is retired with the
 // `g_bootcpu_idle` off-tree state. See ARCH §8.4.5 + scheduler.tla `EnterWFI`.
 void sched_set_idle_in_wfi(bool in_wfi);
+#ifdef KERNEL_TESTS
 bool sched_idle_in_wfi(unsigned cpu_idx);
 
 // Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-1, #299). The earliest
@@ -147,6 +150,7 @@ bool sched_idle_in_wfi(unsigned cpu_idx);
 // min-scan under g_timerwait.lock (irqsave; a leaf acquisition). At TI-1 no
 // production path calls this -- it lands with its consumer at TI-2.
 u64 timerwait_earliest_deadline(void);
+#endif // KERNEL_TESTS
 
 // Tickless idle re-poll backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-4e, #299).
 // An idle CPU arms its one-shot to min(nearest deadline, now + this), so it
@@ -167,12 +171,14 @@ u64 timerwait_earliest_deadline(void);
 // the recorded path to reclaim 0.3% HVF idle without the dev-boot cost.
 #define TICKLESS_IDLE_BACKSTOP_NS  4000000ull
 
+#ifdef KERNEL_TESTS
 // Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2). Pure: the absolute
 // CNTVCT value an idle CPU arms its one-shot to, given the current counter, the
 // nearest pending deadline (0 = none), and the backstop delta in counter ticks.
 // min(deadline, now + backstop), or just the backstop when no deadline. Split
 // out so the arm-decision is unit-testable without the live timer/list.
 u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt);
+#endif // KERNEL_TESTS
 
 // Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2, #299). The shared idle
 // body for bootcpu_idle_main + per_cpu_main: under one IRQ-masked region, set
@@ -256,6 +262,7 @@ void ready_on(unsigned target_cpu, struct Thread *t);
 // the in-kernel test runner NORMAL) and idempotent (never touches IDLE idles).
 void sched_mark_interactive(struct Thread *t);
 
+#ifdef KERNEL_TESTS
 // HMP foundation (ARCH §8.4.3): the placement POLICY. Choose the CPU whose
 // run tree `t` should be enqueued on, given the CPU it last ran on / the
 // CPU waking it (prev_cpu). v1.0 homogeneous body returns prev_cpu (CPU-
@@ -265,6 +272,7 @@ void sched_mark_interactive(struct Thread *t);
 // flag + t->util/cpu_pinned); the core decision is the testable pure
 // function sched_place_by_capacity().
 unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu);
+#endif // KERNEL_TESTS
 
 // HMP foundation (ARCH §8.4.4): parse + normalize per-CPU capacity from the
 // DTB (capacity-dmips-mhz). Called ONCE on the boot CPU during late bring-up
@@ -280,6 +288,7 @@ u32  sched_cpu_capacity(unsigned cpu);
 // False on QEMU virt / RPi (uniform) — the placement policy is then inert.
 bool sched_topology_hetero(void);
 
+#ifdef KERNEL_TESTS
 // HMP foundation (ARCH §8.4.4) — the two PURE functions that hold the
 // load-bearing logic, factored out so a kernel unit test can drive them
 // deterministically against a SYNTHETIC asymmetric DTB (no real perf
@@ -313,6 +322,7 @@ bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle);
 // tree. Takes that CPU's lock for a consistent read. Used by the cross-CPU
 // ready_on enqueue test to prove placement landed on the intended CPU.
 bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
+#endif // KERNEL_TESTS
 
 // Test-support accessors (gated by KERNEL_TESTS, #61): both are exercised only
 // by the in-kernel suite, so they share the build-shape gate with their .c
@@ -347,8 +357,10 @@ void sched_report_el0_leak(void) __attribute__((noreturn));
 
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);
+#ifdef KERNEL_TESTS
 unsigned sched_runnable_count_band(unsigned band);
 void sched_dump_runnable(const char *tag);   // DEBUG (#857): all-CPU runnable set + RX-IRQ counters
+#endif // KERNEL_TESTS
 
 // TI-4d work-conservation telemetry. A core that parks in WFI while a runqueue
 // holds queued-but-not-running work is the classic "wasted core" -- the

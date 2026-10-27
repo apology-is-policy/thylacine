@@ -31,6 +31,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vivarium.h>     // V-6b: the Linux signal disposition decode
 
 #include "../arch/arm64/timer.h"
@@ -170,6 +171,7 @@ static int notes_name_to_bit(const char *name) {
 }
 
 // #15: the note's default action. Contract in <thylacine/notes.h>.
+VISIBLE_IF_KERNEL_TESTS
 enum note_default notes_default_action(const char *name) {
     if (!name) return NOTE_DFL_TERMINATE;
     for (u32 i = 0; i < NOTE_NUM_KNOWN; i++) {
@@ -789,6 +791,7 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
 // F5/F6 audit close: re-enqueue at head. Caller MUST hold q->lock.
 // Cannot fail at v1.0 since the caller just popped (so there is a free
 // slot). Pre-decrement head with wrap; the new entry is the next dequeue.
+VISIBLE_IF_KERNEL_TESTS
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n) {
     if (!q || !n) return -1;
     if (q->count >= NOTE_QUEUE_DEPTH) {
@@ -925,6 +928,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
     if (!p || !p->notes || !out) return 0;
     struct NoteQueue *q = p->notes;
@@ -1125,19 +1129,20 @@ static const char *notes_terminate_pending_name_locked(struct Proc *p,
     return NULL;
 }
 
+#ifdef KERNEL_TESTS
 // LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate this
 // Proc at the EL0-return tail? True iff (a) no async handler is registered (a
 // handler catches interrupt via the async-delivery path), (b) the Proc is not
 // self-managing (has not opened its notes fd -- a self-managing Proc consumes
 // its own notes via devnotes_read), and (c) a deliverable interrupt (queued
 // AND unmasked for `t`) is present. Pure decision; no side effects. The
-// dispatcher calls this under q->lock and, on true, drops the lock + calls
-// exits(NOTE_NAME_INTERRUPT). Non-static + header-declared so the unit test
-// exercises the full decision without driving the noreturn exits(). Caller
-// MUST hold p->notes->lock.
+// dispatcher asks notes_terminate_note_name_locked (below), which this wraps;
+// the tests ask here, without driving the noreturn exits(). Caller MUST hold
+// p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
     return notes_terminate_note_name_locked(p, t) != NULL;
 }
+#endif // KERNEL_TESTS
 
 // PTY-1b: the name-returning generalization (interrupt + tty:quit +
 // tty:hup). Same gates as the historical interrupt-only decision: a
@@ -1147,6 +1152,7 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
 // passes the returned canonical name to exits() so the exit_msg reports
 // WHICH signal terminated the Proc. The per-note disposition (a phenotype
 // sigtab handler or SIG_IGN for THAT name) is applied inside the scan.
+VISIBLE_IF_KERNEL_TESTS
 const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
     if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return NULL;
@@ -1188,6 +1194,7 @@ static int notes_stop_pending_idx_locked(struct Proc *p, struct Thread *t) {
     return -1;
 }
 
+#ifdef KERNEL_TESTS
 static const char *notes_stop_pending_name_locked(struct Proc *p,
                                                   struct Thread *t) {
     int idx = notes_stop_pending_idx_locked(p, t);
@@ -1210,14 +1217,14 @@ static const char *notes_stop_pending_name_locked(struct Proc *p,
 // locked: a phenotyped Proc keeps its disposition in the sigtab. It is
 // applied per note INSIDE the scan (see notes_stop_pending_idx_locked).
 //
-// Non-static + header-declared for the same reason as the terminate twin --
-// the dispatcher takes no Thread argument (it reads current_thread()), so a
-// unit test can only drive this decision directly.
+// The tests drive this decision directly, as they do the terminate twin: the
+// dispatcher takes no Thread argument (it reads current_thread()).
 const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
     if (proc_is_self_managing_notes(p)) return NULL;
     return notes_stop_pending_name_locked(p, t);
 }
+#endif // KERNEL_TESTS
 
 // The dispatcher's stop consumer: decide and consume in ONE call, sharing the
 // peek's index scan so the note that decides the stop is the note that goes.
@@ -1225,7 +1232,7 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
 // The general notes_dequeue_locked is deliberately NOT used here: it is
 // class-blind, so it pops the queue head whenever the head is not the note the
 // stop decision was about. See notes_stop_pending_idx_locked's comment for
-// what that cost. Non-static so a unit test can put a second note in the ring
+// what that cost. Visible to the tests, so one can put a second note in the ring
 // and prove the right one goes -- the defect is invisible on a one-note queue,
 // which is every queue any prior test built.
 //
@@ -1234,6 +1241,7 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
 // answering identically or the tests that drive it would be verifying a
 // disposition production does not apply. Side-by-side is what makes that
 // diffable by eye.
+VISIBLE_IF_KERNEL_TESTS
 int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
                               struct Note *out) {
     if (!p || !p->notes || !out) return 0;
@@ -1457,6 +1465,7 @@ void notes_fault_dying_latch(struct Thread *t) {
 // pending by construction: a caught bit is armed ONLY for a caught note, which
 // the terminate arm refuses -- so no note ever sets both a terminate latch and
 // a caught bit, and death (checked FIRST at every sleep site) always wins.
+VISIBLE_IF_KERNEL_TESTS
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
     if (t->exit_close_active || t->kthread_join_active) return false;
@@ -1488,6 +1497,7 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool thread_caught_note_claim(struct Thread *t) {
     if (!thread_caught_note_deliverable(t)) return false;
     struct Proc *p = t->proc;
