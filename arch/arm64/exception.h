@@ -98,6 +98,11 @@ void exception_irq_curr_el(struct exception_context *ctx);
 // cannot accumulate a false park.
 void exception_sync_depth_reset_this_cpu(void);
 
+// vectors.S: the vector table VBAR_EL1 points at, and the terminal park every
+// unrecoverable path ends in.
+extern char _exception_vectors[];
+void _torpor(void) __attribute__((noreturn));
+
 #endif // __ASSEMBLER__
 
 #endif // THYLACINE_ARCH_ARM64_EXCEPTION_H

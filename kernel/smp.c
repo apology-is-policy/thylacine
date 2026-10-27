@@ -24,13 +24,9 @@
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/psci.h"
 #include "../arch/arm64/timer.h"
+#include "../arch/arm64/exception.h"   // _exception_vectors
+#include "../arch/arm64/sections.h"    // _kernel_start: secondary_entry's PA
 #include "../arch/arm64/uart.h"
-
-// Linker-defined kernel image bounds — used to compute secondary_entry's PA.
-extern char _kernel_start[];
-
-// Asm trampoline label (defined in arch/arm64/start.S).
-extern void secondary_entry(void);
 
 // Per-CPU online flag. Set by secondary_entry's trampoline (asm strb)
 // before pac_apply / mmu_program / branch-to-high-VA. Earliest signal
@@ -441,8 +437,6 @@ unsigned smp_cpu_online_count(void) {
 // default), nothing wakes the CPU — at P2-Cd when GIC SGIs land, the
 // boot CPU can send IPI_RESCHED to wake a secondary into useful work.
 // ---------------------------------------------------------------------------
-
-extern char _exception_vectors[];
 
 __attribute__((noreturn))
 void per_cpu_main(int cpu_idx) {

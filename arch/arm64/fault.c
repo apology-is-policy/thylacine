@@ -15,6 +15,7 @@
 
 #include "kaslr.h"
 #include "mmu.h"
+#include "sections.h"
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev (spoor->dev->read) for the FILE fault arm
 #include <thylacine/dma_handle.h>    // WEAVE-SKEIN: kobj_dma_pa_at for the DMA fault arm
@@ -36,12 +37,6 @@
 #ifdef KERNEL_TESTS
 void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
 #endif
-
-// Linker symbols — boot stack guard region + kernel image bounds.
-extern char _boot_stack_guard[];
-extern char _boot_stack_bottom[];
-extern char _kernel_start[];
-extern char _kernel_end[];
 
 // #806: per-CPU re-entrancy guard for the kernel-fault dispatch. A fault
 // taken WHILE handling a kernel fault (classically a wild current_thread()

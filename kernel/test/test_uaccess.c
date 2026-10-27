@@ -28,24 +28,6 @@ void test_uaccess_copy_out_unmapped_faults_all_arms(void);
 void test_uaccess_copy_in_unmapped_faults_all_arms(void);
 void test_uaccess_copy_fixup_entries_present(void);
 
-// Each fixup table entry — must mirror arch/arm64/uaccess.c's
-// struct layout. PC-relative s32 offsets; absolute PC is recovered
-// by adding the offset to the address of the field itself.
-struct uaccess_fixup_entry {
-    s32 op_rel;
-    s32 fixup_rel;
-};
-
-// Linker bounds of .uaccess_fixup region (kernel.ld emits these).
-extern const struct uaccess_fixup_entry _uaccess_fixup_start[];
-extern const struct uaccess_fixup_entry _uaccess_fixup_end[];
-
-// uaccess.S exports these labels for the test only — they're the
-// faulting-load and fault-recovery points of uaccess_load_u8. Used to
-// cross-check uaccess_fixup_lookup against the actual primitive.
-extern char uaccess_load_u8_op[];
-extern char uaccess_load_u8_fault[];
-
 void test_uaccess_fixup_table_well_formed(void) {
     // start < end (table is non-empty).
     TEST_ASSERT(_uaccess_fixup_start < _uaccess_fixup_end,
@@ -138,15 +120,6 @@ void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void) {
 // mirrors for copy_in), proving each fixup entry resolves. The positive
 // path + mid-copy semantics are exercised in-guest by joey's boot-fatal
 // bulk-I/O probe (every EL0 read/write above SYS_RW_STACK rides them).
-
-extern char uaccess_copy_out_op_head[];
-extern char uaccess_copy_out_op_body[];
-extern char uaccess_copy_out_op_tail[];
-extern char uaccess_copy_out_fault[];
-extern char uaccess_copy_in_op_head[];
-extern char uaccess_copy_in_op_body[];
-extern char uaccess_copy_in_op_tail[];
-extern char uaccess_copy_in_fault[];
 
 void test_uaccess_copy_out_unmapped_faults_all_arms(void) {
     static const u8 src[64] = { 1, 2, 3 };

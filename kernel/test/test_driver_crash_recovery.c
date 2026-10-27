@@ -81,14 +81,14 @@ void test_driver_crash_recovery(void);
 #define VIRTIO_BLK_PROBE_BLOB_MAX 32768
 static _Alignas(16) u8 g_blk_probe_blob[VIRTIO_BLK_PROBE_BLOB_MAX];
 
-struct exec_args {
+struct crash_exec_args {
     const void *blob;
     size_t      size;
 };
 
 __attribute__((noreturn))
 static void blk_probe_thunk(void *arg) {
-    struct exec_args *ea = (struct exec_args *)arg;
+    struct crash_exec_args *ea = (struct crash_exec_args *)arg;
     struct Thread *t = current_thread();
     if (!t) extinction("blk_probe_thunk: no current_thread");
     struct Proc *p = t->proc;
@@ -112,7 +112,7 @@ static void blk_probe_thunk(void *arg) {
 
 // Spawn one virtio-blk-probe child + wait for it to terminate. Returns
 // child's exit status (or -1 if reap mismatched).
-static int spawn_blk_probe_and_reap(struct exec_args *args, const char *label) {
+static int spawn_blk_probe_and_reap(struct crash_exec_args *args, const char *label) {
     uart_puts("    crash-recovery: spawning ");
     uart_puts(label);
     uart_puts(" child\n");
@@ -186,7 +186,7 @@ void test_driver_crash_recovery(void) {
     TEST_ASSERT(!kobj_irq_intid_claimed(blk_intid),
                 "virtio-blk INTID already claimed before first spawn");
 
-    struct exec_args args = {
+    struct crash_exec_args args = {
         .blob = g_blk_probe_blob, .size = size
     };
 

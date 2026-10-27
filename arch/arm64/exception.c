@@ -35,9 +35,6 @@
 #include <thylacine/thread.h>         // R12-uaccess: current_thread()
 #include <thylacine/types.h>
 
-// Vector table from vectors.S.
-extern char _exception_vectors[];
-
 // ---------------------------------------------------------------------------
 // Sanity-check the exception_context layout. vectors.S writes by
 // fixed byte offsets; if the struct ever drifts these asserts fail
@@ -166,8 +163,6 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 // lock-free-or-bounded and never park, per HX-I.
 #define EL1_SYNC_DEPTH_MAX 3u
 static volatile u8 g_el1_sync_depth[DTB_MAX_CPUS];
-
-extern void _torpor(void) __attribute__((noreturn));
 
 void exception_sync_depth_reset_this_cpu(void) {
     unsigned cpu = smp_cpu_idx_self();

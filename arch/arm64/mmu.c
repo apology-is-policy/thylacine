@@ -47,6 +47,7 @@
 #include "kaslr.h"
 #include "asid.h"             // asid_hw_bits (TCR_EL1.AS sizing, RW-1 B-F1)
 #include "hwfeat.h"           // hw_icache_aliasing (arch_icache_sync_range)
+#include "sections.h"         // kernel.ld: the image, section and boot-stack bounds
 
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
@@ -54,30 +55,6 @@
 #include <thylacine/smp.h>          // g_secondary_boot_stacks (P5-secondary-stack-guard)
 #include <thylacine/spinlock.h>     // spin_lock_irqsave(NULL): bare IRQ mask (#806 BBM window)
 #include <thylacine/types.h>
-
-// ---------------------------------------------------------------------------
-// Linker-provided symbols (kernel.ld).
-// ---------------------------------------------------------------------------
-
-extern char _kernel_start[];
-extern char _kernel_end[];
-extern char _bss_start[];
-
-// We don't have explicit per-section start/end symbols for .text /
-// .rodata / .data yet, but we can compute the boundaries based on the
-// kernel.ld layout: each section is page-aligned, and they appear in
-// order .text, .rodata, .data, .bss. We refine kernel.ld below to expose
-// these symbols once mmu.c needs them.
-extern char _text_end[];      // end of .text (== start of .rodata)
-extern char _rodata_end[];    // end of .rodata (== start of .data)
-extern char _data_end[];      // end of .data (== start of .bss)
-// _bss_start, _bss_end are already exported by kernel.ld.
-
-// Boot-stack guard page. Kernel.ld places this 4 KiB slot immediately
-// below the boot stack. mmu.c zeroes its L3 PTE in build_page_tables()
-// so a stack overflow faults synchronously rather than silently
-// corrupting prior BSS.
-extern char _boot_stack_guard[];
 
 // ---------------------------------------------------------------------------
 // Page table memory.

@@ -279,4 +279,8 @@ void smp_resched_others(void);
 // "periodic preemption timer is the floor" true on secondaries.
 void smp_enable_secondary_preemption(void);
 
+// start.S: the secondary CPUs' entry trampoline, the address PSCI CPU_ON is
+// given (a PA, so smp.c computes it against _kernel_start).
+void secondary_entry(void);
+
 #endif // THYLACINE_SMP_H

@@ -28,6 +28,7 @@
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>   // ARCH 8.12: TEST_SYSCALL_DISPATCH's mask-only bracket
 #include "test_registry.h"         // every registered test, declared once
+#include "../../arch/arm64/timer.h" // timer_now_ns, for TEST_YIELD_UNTIL
 
 struct test_case {
     const char *name;       // human-readable identifier
@@ -249,8 +250,7 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
 // is silently racy again with no signal that the guard never guarded.
 //
 // `sched()` is declared by the includer (every user already calls it directly);
-// timer_now_ns is forward-declared here to keep an arch header out of test.h.
-u64 timer_now_ns(void);
+// timer_now_ns comes from arch/arm64/timer.h, included above.
 
 #define TEST_YIELD_BUDGET_NS (2ull * 1000ull * 1000ull * 1000ull)
 

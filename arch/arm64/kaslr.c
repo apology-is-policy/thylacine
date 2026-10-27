@@ -20,17 +20,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/types.h>
 
-// From arch/arm64/start.S — DTB physical address (saved before MMU on).
-extern volatile u64 _saved_dtb_ptr;
-
-// From arch/arm64/kernel.ld — bounds of .rela.dyn.
-extern char _rela_start[];
-extern char _rela_end[];
-
-// PC-relative anchor used to compute the kernel's load PA at runtime
-// (PIC mode: adrp+add of any kernel symbol gives the runtime PA when
-// running with MMU off and PC = load PA).
-extern char _kernel_start[];
+#include "sections.h"
 
 // ---------------------------------------------------------------------------
 // State surfaced to boot_main() for the banner.
@@ -214,7 +204,6 @@ u64 kaslr_init(void) {
     // expression resolves to the high VA — phys_init reads these
     // cached values instead.
     g_kernel_pa_start = (u64)(uintptr_t)_kernel_start;
-    extern char _kernel_end[];
     g_kernel_pa_end   = (u64)(uintptr_t)_kernel_end;
 
     // Initialize the DTB parser if the boot stub didn't already.

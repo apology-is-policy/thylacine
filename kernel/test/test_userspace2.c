@@ -137,7 +137,6 @@ static void exec_thunk(void *arg) {
     uart_puts("\n");
 
     // Read L0[0] via the direct map (pgtable_root PA → KVA).
-    extern void *pa_to_kva(u64);
     u64 *l0 = (u64 *)pa_to_kva(p->as->pgtable_root);
     uart_puts("    [iteration ");
     uart_putdec((u64)ea->iteration);

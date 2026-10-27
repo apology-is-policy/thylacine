@@ -66,32 +66,8 @@
 #include <thylacine/virtio_pci.h>
 
 #include "../arch/arm64/psci.h"
+#include "../arch/arm64/sections.h"
 #include <thylacine/fault_test.h>
-
-// From arch/arm64/start.S — DTB physical address handed to us by the
-// bootloader (in x0 per the Linux ARM64 boot protocol). Populated
-// before boot_main() is called.
-extern volatile u64 _saved_dtb_ptr;
-
-// From arch/arm64/start.S — 1 if the kernel was entered at EL2 and
-// dropped to EL1 by _real_start, 0 if entered at EL1 directly. Used
-// for the el-entry banner diagnostic; surfaces a Pi 5 (or other
-// EL2-entry firmware) condition that QEMU virt never exhibits.
-extern volatile u64 _entered_at_el2;
-
-// From arch/arm64/start.S — CNTPCT_EL0 captured at the very start of
-// _real_start. Used to compute the boot-time banner (P1-I).
-extern volatile u64 _boot_start_cntpct;
-
-// From arch/arm64/kernel.ld.
-extern char _kernel_start[];
-extern char _kernel_end[];
-
-// From arch/arm64/kernel.ld — the boot CPU's static 16 KiB stack. The
-// kthread (TID 0, kstack_base==NULL) runs the entire in-kernel test suite
-// on this stack, including the deep proc.rfork_stress_1000 chain.
-extern char _boot_stack_bottom[];
-extern char _boot_stack_top[];
 
 // #806 boot-stack high-water probe. Paint the unused boot stack at boot_main
 // entry, scan the deepest sentinel-overwrite after the suite -> measure the
@@ -1008,6 +984,5 @@ void boot_main(void) {
     // the banner already printed via SYS_BOOT_COMPLETE if joey got that far).
     // boot_main() must not return; start.S falls through to _torpor, but be
     // explicit.
-    extern void _torpor(void) __attribute__((noreturn));
     _torpor();
 }

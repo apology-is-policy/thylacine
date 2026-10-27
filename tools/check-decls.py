@@ -12,7 +12,9 @@ declarations"). This parses every kernel TU with the build's own flags (clang
       anywhere in the kernel;
   (b) a .c file declaring a non-static function or object that the same
       translation unit does not define, at file or block scope -- such a name
-      belongs in a header.
+      belongs in a header;
+  (c) a struct or union tag defined at file scope in more than one file -- two
+      layouts kept equal by hand, which nothing compares.
 
 Types are compared after typedefs are expanded, `_Bool` is read as `bool`, and
 array bounds are dropped (an `extern T a[]` declares the same object as its
@@ -35,6 +37,7 @@ import sys
 import tempfile
 
 TOP_DECL = re.compile(r"^[|`]-(FunctionDecl|VarDecl) 0x[0-9a-f]+ (.*)$")
+TOP_RECORD = re.compile(r"^[|`]-RecordDecl 0x[0-9a-f]+ .*? (struct|union) ([A-Za-z_][A-Za-z_0-9]*) definition$")
 NESTED_DECL = re.compile(r"^[| ]+[|`]-(FunctionDecl|VarDecl) 0x[0-9a-f]+ (.*)$")
 CHILD_BODY = re.compile(r"^[| ] [|`]-CompoundStmt ")
 QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
@@ -65,7 +68,7 @@ def decls_of(tu, cmd):
                        capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
         raise RuntimeError(f"{tu}: clang failed:\n{r.stderr[-2000:]}")
-    typedefs, found, defined, local = {}, [], set(), set()
+    typedefs, found, defined, local, tags = {}, [], set(), set(), set()
     main, cur, pending = os.path.realpath(tu), None, None
     for line in r.stdout.split("\n"):
         if pending and not TOP_DECL.match(line) and CHILD_BODY.match(line):
@@ -77,6 +80,9 @@ def decls_of(tu, cmd):
         if m and m.group(1) not in ("bool",):
             typedefs.setdefault(m.group(1), m.group(2))
             continue
+        m = TOP_RECORD.match(line)
+        if m and cur:
+            tags.add((m.group(1) + " " + m.group(2), os.path.realpath(cur) if cur.startswith("/") else cur))
         m = TOP_DECL.match(line)
         if not m:
             if line.startswith(("|-", "`-")):
@@ -108,19 +114,22 @@ def decls_of(tu, cmd):
         # inside a macro's header (`bool` is stdbool.h's), the name cannot.
         if cur and os.path.realpath(cur) == main:
             local.add(name)
-    return [(n, canonical(t, typedefs), t) for n, t in found], local - defined
+    return [(n, canonical(t, typedefs), t) for n, t in found], local - defined, tags
 
 
 def check(tus, cmd, jobs):
     seen = collections.defaultdict(lambda: collections.defaultdict(list))
-    foreign = {}
+    foreign, tag_files = {}, collections.defaultdict(set)
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        for tu, (decls, undefined) in zip(tus, ex.map(lambda t: decls_of(t, cmd), tus)):
+        for tu, (decls, undefined, tags) in zip(tus, ex.map(lambda t: decls_of(t, cmd), tus)):
             for name, canon, spelled in decls:
                 seen[name][canon].append((tu, spelled))
             if undefined:
                 foreign[tu] = sorted(undefined)
-    return {n: v for n, v in seen.items() if len(v) > 1}, foreign, len(seen)
+            for tag, f in tags:
+                tag_files[tag].add(f)
+    dup_tags = {tag: sorted(fs) for tag, fs in tag_files.items() if len(fs) > 1}
+    return {n: v for n, v in seen.items() if len(v) > 1}, foreign, len(seen), dup_tags
 
 
 def build_inputs(build_dir):
@@ -159,7 +168,10 @@ def short(path):
     return "kernel/" + path.split("/kernel/", 1)[1] if "/kernel/" in path else path
 
 
-def report(conflicts, foreign):
+def report(conflicts, foreign, dup_tags):
+    for tag in sorted(dup_tags):
+        print(f"check-decls: {tag} is defined in {len(dup_tags[tag])} files: "
+              f"{', '.join(short(f) for f in dup_tags[tag])}")
     for tu in sorted(foreign):
         names = foreign[tu]
         print(f"check-decls: {short(tu)} declares {len(names)} name(s) it does not define: "
@@ -175,7 +187,7 @@ def self_test():
     """The detector must go red on a seeded mismatch and stay green on its absence."""
     # (a.c, b.c, names rule (a) must report, names rule (b) must report in b.c).
     # Every case has a header h.h that both files may include.
-    hdr = "long hf(int x);\nextern int hv;\n"
+    hdr = "long hf(int x);\nextern int hv;\nstruct T { int t; };\n"
     cases = {
         "mismatch": ("long f(int x) { return x; }\n", "extern long f(unsigned x);\nlong g(void) { return f(1); }\n", {"f"}, {"f"}),
         "local-extern": ("long f(int x) { return x; }\n", "extern long f(int x);\nlong g(void) { return f(1); }\n", set(), {"f"}),
@@ -195,6 +207,12 @@ def self_test():
                            "long g(void) { extern long f(long x); return f(1); }\n", {"f"}, {"f"}),
         "block-object": ("int v;\n", "int g(void) { extern int v; return v; }\n", set(), {"v"}),
         "block-locals": ("int k;\n", "int g(void) { static int s; int a = 0; return s + a; }\n", set(), set()),
+        "struct-twice": ("struct S { int x; };\nint f(struct S *s) { return s->x; }\n",
+                         "struct S { int x; long y; };\nlong g(struct S *s) { return s->y; }\n", set(), set(), {"struct S"}),
+        "struct-header": ('#include "h.h"\nint f(struct T *p) { return p->t; }\n',
+                          '#include "h.h"\nint g(struct T *p) { return p->t; }\n', set(), set(), set()),
+        "struct-local": ("int f(void) { struct L { int a; } l = { 1 }; return l.a; }\n",
+                         "int g(void) { struct L { long b; } l = { 2 }; return (int)l.b; }\n", set(), set(), set()),
         "builtin": ("long f(int x) { return x; }\n",
                     "long g(long *p) { return __atomic_fetch_add(p, 1, __ATOMIC_RELAXED) + __builtin_ctzll(8); }\n",
                     set(), set()),
@@ -205,16 +223,18 @@ def self_test():
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         open(os.path.join(tmp, "h.h"), "w").write(hdr)
-        for case, (a, b, want_a, want_b) in cases.items():
+        for case, (a, b, want_a, want_b, *want_c) in cases.items():
             pa, pb = os.path.join(tmp, f"{case}_a.c"), os.path.join(tmp, f"{case}_b.c")
             open(pa, "w").write(a)
             open(pb, "w").write(b)
-            got, foreign, _ = check([pa, pb], [clang, "-std=c99", "-I" + tmp], 2)
+            got, foreign, _, tags = check([pa, pb], [clang, "-std=c99", "-I" + tmp], 2)
             got_b = set(foreign.get(pb, []))
-            ok = set(got) == want_a and got_b == want_b and pa not in foreign
+            ok = set(got) == want_a and got_b == want_b and pa not in foreign and \
+                set(tags) == (want_c[0] if want_c else set())
             bad += not ok
             print(f"check-decls self-test {case}: {'ok' if ok else 'WRONG'} "
-                  f"(a: {sorted(got) or 'nothing'}; b: {sorted(got_b) or 'nothing'}; a.c: {foreign.get(pa) or 'nothing'})")
+                  f"(a: {sorted(got) or 'nothing'}; b: {sorted(got_b) or 'nothing'}; a.c: {foreign.get(pa) or 'nothing'}; "
+                  f"c: {sorted(tags) or 'nothing'})")
     return bad
 
 
@@ -227,15 +247,15 @@ def main():
     if a.self_test:
         sys.exit(1 if self_test() else 0)
     srcs, cmd = build_inputs(a.build_dir)
-    conflicts, foreign, names = check(srcs, cmd, a.jobs)
-    if conflicts or foreign:
-        report(conflicts, foreign)
+    conflicts, foreign, names, dup_tags = check(srcs, cmd, a.jobs)
+    if conflicts or foreign or dup_tags:
+        report(conflicts, foreign, dup_tags)
         print(f"check-decls: FAIL -- {len(conflicts)} of {names} names declared with more than one type; "
               f"{len(foreign)} .c file(s) declare {sum(len(v) for v in foreign.values())} name(s) they do not define; "
-              f"{len(srcs)} TUs")
+              f"{len(dup_tags)} struct/union tag(s) defined in more than one file; {len(srcs)} TUs")
         sys.exit(1)
     print(f"check-decls: ok -- {names} non-static names, one type each, every one declared where it is "
-          f"defined or in a header, across {len(srcs)} TUs")
+          f"defined or in a header; every struct/union tag defined once; {len(srcs)} TUs")
 
 
 if __name__ == "__main__":

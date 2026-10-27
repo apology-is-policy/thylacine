@@ -15,9 +15,8 @@
 
 #include "../arch/arm64/halls.h"
 #include "../arch/arm64/timer.h"
+#include "../arch/arm64/exception.h"   // _torpor
 #include "../arch/arm64/uart.h"
-
-extern void _torpor(void) __attribute__((noreturn));
 
 // #214: extinction re-entrancy guard. If the dump path itself faults
 // (halls_dump dereferencing state the crash already destroyed), the fault

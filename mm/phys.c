@@ -19,14 +19,13 @@
 
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/mmu.h"          // mmu_pagemap_directmap (#808)
+#include "../arch/arm64/sections.h"     // _saved_dtb_ptr
 #include "../arch/arm64/uart.h"
 
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/types.h>
-
-extern volatile u64 _saved_dtb_ptr;
 
 // Snapshot of the layout for diagnostic queries (banner).
 static u64 g_total_pages;
