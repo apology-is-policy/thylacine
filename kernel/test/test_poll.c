@@ -2349,3 +2349,27 @@ void test_poll_reap_cancels_the_walks_owed_to_a_proc(void) {
     TEST_EXPECT_EQ(g_tpo_child_ran, 1u, "the child chained its records");
     TEST_ASSERT(g_tpo_stray.head == NULL, "the reap took both off their chain");
 }
+
+// The console episode's wake (P-d): its four list walks are owed when the
+// transition runs under the table lock, as every production transition does.
+void test_poll_cons_episode_walks_owed_under_the_table_lock(void);
+void test_poll_cons_episode_walks_owed_under_the_table_lock(void) {
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(cons_test_episode_waiters(), &pw);
+
+    irq_state_t s = proc_table_lock_acquire();
+    cons_test_episode_wake_all();
+    u32 owed = 0;
+    for (struct poll_owed *o = current_thread()->table_owed.head; o; o = o->next) owed++;
+    bool early = pw.ready;
+    proc_table_lock_release(s);
+
+    TEST_EXPECT_EQ(owed, 4u, "a transition under the table lock owes all four console walks");
+    TEST_ASSERT(!early, "and walks none of them under it");
+    TEST_ASSERT(pw.ready, "the release walked them");
+    TEST_ASSERT(current_thread()->table_owed.head == NULL, "nothing is owed after");
+    poll_waiter_list_unregister(&pw);
+}

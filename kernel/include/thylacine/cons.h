@@ -540,6 +540,10 @@ void cons_test_service_deferred(void);
 // walk). Direct-drive via cons_test_service_deferred bypasses the cond and is
 // never blocked by the hold. Production never sets it.
 void cons_test_mgr_hold(bool on);
+// The episode transitions' wake (cons_episode_wake_all), and the first list it
+// walks: the walks it owes under g_proc_table_lock, observable.
+void cons_test_episode_wake_all(void);
+struct poll_waiter_list *cons_test_episode_waiters(void);
 
 // Force the single-reader busy flag (to exercise the devcons_read busy-guard
 // without a second live reader thread).

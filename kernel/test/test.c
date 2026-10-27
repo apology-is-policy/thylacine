@@ -2279,6 +2279,7 @@ void test_poll_owed_records_chain_once_and_cancel(void);
 void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void);
 void test_poll_notes_post_under_the_table_lock_owes_its_walk(void);
 void test_poll_reap_cancels_the_walks_owed_to_a_proc(void);
+void test_poll_cons_episode_walks_owed_under_the_table_lock(void);
 void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -4785,6 +4786,7 @@ struct test_case g_tests[] = {
     { "poll.owed_walk_owes_only_hooks_behind_the_bookmark", test_poll_owed_walk_owes_only_hooks_behind_the_bookmark, false, NULL },
     { "poll.notes_post_under_the_table_lock_owes_its_walk", test_poll_notes_post_under_the_table_lock_owes_its_walk, false, NULL },
     { "poll.reap_cancels_the_walks_owed_to_a_proc", test_poll_reap_cancels_the_walks_owed_to_a_proc, false, NULL },
+    { "poll.cons_episode_walks_owed_under_the_table_lock", test_poll_cons_episode_walks_owed_under_the_table_lock, false, NULL },
     { "poll.sleep_for_waits",                   test_poll_sleep_for_waits,                   false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },

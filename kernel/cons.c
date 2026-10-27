@@ -249,6 +249,14 @@ struct cons_input {
     struct poll_waiter_list episode_waiters;
     struct poll_waiter_list reader_waiters;
     struct poll_waiter_list episode_poll_list;
+
+    // The walks of the four lists an episode transition owes when it runs
+    // under g_proc_table_lock (cons_episode_wake_all; specs/poll_owed.tla).
+    // The structure is immortal, so nothing ever cancels them.
+    struct poll_owed        poll_list_owed;
+    struct poll_owed        episode_waiters_owed;
+    struct poll_owed        reader_waiters_owed;
+    struct poll_owed        episode_poll_owed;
 };
 
 static struct cons_input g_cons = {
@@ -258,6 +266,10 @@ static struct cons_input g_cons = {
     .episode_waiters   = POLL_WAITER_LIST_INIT,
     .reader_waiters    = POLL_WAITER_LIST_INIT,
     .episode_poll_list = POLL_WAITER_LIST_INIT,
+    .poll_list_owed       = { .list = &g_cons.poll_list },
+    .episode_waiters_owed = { .list = &g_cons.episode_waiters },
+    .reader_waiters_owed  = { .list = &g_cons.reader_waiters },
+    .episode_poll_owed    = { .list = &g_cons.episode_poll_list },
 };
 static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
 static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
@@ -1966,15 +1978,30 @@ static int cons_episode_park(void) {
 // and writers, the reader parked on data (a non-attached one vacates at
 // BEGIN, an attached one re-evaluates at END), the reader-slot waiters, and
 // the pollers (readiness changes for the non-attached at both transitions).
-// Lock-free: the caller released g_cons.lock; a wake with no waiter is a
-// no-op.
+// The caller released g_cons.lock; a wake with no waiter is a no-op. Every
+// transition but the test reset runs under g_proc_table_lock (proc.c), and
+// any number of Procs' hooks may be on these lists, so there the walks are
+// owed to that lock's release (proc_wake_or_owe). The SAK's BEGIN runs on
+// console_mgr, and its release comes before the mgr's next relay walk of
+// poll_list: a secret keystroke's relay still never precedes BEGIN's walk
+// (cons_poll.tla's Begin, which walks both lists in its own step).
 static void cons_episode_wake_all(void) {
-    poll_waiter_list_wake(&g_cons.episode_waiters);
+    proc_wake_or_owe(&g_cons.episode_waiters_owed);
     wakeup(&g_cons_data_rendez);
-    poll_waiter_list_wake(&g_cons.reader_waiters);
-    poll_waiter_list_wake(&g_cons.poll_list);
-    poll_waiter_list_wake(&g_cons.episode_poll_list);
+    proc_wake_or_owe(&g_cons.reader_waiters_owed);
+    proc_wake_or_owe(&g_cons.poll_list_owed);
+    proc_wake_or_owe(&g_cons.episode_poll_owed);
 }
+
+#ifdef KERNEL_TESTS
+void cons_test_episode_wake_all(void) {
+    cons_episode_wake_all();
+}
+
+struct poll_waiter_list *cons_test_episode_waiters(void) {
+    return &g_cons.episode_waiters;
+}
+#endif
 
 static void cons_episode_diag(const char *what) {
     struct cons_diag_line l;
