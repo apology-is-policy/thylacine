@@ -754,8 +754,15 @@ ProcCap (CapHostowner). Datasets identified by their owner user
 file limitation on record/function constants; the convention matches
 the live system (`thylacine/users/<name>` dataset path).
 
-Safety: TLC-clean — `corvus.cfg` explores 186,493,573 states /
-21,641,580 distinct, depth 32, ~3min36s wall time on 8 cores. The
+Safety: TLC-clean — `corvus.cfg` explores 1,176,000,397 states /
+121,784,148 distinct (re-measured 2026-10-27 at thread-model C5's close,
+rolling TLC 2026.10.26, ~1 h on the Mac; the earlier pin, 186,493,573 /
+21,641,580 at depth 32, predates P5-corvus-srv-impl's audit close, whose
+append-only `connections_history` ledger multiplied the space and was never
+re-pinned). The buggy rows' counts below are the original pins; the
+2026-10-27 re-run used `-workers auto`, whose counts at a violation vary, and
+every buggy cfg checks the `Invariants` conjunction, so TLC reports
+`Invariants` violated rather than the conjunct named in the table. The
 P5-corvus-srv-impl-a2 post-gate extension added the connection-layer
 variables `service_marked` / `service_poster` (replacing the prior
 one-shot `service_posted` BOOLEAN) / `service_posters`, the actions
@@ -764,7 +771,7 @@ one-shot `service_posted` BOOLEAN) / `service_posters`, the actions
 
 | Config | Flag | Invariant | Result | Distinct | Depth |
 |---|---|---|---|---|---|
-| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 21641580 | 32 |
+| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 121784148 | — |
 | `corvus_buggy_unwrap_cross_user.cfg`      | `BUGGY_UNWRAP_CROSS_USER`       | `UnwrapOwnerOnly`        | violation | 82 | 4 |
 | `corvus_buggy_auth_binding_mutate.cfg`    | `BUGGY_AUTH_BINDING_MUTATE`     | `SessionUserImmutable`   | violation | 85 | 5 |
 | `corvus_buggy_admin_without_proc_cap.cfg` | `BUGGY_ADMIN_WITHOUT_PROC_CAP`  | `AdminRequiresProcCap`   | violation | 83 | 5 |
