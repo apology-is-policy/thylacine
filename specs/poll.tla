@@ -372,8 +372,14 @@ CONSTANTS
                                   \*   caught note to tsleep's arm alone.
     BUGGY_CAUGHT_BEFORE_READY,    \* BOOLEAN -- TRUE: the verdict asks for a
                                   \*   caught note before the readiness.
-    BUGGY_DEADLINE_BEFORE_CAUGHT  \* BOOLEAN -- TRUE: a lapsed deadline
+    BUGGY_DEADLINE_BEFORE_CAUGHT, \* BOOLEAN -- TRUE: a lapsed deadline
                                   \*   returns 0 over a pending note.
+    BUGGY_WALK_DROPS_OWED,        \* BOOLEAN -- TRUE: a walk in batches loses
+                                  \*   a hook it owed across a lock drop
+                                  \*   (poll_walk.tla's Covered broken).
+    BUGGY_WALK_STALLS             \* BOOLEAN -- TRUE: a started walk never
+                                  \*   reaches its hooks (poll_walk.tla's
+                                  \*   WalkEnds broken).
     \* BUGGY_NO_POINT is GONE (ARCH 8.12), with the preemption point it
     \* turned off: a syscall body now runs interrupts-on throughout, so
     \* there is no masked span for this module to bound.
@@ -396,6 +402,8 @@ ASSUME BUGGY_RETRY_IS_TIMEOUT      \in BOOLEAN
 ASSUME BUGGY_NO_LOOP_CAUGHT_CHECK  \in BOOLEAN
 ASSUME BUGGY_CAUGHT_BEFORE_READY   \in BOOLEAN
 ASSUME BUGGY_DEADLINE_BEFORE_CAUGHT \in BOOLEAN
+ASSUME BUGGY_WALK_DROPS_OWED       \in BOOLEAN
+ASSUME BUGGY_WALK_STALLS           \in BOOLEAN
 
 VARIABLES
     pc,               \* the poll call's lifecycle ∈ PCs (see below).
@@ -424,12 +432,18 @@ VARIABLES
                       \*   instant of the current pass.
     retry,            \* BOOLEAN -- the park is bounded by the retry timer:
                       \*   some remote fd's arm could not be sent.
-    caught            \* BOOLEAN -- a caught note is pending for the
+    caught,           \* BOOLEAN -- a caught note is pending for the
                       \*   poller's Proc (ARCH 8.8.3). Posted once; the
                       \*   call's EINTR return is what consumes it.
+    owed              \* [Fds -> BOOLEAN] -- a producer's walk that began
+                      \*   while this poller's hook was on f's list has not
+                      \*   reached it yet (the walk goes in batches,
+                      \*   poll_walk.tla). Cleared at the reach, and at the
+                      \*   re-arm's unhook: a walk owes a hook that left
+                      \*   the list nothing.
 
 vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req,
-          stop_used, snapping, pass_notready, retry, caught>>
+          stop_used, snapping, pass_notready, retry, caught, owed>>
 
 \* "start"         — poll() entered; no hook installed, nothing sampled.
 \* "checked"       — BUGGY path only: readiness sampled, no hook installed.
@@ -482,6 +496,7 @@ TypeOk ==
     /\ pass_notready   \in [Fds -> BOOLEAN]
     /\ retry           \in BOOLEAN
     /\ caught          \in BOOLEAN
+    /\ owed            \in [Fds -> BOOLEAN]
 
 NoneSet == [f \in Fds |-> FALSE]
 AllSet  == [f \in Fds |-> TRUE]
@@ -500,6 +515,7 @@ Init ==
     /\ pass_notready   = NoneSet
     /\ retry           = FALSE
     /\ caught          = FALSE
+    /\ owed            = NoneSet
 
 (***************************************************************************)
 (* Expired — the deadline-reached predicate. FALSE whenever the modeled    *)
@@ -545,17 +561,20 @@ Eintr ==
     /\ snapping'   = NoneSet
 
 (***************************************************************************)
-(* The hook-list walk every producer-side event performs: set this         *)
-(* poller's flag if its hook is on f's list, and — the CORRECT path — wake *)
-(* a sleeping poller. BUGGY_NO_WAKE sets the flag but skips the wake.      *)
+(* The hook-list walk every producer-side event performs begins here: if   *)
+(* this poller's hook is on f's list, the walk OWES it a reach. The walk   *)
+(* goes in batches of K hooks per hold of the list lock (vote 12), so the  *)
+(* reach -- the flag and the wake -- is a later step, Reach(f), and the    *)
+(* poller may move in between: re-arm (its hook leaves; its re-sample sees *)
+(* the readiness) or sleep (the reach wakes it). poll_walk.tla checks that *)
+(* a walk reaches every hook it owes, and ends. BUGGY_WALK_DROPS_OWED is a *)
+(* walk that loses one across a lock drop.                                 *)
 (***************************************************************************)
 Walk(f) ==
-    /\ flagged' = IF registered[f]
-                  THEN [flagged EXCEPT ![f] = TRUE]
-                  ELSE flagged
-    /\ pc' = IF pc = "sleeping" /\ registered[f] /\ ~BUGGY_NO_WAKE
-             THEN "woken"
-             ELSE pc
+    /\ owed' = IF registered[f] /\ ~BUGGY_WALK_DROPS_OWED
+               THEN [owed EXCEPT ![f] = TRUE]
+               ELSE owed
+    /\ UNCHANGED <<flagged, pc>>
 
 (***************************************************************************)
 (* MakeReady — a producer makes fd f ready for what the poller asked       *)
@@ -570,6 +589,22 @@ MakeReady(f) ==
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
+(* Reach — the walk that owes f's hook reaches it: set this poller's flag  *)
+(* and -- the CORRECT path -- wake a sleeping poller. BUGGY_NO_WAKE sets   *)
+(* the flag but skips the wake; BUGGY_WALK_STALLS never reaches at all.    *)
+(***************************************************************************)
+Reach(f) ==
+    /\ ~BUGGY_WALK_STALLS
+    /\ pc \notin Terminal
+    /\ owed[f]
+    /\ registered[f]
+    /\ flagged' = [flagged EXCEPT ![f] = TRUE]
+    /\ owed'    = [owed EXCEPT ![f] = FALSE]
+    /\ pc' = IF pc = "sleeping" /\ ~BUGGY_NO_WAKE THEN "woken" ELSE pc
+    /\ UNCHANGED <<caught, ready, registered, seen, deadline_passed, dying, stop_req, stop_used,
+                   snapping, pass_notready, retry>>
+
+(***************************************************************************)
 (* Retract — readiness falls again before the poller looks: a competing    *)
 (* reader drained the bytes. No hook-list walk (nothing became MORE        *)
 (* ready); a flag an earlier MakeReady set stays set, now stale.            *)
@@ -579,7 +614,7 @@ Retract(f) ==
     /\ ready[f]
     /\ ready' = [ready EXCEPT ![f] = FALSE]
     /\ pass_notready' = [pass_notready EXCEPT ![f] = TRUE]
-    /\ UNCHANGED <<caught, pc, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, pc, registered, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, retry>>
 
 (***************************************************************************)
@@ -603,7 +638,7 @@ AdvanceTime ==
     /\ ~deadline_passed
     /\ pc \notin Terminal
     /\ deadline_passed' = TRUE
-    /\ UNCHANGED <<caught, pc, ready, registered, flagged, seen, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, pc, ready, registered, flagged, owed, seen, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -616,7 +651,7 @@ Die ==
     /\ ~dying
     /\ dying' = TRUE
     /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
-    /\ UNCHANGED <<caught, ready, registered, flagged, seen, deadline_passed, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, seen, deadline_passed, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -632,7 +667,7 @@ NotePost ==
     /\ ~caught
     /\ caught' = TRUE
     /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req,
+    /\ UNCHANGED <<ready, registered, flagged, owed, seen, deadline_passed, dying, stop_req,
                    stop_used, snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -646,7 +681,7 @@ StopRequest ==
     /\ stop_req'  = TRUE
     /\ stop_used' = TRUE
     /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
-    /\ UNCHANGED <<caught, ready, registered, flagged, seen, deadline_passed, dying,
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, seen, deadline_passed, dying,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -662,7 +697,7 @@ StopResume ==
     /\ stop_req' = FALSE
     /\ pc' = CASE pc = "tsparked"   -> "armed"
                 [] pc = "loopparked" -> "cleared"
-    /\ UNCHANGED <<caught, ready, registered, flagged, seen, deadline_passed, dying, stop_used,
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, seen, deadline_passed, dying, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -674,7 +709,7 @@ ParkDeath ==
     /\ dying
     /\ pc'         = "done_intr"
     /\ registered' = Unhook
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -694,7 +729,7 @@ Register ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<caught, ready, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
+    /\ UNCHANGED <<caught, ready, flagged, owed, deadline_passed, dying, stop_req, stop_used, retry>>
 
 (***************************************************************************)
 (* BuggyCheck / BuggyRegisterLate — the BUGGY entry: sample, THEN install. *)
@@ -708,14 +743,14 @@ BuggyCheck ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<caught, ready, registered, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, deadline_passed, dying, stop_req, stop_used, retry>>
 
 BuggyRegisterLate ==
     /\ BUGGY_CHECK_BEFORE_REGISTER
     /\ pc = "checked"
     /\ pc'         = "scanned"
     /\ registered' = [f \in Fds |-> f \in Local]
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -730,7 +765,7 @@ SnapshotAnswer(f) ==
     /\ snapping[f]
     /\ snapping' = [snapping EXCEPT ![f] = FALSE]
     /\ seen'     = [seen EXCEPT ![f] = ready[f]]
-    /\ UNCHANGED <<caught, pc, ready, registered, flagged, deadline_passed, dying, stop_req,
+    /\ UNCHANGED <<caught, pc, ready, registered, flagged, owed, deadline_passed, dying, stop_req,
                    stop_used, pass_notready, retry>>
 
 (***************************************************************************)
@@ -750,7 +785,7 @@ SettleDeath ==
     /\ pc'         = "done_intr"
     /\ registered' = Unhook
     /\ snapping'   = IF BUGGY_SWEEP_LEAVES_SNAPSHOT THEN snapping ELSE NoneSet
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    pass_notready, retry>>
 
 (***************************************************************************)
@@ -763,7 +798,7 @@ SettleDeath ==
 EvaluateFirst ==
     /\ pc = "scanned"
     /\ MayDecide
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    pass_notready, retry>>
     /\ IF NoteFirst THEN Eintr
        ELSE IF \E f \in Fds : seen[f]
@@ -798,8 +833,11 @@ Arm ==
     /\ pc = "arming"
     /\ \E failed \in ArmFailures :
           /\ registered' = [f \in Fds |-> registered[f] \/ f \in Remote \ failed]
-          /\ flagged'    = [f \in Fds |-> flagged[f] \/
+          \* An arm whose fd is ready is answered at once: its completion
+          \* walks the list, which now owes the fresh hook a reach.
+          /\ owed'       = [f \in Fds |-> owed[f] \/
                                          (f \in Remote \ failed /\ ready[f])]
+          /\ flagged'    = flagged
           /\ retry'      = (failed # {} /\ ~BUGGY_NO_RETRY)
     /\ pc' = "armed"
     /\ UNCHANGED <<caught, ready, seen, deadline_passed, dying, stop_req, stop_used,
@@ -815,7 +853,7 @@ Arm ==
 (***************************************************************************)
 TSleepCommit ==
     /\ pc = "armed"
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
     /\ IF \E f \in Fds : flagged[f] THEN /\ pc' = "woken"
                                          /\ registered' = registered
@@ -837,7 +875,7 @@ Timeout ==
     /\ pc = "sleeping"
     /\ deadline_passed
     /\ pc' = "timedout"
-    /\ UNCHANGED <<caught, ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -851,7 +889,7 @@ RetryWake ==
     /\ pc = "sleeping"
     /\ retry
     /\ pc' = IF BUGGY_RETRY_IS_TIMEOUT THEN "timedout" ELSE "woken"
-    /\ UNCHANGED <<caught, ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -864,6 +902,7 @@ Rearm ==
     /\ pc = "woken"
     /\ pc'         = "unhooked"
     /\ registered' = NoneSet
+    /\ owed'       = NoneSet
     /\ flagged'    = IF BUGGY_CLEAR_AFTER_SAMPLE THEN flagged ELSE NoneSet
     /\ retry'      = FALSE
     /\ UNCHANGED <<caught, ready, seen, deadline_passed, dying, stop_req, stop_used,
@@ -878,7 +917,7 @@ LoopCheck ==
     /\ pc' = IF dying /\ ~BUGGY_NO_LOOP_DIE_CHECK THEN "done_intr"
              ELSE IF stop_req /\ ~BUGGY_NO_LOOP_STOP_CHECK THEN "loopparked"
              ELSE "cleared"
-    /\ UNCHANGED <<caught, ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -895,14 +934,14 @@ Resample ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<caught, ready, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
+    /\ UNCHANGED <<caught, ready, flagged, owed, deadline_passed, dying, stop_req, stop_used, retry>>
 
 \* The BUGGY order's second half: the flags are cleared after the sample.
 BuggyClearLate ==
     /\ pc = "sampled_dirty"
     /\ pc'      = "rescanned"
     /\ flagged' = NoneSet
-    /\ UNCHANGED <<caught, ready, registered, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<owed, caught, ready, registered, seen, deadline_passed, dying, stop_req, stop_used,
                    snapping, pass_notready, retry>>
 
 (***************************************************************************)
@@ -919,7 +958,7 @@ BuggyClearLate ==
 EvaluateWake ==
     /\ pc = "rescanned"
     /\ MayDecide
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    pass_notready, retry>>
     /\ IF NoteFirst THEN Eintr
        ELSE IF \E f \in Fds : seen[f]
@@ -965,7 +1004,7 @@ FinalSample ==
     /\ seen'          = ScanSeen
     /\ snapping'      = ScanSnapping
     /\ pass_notready' = ScanNotReady
-    /\ UNCHANGED <<caught, ready, registered, flagged, deadline_passed, dying, stop_req, stop_used, retry>>
+    /\ UNCHANGED <<caught, ready, registered, flagged, owed, deadline_passed, dying, stop_req, stop_used, retry>>
 
 EvaluateFinal ==
     /\ pc = "final"
@@ -975,7 +1014,7 @@ EvaluateFinal ==
        ELSE /\ pc' = IF \E f \in Fds : seen[f] THEN "done_ready" ELSE "done_timeout"
             /\ registered' = Unhook
             /\ snapping'   = NoneSet
-    /\ UNCHANGED <<caught, ready, flagged, seen, deadline_passed, dying, stop_req, stop_used,
+    /\ UNCHANGED <<caught, ready, flagged, owed, seen, deadline_passed, dying, stop_req, stop_used,
                    pass_notready, retry>>
 
 (***************************************************************************)
@@ -1009,6 +1048,7 @@ Next ==
     \/ PollerStep
     \/ Settle
     \/ \E f \in Fds : MakeReady(f)
+    \/ \E f \in Fds : Reach(f)
     \/ \E f \in Fds : Retract(f)
     \/ \E f \in Fds : OtherEvent(f)
     \/ AdvanceTime
@@ -1031,7 +1071,7 @@ Spec == Init /\ [][Next]_vars
 \* the readiness instead.
 HookedReadyIsFlagged ==
     (pc \in {"armed", "sleeping"}) =>
-        (\A f \in Fds : (registered[f] /\ ready[f]) => flagged[f])
+        (\A f \in Fds : (registered[f] /\ ready[f]) => (flagged[f] \/ owed[f]))
 
 \* NoMissedPoll — ARCH §28 I-9 across N fds: a poller is never left asleep
 \* while a registered fd is ready, nor on a ready fd its park does not
@@ -1042,7 +1082,14 @@ HookedReadyIsFlagged ==
 \* sample was too early to see) and BUGGY_NO_RETRY (an uncovered park with
 \* no timer).
 NoMissedPoll ==
-    ~(pc = "sleeping" /\ \E f \in Fds : ready[f] /\ (registered[f] \/ ~retry))
+    ~(pc = "sleeping" /\ \E f \in Fds :
+          ready[f] /\ ((registered[f] /\ ~owed[f]) \/ (~registered[f] /\ ~retry)))
+
+\* OwedIsListed -- a walk owes only a hook that is on the list: the re-arm's
+\* unhook clears what the walks owed, and a later registration is a fresh
+\* hook with a fresh sample. (Past the return nothing is walked.)
+OwedIsListed ==
+    (pc \notin Terminal) => (\A f \in Fds : owed[f] => registered[f])
 
 \* NoStaleHook — a returned poll holds no poll_waiter hook. Violated by
 \* BUGGY_LAZY_UNREGISTER.
@@ -1107,6 +1154,7 @@ Invariants ==
     /\ NoSnapshotOutlivesCall
     /\ EintrNotOverReady
     /\ NoZeroOverCaught
+    /\ OwedIsListed
 
 (***************************************************************************)
 (* ============================== LIVENESS ================================ *)
@@ -1167,6 +1215,7 @@ Liveness ==
     /\ WF_vars(Settle)
     /\ WF_vars(AdvanceTime)
     /\ WF_vars(StopResume)
+    /\ \A f \in Fds : WF_vars(Reach(f))
 
 Spec_Live == Init /\ [][Next]_vars /\ Liveness
 

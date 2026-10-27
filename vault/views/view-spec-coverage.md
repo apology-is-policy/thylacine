@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**44 dossiered · 0 missing · 44 modules.**
+**44 dossiered · 1 missing · 45 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -62,6 +62,7 @@ reads as missing, which is the intended pressure.
 | net_poll_teardown.tla | [[spec-net-poll-teardown]] | dossiered |
 | pipe.tla | [[spec-pipe]] | dossiered |
 | poll.tla | [[spec-poll]] | dossiered |
+| poll_walk.tla | `spec-poll-walk` | **missing** |
 | pty.tla | [[spec-pty]] | dossiered |
 | pty_stop.tla | [[spec-pty-stop]] | dossiered |
 | reader_frame.tla | [[spec-reader-frame]] | dossiered |
