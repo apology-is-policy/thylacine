@@ -2559,10 +2559,12 @@ before the code, on aux-3-c6.
   red exactly where predicted and T4's reds a subset explained by two room-only tests; regreen bit-identical;
   thread_reap TLC clean 9494 with all 14 buggy cfgs as named; check-production PASS; SMP gate 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption. Lease 2
   (79f886762, the round-1 fixes): suite 2048/2048 with both joey markers; six sabotage builds (T8b, T10-T14; T10 is the runtime
-  twin of BUGGY_PID_AT_CLAIM) each red exactly where predicted; regreen bit-identical; check-production PASS; the SMP
-  gate on this tip queued behind corona's lease (2b).
+  twin of BUGGY_PID_AT_CLAIM) each red exactly where predicted; regreen bit-identical; check-production PASS. Lease 2b
+  (20:00-20:53Z, the landed tip 1c1f85336, whose code is 79f886762's): SMP gate 50/50 (default smp1/4/8, UBSan smp4/8),
+  0 corruption; ci re-bake rc 0.
 - **Audit.** Round 1 Fable 5.1 (start == end): 0 P0 / 0 P1 / 1 P2 / 2 P3 + 1 pre-existing observation, all fixed
-  (cfbf765fd) or enqueued (exec does not reset clear_child_tid: OPEN-BUGS, owner aux). Not dirty.
+  (cfbf765fd) or withdrawn: the observation (exec does not reset clear_child_tid) was false -- proc_exec_drop_image_state
+  has zeroed it since 4b78a21ca (main#243 F8), asserted at kernel/test/test_proc.c:2156. Not dirty.
 - **Still open, owned.** The poll_waiter_list hook bound (OPEN-BUGS P2; C6 raised its per-Proc factor 16x): aux's
   next chunk by vote 11. A refused first create burns the main tid only in a hand-built test Proc (rfork frees the
   Proc on failure).
