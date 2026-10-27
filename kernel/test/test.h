@@ -27,6 +27,7 @@
 
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>   // ARCH 8.12: TEST_SYSCALL_DISPATCH's mask-only bracket
+#include "test_registry.h"         // every registered test, declared once
 
 struct test_case {
     const char *name;       // human-readable identifier
