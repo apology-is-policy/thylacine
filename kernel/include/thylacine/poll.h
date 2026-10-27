@@ -407,6 +407,53 @@ void poll_waiter_list_wake_from(struct poll_waiter_list *l,
 // owner's threads are gone, so a hook still listed would dangle: extinction.
 void poll_waiter_list_await_unmarked(struct poll_waiter_list *l);
 
+// A walk deferred past a DEFERRING lock (operator vote 13;
+// specs/poll_defer.tla): the 9P client's c->lock and g_dev9p_poll_lock, which
+// nests around it. Unlike the table lock's, these records can be owed by
+// threads holding different locks (a Loom's CQ list, from completions on two
+// clients), so a record's `chain` is tested and set under its LIST's lock;
+// `next` belongs to the thread whose chain holds the record. Nothing holds the
+// owner across the drain, so each owner keeps itself alive one of two ways:
+//  - `ops` set: the owe takes a reference (ops->tryget) and the walk's end
+//    drops it (ops->put, which may free the owner);
+//  - `ops` NULL: the owner is freed only once no deferring-lock holder can
+//    post to it, and its free first calls poll_deferred_await.
+struct poll_defer_ops {
+    bool (*tryget)(void *owner);   // false: the owner is in its free
+    void (*put)(void *owner);
+};
+struct poll_defer_chain;
+struct poll_deferred {
+    struct poll_waiter_list     *list;
+    const struct poll_defer_ops *ops;
+    void                        *owner;   // ops' argument
+    struct poll_defer_chain     *chain;   // under list->lock; non-NULL while owed
+    struct poll_deferred        *next;
+};
+struct poll_defer_chain {
+    struct poll_deferred *head;
+};
+
+void poll_deferred_init(struct poll_deferred *d, struct poll_waiter_list *l,
+                        const struct poll_defer_ops *ops, void *owner);
+
+// Count a deferring lock just taken, and one just dropped. The release that
+// leaves the thread in none drains its chain there, holding nothing: each
+// record's walk begins (its bookmark at the head) in the same hold of the list
+// lock that takes it off the chain.
+void poll_defer_enter(void);
+void poll_defer_exit(void);
+
+// Walk `d`'s list now, or -- inside a deferring lock -- owe the walk. A record
+// owed already stays where it is (its walk has not begun). A REF owner already
+// in its free has no poller, so its list is walked at once: it is empty.
+void poll_wake_deferred(struct poll_deferred *d);
+
+// For a WAIT owner's free, once no deferring-lock holder can reach it: spin
+// until its record is on no chain and no bookmark is on its list. A free by
+// the thread that owes the walk itself would spin forever: extinction.
+void poll_deferred_await(struct poll_deferred *d);
+
 // =============================================================================
 // Remote readiness: the per-fd snapshot slot (see REMOTE READINESS above).
 // =============================================================================

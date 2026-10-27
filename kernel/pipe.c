@@ -55,6 +55,7 @@ struct pipe_ring {
     bool                      write_eof;      // write end closed or hung up → reads return 0 (EOF) after drain
     spin_lock_t               lock;           // protects count/head/tail/{read,write}_eof
     struct poll_waiter_list   poll_list;      // every waiter: pollers AND blocked readers/writers
+    struct poll_deferred      poll_owed;      // poll_list's walk, owed past a 9P client's lock
     u8                        buf[PIPE_BUF_SIZE];
 };
 
@@ -64,8 +65,9 @@ struct pipe_endpoint {
     bool               is_read_end;
 };
 
-// 56 bytes header — derived layout (was 88 while the ring carried a Rendez
-// per direction; the two 16-byte Rendez left with the multi-waiter rewrite):
+// 96 bytes header — derived layout (was 88 while the ring carried a Rendez
+// per direction; the two 16-byte Rendez left with the multi-waiter rewrite,
+// and the deferred-walk record came in after the hook list):
 //   offset  0:  u32  magic           (4)
 //   offset  4:  int  ref             (4)
 //   offset  8:  size_t count         (8)
@@ -76,9 +78,10 @@ struct pipe_endpoint {
 //   offset 34-35: pad
 //   offset 36:  spin_lock_t lock     (4; u32)
 //   offset 40:  struct poll_waiter_list poll_list  (16: spin_lock+pad+ptr)
-//   offset 56:  u8 buf[PIPE_BUF_SIZE]
-_Static_assert(sizeof(struct pipe_ring) == 56 + PIPE_BUF_SIZE,
-               "pipe_ring size pinned (56-byte header + 4 KiB buf)");
+//   offset 56:  struct poll_deferred poll_owed     (40: 5 pointers)
+//   offset 96:  u8 buf[PIPE_BUF_SIZE]
+_Static_assert(sizeof(struct pipe_ring) == 96 + PIPE_BUF_SIZE,
+               "pipe_ring size pinned (96-byte header + 4 KiB buf)");
 
 // The ring is ~4 KiB — above the SLUB max-object threshold, so kmalloc
 // routes it through alloc_pages (same path the p9_client uses). The
@@ -295,6 +298,47 @@ static int pipe_block_locked(struct pipe_ring *r) {
     return rc;
 }
 
+// R15 F234 close: atomic decrement under ACQ_REL ordering. Without atomics,
+// concurrent close of two endpoints on two CPUs would race on r->ref →
+// lost-update or both-see-zero hazards. fetch_sub returns PRE; pre == 1 means
+// this was the last reference (post == 0) and owns the free. pre <= 0 is the
+// underflow diagnostic case.
+static void pipe_ring_unref(struct pipe_ring *r) {
+    int pre = __atomic_fetch_sub(&r->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0) {
+        extinction("pipe: ring refcount underflow");
+    }
+    if (pre == 1) {
+        r->magic = 0;       // UAF defense — readers see magic clobber
+        kfree(r);
+        __atomic_fetch_add(&g_pipe_freed, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+// The ring's write end is a 9P transport's tx, written and hung up under the
+// client's c->lock, so a ring walk can be owed past it (poll.h); the owed walk
+// holds a ring reference until it ends. A ring at zero is being freed by its
+// last close: no end is open, so nothing polls it.
+static bool pipe_defer_tryget(void *owner) {
+    struct pipe_ring *r = owner;
+    int ref = __atomic_load_n(&r->ref, __ATOMIC_RELAXED);
+    while (ref > 0) {
+        if (__atomic_compare_exchange_n(&r->ref, &ref, ref + 1, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return true;
+    }
+    return false;
+}
+
+static void pipe_defer_put(void *owner) {
+    pipe_ring_unref(owner);
+}
+
+static const struct poll_defer_ops g_pipe_defer_ops = {
+    .tryget = pipe_defer_tryget,
+    .put    = pipe_defer_put,
+};
+
 static int devpipe_close(struct Spoor *c) {
     struct pipe_endpoint *p = priv_of(c);
     if (!p) return 0;
@@ -315,25 +359,11 @@ static int devpipe_close(struct Spoor *c) {
     if (p->is_read_end) r->read_eof  = true;
     else                r->write_eof = true;
     spin_unlock(&r->lock);
-    poll_waiter_list_wake(&r->poll_list);
+    poll_wake_deferred(&r->poll_owed);
 
     // Drop this endpoint's ring ref. When both endpoints have been
-    // closed, the ring is freed.
-    //
-    // R15 F234 close: atomic decrement under ACQ_REL ordering. Without
-    // atomics, concurrent close of two endpoints on two CPUs would
-    // race on r->ref → lost-update or both-see-zero hazards. fetch_sub
-    // returns PRE; pre == 1 means we were the last endpoint (post == 0)
-    // and own the free. pre <= 0 is the underflow diagnostic case.
-    int pre = __atomic_fetch_sub(&r->ref, 1, __ATOMIC_ACQ_REL);
-    if (pre <= 0) {
-        extinction("pipe: ring refcount underflow");
-    }
-    if (pre == 1) {
-        r->magic = 0;       // UAF defense — readers see magic clobber
-        kfree(r);
-        __atomic_fetch_add(&g_pipe_freed, 1u, __ATOMIC_RELAXED);
-    }
+    // closed, and no owed walk holds it, the ring is freed.
+    pipe_ring_unref(r);
     // Free the endpoint priv. The Spoor's aux is now dangling — caller
     // must not dereference c after spoor_clunk returns, which spoor.c
     // documents as the contract.
@@ -353,7 +383,7 @@ bool pipe_hangup_write(struct Spoor *c) {
     spin_lock(&r->lock);
     r->write_eof = true;
     spin_unlock(&r->lock);
-    poll_waiter_list_wake(&r->poll_list);
+    poll_wake_deferred(&r->poll_owed);
     return true;
 }
 
@@ -390,7 +420,7 @@ static long pipe_read_common(struct Spoor *c, void *buf, long n, bool now) {
                 // A drained ring may have just become writable: wake every
                 // hook -- a writer blocked on full, a poller on the write
                 // end; each re-samples and filters.
-                poll_waiter_list_wake(&r->poll_list);
+                poll_wake_deferred(&r->poll_owed);
             }
             return got;
         }
@@ -474,7 +504,7 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
         if ((long)(PIPE_BUF_SIZE - r->count) >= n) {
             long put = ring_write(r, (const u8 *)buf, n);   // == n (it fits)
             spin_unlock(&r->lock);
-            if (put > 0) poll_waiter_list_wake(&r->poll_list);
+            if (put > 0) poll_wake_deferred(&r->poll_owed);
             return put;
         }
         spin_unlock(&r->lock);
@@ -540,7 +570,7 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             if (put > 0) {
                 // A non-empty ring has just become readable: wake every hook
                 // -- a reader blocked on empty, a poller on the read end.
-                poll_waiter_list_wake(&r->poll_list);
+                poll_wake_deferred(&r->poll_owed);
             }
             return put;
         }
@@ -692,6 +722,7 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
     r->write_eof = false;
     spin_lock_init(&r->lock);
     poll_waiter_list_init(&r->poll_list);
+    poll_deferred_init(&r->poll_owed, &r->poll_list, &g_pipe_defer_ops, r);
     // buf[] already zero from KP_ZERO.
 
     struct pipe_endpoint *rd_priv = kmem_cache_alloc(g_endpoint_cache, KP_ZERO);

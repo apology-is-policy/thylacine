@@ -29,6 +29,7 @@ int p9_loopback_init(struct p9_loopback *lb,
     lb->closed          = false;
     lb->eof             = false;
     poll_waiter_list_init(&lb->ready_list);
+    poll_deferred_init(&lb->ready_owed, &lb->ready_list, NULL, NULL);
     return 0;
 }
 
@@ -42,6 +43,7 @@ void p9_loopback_destroy(struct p9_loopback *lb) {
     lb->response_pos = 0;
     lb->closed       = true;
     poll_waiter_list_wake(&lb->ready_list);   // a closed recv fails at once
+    poll_deferred_await(&lb->ready_owed);
 }
 
 void p9_loopback_set_chunk_size(struct p9_loopback *lb, size_t chunk_size) {
@@ -58,7 +60,7 @@ void p9_loopback_force_eof(struct p9_loopback *lb) {
     lb->response_len = 0;
     lb->response_pos = 0;
     lb->eof          = true;
-    poll_waiter_list_wake(&lb->ready_list);
+    poll_wake_deferred(&lb->ready_owed);
 }
 
 // =============================================================================
@@ -107,7 +109,7 @@ static int loopback_send(void *ctx, const u8 *buf, size_t len) {
     lb->response_len = (size_t)n;
     lb->response_pos = 0;
     lb->sends++;
-    if (n > 0) poll_waiter_list_wake(&lb->ready_list);
+    if (n > 0) poll_wake_deferred(&lb->ready_owed);
     return (int)len;
 }
 
@@ -144,7 +146,7 @@ static int loopback_close(void *ctx) {
     if (!lb) return -1;
     if (lb->magic != P9_LOOPBACK_MAGIC) return -1;
     lb->closed = true;
-    poll_waiter_list_wake(&lb->ready_list);   // closed reads as ready
+    poll_wake_deferred(&lb->ready_owed);   // closed reads as ready
     return 0;
 }
 

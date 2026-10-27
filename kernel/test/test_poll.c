@@ -2373,3 +2373,273 @@ void test_poll_cons_episode_walks_owed_under_the_table_lock(void) {
     TEST_ASSERT(current_thread()->table_owed.head == NULL, "nothing is owed after");
     poll_waiter_list_unregister(&pw);
 }
+
+// =============================================================================
+// Walks deferred past a deferring lock (vote 13; specs/poll_defer.tla). The
+// tests count the deferring locks with poll_defer_enter/exit directly, as
+// client_lock and dpl_lock do around their spinlocks.
+// =============================================================================
+
+static struct poll_deferred g_tpd;
+
+// Between two batches of the drained walk: no deferring lock is counted, IRQs
+// are as before, and the walk's bookmark is listed (what poll_deferred_await
+// waits out).
+static void tpd_check_batch(struct poll_waiter_list *l) {
+    g_tpw_batches++;
+    if (current_thread()->defer_depth != 0) g_tpw_ok = false;
+    if (irqs_masked()) g_tpw_ok = false;
+    if (poll_waiter_list_marks_for_test(l) != 1u) g_tpw_ok = false;
+}
+
+static u32 tpd_reached(u32 n) {
+    u32 reached = 0;
+    for (u32 i = 0; i < n; i++) reached += g_tpw[i].ready ? 1u : 0u;
+    return reached;
+}
+
+void test_poll_deferred_walk_runs_at_the_outermost_release(void);
+void test_poll_deferred_walk_runs_at_the_outermost_release(void) {
+    tpw_setup(TPW_N);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(!irqs_masked(), "the test runs with IRQs on (else the IRQ check is empty)");
+    g_poll_wake_batch_hook = tpd_check_batch;
+
+    poll_defer_enter();                 // the poll lock
+    poll_defer_enter();                 // a client's lock inside it
+    poll_wake_deferred(&g_tpd);
+    poll_wake_deferred(&g_tpd);
+    bool owed = g_tpd.chain == &t->lock_owed;
+    bool once = t->lock_owed.head == &g_tpd && g_tpd.next == NULL;
+    u32 reached_held = tpd_reached(TPW_N);
+    poll_defer_exit();                  // the inner release
+    bool still_owed = g_tpd.chain == &t->lock_owed;
+    u32 reached_inner = tpd_reached(TPW_N);
+    poll_defer_exit();                  // the outermost
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(owed, "an event inside a deferring lock owes the walk to the thread");
+    TEST_ASSERT(once, "a second event owes nothing more (the record is chained once)");
+    TEST_EXPECT_EQ(reached_held, 0u, "nothing was walked inside the locks");
+    TEST_ASSERT(still_owed, "the inner release does not drain (NoWalkUnderLock)");
+    TEST_EXPECT_EQ(reached_inner, 0u, "and walks nothing");
+    TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "the outermost release walked every hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH, "one walk, in batches");
+    TEST_ASSERT(g_tpw_ok, "between batches: no lock counted, IRQs on, the bookmark listed");
+    TEST_ASSERT(g_tpd.chain == NULL && t->lock_owed.head == NULL && t->defer_depth == 0,
+        "nothing is owed after the release (ChainDrained)");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u,
+        "the bookmark left with the walk");
+
+    // Outside every deferring lock the same call walks at once.
+    for (u32 i = 0; i < TPW_N; i++) g_tpw[i].ready = false;
+    poll_wake_deferred(&g_tpd);
+    TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "unlocked, the walk runs in the call");
+    TEST_ASSERT(g_tpd.chain == NULL, "and owes nothing");
+    tpw_teardown();
+}
+
+// A REF owner's test double: a count, and a put that checks the walk it ends
+// is over.
+static int  g_tpd_ref;
+static u32  g_tpd_puts;
+static bool g_tpd_put_after_walk;
+
+static bool tpd_tryget(void *owner) {
+    if (owner != &g_tpd_ref || g_tpd_ref <= 0) return false;
+    g_tpd_ref++;
+    return true;
+}
+
+static void tpd_put(void *owner) {
+    if (owner != &g_tpd_ref) return;
+    g_tpd_ref--;
+    g_tpd_puts++;
+    g_tpd_put_after_walk = tpd_reached(TPW_M) == TPW_M &&
+                           poll_waiter_list_marks_for_test(&g_tpw_list) == 0u;
+}
+
+static const struct poll_defer_ops g_tpd_ops = { .tryget = tpd_tryget, .put = tpd_put };
+
+void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void);
+void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void) {
+    tpw_setup(TPW_M);
+    poll_deferred_init(&g_tpd, &g_tpw_list, &g_tpd_ops, &g_tpd_ref);
+    g_tpd_ref = 1;                      // the transport's
+    g_tpd_puts = 0;
+    g_tpd_put_after_walk = false;
+
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    poll_wake_deferred(&g_tpd);
+    int held = g_tpd_ref;
+    g_tpd_ref--;                        // the transport's close drops its own
+    poll_defer_exit();
+    TEST_EXPECT_EQ(held, 2, "the owe took one reference, once");
+    TEST_EXPECT_EQ(g_tpd_puts, 1u, "the walk's end dropped it");
+    TEST_ASSERT(g_tpd_put_after_walk, "after the walk was over, its bookmark gone");
+    TEST_EXPECT_EQ(g_tpd_ref, 0, "no reference leaked (RefExact)");
+    tpw_teardown();
+}
+
+// An owner already in its free has no poller: the owe that cannot take a
+// reference walks at once instead of chaining a record nothing pins.
+void test_poll_deferred_walks_a_dying_owner_at_once(void);
+void test_poll_deferred_walks_a_dying_owner_at_once(void) {
+    tpw_setup(TPW_M);
+    poll_deferred_init(&g_tpd, &g_tpw_list, &g_tpd_ops, &g_tpd_ref);
+    g_tpd_ref = 0;
+    g_tpd_puts = 0;
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    bool chained = g_tpd.chain != NULL;
+    u32 reached = tpd_reached(TPW_M);
+    poll_defer_exit();
+    TEST_ASSERT(!chained, "nothing was chained");
+    TEST_EXPECT_EQ(reached, TPW_M, "the walk ran in the call");
+    TEST_EXPECT_EQ(g_tpd_puts, 0u, "and dropped nothing it never took");
+    TEST_EXPECT_EQ(g_tpd_ref, 0, "the count was left alone");
+    tpw_teardown();
+}
+
+// A WAIT owner's free waits out a walk another thread owes it. The child owes
+// the walk and then holds its deferring lock for TPD_HOLD_NS before draining:
+// an await that returned before the drain would find the hooks unreached.
+#define TPD_HOLD_NS (20ull * 1000ull * 1000ull)
+static volatile u32 g_tpd_owed;
+static volatile u32 g_tpd_go;
+
+static void tpd_child_owes_then_drains(void *arg) {
+    (void)arg;
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    __atomic_store_n(&g_tpd_owed, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_tpd_go, __ATOMIC_ACQUIRE)) sched();
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < TPD_HOLD_NS) sched();
+    poll_defer_exit();
+    exits("ok");
+}
+
+void test_poll_deferred_await_waits_out_an_owed_walk(void);
+void test_poll_deferred_await_waits_out_an_owed_walk(void) {
+    tpw_setup(TPW_M);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    g_tpd_owed = 0;
+    g_tpd_go = 0;
+    int pid = rfork(RFPROC, tpd_child_owes_then_drains, NULL);
+    TEST_ASSERT(pid > 0, "rfork");
+    while (!__atomic_load_n(&g_tpd_owed, __ATOMIC_ACQUIRE)) sched();
+    bool owed = g_tpd.chain != NULL;
+    __atomic_store_n(&g_tpd_go, 1u, __ATOMIC_RELEASE);
+    poll_deferred_await(&g_tpd);
+    u32 reached = tpd_reached(TPW_M);
+    bool clear = g_tpd.chain == NULL && poll_waiter_list_marks_for_test(&g_tpw_list) == 0u;
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), pid, "the child was reaped");
+    TEST_ASSERT(owed, "the child owed the walk before the await began");
+    TEST_EXPECT_EQ(reached, TPW_M, "the await returned only after the owed walk was over");
+    TEST_ASSERT(clear, "with the record off every chain and no bookmark listed");
+    tpw_teardown();
+}
+
+// A srvconn send under a client's lock (the client holds c->lock across its
+// transport's send) owes the poll_list walk and holds the conn across it.
+void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void);
+void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void) {
+    struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0,
+                                        PRINCIPAL_INVALID, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(&cn->poll_list, &pw);
+
+    u8 frame[16] = { 16, 0, 0, 0 };
+    poll_defer_enter();
+    long put = srvconn_client_send_frame(cn, frame, (long)sizeof(frame));
+    bool owed = cn->poll_owed.chain != NULL;
+    bool early = pw.ready;
+    int held = __atomic_load_n(&cn->ref, __ATOMIC_RELAXED);
+    poll_defer_exit();
+    TEST_EXPECT_EQ(put, (long)sizeof(frame), "the frame went in");
+    TEST_ASSERT(owed, "the send under the lock owed the conn's walk");
+    TEST_ASSERT(!early, "and walked nothing under it");
+    TEST_EXPECT_EQ(held, 2, "the owed walk holds a conn reference");
+    TEST_ASSERT(pw.ready, "the release walked it");
+    TEST_EXPECT_EQ(__atomic_load_n(&cn->ref, __ATOMIC_RELAXED), 1, "and dropped the reference");
+    poll_waiter_list_unregister(&pw);
+    srvconn_unref(cn);
+}
+
+// p9_client_close: the transport's close tears the conn down and drops its
+// reference under c->lock. The walks the teardown owes keep the conn alive,
+// and the drain's last put frees it, after the lock.
+void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void);
+void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void) {
+    struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0,
+                                        PRINCIPAL_INVALID, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    struct Rendez r[3];
+    struct poll_waiter pw[3];
+    struct poll_waiter_list *lists[3] = {
+        &cn->c2s.role_waiters, &cn->s2c.role_waiters, &cn->poll_list };
+    for (u32 i = 0; i < 3u; i++) {
+        rendez_init(&r[i]);
+        poll_waiter_init(&pw[i], &r[i]);
+        poll_waiter_list_register(lists[i], &pw[i]);
+    }
+    u64 freed0 = srvconn_total_freed();
+    poll_defer_enter();
+    srvconn_teardown(cn);
+    u32 owed = 0;
+    for (struct poll_deferred *d = current_thread()->lock_owed.head; d; d = d->next) owed++;
+    bool early = pw[0].ready || pw[1].ready || pw[2].ready;
+    // The pollers see the hangup and leave; then the transport's reference
+    // goes, which is not the last.
+    for (u32 i = 0; i < 3u; i++) poll_waiter_list_unregister(&pw[i]);
+    srvconn_unref(cn);
+    u64 freed_held = srvconn_total_freed();
+    poll_defer_exit();
+    TEST_ASSERT(!early, "the teardown under the lock walked nothing");
+    TEST_EXPECT_EQ(owed, 3u, "the teardown owed all three conn walks");
+    TEST_EXPECT_EQ(freed_held, freed0, "the owed walks kept the conn alive past its close");
+    TEST_EXPECT_EQ(srvconn_total_freed(), freed0 + 1u, "the drain's last put freed it");
+    TEST_ASSERT(current_thread()->lock_owed.head == NULL, "nothing is owed after");
+}
+
+// The pipe a 9P transport writes and hangs up under c->lock: the ring's walk
+// is owed, and the ring outlives both ends' closes until it is walked.
+void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void);
+void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    struct Rendez r;
+    struct poll_waiter pw;
+    rendez_init(&r);
+    poll_waiter_init(&pw, &r);
+    short rev = rd->dev->poll(rd, POLLIN, &pw);
+    TEST_EXPECT_EQ(rev & (POLLIN | POLLHUP), 0, "an empty pipe is not ready; the hook is listed");
+
+    poll_defer_enter();
+    TEST_ASSERT(pipe_hangup_write(wr), "the hangup");
+    bool early = pw.ready;
+    poll_defer_exit();
+    TEST_ASSERT(!early, "the hangup under the lock walked nothing");
+    TEST_ASSERT(pw.ready, "the release walked the ring");
+    poll_waiter_list_unregister(&pw);
+
+    pw.ready = false;
+    (void)rd->dev->poll(rd, POLLIN, &pw);
+    u64 freed0 = pipe_total_freed();
+    poll_defer_enter();
+    spoor_clunk(wr);                    // owes the ring's walk: a poller is listed
+    poll_waiter_list_unregister(&pw);   // which leaves before its end closes
+    spoor_clunk(rd);
+    u64 freed_held = pipe_total_freed();
+    poll_defer_exit();
+    TEST_EXPECT_EQ(freed_held, freed0, "the owed walk kept the ring past both closes");
+    TEST_EXPECT_EQ(pipe_total_freed(), freed0 + 1u, "the drain's put freed it");
+}

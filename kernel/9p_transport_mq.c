@@ -23,6 +23,7 @@ int p9_mq_loopback_init(struct p9_mq_loopback *mq,
     mq->sends          = 0;
     mq->recvs          = 0;
     poll_waiter_list_init(&mq->ready_list);
+    poll_deferred_init(&mq->ready_owed, &mq->ready_list, NULL, NULL);
     mq->eagain_budget  = 0;
     mq->scribble_buf   = NULL;
     mq->scribble_len   = 0;
@@ -42,6 +43,7 @@ void p9_mq_loopback_destroy(struct p9_mq_loopback *mq) {
     mq->closed = true;
     spin_unlock(&mq->lock);
     poll_waiter_list_wake(&mq->ready_list);
+    poll_deferred_await(&mq->ready_owed);
 }
 
 // send: synthesize the reply (into scratch, under the lock -- the responder is
@@ -69,7 +71,7 @@ static int mq_send(void *ctx, const u8 *buf, size_t len) {
     mq->tail += (u32)n;
     mq->sends++;
     spin_unlock(&mq->lock);
-    if (n > 0) poll_waiter_list_wake(&mq->ready_list);
+    if (n > 0) poll_wake_deferred(&mq->ready_owed);
     return (int)len;
 }
 
@@ -123,7 +125,7 @@ static int mq_close(void *ctx) {
     spin_lock(&mq->lock);
     mq->closed = true;
     spin_unlock(&mq->lock);
-    poll_waiter_list_wake(&mq->ready_list);
+    poll_wake_deferred(&mq->ready_owed);
     return 0;
 }
 

@@ -46,6 +46,8 @@
 //                                            poller)
 // g_dev9p_poll_lock is never held across a wakeup, a pump, a snapshot submit, or
 // an unref. The one abandon under it is the collector's, which must be (below).
+// Like c->lock it DEFERS hook walks (dpl_lock): one an arm submit or an abandon
+// reaches under both locks runs after this one drops.
 
 #include <thylacine/dev9p.h>
 
@@ -150,6 +152,18 @@ static bool                     g_dev9p_poll_inited;
 static int                      g_dev9p_poll_test_gc;     // atomic; see dev9p_poll_test_gc
 static bool                     g_dev9p_poll_test_held;   // atomic
 
+// g_dev9p_poll_lock defers hook walks as c->lock does, and is taken around it:
+// a walk reached under both runs at this lock's release (specs/poll_defer.tla).
+static void dpl_lock(void) {
+    spin_lock(&g_dev9p_poll_lock);
+    poll_defer_enter();
+}
+
+static void dpl_unlock(void) {
+    spin_unlock(&g_dev9p_poll_lock);
+    poll_defer_exit();
+}
+
 void dev9p_poll_init(void) {
     if (g_dev9p_poll_inited) return;
     spin_lock_init(&g_dev9p_poll_lock);
@@ -213,11 +227,11 @@ static struct dev9p_poll_state *dev9p_poll_state_get(struct dev9p_priv *p) {
                       // dev9p_poll_priv_release). MUST be set before publish, or
                       // the first arm's teardown takes refs 1->0 and frees ps out
                       // from under p->poll.
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     if (!__atomic_load_n(&p->poll, __ATOMIC_RELAXED))
         __atomic_store_n(&p->poll, cand, __ATOMIC_RELEASE);   // win: publish
     ps = __atomic_load_n(&p->poll, __ATOMIC_RELAXED);
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
     if (ps != cand) kfree(cand);       // lost the race
     return ps;
 }
@@ -344,11 +358,11 @@ void dev9p_poll_snapshot(struct Spoor *c, short events, struct poll_snap *s) {
         sn->attached_owner  = p->attached_owner;
         if (sn->attached_owner) p9_attached_ref(sn->attached_owner);
         sn->live            = true;
-        spin_lock(&g_dev9p_poll_lock);
+        dpl_lock();
         sn->next = g_dev9p_poll_snaps;
         g_dev9p_poll_snaps = sn;
         __atomic_fetch_add(&g_dev9p_poll_snap_live, 1u, __ATOMIC_RELEASE);
-        spin_unlock(&g_dev9p_poll_lock);
+        dpl_unlock();
         s->op = sn;
     }
 
@@ -375,12 +389,12 @@ void dev9p_poll_snapshot_release(struct Spoor *c, struct poll_snap *s) {
     // inflight slot, so this is a no-op for it.
     p9_client_abandon_async(sn->client, &sn->rpc);
 
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     struct dev9p_poll_snap **pp = &g_dev9p_poll_snaps;
     while (*pp && *pp != sn) pp = &(*pp)->next;
     if (*pp == sn) *pp = sn->next;
     dev9p_poll_snap_unlive(sn);        // with the unlink, so the kthread's view agrees
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
 
     if (sn->attached_owner) p9_attached_unref(sn->attached_owner);
     kfree(sn);
@@ -405,7 +419,7 @@ int dev9p_poll_arm(struct Spoor *c, short events, struct poll_waiter *pw) {
     struct dev9p_poll_op *abandon = NULL;   // widened away: flush + free
     int armed = 0;
 
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     struct dev9p_poll_op *live = ps->op;
     bool live_ok = live && !__atomic_load_n(&live->terminal, __ATOMIC_ACQUIRE);
     u16 want = (u16)((live_ok ? live->mask : 0u) | asked);
@@ -444,7 +458,7 @@ int dev9p_poll_arm(struct Spoor *c, short events, struct poll_waiter *pw) {
         }
         cand = NULL;
     }
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
 
     if (cand) kfree(cand);              // unused (the reuse path)
     if (failed) dev9p_poll_op_free(failed);
@@ -486,7 +500,7 @@ static void dev9p_poll_collect_one(struct p9_client *client, struct p9_attached 
 static struct p9_client *dev9p_poll_collect_clients(bool *arm_out) {
     struct p9_client *head = NULL;
     bool arm = false;
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     for (struct dev9p_poll_op *op = g_dev9p_poll_ops; op; op = op->next) {
         if (__atomic_load_n(&op->terminal, __ATOMIC_ACQUIRE)) continue;
         arm = true;
@@ -496,7 +510,7 @@ static struct p9_client *dev9p_poll_collect_clients(bool *arm_out) {
         if (!__atomic_load_n(&sn->live, __ATOMIC_ACQUIRE)) continue;
         dev9p_poll_collect_one(sn->client, sn->attached_owner, &head);
     }
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
     *arm_out = arm;
     return head;
 }
@@ -555,7 +569,7 @@ static void dev9p_poll_service_once(void) {
     // be off the fid: while it is live, the session refuses the close's Tclunk
     // (any_outstanding_on_fid) and dev9p_close has no fallback -- the server's
     // slot would stay bound for the life of the session.
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     struct dev9p_poll_op **pp = &g_dev9p_poll_ops;
     while (*pp) {
         struct dev9p_poll_op *op = *pp;
@@ -578,7 +592,7 @@ static void dev9p_poll_service_once(void) {
         }
         pp = &op->next;
     }
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
 
     // Test hook: stop between the collect and the frees while a test closes a
     // file whose arm this pass collected.
@@ -665,7 +679,7 @@ void dev9p_poll_priv_release(struct dev9p_priv *p) {
     struct dev9p_poll_state *ps = p->poll;
     struct dev9p_poll_op *grabbed = NULL;
 
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     struct dev9p_poll_op *op = ps->op;
     if (op) {
         // ps->op is consistent with the registry under g_lock (an arm is linked
@@ -676,7 +690,7 @@ void dev9p_poll_priv_release(struct dev9p_priv *p) {
         if (dev9p_poll_unlink_op_locked(op)) grabbed = op;
         ps->op = NULL;
     }
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
 
     if (grabbed) {
         // Cancel at the client (drop the registration + Tflush; #845) so no late
@@ -708,9 +722,9 @@ u32 dev9p_poll_op_count_for_test(void) {
 
 u32 dev9p_poll_snap_count_for_test(void) {
     u32 n = 0;
-    spin_lock(&g_dev9p_poll_lock);
+    dpl_lock();
     for (struct dev9p_poll_snap *sn = g_dev9p_poll_snaps; sn; sn = sn->next) n++;
-    spin_unlock(&g_dev9p_poll_lock);
+    dpl_unlock();
     return n;
 }
 

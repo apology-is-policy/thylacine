@@ -309,6 +309,15 @@ void poll_waiter_list_wake_from(struct poll_waiter_list *l,
 // under the caller's lock, the one that serializes the chains and records.
 // =============================================================================
 
+// A walk begins here: every hook listed now is behind the bookmark. l->lock HELD.
+static void poll_list_push_mark(struct poll_waiter_list *l,
+                                struct poll_waiter *mark) {
+    mark->prev = NULL;
+    mark->next = l->head;
+    if (l->head) l->head->prev = mark;
+    l->head = mark;
+}
+
 void poll_owed_init(struct poll_owed *o, struct poll_waiter_list *l) {
     if (!o || !l) extinction("poll_owed_init: NULL");
     o->list  = l;
@@ -346,9 +355,7 @@ struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
     struct poll_waiter_list *l = o->list;
     *mark = (struct poll_waiter){ .magic = POLL_MARK_MAGIC };
     irq_state_t s = spin_lock_irqsave(&l->lock);
-    mark->next = l->head;
-    if (l->head) l->head->prev = mark;
-    l->head = mark;
+    poll_list_push_mark(l, mark);
     spin_unlock_irqrestore(&l->lock, s);
     return l;
 }
@@ -369,6 +376,99 @@ void poll_waiter_list_await_unmarked(struct poll_waiter_list *l) {
         if (!marked) return;
         __asm__ __volatile__("yield" ::: "memory");
     }
+}
+
+// =============================================================================
+// Walks deferred past a deferring lock (specs/poll_defer.tla). A thread's
+// lock_owed chain and defer_depth are its own: only it pushes and pops. An IRQ
+// handler never owes -- it would be touching the interrupted thread's chain --
+// and neither does a section with IRQs masked under the lock: both walk at
+// once.
+// =============================================================================
+
+void poll_deferred_init(struct poll_deferred *d, struct poll_waiter_list *l,
+                        const struct poll_defer_ops *ops, void *owner) {
+    if (!d || !l) extinction("poll_deferred_init: NULL");
+    if (ops && (!ops->tryget || !ops->put))
+        extinction("poll_deferred_init: a ref owner without tryget and put");
+    d->list  = l;
+    d->ops   = ops;
+    d->owner = owner;
+    d->chain = NULL;
+    d->next  = NULL;
+}
+
+void poll_defer_enter(void) {
+    struct Thread *t = current_thread();
+    if (t) t->defer_depth++;
+}
+
+void poll_defer_exit(void) {
+    struct Thread *t = current_thread();
+    if (!t) return;
+    if (t->defer_depth == 0)
+        extinction("poll_defer_exit: no deferring lock held");
+    if (--t->defer_depth) return;
+
+    struct poll_deferred *d;
+    while ((d = t->lock_owed.head) != NULL) {
+        struct poll_waiter_list *l = d->list;
+        // A WAIT owner may be freed the moment the bookmark leaves its list,
+        // and the record with it: read what the put needs first.
+        const struct poll_defer_ops *ops = d->ops;
+        void *owner = d->owner;
+        struct poll_waiter mark = { .magic = POLL_MARK_MAGIC };
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        t->lock_owed.head = d->next;
+        d->next  = NULL;
+        d->chain = NULL;
+        poll_list_push_mark(l, &mark);
+        spin_unlock_irqrestore(&l->lock, s);
+        poll_walk(l, &mark, true);
+        if (ops) ops->put(owner);
+    }
+}
+
+void poll_wake_deferred(struct poll_deferred *d) {
+    struct Thread *t = current_thread();
+    struct poll_waiter_list *l = d->list;
+    if (!t || t->defer_depth == 0 || irqs_masked()) {
+        poll_waiter_list_wake(l);
+        return;
+    }
+    irq_state_t s = spin_lock_irqsave(&l->lock);
+    // Owed already (its walk has not begun), or nothing listed to owe: a hook
+    // that registers after this samples the condition itself.
+    if (d->chain || !l->head) {
+        spin_unlock_irqrestore(&l->lock, s);
+        return;
+    }
+    if (d->ops && !d->ops->tryget(d->owner)) {
+        spin_unlock_irqrestore(&l->lock, s);
+        poll_waiter_list_wake(l);
+        return;
+    }
+    d->chain = &t->lock_owed;
+    d->next  = t->lock_owed.head;
+    t->lock_owed.head = d;
+    spin_unlock_irqrestore(&l->lock, s);
+}
+
+void poll_deferred_await(struct poll_deferred *d) {
+    struct Thread *t = current_thread();
+    struct poll_waiter_list *l = d->list;
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&l->lock);
+        struct poll_defer_chain *c = d->chain;
+        spin_unlock_irqrestore(&l->lock, s);
+        if (!c) break;
+        if (t && c == &t->lock_owed)
+            extinction("poll_deferred_await: the freeing thread owes the walk itself");
+        __asm__ __volatile__("yield" ::: "memory");
+    }
+    // Off every chain, so each walk owed to it has its bookmark listed or is
+    // over (the drain clears `chain` and lists the bookmark in one hold).
+    poll_waiter_list_await_unmarked(l);
 }
 
 // =============================================================================

@@ -16,7 +16,7 @@
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/rendez.h>   // 8a-1b-beta: embedded per-Thread debug_rendez
-#include <thylacine/poll.h>     // table_owed
+#include <thylacine/poll.h>     // table_owed, lock_owed
 
 struct Proc;
 struct Rendez;
@@ -625,10 +625,21 @@ struct Thread {
     // release returns (specs/poll_owed.tla ChainDrained): empty whenever the
     // thread is outside the lock. Under g_proc_table_lock.
     struct poll_owed_chain table_owed;
+
+    // The walks this thread owes while it holds a deferring lock (a 9P
+    // client's c->lock, g_dev9p_poll_lock), and how many it holds: the
+    // release that leaves it in none drains the chain (specs/poll_defer.tla
+    // ChainDrained). Only this thread touches either.
+    struct poll_defer_chain lock_owed;
+    u32                     defer_depth;
 };
 
-_Static_assert(sizeof(struct Thread) == 1760,
-               "the poll hook chunk appended table_owed (a pointer) after "
+_Static_assert(sizeof(struct Thread) == 1776,
+               "the deferred-walk chunk appended lock_owed (a pointer) + "
+               "defer_depth (u32) after table_owed: 1760 -> 1776 (12 bytes + "
+               "4 trailing pad to the 16-byte alignment); the thread cache "
+               "keeps 2 objects per 4 KiB slab. "
+               "Before that the poll hook chunk appended table_owed (a pointer) after "
                "note_saved_fp, into the 8 bytes of tail pad -- NO size change. "
                "Before that: notetarget carved note_target + caught_wait (2 x u8) from "
                "in_handler's explicit pad -- no size change. "

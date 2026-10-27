@@ -246,6 +246,28 @@ static int chan_role_acquire(struct srvconn_chan *ch, bool writer,
     }
 }
 
+// A walk owed past a 9P client's lock holds the conn until it ends (poll.h).
+// A conn at zero is in its last unref: nothing polls it, so nothing is owed.
+static bool srvconn_defer_tryget(void *owner) {
+    struct SrvConn *cn = owner;
+    int r = __atomic_load_n(&cn->ref, __ATOMIC_RELAXED);
+    while (r > 0) {
+        if (__atomic_compare_exchange_n(&cn->ref, &r, r + 1, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return true;
+    }
+    return false;
+}
+
+static void srvconn_defer_put(void *owner) {
+    srvconn_unref(owner);
+}
+
+static const struct poll_defer_ops g_srvconn_defer_ops = {
+    .tryget = srvconn_defer_tryget,
+    .put    = srvconn_defer_put,
+};
+
 // chan_role_release — drop the role + wake every parked contender. The
 // wake runs OUTSIDE ch->lock (poll_waiter_list_wake takes the list + each
 // waiter's rendez lock — the chan_produce mutate-then-wake discipline).
@@ -254,7 +276,7 @@ static void chan_role_release(struct srvconn_chan *ch, bool writer) {
     if (writer) ch->writing = false;
     else        ch->reading = false;
     spin_unlock(&ch->lock);
-    poll_waiter_list_wake(&ch->role_waiters);
+    poll_wake_deferred(&ch->role_owed);
 }
 
 // chan_produce — append `n` bytes; wake a blocked consumer. Returns
@@ -314,7 +336,7 @@ long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
         wakeup(writing ? &ch->rendez : &ch->wrendez);
         // Wake endpoint pollers after releasing the channel lock: any ring
         // mutation is a readiness edge for ONE endpoint (srvconn_poll).
-        poll_waiter_list_wake(&cn->poll_list);
+        poll_wake_deferred(&cn->poll_owed);
         // Keep the existing completed-buffer diagnostic semantics. A short
         // nonblocking prefix is progress, but not a completed requested buffer.
         if (server && writing && rc == n) __atomic_fetch_add(&cn->s2c_frames, 1u, __ATOMIC_RELAXED);
@@ -360,6 +382,11 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     chan_init(&cn->c2s, b_c2s, cap);
     chan_init(&cn->s2c, b_s2c, cap);
     poll_waiter_list_init(&cn->poll_list);
+    poll_deferred_init(&cn->c2s.role_owed, &cn->c2s.role_waiters,
+                       &g_srvconn_defer_ops, cn);
+    poll_deferred_init(&cn->s2c.role_owed, &cn->s2c.role_waiters,
+                       &g_srvconn_defer_ops, cn);
+    poll_deferred_init(&cn->poll_owed, &cn->poll_list, &g_srvconn_defer_ops, cn);
 
     spin_lock_init(&cn->lock);
     cn->msize              = msize;
@@ -532,14 +559,14 @@ void srvconn_teardown(struct SrvConn *cn) {
     wakeup(&cn->s2c.rendez);
     wakeup(&cn->c2s.wrendez);
     wakeup(&cn->s2c.wrendez);
-    poll_waiter_list_wake(&cn->c2s.role_waiters);
-    poll_waiter_list_wake(&cn->s2c.role_waiters);
+    poll_wake_deferred(&cn->c2s.role_owed);
+    poll_wake_deferred(&cn->s2c.role_owed);
 
     // Teardown is a single readiness edge for every poller of EITHER
     // endpoint: POLLHUP latches off the eof of the direction it reads,
     // POLLERR off the one it writes. ONE wake walks every registered hook.
     // specs/poll.tla MakeReady.
-    poll_waiter_list_wake(&cn->poll_list);
+    poll_wake_deferred(&cn->poll_owed);
 }
 
 bool srvconn_is_live(const struct SrvConn *cn) {
@@ -604,7 +631,7 @@ long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n) {
         // registered on the server endpoint. chan_produce already woke
         // the (single) blocking-recv Rendez; this wakes the poll list.
         // specs/poll.tla MakeReady.
-        poll_waiter_list_wake(&cn->poll_list);
+        poll_wake_deferred(&cn->poll_owed);
     }
     return put;
 }
@@ -640,7 +667,7 @@ long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n) {
     spin_unlock(&ch->lock);
     if (put > 0) {
         wakeup(&ch->rendez);
-        poll_waiter_list_wake(&cn->poll_list);
+        poll_wake_deferred(&cn->poll_owed);
     }
     return put;
 }
@@ -676,7 +703,7 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
             wakeup(&ch->wrendez);
             // ... and s2c room is the SERVER endpoint's POLLOUT edge: a
             // nonblocking server that polled after EAGAIN is parked on it.
-            poll_waiter_list_wake(&cn->poll_list);
+            poll_wake_deferred(&cn->poll_owed);
             break;
         }
         if (ch->eof) {
@@ -745,7 +772,7 @@ long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n) {
         // As srvconn_client_recv: room for a parked server send, and the
         // server endpoint's POLLOUT edge. Outside ch->lock.
         wakeup(&ch->wrendez);
-        poll_waiter_list_wake(&cn->poll_list);
+        poll_wake_deferred(&cn->poll_owed);
     }
     return ret;
 }
@@ -756,7 +783,7 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (n == 0) return 0;
     long put = chan_produce(&cn->s2c, buf, n);
     // s2c fill is the CLIENT endpoint's POLLIN edge (srvconn_poll).
-    if (put > 0) poll_waiter_list_wake(&cn->poll_list);
+    if (put > 0) poll_wake_deferred(&cn->poll_owed);
     return put;
 }
 
@@ -819,7 +846,7 @@ long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
         // poll-then-read client is the drainer this send may be about to park
         // waiting for, so deferring the walk to end-of-delivery is a circular
         // wait.
-        if (put > 0) poll_waiter_list_wake(&cn->poll_list);
+        if (put > 0) poll_wake_deferred(&cn->poll_owed);
         if (done >= n) {
             // #210: one whole server reply buffer delivered (one 9P reply
             // frame on the devsrv server arm). The #354 writer role makes
@@ -902,7 +929,7 @@ long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
         // chan_produce woke the blocking-recv rendez; this wakes the
         // registered poll hooks (per-write, mirroring the non-blocking
         // srvconn_client_send).
-        if (put > 0) poll_waiter_list_wake(&cn->poll_list);
+        if (put > 0) poll_wake_deferred(&cn->poll_owed);
         if (done >= n) { ret = done; break; } // whole buffer delivered
 
         // Ring full -> park until the server drains c2s (wakes wrendez)
@@ -930,7 +957,7 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {
     if (n == 0) return 0;
     long got = chan_consume_nonblock(&cn->c2s, buf, n);
     // c2s room is the CLIENT endpoint's POLLOUT edge (srvconn_poll).
-    if (got > 0) poll_waiter_list_wake(&cn->poll_list);
+    if (got > 0) poll_wake_deferred(&cn->poll_owed);
     return got;
 }
 
@@ -978,7 +1005,7 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
             // drain-wake discipline, outside ch->lock.
             wakeup(&ch->wrendez);
             // ... and c2s room is the CLIENT endpoint's POLLOUT edge.
-            poll_waiter_list_wake(&cn->poll_list);
+            poll_wake_deferred(&cn->poll_owed);
             break;
         }
         if (ch->eof) {
@@ -1091,6 +1118,10 @@ short srvconn_poll(struct SrvConn *cn, bool client, short events,
 
 u64 srvconn_total_created(void) {
     return __atomic_load_n(&g_srvconn_created, __ATOMIC_RELAXED);
+}
+
+u64 srvconn_total_freed(void) {
+    return __atomic_load_n(&g_srvconn_freed, __ATOMIC_RELAXED);
 }
 
 // #210: walk every live conn for /ctl/9p-sessions. Registry lock held

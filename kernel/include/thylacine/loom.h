@@ -508,6 +508,11 @@ struct Loom {
     // CqWaitCommitOrSleep; invariants CqFlagTracksCq + NoMissedCqWake (I-9 on the
     // CQ wait-list) + NoStrandedWaiter + CqWaitFlagSound.
     struct poll_waiter_list cq_waiters;
+    // cq_waiters' walk, owed past a 9P client's lock (poll.h): an async op's
+    // completion posts its CQE under the client's c->lock. The Loom is the
+    // record's WAIT owner -- nothing references it from the op -- so loom_free
+    // awaits it once every op is abandoned.
+    struct poll_deferred    cq_owed;
     // Loom-4c (LOOM.md 8.6): the SQPOLL poll-thread. NULL unless the ring was
     // set up with LOOM_SETUP_SQPOLL. A per-ring kproc() kthread (the console_mgr
     // precedent) that drains the SQ + drives the elected reader so steady-state

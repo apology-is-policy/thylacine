@@ -218,6 +218,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     l->refcount = 1;
     spin_lock_init(&l->lock);
     poll_waiter_list_init(&l->cq_waiters);   // Loom-4 CQ wait-list (its own lock)
+    poll_deferred_init(&l->cq_owed, &l->cq_waiters, NULL, NULL);
     rendez_init(&l->sqpoll_park);            // Loom-4c SQPOLL park (no kthread until loom_start_sqpoll)
     rendez_init(&l->sqpoll_join);            // the join Rendez loom_free blocks on
     l->ring     = r;
@@ -440,7 +441,7 @@ static void loom_free(struct Loom *l) {
     // cannot run -- while any cq_waiter sleeps; the list is empty here. The wake
     // is the spec's teardown action made literal (a no-op walk of an empty list),
     // kept as defense if that ref invariant ever weakens.
-    poll_waiter_list_wake(&l->cq_waiters);
+    poll_wake_deferred(&l->cq_owed);
 
     // #898: quiesce any in-flight async op BEFORE freeing the ring. refcount hit
     // 0 -> no SYS_LOOM_ENTER is in progress (an enter holds a loom ref via
@@ -481,6 +482,9 @@ static void loom_free(struct Loom *l) {
         kfree(op);
         op = next;
     }
+    // Every op is abandoned under its client's lock, so no completion can
+    // post here now; one that posted before may still owe its CQ walk.
+    poll_deferred_await(&l->cq_owed);
 
     // Loom-5b: free the LINK/DRAIN chain. refcount is 0 (the SQPOLL kthread is
     // joined; no ENTER runs), so nothing mutates l->chain here. A HELD entry never
@@ -737,11 +741,11 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     // above happened-before this under l->lock, so a concurrent CqWaitRegister's
     // sample (also under l->lock) either observes the bumped CQ (and does not
     // sleep) or is found by this list walk (and is woken) -- no missed wake
-    // (CqFlagTracksCq + NoMissedCqWake, I-9). poll_waiter_list_wake takes only the
-    // list + rendez locks (below l->lock in the global order) and does NOT sleep
-    // or re-enter p9_client_*, so it is safe under the c->lock loom_async_complete
-    // holds (the seam contract).
-    poll_waiter_list_wake(&l->cq_waiters);
+    // (CqFlagTracksCq + NoMissedCqWake, I-9). Under the c->lock
+    // loom_async_complete holds, the walk is owed and runs after the client's
+    // release (specs/poll_defer.tla); the owe takes only the list lock and does
+    // NOT sleep or re-enter p9_client_* (the seam contract).
+    poll_wake_deferred(&l->cq_owed);
     return 0;
 }
 
@@ -1714,7 +1718,7 @@ static void loom_admitted(struct Loom *l) {
     // A waiter asleep only because this op could still post re-samples: the op
     // posted (it was woken then too), went in flight (it may need to pump), or
     // parked HELD. After the unlock, as loom_post_cqe wakes (I-9).
-    poll_waiter_list_wake(&l->cq_waiters);
+    poll_wake_deferred(&l->cq_owed);
 }
 
 // Loom-4 (KT-1.5): the KObj_Loom .poll hook -- fold a Loom ring into a poll(2)
@@ -2306,7 +2310,7 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
                     // sibling (so it retries instead of stranding), then return
                     // what is posted (io_uring-style degradation under a
                     // Byzantine server). Trusted servers never reach here.
-                    poll_waiter_list_wake(&l->cq_waiters);
+                    poll_wake_deferred(&l->cq_owed);
                     break;
                 }
                 continue;
@@ -2492,7 +2496,7 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
             l->chain_len++;
             if (l->admitting > 0) l->admitting--;           // HELD: re-reserved at admit
             spin_unlock(&l->lock);
-            poll_waiter_list_wake(&l->cq_waiters);          // as loom_admitted
+            poll_wake_deferred(&l->cq_owed);          // as loom_admitted
             submitted++;
         } else {
             loom_submit_one(l, &ksqe, NULL);                // fast path (Loom-3)

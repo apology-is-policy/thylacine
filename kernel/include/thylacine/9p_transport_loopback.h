@@ -71,6 +71,9 @@ struct p9_loopback {
     // it: the loopback is synchronous, so an empty one models a real
     // transport's blocking recv, and recv_ready reports it not ready.
     struct poll_waiter_list ready_list;
+    // ready_list's walk, owed past the client's lock that send and close run
+    // under (poll.h); destroy awaits it.
+    struct poll_deferred    ready_owed;
 };
 
 // Initialize a loopback. `response_buf` / `response_cap` is the

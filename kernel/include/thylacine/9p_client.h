@@ -313,6 +313,11 @@ struct p9_client {
     // Under c->lock.
     struct poll_waiter_list role_waiters_list;
     u32                  role_waiters;
+    // Both lists are walked under c->lock, so their walks are deferred past
+    // it (poll.h, poll_wake_deferred). The client is their WAIT owner: no op
+    // is in flight at destroy, which awaits both.
+    struct poll_deferred send_owed;
+    struct poll_deferred role_owed;
     // The dev9p poll kthread's fan-in entry for this client (dev9p_poll.c).
     // One kthread, so one entry per client and no cap; written by that thread
     // alone, so no lock. poll_pin is the session ref it holds across the pump
