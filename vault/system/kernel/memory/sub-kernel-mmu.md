@@ -364,15 +364,17 @@ number was later reused, so for twelve weeks it had no owner. Operator vote 22
 wired it into the encoders (Mechanism), which made those documents true. Full
 chain in [[inv-i12]].
 
-**An extinction with the MMU off may not print on hardware.** With stage 1
-translation off every data access is Device-nGnRnE, and `extinction()` claims
-the console with an exclusive pair on `.bss` (`ldaxr`/`stlxr` on the ARMv8.0
-floor). Exclusives to Device memory are IMPLEMENTATION DEFINED: QEMU honours
-them, but a core with no global monitor can fail the store forever, and the boot
-would hang with no `EXTINCTION:` line. It applies to `build_page_tables`' own
-extinctions and to a composite edited past its asserts, whose folded extinction
-runs there first. No witness covers it: every `wxe_install_*` variant fires after
-`mmu_enable`.
+**An extinction with the MMU off executes no exclusive (2026-10-27).** With
+stage 1 translation off every data access is Device-nGnRnE, and an exclusive
+pair to Device memory is IMPLEMENTATION DEFINED. `extinction()` used to claim
+the console with one (`ldaxr`/`stlxr` on `.bss`), and every console byte passed
+another, so `build_page_tables`' own extinctions, and a composite edited past
+its asserts (whose folded extinction runs there first), hung with no
+`EXTINCTION:` line. Measured: the `extinction_mmu_off` fault variant printed
+nothing under HVF on Apple silicon and under KVM on thyla-pi's Cortex-A72, where
+the boot CPU spun at the claim's `stlxr` forever. With the MMU off,
+`extinction()` now takes the console without an atomic ([[sub-kernel-halls]]),
+and the variant prints the banner and the dump on both.
 
 **The ASID argument is vestigial** on the install and uninstall paths and is
 documented as such at each — the invalidates are all-ASID. It is retained for a

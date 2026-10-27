@@ -427,3 +427,13 @@ would extinct before the provoker, builds that variant with `--config default
 `THYLACINE_NO_RNG=1`, and test-fault.sh requires the refusal's body with the
 suite's first line, `  tests:`, absent -- a refusal printed once the suite
 had started came too late.
+
+**Fault variant append (2026-10-27).** `extinction_mmu_off` encodes a W+X kernel
+page at the top of `build_page_tables`, with stage 1 still off, so its
+extinction must print through `extinction()`'s MMU-off path, which executes no
+exclusive ([[sub-kernel-halls]]). It reuses the `PTE violates W^X at install
+(kernel page)` body, so the matched set stays twelve bodies, and test-fault.sh's
+new `require_for` names what the expected line cannot: the report line
+`console-claim: skipped with the MMU off` and a symbolized `extinction+0x` frame
+(before the MMU every code address is physical, and only the dump's rebase names
+it). Without the fix the variant printed nothing, on HVF and on thyla-pi's KVM.

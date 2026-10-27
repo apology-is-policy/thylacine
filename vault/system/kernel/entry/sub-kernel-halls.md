@@ -3,7 +3,7 @@ id: sub-kernel-halls
 type: sub
 title: "Halls of Extinction — the crash dump and the live-thread backtrace"
 parent: moc-kernel-entry
-code: ["arch/arm64/halls.c", "arch/arm64/halls.h", "arch/arm64/halls_symtab.h", "arch/arm64/halls_symtab.stub.c", "kernel/extinction.c", "kernel/include/thylacine/extinction.h"]
+code: ["arch/arm64/halls.c", "arch/arm64/halls.h", "arch/arm64/halls_symtab.h", "arch/arm64/halls_symtab.stub.c", "kernel/extinction.c", "kernel/include/thylacine/extinction.h", "kernel/test/test_halls.c"]
 audit: hard
 guarded-by: []
 validated-by: [gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/HALLS-OF-EXTINCTION.md", "docs/TOOLING.md section 10"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -39,7 +39,10 @@ state the crash destroyed — is caught: the second entry prints a marker and pa
 suppressed rather than recursing into a stack overflow. The crash emitter takes
 the console ring lock and holds it to `_torpor` ([[sub-kernel-cons]]), never the
 parking writer role — a dying machine must never block on a wake that may never
-come.
+come. With the MMU off (the boot CPU before `mmu_enable`, where every data access
+is Device memory and an exclusive pair need not complete) it takes no claim, no
+ring lock and no per-byte console gate, and says so after the dump with
+`console-claim: skipped with the MMU off`.
 
 `halls_dump(ctx)` — the whole dump. Called from the extinction path *after* the
 `EXTINCTION:` line and *before* the halt. A non-NULL `ctx` dumps that saved
@@ -51,10 +54,12 @@ by the exception entry wrappers in [[sub-kernel-exception]]. Enter returns the
 previous value; leave restores it, so a nested exception does not clobber an
 outer frame.
 
-Four pure helpers, exposed because they are the testable part:
+Five pure helpers, exposed because they are the testable part:
 `halls_fp_is_sane` (the frame-pointer gate), `halls_frame_is_live` (the
 plausibility gate on the per-CPU slot), `halls_link_addr` (remove the slide),
-and `halls_symbolize_table` (the symbol lookup over an explicit table).
+`halls_code_link_addr` (the dump's form: rebase an address inside the image's
+physical range onto the link base, else remove the slide), and
+`halls_symbolize_table` (the symbol lookup over an explicit table).
 
 `halls_walk_kernel_frames` — the live-thread twin of the backtrace, for the
 debugger's kernel-stack read in [[sub-kernel-devproc]]. Takes **explicit**
@@ -100,7 +105,10 @@ syndrome registers still carry the signal.
 offsets, generated per build directory from the linked image and living in
 read-only data. It reads no stack, takes no lock, allocates nothing, and is
 bounded by the log of the entry count — the properties that let it run on the
-dying path at all.
+dying path at all. The address it is given is a link address: one inside the
+kernel image's physical range — code that ran before the MMU, which executes at
+its load address, and `start.S`'s frame beneath `boot_main` — is rebased onto the
+link base; any other has the slide removed.
 
 **Return addresses are stripped, not authenticated.** On a core with pointer
 authentication the spilled return address carries a signature in the unused high
@@ -218,12 +226,13 @@ three dispositions for one impossible input.
 **The symbol table has no end sentinel.** See Caveats — this is the one seam with
 a live consumer.
 
-**`IPI_HALT` is owed, so the `EXTINCTION:` line can still be torn by a peer CPU
-(#243).** The crash emitter serializes its *own* output under the console ring
-lock, but the other CPUs are not halted before it prints, so a peer's concurrent
-`uart_puts` (which does not take the ring) can still interleave the marker the
-tooling matches literally. The fix is an `IPI_HALT` that quiesces the peers first;
-until it lands this is a known-open tearing window on SMP.
+**`IPI_HALT` is owed, so peers keep running after an extinction (#243).** A peer
+admitted after the claim can no longer tear the banner: the winner holds the
+console ring lock, and the per-byte console gate drops a peer's direct
+`uart_putc` byte once the console is claimed (the 2026-10-14 appends below). A
+peer already mid-byte, or holding the ring lock, is waited out under a bound;
+past it the banner prints anyway and the report lines say it may be torn. The
+peers themselves run on, their output dropped, until an `IPI_HALT` stops them.
 
 ## Caveats
 
@@ -348,3 +357,30 @@ The function is `sched_take_deferred_preempt`; ARCH 8.12's deleted
 masked syscall body). `extinction.tx_exit_takes_a_pending_preempt` reads its
 verdict from an iteration no timer tick crossed (up to eight tries), since a
 tick in the test's short unheld windows would take the preempt itself.
+
+**MMU-off path append (2026-10-27).** Before `mmu_enable` stage 1 is off and
+every data access is Device-nGnRnE, where an exclusive pair is IMPLEMENTATION
+DEFINED. The claim, the per-byte gate and the ring lock are all exclusives, so an
+extinction there (`build_page_tables`' own, or a W^X composite's folded one)
+printed nothing: the `extinction_mmu_off` fault variant timed out with zero bytes
+under HVF on Apple silicon, and under KVM on thyla-pi's Cortex-A72 the boot CPU
+sat at the claim's `stlxr` loop. Read from `SCTLR_EL1.M`, never from a flag in
+memory, an MMU-off extinction now takes the console word with a plain store and
+marks itself owner; `extinction_tx_enter` returns `EXTINCTION_TX_UNGATED` before
+any atomic, and `extinction_tx_exit` does nothing for it; `cons_tx_claim_for_dump`
+returns at once, which covers the second banner emitter (`el1_sync_runaway`)
+too; the ring report is skipped; `console-claim: skipped with the MMU off`
+follows the dump.
+Skipping the claim is sound because only the boot CPU runs C with the MMU off: a
+secondary's MMU-off window is `start.S` and the frameless
+`mmu_program_this_cpu`. The dump's code addresses were physical there and printed
+as their own "link" addresses; `halls_code_link_addr` rebases a return address
+inside the image's PA range (never an ELR, which is a high VA when real and
+leftover when stale), so the pre-MMU dump names its frames: `extinction+0x60`, then `_real_start+0xf4`. The frame between, `mmu_enable`, reads as `mmu_retire_ttbr0_identity+0x0`: its last instruction is the noreturn call, so its return address is the first byte of the next function, a backtrace property of every dump (OPEN-BUGS, 2026-10-27).
+HX-I1 does not hold there: the boot CPU has no vectors before `exception_init`,
+so a fault inside the pre-MMU dump would wedge rather than reach the guard (the
+OPEN-BUGS VBAR item, 2026-10-27). Every read that dump makes today is RAM: the
+boot stack and `.rodata`. Tests:
+`halls.code_link_addr_rebases_the_image_pa`, and `tools/test-fault.sh`'s
+`extinction_mmu_off`, which requires the report line and a symbolized
+`extinction+0x` frame besides the banner.

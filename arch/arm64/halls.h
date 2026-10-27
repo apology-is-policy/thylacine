@@ -79,6 +79,13 @@ bool halls_frame_is_live(u64 frame, u64 cur_sp);
 // address -- a stack/heap/zero value), returns addr unchanged.
 u64 halls_link_addr(u64 addr, u64 kaslr_offset);
 
+#ifdef KERNEL_TESTS
+// The dump's translation of a return address: one inside the kernel image's PA
+// range [pa_start, pa_end) -- code that ran before the MMU -- is rebased onto
+// KASLR_LINK_VA; any other address goes through halls_link_addr.
+u64 halls_code_link_addr(u64 addr, u64 kaslr_offset, u64 pa_start, u64 pa_end);
+#endif // KERNEL_TESTS
+
 // 8a-1b-gamma-3 (I-39; DEBUG-FS-DESIGN.md section 4.6): walk a LIVE stopped
 // thread's kernel frame-pointer chain into `out` -- canonical (PAC-stripped)
 // return addresses, out[0] = the frame-0 PC, out[1..] = saved LRs walked from

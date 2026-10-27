@@ -124,13 +124,14 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on twelve of them.** `tools/test-fault.sh` runs fourteen
+that one gate depends on twelve of them.** `tools/test-fault.sh` runs fifteen
 variants (`ALL_VARIANTS`), and its `expected_for` case matches twelve bodies:
 `EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, and since
 2026-10-27 `... PTE violates W^X at install (kernel page)`, `... (kernel L2
 block)`, `... (kernel L1 block)` and `... (user page)` (the
 four `wxe_install_*` variants, printed by `arch/arm64/mmu.c`'s leaf encoders;
-operator vote 22), `... BTI fault`,
+operator vote 22; `extinction_mmu_off`, since 2026-10-27, expects the `(kernel
+page)` body too, printed before the MMU is on), `... BTI fault`,
 `... kernel stack overflow` (three provokers), `... recursive kernel fault`,
 `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
 guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:

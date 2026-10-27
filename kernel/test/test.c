@@ -962,6 +962,7 @@ struct test_case g_tests[] = {
                                        test_halls_fp_sane_rejects_out_of_range,    false, NULL },
     { "halls.link_addr_removes_slide",     test_halls_link_addr_removes_slide,     false, NULL },
     { "halls.link_addr_underflow_guarded", test_halls_link_addr_underflow_guarded, false, NULL },
+    { "halls.code_link_addr_rebases_the_image_pa", test_halls_code_link_addr_rebases_the_image_pa, false, NULL },
     { "halls.frame_enter_leave_nesting",   test_halls_frame_enter_leave_nesting,   false, NULL },
     { "halls.frame_is_live_gate",          test_halls_frame_is_live_gate,          false, NULL },
     { "halls.symbolize_table",             test_halls_symbolize_table,             false, NULL },

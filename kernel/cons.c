@@ -12,6 +12,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>                 // T_E_INTR (ARCH 8.8.3)
+#include <thylacine/extinction.h>            // extinction_mmu_off: the dump claim before the MMU
 #include <thylacine/joey.h>                  // #95: boot_is_complete (the drop-report gate)
 #include <thylacine/poll.h>                  // LS-8a: pollable cons (deferred poll-wake)
 #include <thylacine/proc.h>
@@ -633,6 +634,9 @@ bool cons_tx_claim_core(spin_lock_t *l) {
 
 bool cons_tx_claim_for_dump(void) {
     __asm__ __volatile__("msr daifset, #2" ::: "memory");   // never restored: the caller parks
+    // Before the MMU the lock's exclusive need not complete, only this CPU runs,
+    // and nothing has been staged: there is nothing to serialize against.
+    if (extinction_mmu_off()) return true;
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     if (g_cons_tx_claim_owner[cpu]) return true;             // already ours (see above); nothing left to flush

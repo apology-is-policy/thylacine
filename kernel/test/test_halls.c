@@ -11,6 +11,7 @@
 
 #include "../../arch/arm64/halls.h"
 #include "../../arch/arm64/halls_symtab.h"
+#include "../../arch/arm64/kaslr.h"
 
 #include <thylacine/types.h>
 
@@ -60,6 +61,24 @@ void test_halls_link_addr_underflow_guarded(void) {
                    0x100ull, "below offset -> unchanged");
     TEST_EXPECT_EQ(halls_link_addr(0xDEADBEEFull, 0ull),
                    0xDEADBEEFull, "zero offset -> unchanged");
+}
+
+void test_halls_code_link_addr_rebases_the_image_pa(void) {
+    // Code run before the MMU executes at the load PA, which the slide does not
+    // map: an address in the image's PA range rebases onto the link VA.
+    const u64 ps = 0x40080000ull, pe = 0x40680000ull, koff = 0x183800000ull;
+    TEST_EXPECT_EQ(halls_code_link_addr(ps, koff, ps, pe), KASLR_LINK_VA,
+                   "the image's first PA -> the link base");
+    TEST_EXPECT_EQ(halls_code_link_addr(ps + 0x1434ull, koff, ps, pe),
+                   KASLR_LINK_VA + 0x1434ull, "inside the image -> link base + offset");
+    TEST_EXPECT_EQ(halls_code_link_addr(KASLR_LINK_VA + koff + 0x10ull, koff, ps, pe),
+                   KASLR_LINK_VA + 0x10ull, "a slid VA takes the slide");
+    TEST_EXPECT_EQ(halls_code_link_addr(pe, koff, ps, pe), pe,
+                   "the end is exclusive (and below the offset: untouched)");
+    TEST_EXPECT_EQ(halls_code_link_addr(ps - 4ull, koff, ps, pe), ps - 4ull,
+                   "below the image: untouched");
+    TEST_EXPECT_EQ(halls_code_link_addr(ps + 8ull, koff, 0ull, 0ull), ps + 8ull,
+                   "an empty range (before kaslr_init records it) rebases nothing");
 }
 
 void test_halls_frame_enter_leave_nesting(void) {

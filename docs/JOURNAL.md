@@ -22,6 +22,91 @@ needed the operator.
 
 
 ---
+## 2026-10-27 -- an extinction before the MMU that printed nothing, on both machines we have (corona)
+
+**What started it.** The kernel-declarations audit (r1 F2, Fable 5.1) read the
+production ELF: `extinction()` claims the console with an `ldaxr`/`stlxr` pair,
+and `build_page_tables` runs with stage 1 off, where every data access is
+Device-nGnRnE and an exclusive is IMPLEMENTATION DEFINED. Filed in OPEN-BUGS as
+a P3, "read, not reproduced".
+
+**Enumerating first.** Before the MMU the boot CPU runs `pac_derive_keys` and
+`pac_apply_this_cpu` (assembly), `kaslr_init` (with `dtb_init` and
+`canary_init`) and `build_page_tables`. Only `build_page_tables` (three explicit
+extinctions plus the encoders' folded W^X one) and a canary mismatch can reach
+`extinction()`; `lib/dtb.c` and `kaslr.c` have neither an extinction nor an
+atomic. The exclusives on the dying path were the claim, the per-byte console
+gate on every `uart_putc` (enter and exit), the ring lock, and the losers'
+counter.
+
+**Reproduced on two kinds of silicon.** A new fault variant,
+`extinction_mmu_off`, encodes a W+X kernel page at the top of
+`build_page_tables` and reuses the existing ABI body. Built without the fix, it
+printed zero guest bytes in 40 s under HVF on the Mac, and zero in 20 s under KVM
+on thyla-pi's Cortex-A72. There, gdb on QEMU's stub put cpu0 at
+`extinction_claim_word`, inlined in `extinction_claim_console`, in `ldaxr w10,
+[x8]; stlxr w11, w9, [x8]; cbnz w11`: the store never succeeds. The finding
+said "a core with no global monitor"; both machines we have are such a core
+before the MMU.
+
+**The fix.** It reads `SCTLR_EL1.M`, the CPU's own fact. A flag in memory would
+be written uncached before the MMU and read through the cache after. With the
+MMU off:
+
+- The claim is a plain store plus the owner mark.
+- The gate returns a new `EXTINCTION_TX_UNGATED` before any atomic.
+- `cons_tx_claim_for_dump` returns at once.
+- A report line says the claim was skipped.
+
+One CPU runs then: a secondary's MMU-off window is `start.S` and the frameless
+`mmu_program_this_cpu`. With the fix the variant prints the banner, the dump and
+the report on HVF and on the A72.
+
+**What the fix exposed.** Now that the pre-MMU dump printed, its addresses were
+physical and labelled "link", so nothing was symbolized. `halls_code_link_addr`
+rebases a return address inside the image's PA range onto the link base. The
+dump now reads `extinction+0x60` and `_real_start+0xf4`. The frame between,
+`mmu_enable`, reads `mmu_retire_ttbr0_identity+0x0`, because its last
+instruction is the noreturn call. That is true of every Halls backtrace, and it
+is enqueued.
+
+**The audit** (Fable 5.1 on Opus 5.5, start == end) returned 0/0/0/5 P3, all
+fixed before the gates. The one with teeth, F1: the second banner emitter,
+`el1_sync_runaway`, would still have tried the ring lock's exclusive. Today it
+cannot run before the MMU, because there are no vectors yet. The fix moved the
+exemption into `cons_tx_claim_for_dump` itself. F2 was that the variant could
+not see a ring report printed on that path; a `forbid_for` of `console-ring:`
+now catches it. F3: an ELR is never rebased. F4 and F5 were wording.
+
+**A wrong turn in my own gate script.** The first sabotaged suite run returned
+rc 0 and "2090/2090 PASS". `tools/test.sh` builds only when the ELF is missing,
+so it booted the 17:18 kernel from before the change. A fail-fast guard that was
+itself looking in the wrong file stopped the batch. Every suite run now does
+`tools/build.sh kernel` first and reads `  tests: N/M` from
+`build/test-boot.log` (memory: bug_sabotage_leaves_its_kernel_in_build,
+RECURRED).
+
+**Two neighbours found on the way, enqueued, not fixed here.**
+
+- The boot CPU gets VBAR_EL1 only at `exception_init` (main.c:443), so any fault
+  before it wedges silently. It is the twin of #214's secondary fix.
+- The noreturn-frame naming above.
+
+**Evidence.** Mac lease 20:53-21:45:39Z.
+
+- Sabotages, one claim each:
+  - The inverted predicate and the deleted rebase together: 2088/2091, failing
+    exactly the two token assertions and the rebase assertion.
+  - The gate's exclusive restored: zero bytes, timeout.
+  - The ring lock's exclusive restored: zero bytes, timeout.
+  - The ring report restored: the forbid catches it.
+- Clean: `tools/test-fault.sh` 15/15, `tools/test.sh` 2091/2091 PASS (its
+  check-production leg included).
+- Pi lease 20:00-20:01Z.
+
+The SMP gate was not run: the change is on the dying path, plus one `mrs` per
+console byte.
+
 ## 2026-10-27 -- two build knobs that changed nothing, retired; a mirror out of quota; the diagnostic knobs built (vote 25; corona)
 
 **What started it.** The kernel-declarations arc's self-audit of

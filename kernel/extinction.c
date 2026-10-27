@@ -143,6 +143,22 @@ int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) 
     return 1;
 }
 
+// With stage 1 off -- the boot CPU before mmu_enable -- every data access is
+// Device-nGnRnE, and an exclusive pair to Device memory is IMPLEMENTATION
+// DEFINED: QEMU completes it, but a memory system with no global monitor can
+// fail the store forever, and the claim and the per-byte gate would spin with
+// nothing printed. Only the boot CPU runs C then (a secondary's MMU-off window
+// is start.S and the frameless mmu_program_this_cpu), so there is no peer to
+// claim against: with the MMU off the dying path takes no claim, no gate and no
+// ring lock (cons_tx_claim_for_dump asks this too, which covers the runaway's
+// banner), and executes no exclusive. SCTLR_EL1 is this CPU's own fact; a flag
+// in memory would be written uncached and read back through the cache.
+int extinction_mmu_off(void) {
+    u64 sctlr;
+    __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
+    return !(sctlr & 1ull);
+}
+
 // The mark is per CPU, so the byte's thread must not leave the CPU between
 // enter and exit: a switch would let another thread's exit clear the mark,
 // and a migration would drop it on a CPU that never raised it. With IRQs on,
@@ -153,6 +169,7 @@ int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) 
 // TPIDR_EL1 may be wild (#806) and a fault on the banner's first byte would
 // park the CPU with nothing printed.
 int extinction_tx_enter(void) {
+    if (extinction_mmu_off()) return EXTINCTION_TX_UNGATED;
     u64 daif;
     __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
     int held = !(daif & (1ull << 7));
@@ -167,6 +184,7 @@ int extinction_tx_enter(void) {
 }
 
 void extinction_tx_exit(int token) {
+    if (token == EXTINCTION_TX_UNGATED) return;
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
@@ -186,13 +204,18 @@ static u8 g_extinction_claim_irqs_on;
 // byte in flight (or the wait's bound has passed), so the banner it prints next
 // starts a line no peer can split.
 static int extinction_claim_console(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (extinction_mmu_off()) {
+        __atomic_store_n(&g_extinction_console, 1u, __ATOMIC_RELAXED);
+        g_extinction_owner[cpu] = 1u;
+        return 1;
+    }
     if (!extinction_claim_word(&g_extinction_console))
         return 0;
     u64 daif;
     __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
     if (!(daif & (1ull << 7))) g_extinction_claim_irqs_on = 1u;
-    unsigned cpu = smp_cpu_idx_self();
-    if (cpu >= DTB_MAX_CPUS) cpu = 0;
     g_extinction_owner[cpu] = 1u;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     (void)extinction_tx_wait_core(g_extinction_tx_busy, DTB_MAX_CPUS, cpu);
@@ -272,11 +295,14 @@ static void extinction_claim_ring(void) {
 // Printed by the winner AFTER halls_dump (the ABI line stays first). Same
 // wording rules as the peer report: no "EXTINCTION" token, nothing at column 0.
 static void extinction_report_claim(void) {
+    if (extinction_mmu_off())
+        uart_puts("  console-claim: skipped with the MMU off (one cpu runs; an exclusive to Device memory may never complete)\n");
     if (g_extinction_claim_irqs_on)
         uart_puts("  console-claim: taken with irqs on (the claiming thread could leave the owning cpu)\n");
 }
 
 static void extinction_report_ring(void) {
+    if (extinction_mmu_off()) return;
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     if (g_extinction_ring_held[cpu]) {

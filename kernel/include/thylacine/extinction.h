@@ -53,13 +53,21 @@ int extinction_console_claim_or_own(void);
 int extinction_claim_word(uint32_t *word);
 #endif // KERNEL_TESTS
 
+// True on a CPU whose stage 1 translation is off (SCTLR_EL1.M clear): the boot
+// CPU before mmu_enable. Every data access is then Device memory, where an
+// exclusive need not complete, so the dying path's claim, console gate and ring
+// lock take none.
+int extinction_mmu_off(void);
+
 // The console gate every direct UART byte passes (uart_putc). Enter returns 0
 // when a PEER owns the console: the caller drops the byte and does not call exit.
 // Otherwise the byte is in flight until extinction_tx_exit, which takes enter's
 // token: HELD when IRQs were on and the thread's preempt count is held across
-// the byte, BYTE when IRQs were masked and no thread state was touched.
-#define EXTINCTION_TX_BYTE 1
-#define EXTINCTION_TX_HELD 2
+// the byte, BYTE when IRQs were masked and no thread state was touched, UNGATED
+// when the MMU was off and the gate did not run (exit then does nothing).
+#define EXTINCTION_TX_BYTE    1
+#define EXTINCTION_TX_HELD    2
+#define EXTINCTION_TX_UNGATED 3
 int  extinction_tx_enter(void);
 void extinction_tx_exit(int token);
 

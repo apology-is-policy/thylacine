@@ -12,6 +12,11 @@
 #                     "EXTINCTION: stack canary mismatch (smashed stack)"
 #   wxe_violation   — kernel-image permission fault →
 #                     "EXTINCTION: PTE violates W^X (kernel image)"
+#   wxe_install_kernel, wxe_install_block, wxe_install_gib, wxe_install_user —
+#                     each leaf encoder handed a writable + executable
+#                     attribute (I-12, vote 22) →
+#                     "EXTINCTION: PTE violates W^X at install (kernel page)",
+#                     "(kernel L2 block)", "(kernel L1 block)", "(user page)"
 #   bti_fault       — Branch Target Exception (FEAT_BTI required) →
 #                     "EXTINCTION: BTI fault (...)"
 #   kstack_overflow — per-thread kstack guard page fires (P2-Dc) →
@@ -31,6 +36,16 @@
 #                     (the per-byte console gate) →
 #                     "EXTINCTION: peer chatter: this banner must reach the wire whole"
 #                     matched as the ENTIRE line, not a substring
+#   extinction_mmu_off — a W+X leaf encoded inside build_page_tables, with
+#                     stage 1 still off: the banner must come from extinction's
+#                     MMU-off path, which takes no exclusive →
+#                     "EXTINCTION: PTE violates W^X at install (kernel page)"
+#                     with "console-claim: skipped with the MMU off" and a
+#                     symbolized "  extinction+0x" frame present and no
+#                     "console-ring:" line. An exclusive left on that path is
+#                     seen only where one to Device memory never completes:
+#                     measured under HVF on Apple silicon and KVM on thyla-pi's
+#                     A72 (zero bytes); TCG completes it and passes.
 #   no_entropy      — no provoker in the build: the LAUNCH leaves the kernel
 #                     no strong entropy source (TCG -cpu cortex-a72 has no
 #                     RNDR; THYLACINE_NO_RNG=1 attaches no virtio-rng), and the
@@ -68,7 +83,7 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter no_entropy"
+ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off no_entropy"
 
 # Launcher settings a variant boots under, word-split into run-vm.sh's
 # environment. Empty = the caller's own.
@@ -92,10 +107,26 @@ whole_line_for() {
     esac
 }
 
+# Substrings, one per line, that must ALSO appear for a variant to PASS.
+# Empty = no such requirement. The expected line names the extinction, not the
+# path that printed it: where the variant exists to prove the path, these do.
+require_for() {
+    case "$1" in
+        # The MMU-off claim's own report, and a pre-MMU frame symbolized: before
+        # the MMU every code address is a PA, which only the dump's PA rebase
+        # turns into a name.
+        extinction_mmu_off) printf '%s\n' "console-claim: skipped with the MMU off" \
+                                           "  extinction+0x" ;;
+        *)                  echo "" ;;
+    esac
+}
+
 forbid_for() {
     case "$1" in
         el1_sync_runaway) echo "console-ring: NOT held" ;;
         extinction_peer_chatter) echo "console-claim: taken with irqs on" ;;
+        # The ring is not claimed before the MMU, so no ring report is true.
+        extinction_mmu_off) echo "console-ring:" ;;
         # The suite's first line: a refusal printed after it came too late.
         no_entropy)       echo "  tests:" ;;
         # The provoker's own line: the encode returned.
@@ -120,6 +151,7 @@ expected_for() {
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
         extinction_peer_chatter) echo "EXTINCTION: peer chatter: this banner must reach the wire whole" ;;
+        extinction_mmu_off) echo "EXTINCTION: PTE violates W^X at install (kernel page)" ;;
         no_entropy)      echo "EXTINCTION: CSPRNG unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed entropy; refusing to start userspace" ;;
         # ROUND F6: the variant REACHES cons_tx_claim_for_dump's
         # already-ours arm but could not FAIL if it were wrong -- delete that
@@ -269,11 +301,19 @@ for variant in $selected; do
             # banner the slow way (a broken re-entrant claim burning its bound
             # and emitting unserialized) prints the expected string too.
             forbid="$(forbid_for "$variant")"
+            missing=""
+            while IFS= read -r req; do
+                [[ -n "$req" ]] && ! grep -qF -- "$req" "$log_file" && missing="$req" && break
+            done <<< "$(require_for "$variant")"
             if [[ -n "$(whole_line_for "$variant")" ]] \
                && ! tr -d '\r' < "$log_file" | grep -qxF "$expect"; then
                 fail=$((fail + 1))
                 echo "==> [$variant] FAIL: '$expect' is not a whole line -- the banner was torn:"
                 grep -aF "$expect" "$log_file" | head -2 | sed 's/^/    /'
+            elif [[ -n "$missing" ]]; then
+                fail=$((fail + 1))
+                echo "==> [$variant] FAIL: saw '$expect' but not '$missing'"
+                echo "    the banner printed, but not by the path the variant exists to prove"
             elif [[ -n "$forbid" ]] && grep -qF "$forbid" "$log_file"; then
                 fail=$((fail + 1))
                 echo "==> [$variant] FAIL: saw '$expect' but ALSO '$forbid'"
@@ -281,7 +321,8 @@ for variant in $selected; do
                 grep -F "$forbid" "$log_file" | head -2 | sed 's/^/    /'
             else
                 pass=$((pass + 1))
-                echo "==> [$variant] PASS (saw '$expect'${forbid:+; '"$forbid"' absent})"
+                required="$(require_for "$variant" | sed '/^$/d' | sed "s/.*/'&'/" | paste -sd, -)"
+                echo "==> [$variant] PASS (saw '$expect'${required:+ and $required}${forbid:+; '"$forbid"' absent})"
                 (( verbose )) && grep "^EXTINCTION:" "$log_file" | head -3
             fi
             ;;

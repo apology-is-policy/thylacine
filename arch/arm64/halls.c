@@ -113,6 +113,15 @@ u64 halls_link_addr(u64 addr, u64 kaslr_offset) {
     return addr - kaslr_offset;
 }
 
+// Code that ran before the MMU -- and start.S's frame beneath boot_main -- ran
+// at the image's load PA, which no slide maps: an address inside the image's
+// PA range is rebased onto the link VA. Every other address takes the slide.
+VISIBLE_IF_KERNEL_TESTS
+u64 halls_code_link_addr(u64 addr, u64 kaslr_offset, u64 pa_start, u64 pa_end) {
+    if (addr >= pa_start && addr < pa_end) return addr - pa_start + KASLR_LINK_VA;
+    return halls_link_addr(addr, kaslr_offset);
+}
+
 // Return addresses spilled to the kernel stack are PAC-signed on a FEAT_PAuth
 // core (the kernel signs with paciasp on entry where start.S enabled PAC). The
 // raw stack word carries the pointer-auth code in the unused high VA bits;
@@ -200,13 +209,19 @@ const char *halls_symbolize(u64 link_va, u64 *out_off) {
 // canonical address, then -- unless it is a userspace VA (skip_link; F5) --
 // its KASLR link-time form for addr2line, and (HX-2) its live `name+0xN`
 // symbolization. A user VA minus the kernel KASLR offset is nonsense, so both
-// the link and the symbol are suppressed for EL0-source frames.
-static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool skip_link) {
+// the link and the symbol are suppressed for EL0-source frames. A return
+// address (ret_addr) inside the image's PA range is code that ran there, before
+// the MMU; an ELR there is not (a real one is a high VA, a stale one is
+// whatever the last exception left), so only return addresses are rebased.
+static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool skip_link,
+                                 bool ret_addr) {
     u64 a = halls_strip_pac(addr);
     uart_puts(label);
     uart_puthex64(a);
     if (!skip_link) {
-        u64 link = halls_link_addr(a, koff);
+        u64 link = ret_addr ? halls_code_link_addr(a, koff, kaslr_kernel_pa_start(),
+                                                   kaslr_kernel_pa_end())
+                            : halls_link_addr(a, koff);
         uart_puts("  link ");
         uart_puthex64(link);
         // HX-2: live symbolization. NULL (a stub/count-0 table, or an address
@@ -235,7 +250,7 @@ static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool ski
 // suppressed (the register block + ESR/FAR remain, which carry the signal).
 static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool el0_source) {
     uart_puts("HALLS: backtrace (fp-chain; link addrs for addr2line):\n");
-    halls_emit_code_addr("HALLS:   #0  ", ctx->elr, koff, el0_source);
+    halls_emit_code_addr("HALLS:   #0  ", ctx->elr, koff, el0_source, false);
     if (el0_source) {
         uart_puts("HALLS:   (EL0 source -- userspace fp not walked from EL1)\n");
         return;
@@ -251,7 +266,7 @@ static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool 
         uart_puts("HALLS:   #");
         uart_putdec((u64)(i + 1));
         uart_puts(i + 1 < 10 ? "  " : " ");
-        halls_emit_code_addr("", ra, koff, false);
+        halls_emit_code_addr("", ra, koff, false, true);
         prev = fp;
         fp = halls_peek(fp);   // next frame
     }
@@ -335,7 +350,7 @@ static void halls_emit(const struct exception_context *ctx, u64 ksp,
                              : "  source: bare extinction (no exception frame)\n");
 
     halls_emit_code_addr(from_exception ? "HALLS: ELR  " : "HALLS: ELR  (stale) ",
-                         ctx->elr, koff, el0_source);
+                         ctx->elr, koff, el0_source, false);
 
     uart_puts("HALLS: ESR  ");
     uart_puthex64(ctx->esr);
@@ -348,7 +363,7 @@ static void halls_emit(const struct exception_context *ctx, u64 ksp,
     uart_puts("HALLS: SP   ");
     uart_puthex64(ksp);
     uart_puts("\n");
-    halls_emit_code_addr("HALLS: LR   ", ctx->regs[30], koff, el0_source);
+    halls_emit_code_addr("HALLS: LR   ", ctx->regs[30], koff, el0_source, true);
     uart_puts("HALLS: FP   ");
     uart_puthex64(ctx->regs[29]);
     uart_puts("\n");

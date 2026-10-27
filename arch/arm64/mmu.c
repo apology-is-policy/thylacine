@@ -338,6 +338,14 @@ _Static_assert((PTE_KERN_TEXT & PTE_GP) != 0,
 #define PL011_BASE_FALLBACK 0x09000000ull
 
 static void build_page_tables(u64 slide) {
+#ifdef THYLACINE_FAULT_TEST_extinction_mmu_off
+    // A W+X leaf encoded with stage 1 still off: its extinction must reach the
+    // wire through extinction()'s MMU-off path (tools/test-fault.sh).
+    {
+        volatile u64 pte = make_page_pte_l3(0, PTE_KERN_RW & ~PTE_PXN);
+        (void)pte;
+    }
+#endif
     // PA of kernel start. In PIC mode this is PC-relative — gives the
     // runtime load PA when called pre-MMU-on with PC = load PA.
     u64 pa_kernel_start = (u64)(uintptr_t)_kernel_start;
