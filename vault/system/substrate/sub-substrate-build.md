@@ -102,6 +102,16 @@ release default, and `build.sh` builds that kernel into
 ([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
 the export.
 
+KASLR (I-16) and the kernel hardening flags are not configuration: every
+image has both ([[dec-2026-10-27-build-knobs]]). The schema has no `KASLR` or
+`HARDENING_FULL` symbol and `build.sh` no `--kaslr` or `--hardening-full`.
+A profile that still names a symbol the schema lacks loads anyway:
+`bc_set_one` names the symbol, `bc_load_file` names the file and the line it
+skips, and the lines after it apply. On the command line an unknown `--set`
+symbol, an unknown flag or a missing `--with` fragment stops the build.
+`test-build-config.sh` pins the stale-profile load and that every shipped
+preset and fragment loads without a warning.
+
 The lever selects a kernel, never a ramfs. `build/ramfs.cpio` is shared by every
 kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,
 `loom-bridge-probe`, therefore sits in the curated `usr_bins` list of every

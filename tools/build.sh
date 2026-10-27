@@ -60,8 +60,6 @@
 #
 # Options:
 #   --release        Release build (-O2, no debug). Default Debug (assertions on).
-#   --hardening-full Enable P1-H hardening flags.
-#   --kaslr          Enable KASLR.
 #   --sanitize=ubsan UBSan kernel build (separate build dir).
 #   --production     V1.0 lean boot shape: drop the in-kernel test suite
 #                    (KERNEL_TESTS=OFF) + joey's boot-test probe ladder (#61).
@@ -153,8 +151,8 @@ fi
 # --- build configuration (tools/build-config.sh: the typed config artifact) ----
 # docs/BUILD-CONFIG-DESIGN.md. The old flag-bundles + scattered THYLACINE_* env
 # vars are now orthogonal axes resolved here; bc_export threads them onto the knobs
-# this script reads (build_type/kernel_tests/boot_probes/dev_accounts/hardening_full/
-# kaslr/sanitize/no_tickless + the bake env vars). Legacy flags stay as sugar; a bare
+# this script reads (build_type/kernel_tests/boot_probes/dev_accounts/sanitize/
+# no_tickless + the bake env vars). Legacy flags stay as sugar; a bare
 # invocation applies the `default` preset -- the historical dev/CI shape (in-kernel
 # tests + boot-probe ladder ON) that make/tools/test.sh/the SMP gate rely on.
 BC_DIR_CONFIGS="$REPO_ROOT/configs"
@@ -179,13 +177,11 @@ while [[ $# -gt 0 ]]; do
         --show-config) show_config=1; shift ;;
         # -- legacy sugar; preserved behavior (BUILD-CONFIG-DESIGN.md 4.3) --
         --release)         bc_set BUILD_TYPE=release; shift ;;
-        --hardening-full)  bc_set HARDENING_FULL=y;   shift ;;
-        --kaslr)           bc_set KASLR=y;            shift ;;
         --no-tickless)     bc_set TICKLESS=n;         shift ;;
         --sanitize=*)      bc_set "SANITIZE=$(bc__san_alias "${1#--sanitize=}")"; shift ;;
         --production)      # exact old lean shape: tests + probes OFF. Accounts now
                            # stay on (DEV_ACCOUNTS default y) -- the finding-#1 fix.
-                           # `--config production` is the separate hardened preset.
+                           # `--config production` is the separate release preset.
                            bc_set TESTS=n; bc_set BOOT_PROBES=n; config_selected=1; shift ;;
         --dev)             bc_apply_preset dev; config_selected=1; shift ;;
         # -- non-config passthroughs (unchanged) --
@@ -200,14 +196,14 @@ done
 if [[ "$config_selected" == 0 ]]; then bc_apply_preset default; fi
 bc_resolve
 bc_export                 # -> build_type/kernel_tests/boot_probes/dev_accounts/
-                          #    hardening_full/kaslr/sanitize/no_tickless + bake env vars
+                          #    sanitize/no_tickless + bake env vars
 mkdir -p "$BUILD_DIR"
 bc_emit_config "$BUILD_DIR/.config"
 if [[ "$show_config" == 1 ]]; then
     echo "== resolved build config ($BUILD_DIR/.config) =="
     bc_show
     echo "== -> build.sh knobs =="
-    echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts hardening=$hardening_full kaslr=$kaslr sanitize='$sanitize' no_tickless=$no_tickless"
+    echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts sanitize='$sanitize' no_tickless=$no_tickless"
     if [[ ${#extra_cmake_args[@]} -gt 0 ]]; then printf 'cmake extra:'; printf ' %s' "${extra_cmake_args[@]}"; echo; fi
     exit 0
 fi
@@ -348,12 +344,10 @@ stratum_host_tools_stale() {
 }
 
 build_kernel() {
-    echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', tests=$kernel_tests, dir=$KERNEL_BUILD)"
+    echo "==> Building kernel (build_type=$build_type, sanitize='${sanitize_cmake}', tests=$kernel_tests, dir=$KERNEL_BUILD)"
     cmake -S "$REPO_ROOT" -B "$KERNEL_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
-        -DTHYLACINE_HARDENING_FULL="$hardening_full" \
-        -DTHYLACINE_KASLR="$kaslr" \
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         -DKERNEL_TESTS="$kernel_tests" \
         -DTHYLACINE_NO_TICKLESS="$no_tickless" \
@@ -383,7 +377,7 @@ build_kernel() {
              echo "    \"Cross-file declarations\"" >&2
              exit 1; }
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
-    ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
+    ledger "kernel ELF: BUILT ($build_type, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
     ls -la "$KERNEL_BUILD/thylacine.elf"
 
     # P4-E: build the ramfs cpio alongside the kernel so QEMU's

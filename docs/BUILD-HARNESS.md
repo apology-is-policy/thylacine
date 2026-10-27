@@ -129,11 +129,11 @@ The **configurator** (§4.3) is the primary interface; the older flags are kept 
 | Flag | Effect |
 |---|---|
 | `--config <name>` | Start from the preset `configs/<name>.config` (`production` / `dev` / `everything` / `default` / `ci`, or one the wizard wrote). |
-| `--with <frag>` | Overlay a fragment from `configs/fragments/` (`ubsan`, `kaslr`, `chunk-clade`, …). Repeatable. |
+| `--with <frag>` | Overlay a fragment from `configs/fragments/` (`ubsan`, `release`, `chunk-clade`, `chunk-go`). Repeatable. |
 | `--set KEY=VALUE` | Override one symbol (e.g. `--set DEV_ACCOUNTS=n`). Repeatable; wins over presets/fragments. |
 | `--show-config` | Resolve + print the config (and the build.sh knobs it maps to), then exit without building. |
-| `--release` / `--kaslr` / `--hardening-full` / `--sanitize=ubsan` / `--no-tickless` | Legacy sugar for single symbols. |
-| `--production` | Legacy sugar: the lean **V1.0 boot shape** (in-kernel tests + boot-probe ladder OFF; login accounts stay ON since the account decouple). `--config production` is the separate hardened preset. |
+| `--release` / `--sanitize=ubsan` / `--no-tickless` | Legacy sugar for single symbols. KASLR and the hardening flags are not options: every image has both. |
+| `--production` | Legacy sugar: the lean **V1.0 boot shape** (in-kernel tests + boot-probe ladder OFF; login accounts stay ON since the account decouple). `--config production` is the separate release preset. |
 | `--dev` | Legacy sugar for `--config dev`. |
 | `--verbose` | Verbose CMake/Cargo output. |
 

@@ -85,11 +85,6 @@ if(THYLACINE_FAULT_TEST)
     add_compile_definitions(THYLACINE_FAULT_TEST_${THYLACINE_FAULT_TEST}=1)
 endif()
 
-# Build-time options. Each defaults to off at P1-A and gets enabled at later phases.
-option(THYLACINE_HARDENING_FULL "Enable full hardening (CFI/PAC/MTE/BTI/LSE/canaries) — P1-H+" OFF)
-option(THYLACINE_KASLR          "Enable KASLR — P1-C+" OFF)
-option(THYLACINE_DEBUG_BUILD    "Debug build with extra assertions" ON)
-
 # Compile/link flag plumbing comes from the toolchain file. We re-export here
 # so subdirectories can compose with target_compile_options().
 add_compile_options(${THYLACINE_KERNEL_C_FLAGS})

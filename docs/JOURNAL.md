@@ -22,6 +22,54 @@ needed the operator.
 
 
 ---
+## 2026-10-27 -- two build knobs that changed nothing, retired (vote 25; corona)
+
+**What started it.** The kernel-declarations arc's self-audit of
+check-production's kernel leg compared a Release configure with a Debug one
+and found that the options `THYLACINE_HARDENING_FULL` and `THYLACINE_KASLR`
+were declared in `CMakeLists.txt`, passed by `build.sh`, and read by nothing.
+The configurator described them as switches ("off makes crash addresses
+stable for debugging"); the toolchain hardens every kernel and `kaslr.c`
+randomizes every boot. Enqueued in OPEN-BUGS as a P3 config defect, put to
+the operator in the vote-25 batch: retire both (chosen), wire `KASLR=n` as a
+fixed slide, or wire both.
+
+**Enumerating before deleting.** A tracked-file census for every spelling
+(`HARDENING_FULL`, `hardening_full`, `--hardening-full`, `--kaslr`, `KASLR=`,
+`THYLACINE_KASLR`) found 16 files outside `work/`, and two consumers the
+resume note had not listed: `configs/fragments/{kaslr,hardening-full}.config`
+and `tools/test-configure.sh`, whose wizard cases used KASLR as their example
+bool. The vault had no mention. Nothing re-reads an emitted `build/.config`
+(ci-smp-gate only hashes it). A third option, `THYLACINE_DEBUG_BUILD`, was
+read by nothing too, and went with them.
+
+**A message that said the opposite of what happened.** Checking how a stale
+key is refused: in a profile file, `bc_load_file` warns and keeps loading (as
+designed, Kconfig-style). On the command line, `--set KASLR=y` printed
+"unknown symbol 'KASLR' (ignored)" and then stopped the build with rc 1,
+because the "(ignored)" belonged to the file loader but lived in the shared
+setter. Now the setter names the fault and the loader names the file and the
+line it skips.
+
+**A test that never tested its claim.** T-precedence said "--set overrides a
+fragment" but set a different symbol at the CLI layer than the fragment had
+set, so it could not fail on that. Rewritten to push one symbol through all
+three layers.
+
+**Evidence.** Host tests green (test-build-config ALL PASS, test-configure
+28/0); 8 sabotages, each red on its named line; a configure of HEAD's
+`CMakeLists.txt` with both knobs ON against the new one without: 0 of 23
+generated build files differ, with a control (`THYLACINE_NO_TICKLESS=ON`)
+showing 2. `tools/build.sh kernel` (the whole image
+chain) rc 0 and `check-production` rc 0, on a Mac lease held 16:14Z to
+16:20:33Z.
+
+**Decisions.** The operator's vote 25 (retire both). Mine, stated in the
+commit: `THYLACINE_DEBUG_BUILD` retired with them; the frozen
+`docs/reference/150-build-config.md` left untouched; the build dossier's
+`updated:` date left at 2026-10-13 because `tools/build.sh` has 349
+undocumented lines since then.
+
 ## 2026-10-26/27 -- one checked declaration per cross-file kernel name (votes 19-24; corona)
 
 *What this run was for:* OPEN-BUGS "kernel warning census" (10-26 14:00Z).

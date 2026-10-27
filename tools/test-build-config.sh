@@ -26,7 +26,7 @@ eq()   { if [[ "$2" == "$3" ]]; then ok "$1 ($2)"; else bad "$1: want '$3', got 
 
 echo "== defaults =="
 bc_reset
-eq "default KASLR"        "$(bc_get KASLR)"        "n"
+eq "default TESTS"        "$(bc_get TESTS)"        "n"
 eq "default DEV_ACCOUNTS" "$(bc_get DEV_ACCOUNTS)" "y"
 eq "default BUILD_TYPE"   "$(bc_get BUILD_TYPE)"   "debug"
 eq "default CHUNK_DOSBOX"  "$(bc_get CHUNK_DOSBOX)"  "y"
@@ -38,8 +38,6 @@ eq "default CHUNK_WEBKIT (slow + foraged -> off)" "$(bc_get CHUNK_WEBKIT)" "n"
 echo "== preset: production =="
 bc_reset; bc_apply_preset production
 eq "prod BUILD_TYPE"    "$(bc_get BUILD_TYPE)"    "release"
-eq "prod KASLR"         "$(bc_get KASLR)"         "y"
-eq "prod HARDENING"     "$(bc_get HARDENING_FULL)" "y"
 eq "prod TESTS"         "$(bc_get TESTS)"         "n"
 eq "prod DEV_ACCOUNTS"  "$(bc_get DEV_ACCOUNTS)"  "y"
 
@@ -57,11 +55,32 @@ eq "dev TESTS"          "$(bc_get TESTS)"         "n"
 
 echo "== T-precedence: fragment overrides preset, --set overrides fragment =="
 bc_reset; bc_apply_preset dev
-eq "dev KASLR (pre)"    "$(bc_get KASLR)"         "n"
-bc_apply_fragment kaslr
-eq "frag KASLR override" "$(bc_get KASLR)"        "y"
-bc_set BUILD_TYPE=release
-eq "cli BUILD_TYPE override" "$(bc_get BUILD_TYPE)" "release"
+eq "dev BUILD_TYPE (pre)" "$(bc_get BUILD_TYPE)"   "debug"
+bc_apply_fragment release
+eq "frag BUILD_TYPE override" "$(bc_get BUILD_TYPE)" "release"
+bc_set BUILD_TYPE=debug
+eq "cli BUILD_TYPE override" "$(bc_get BUILD_TYPE)" "debug"
+
+echo "== T-retired: a profile naming KASLR or HARDENING_FULL still loads =="
+# Every image has KASLR and the hardening flags, so the two symbols were retired
+# (operator vote 2026-10-27). A profile the wizard wrote before still names them:
+# it must load, name each one, and apply the line after them -- not abort.
+tmp="$(mktemp)"; printf 'KASLR=y\nHARDENING_FULL=y\nBUILD_TYPE=release\n' > "$tmp"
+bc_reset; bc_load_file "$tmp" 2> "$tmp.err"; rc=$?
+eq "stale profile loads" "$rc" "0"
+eq "stale profile: the line after the retired ones applies" "$(bc_get BUILD_TYPE)" "release"
+if grep -q "unknown symbol 'KASLR'" "$tmp.err" && grep -q "unknown symbol 'HARDENING_FULL'" "$tmp.err"; then
+    ok "stale profile: each retired symbol is named"; else bad "stale profile: each retired symbol is named"; fi
+# ... and the file holding it, so the operator knows which profile to edit.
+if grep -q -F "$tmp: ignoring 'KASLR=y'" "$tmp.err"; then
+    ok "stale profile: the file and its line are named"; else bad "stale profile: the file and its line are named"; fi
+rm -f "$tmp" "$tmp.err"
+# Every shipped preset and fragment loads without a warning: a key the schema
+# no longer has would be dropped on every build that names the file.
+for cfg in "$BC_DIR_CONFIGS"/*.config "$BC_DIR_CONFIGS"/fragments/*.config; do
+    bc_reset; w="$(bc_load_file "$cfg" 2>&1 >/dev/null)"
+    eq "${cfg#"$BC_DIR_CONFIGS"/} loads without a warning" "$w" ""
+done
 
 echo "== T-implies: BOOT_PROBES=y auto-raises DEV_ACCOUNTS =="
 bc_reset; bc_set BOOT_PROBES=y; bc_set DEV_ACCOUNTS=n
@@ -81,13 +100,13 @@ eq "control: DOSBOX=y keeps CHUNK_DUKE3D" "$(bc_get CHUNK_DUKE3D)" "y"
 
 echo "== validation: bad value + unknown symbol rejected =="
 bc_reset
-if bc_set KASLR=maybe 2>/dev/null; then bad "bad value accepted"; else ok "bad value rejected"; fi
+if bc_set TESTS=maybe 2>/dev/null; then bad "bad value accepted"; else ok "bad value rejected"; fi
 if bc_set DOSBOX_CPU_PRESET=turbo 2>/dev/null; then bad "bad preset accepted"; else ok "bad preset (turbo) rejected"; fi
 if bc_set DOSBOX_CPU_PRESET=486 2>/dev/null; then ok "preset 486 accepted"; else bad "preset 486 rejected"; fi
 if bc_set_one BOGUS y 2>/dev/null; then bad "unknown symbol accepted"; else ok "unknown symbol rejected"; fi
 
 echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + DEV_ACCOUNTS) =="
-build_type=""; kernel_tests=""; boot_probes=""; hardening_full=""; kaslr=""
+build_type=""; kernel_tests=""; boot_probes=""
 sanitize="__unset__"; no_tickless=""; dev_accounts=""; private_async_qual=""; extra_cmake_args=()
 unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET THYLACINE_BAKE_WEBKIT 2>/dev/null || true
 bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export
@@ -95,8 +114,6 @@ eq "export THYLACINE_BAKE_WEBKIT (n -> 0)" "${THYLACINE_BAKE_WEBKIT:-}" "0"
 eq "export build_type"    "$build_type"    "Release"
 eq "export kernel_tests"  "$kernel_tests"  "OFF"
 eq "export boot_probes"   "$boot_probes"   "OFF"
-eq "export hardening_full" "$hardening_full" "ON"
-eq "export kaslr"         "$kaslr"         "ON"
 eq "export sanitize (none->empty)" "$sanitize" ""
 eq "export no_tickless (TICKLESS=y -> OFF)" "$no_tickless" "OFF"
 eq "export dev_accounts (DEV_ACCOUNTS=y -> ON)" "$dev_accounts" "ON"

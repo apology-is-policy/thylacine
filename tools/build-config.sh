@@ -50,12 +50,6 @@ bc_def compile BOOT_PROBES bool n "var:boot_probes" \
 bc_def compile DEV_ACCOUNTS bool y "var:dev_accounts" \
   "Bake a dev login account" \
   "Provisions the daily-use login accounts (michael + cora) at first boot so a lean image is loginnable -- without it, --production has no accounts and you cannot log in (the finding-#1 fix; before this axis, accounts rode BOOT_PROBES). The full michael/susan/cora/wheel fixture set is created only when the boot-probe ladder (BOOT_PROBES) also runs. Turn OFF only for a bare image an installer/first-boot flow will provision."
-bc_def compile HARDENING_FULL bool n "var:hardening_full" \
-  "Full P1-H hardening" \
-  "Enables the full hardening flag set (PAC/BTI where the CPU has them, plus extra guards). A small size/complexity cost; on for production-like images."
-bc_def compile KASLR bool n "var:kaslr" \
-  "Kernel ASLR" \
-  "Randomizes the kernel base address at each boot (invariant I-16). On for production-like images; off makes crash addresses stable for debugging."
 bc_def compile SANITIZE "choice:none,ubsan" none "sanitize:sanitize" \
   "Kernel sanitizer" \
   "ubsan = UndefinedBehaviorSanitizer (trapping); builds into a separate dir so it never clobbers the normal kernel. none for everything else."
@@ -181,7 +175,7 @@ bc_validate() {
 bc_set_one() {
     local name="$1" val="$2" idx
     if ! idx="$(bc_index_of "$name")"; then
-        echo "build-config: unknown symbol '$name' (ignored)" >&2; return 1
+        echo "build-config: unknown symbol '$name'" >&2; return 1
     fi
     if ! bc_validate "${BC_TYPE[$idx]}" "$val"; then
         echo "build-config: '$val' is not valid for $name (${BC_TYPE[$idx]})" >&2; return 1
@@ -217,7 +211,7 @@ bc_load_file() {
         key="${line%%=*}"; val="${line#*=}"
         key="${key%"${key##*[![:space:]]}"}"     # rtrim key
         val="${val#"${val%%[![:space:]]*}"}"     # ltrim val
-        bc_set_one "$key" "$val" || true
+        bc_set_one "$key" "$val" || echo "build-config: $path: ignoring '$line'" >&2
     done < "$path"
 }
 
