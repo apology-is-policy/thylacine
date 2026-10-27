@@ -4438,6 +4438,8 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // snare:* per-Proc-termination contract the pre-#809 thread_count>1
     // extinction predated and violated. The dependency that branch waited
     // on (cross-thread shootdown) has landed; the branch is now retired.
+    // The one exception is a thread an exec has doomed: exits_term lets it
+    // leave alone, and the Proc lives on (ARCH 7.3.3).
     //
     // The uart line preserves pre-#3a visibility: a faulting binary
     // announces pid + reason + addr on the boot log. The death records the
@@ -4472,7 +4474,13 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
         cons_diag_line_puts(&dl, " lr=");
         cons_diag_line_puthex64(&dl, t->debug_trapframe->regs[30]);
     }
-    cons_diag_line_puts(&dl, " -- terminating Proc\n");
+    // A thread an exec by another thread has doomed dies alone, and the Proc
+    // goes on into the new image (ARCH 7.3.3), so the line names the thread
+    // (docs/ERRORS.md).
+    bool alone = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&
+                 proc_exec_dooms(p, t);
+    cons_diag_line_puts(&dl, alone ? " -- terminating thread (an exec holds the Proc)\n"
+                                   : " -- terminating Proc\n");
     cons_diag_line_emit(&dl);
 
     exits_note(name);

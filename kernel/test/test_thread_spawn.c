@@ -118,6 +118,7 @@
 #include "../../arch/arm64/uart.h"
 
 #include <thylacine/addrspace.h>
+#include <thylacine/cons.h>
 #include <thylacine/context.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/errno.h>
@@ -1728,11 +1729,12 @@ static void xc_peer_entry(void *arg) {
     case XC_TRAPPED:
     case XC_GROUP_EXITER:
         // Woken to die, the thread ends itself instead: an exit call, a death by
-        // a trap, or an exit_group.
+        // a trap (through the fault path, which announces it), or an
+        // exit_group.
         g_xc_rc[i] = sleep(&g_xc_rendez[i], xc_never, NULL);
         if (g_xc_kind[i] == XC_EXITER) exits("c5-peer");
         if (g_xc_kind[i] == XC_GROUP_EXITER) sys_exit_group_for_test(3);
-        exits_note(NOTE_NAME_SNARE_ILL);
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, 0);
     case XC_VFORK: {
         // A vfork parent parks until its child gives back the space they share.
         int cpid = rfork(RFPROC | RFMEM, xc_vfork_child, NULL);
@@ -2032,11 +2034,26 @@ void test_proc_exec_claim_does_not_hold_for_a_stop(void) {
     TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
 }
 
+static u8 g_xc_dbuf[4096];
+
+// True iff `want` occurs in the first n bytes of buf.
+static bool xc_bytes_have(const u8 *buf, long n, const char *want) {
+    long w = 0;
+    while (want[w]) w++;
+    for (long i = 0; i + w <= n; i++) {
+        long k = 0;
+        while (k < w && buf[i + k] == (u8)want[k]) k++;
+        if (k == w) return true;
+    }
+    return false;
+}
+
 // A doomed thread that ends itself -- an exit call, a death by a trap, or an
 // exit_group -- leaves alone, as Linux's do_group_exit does while
 // group_exec_task is set (ARCH 7.3.3): the claim still returns and the Proc
-// goes on into the new image with its /srv service posted. The service goes at
-// the real last exit.
+// goes on into the new image with its /srv service posted, and the trap's
+// console line names the thread, not the Proc. The service goes at the real
+// last exit.
 void test_proc_exec_claim_survives_a_doomed_exit(void) {
     xc_reset();
     g_xc_npeers  = 3;
@@ -2045,9 +2062,21 @@ void test_proc_exec_claim_survives_a_doomed_exit(void) {
     g_xc_kind[2] = XC_GROUP_EXITER;
     g_xc_post    = true;
     srv_registry_reset();
+    int drain = cons_drain_open();
     int child_pid = rfork(RFPROC, xc_main_entry, NULL);
+    int status = child_pid > 0 ? xc_finish(child_pid) : -1;
+    // Sampled, then read no further than the count: a read of an empty armed
+    // drain sleeps. Closed before any assert can return.
+    long have = drain == 0 ? (long)cons_test_drain_count() : 0;
+    long dn = 0;
+    while (dn < have && dn < (long)sizeof g_xc_dbuf) {
+        long r = cons_drain_read(g_xc_dbuf + dn, (long)sizeof g_xc_dbuf - dn);
+        if (r <= 0) break;
+        dn += r;
+    }
+    if (drain == 0) cons_drain_close();
     TEST_ASSERT(child_pid > 0, "rfork failed");
-    int status = xc_finish(child_pid);
+    TEST_EXPECT_EQ(drain, 0, "the console drain armed");
     TEST_ASSERT(xc_phase() != XC_FAILED, "setup: a service posted, three peers in place and a new address space");
     TEST_ASSERT(g_xc_held_in_place, "with no claim the three peers slept on");
     TEST_EXPECT_EQ(g_xc_claim_rc, 0, "a doomed thread's own exit did not end the exec");
@@ -2061,6 +2090,10 @@ void test_proc_exec_claim_survives_a_doomed_exit(void) {
     struct SrvService *svc = srv_lookup_in(srv_boot_registry(), XC_SVC, XC_SVC_LEN);
     TEST_ASSERT(svc && svc->state == SRV_STATE_TOMBSTONED,
         "the last thread out of exits() tombstoned the service");
+    TEST_ASSERT(xc_bytes_have(g_xc_dbuf, dn, "user fault: pid="),
+        "the trapped peer's fault line reached the console");
+    TEST_ASSERT(xc_bytes_have(g_xc_dbuf, dn, " -- terminating thread (an exec holds the Proc)"),
+        "the doomed thread's fault line names the thread, not the Proc");
 }
 
 // An interrupt with no handler arms its terminate latch and wakes every
