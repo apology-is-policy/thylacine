@@ -360,9 +360,15 @@ struct poll_waiter_list *poll_owed_begin(struct poll_owed_chain *c,
     return l;
 }
 
-// The holder of a bookmark here is between two batches of a walk no lock of
-// the owner's covers, and it may be preempted: spin with IRQs and preemption
-// as the caller has them, which on a free path is both on.
+// The holder of a bookmark (or of a record not yet begun) is between two
+// batches of a walk no lock of the owner's covers, and may be preempted -- onto
+// THIS CPU's run tree. A syscall body is never preempted, so an awaiter there
+// that only spun would never let it back on (audit r1 F1): yield the CPU while
+// anything else can run on it. Every caller holds no spinlock.
+static void poll_await_pause(void) {
+    if (!sched_yield_hint()) __asm__ __volatile__("yield" ::: "memory");
+}
+
 static void poll_list_await_no_mark(struct poll_waiter_list *l, bool hook_fatal) {
     for (;;) {
         bool marked = false;
@@ -374,7 +380,7 @@ static void poll_list_await_no_mark(struct poll_waiter_list *l, bool hook_fatal)
         }
         spin_unlock_irqrestore(&l->lock, s);
         if (!marked) return;
-        __asm__ __volatile__("yield" ::: "memory");
+        poll_await_pause();
     }
 }
 
@@ -461,6 +467,8 @@ void poll_wake_deferred(struct poll_deferred *d) {
 void poll_deferred_await(struct poll_deferred *d) {
     struct Thread *t = current_thread();
     struct poll_waiter_list *l = d->list;
+    if (t && t->defer_depth)
+        extinction("poll_deferred_await inside a deferring lock");
     for (;;) {
         irq_state_t s = spin_lock_irqsave(&l->lock);
         struct poll_defer_chain *c = d->chain;
@@ -468,7 +476,7 @@ void poll_deferred_await(struct poll_deferred *d) {
         if (!c) break;
         if (t && c == &t->lock_owed)
             extinction("poll_deferred_await: the freeing thread owes the walk itself");
-        __asm__ __volatile__("yield" ::: "memory");
+        poll_await_pause();
     }
     // Off every chain, so each walk owed to it has its bookmark listed or is
     // over (the drain clears `chain` and lists the bookmark in one hold). Its

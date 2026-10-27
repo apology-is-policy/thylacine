@@ -865,6 +865,10 @@ static void thread_release(struct Thread *t, bool unlink) {
                                   extinction("thread_free of uninitialized Thread");
     if (t->state == THREAD_RUNNING)
                                   extinction("thread_free of RUNNING thread");
+    // ChainDrained (specs/poll_owed.tla, poll_defer.tla): a thread leaves every
+    // lock it held, and each release drained what it owed.
+    if (t->defer_depth || t->lock_owed.head || t->table_owed.head)
+                                  extinction("thread_free of a thread still owing hook walks");
     // An exited user thread belongs to the resume path of its last switch-out
     // (ARCH 7.3.2); a second free here would race it.
     if (t->state == THREAD_EXITING && t->proc != kproc())

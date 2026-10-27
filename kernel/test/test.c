@@ -2288,6 +2288,7 @@ void test_poll_deferred_await_waits_out_an_owed_walk(void);
 void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void);
 void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void);
 void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void);
+void test_poll_await_yields_to_a_drainer_on_its_cpu(void);
 void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -4804,6 +4805,7 @@ struct test_case g_tests[] = {
     { "poll.srvconn_send_under_a_client_lock_owes_its_walk", test_poll_srvconn_send_under_a_client_lock_owes_its_walk, false, NULL },
     { "poll.srvconn_close_under_a_client_lock_outlives_its_walks", test_poll_srvconn_close_under_a_client_lock_outlives_its_walks, false, NULL },
     { "poll.pipe_hangup_under_a_client_lock_owes_its_walk", test_poll_pipe_hangup_under_a_client_lock_owes_its_walk, false, NULL },
+    { "poll.await_yields_to_a_drainer_on_its_cpu", test_poll_await_yields_to_a_drainer_on_its_cpu, false, NULL },
     { "poll.sleep_for_waits",                   test_poll_sleep_for_waits,                   false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },

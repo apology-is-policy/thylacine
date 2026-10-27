@@ -32,6 +32,7 @@
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>         // smp_cpu_idx_self
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/thread.h>
@@ -2642,4 +2643,57 @@ void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void) {
     poll_defer_exit();
     TEST_EXPECT_EQ(freed_held, freed0, "the owed walk kept the ring past both closes");
     TEST_EXPECT_EQ(pipe_total_freed(), freed0 + 1u, "the drain's put freed it");
+}
+
+// Audit r1 F1: a free in a syscall body (never preempted) awaits a walk whose
+// drainer is a kthread preempted between two batches on the SAME CPU. An await
+// that only spins never lets the drainer back on -- the thread waited on
+// cannot run -- so it hangs; it must yield the CPU. Both threads are pinned to
+// one CPU so a peer cannot rescue the drainer.
+static struct Thread *volatile g_tpd_drainer;
+static volatile u32  g_tpd_parked;
+static volatile bool g_tpd_drainer_done;
+
+static void tpd_park_between_batches(struct poll_waiter_list *l) {
+    (void)l;
+    if (current_thread() != g_tpd_drainer) return;
+    if (__atomic_fetch_add(&g_tpd_parked, 1u, __ATOMIC_ACQ_REL) != 0) return;
+    sched();                            // runnable, its bookmark listed, off the CPU
+}
+
+static void tpd_drainer_entry(void) {
+    poll_defer_enter();
+    poll_wake_deferred(&g_tpd);
+    poll_defer_exit();                  // the drain parks once between batches
+    test_kthread_park_terminal(&g_tpd_drainer_done);
+}
+
+void test_poll_await_yields_to_a_drainer_on_its_cpu(void);
+void test_poll_await_yields_to_a_drainer_on_its_cpu(void) {
+    tpw_setup(TPW_N);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    struct Thread *me = current_thread();
+    bool was_pinned = me->cpu_pinned;
+    me->cpu_pinned = true;
+    g_tpd_parked = 0;
+    g_tpd_drainer_done = false;
+    struct Thread *k = thread_create(kproc(), tpd_drainer_entry);
+    TEST_ASSERT(k != NULL, "thread_create");
+    k->cpu_pinned = true;
+    g_tpd_drainer = k;
+    g_poll_wake_batch_hook = tpd_park_between_batches;
+    me->in_syscall = 1u;                // no timer preemption from here on
+    ready_on(smp_cpu_idx_self(), k);
+    while (!__atomic_load_n(&g_tpd_parked, __ATOMIC_ACQUIRE)) sched();
+    bool marked = poll_waiter_list_marks_for_test(&g_tpw_list) == 1u;
+    poll_deferred_await(&g_tpd);
+    u32 reached = tpd_reached(TPW_N);
+    me->in_syscall = 0u;
+    g_poll_wake_batch_hook = NULL;
+    me->cpu_pinned = was_pinned;
+    test_kthread_join_free(k, &g_tpd_drainer_done);
+    TEST_ASSERT(marked, "the drainer parked with its bookmark listed");
+    TEST_EXPECT_EQ(reached, TPW_N, "the await let the drainer finish its walk");
+    TEST_EXPECT_EQ(poll_waiter_list_marks_for_test(&g_tpw_list), 0u, "the bookmark left");
+    tpw_teardown();
 }
