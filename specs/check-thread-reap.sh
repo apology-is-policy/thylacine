@@ -37,7 +37,8 @@ thread_reap_buggy_waitpid_unlocked:ProcFreedLast
 thread_reap_buggy_reap_at_spawn:~ExitedThreadsFreed
 thread_reap_buggy_cap_counts_exited:ExitedNotCharged
 thread_reap_buggy_exec_perthread:DoomedNeverLast
-thread_reap_buggy_doom_missed:~ExecResolves"
+thread_reap_buggy_doom_missed:~ExecResolves
+thread_reap_buggy_pid_at_claim:PidNamesOne"
 
 run() {  # $1 = cfg basename -> sets RC, LOG and GOT (distinct states)
     LOG="$TMP/$1.log"

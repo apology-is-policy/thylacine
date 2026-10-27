@@ -43,6 +43,13 @@
 (* the only thread on the list, then swaps and clears the claim. That an    *)
 (* exec ever ends is the death machinery's to deliver: a doomed thread      *)
 (* eventually takes its die-check (death_wake.tla's wake; here, fairness).  *)
+(*                                                                         *)
+(* Identity (C6). Procs and threads draw ids from one space, and a Proc's  *)
+(* first thread takes the pid as its tid, so the main thread's tid is the   *)
+(* pid (operator vote 3, 2026-10-21). An exec from another thread takes     *)
+(* the pid at its swap, when it is the only thread on the list; a thread    *)
+(* admitted later draws a fresh id. A lookup by tid walks the list under    *)
+(* threads_lock, so the pid must name at most one thread on it.             *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -62,7 +69,8 @@ CONSTANTS
     BUGGY_REAP_AT_SPAWN,        \* the interim fix: only a later spawn frees the dead
     BUGGY_CAP_COUNTS_EXITED,    \* the cap counts every linked thread, the dead too
     BUGGY_EXEC_PERTHREAD,       \* exec dooms by per-thread flags, checked and set in two holds
-    BUGGY_DOOM_MISSED           \* a doomed thread's waits do not read the exec as death
+    BUGGY_DOOM_MISSED,          \* a doomed thread's waits do not read the exec as death
+    BUGGY_PID_AT_CLAIM          \* the execer takes the pid at its claim, not at the swap
 
 ASSUME Main \in Threads /\ Cap \in Nat /\ Cap >= 1 /\ NoThread \notin Threads
 
@@ -98,10 +106,11 @@ VARIABLES
     tlheld,   \* a reaper holds threads_lock between its unlink and its unlock
     execbad,  \* history: exec swapped the space while a peer was linked or on a CPU
     exectask, \* p->exec_task: the thread whose exec holds the Proc, or NoThread
-    dset      \* SUBSET Threads -- BUGGY_EXEC_PERTHREAD's per-thread die flags
+    dset,     \* SUBSET Threads -- BUGGY_EXEC_PERTHREAD's per-thread die flags
+    pidtid    \* SUBSET Threads -- the threads whose tid is the pid
 
 vars == <<pc, linked, live, seen, gflag, lastout, zombie, reaped, late,
-          oncpu, inhand, frees, tlheld, execbad, exectask, dset>>
+          oncpu, inhand, frees, tlheld, execbad, exectask, dset, pidtid>>
 
 TypeOk ==
     /\ pc       \in [Threads -> PCs]
@@ -120,6 +129,7 @@ TypeOk ==
     /\ execbad  \in BOOLEAN
     /\ exectask \in Threads \cup {NoThread}
     /\ dset     \subseteq Threads
+    /\ pidtid   \subseteq Threads
 
 Init ==
     /\ pc       = [t \in Threads |-> IF t = Main THEN "run" ELSE "unborn"]
@@ -138,6 +148,7 @@ Init ==
     /\ execbad  = FALSE
     /\ exectask = NoThread
     /\ dset     = {}
+    /\ pidtid   = {Main}
 
 Running == {s \in linked : pc[s] = "run"}
 
@@ -160,7 +171,7 @@ DeathReaches(t) == gflag \/ (Doomed(t) /\ ~BUGGY_DOOM_MISSED)
 (* Every C3 action takes threads_lock, so none runs while a reaper holds it. *)
 C3Vars == <<pc, linked, live, seen, gflag, lastout, zombie, reaped, late>>
 C1Vars == <<oncpu, inhand, frees, tlheld, execbad>>
-C5Vars == <<exectask, dset>>
+C5Vars == <<exectask, dset, pidtid>>
 
 (***************************************************************************)
 (* Admission (proc_thread_admit). The spawner s is a RUNNING thread of the *)
@@ -427,6 +438,8 @@ Sweep(t) ==
 (* has been freed and none is on a CPU; it clears the claim.                *)
 (* BUGGY_EXEC_EARLY: it swaps once s is the only LIVE thread (C3's          *)
 (* proc_exec_alone), while a committed peer may still run its tail.         *)
+(* The swap is also where s takes the pid (C6). BUGGY_PID_AT_CLAIM takes it *)
+(* in the claim's hold instead, while the old main may still be linked.     *)
 (***************************************************************************)
 ExecClaim(s) ==
     /\ ~BUGGY_EXEC_PERTHREAD
@@ -436,6 +449,7 @@ ExecClaim(s) ==
     /\ exectask = NoThread
     /\ exectask' = s
     /\ pc'       = [pc EXCEPT ![s] = "exec_wait"]
+    /\ pidtid'   = IF BUGGY_PID_AT_CLAIM THEN pidtid \cup {s} ELSE pidtid
     /\ UNCHANGED <<linked, live, seen, gflag, lastout, zombie, reaped, late>>
     /\ UNCHANGED C1Vars
     /\ UNCHANGED dset
@@ -463,6 +477,7 @@ ExecDoom(s) ==
     /\ pc'       = [pc EXCEPT ![s] = "exec_wait"]
     /\ UNCHANGED <<linked, live, seen, gflag, lastout, zombie, reaped, late>>
     /\ UNCHANGED C1Vars
+    /\ UNCHANGED pidtid
 
 (* The execer abandons the exec on a death that reaches it: group death    *)
 (* (only, in the correct protocol: its own claim never dooms it). It        *)
@@ -475,7 +490,7 @@ ExecAbort(s) ==
     /\ exectask' = IF exectask = s THEN NoThread ELSE exectask
     /\ UNCHANGED <<linked, live, seen, gflag, lastout, zombie, reaped, late>>
     /\ UNCHANGED C1Vars
-    /\ UNCHANGED dset
+    /\ UNCHANGED <<dset, pidtid>>
 
 ExecSwap(s) ==
     /\ ~tlheld
@@ -484,6 +499,7 @@ ExecSwap(s) ==
     /\ execbad'  = (execbad \/ (oncpu \ {s}) # {} \/ linked # {s})
     /\ pc'       = [pc EXCEPT ![s] = "run"]
     /\ exectask' = IF exectask = s THEN NoThread ELSE exectask
+    /\ pidtid'   = pidtid \cup {s}
     /\ UNCHANGED <<linked, live, seen, gflag, lastout, zombie, reaped, late>>
     /\ UNCHANGED <<oncpu, inhand, frees, tlheld>>
     /\ UNCHANGED dset
@@ -623,6 +639,10 @@ OneExecer == Cardinality({s \in Threads : pc[s] \in {"exec_ok", "exec_wait"}}) <
 DoomedNeverLast ==
     \A t \in Threads : pc[t] = "closing" => (gflag \/ ~Doomed(t))
 
+(* C6: the pid names at most one thread on the list, so a lookup of the    *)
+(* pid as a tid finds the main thread, never a dying one beside it.         *)
+PidNamesOne == Cardinality(pidtid \cap linked) <= 1
+
 Safety ==
     /\ TypeOk
     /\ LiveMatches
@@ -641,6 +661,7 @@ Safety ==
     /\ NoParkedDead
     /\ OneExecer
     /\ DoomedNeverLast
+    /\ PidNamesOne
 
 (* Once claimed, the Proc reaches ZOMBIE and is freed.                      *)
 EventuallyReaped == (gflag ~> reaped)

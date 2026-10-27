@@ -1481,7 +1481,7 @@ the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascad
 
 ---
 
-## thread_reap.tla — the thread lifecycle (thread-model C3 first; C1 and C5 extend it)
+## thread_reap.tla — the thread lifecycle (thread-model C3 first; C1, C5 and C6 extend it)
 
 Spec-first RE-ENABLED for the thread lifecycle (operator vote 2026-10-21,
 thread-model decision 1: the Thread reclamation invariant + spec-first, the vote
@@ -1497,6 +1497,8 @@ action with the claim that dooms every other thread, the abandon on group death 
 the swap (ARCH §7.3.3, LINEAGE L-2b); exits split into a voluntary one, which has no
 fairness, and a death-driven one, which has it, so an exec is shown to end only
 because its claim kills its peers.
+C6 (spec-first) adds identity: `pidtid`, the threads whose tid is the pid
+(ARCH §7.3.4). The Proc's first thread holds it; the execer takes it at the swap.
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
@@ -1518,7 +1520,9 @@ because its claim kills its peers.
 | `DieDecide(t)` / `ExitDecide(t)` (the exit body, driven by a death or not) | `thread_exit_self` from the die-checks, or from the thread's own exit; `exits_term` sends a thread an exec dooms there as it sends one in a dying group, and `sys_exit_group_handler` makes no group claim for it, so a doomed thread's own `exits()` or exit_group is an exit body, never a `Claim` (ARCH 7.3.3, operator vote 2026-10-26) | (fairness: only a death obliges an exit) |
 | `ExecCheck` / `ExecDoom` (`BUGGY_EXEC_PERTHREAD`) | (none -- LINEAGE L-2b's first sketch: per-thread die flags, the own-flag check and the peers' flags in two holds) | `thread_reap_buggy_exec_perthread` violates `DoomedNeverLast` (two execs doom each other; the last closes the Proc with no group death) |
 | `ExecAbort(s)` (group death reaches the execer: claim cleared, exec abandoned) | `kernel/proc.c::proc_exec_claim`'s wait: `sleep_death_only` until `live_threads == 1`, woken by `proc_exec_live_dropped_locked` at each `live_threads` decrement; returns failure on `thread_group_death_pending(self)` and `sys_execve_core` drops the new image | `ExecResolves` |
-| `ExecSwap(s)` (the swap, once `s` is the only thread on the list; clears the claim) | `kernel/proc.c::proc_exec_replace`: waits for `thread_count == 1` under the thread lock, then re-checks it at the swap under `g_proc_table_lock` with the thread lock nested, and clears `exec_task` there | `NoSwapWhileOnCpu` (F-1, and no peer of the old image survives); `thread_reap_buggy_exec_early` (the swap once the caller is the only LIVE thread) violates it |
+| `ExecSwap(s)` (the swap, once `s` is the only thread on the list; clears the claim; `s` takes the pid as its tid, C6) | `kernel/proc.c::proc_exec_replace`: waits for `thread_count == 1` under the thread lock, then re-checks it at the swap under `g_proc_table_lock` with the thread lock nested, and there clears `exec_task` and sets `self->tid = p->pid` | `NoSwapWhileOnCpu` (F-1, and no peer of the old image survives); `thread_reap_buggy_exec_early` (the swap once the caller is the only LIVE thread) violates it. `PidNamesOne` (the old main is freed before the execer takes its tid, so a tid lookup of the pid under the thread lock finds one thread) |
+| `Init`'s `pidtid = {Main}` (C6: a Proc's first thread takes the pid) | `kernel/thread.c::thread_id_for` (the first create to set `PROC_FLAG_MAIN_TID` takes `proc->pid`; every later create draws from `kernel/proc.c::proc_id_alloc`, the one id space) | `PidNamesOne` |
+| `ExecClaim(s)` with `BUGGY_PID_AT_CLAIM` | (none -- the execer taking the pid in the claim's hold, while the old main may still be linked and live) | `thread_reap_buggy_pid_at_claim` violates `PidNamesOne` |
 | `WaitPid` (C1: frees only the Proc, once the count read under the zombie's thread lock is zero) | `kernel/proc.c::wait_pid_for`: after `proc_unlink_child`, waits for `thread_count == 0` read under the zombie's `threads_lock`, then `proc_free` | `ProcFreedLast`, `EventuallyReaped`; `thread_reap_buggy_waitpid_unlocked` (a bare load of the count) violates `ProcFreedLast` |
 
 What the model does not see, so the green reads no larger: two Procs (the
