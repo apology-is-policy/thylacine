@@ -98,6 +98,9 @@ forbid_for() {
         extinction_peer_chatter) echo "console-claim: taken with irqs on" ;;
         # The suite's first line: a refusal printed after it came too late.
         no_entropy)       echo "  tests:" ;;
+        # The provoker's own line: the encode returned.
+        wxe_install_kernel|wxe_install_block|wxe_install_gib|wxe_install_user)
+                          echo "FAIL: a W+X leaf was encoded" ;;
         *)                echo "" ;;
     esac
 }
@@ -107,8 +110,8 @@ expected_for() {
         canary_smash)    echo "EXTINCTION: stack canary mismatch" ;;
         wxe_violation)   echo "EXTINCTION: PTE violates W^X" ;;
         wxe_install_kernel) echo "EXTINCTION: PTE violates W^X at install (kernel page)" ;;
-        wxe_install_block)  echo "EXTINCTION: PTE violates W^X at install (kernel block)" ;;
-        wxe_install_gib)    echo "EXTINCTION: PTE violates W^X at install (kernel block)" ;;
+        wxe_install_block)  echo "EXTINCTION: PTE violates W^X at install (kernel L2 block)" ;;
+        wxe_install_gib)    echo "EXTINCTION: PTE violates W^X at install (kernel L1 block)" ;;
         wxe_install_user)   echo "EXTINCTION: PTE violates W^X at install (user page)" ;;
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
         kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;

@@ -250,10 +250,11 @@ bool pte_violates_wxe(u64 pte) {
 // user, page or block -- comes from make_block_pte_l1, make_block_pte_l2,
 // make_page_pte_l3 or make_user_pte_l3, and each hands its value through here
 // before any table can hold it. A leaf composed by hand would bypass the check,
-// so none is. The attribute constants are W^X by construction (the static asserts
-// below) and the user encoder by its prot mapping; this is the leg that still
-// holds when either of those changes. It runs MMU-off inside build_page_tables
-// too, where a violation stops the boot before the MMU is enabled.
+// so none is. Every kernel caller passes a constant composite, so the compiler
+// decides a kernel leaf's check: a W^X composite (the static asserts below)
+// folds it away, and one edited past the asserts folds to an unconditional
+// extinction wherever it is used. The user encoder's prot is a run-time value,
+// so its check runs on every user leaf.
 static inline u64 pte_wxe_checked(u64 pte, const char *msg) {
     if (pte_violates_wxe(pte)) extinction(msg);
     return pte;
@@ -262,13 +263,13 @@ static inline u64 pte_wxe_checked(u64 pte, const char *msg) {
 // Build a 1 GiB block descriptor at L1 with the given attribute mask.
 static inline u64 make_block_pte_l1(paddr_t pa, u64 attrs) {
     return pte_wxe_checked((pa & ~(BLOCK_SIZE_L1 - 1)) | attrs,
-                           "PTE violates W^X at install (kernel block)");
+                           "PTE violates W^X at install (kernel L1 block)");
 }
 
 // Build a 2 MiB block descriptor at L2 with the given attribute mask.
 static inline u64 make_block_pte_l2(paddr_t pa, u64 attrs) {
     return pte_wxe_checked((pa & ~(BLOCK_SIZE_L2 - 1)) | attrs,
-                           "PTE violates W^X at install (kernel block)");
+                           "PTE violates W^X at install (kernel L2 block)");
 }
 
 // Build a 4 KiB page descriptor at L3 with the given attribute mask.
@@ -281,9 +282,9 @@ static inline u64 make_page_pte_l3(paddr_t pa, u64 attrs) {
 // Static assertions on the PTE bit constants.
 //
 // W^X invariant I-12 is enforced at construction time by the PTE_KERN_*
-// helpers, and checked again at runtime on every encoded leaf
-// (pte_wxe_checked). The asserts below would catch a regression where someone
-// changes the helpers and accidentally allows W+X.
+// helpers, and pte_wxe_checked repeats the check in every encoder (decided at
+// compile time for these constants). The asserts below would catch a
+// regression where someone changes the helpers and accidentally allows W+X.
 // ---------------------------------------------------------------------------
 
 _Static_assert((PTE_KERN_TEXT & PTE_AP_RO_EL1) != 0,
@@ -305,13 +306,20 @@ _Static_assert((PTE_KERN_RO_BLOCK & PTE_AP_RO_EL1) != 0,
 _Static_assert((PTE_DEVICE_RW & PTE_PXN) != 0 && (PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
                "Device PTEs must NOT allow EL1 execution");
 // The EL0 leg: UXN clear makes a page executable at EL0 whatever its AP bits
-// say about EL0 data access, so every writable kernel attribute sets it.
+// say about EL0 data access, so every kernel attribute sets it -- the writable
+// ones for W^X, the text and read-only ones so EL0 never executes kernel memory.
 _Static_assert((PTE_KERN_RW & PTE_UXN) != 0,
                "PTE_KERN_RW must NOT allow EL0 execution");
 _Static_assert((PTE_KERN_RW_BLOCK & PTE_UXN) != 0,
                "PTE_KERN_RW_BLOCK must NOT allow EL0 execution");
 _Static_assert((PTE_DEVICE_RW & PTE_UXN) != 0 && (PTE_DEVICE_RW_BLOCK & PTE_UXN) != 0,
                "Device PTEs must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_TEXT & PTE_UXN) != 0,
+               "PTE_KERN_TEXT must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_RO & PTE_UXN) != 0,
+               "PTE_KERN_RO must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_RO_BLOCK & PTE_UXN) != 0,
+               "PTE_KERN_RO_BLOCK must NOT allow EL0 execution");
 
 // P1-H BTI guard-page invariant. A future PTE-bit refactor that moves
 // PTE_GP without updating PTE_KERN_TEXT would silently disable BTI on

@@ -585,8 +585,8 @@ void sched_set_need_resched_for_test(unsigned cpu) {
 // P3-G: WFI signaling for ready/wakeup wake-idle-peer (closes R5-H F78).
 //
 // `sched_set_idle_in_wfi(true)` is called by THIS CPU immediately before
-// entering `wfi` in per_cpu_main's idle loop; `false` is called immediately
-// after WFI exits. Peer CPUs read these flags via `sched_idle_in_wfi(idx)`
+// entering `wfi` in sched_idle_park (the idle body cpu0's loop and
+// per_cpu_main share); `false` is called immediately after WFI exits. Peer CPUs read these flags via `sched_idle_in_wfi(idx)`
 // to identify wake targets; ready() / wakeup() send IPI_RESCHED to one
 // such target so it wakes from WFI and runs sched (which try_steals the
 // new work). Without this signaling, secondaries (no per-CPU timer at

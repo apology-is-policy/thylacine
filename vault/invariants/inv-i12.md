@@ -45,9 +45,10 @@ AP encoding and a W-only request would silently map readable.
 
 **2. The kernel PTE composites.** `PTE_KERN_TEXT` (RO + PXN clear),
 `PTE_KERN_RO` and `PTE_KERN_RW` (both PXN set) are constructed so the
-combination cannot arise, and twelve `_Static_assert`s pin the bits of all
-seven composites, `UXN` as well as `PXN`. A refactor that made kernel text
-writable fails the build.
+combination cannot arise, and fifteen `_Static_assert`s pin the bits of all
+seven composites: read-only or `PXN` on each, and `UXN` on all seven. A
+refactor that made kernel text writable, or any kernel memory executable at EL0,
+fails the build.
 
 **3. The ELF loader.** A `PT_LOAD` segment requesting both W and X is rejected
 at load, so a hostile or broken binary cannot ask for it.
@@ -82,14 +83,20 @@ fail and nothing else), and `/protect-probe`'s fifth leg.
 2026-10-27).** Every leaf descriptor the kernel builds, kernel or user, page or
 block, comes from one of four encoders in `arch/arm64/mmu.c`, and each passes
 its value through `pte_violates_wxe` before a table can hold it: writable with
-`PXN` or `UXN` clear is an extinction (`PTE violates W^X at install (kernel
-block)`, `(kernel page)` or `(user page)`). It is a backstop beneath the five
-above, not a gate -- nothing reaches it today -- and it is the one mechanism that
-inspects the bits actually written rather than the request that produced them,
-so a regression in any of the others stops the kernel instead of mapping the
-page. Witnesses: `mmu.wxe_predicate` (the predicate over every AP x PXN x UXN
+`PXN` or `UXN` clear is an extinction (`PTE violates W^X at install (kernel L1
+block)`, `(kernel L2 block)`, `(kernel page)` or `(user page)`). It is a
+backstop beneath the five above, not a gate -- nothing reaches it today. Where it
+is decided differs by leaf. Every kernel caller passes a constant composite, so
+the compiler decides the kernel leaves: a clean composite folds the check away
+(neither shipped kernel contains the kernel bodies), and one edited past its
+asserts folds to an unconditional extinction wherever it is used. The user
+encoder's prot is a run-time value, so its check runs on every user leaf and
+reads the bits it is about to return. Either way a regression in the others
+stops the kernel instead of mapping the page. Witnesses: `mmu.wxe_predicate` (the predicate over every AP x PXN x UXN
 combination, written out), and `tools/test-fault.sh`'s four `wxe_install_*` variants, one per encoder,
-which have it build a W+X leaf and pass only on its extinction body. It holds by convention in one respect: a leaf composed by
+which have it build a W+X leaf and pass only on its extinction body (their
+provokers pass constants too, so they prove each encoder's wiring in the source,
+not a run-time decision). It holds by convention in one respect: a leaf composed by
 hand would skip it, and three were (block leaves from clean composites,
 converted in the same change; [[sub-kernel-mmu]] Seams).
 

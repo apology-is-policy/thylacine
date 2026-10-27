@@ -82,9 +82,9 @@ static void provoke_wxe_violation(void) {
 // per encoder (L3 kernel page, L2 block, L1 block, L3 user page). The provoker
 // has mmu.c encode a writable + executable leaf; the encoder's check
 // (pte_wxe_checked) extincts before the value can reach a table, with
-// "PTE violates W^X at install (kernel page)", "(kernel block)" or
-// "(user page)". Without the check the encode returns, the FAIL line prints
-// and the boot goes on.
+// "PTE violates W^X at install (kernel page)", "(kernel L2 block)",
+// "(kernel L1 block)" or "(user page)". Without the check the encode returns,
+// the FAIL line prints and the boot goes on.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

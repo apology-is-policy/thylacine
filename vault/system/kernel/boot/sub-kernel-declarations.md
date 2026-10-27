@@ -44,8 +44,12 @@ and vote 23 (file-local functions), written down in
 - **The tests' own names.** `kernel/test/test_registry.h` declares every
   registered test once; `test.c`'s table and each test file see the same
   prototype.
-- **Linker and asm symbols** that C reads (`_kernel_start`, the section
-  bounds, the vector base) are declared in `arch/arm64/sections.h`.
+- **Linker and asm symbols** that C reads are declared once: the image and
+  section bounds, the boot stack and `start.S`'s boot words in
+  `arch/arm64/sections.h`; a symbol that belongs to one subsystem in that
+  subsystem's header (the vector base and `_torpor` in `exception.h`, the
+  alternatives table in `alternatives.h`, the uaccess fixup table in
+  `uaccess.h`).
 - **Warnings are fatal** on both kernel builds (vote 20, `-Werror` in
   `cmake/Toolchain-aarch64-thylacine.cmake`), and so on the fault-test and
   sanitizer kernels built from the same flag list. A warning is fixed where it
@@ -81,7 +85,7 @@ passed 0. The census that found it also found 101 test hooks compiled into
 production and 218 local `extern` declarations.
 
 `check-decls.py` builds its view from the compiler, not from text: each TU's
-clang JSON AST, with every declaration placed by its NAME's location (a
+clang AST dump (the text form, parsed line by line), with every declaration placed by its NAME's location (a
 declaration whose range begins in a macro, such as `bool`, would otherwise be
 attributed to the macro's header), implicit builtin declarations skipped, and
 array bounds stripped before types are compared. Rule (b) compares a

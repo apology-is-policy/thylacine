@@ -25,7 +25,10 @@ static const struct wxe_row g_wxe_rows[] = {
     { PTE_AP_RW_EL1, false, true,  true  },
     { PTE_AP_RW_EL1, true,  false, true  },
     { PTE_AP_RW_EL1, true,  true,  false },
-    // Writable at both ELs: the same three violate.
+    // Writable at both ELs: the same three violate. The second is conservative:
+    // the hardware treats an EL0-writable page as PXN whatever the bit says, so
+    // it executes at neither EL. No leaf can carry it (user leaves set PXN; no
+    // kernel composite is EL0-writable), and the predicate refuses it anyway.
     { PTE_AP_RW_ANY, false, false, true  },
     { PTE_AP_RW_ANY, false, true,  true  },
     { PTE_AP_RW_ANY, true,  false, true  },

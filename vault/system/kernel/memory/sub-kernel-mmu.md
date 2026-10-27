@@ -57,19 +57,24 @@ their second level emptied, so the register never points at physical zero.
 **The permission encoding is the invariant.** Composite constants —
 `PTE_KERN_TEXT` (read-only, executable at EL1), `PTE_KERN_RO` and `PTE_KERN_RW`
 (both execute-never) — make the forbidden combination unconstructible, and
-twelve `_Static_assert`s pin the bits of all seven composites, the EL0 leg
-(`UXN` on every writable one) as well as the EL1, so a refactor that made kernel
-text writable fails the build rather than the boot.
+fifteen `_Static_assert`s pin the bits of all seven composites, the EL1 leg
+(read-only or `PXN` on each) and the EL0 leg (`UXN` on all seven: EL0
+instruction fetch ignores AP), so a refactor that made kernel text writable, or
+any kernel memory executable at EL0, fails the build rather than the boot.
 
 **And every leaf is checked as it is built** (operator vote 22, 2026-10-27).
 Four encoders build every leaf descriptor in the file -- `make_block_pte_l1`
 and `make_block_pte_l2` (kernel blocks), `make_page_pte_l3` (kernel pages) and
 `make_user_pte_l3` -- and each returns its value through `pte_wxe_checked`,
 which asks `pte_violates_wxe` (writable, AP bit 7 clear, with `PXN` or `UXN`
-clear) and extincts with `PTE violates W^X at install (kernel block)`,
-`(kernel page)` or `(user page)` before any table can hold the value. The kernel
-encoders also run with the MMU off inside `build_page_tables`, where a violation
-stops the boot before translation is enabled. It is the backstop, not the gate:
+clear) and extincts with `PTE violates W^X at install (kernel L1 block)`,
+`(kernel L2 block)`, `(kernel page)` or `(user page)` before any table can hold
+the value. For a kernel leaf the compiler does the checking: every kernel caller
+passes a constant composite, so a clean one folds the check away (neither shipped
+kernel contains the kernel bodies) and one edited past its asserts folds to an
+unconditional extinction at its first use, in `build_page_tables` with the MMU
+off (Caveats). For a user leaf, whose prot is a run-time value, the check runs
+every time. It is the backstop, not the gate:
 the composites are clean by the asserts, and a user `WRITE|EXEC` never reaches
 the encoder (`vma_alloc` refuses the VMA, and both install entries refuse the
 prot). What it catches is a regression in either -- a composite edited past its
@@ -219,7 +224,7 @@ which the reclaim holds.
 
 ## Invariants enforced
 
-[[inv-i12]] — the composites, the twelve asserts, the encoders' check of every
+[[inv-i12]] — the composites, the fifteen asserts, the encoders' check of every
 leaf, the user encoder, and both transient aliases. The **gate** is not here: it
 is `vma_alloc`'s rejection ([[sub-kernel-vma]]). This file makes the invariant
 *representable*, unbreakable-by-refactor and fail-closed at the leaf; one `if` a
@@ -358,6 +363,16 @@ recorded "dormant; 0 callers" as a parenthetical without asking why. Its task
 number was later reused, so for twelve weeks it had no owner. Operator vote 22
 wired it into the encoders (Mechanism), which made those documents true. Full
 chain in [[inv-i12]].
+
+**An extinction with the MMU off may not print on hardware.** With stage 1
+translation off every data access is Device-nGnRnE, and `extinction()` claims
+the console with an exclusive pair on `.bss` (`ldaxr`/`stlxr` on the ARMv8.0
+floor). Exclusives to Device memory are IMPLEMENTATION DEFINED: QEMU honours
+them, but a core with no global monitor can fail the store forever, and the boot
+would hang with no `EXTINCTION:` line. It applies to `build_page_tables`' own
+extinctions and to a composite edited past its asserts, whose folded extinction
+runs there first. No witness covers it: every `wxe_install_*` variant fires after
+`mmu_enable`.
 
 **The ASID argument is vestigial** on the install and uninstall paths and is
 documented as such at each — the invalidates are all-ASID. It is retained for a

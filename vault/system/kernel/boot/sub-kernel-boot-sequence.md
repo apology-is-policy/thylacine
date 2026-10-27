@@ -159,8 +159,9 @@ permission fault. The four `wxe_install_*` variants (vote 22, 2026-10-27), one
 per leaf encoder, have `mmu.c` encode a writable and executable leaf -- a kernel
 page, an L2 and an L1 kernel block, each with an execute-never bit cleared, and
 a user page asked for `W|X` past the install entries' refusal -- and pass only
-on the encoder's own extinction body, which names the leaf kind, so the
-permission-fault path cannot satisfy them ([[sub-kernel-mmu]]). `pac_mismatch` is deferred (forging a poisoned LR depends on
+on the encoder's own extinction body, which names the leaf kind (an L1 block
+apart from an L2), so the permission-fault path cannot satisfy them; each also
+fails if the provoker's own `FAIL: a W+X leaf was encoded` line appears ([[sub-kernel-mmu]]). `pac_mismatch` is deferred (forging a poisoned LR depends on
 FEAT_FPAC specifics); v1.0 verifies PAC by asserting `SCTLR_EL1.EnIA` + a
 non-zero APIA key, code-reviewing `paciasp/autiasp` emission, and the ARM-mandated
 hardware enforcement. The matrix is only as good as its being *run*:
