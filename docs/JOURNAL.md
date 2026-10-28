@@ -22,6 +22,118 @@ needed the operator.
 
 
 ---
+## 2026-10-28 -- the go that orphaned a go was a go the environment never reached (corona)
+
+**What started it.** OPEN-BUGS 12:01Z: every ls-ci boot reported one `go`
+orphaned by a `go`, and the working theory (from reading nora's gopls
+teardown) was that gopls's interrupt killed its `go list` child's parent
+first. Counting falsified it in minutes: exactly one orphan per boot in all 19
+gopls-gate logs, and in go6 it lands at the boot's FIRST go command
+(`go env GOROOT`), with no gopls running at all. **A cause read from code is a
+hypothesis; a per-boot count is a measurement.**
+
+**What it is.** cmd/go's x/telemetry sidecar. `telemetry.MaybeParent` ->
+`telemetry.Start`, once a day (`acquireUploadToken`), runs
+`exec.Command(os.Executable(), "** telemetry **")` with
+`cmd.Env += GO_TELEMETRY_CHILD=1` and never waits for it; upstream designs it to
+outlive its parent. Its POSIX detachment (`daemonize`, Setsid) builds for no
+thylacine GOOS, so it stays in the parent's session (P3, OPEN-BUGS 15:19Z).
+Not yet boot-confirmed: a boot with `~/.config/go/telemetry/mode` = off should
+show no orphan.
+
+**The defect under it (P1, OPEN-BUGS 15:19Z).** Without `GO_TELEMETRY_CHILD`
+the sidecar is a plain `go "** telemetry **"` -- because go-thylacine's
+`syscall/exec_thylacine.go:164` drops `ProcAttr.Env` ("silently dropped").
+`os/exec` always fills `Env`, and `os.Setenv` is process-local, so NO variable
+a Go program set or asked for ever reached a child: gopls's per-call
+`GOFLAGS`/`GOWORK`/`GOPROXY=off`, `go generate`'s `GOFILE`. Pouch's
+`posix_spawn` did `(void)envp` (seam-pouch-spawn-envp); libthyla-rs `Command`
+had no setter. Three runtimes, one missing kernel surface.
+
+**The design fork, and the operator's call (vote 28).** Researched: Plan 9's
+Go forkExec rforks with RFCENVG and writes /env in the child
+(`exec_plan9.go:155-216`); every atomic spawn API (posix_spawn, fdio_spawn_etc,
+CreateProcess) takes the environment as an argument; Thylacine's spawn births
+the child fully formed, which is the wall the cwd hit
+(dec-2026-10-06-spawn-cwd, which already named a future SPAWN_EXT_ENV).
+Options: a record tail; the native rfork+execve path (no held spawn, no cap
+mask, no cwd tail); swap the spawner's own /env around a locked spawn (the
+borrowed-state window the cwd tail removed); leave the seam. The operator
+chose the tail. Scripture 7bf17edb5 (ARCH 9.7, GO-PORT-PLAN decision 1,
+dec-2026-10-28-spawn-env, the audit row).
+
+**One design choice worth recording.** The child's thunk installs the built
+group by REFILLING rfork's copy in place, not by swapping `p->env`: devproc's
+flat-block read loads a Proc's group with no reference and then takes its lock,
+so a swap-and-free would hand a concurrent `/proc/<pid>/environ` reader freed
+memory. Refilling keeps the struct, the lock and the minted devno.
+
+**Evidence.** Mac lease 19:14-19:42Z, logs `work/oct28-env-a/`.
+
+- The first build of the WIP (written unbuilt before the lease) compiled
+  everywhere: both kernel builds `-Werror`, check-decls ok (4223 names, 261
+  TUs), the production shape, joey, libthyla-rs, coreutil-smoke.
+- Suite 1: 2119/2120 -- the new frame witness's CONTROL failed. I had read a
+  held child's frame through `mmu_cross_proc_read`, the /proc/<pid>/mem
+  primitive; exec fills the stack Burrow's slot and leaves the PTE to the
+  first fault, so before the first instruction the page tables show a hole.
+  **The control caught a broken instrument before it could vouch for
+  anything**: the read now takes the slot itself under `as->lock`.
+- Suite 2 (3d6a29fb7's code): 2120/2120 PASS; `joey: probe spawn-env OK`;
+  both coreutil-smoke `env tail:` legs ok; post-suite orphans identical to
+  the 12:34Z gopls suite's six (warden's daemons, ambush-child, one unnamed).
+- Sabotage, each its own build and boot. **Wrong turn:** the first chain put
+  a kernel sabotage and a userspace one in one boot, but a failed kernel
+  suite extincts the boot (`main.c:893`) before userspace runs, so set A
+  showed only its kernel red. The rerun adds S0, a sabotage-only patch that
+  prints instead of extincting:
+  - A2 (the thunk never installs): kernel `child_gets_block` "exactly the
+    block"; coreutil-smoke both legs; joey block, dup and offsets WRONG,
+    empty=13 (joey's own 13-byte environment leaking through); the eight
+    refusals still right (they precede rfork).
+  - B2 (install after exec, plus Command::env not announcing the bit): only
+    the frame leg reds for the first ("the block child's exec frame carries
+    the block", its control passing); the same test's /env asserts before it
+    passed, and joey reads that same /env (not measured here: S5 stopped the
+    boot at coreutil-smoke), so **without the frame leg the ordering had no
+    witness**; both coreutil-smoke legs for the second.
+  - C2 (a repeat stored twice, plus the tail placed ignoring the thread
+    tail): kernel "a repeated name is one entry" and "holding the name once",
+    joey dup=WRONG; joey offsets=WRONG; coreutil-smoke green, as neither
+    touches it.
+
+**The audit.** Fable 5.1 reviewing Opus 5.5 (MODEL start == end), read from
+`git show 3d6a29fb7:` because the sabotage chain was rewriting the tree:
+0/0/0/6, clean, every lifetime and ordering path verified. All six P3s fixed:
+a stale #140 comment in exec.c that described a mechanism that cannot exist;
+GO-PORT-PLAN stating the Go half as landed; joey's "next unknown bit" pinned to
+a hand-kept list (now `T_SPAWN_EXT_FLAGS_ALL`, mirrored in both libraries and
+held to the kernel's members by the mirror check, proved red on a real edited
+file); the poison control only at +104 (now behind every tail combination);
+the env_remove leg satisfiable by emptying everything (now a removal of another
+name must keep BEACON); `Command::env` depending on `/proc` being bound (the
+base is now `/env` itself, listed and read). The reviewer's suggested control
+for the fifth -- the native `env` printing the environment -- does not work:
+that utility still prints nothing (the stale tool already enqueued).
+
+**After the fixes** (Mac lease from 20:30Z, 530ddd916): suite 2120/2120;
+`joey: probe spawn-env OK (block exact, inherit without the bit behind every
+tail combination, ...)`; both coreutil-smoke env legs ok. Set D, one build
+and boot, both new witnesses red for their own reason: an `env_remove` of an
+absent name that clears everything -> coreutil-smoke leg 2
+`other-removed=Some(false)`; the cwd bit read as the env bit -> joey
+`poison-behind-tails=WRONG` with block, dup and offsets still ok (and, as a
+bonus witness, joey's thread-budget probe `both=-1 cwd=wrong`). The SMP gate
+(20:40-21:45Z): default-smp1, default-smp4 and ubsan-smp4 each 10/10 PASS, 0
+corruption, 0 external-kill, 0 inject-miss, 0 timing, 0 other.
+
+**Still open.** env-b: the Go fork sends `ProcAttr.Env` as the tail -- only
+after main, b3 and aux-3 carry this kernel half, because the fork is shared
+and an older kernel refuses bit 2 (and cwd-b, the fork's use of the cwd tail,
+never landed either). env-c: pouch's `posix_spawn` sends `envp`, closing the
+seam. The telemetry boot-confirm. 12:01Z closes as "by design" only once
+env-b lands and the sidecar arrives knowing what it is.
+
 ## 2026-10-28 -- the thread model joins the async arc: who pays for a kernel thread that works for a user (corona)
 
 **What started it.** UPDATE 50's join list (yip 0261): aux's thread-model C6

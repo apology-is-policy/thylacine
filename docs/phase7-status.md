@@ -2670,3 +2670,49 @@ only; the kernel is unchanged.
 - **Enqueued.** OPEN-BUGS 11:42Z (stderr EOF spins the main loops), 11:43Z (blocking writes to a server), 12:01Z (a `go`
   child of `go` orphaned mid-session), 12:22Z x2 (gopls's imports refresh; a disconnect during `initialized`'s `go env`),
   13:02Z (gopls's pre-load re-run window).
+
+## env-a: a spawner names its child's environment (SPAWN_EXT_ENV) -- 2026-10-28
+
+OPEN-BUGS "A spawned child never gets the environment its spawner asked for" (P1, corona, 2026-10-28T15:19Z), found
+under 12:01Z (the `go` orphaned by a `go`: cmd/go's x/telemetry sidecar, whose `GO_TELEMETRY_CHILD=1` never arrived).
+Operator vote 28: a spawn-record tail. Scripture 7bf17edb5 (ARCH 9.7, GO-PORT-PLAN decision 1,
+dec-2026-10-28-spawn-env, the audit row "The spawn environment tail").
+
+- **The tail.** `ext_flags` bit 2, `SPAWN_EXT_ENV`: a 16-byte `sys_spawn_ext_env` { `env_va`, `env_len`, `env_flags` }
+  after the cwd (16) and thread (8) tails whose bits are set. The block is NUL-terminated `NAME=VALUE` records (the
+  argv packing, the shape exec projects) and is the child's whole environment; `env_len` 0 is an empty one. Bound
+  `SYS_SPAWN_ENV_DATA_MAX` 32768, asserted equal to `EXEC_ENV_DATA_MAX`. The record stays 104 bytes.
+- **Kernel.** The handler checks the tail before allocating and copies the records once. The new gate site
+  `sys_spawn_full_argv_env_for_proc` builds the group (`env_from_block`) after every gate and the cwd, so a refusal
+  makes no child: `T_E_INVAL` (no `=`, a name /env refuses, unterminated), `T_E_2BIG` (a value past 4096, a 65th name,
+  a block past 32 KiB), `T_E_FAULT`, `T_E_NOMEM`; a nonzero `env_flags` -1. The thunk installs it (`env_install`)
+  first, before the cwd and before exec projects /env. The install refills rfork's copy in place under its lock --
+  devproc's environ read loads `p->env` with no reference, so a swap-and-free would be a use-after-free.
+- **Userspace.** libt `T_SPAWN_EXT_ENV` / `t_sys_spawn_ext_env`; libthyla-rs `TSpawnExtEnv` and `Command::env`,
+  `env_remove`, `env_clear` (base: the live /env, listed and read). The Go fork (env-b) and pouch (env-c)
+  do not send it yet: the fork is shared, and a kernel without bit 2 refuses the bit.
+- **Witnesses.** `spawn_env.*` (kernel/test/test_spawn_env.c): the parse and each refusal one variable from an accepted
+  control; the in-place refill (same struct, same devno, fresh ids); a held child's /env AND its exec frame against the
+  block, an inheriting child as the control; an empty block; refused spawns that make no child. joey's
+  `probe_spawn_env` (boot-fatal) drives the real ABI: the block, a poison tail behind a clear bit, empty, a repeat, the
+  tail at +120/+112/+128 after each earlier tail, eight refusals. coreutil-smoke's two Beacon legs prove
+  `Command::env`, `env_remove` and `env_clear` reach only the child.
+- **Verification.** Mac lease 19:14-19:42Z (logs `work/oct28-env-a/`). Both kernel builds `-Werror`, check-decls ok
+  (4223 names, 261 TUs), production shape builds; suite 2120/2120 with `joey: probe spawn-env OK` and both
+  coreutil-smoke `env tail:` legs ok. The first frame read (`mmu_cross_proc_read`) failed its control: exec leaves
+  the stack PTE to the first fault, so the read now takes the Burrow slot under `as->lock`. Sabotage, each its own
+  build and boot, with S0 (sabotage-only: a failed kernel suite prints instead of extincting, so userspace witnesses
+  are reached): no install -> kernel, coreutil-smoke and joey red; install after exec -> only the frame leg red;
+  Command::env without the bit -> coreutil-smoke red; a repeat stored twice -> kernel and joey dup red; the tail
+  placed ignoring the thread tail -> joey offsets red.
+- **Audit.** Fable 5.1 round 1 (start == end), 0/0/0/6, clean; all six fixed: the stale exec.c #140 comment;
+  GO-PORT-PLAN's tense (env-b is owed); `T_SPAWN_EXT_FLAGS_ALL` mirrored and held to the kernel by
+  `check-spawn-args-mirrors.py` (member/mask rule + 3 self-test mutations), joey's unknown bit derived from it;
+  joey's poison control behind every tail combination; coreutil-smoke's removal control; `Command::env`'s base read
+  from `/env` itself instead of `/proc/<pid>/environ`.
+- **After the fixes.** Suite 2120/2120 (joey's line now names "behind every tail combination"); set D red as
+  predicted (env_remove of an absent name clearing all -> coreutil-smoke `other-removed=Some(false)`; the cwd bit read as
+  the env bit -> joey `poison-behind-tails=WRONG`). SMP gate 20:40-21:45Z: default-smp1, default-smp4 and ubsan-smp4 each 10/10 PASS, 0 corruption, 0 external-kill, 0 inject-miss, 0 timing, 0 other.
+- **Enqueued / next.** env-b (the Go fork sends `ProcAttr.Env`; after main, b3 and aux-3 carry this kernel half);
+  env-c (pouch `posix_spawn` sends `envp`; closes seam-pouch-spawn-envp); the telemetry boot-confirm (12:01Z);
+  OPEN-BUGS 15:19Z P3 (the sidecar is not detached on thylacine).
