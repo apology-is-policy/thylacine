@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-28
 ---
 ## Event-loop I/O
 
@@ -359,6 +359,19 @@ Argon2id+AEGIS+ML-KEM verb on emulated targets) · `SRVCONN_PATH_MAX` 64
 the magic offset is pinned.
 
 ## Concurrency
+
+**The conn's three hook lists are REF-owned deferred records** (the poll chunk,
+2026-10-28, [[chg-2026-10-28-poll-hook-walks]]): every walk of `poll_list` and of either channel's
+`role_waiters` is `poll_wake_deferred` on `poll_owed` / `role_owed`. Outside a
+deferring lock it walks at once; under a 9P client's `c->lock` (the client's
+`srvconn_client_send_frame`, and the transport's hangup and close, which run
+`srvconn_teardown`) it owes the walk and takes a conn reference
+(`srvconn_defer_tryget`, CAS inc-not-zero), dropped by the drain after the walk
+(`srvconn_unref`). `p9_client_close` tears the conn down and drops the
+transport's reference under `c->lock`; the owed walks keep the conn alive and the
+drain's last put frees it after the lock (test
+`poll.srvconn_close_under_a_client_lock_outlives_its_walks`). A teardown inside
+the last unref finds the count at zero and walks its (empty) lists at once.
 
 Locks: [[lock-srvconn-chan-lock]] (two instances; the dual-lock pair) +
 the conn `state` lock. Rendez/list locks never nest inside a chan lock

@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-28
 ---
 ## Graphical attention and serial posture
 
@@ -544,6 +544,14 @@ argument: the two readers by an explicit busy guard, the room by the writer
 role's exclusivity. See [[haz-single-waiter-rendez]].
 
 ## Concurrency
+
+**The console episode's four list walks are owed under the process table lock**
+(the poll chunk, 2026-10-28): `cons_episode_wake_all` calls `proc_wake_or_owe` on
+`g_cons`'s four records (`poll_list`, `episode_waiters`, `reader_waiters`,
+`episode_poll_list`); `wakeup(&g_cons_data_rendez)` stays inline (O(1)). Every
+production BEGIN runs on the console manager through `proc_console_sak_from`,
+whose release walks them before the manager's relay, so [[spec-cons-poll]]'s
+atomic Begin + WalkBoth remains a faithful abstraction.
 
 [[lock-cons]] and [[lock-cons-tx]] carry the full discipline; the drain lock is
 [[lock-cons]]'s shape applied to the output ring.

@@ -5,11 +5,11 @@ title: "poll.tla"
 models: [sub-kernel-poll]
 pins: [inv-i9]
 cfgs:
-  - "poll.cfg -- clean: every invariant, HAS_TIMEOUT, one local fd beside one remote (7156 distinct states)"
-  - "poll_notimeout.cfg -- poll(-1), the infinite wait; safety holds (2446)"
-  - "poll_liveness.cfg -- Spec_Live: PollTerminates + StableReadyReturns + DeathTerminates + StopHonoured + CaughtTerminates (7156)"
-  - "poll_liveness_notimeout.cfg -- Spec_Live, poll(-1): StableReadyReturns + DeathTerminates + StopHonoured + CaughtTerminates (2446)"
-  - "poll_local.cfg -- Remote = {}: every fd local, the as-built configuration until NP-4 (6534)"
+  - "poll.cfg -- clean: every invariant, HAS_TIMEOUT, one local fd beside one remote (22276 distinct states)"
+  - "poll_notimeout.cfg -- poll(-1), the infinite wait; safety holds (6022)"
+  - "poll_liveness.cfg -- Spec_Live: PollTerminates + StableReadyReturns + DeathTerminates + StopHonoured + CaughtTerminates (22276)"
+  - "poll_liveness_notimeout.cfg -- Spec_Live, poll(-1): StableReadyReturns + DeathTerminates + StopHonoured + CaughtTerminates (6022)"
+  - "poll_local.cfg -- Remote = {}: every fd local, the as-built configuration until NP-4 (29286)"
   - "poll_buggy_check_before_register.cfg -- sample-then-register: a readiness edge in the gap reaches no hook (NoMissedPoll counterexample)"
   - "poll_buggy_no_wake.cfg -- producer sets the flag but never signals the Rendez (NoMissedPoll counterexample)"
   - "poll_buggy_lazy_unregister.cfg -- poll returns still-listed (NoStaleHook counterexample)"
@@ -22,14 +22,16 @@ cfgs:
   - "poll_buggy_no_loop_caught_check.cfg -- a caught note left to tsleep's arm, which a producer's noise keeps unreached (CaughtTerminates counterexample, poll(-1))"
   - "poll_buggy_caught_before_ready.cfg -- the verdict asks for the note before the readiness the pass found (EintrNotOverReady counterexample)"
   - "poll_buggy_deadline_before_caught.cfg -- a lapsed deadline returns 0 over a pending note (NoZeroOverCaught counterexample)"
-  - "poll_armfail.cfg -- ARM_MAY_FAIL, one local fd beside two remote: any arm may fail; every invariant (77732)"
-  - "poll_armfail_liveness.cfg -- ARM_MAY_FAIL, Spec_Live: the five liveness properties (8640)"
-  - "poll_armfail_liveness_notimeout.cfg -- ARM_MAY_FAIL, Spec_Live, poll(-1) (2642)"
+  - "poll_armfail.cfg -- ARM_MAY_FAIL, one local fd beside two remote: any arm may fail; every invariant (461108)"
+  - "poll_armfail_liveness.cfg -- ARM_MAY_FAIL, Spec_Live: the five liveness properties (26100)"
+  - "poll_armfail_liveness_notimeout.cfg -- ARM_MAY_FAIL, Spec_Live, poll(-1) (6490)"
   - "poll_buggy_no_retry.cfg -- a park an arm failed to cover gets no retry timer (NoMissedPoll counterexample)"
   - "poll_buggy_retry_is_timeout.cfg -- the retry timer's expiry taken for the call's timeout returns 0 early (NoSpuriousZero counterexample)"
-gate: "any change to the register/sample atomicity, the settle, the arm and its retry timer, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop/caught-note checks, the verdict's order, or a producer wake site -- specs/check-poll.sh"
+  - "poll_buggy_walk_drops_owed.cfg -- a batched walk loses an owed hook across a lock drop (NoMissedPoll counterexample)"
+  - "poll_buggy_walk_stalls.cfg -- a started walk never reaches (StableReadyReturns counterexample, poll(-1))"
+gate: "any change to the register/sample atomicity, the settle, the arm and its retry timer, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop/caught-note checks, the verdict's order, or a producer wake site, or the walk's Walk/Reach split -- specs/check-poll.sh"
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-28
 ---
 ## Abstraction
 
@@ -103,6 +105,16 @@ cross-lock handoff.
   with the one boolean; the three new buggy cfgs each violate the property
   they name.
 
+- **The walk is a later step than the mutation** (2026-10-28,
+  [[dec-2026-10-27-poll-walk-span]]): `Walk(f)` records that a walk OWES this
+  poller's listed hook a reach (`owed`); `Reach(f)` sets the flag and wakes,
+  under weak fairness. NoMissedPoll and HookedReadyIsFlagged accept an owed
+  hook; **OwedIsListed** holds; the re-arm's unhook clears what walks owed (a
+  re-listed hook samples afresh). The batching itself -- bookmarks, resumes,
+  who a walk reaches -- is [[spec-poll-walk]]'s; walks owed past a lock are
+  [[spec-poll-owed]]'s and [[spec-poll-defer]]'s. The re-pinned distinct-state
+  counts above are the lease-A run's (2026-10-27).
+
 ## What it cannot see
 
 The hook-lifetime UAF class ([[fnd-rw2-2cf1]]) is BELOW the model:
@@ -119,8 +131,10 @@ blindness class [[spec-sched-tickless]] has for #363.
 `thread_die_pending` + `proc_stop_sleeper_park`; Resample ↔ the
 re-registering scan (round 5's SpinLapse / BackoffCommit / BackoffTimeout, and
 then ARCH 8.12's Point / PointDone, are all GONE with the code they named);
-MakeReady ↔
-`poll_waiter_list_wake`; the timeout
+MakeReady ↔ the producer's
+mutation + its wake call (`poll_waiter_list_wake`, `proc_wake_or_owe`,
+`poll_wake_deferred`); Walk ↔ the walk's start; Reach ↔ the batch that reaches
+the hook; the timeout
 composes with [[spec-tsleep]]; SnapshotAnswer / Arm / SettleDeath / RetryWake
 are filled at NP-4, when the split lands. NotePost ↔ `notes_post` +
 `proc_caught_note_wake`; TSleepCommit's caught branch ↔ `tsleep_common`'s

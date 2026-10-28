@@ -22,6 +22,47 @@ needed the operator.
 
 
 ---
+## 2026-10-28 (aux, Opus 5.5 1M) -- the poll chunk: hook walks bounded, and none under its owner's lock
+
+**The ask.** Vote 11 sequenced the hook-list bound after C6; votes 12 (bound the span, not the count) and 13 (move every
+locked walk out, the console's and the 9P client's included) set the design. Never re-asked.
+
+**What landed (aux-3-poll, 13 commits, tip cc82c1d17).** P-a/P-b the batched walk; P-c walks owed under the process
+table lock, pinned by a bookmark at the head; P-d the console episode; P-e walks deferred past `c->lock` and
+`g_dev9p_poll_lock`. Each spec before its code: `poll_walk.tla`, `poll_owed.tla`, `poll_defer.tla`.
+
+**The design turn that mattered.** Vote 13 said the 9P walks move after `c->lock` "using the refs they hold". The Loom
+broke that: an async op does not reference its Loom, and `loom_free` serializes with completions only through each
+op's `c->lock` in its abandon loop. A reference taken at the owe would have been a resurrection at refcount zero, and
+worse, the SQPOLL kthread could end up running `loom_free` on itself (its self-join). So the owners split: REF owners
+(srvconn, pipe ring -- refcounted, frees safe anywhere) take a reference; WAIT owners (the Loom, the client, the test
+transports) wait in their free. The srvconn could not be a WAIT owner: its last unref can run under `c->lock` in
+`p9_client_close`, where a wait would spin on the same CPU as the thread it waits for.
+
+**Wrong turns, and what caught each.**
+- 96f259231 added `srvconn_total_freed`, which already existed: two commits do not compile. The per-file compile had
+  run on srvconn.c before the accessor went in; the sabotage set's per-variant compile check caught it (d1a0bf094).
+  Lesson, again: the posture is measured after the LAST edit.
+- The first boot extincted (`pw_await: a hook outlived its list's owner`): the WAIT owners' wait reused the table
+  lock's, whose hook check belongs to `proc_free`, not to the spec's Free (71402f7f6).
+- The first TLC run failed the clean `poll_defer_liveness`: weak fairness on Unlock admits a thread cycling depth 1-2
+  forever inside one outer hold (f6f49c134).
+- Audit F1 (Fable): both bookmark waits spun on the core's `yield` hint. Making the walks preemptible made every spin
+  on them a same-CPU livelock from a syscall body, which is never preempted -- the third shape of the loom_free join
+  lesson. The regression pins both threads to one CPU; sabotage S18 shows the spin hangs it (cc82c1d17).
+- Sabotage S2 and S8 hung the boot at test 112 before reaching their targets: every owed walk ENTERS `poll_walk`
+  parked, so breaking the resume broke `wait_pid`. Narrowed to S2b/S8b, both red. The judge also missed the 9P
+  fixture's `P9-FIXTURE FAIL:` lines (S17 was red all along).
+
+**Evidence.** ~/projects/aux-gate/poll/runs/summary.txt: green 2068/0 on cc82c1d17, 19/19 new tests red under
+sabotage, regreen ELF == green, check-production PASS, SMP gate 5 rows x 10/10 0 corruption; TLC every cfg as
+claimed. Audit: `vault/record/audits/adt-pollwalk-r1.md`.
+
+**What "fixed" covers.** No walk runs under its owner's lock and no hold exceeds 32 hooks; the TOTAL work per event is
+still O(pollers), each a pool-charged thread. Open: the dedupe-direction test (seam), `dpl_lock` untested directly,
+the EL0-return re-enqueue residue, the `SPAWN_PERM_ALL` alias assert.
+
+---
 ## 2026-10-27 (aux, Opus 5.5 1M) -- thread-model C6: one id space, a thread's kernel memory charged to the pool, a per-Proc thread budget
 
 **The ask.** The same overhaul (operator 10-20, 10-21). C6 is "limits and identity": votes 2-4 and 7 of 10-21 (never re-asked). C4's tgkill and C7's /proc/<pid>/thread/<tid> both name tids, so the id policy went first; C6 also owed C5's follow-up -- an execer from a non-main thread takes the pid.

@@ -6,10 +6,10 @@ title: "poll — one thread waiting on N readiness sources"
 code: ["kernel/poll.c", "kernel/include/thylacine/poll.h"]
 audit: hard
 guarded-by: [inv-i9]
-validated-by: [spec-poll, spec-tsleep, gate-smp]
+validated-by: [spec-poll, spec-poll-walk, spec-poll-owed, spec-poll-defer, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -25,6 +25,11 @@ dev9p.poll bridge's userside. Since #98 (NP-4c, 2026-09-28) an fd whose
 readiness lives in a server is SAMPLED by a snapshot its server answers at
 once and ARMED only when the call will park — the pass below settles every
 snapshot before it decides ([[sub-kernel-ninep-dev9p-poll]]).
+Since the poll chunk (2026-10-28, [[chg-2026-10-28-poll-hook-walks]]) a
+producer's walk is bounded in SPAN -- at most 32 hooks per hold of the list
+lock, behind a bookmark -- and no walk runs under its owner's lock: walks owed
+under the process table lock begin at its release, walks reached under a 9P
+client's lock are deferred past it (Concurrency below).
 
 ## Contract
 
@@ -265,8 +270,17 @@ leaves some out), then unhooks, then drops the refs
 `struct poll_waiter` — magic ("POLW") + `ready` + private-rendez
 backref + `list` backpointer (set at register, cleared at unregister;
 the sweep's route home without a Dev vtable op) + `next`.
-`struct poll_waiter_list` — a spinlock + singly-linked head, embedded
-in the pollable object. `struct pollfd` — the 8-byte pinned ABI.
+`struct poll_waiter_list` — a spinlock + doubly-linked head (`prev` on every
+element, so unregister is O(1) with both neighbour links checked), embedded in
+the pollable object; a walk's stack bookmark is a `poll_waiter` carrying
+`POLL_MARK_MAGIC`, skipped by every walk, by `poll_waiter_list_empty` and by the
+count. `struct poll_owed` / `poll_owed_chain` -- a list's record for a walk
+owed under the table lock, chained on `Thread.table_owed` (serialized by that
+lock; the reap cancels). `struct poll_deferred` / `poll_defer_chain` /
+`poll_defer_ops` -- a list's record for a walk deferred past a deferring lock:
+`chain` under the LIST's lock, `next` the owning thread's, optional `ops`
+{tryget, put} with an `owner` argument (a REF owner), NULL for a WAIT owner;
+chained on `Thread.lock_owed`, counted by `Thread.defer_depth`. `struct pollfd` — the 8-byte pinned ABI.
 Diagnostics: `poll_total_calls` / `poll_total_slept` — the latter
 counts "committed to the slow path", not "actually parked" (a
 producer racing register-to-tsleep still increments it) —
@@ -281,6 +295,52 @@ and `remote`. `poll_total_snap_failsafes` (zero on a healthy system) and
 knob and the runner's release.
 
 ## Concurrency
+
+**The walk in batches** ([[spec-poll-walk]], [[dec-2026-10-27-poll-walk-span]]).
+`poll_walk` reaches up to `POLL_WAKE_BATCH` hooks per hold, then parks its stack
+bookmark right behind the last hook reached and drops the lock (IRQs restored;
+preemptible when the walker holds nothing else); the next hold resumes from
+`mark->next`. Register pushes at the HEAD, so a parked walk meets only hooks
+older than itself and always ends -- the shape Linux's 2017 bookmark lacked
+(appended at the tail; removed in v6.7 for livelock). A walk steps over other
+walks' bookmarks.
+
+**Walks owed under the table lock** ([[spec-poll-owed]]). `g_proc_table_lock` is
+IRQSAVE and is what keeps a Proc alive, so a walk under it cannot simply move
+after the unlock. `proc_wake_or_owe` (the holder's call) chains the list's
+`poll_owed` record on the holder's own chain, once; every
+`proc_table_lock_release` -- the only release path; a release by a thread that
+did not take the lock through `proc_table_lock_acquire` extincts -- pops each
+record, lists a bookmark at the head while still holding the lock (the walk
+BEGINS), drops it, walks from the bookmark, and retakes the lock for the next.
+The bookmark pins the Proc: the reap cancels the Proc's records under the lock,
+and `proc_free` extincts on a record still chained and waits until no bookmark
+is on its lists. A release may retake the lock, so no caller holds a lock
+ordered after it across a release.
+
+**Walks deferred past a deferring lock** ([[spec-poll-defer]]). A 9P client's
+`c->lock` (through `client_lock`/`client_unlock`) and `g_dev9p_poll_lock`
+(`dpl_lock`/`dpl_unlock`, taken around it) count themselves in
+`Thread.defer_depth`. `poll_wake_deferred` walks at once outside every deferring
+lock, in an IRQ handler or with IRQs masked; inside one it owes: under the list
+lock, nothing if the record is chained already or no hook is listed, else
+`tryget` (a REF owner already in its free has no poller: walk at once) and chain.
+The release that leaves the thread in none drains, holding nothing: per record,
+in ONE hold of the list lock, unchain, clear the field and list the bookmark;
+walk; then `put`. REF owners: the srvconn's three lists, the pipe ring's (CAS
+inc-not-zero; the drainer's last put may free the owner, as
+`p9_client_close`'s transport close needs). WAIT owners: the client's send and
+role lists, a Loom's CQ list, the test loopback/mq -- each free calls
+`poll_deferred_await` once nothing can post (spin until off every chain, then
+until no bookmark; extincts inside a deferring lock or on a record its own chain
+holds).
+
+**Every wait yields the CPU** (audit [[adt-pollwalk-r1]] F1). The walker of an
+owed or deferred walk is preemptible and may sit runnable on a CPU's run tree
+with its bookmark listed, while the waiter -- `proc_free` in wait_pid,
+`loom_free` in close -- runs in a syscall body that the timer never preempts.
+`poll_await_pause` is `sched_yield_hint()` (dispatch while anything else can
+run here), the core hint only when nothing can.
 
 Producer order inside `poll_waiter_list_wake`, load-bearing: write
 `pw->ready = true` FIRST, then `wakeup(pw->rendez)` — the rendez-lock
@@ -349,7 +409,8 @@ and snapshots are swept as on every other exit.
 
 ## Performance
 
-O(nfds) lock pairs per scan; no allocation in the core — `waiters[]`
+A walk's longest hold is `POLL_WAKE_BATCH` hooks whatever the list's length; the
+total stays O(hooks), each hook a pool-charged thread's. O(nfds) lock pairs per scan; no allocation in the core — `waiters[]`
 (~2 KiB) + `held[]` (~1.5 KiB) + `snaps[]` (~1.5 KiB) are frame-resident,
 which is exactly why `POLL_MAX_NFDS` is a frame bound, not an fd-table
 bound. A pass with remote fds costs one server round trip whatever their
@@ -408,13 +469,29 @@ number: every snapshot is sent before the settle waits.
   a pass past the deadline hooks and arms nothing; an uncovered park is
   bounded by the retry timer, whose expiry is a wake. Each has its `poll.tla`
   or `net_poll.tla` buggy cfg and a `dev9p.poll_*` test seen red.
+- Register must push at the HEAD: a tail insert lets a parked walk meet newer
+  hooks for ever ([[spec-poll-walk]] tail_insert).
+- One hook per list per call (`poll_hook_once`) keeps the EARLIER hook: it was
+  listed before the later entry's sample, so it covers every mutation that
+  sample missed; keeping the later one loses a wake when two different objects
+  share the list ([[seam-poll-dedupe-direction-test]]).
+- The drain of a deferred record clears `chain` and lists the bookmark in ONE
+  hold of the list lock; split, a WAIT owner's free sees neither and frees under
+  the walk (split_pop).
+- A new path to `g_proc_table_lock`, a 9P client's lock or `g_dev9p_poll_lock`
+  goes through its wrapper; a raw release skips the drain (and the table lock's
+  extincts).
+- A wait for an owed or deferred walk yields the CPU; a spin is a same-CPU
+  livelock from a syscall-body waiter ([[fnd-pollwalk-r1-f1]]).
 - **A wake site may walk its list for ANY state change; what it may
   never do is fail to walk it for one.** That licence is what lets one
   list serve two endpoints, and it exists only because of the re-arm.
 
 ## Seams
 
-[[seam-poll-srv-registry-retain]] · [[seam-poll-heap-waiters]].
+[[seam-poll-srv-registry-retain]] · [[seam-poll-heap-waiters]] ·
+[[seam-poll-dedupe-direction-test]]. Closed: [[seam-poll-hooks-per-list]]
+(2026-10-28, by the span).
 
 ## Caveats
 
@@ -472,3 +549,5 @@ caught note ends a Linux caller's `ppoll`/`pselect6`/`pause()` -- the
 nothing gives EINTR, timeout 0 gives EINTR), `poll.caught_note_ends_a_noise_driven_poll`
 (with its no-note twin) and `poll.caught_note_ends_pause` (timeout 0, a
 bounded and a `-1` sleep).
+
+The poll chunk: [[chg-2026-10-28-poll-hook-walks]] (votes 12 + 13; audit [[adt-pollwalk-r1]]).

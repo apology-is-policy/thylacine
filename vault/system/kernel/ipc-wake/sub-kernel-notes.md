@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -658,6 +658,15 @@ rendezvous on its own stack, producers wake the whole list, and the ABBA between
 a reader's condition check and a poster's wake disappears.
 
 ## Concurrency
+
+**No poll-list walk runs under the queue lock** (the poll chunk, 2026-10-28):
+`notes_post` drops `q->lock` and then calls `proc_wake_or_owe(&q->owed)`, which
+owes the walk when the poster holds the process table lock (most callers) and
+walks at once otherwise ([[spec-poll-owed]]); `notes_reenqueue_head_locked` no
+longer wakes -- its callers walk after `spin_unlock`. The queue's `owed` record
+is cancelled at the reap with the Proc's. Residue: the three re-enqueue walks of
+`notes_deliver_at_el0_return` run after `q->lock` but still in the IRQ-masked
+EL0-return tail; their hooks are only the Proc's own threads.
 
 **The queue lock is the mutual-exclusion argument for the whole invariant.**
 Both delivery paths take it; whichever gets it first owns the note.

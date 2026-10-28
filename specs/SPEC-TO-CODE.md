@@ -1114,7 +1114,94 @@ cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 ARCH §23.3.
 
+**The walk's Walk/Reach split (2026-10-28, the poll chunk; operator vote 12).**
+`MakeReady` no longer flags the hook in the same step: `Walk(f)` records that a
+walk OWES the listed hook a reach (`owed`), `Reach(f)` sets the flag and wakes
+(weak fairness). NoMissedPoll / HookedReadyIsFlagged accept an owed hook; new
+invariant OwedIsListed; the re-arm's unhook clears what walks owed. Buggy cfgs
+`walk_drops_owed` -> NoMissedPoll, `walk_stalls` -> StableReadyReturns. Walk <->
+the producer's wake call; Reach <-> the batch of `poll_walk` that reaches the
+hook. The batching itself is `poll_walk.tla`'s. Clean counts re-pinned in the
+vault note from the 2026-10-27 run (poll 22276, poll_armfail 461108, ...);
+check-poll.sh does not pin them.
+
+## poll_walk.tla — the poll chunk P-a/P-b (operator vote 12, 2026-10-27; spec-first)
+
+Status: **spec landed 49c3e034b; mechanism 73fc51435; TLC all cfgs as claimed
+(2026-10-27).** One list, hooks churning with no fairness, two producers walking
+in batches of K behind stack bookmarks.
+
+| Spec | Code |
+|---|---|
+| `Batch(w)` (one hold, up to K hooks, park behind the last) | `poll_walk` in `kernel/poll.c`: `POLL_WAKE_BATCH`, the park behind `last`, the resume from `mark->next` + `poll_list_unlink` |
+| `Register(k)` (push at the head) | `poll_waiter_list_register` |
+| `Unregister(k)` | `poll_waiter_list_unregister` (O(1), both neighbour checks) |
+| a walk stepping over another's bookmark | the `POLL_MARK_MAGIC` skip in `poll_walk` |
+| Covered / NoStray / MarkIffParked / WalkEnds | runtime: `poll.wake_reaches_every_hook_in_batches`, `wake_batches_owe_only_older_hooks`, `wake_steps_over_another_walks_bookmark`, `wake_bookmark_alone_reads_empty` |
+
+Buggy cfgs: `tail_insert` -> WalkEnds, `tail_insert_stray` -> NoStray,
+`resume_skips` -> Covered, `mark_ends` -> Covered. Each test above was shown red
+under a code sabotage on cc82c1d17 (S1, S2b, S3, S4).
+
+## poll_owed.tla — the poll chunk P-c/P-d (operator vote 13, 2026-10-27; spec-first)
+
+Status: **spec landed ea54736c8; mechanism dfa2fe372 + e9aeccb4f; console
+episode 8d18a87cd; TLC all cfgs as claimed.** Walks owed under
+`g_proc_table_lock` (IRQSAVE; it is also what keeps a Proc alive).
+
+| Spec | Code |
+|---|---|
+| `Acquire(h)` / `Release(h)` | `proc_table_lock_acquire` / `proc_table_lock_release` -- the ONLY path to the lock; the holder in `g_proc_table_holder`; a mismatched release extincts |
+| `Event(h, o)` (owe once) | `proc_wake_or_owe` -> `poll_owe` at the six `child_waiters` sites, `notes_post` (+ re-enqueue callers) and `cons_episode_wake_all` |
+| Release's pop + bookmark at the head, under the lock | `poll_owed_begin` inside `proc_table_lock_release` |
+| `Batch(h)` after the drop | `poll_waiter_list_wake_from` |
+| `Unlink(o)` (cancel) | `poll_owed_cancel` in `proc_unlink_child` / `proc_test_unlink` |
+| `Free(o)` (wait for no bookmark) | `proc_free`: extinction on a chained record, then `poll_waiter_list_await_unmarked` (yields the CPU: audit F1) |
+
+Buggy cfgs: `skip_drain` -> ChainDrained, `skip_drain_live` -> OwedReached,
+`no_cancel` / `free_no_wait` / `begin_after_unlock` -> NoUAF, `owe_joins_walk` ->
+OwedCovered, `drain_all` -> DrainEnds. Runtime: `poll.owed_walk_runs_at_the_table_release`,
+`owed_records_chain_once_and_cancel`, `owed_walk_owes_only_hooks_behind_the_bookmark`,
+`notes_post_under_the_table_lock_owes_its_walk`, `reap_cancels_the_walks_owed_to_a_proc`,
+`cons_episode_walks_owed_under_the_table_lock` -- each shown red under sabotage.
+The model's drainer has weak fairness; the same-CPU starvation of a preempted
+drainer by a never-preempted waiter is below it (runtime:
+`poll.await_yields_to_a_drainer_on_its_cpu`).
+
+## poll_defer.tla — the poll chunk P-e (operator vote 13; spec-first)
+
+Status: **spec landed 543dacebf, fairness fixed f6f49c134 (the outermost release
+strongly fair); mechanism 96f259231 (+ d1a0bf094 build fix, 71402f7f6, cc82c1d17);
+TLC all cfgs as claimed.** Walks deferred past a deferring lock: a 9P client's
+`c->lock`, and `g_dev9p_poll_lock` around it.
+
+| Spec | Code |
+|---|---|
+| `Lock(h)` / `Unlock(h)` (depth; the outermost drains) | `client_lock` / `client_unlock`, `dpl_lock` / `dpl_unlock` -> `poll_defer_enter` / `poll_defer_exit` |
+| `Event(h, o)` (test-and-set under the list lock; tryget) | `poll_wake_deferred` |
+| `Pop(h)` (unchain + clear + bookmark, one hold) + `Batch(h)` + put | the drain in `poll_defer_exit` |
+| `Close(h, o)` | `p9_client_close` -> the srvconn transport's close (teardown + `srvconn_unref` under `c->lock`) |
+| REF owners (`Get` / `Put`) | srvconn (`srvconn_defer_tryget` / `srvconn_unref`), pipe ring (`pipe_defer_tryget` / `pipe_ring_unref`) |
+| WAIT owners (`Detach` + `Free`) | `loom_free` after its abandon loop, `p9_client_destroy`, `p9_loopback_destroy`, `p9_mq_loopback_destroy` -> `poll_deferred_await` |
+
+Buggy cfgs: `no_get` / `put_at_pop` / `free_ignores_chain` / `split_pop` ->
+NoUAF, `split_owe` -> OneChain, `drain_inner` -> NoWalkUnderLock, `skip_drain` ->
+ChainDrained, `skip_drain_live` -> OwedReached, `skip_drain_free` -> FreeEnds,
+`owe_joins_walk` -> OwedCovered. Runtime: `poll.deferred_walk_runs_at_the_outermost_release`,
+`deferred_ref_owner_holds_a_ref_across_the_walk`, `deferred_walks_a_dying_owner_at_once`,
+`deferred_await_waits_out_an_owed_walk`, `srvconn_send_under_a_client_lock_owes_its_walk`,
+`srvconn_close_under_a_client_lock_outlives_its_walks`,
+`pipe_hangup_under_a_client_lock_owes_its_walk`, `await_yields_to_a_drainer_on_its_cpu`,
+`9p_client.transport_walk_runs_after_the_client_lock` -- each shown red under
+sabotage. `dpl_lock`'s deferral has no dedicated test.
+
 ## cons_poll.tla — P7-LS-8a (the pollable-console deferred poll-wake; spec-first re-enabled)
+
+**Poll chunk note (2026-10-28, P-d):** the episode's four list walks are now
+owed under the process table lock (`proc_wake_or_owe`) and run at
+`proc_console_sak_from`'s release -- on the console manager, before its relay --
+so `Begin`'s atomic Begin + WalkBoth still abstracts the code. No change to this
+module.
 
 Status: **spec landed at LS-8 scripture; the mechanism lands at LS-8a
 (source map filled then).** Models the LS-8a DEFERRED poll-wake: the

@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-pipe, gate-smp]
 locks: [lock-pipe-ring, lock-poll-list]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -144,6 +144,17 @@ routes through the large path as an **order-1 (8 KiB) allocation**,
 is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level).
 
 ## Concurrency
+
+- **The ring's list walk is a REF-owned deferred record** (the poll chunk,
+  2026-10-28, [[chg-2026-10-28-poll-hook-walks]]): all five `r->poll_list` walks are
+  `poll_wake_deferred(&r->poll_owed)`. A pipe that is a 9P transport's tx is
+  written (`CNBFRAME`) and hung up under the client's `c->lock`; there the walk
+  is owed and holds a ring reference (`pipe_defer_tryget`, CAS inc-not-zero)
+  until the drain drops it with `pipe_ring_unref`, factored from
+  `devpipe_close` -- so a ring whose ends both close under the lock outlives
+  them until it is walked (test
+  `poll.pipe_hangup_under_a_client_lock_owes_its_walk`). The ring header grew
+  by the 40-byte record (56 -> 96).
 
 - The ring ref is `__atomic` ACQ_REL (r15-b F234,
   [[fnd-r15b-f234]]): two CPUs closing the two endpoints

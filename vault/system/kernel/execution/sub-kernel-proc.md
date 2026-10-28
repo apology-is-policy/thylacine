@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Graphical seat incarnations
 
@@ -557,6 +557,22 @@ failing test left behind ([[sub-substrate-gates]]). Its assert names every
 flag below it.
 
 ## Concurrency
+
+**Every acquire and release of `g_proc_table_lock` is `proc_table_lock_acquire` /
+`proc_table_lock_release`** (the poll chunk, 2026-10-28,
+[[chg-2026-10-28-poll-hook-walks]]): the holder is recorded, a release by a
+thread that did not take the lock through the wrapper extincts, and every
+release drains the walks the holder OWED while it held the lock
+([[spec-poll-owed]]). `proc_wake_or_owe` is the call at every walk of a Proc's
+`child_waiters` (reparent, exit-notify, exec-replace, the birth hold, job
+stop/resume) and of its notes queue: under the lock it chains the list's record
+on the holder's chain; outside it walks at once. The release begins each owed
+walk under the lock (a bookmark at the head) and finishes it after the drop, so
+a release may RETAKE the lock: no caller holds a lock ordered after it across a
+release. The reap (`proc_unlink_child`) cancels a Proc's two records under the
+lock; `proc_free` extincts on a record still chained and waits (yielding the
+CPU) until no walk's bookmark is on `child_waiters` or the notes poll list --
+the pin that replaces the lock's coverage of the walk.
 
 Two locks. [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
 and exposed only as an acquire/release pair, guards the children lists, the

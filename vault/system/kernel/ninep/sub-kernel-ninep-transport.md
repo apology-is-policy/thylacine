@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-14
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -214,6 +214,15 @@ the attach layer), last_recv_len, counters. Adapters: `p9_spoor_transport`
 `P9_MQ_RING_CAP` ring + scratch + knobs).
 
 ## Concurrency
+
+**A backend's list walk under the client's lock is deferred** (the poll chunk,
+2026-10-28, [[chg-2026-10-28-poll-hook-walks]]): the loopback and mq backends' `ready_list` walks (send,
+close, forced EOF) go through `poll_wake_deferred(&ready_owed)`, which owes the
+walk while the caller holds `c->lock` and walks at once otherwise
+([[spec-poll-defer]]). Both are WAIT owners: their destroys walk the list
+themselves and then `poll_deferred_await` the record. The srvconn and pipe
+backends' endpoint lists are REF owners ([[sub-kernel-srvconn]],
+[[sub-kernel-pipe]]).
 
 The core is lock-free and single-caller by contract — the client serializes
 sends under `c->lock` and gives the recv side to exactly one elected reader

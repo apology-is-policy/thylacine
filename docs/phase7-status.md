@@ -2568,3 +2568,38 @@ before the code, on aux-3-c6.
 - **Still open, owned.** The poll_waiter_list hook bound (OPEN-BUGS P2; C6 raised its per-Proc factor 16x): aux's
   next chunk by vote 11. A refused first create burns the main tid only in a hand-built test Proc (rfork frees the
   Proc on failure).
+
+## The poll chunk: hook walks bounded, and none under its owner's lock — 2026-10-28
+
+Operator votes 12 (bound the span, not the count) and 13 (every locked walk moves out) of 2026-10-27; vote 11 sequenced
+it after C6. It closes OPEN-BUGS 10-27 15:42Z (nothing capped the hooks on one `poll_waiter_list`) and
+`seam-poll-hooks-per-list`. Spec-first at every step, on aux-3-poll in the reap tree.
+
+- **The walk in batches** (P-a 49c3e034b spec, P-b 73fc51435). A wake reaches at most `POLL_WAKE_BATCH` (32) hooks per
+  hold of the list lock and parks a stack bookmark between holds; register pushes at the head, so a walk never meets a
+  newer hook and ends; unregister is O(1); a poll call keeps one hook per list. Nothing new is refused.
+  `specs/poll_walk.tla` + poll.tla's Walk/Reach split.
+- **Walks owed under the process table lock** (P-c ea54736c8 spec, dfa2fe372 + e9aeccb4f). `proc_table_lock_acquire` /
+  `_release` are the only path to the lock; an event owes a per-list record on the holder's chain; every release begins
+  each owed walk under the lock (a bookmark at the head) and finishes it after the drop; the reap cancels; `proc_free`
+  waits out the bookmarks. `specs/poll_owed.tla`. P-d 8d18a87cd: the console episode's four walks the same way.
+- **Walks deferred past the 9P client's lock** (P-e 543dacebf spec, 96f259231 + 64b13b19a + d1a0bf094). `c->lock`
+  (`client_lock`) and `g_dev9p_poll_lock` (`dpl_lock`) are deferring locks; the outermost release drains. srvconn and
+  pipe ring take a reference per owe; the Loom, the client and the test transports' frees wait. `specs/poll_defer.tla`.
+  96f259231 and 64b13b19a do not compile alone (a duplicate `srvconn_total_freed`); d1a0bf094 fixes it.
+- **Found by the gates, fixed.** Lease A's first boot: the WAIT owners' wait borrowed the table lock's hook check and
+  extincted (71402f7f6). The first TLC run: a clean liveness cfg failed on a fairness gap in the model (f6f49c134,
+  strong fairness on the outermost release).
+- **Audit r1** (Fable 5.1, start == end): 0 P0 / 1 P1 / 0 P2 / 2 P3, clean, no round 2 (cc82c1d17). F1: the bookmark
+  waits spun while a preemptible drainer sat runnable on the same CPU under a never-preempted syscall-body waiter --
+  now `sched_yield_hint`, regression `poll.await_yields_to_a_drainer_on_its_cpu`. F3: chain/depth assertions. F2
+  (which hook the dedupe keeps is untested for two objects on one list) is `seam-poll-dedupe-direction-test`.
+- **Gates on cc82c1d17.** Kernel suite 2068/0 (green and regreen, ELF identical); 19 new tests, each shown red under a
+  sabotage aimed at it (S2/S8 hung boot before their targets and were narrowed to S2b/S8b); every poll, poll_walk,
+  poll_owed and poll_defer cfg as claimed; check-production PASS; SMP gate default-smp1/4/8 + ubsan-smp4/8 each 10/10,
+  0 corruption (main's unleased Stratum load overlapped its first minute; no row timed out).
+- **Still open, owned.** `seam-poll-dedupe-direction-test`; `dpl_lock`'s deferral has no dedicated test;
+  `notes_deliver_at_el0_return`'s three re-enqueue walks run after `q->lock` but in the IRQ-masked EL0-return tail
+  (their hooks are the Proc's own threads); `SPAWN_PERM_ALL` lacks the alias assert `PROC_FLAGS_ALL` has (corona,
+  yip 0263); corona's `sqpoll_ticket_cb` takes the table lock raw and converts at the next join.
+

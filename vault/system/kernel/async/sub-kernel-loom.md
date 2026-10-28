@@ -16,7 +16,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -465,6 +465,17 @@ field offsets — size alone would let a same-size field reorder shift the layou
 the userspace mirror reads.
 
 ## Concurrency
+
+**The CQ wait-list walk is a WAIT-owned deferred record** (the poll chunk,
+2026-10-28, [[chg-2026-10-28-poll-hook-walks]]): every `cq_waiters` walk is `poll_wake_deferred(&l->cq_owed)`.
+`loom_post_cqe` from `loom_async_complete` runs under the completing client's
+`c->lock`, so there the walk is owed and runs at that client's release; the CQE
+write and the CQ flag still precede it (I-29 untouched). An async op holds no
+Loom reference -- a reference taken at the owe could make a drainer, the SQPOLL
+kthread itself, run `loom_free` -- so the Loom is the record's WAIT owner:
+`loom_free` calls `poll_deferred_await(&l->cq_owed)` after its abandon loop,
+when no completion can post any more (each op is abandoned under its client's
+lock).
 
 An SQPOLL kthread is charged to its creator's thread budget under the
 creator's thread lock (`proc_sqpoll_charge` / `proc_sqpoll_uncharge`,

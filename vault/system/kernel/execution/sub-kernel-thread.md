@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -202,7 +202,7 @@ which caches it or restores its guard and frees it.
 
 ## Data structures
 
-`struct Thread` is 1760 bytes, pinned by a `_Static_assert` whose message is
+`struct Thread` is 1776 bytes, pinned by a `_Static_assert` whose message is
 a running changelog of every append and why. `magic` at offset 0, same SLUB
 double-free defence as `Proc`. Alignment is `_Alignof(struct Thread)` (16,
 from the embedded `Context`'s `_Alignas(16)` vector block) — passing a
@@ -248,7 +248,13 @@ reap's last dev9p close hands a staged write-behind run to the closer instead
 of waiting on the server ([[sub-kernel-ninep-dev9p]]). `exit_close_active` has
 one setter again, the at-exit close. The struct size is unchanged at 1760.
 Since thread-model C6, `pool_pages` (a byte taken from the padding beside
-`in_handler`) holds the pool charge the thread returns; still 1760.
+`in_handler`) holds the pool charge the thread returns; still 1760. The poll
+chunk (2026-10-28, [[chg-2026-10-28-poll-hook-walks]]) appended `table_owed`
+(into the tail pad: 1760) and then `lock_owed` + `defer_depth`: 1776, still two
+per 4 KiB slab -- the walks the thread owes under the process table lock and
+under a deferring lock, and how many deferring locks it holds
+([[sub-kernel-poll]]). `thread_release` extincts on a thread freed still
+counting a deferring lock or owing a walk on either chain (ChainDrained).
 `cpu_pinned` is the single
 clean unstealability predicate that replaced the old `kstack_base != NULL`
 gate — the #860 root cause was that `g_bootcpu_idle` owned a real kstack, so

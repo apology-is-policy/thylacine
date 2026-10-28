@@ -3,10 +3,10 @@ id: lock-poll-list
 type: lock
 title: "poll_waiter_list.lock — the per-object hook list"
 kind: spin (irqsave since 2026-09-21)
-guards: "the singly-linked poll_waiter hook chain, each hook's list backpointer, and the producer-side ready-flag writes during a wake walk"
+guards: "the doubly-linked poll_waiter hook chain (hooks and walk bookmarks), each hook's list backpointer, the producer-side ready-flag writes during one batch of a wake walk, and each deferred record's chain field"
 orders-before: [lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-10-28
 ---
 ## Discipline
 
@@ -48,9 +48,22 @@ the interleaving; the guard is the comment at the list ops in
 
 ## Held across
 
-The wake walk including its per-hook `wakeup` calls (bounded by the
-number of registered pollers). A stale magic mid-walk extincts —
-that is the NoStaleHook tripwire firing.
+ONE BATCH of a wake walk: at most `POLL_WAKE_BATCH` (32) hooks and their
+`wakeup` calls ([[dec-2026-10-27-poll-walk-span]], [[spec-poll-walk]]). Between
+batches the walk parks a stack bookmark (`POLL_MARK_MAGIC`) right behind the last
+hook it reached and drops the lock: IRQs are restored and, when the walker holds
+nothing else, it can be preempted. Register pushes at the head, so a walk never
+meets a hook newer than itself and always ends. Unregister is O(1) (both
+neighbour links checked). A stale magic mid-walk extincts — that is the
+NoStaleHook tripwire firing.
+
+No walk runs under its OWNER's lock any more ([[dec-2026-10-27-locked-walks-out]]):
+under `g_proc_table_lock` a walk is owed and begins at the release
+([[spec-poll-owed]]); under a 9P client's `c->lock` or `g_dev9p_poll_lock` it is
+deferred to the outermost release ([[spec-poll-defer]]). The deferred records'
+`chain` field is tested and set under this lock, and the drain clears it and
+lists the walk's bookmark in one hold -- the atomicity a WAIT owner's free relies
+on.
 
 ## Prosecution
 
