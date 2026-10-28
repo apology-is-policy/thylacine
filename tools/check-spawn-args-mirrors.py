@@ -75,6 +75,8 @@ GO_TAIL = re.compile(r"^\s*type\s+(spawnExt\w*)\s+struct\b", re.M)
 EXT_TAILS = [
     ("sys_spawn_ext_cwd", [("libt", "t_sys_spawn_ext_cwd", "c"),
                            ("libthyla-rs", "TSpawnExtCwd", "rust")]),
+    ("sys_spawn_ext_threads", [("libt", "t_sys_spawn_ext_threads", "c"),
+                               ("libthyla-rs", "TSpawnExtThreads", "rust")]),
 ]
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
@@ -476,11 +478,26 @@ def self_test(texts, go_text):
                                 lambda l: l + "\n    u32 unasserted_field;")
         if not fails(t, go_text):
             missed.append(f"a {kstruct} field with no offsetof assert")
+        # An address field loses its suffix; a tail with none gains an 8-byte
+        # field without one. Either way the u64 rule must report it.
         t = dict(texts)
-        t["kernel"] = re.sub(r"\bcwd_va\b", "cwd_addr", texts["kernel"]) \
-            if kstruct == "sys_spawn_ext_cwd" else texts["kernel"]
+        tail_va = [f[0] for f in tf if f[0].endswith("_va")]
+        if tail_va:
+            t["kernel"] = re.sub(r"\b%s\b" % tail_va[0], tail_va[0][:-3] + "_addr",
+                                 texts["kernel"])
+        else:
+            # Asserted and sized, so the layout holds and only the u64 rule
+            # has anything to say about it.
+            _, size = layout(tf)
+            off = (size + 7) & ~7
+            k = edit_line(texts["kernel"], "kernel", tf[-1][3],
+                          lambda l: l + "\n    u64 addr;")
+            k = re.sub(r"(_Static_assert\(\s*sizeof\(\s*struct\s+%s\s*\)\s*==\s*)\d+"
+                       % kstruct, lambda m: m.group(1) + str(off + 8), k, count=1)
+            t["kernel"] = k + (f"\n_Static_assert(__builtin_offsetof(struct {kstruct}, "
+                               f"addr) == {off}, \"\");\n")
         if t["kernel"] == texts["kernel"] or not reported(t, go_text, "not named *_va"):
-            missed.append(f"a {kstruct} address field without its _va suffix")
+            missed.append(f"a {kstruct} 8-byte field without the _va suffix")
     first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
                     if n.endswith("_va"))
     t = dict(texts)

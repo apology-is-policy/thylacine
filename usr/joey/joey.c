@@ -4960,7 +4960,10 @@ static int probe_spawn_cwd(void) {
     long r_nd  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin/hello", 10, 0);
     long r_em  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 0, 0);
     long r_fl  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 4, 1);
-    long r_bit = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD | (1u << 1), "/bin", 4, 0);
+    // The lowest bit no tail claims, derived so a new tail cannot make it known.
+    const unsigned int known = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS;
+    long r_bit = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD | (~known & (known + 1u)),
+                            "/bin", 4, 0);
     long refused[5] = { r_nf, r_nd, r_em, r_fl, r_bit };
     for (int i = 0; i < 5; i++)
         if (refused[i] > 0 && !scwd_kill_reap(refused[i])) unreaped++;
@@ -5002,6 +5005,163 @@ static int probe_spawn_cwd(void) {
         return -1;
     }
     t_putstr("joey: probe spawn-cwd OK (child born in /bin; relative image from the child cwd; ENOENT/ENOTDIR/EINVAL refusals)\n");
+    return 0;
+}
+
+// The thread-budget tail (ARCH 7.3.5), driven through the REAL ABI: alone at
+// +104, and after the cwd tail when both bits are set -- the offset the handler
+// computes. Held spawns, so the child's stamped budget is read through
+// /proc/<pid>/status ("threadcap:") before it runs; each is then killed and
+// reaped. joey holds no MAY_RAISE_THREAD_BUDGET, so it may lower and not
+// raise. Boot-fatal.
+struct sthr_record {
+    struct t_sys_spawn_args        base;
+    struct t_sys_spawn_ext_threads thr;
+};
+_Static_assert(__builtin_offsetof(struct sthr_record, thr) == 104,
+               "a lone threads tail sits directly after the 104-byte record");
+struct sboth_record {
+    struct t_sys_spawn_args        base;
+    struct t_sys_spawn_ext_cwd     cwd;
+    struct t_sys_spawn_ext_threads thr;
+};
+_Static_assert(__builtin_offsetof(struct sboth_record, thr) == 120,
+               "the threads tail follows the cwd tail, in bit order");
+
+static long sthr_spawn(unsigned int budget, unsigned int flags) {
+    static const char nm[] = "/bin/hello";
+    struct sthr_record rec = {
+        .base = {
+            .name_va     = (unsigned long)nm,
+            .name_len    = sizeof(nm) - 1,
+            .ext_flags   = T_SPAWN_EXT_THREADS,
+            .debug_flags = T_SPAWN_DEBUG_HELD,
+        },
+        .thr = { .thread_budget = budget, .threads_flags = flags },
+    };
+    return t_spawn_full_argv(&rec.base);
+}
+
+static int probe_thread_budget(void) {
+    char nb[24], got[64];
+    unsigned int mine = 0;
+    if (!proc_status_field(t_getpid(), "threadcap:", 10, &mine) || mine < 2u) {
+        t_putstr("joey: thread-budget probe: cannot read joey's own threadcap\n");
+        return -1;
+    }
+    int unreaped = 0;
+
+    // (a) The control: no tail, the child inherits joey's budget.
+    long pi = scwd_spawn("/bin/hello", 10, 0u, NULL, 0u, 0u);
+    unsigned int bi = 0;
+    int ri = pi > 0 && proc_status_field(pi, "threadcap:", 10, &bi);
+    if (pi > 0 && !scwd_kill_reap(pi)) unreaped++;
+
+    // (b) A lone tail lowering it, which needs no authority.
+    long pl = sthr_spawn(mine - 1u, 0u);
+    unsigned int bl = 0;
+    int rl = pl > 0 && proc_status_field(pl, "threadcap:", 10, &bl);
+    if (pl > 0 && !scwd_kill_reap(pl)) unreaped++;
+
+    // (c) Both tails: the threads tail is read from after the cwd tail.
+    static const char nm[] = "/bin/hello";
+    static const char dir[] = "/bin";
+    struct sboth_record both = {
+        .base = {
+            .name_va     = (unsigned long)nm,
+            .name_len    = sizeof(nm) - 1,
+            .ext_flags   = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS,
+            .debug_flags = T_SPAWN_DEBUG_HELD,
+        },
+        .cwd = { .cwd_va = (unsigned long)dir, .cwd_len = sizeof(dir) - 1, .cwd_flags = 0u },
+        .thr = { .thread_budget = 3u, .threads_flags = 0u },
+    };
+    long pb = t_spawn_full_argv(&both.base);
+    unsigned int bb = 0;
+    int rb = pb > 0 && proc_status_field(pb, "threadcap:", 10, &bb);
+    long gb = (pb > 0) ? scwd_child_cwd(pb, got, sizeof(got)) : -1;
+    int cwd_ok = gb > 0 && scwd_eq(got, "/bin");
+    if (pb > 0 && !scwd_kill_reap(pb)) unreaped++;
+
+    // (d) Refusals: a raise without the authority, past the hard max, a zero
+    //     budget (EINVAL: clear the bit to inherit), an unknown flag bit.
+    long r_up   = sthr_spawn(mine + 1u, 0u);
+    long r_max  = sthr_spawn(0xFFFFFFFFu, 0u);
+    long r_zero = sthr_spawn(0u, 0u);
+    long r_fl   = sthr_spawn(1u, 1u);
+    long refused[4] = { r_up, r_max, r_zero, r_fl };
+    for (int i = 0; i < 4; i++)
+        if (refused[i] > 0 && !scwd_kill_reap(refused[i])) unreaped++;
+
+    if (!ri || bi != mine || !rl || bl != mine - 1u || !rb || bb != 3u || !cwd_ok ||
+        r_up > 0 || r_max > 0 || r_zero != -22 /* EINVAL */ || r_fl != -1 || unreaped) {
+        t_putstr("joey: thread-budget probe FAILED mine=");
+        t_putstr(itoa_dec((long)mine, nb, sizeof(nb)));
+        t_putstr(" inherit=");
+        t_putstr(itoa_dec(ri ? (long)bi : -1L, nb, sizeof(nb)));
+        t_putstr(" lowered=");
+        t_putstr(itoa_dec(rl ? (long)bl : -1L, nb, sizeof(nb)));
+        t_putstr(" both=");
+        t_putstr(itoa_dec(rb ? (long)bb : -1L, nb, sizeof(nb)));
+        t_putstr(cwd_ok ? " cwd=/bin" : " cwd=wrong");
+        t_putstr(" raise=");
+        t_putstr(itoa_dec(r_up, nb, sizeof(nb)));
+        t_putstr(" max=");
+        t_putstr(itoa_dec(r_max, nb, sizeof(nb)));
+        t_putstr(" zero=");
+        t_putstr(itoa_dec(r_zero, nb, sizeof(nb)));
+        t_putstr(" flag=");
+        t_putstr(itoa_dec(r_fl, nb, sizeof(nb)));
+        t_putstr(" unreaped=");
+        t_putstr(itoa_dec(unreaped, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: probe thread-budget OK (inherited; lowered alone and after a cwd tail; raise, over-max, zero and unknown-flag refused)\n");
+    return 0;
+}
+
+// One run of go-threads (300 goroutines locked to 300 Ms at once) as a user,
+// who is not exempt from the thread budget: `budget` 0 inherits joey's, else
+// a SPAWN_EXT_THREADS tail sets it. Drained to EOF first (EOF is the child's
+// exit), since a Go fatal error can print past the pipe's ring. Returns 0 with
+// *status and whether the output named a refused thread create, -1 if the run
+// could not be made or reaped.
+static int go_threads_run(unsigned int budget, int *status, int *refused) {
+    long rd = -1, wr = -1;
+    if (t_pipe(&rd, &wr) < 0) return -1;
+    unsigned int fds[3] = { (unsigned int)wr, (unsigned int)wr, (unsigned int)wr };
+    static const char nm[] = "go-threads";
+    struct sthr_record rec = {
+        .base = {
+            .name_va        = (unsigned long)nm,
+            .argv_data_va   = (unsigned long)nm,
+            .fd_list_va     = (unsigned long)fds,
+            .name_len       = sizeof(nm) - 1,
+            .argv_data_len  = sizeof(nm),
+            .argc           = 1,
+            .fd_count       = 3,
+            .principal_id   = 1000u,
+            .primary_gid    = 1000u,
+            .identity_flags = T_SPAWN_IDENTITY_SET,
+            .ext_flags      = budget ? T_SPAWN_EXT_THREADS : 0u,
+        },
+        .thr = { .thread_budget = budget, .threads_flags = 0u },
+    };
+    long pid = t_spawn_full_argv(&rec.base);
+    (void)t_close(wr);
+    if (pid <= 0) {
+        (void)t_close(rd);
+        return -1;
+    }
+    unsigned char acc[2048];
+    size_t len = 0;
+    int drained = smoke_drain(rd, acc, sizeof(acc), &len);
+    (void)t_close(rd);
+    long reaped = reap_bounded(pid, status, PROBE_REAP_MAX_SEC);
+    if (drained < 0 || reaped != pid) return -1;
+    static const char needle[] = "failed to create new OS thread";
+    *refused = mem_contains(acc, len, needle, sizeof(needle) - 1);
     return 0;
 }
 
@@ -6695,6 +6855,31 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM\n");
+
+            // The thread budget against Go's M model (ARCH 7.3.5; review F-5):
+            // built beside go-goroutines, so absent only if this one failed to
+            // build. Under the default budget 300 locked Ms fit; under 256 the
+            // runtime's refused create is fatal -- the control that shows the
+            // first run reached past 256.
+            int ok_st = -1, ok_ref = 0, cap_st = -1, cap_ref = 0;
+            int ok_rc  = go_threads_run(0u, &ok_st, &ok_ref);
+            int cap_rc = go_threads_run(256u, &cap_st, &cap_ref);
+            if (ok_rc != 0 || ok_st != 0 || ok_ref ||
+                cap_rc != 0 || cap_st == 0 || !cap_ref) {
+                char nb[24];
+                t_putstr("joey: go-threads FAILED default rc=");
+                t_putstr(itoa_dec(ok_rc, nb, sizeof(nb)));
+                t_putstr(" status=");
+                t_putstr(itoa_dec(ok_st, nb, sizeof(nb)));
+                t_putstr(ok_ref ? " refused-create" : "");
+                t_putstr(" | budget-256 rc=");
+                t_putstr(itoa_dec(cap_rc, nb, sizeof(nb)));
+                t_putstr(" status=");
+                t_putstr(itoa_dec(cap_st, nb, sizeof(nb)));
+                t_putstr(cap_ref ? " refused-create\n" : " (want a refused create)\n");
+                return 1;
+            }
+            t_putstr("joey: go-threads OK (300 locked Ms as a user under the default budget; a 256 budget refuses the create, fatally to Go)\n");
         }
     }
 
@@ -7497,6 +7682,7 @@ int main(void) {
     if (probe_cl5_page_budget() != 0) return 1;
     // The spawn cwd tail, driven through the real ABI.
     if (probe_spawn_cwd() != 0) return 1;
+    if (probe_thread_budget() != 0) return 1;
     // Menagerie devhw: prove /hw is reachable + walkable through the REAL
     // namespace -- the load-bearing path the kernel tests cannot exercise
     // (stalk crosses the /hw mount, devhw's reuse-nc walk descends multiple

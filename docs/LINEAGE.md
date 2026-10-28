@@ -487,6 +487,13 @@ CPU, then frees them (`proc_exec_wait_peers_off_cpu`,
 `proc_reap_exited_threads`). The step stays infallible: the wait is bounded by
 a tail that neither sleeps nor is switched out at an interrupt return.
 
+**Amended at thread-model C1 (2026-10-22).** Exec frees no peer itself. Each
+peer is freed by the resume path of its own last switch-out (ARCH 7.3.2), so
+the commit waits until the caller is the only thread on the list
+(`proc_exec_wait_alone`, `thread_count == 1` under the Proc's thread lock) and
+re-checks that, with the live count, at the swap. The bound is the same: one
+switch and one free per remaining peer, each on its own CPU.
+
 #### As built at L-6a — the split, and what envp measured
 
 The phenotype cannot hand `SYS_EXECVE` a user VA: Linux passes a
@@ -546,6 +553,15 @@ Nothing in this arc is blocked by that: an `rfork(RFPROC|RFMEM)` child (L-3), a
 `fork` child (L-5) and a shell (L-6) are all single-threaded when they exec.
 L-2a therefore **refuses** a multi-threaded caller with `-EAGAIN` — loudly,
 documented, and covered by the prover's leg C — rather than half-serving it.
+
+**Built as thread-model C5 (2026-10-22), with one change to the sketch above**
+(ARCHITECTURE 7.3.3). The new state is not a flag per thread but ONE claim on the
+Proc, `p->exec_task`, Linux's `signal->group_exec_task`: every death predicate reads
+an exec by another thread as death, and `group_exit_msg` stays untouched, which is
+what the reasoning above requires. Per-thread flags checked and set in two holds let
+two threads that exec at once doom each other and end the process with no group exit
+(`specs/thread_reap.tla`, `thread_reap_buggy_exec_perthread`); a single claim cannot,
+because the second exec finds it held.
 
 #### As built at L-6c (#140) — the environment on the exec stack
 
@@ -1486,7 +1502,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-0** | This document + the ARCH §25.4 row + the §28 invariant number + `VIVARIUM.md` §9/§10 updates. **Scripture only, no code.** | user signoff |
 | **L-1** ✅ **LANDED** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. **Seven** fields moved; `struct Proc` 408 → 376 B; 239 compiler-enumerated conversion sites across 22 files; 23 offset asserts re-baselined. As-built: `docs/reference/146-addrspace.md`. | **MET** — 1272/1272 → 1276/1276 (the four new `addrspace.*`), boot OK, 0 EXTINCTION, `asid.tla` clean (443457 states; the depth figure TLC reports varies with worker count and is not a fingerprint), SMP gate; the nine Proc-field predicates converted as a set (the four `mmu.c` parameter checks correctly did not) |
 | **L-2a** ✅ **LANDED** | `execve` (stage 1) for a **single-threaded** Proc: the AddrSpace-targeted load path (`exec_load_into` + the `*_in` VMA/burrow forms), `proc_exec_replace`, `sched_activate_addrspace`, `SYS_EXECVE = 101`. A multi-threaded caller is refused with `-EAGAIN`. | **MET** — `/exec-probe` re-execs itself and the successor prints from an fd inherited across the swap; a **failed** execve returns with the caller's address space intact; all three load-bearing pieces revert-probed to *distinct* failures |
-| **L-2b** | The de_thread primitive: a per-Thread die flag + wait-for-EXITING + reap, removing L-2a's multi-thread refusal. | a multi-thread Proc's peers are all EXITING and off-CPU before the swap; own audit round |
+| **L-2b** ✅ **LANDED** *(thread-model C5)* | The de_thread primitive: a per-Proc exec claim (ARCH 7.3.3; the per-Thread die flag first sketched here is the buggy cfg `thread_reap_buggy_exec_perthread`) + wait-for-EXITING + reap, removing L-2a's multi-thread refusal. | **MET** — the claim's wait ends only at `live_threads == 1` and C1's swap re-check holds every peer off-CPU; `/exec-probe` leg C (a multi-thread exec from userspace) passes every boot; `thread_reap.tla` clean at 5894 with `_exec_perthread` and `_doom_missed` red as named; suite 2041/2041, SMP gate 50/50; own rounds (Fable 5.1) 0/0/0/3 and 0/0/2/5, all fixed |
 | **L-3a** ✅ **LANDED** | The share substrate: the VMA drain moves into `addrspace_unref`'s last drop (fixing the same latent bug in `proc_free` *and* `proc_exec_replace`), `proc_alloc_in(share)`, `rfork_internal` accepts `RFPROC\|RFMEM`, the device quiesce gates on sole ownership, `RFMEM`-without-a-space refused. No EL0 surface. | **MET** — 1279/1279 → 1282/1282, boot OK, 0 EXTINCTION, `asid.tla` unperturbed (443457, depth 18); all three pieces revert-probed to *distinct* failures |
 | **L-3b** ✅ **LANDED** | Child-context restoration (pulled forward from L-5 per §5.4's correction) **+ the `SYS_RFORK = 102` EL0 surface**, which had to come with it: `fork_frame_init`, `thread_create_forked`, `thread_fork_trampoline`, `rfork_forked`, and `libthyla_rs::rfork_spawn` (the musl-`clone.s` shim the different-stack return demands). The handle-table copy moved OUT to L-3c — it is orthogonal, and #119 is a decision that deserves its own reasoning. | **MET, but not by the gate as written** — that gate said *kernel-driven*, and measuring showed a kernel test cannot observe an eret to EL0 at all (kproc has neither an address space nor a frame). Replaced by `/fork-probe`: six legs, boot-fatal. Revert-probed to the sharpest available pairing — ignoring `child_sp` leaves the **unit suite fully green** while only the in-guest leg fails |
 | **L-3c-1** ✅ **LANDED** | The handle-table copy (§2.4; #119). `handle_table_copy_into`, index-preserving, gated on the fork shape so the spawn family is byte-unchanged by construction. **Skip, not refuse** — the choice is stated at §5.4's as-built section, and the admissibility test is the SAME predicate `handle_dup` uses, extracted so the two cannot drift. | **MET** — 1284 → 1285/1285, boot OK, `/fork-probe` leg H (a child writes to a pipe fd only the parent opened). Three revert probes, each failing at its own assertion; removing the wiring leaves the **unit suite fully green** |

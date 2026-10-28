@@ -268,7 +268,12 @@ struct Thread {
     // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
     // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
     u8                 caught_wait;
-    u8                 _pad_in_handler[5];   // explicit 8-byte alignment
+    // The user-pool pages this thread's kernel memory is charged as (ARCH
+    // 7.3.5): THREAD_POOL_PAGES, or 0 for a kproc thread that is the reserve's.
+    // Set at create, before anything can free the thread; returned once, by
+    // thread_destroy. Carved from in_handler's pad -- no size change.
+    u8                 pool_pages;
+    u8                 _pad_in_handler[4];   // explicit 8-byte alignment
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
@@ -433,7 +438,7 @@ struct Thread {
     // stepping (the step-over-breakpoint dance: a thread stopped AT a bp would
     // re-trap on the resume instead of stepping, so switch_in loads that bp
     // disabled for this thread's step). Both set only while the target is
-    // fully-stopped (the `step` verb, under g_proc_table_lock) + on the local
+    // fully-stopped (the `step` verb, under the target's threads_lock) + on the local
     // CPU under IRQ-mask; read (ACQUIRE) in the ctx-switch install. KP_ZERO inits
     // them (not stepping); NOT propagated by rfork.
     bool               debug_ss_armed;
@@ -518,7 +523,7 @@ struct Thread {
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
     // on-CPU time telemetry. run_ns accumulates (now - switched_in_at) at every
     // switch-OUT; the per-Proc cpu_ns a /proc reader reports is the sum over
-    // p->threads (proc_cpu_ns, under g_proc_table_lock). READ-ONLY -- NO
+    // p->threads (proc_cpu_ns, under p->threads_lock). READ-ONLY -- NO
     // scheduling decision reads run_ns, so EEVDF placement / the vd_t math /
     // liveness / latency are byte-unchanged; this is telemetry, not policy.
     //
@@ -677,6 +682,10 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 #define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
 #define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
 
+// What a user Proc's thread costs the user pool (mm/phys.h, ARCH 7.3.5): the
+// stack block plus one page for its slot. kproc's threads cost it nothing.
+#define THREAD_POOL_PAGES          ((1u << THREAD_KSTACK_TOTAL_ORDER) + 1u)
+
 // Freed stacks kept with their guard still no-access, for the next create:
 // 1 MiB of the TCB reserve (phys.h) at most.
 #define THREAD_KSTACK_CACHE_MAX    32
@@ -777,8 +786,11 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top);
 // trampoline which then blr's `entry`. Adds to proc->threads list.
 //
 // Returns NULL on OOM (Thread alloc fail or kstack alloc fail; cleanup
-// is internal), or when the tid space is spent (thread_tid_space_spent: a
-// permanent refusal, not a retryable one).
+// is internal), when the user pool refuses the thread's charge (a non-exempt
+// Proc's thread costs THREAD_POOL_PAGES, ARCH 7.3.5), or when the id space is
+// spent (proc_id_space_spent: a permanent refusal, not a retryable one). A
+// Proc's first thread takes the pid as its tid; every later one draws a fresh
+// id (ARCH 7.3.4).
 //
 // `entry` takes no argument. For arg-passing (P2-D rfork), use
 // thread_create_with_arg below.
@@ -796,6 +808,14 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void));
 struct Thread *thread_create_with_arg(struct Proc *proc,
                                       void (*entry)(void *),
                                       void *arg);
+
+// A kproc kthread that works for `owner` (a Loom's SQPOLL poller): it lives
+// and dies in kproc, but its kernel memory is charged to the user pool as
+// `owner`'s thread would be, refused when the pool refuses `owner`. The charge
+// needs nothing of `owner` after the create: it returns when the thread is freed.
+struct Thread *thread_create_kthread_for(struct Proc *owner,
+                                         void (*entry)(void *),
+                                         void *arg);
 
 // P6-pouch-threads (sub-chunk 9): create a USER-mode Thread in `proc`.
 // Sibling of thread_create_with_arg, but instead of running `entry` in
@@ -815,12 +835,19 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
 // user-mode extinction for the misbehaving Proc, not a kernel issue).
 //
 // Returns the new Thread on success, NULL on OOM (Thread cache or
-// kstack alloc fail) or a spent tid space (thread_tid_space_spent).
+// kstack alloc fail) or a spent id space (proc_id_space_spent).
 struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_entry_va,
                                   u64 user_sp_va,
                                   u64 user_arg,
                                   u64 user_tls_va);
+// The same Thread, built but NOT linked into `proc`: the user spawn arms admit
+// it with proc_thread_admit, or free it with thread_free_unlinked.
+struct Thread *thread_alloc_user(struct Proc *proc,
+                                 u64 user_entry_va,
+                                 u64 user_sp_va,
+                                 u64 user_arg,
+                                 u64 user_tls_va);
 
 #ifdef KERNEL_TESTS
 // LINEAGE L-3b: build the child's EL0 frame for a forked Thread.
@@ -891,20 +918,38 @@ struct Thread *thread_create_forked(struct Proc *proc,
                                     const struct exception_context *frame,
                                     u64 child_sp,
                                     u64 child_tls);
+// Built but not linked, as thread_alloc_user.
+struct Thread *thread_alloc_forked(struct Proc *proc,
+                                   const struct exception_context *frame,
+                                   u64 child_sp,
+                                   u64 child_tls);
 
-// Release a Thread descriptor + its kstack. Caller must ensure the
-// thread is not current (current_thread() != t) and not still on any
-// runqueue. Extincts on violation.
+// Release a Thread descriptor + its kstack: a kernel thread, by its joiner, or
+// a thread that never ran, by its creator. Caller must ensure the thread is not
+// current (current_thread() != t). An exited user thread is thread_reap_dead's.
+// Extincts on violation.
 void thread_free(struct Thread *t);
 
-// True once the tid space is spent (alloc_next_tid refuses). A create that
-// failed then reports EAGAIN, a system limit, rather than ENOMEM.
-bool thread_tid_space_spent(void);
-
-// The in-Proc reap's halves (proc_reap_exited_threads): unlink under the
-// caller's g_proc_table_lock hold, then free with no lock held.
-void thread_unlink_from_proc_locked(struct Thread *t);
+// The thread list's link (ARCH 7.3.1), under the caller's hold of the Proc's
+// threads_lock; it counts the thread live. thread_free_unlinked frees a thread
+// that was never admitted to a list.
+void thread_link_into_proc_locked(struct Thread *t, struct Proc *p);
 void thread_free_unlinked(struct Thread *t);
+
+// The free of an exited user thread, by the resume path of its last switch-out
+// and by nothing else (ARCH 7.3.2, I-48): IRQs masked, on_cpu just cleared, no
+// lock held. Folds its run time and stack depth into the Proc, clears a debug
+// focus naming it, unlinks it and frees it.
+void thread_reap_dead(struct Thread *t);
+
+// The one writer of state = THREAD_EXITING: under t->proc's threads_lock, and
+// it takes t out of live_threads. Nothing t runs after it may sleep.
+void thread_commit_exiting_locked(struct Thread *t);
+
+// A kernel thread's terminal commit on its own Proc (kproc, or a test's), with
+// the lock taken here. The caller keeps IRQs masked from before this call to
+// its final sched().
+void thread_kthread_retire(void);
 
 // Direct context switch from current_thread to `next`. Updates state
 // fields (prev → RUNNABLE, next → RUNNING), parks `next` in TPIDR_EL1,
@@ -932,6 +977,12 @@ void thread_switch(struct Thread *next);
 // context.switch_irq_safe only.
 extern volatile u64 g_thread_switch_test_window_ns;
 
+// Tests only (thread.kernel_memory_charged_to_the_pool): the pool's charge as
+// thread_reap_dead found it and at its unlink, for threads of the watched pid.
+extern volatile int g_thread_reap_watch_pid;
+extern volatile u32 g_thread_reap_pool_found;
+extern volatile u32 g_thread_reap_pool_at_unlink;
+
 // Diagnostic.
 u64 thread_total_created(void);
 u64 thread_total_destroyed(void);
@@ -940,12 +991,5 @@ u64 thread_total_destroyed(void);
 // How many thread_free calls waited out an in-flight switch away from their
 // victim (#788); boot_main reports a non-zero count.
 u64 thread_free_oncpu_waits(void);
-
-#ifdef KERNEL_TESTS
-// The in-kernel tests' reach into thread.c (.claude/rules/kernel-code.md,
-// "Cross-file declarations"): hooks compiled only with the tests, and
-// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
-u32 thread_tid_counter_swap_for_test(u32 v);
-#endif // KERNEL_TESTS
 
 #endif // THYLACINE_THREAD_H

@@ -5,11 +5,11 @@
 #include <pthread.h>
 #include <limits.h>
 typedef uint64_t u64;
+typedef uint32_t u32;
 #define PROC_STATE_ALIVE 1
-#define PROC_THREAD_MAX 8
 #define CHECK(x,msg) do { if (!(x)) { fprintf(stderr,"FAIL %s\n",msg); exit(1); } } while(0)
 struct AddrSpace { int value; };
-struct Proc { u64 stripes; struct AddrSpace *as; int state,thread_count,loom_sqpoll_count; const char *group_exit_msg; bool exempt; };
+struct Proc { u64 stripes; struct AddrSpace *as; int state,live_threads,loom_sqpoll_count; u32 thread_budget; const char *group_exit_msg; bool exempt; pthread_mutex_t tl; };
 /* ACTUAL_DECL */
 typedef pthread_mutex_t spin_lock_t;
 typedef int irq_state_t;
@@ -25,12 +25,19 @@ static int proc_for_each_walk(struct Proc *root,int (*cb)(struct Proc *,void *),
     return 0;
 }
 static bool proc_resource_exempt(struct Proc *p) { CHECK(locked,"budget under lifetime lock"); return p->exempt; }
+// The Proc's thread lock, nested inside the table lock as in the kernel.
+static _Thread_local struct Proc *tl_held;
+#define ASSERT_TL_HELD(p) CHECK(tl_held==(p),"budget under the thread lock")
+// Unused only by the mutant that drops the lock, which must still compile.
+__attribute__((unused)) static irq_state_t proc_threads_lock(struct Proc *p) { CHECK(locked,"thread lock nests in the table lock"); pthread_mutex_lock(&p->tl); tl_held=p; return 0; }
+static void proc_threads_unlock(struct Proc *p,irq_state_t s) { (void)s; ASSERT_TL_HELD(p); tl_held=NULL; pthread_mutex_unlock(&p->tl); }
+/* ACTUAL_ROOM */
 /* ACTUAL_BODY */
 static struct AddrSpace old_image,new_image;
 static struct Proc creator,other;
 static void reset(void) {
-    creator=(struct Proc){.stripes=17,.as=&old_image,.state=1,.thread_count=7};
-    other=(struct Proc){.stripes=18,.as=&old_image,.state=1,.loom_sqpoll_count=3};
+    creator=(struct Proc){.stripes=17,.as=&old_image,.state=1,.live_threads=7,.thread_budget=8,.tl=PTHREAD_MUTEX_INITIALIZER};
+    other=(struct Proc){.stripes=18,.as=&old_image,.state=1,.loom_sqpoll_count=3,.thread_budget=8,.tl=PTHREAD_MUTEX_INITIALIZER};
     table[0]=&other;table[1]=&creator;table[2]=table[3]=NULL;
 }
 static void cases(void) {
@@ -40,6 +47,7 @@ static void cases(void) {
     CHECK(!proc_sqpoll_ticket_charge(17,&new_image,&t),"wrong image refused");
     creator.state=2; CHECK(!proc_sqpoll_ticket_charge(17,&old_image,&t),"zombie refused");creator.state=1;
     creator.group_exit_msg="exit";CHECK(!proc_sqpoll_ticket_charge(17,&old_image,&t),"terminating refused");creator.group_exit_msg=NULL;
+    creator.thread_budget=7;CHECK(!proc_sqpoll_ticket_charge(17,&old_image,&t),"the Proc's own budget refuses");creator.thread_budget=8;
     CHECK(proc_sqpoll_ticket_charge(17,&old_image,&t)&&t.stripes==17&&creator.loom_sqpoll_count==1,"exact creator charged");
     CHECK(!proc_sqpoll_ticket_charge(17,&old_image,&t2)&&!t2.stripes,"shared cap enforced");
     creator.exempt=true;

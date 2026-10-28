@@ -101,8 +101,7 @@ static struct Proc *make_marked_test_proc(void) {
 
 static void drop_test_proc(struct Proc *p) {
     if (!p) return;
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 // A test Proc spliced into the process table so proc_peer_snapshot_by_stripes
@@ -121,8 +120,7 @@ static struct Proc *make_linked_test_proc(void) {
 static void drop_linked_test_proc(struct Proc *p) {
     if (!p) return;
     proc_test_unlink(p);
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 // post_svc_byte — post a byte-mode service into the boot registry via the

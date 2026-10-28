@@ -7,7 +7,7 @@ surface: [sub-kernel-poll]
 opened-by: fnd-b0poll-r7-f1
 tracker: "v1.x"
 created: 2026-09-22
-updated: 2026-09-22
+updated: 2026-10-27
 ---
 ## Owed
 
@@ -23,8 +23,12 @@ in the attacker's favour:
   - the PRODUCER's `poll_waiter_list_wake` walk, which crosses no point at all,
     because it runs in the waker's context rather than the poller's.
 
-The list can hold 64 hooks per `poll` call, times `PROC_THREAD_MAX`, times the
-number of Procs that can name the object. Nothing anywhere caps the product.
+The list can hold 64 hooks per `poll` call, times the Proc's thread budget
+(`thread_budget`: 4096 by default since thread-model C6, where the fixed
+`PROC_THREAD_MAX` was 256, and up to the hard maximum -- the pool's pages /
+`THREAD_POOL_PAGES` -- for a Proc granted the raise), times the number of Procs
+that can name the object. Nothing anywhere caps the product, and C6 raised its
+default per-Proc factor sixteenfold.
 
 ## What closes it
 

@@ -27,7 +27,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -208,7 +208,9 @@ every parent precedes its children, which devramfs requires
 ([[dec-2026-09-25-devramfs-directories]], [[sub-kernel-content]]). It packed the
 top level only until B-1d, and so dropped the staged `lib/` without a word.
 `build_ramfs` stages every program and data file into `ramfs-src/bin/` and the
-loader's files into `ramfs-src/lib/`; nothing else goes at the top, so no staged
+loader's files into `ramfs-src/lib/` (the Go probes from `go_bins`, which
+`build_go_probes` cross-compiles; `go-threads`, the thread-budget probe joey
+runs, joined them with thread-model C6); nothing else goes at the top, so no staged
 name can meet one of the kernel's synthetic mount points
 ([[dec-2026-09-25-initrd-bin-directory]]; the flat layout had carried the
 native `env` under the `/env` mount point since G15). The bake always passes

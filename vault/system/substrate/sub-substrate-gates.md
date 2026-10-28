@@ -13,6 +13,8 @@ code:
   - tools/test-rust.sh
   - tools/host-sanitizer-cc.py
   - tools/host-tests/host-env/atomic_lse.h
+  - kernel/test/test.c
+  - kernel/test/test.h
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp, gate-v80-floor]
@@ -20,7 +22,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-26
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -350,7 +352,10 @@ Its sibling `9p: close: flush of fid N failed rc R` (2026-10-07, ARCH 7.9.1
 part C: a last close's staged bytes never reached a live server) fails the
 verdict the same way. The knob, and the collector
 mode the dev9p tests set, are released by the kernel test runner after every
-test, which prints `POLL-KNOB(...)` and fails a passing test that left one set
+test (`kernel/test/test.c`: the registry, one `{name, fn, ...}` row per test,
+run in order at boot, each printing `[test] <name> ... PASS` or a `FAIL:
+<message>` line; `main.c` then ends a failed suite's boot with `EXTINCTION:
+kernel test suite failed` before joey runs; `test.h` carries the assert macros), which prints `POLL-KNOB(...)` and fails a passing test that left one set
 (the POOL-PARKED pattern: a knob restored on a test's last line is restored
 only by a test that passes).
 

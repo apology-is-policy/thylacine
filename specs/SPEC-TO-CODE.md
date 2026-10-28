@@ -754,8 +754,15 @@ ProcCap (CapHostowner). Datasets identified by their owner user
 file limitation on record/function constants; the convention matches
 the live system (`thylacine/users/<name>` dataset path).
 
-Safety: TLC-clean — `corvus.cfg` explores 186,493,573 states /
-21,641,580 distinct, depth 32, ~3min36s wall time on 8 cores. The
+Safety: TLC-clean — `corvus.cfg` explores 1,176,000,397 states /
+121,784,148 distinct (re-measured 2026-10-27 at thread-model C5's close,
+rolling TLC 2026.10.26, ~1 h on the Mac; the earlier pin, 186,493,573 /
+21,641,580 at depth 32, predates P5-corvus-srv-impl's audit close, whose
+append-only `connections_history` ledger multiplied the space and was never
+re-pinned). The buggy rows' counts below are the original pins; the
+2026-10-27 re-run used `-workers auto`, whose counts at a violation vary, and
+every buggy cfg checks the `Invariants` conjunction, so TLC reports
+`Invariants` violated rather than the conjunct named in the table. The
 P5-corvus-srv-impl-a2 post-gate extension added the connection-layer
 variables `service_marked` / `service_poster` (replacing the prior
 one-shot `service_posted` BOOLEAN) / `service_posters`, the actions
@@ -764,7 +771,7 @@ one-shot `service_posted` BOOLEAN) / `service_posters`, the actions
 
 | Config | Flag | Invariant | Result | Distinct | Depth |
 |---|---|---|---|---|---|
-| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 21641580 | 32 |
+| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 121784148 | — |
 | `corvus_buggy_unwrap_cross_user.cfg`      | `BUGGY_UNWRAP_CROSS_USER`       | `UnwrapOwnerOnly`        | violation | 82 | 4 |
 | `corvus_buggy_auth_binding_mutate.cfg`    | `BUGGY_AUTH_BINDING_MUTATE`     | `SessionUserImmutable`   | violation | 85 | 5 |
 | `corvus_buggy_admin_without_proc_cap.cfg` | `BUGGY_ADMIN_WITHOUT_PROC_CAP`  | `AdminRequiresProcCap`   | violation | 83 | 5 |
@@ -800,7 +807,7 @@ Spec actions ↔ impl mapping (impl filled in at P5-corvus-bringup):
 | `BuggyElevateWithoutConsole` | (none — bug class prevented by `peer_console_bit?` precondition) | Same shape; bug = missing precondition. |
 | `BuggyTransferRebind` | (none — bug class prevented by the SessionTransfer impl COPYING bound_user from src) | Critical impl discipline: the transfer path MUST take bound_user from the existing session by reference, not from any request-supplied field. |
 | `PostService(p)` | `kernel/syscall.c::sys_post_service_for_proc` + `kernel/devsrv.c::srv_reserve`/`srv_commit` (as-built; landed P5-corvus-srv-impl-a2) | `SYS_POST_SERVICE` registers the caller as the `/srv/<name>` server. Gated on `proc_may_post_service` (spec precondition `p \in service_marked`). Reserve-then-commit two-phase so a failed `handle_alloc` rolls back (`srv_abort`). The kernel owns all transport (C-23). corvus's startup `SYS_POST_SERVICE("corvus")` call lands at P5-corvus-srv-impl-b. |
-| `ServiceTombstone` | `kernel/devsrv.c::srv_proc_exit_notify`, called from `kernel/proc.c::exits` (as-built; landed P5-corvus-srv-impl-a2) | On poster exit the kernel flips the service `LIVE → TOMBSTONED`: the name stays reserved, re-postable only by a joey-marked Proc. Poster identity is held by value (`stripes`), so a reaped poster is no UAF. |
+| `ServiceTombstone` | `kernel/devsrv.c::srv_proc_exit_notify`, called by the poster's last live thread out on either exit path (`kernel/proc.c::proc_exit_last_out`; as-built since P5-corvus-srv-impl-a2, moved there by thread-model C5) | On poster exit the kernel flips the service `LIVE → TOMBSTONED`: the name stays reserved, re-postable only by a joey-marked Proc. Poster identity is held by value (`stripes`), so a reaped poster is no UAF. |
 | `SrvBind(cn, p)` | `kernel/devsrv.c::srv_conn_open_for_proc` + `kernel/srvconn.c::srvconn_create` (kernel; landed P5-corvus-srv-impl-a3b) + `kernel/syscall.c::sys_srv_connect_handler` (production client-open path; landed P5-corvus-srv-impl-b2) | The kernel mints a fresh per-Proc connection (transport pair + dedicated synchronous `p9_client`) when Proc p opens `/srv/corvus`, stamping the peer identity. `SRV_CONN_PER_PROC_MAX = 1` enforces "one connection per LIVE connection per Proc" structurally; the cap is checked at `srv_conn_open_for_proc` entry and decremented in `handle_close`'s KOBJ_SRV arm — allowing reconnect after teardown. |
 | `ConnTeardown(cn)` | `kernel/handle.c::handle_close` KOBJ_SRV arm + `kernel/srvconn.c::srvconn_teardown` (idempotent LIVE→TORN; landed across P5-corvus-srv-impl-a3a/a3b/b2) | A client closes its KObj_Srv handle → `handle_close` runs the KOBJ_SRV close-time dispatch → `srvconn_teardown` flips state LIVE→TORN under both channel locks, sets EOF on both rings, wakes pollers + accept_rendez. The per-Proc `srv_conn_count` decrements via the magic discriminator BEFORE `handle_release_obj` (the last unref can clobber the magic). After teardown the same Proc may open a fresh connection (`SrvBind` re-fires). F5 close (P5-corvus-srv-impl audit): the corvus.tla model gained a `connections_history` parallel APPEND-ONLY variable so the post-hoc identity invariant `ConnOpIdentityIsKernelTruth` stays sound across reconnects — the live `connections` set shrinks on teardown; the history set retains every binding ever minted for the invariant check. |
 | `SrvAccept(cn)` | `kernel/syscall.c::sys_srv_accept_handler` (kernel; landed P5-corvus-srv-impl-a3b) + `usr/corvus/src/main.rs::srv_server_loop` (corvus accept loop; landed P5-corvus-srv-impl-b3b) | corvus accepts a kernel-bound connection; it never mints transport itself. The b3b accept loop polls `[listener, conns...]`; on listener-readiness it calls `t_srv_accept(listener)` (gets a `KObj_Spoor` connection endpoint) then `t_srv_peer(handle)` (gets the `TSrvPeerInfo` 24-byte by-value identity snapshot). |
@@ -1472,13 +1479,83 @@ audits established by prose. The clean cfg is TLC-green; `death_wake_buggy.cfg`
 | `SleepBegin` / `AcquireLock` / `RegisterObserve` (the CORRECT register-then-observe under `wlock`) | `kernel/sched.c::sleep` + `tsleep` — take per-Thread `wait_lock`, register (`rendez_blocked_on` + `THREAD_SLEEPING`), re-check `group_exit_msg` (+ the LS-5 latch via `thread_die_pending`) BEFORE dropping the lock + sleeping | `NoLostDeathWake` / `NoStuckSleeper` (I-9): a registered-then-observed sleeper either sees `gflag` and dies or is found+woken by the walk. |
 | `RegisterBuggy` / `SleepBegin` buggy leg (observe BEFORE register, OUTSIDE the lock) | (none — the anti-pattern the impl does NOT do; the buggy cfg only) | the lost-wake window: `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostDeathWake` fail. |
 | `CascadeSet` (publish `gflag` once) | `kernel/proc.c::proc_group_terminate` — the set-once `group_exit_msg` RELEASE CAS | set-once; the RELEASE precedes the per-Thread walk. |
-| `CascadeWalk(t)` (per-Thread wake under `~wlock[t]`) | `proc_group_terminate` / `proc_interrupt_terminate_wake` — walk `p->threads` under `g_proc_table_lock`, take each peer's `wait_lock`, read `rendez_blocked_on`, `wakeup()` (Option-A stack-pin: lock held across the wake) | the cascade wakes only a SLEEPING peer it can lock (never one mid reg-obs). |
+| `CascadeWalk(t)` (per-Thread wake under `~wlock[t]`) | `proc_death_wake_locked` (since thread-model C5 the one walk `proc_group_terminate` and exec's claim, `proc_exec_claim`, share; every `rendez_blocked_on` including `debug_rendez`) and `proc_interrupt_terminate_wake` (the same walk minus `debug_rendez`) — walk `p->threads` under the Proc's `threads_lock` (thread-model C3; it was `g_proc_table_lock`), take each peer's `wait_lock`, read `rendez_blocked_on`, `wakeup()` (Option-A stack-pin: lock held across the wake) | the cascade wakes only a SLEEPING peer it can lock (never one mid reg-obs). |
 | `Resume(t)` / `RunCheckpoint(t)` (die at the EL0-return tail) | `arch/arm64/exception.c::el0_return_die_check` (sync + IRQ-from-EL0 tails) — a flagged Thread `sched()`s away noreturn; a woken sleeper returns `*_INTR` then dies at the tail | `ZombieImpliesAllDead` (I-24): no Thread runs at EL0 after the ZOMBIE transition. |
 | `ProcReap` (last out → ZOMBIE, set once) | `proc.c::thread_exit_self` / `exits` last-Thread-out `proc_become_zombie_locked` | exactly-once ZOMBIE; `EventuallyReaps` (liveness) is the witness the hang cannot occur. |
 
 Pre-commit gate: `death_wake.cfg` clean GREEN + `death_wake_buggy.cfg`
 counterexample confirmed, on any change to `sleep`/`tsleep`'s register-then-observe,
 the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascade.
+
+---
+
+## thread_reap.tla — the thread lifecycle (thread-model C3 first; C1, C5 and C6 extend it)
+
+Spec-first RE-ENABLED for the thread lifecycle (operator vote 2026-10-21,
+thread-model decision 1: the Thread reclamation invariant + spec-first, the vote
+naming C3's per-Proc thread lock as covered). Model-first: the spec lands before
+the code (C3a), and C3b's code is written to it. This first part models one Proc's
+thread admission, the EXITING commit, the last thread out (decide, drop every lock,
+close), the group claim and `wait_pid` (ARCH §7.3.1). Every action is ONE critical
+section; each buggy cfg splits one of them in two with the lock free between.
+C1 (C1a spec-first, then C1b) adds the final switch-out, the reaper and the free,
+exec's wait for its dead peers and `wait_pid` freeing only the Proc (ARCH §7.3.2,
+section 28 I-48, Thread reclamation). C5 (spec-first again) replaces exec's single
+action with the claim that dooms every other thread, the abandon on group death and
+the swap (ARCH §7.3.3, LINEAGE L-2b); exits split into a voluntary one, which has no
+fairness, and a death-driven one, which has it, so an exec is shown to end only
+because its claim kills its peers.
+C6 (spec-first) adds identity: `pidtid`, the threads whose tid is the pid
+(ARCH §7.3.4). The Proc's first thread holds it; the execer takes it at the swap.
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `Admit(s, t)` (one `threads_lock` hold: claim + cap checked against the live count (`CapCount`), then linked, `live++`; `s` a RUNNING thread of the Proc) | `kernel/proc.c::proc_thread_admit` from both user spawn arms (`kernel/syscall.c::sys_thread_spawn_handler` + `viv_clone_thread`), after an unlinked `thread_alloc_*` | `NoAdmitAfterClaim` (C0's refusal, now exact), `CapExact` (the thread budget exact, no longer a TOCTOU floor), `ExitedNotCharged` (no create is refused while the live count has room, so a join followed by a create succeeds though the joined thread awaits its reaper; operator vote 7, 2026-10-22), `ListBound` (the list exceeds the cap only by threads on a CPU or in a reaper's hand), `LiveMatches` |
+| `CapCount` with `BUGGY_CAP_COUNTS_EXITED` | (none after vote 7 -- the C3/C1b shape: `proc_thread_room_locked` charged `thread_count`, so a joined thread counted until its resume path freed it) | `thread_reap_buggy_cap_counts_exited` violates `ExitedNotCharged` |
+| `AdmitCheck` / `AdmitLink` (`BUGGY_ADMIT_SPLIT`) | (none -- the pre-C3 shape: the lockless claim pre-check, then `proc_thread_cap_ok`, then `thread_create_user`'s link, three holds; both checks survive as lockless pre-checks, decided again inside the admit) | `thread_reap_buggy_admit_claim` violates `NoAdmitAfterClaim`; `thread_reap_buggy_admit_cap` violates `CapExact` |
+| `AdmitFree(t)` (`BUGGY_SPAWNER_FREE`) | (none -- a creation path that is not a RUNNING thread of the Proc; the code asserts the spawner is) | `thread_reap_buggy_spawner` violates `CloseStable` |
+| `Claim` (under `g_proc_table_lock` AND `threads_lock`) | `kernel/proc.c::group_terminate` -- the set-once `group_exit_msg` CAS + code/sig/close flags inside the Proc's thread lock, callers holding `g_proc_table_lock` | a reader under either lock reads the claim exactly |
+| `ExitDecide(t)` (one `threads_lock` hold: another live -> commit EXITING + `live--`; else the last out -> "closing") | `kernel/proc.c::thread_exit_self` / `exits_term`, via `thread_commit_exiting_locked` (the only writer of `THREAD_EXITING`) | `OneLastOut`, `NoOrphanedProc`, `LiveMatches` |
+| `ExitRead` / `ExitApply` (`BUGGY_COUNT_SPLIT`) | (none -- the read of the live count and the commit in separate holds) | `thread_reap_buggy_count` violates `NoOrphanedProc` (both see another live, neither is last, nobody publishes ZOMBIE) |
+| `CloseDone(t)` (one `g_proc_table_lock` hold: the commit under the nested `threads_lock`, then ZOMBIE) | the last-out tail of `thread_exit_self` / `exits_term`: `proc_release_territory_at_exit`, the commit, `proc_become_zombie_locked` | `CloseStable` (the drop-and-retake's premise), `ZombieImpliesAllExiting` |
+| `CloseZombie` / `CloseCommit` (`BUGGY_ZOMBIE_BEFORE_COMMIT`) | (none -- ZOMBIE published in a hold before the commit) | `thread_reap_buggy_zombie` violates `ZombieImpliesAllExiting` (`wait_pid_for` extincts on a ZOMBIE with a live thread) |
+| `SwitchOut(t)` (the final `sched()` of an EXITING thread; the resume path that clears `on_cpu` keeps it in a local) | `kernel/sched.c`: both resume tails (`sched()` after `cpu_switch_context`, `sched_finish_task_switch` for a new thread's trampoline) read the decision (EXITING, not `g_kproc`) BEFORE the RELEASE clear of `prev->on_cpu`, while `on_cpu` still pins the thread | `NoParkedDead`, `ExitedThreadsFreed` |
+| `ReapUnlink(t)` / `ReapUnlock(t)` (the reaper: one `threads_lock` hold to fold, clear the focus and unlink; the unlock is its last touch of the Proc) | `kernel/thread.c::thread_reap_dead`, called by both resume tails after the run-queue lock is released and before interrupts are restored; it frees the stack and the slot after the unlock | `ExactlyOnce` (no claim: no other path frees a user thread), `NoFreeOnCpu`, `ProcFreedLast` |
+| `FreeEarly(t)` (`BUGGY_FREE_ON_CPU`) | (none -- a free on THREAD_EXITING alone, without the final switch-out: the #788 shape) | `thread_reap_buggy_free_on_cpu` violates `NoFreeOnCpu` |
+| `Sweep(t)` (`BUGGY_TWO_REAPERS`, `BUGGY_REAP_AT_SPAWN`) | (none after C1 -- the shapes C1 deletes: `proc_reap_exited_threads` at each spawn and at exec, and `wait_pid_for`'s per-thread `thread_free` walk) | `thread_reap_buggy_two_reapers` violates `ExactlyOnce`; `thread_reap_buggy_reap_at_spawn` violates `ExitedThreadsFreed` (the 10-19 freeze's leftover, `seam-exited-threads-wait-for-a-create`) |
+| `ExecClaim(s)` (one `threads_lock` hold, after the new image loaded: refused under the group claim or another exec's, else `exec_task = s`) | `kernel/proc.c::proc_exec_claim` from `kernel/syscall.c::sys_execve_core`, between `exec_load_into`'s success and `proc_exec_replace`; then the death wake (`proc_death_wake_locked`, factored out of `group_terminate`) | `OneExecer`, `DoomedNeverLast` |
+| `Doomed(t)` / `DeathReaches(t)` (an exec by another thread is death) | `kernel/include/thylacine/proc.h::proc_exec_dooms`, read by `kernel/notes.c::thread_die_pending` + `thread_group_death_pending`, `kernel/proc.c::el0_return_die_check` + `el0_stop_park`'s death checks; refused by `proc_thread_admit` and the spawn pre-checks; `caught_candidate` skips a doomed thread | `ExecResolves`; `thread_reap_buggy_doom_missed` (the predicate lacks the exec leg) violates it |
+| `DieDecide(t)` / `ExitDecide(t)` (the exit body, driven by a death or not) | `thread_exit_self` from the die-checks, or from the thread's own exit; `exits_term` sends a thread an exec dooms there as it sends one in a dying group, and `sys_exit_group_handler` makes no group claim for it, so a doomed thread's own `exits()` or exit_group is an exit body, never a `Claim` (ARCH 7.3.3, operator vote 2026-10-26) | (fairness: only a death obliges an exit) |
+| `ExecCheck` / `ExecDoom` (`BUGGY_EXEC_PERTHREAD`) | (none -- LINEAGE L-2b's first sketch: per-thread die flags, the own-flag check and the peers' flags in two holds) | `thread_reap_buggy_exec_perthread` violates `DoomedNeverLast` (two execs doom each other; the last closes the Proc with no group death) |
+| `ExecAbort(s)` (group death reaches the execer: claim cleared, exec abandoned) | `kernel/proc.c::proc_exec_claim`'s wait: `sleep_death_only` until `live_threads == 1`, woken by `proc_exec_live_dropped_locked` at each `live_threads` decrement; returns failure on `thread_group_death_pending(self)` and `sys_execve_core` drops the new image | `ExecResolves` |
+| `ExecSwap(s)` (the swap, once `s` is the only thread on the list; clears the claim; `s` takes the pid as its tid, C6) | `kernel/proc.c::proc_exec_replace`: waits for `thread_count == 1` under the thread lock, then re-checks it at the swap under `g_proc_table_lock` with the thread lock nested, and there clears `exec_task` and sets `self->tid = p->pid` | `NoSwapWhileOnCpu` (F-1, and no peer of the old image survives); `thread_reap_buggy_exec_early` (the swap once the caller is the only LIVE thread) violates it. `PidNamesOne` (the old main has left the list before the execer takes its tid -- its free may follow -- so a tid lookup of the pid, which walks the list under the thread lock, finds one thread) |
+| `Init`'s `pidtid = {Main}` (C6: a Proc's first thread takes the pid) | `kernel/thread.c::thread_id_for` (the first create to set `PROC_FLAG_MAIN_TID` takes `proc->pid`; every later create draws from `kernel/proc.c::proc_id_alloc`, the one id space) | `PidNamesOne` |
+| `ExecClaim(s)` with `BUGGY_PID_AT_CLAIM` | (none -- the execer taking the pid in the claim's hold, while the old main may still be linked and live) | `thread_reap_buggy_pid_at_claim` violates `PidNamesOne` |
+| `WaitPid` (C1: frees only the Proc, once the count read under the zombie's thread lock is zero) | `kernel/proc.c::wait_pid_for`: after `proc_unlink_child`, waits for `thread_count == 0` read under the zombie's `threads_lock`, then `proc_free` | `ProcFreedLast`, `EventuallyReaped`; `thread_reap_buggy_waitpid_unlocked` (a bare load of the count) violates `ProcFreedLast` |
+
+What the model does not see, so the green reads no larger: two Procs (the
+one-thread-lock-per-CPU rule, which the kernel asserts under KERNEL_TESTS), the
+death-wake walk itself (`death_wake.tla`), CPUs (the reaper running before its CPU
+runs anything else is the resume path's code, not an action), kernel threads (freed
+by their joiners), and the clear-child-tid store, which follows the commit and must not sleep
+(`demand_page_locked` refuses the file page-in to a thread that is not RUNNING;
+a kernel test pins it). Nor does it see who makes the group claim: `Claim` is
+enabled whenever none is made, so the lone exit a doomed thread takes at its own
+`exits()` lies inside behaviours the model already explores. So does the other
+order: `exits_term`'s live-peer path and exit_group read the exec claim, then
+make the group claim after an unlock, so an exec claim taken between the two is
+met by a `Claim` during its wait, which `ExecAbort` answers. And `WF(DieDecide)`
+assumes a death that reaches a thread is taken: a thread whose death is held
+(`thread_death_held`, here `loom_free`'s join of its SQPOLL kthread) defers it
+until the join returns. That bound lies outside the model, so `ExecResolves`
+holds only as far as the join ends. (The other hold, an exit close, is the last
+live thread's, which a doomed thread never is.)
+
+Pre-commit gate: `specs/check-thread-reap.sh` -- the clean cfg green at its pinned
+state count and every buggy cfg violating the named invariant -- on any change to
+thread admission, the EXITING commit, the last-out close, the group claim,
+the final switch-out and its reaper, exec's claim, wake and wait, any death
+predicate's exec leg, or `wait_pid_for`'s zombie wait.
 
 ---
 
@@ -2972,8 +3049,9 @@ the kernel invariants):
   `Free` fires kernel-side when the client's `mapped` ref also drops,
   #847).
 - **`ServerDeath` (serverRef drops AT ONCE; armed dies; the client
-  mapping survives)** ↔ the tapestryd Proc's reap: the RW-7 quiesce
-  resets its virtio devices, `weft_share_release_owner` GCs the
+  mapping survives)** ↔ the tapestryd Proc's death (its last thread
+  out, `proc_exit_last_out`): the RW-7 quiesce in the handle close
+  resets its virtio devices, then `weft_share_release_owner` GCs the
   unclaimed registry entries (`armed` := FALSE), the #847 client
   mapping keeps the pages backed (`RefImpliesBacked` across the crash —
   the R2-F2 non-vacuity check), and **the R2-F3 reaper**

@@ -1035,12 +1035,13 @@ static const char *sqpoll_ticket_fixture(void) {
     const char *error = NULL;
 #define TICKET_CHECK(cond, msg) do { if (!(cond)) { error = msg; goto done; } } while (0)
     p->principal_id = 1000;
-    p->thread_count = PROC_THREAD_MAX - 1;
+    p->thread_budget = 2;
+    p->live_threads = 1;
     proc_test_link(p); proc_test_link(q);
     TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, q->as, &t), "ticket wrong image");
     TICKET_CHECK(proc_sqpoll_ticket_charge(p->stripes, original, &t), "ticket admission");
     TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, original, &u), "ticket cap");
-    proc_test_unlink(p); p->thread_count = 0; proc_test_link(p);
+    p->live_threads = 0;
     TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, original, &t), "ticket occupied");
     TICKET_CHECK(proc_sqpoll_ticket_charge(p->stripes, original, &u), "ticket second");
     proc_test_unlink(p); p->as = q->as; proc_test_link(p);
@@ -1056,7 +1057,7 @@ static const char *sqpoll_ticket_fixture(void) {
     TICKET_CHECK(!u.stripes && !q->loom_sqpoll_count, "ticket release after reap");
 done:
     proc_sqpoll_ticket_release(&t); proc_sqpoll_ticket_release(&u);
-    if (p) { proc_test_unlink(p); p->as = original; p->thread_count = 0; p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+    if (p) { proc_test_unlink(p); p->as = original; p->live_threads = 0; p->state = PROC_STATE_ZOMBIE; proc_free(p); }
     proc_test_unlink(q); q->state = PROC_STATE_ZOMBIE; proc_free(q);
 #undef TICKET_CHECK
     return error;
@@ -1758,6 +1759,17 @@ void test_proc_wait_pid_syscall_packed_flag(void) {
 // PTY-1f: the job-control stop -- the second stop owner (specs/pty_stop.tla)
 // =============================================================================
 
+// The sole thread of a live, single-threaded child. Read under the child's
+// threads_lock and kept past it: the thread exits only once the caller
+// releases it, and the resume path of its last switch-out then frees it (ARCH
+// 7.3.2), so a caller must not touch the pointer after the release.
+static struct Thread *js_sole_thread(struct Proc *c) {
+    irq_state_t s = proc_threads_lock(c);
+    struct Thread *t = c->threads;
+    proc_threads_unlock(c, s);
+    return t;
+}
+
 // Count queued notes named `name` in p's queue (under q->lock).
 static u32 js_note_count(struct Proc *p, const char *name) {
     struct NoteQueue *q = p->notes;
@@ -1882,10 +1894,9 @@ void test_proc_job_stop_park_report_cont_live(void) {
     TEST_EXPECT_EQ((int)c->job_stop_req, 1, "the child is job-stopped");
 
     // The child's (only) thread must land parked on its OWN debug_rendez --
-    // the sleep-detour park driven by the job owner. Bounded poll; the head
-    // pointer is stable for an ALIVE unreaped child (only the reap mutates
-    // the thread list), and rendez_blocked_on is read under its wait_lock.
-    struct Thread *th = c->threads;
+    // the sleep-detour park driven by the job owner. Bounded poll;
+    // rendez_blocked_on is read under its wait_lock.
+    struct Thread *th = js_sole_thread(c);
     TEST_ASSERT(th != NULL, "the child has a thread");
     bool parked = false;
     for (int i = 0; i < 2000000 && !parked; i++) {
@@ -1936,7 +1947,7 @@ void test_proc_job_stop_recycle(void) {
     TEST_YIELD_UNTIL((c = __atomic_load_n(&g_js_sleeper_proc,
                                           __ATOMIC_ACQUIRE)) != NULL);
 
-    struct Thread *th = c->threads;
+    struct Thread *th = js_sole_thread(c);
     TEST_ASSERT(th != NULL, "the child has a thread");
     int st = -42;
 
@@ -2025,7 +2036,7 @@ void test_proc_job_stop_preserves_torpor_wait(void) {
     struct Proc *c;
     TEST_YIELD_UNTIL((c = __atomic_load_n(&g_tsp_proc,
                                           __ATOMIC_ACQUIRE)) != NULL);
-    struct Thread *th = c->threads;
+    struct Thread *th = js_sole_thread(c);
     TEST_ASSERT(th != NULL, "the child has a thread");
 
     // Stop: the fan wakes the torpor waiter (non-completing) -> the tsleep

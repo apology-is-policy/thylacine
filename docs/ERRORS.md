@@ -299,6 +299,10 @@ A fault still announces itself on the console before the Proc dies:
 ```
 user fault: pid=42 reason="snare:segv" addr=0x000000000123abcd pc=0x... lr=0x... -- terminating Proc
 ```
+A thread that faults while another thread's exec holds the Proc dies alone,
+and the Proc goes on into the new image (ARCHITECTURE.md 7.3.3), so its line
+ends `-- terminating thread (an exec holds the Proc)` instead (operator
+sign-off 2026-10-27).
 
 ## The wait status
 

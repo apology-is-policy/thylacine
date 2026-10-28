@@ -303,7 +303,7 @@ static const char *loom_private_fixture(void) {
     // Public setup and legacy execution stay refused on a private owner.
     LP_CHECK(loom_register_handles(l, NULL, NULL, 0) == -T_E_OPNOTSUPP &&
              loom_register_buffers(l, p, NULL, 0) == -T_E_OPNOTSUPP &&
-             loom_start_sqpoll(l) == -T_E_OPNOTSUPP &&
+             loom_start_sqpoll(l, p) == -T_E_OPNOTSUPP &&
              loom_enter(l, 0, 0, 0) == -T_E_OPNOTSUPP,
              "private owner refuses legacy execution");
 

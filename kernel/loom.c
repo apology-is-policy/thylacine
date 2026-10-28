@@ -3923,7 +3923,7 @@ static void loom_sqpoll_main(void *arg) {
 
 executor_exiting:
     (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
     if (loom_is_private(l)) loom_private_close_changed(l);
     // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
@@ -3938,8 +3938,9 @@ executor_exiting:
     extinction("loom_sqpoll_main: returned from terminal sched");
 }
 
-int loom_private_start_executor(struct Loom *l) {
+int loom_private_start_executor(struct Loom *l, struct Proc *owner) {
     if (!l || l->magic!=LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    if (!owner || owner->stripes!=l->service_creator) return -T_E_INVAL;
     spin_lock(&l->lock);
     if (l->service_closing || l->sqpoll || l->service_engine->worker_starting) {
         int rc=l->service_closing ? -T_E_CANCELED : -T_E_BUSY;
@@ -3952,7 +3953,9 @@ int loom_private_start_executor(struct Loom *l) {
     if (!proc_sqpoll_ticket_charge(l->service_creator,l->service_as,
                                   &l->service_engine->worker_ticket)) rc=-T_E_AGAIN;
     else {
-        kt=thread_create_with_arg(kproc(),loom_sqpoll_main,l);
+        // The executor's stack and slot come out of the creator's share of the
+        // user pool (ARCH 7.3.5). The create reads owner and keeps nothing of it.
+        kt=thread_create_kthread_for(owner,loom_sqpoll_main,l);
         if (!kt) rc=-T_E_NOMEM;
     }
     spin_lock(&l->lock);
@@ -3973,14 +3976,15 @@ int loom_private_start_executor(struct Loom *l) {
     return rc;
 }
 
-int loom_start_sqpoll(struct Loom *l) {
-    if (!l || l->magic != LOOM_MAGIC) return -T_E_INVAL;
-    if (loom_is_private(l))           return -T_E_OPNOTSUPP;
+int loom_start_sqpoll(struct Loom *l, struct Proc *owner) {
+    if (!l || l->magic != LOOM_MAGIC || !owner) return -T_E_INVAL;
+    if (loom_is_private(l))                     return -T_E_OPNOTSUPP;
     // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
-    // group-terminates and its only exit is the stop-flag terminal above). Set
+    // group-terminates and its only exit is the stop-flag terminal above), its
+    // kernel memory charged to the user pool as the creator's (ARCH 7.3.5). Set
     // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free
     // would observe it; ready() then makes it runnable.
-    struct Thread *kt = thread_create_with_arg(kproc(), loom_sqpoll_main, l);
+    struct Thread *kt = thread_create_kthread_for(owner, loom_sqpoll_main, l);
     if (!kt) return -T_E_NOMEM;
     l->sqpoll = kt;
     ready(kt);

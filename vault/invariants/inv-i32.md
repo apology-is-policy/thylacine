@@ -3,7 +3,7 @@ id: inv-i32
 type: inv
 title: "I-32 — the resource floor (per-Proc, and per-address-space since L-2)"
 number: I-32
-guards: [sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content, sub-kernel-addrspace, sub-kernel-pagemap, sub-kernel-mm-phys, sub-kernel-mmu]
+guards: [sub-kernel-proc, sub-kernel-thread, sub-kernel-hwcap, sub-kernel-content, sub-kernel-addrspace, sub-kernel-pagemap, sub-kernel-mm-phys, sub-kernel-mmu]
 validated-by: [gate-smp, spec-capacity]
 strength: prose
 created: 2026-08-01
@@ -36,7 +36,7 @@ address-space extraction three of them are **not per-Proc at all**:
 | live VMAs | `vma_count` | `AddrSpace` | `PROC_VMA_MAX` | [[lock-vma]] — same |
 | shared-in pages | `shared_map_pages` | `AddrSpace` | `PROC_SHARED_MAP_MAX_PAGES` | [[lock-vma]] — same |
 | direct children | `child_count` | `Proc` | `PROC_CHILD_MAX` | [[lock-proc-table]] — bounded overshoot |
-| threads not yet freed (live, plus peers exited since the Proc's last thread create or exec, which free them) | `thread_count` (+ the poll-thread count) | `Proc` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
+| live threads -- one stops counting at its EXITING commit, before its joiner is woken; the exited ones not yet freed, at most one per CPU ([[inv-i48]]), stay on the list (`thread_count`) but are not charged (operator vote 7, 2026-10-22) | `live_threads` (+ the poll-thread count) | `Proc` | `Proc.thread_budget` -- min(4096, `proc_thread_budget_hard_max()` = the pool's pages / `THREAD_POOL_PAGES`) by default, inherited across rfork, set at spawn by the `SPAWN_EXT_THREADS` tail under the page budget's rules (thread-model C6, ARCH 7.3.5; was the fixed `PROC_THREAD_MAX` 256) | [[lock-proc-threads]] — exact (the admit and both executor charges decide in one hold) |
 
 **The first three moved with the mapping list, and that changed what they
 bound.** Two Procs sharing an address space share its pages, so one charge is
@@ -198,6 +198,14 @@ reshape order ([[sub-kernel-vma]]). The fork clone's node pages ARE charged
 to the child (`burrow_lazy_footprint`; fixed in the chunk, the round-1 audit's
 F2).
 
+**A user Proc's threads are pool memory too** (thread-model C6, ARCH 7.3.5,
+operator vote 4). A non-kproc thread's kernel stack block and slot
+(`THREAD_POOL_PAGES` = 9 pages) are charged at create by its payer -- the Proc,
+or for a Loom SQPOLL poller the Proc it works for -- and returned exactly once
+([[sub-kernel-thread]]). So a thread bomb within the budget meets the pool's
+bound, not the reserve's, and an exempt Proc's threads are counted, never
+refused. The budget confines one Proc; the pool bounds them all.
+
 ## Validation
 
 Prose + the focused audits; [[gate-smp]] for the counter races; since B-1a'
@@ -207,7 +215,11 @@ physical return are the sixteen `test_capacity` tests'
 ([[sub-kernel-pagemap]]; `capacity.memory_bomb_leaves_the_reserve` is the
 round-1 attack refused), the holder charge and the reclaim the two round-2
 `demand_page` tests' (`file_pages_charge_the_holder`,
-`idle_image_reclaimed_under_pressure`). **blind-to:** there is
+`idle_image_reclaimed_under_pressure`); the thread charge and its edge
+`thread.kernel_memory_charged_to_the_pool` and
+`thread.pool_refuses_users_keeps_tcb`, the budget `resource.thread_cap_ok`,
+`resource.thread_admit_exact` and `spawn_cwd.thread_budget_resolves`, and
+joey's go-threads run (300 Go Ms under the default, refused under 256). **blind-to:** there is
 a machine-wide aggregate now (the pool) but still no per-user one, so a
 cgroup-equivalent remains a recorded seam; the spec sees one address space and
 no metadata; the two creation gates' overshoot is real and deliberate;

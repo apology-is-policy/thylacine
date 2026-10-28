@@ -7,7 +7,7 @@ surface: [sub-kernel-proc]
 opened-by: chg-2026-08-01-proc-thread-sweep
 tracker: "unfiled"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-22
 ---
 ## Owed
 
@@ -20,8 +20,8 @@ Phase 5+ was supposed to return a `proc_get`'d reference requiring a
 ## What closes it
 
 A refcount on `struct Proc` with acquire-at-lookup / release-at-done, which
-is a wider change than it looks — the reap path currently frees on the
-strength of the ZOMBIE state alone.
+is a wider change than it looks — `wait_pid` frees a Proc on the strength
+of its ZOMBIE state and a zero thread count alone.
 
 ## Risk while open
 

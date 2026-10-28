@@ -547,6 +547,10 @@ the principals at its two ends, the system principal and a hostowner
 
 ## Concurrency
 
+A retired closer kthread commits `THREAD_EXITING` through
+`thread_kthread_retire` (under kproc's thread lock, [[lock-proc-threads]]) with
+IRQs masked to its final switch, before the idle closer reaps it.
+
 The discipline lives in [[lock-9p-client-c-lock]]; load-bearing here:
 
 - `c->lock` is NEVER held across the blocking recv or any sleep.

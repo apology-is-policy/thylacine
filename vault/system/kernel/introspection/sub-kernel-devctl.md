@@ -93,13 +93,15 @@ nothing here takes a lock ([[sub-kernel-addrspace]]).
 Two leaves are gated, on the SAME `CAP_HOSTOWNER` check and for DIFFERENT
 reasons. `kernel-base` discloses the live KASLR slide. `kstack` discloses no
 address at all — it is gated because of its COST: its formatter walks every
-live Proc under `g_proc_table_lock` with IRQs MASKED and scans each thread's
+live Proc under `g_proc_table_lock`, each Proc's threads under its thread lock, with IRQs MASKED, and scans each thread's
 16 KiB stack for the poison boundary, recomputed on every `read()` at every
 offset, since these leaves are stateless. Left world-readable, a `pread` loop
 would hold a CPU masked and block every fork/exit/wait behind the proc-table
 lock, defeating on that CPU the very interrupt-latency property ARCH 8.12
-exists to establish (I-32). The scan is separately budgeted; the gate and the
-bound close different halves and both are wanted. Added by the ARCH 8.12 audit
+exists to establish (I-32). The scan is separately budgeted (1 MiB of loads in
+all), not by the thread cap, which no longer bounds it usefully: a Proc's
+thread budget is 4096 by default since thread-model C6 (ARCH 7.3.5). The gate
+and the bound close different halves and both are wanted. Added by the ARCH 8.12 audit
 round (F2); `devctl.kstack_gated` is the deny-path regression, and it is a
 deny probe through the REAL read path because the predicate is shared and a
 predicate-only test would pass whether or not the gate were WIRED for a kind.
@@ -307,8 +309,9 @@ per-CPU scheduler meters.
 
 ## Concurrency
 
-Only `g_proc_table_lock`, and only for the process list (taken by
-`proc_for_each`; the CPU-time helper walks a Proc's threads under it).
+`g_proc_table_lock` for the process list (taken by `proc_for_each`), and each
+Proc's [[lock-proc-threads]] for its threads (the CPU-time and stack-peak
+helpers take it themselves).
 
 The CPU-time gates read the reader's principal and capabilities with acquire
 loads and take no lock.

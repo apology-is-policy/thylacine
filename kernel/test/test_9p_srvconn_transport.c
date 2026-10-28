@@ -71,8 +71,7 @@ static struct Proc *make_test_proc(void) {
 
 static void drop_test_proc(struct Proc *p) {
     if (!p) return;
-    p->state = PROC_STATE_ZOMBIE;
-    proc_free(p);
+    test_proc_free_drained(p);
 }
 
 // Post a byte-mode service (create=post) + open one connection (open=connect)
@@ -916,7 +915,7 @@ static void mf_reader_entry(void) {
     g_mf_run = 1;
     g_mf_rc  = p9_client_getattr(&g_sc_client, 0, P9_GETATTR_BASIC, &g_mf_attr);
     g_mf_run = 2;
-    test_kthread_park_terminal(&g_mf_exited);
+    test_thread_park_terminal(&g_mf_exited);
 }
 
 struct mf_async {
@@ -942,7 +941,8 @@ struct mf_rig {
     struct SrvConn         *cn;
     struct p9_srvconn_transport st;
     struct p9_transport_ops ops;
-    struct Thread          *reader;
+    struct Thread          *reader;      // a started flag only: freed at its last switch-out
+    int                     reader_tid;  // what names it (test_thread_view)
     u8                      reply[256];
     int                     reply_len;
     bool                    open, midframe, tail_sent;
@@ -1001,16 +1001,20 @@ static int mf_take_request(struct SrvConn *cn, u8 *buf, size_t cap) {
     return (int)got;
 }
 
-static void mf_wake(struct Thread *t) {
-    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
-    struct Rendez *rz = t->rendez_blocked_on;
-    if (rz) (void)wakeup(rz);
-    spin_unlock_irqrestore(&t->wait_lock, ws);
+static void mf_wake(int tid) {
+    test_thread_wake(g_mf_proc, tid, false);
 }
 
-static bool mf_parked_on(struct Thread *t, struct Rendez *rz) {
-    return __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
-           t->rendez_blocked_on == rz;
+// Parked for a stop: asleep on its own debug_rendez.
+static bool mf_stop_parked(int tid) {
+    struct test_thread_view v = test_thread_view(g_mf_proc, tid);
+    return v.present && v.state == THREAD_SLEEPING && v.on_debug_rendez;
+}
+
+// Asleep mid-frame: in some wait other than the stop park.
+static bool mf_in_transport(int tid) {
+    struct test_thread_view v = test_thread_view(g_mf_proc, tid);
+    return v.present && v.state == THREAD_SLEEPING && v.blocked_on && !v.on_debug_rendez;
 }
 
 // The rig: an OPEN client over a real SrvConn, a reader thread of its own Proc
@@ -1037,6 +1041,7 @@ static void mf_setup(struct mf_rig *r) {
     if (!g_mf_proc) return;
     r->reader = thread_create(g_mf_proc, mf_reader_entry);
     if (!r->reader) return;
+    r->reader_tid = r->reader->tid;
     ready(r->reader);
     r->stage = 3;
 
@@ -1051,18 +1056,16 @@ static void mf_setup(struct mf_rig *r) {
     r->stage = 6;
     // c->rx_got is written when the frame reader returns, so mid-frame shows
     // as the reader asleep in the transport with the ring drained.
-    TEST_YIELD_UNTIL_SOFT(g_mf_run == 1u &&
-                          __atomic_load_n(&r->reader->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
-                          r->reader->rendez_blocked_on != NULL &&
-                          r->reader->rendez_blocked_on != &r->reader->debug_rendez &&
+    TEST_YIELD_UNTIL_SOFT(g_mf_run == 1u && mf_in_transport(r->reader_tid) &&
                           !p9_transport_recv_ready(&g_sc_client.transport, NULL));
+    struct test_thread_view v = test_thread_view(g_mf_proc, r->reader_tid);
     r->d_run      = g_mf_run;
     r->d_rc       = g_mf_rc;
-    r->d_state    = (u32)__atomic_load_n(&r->reader->state, __ATOMIC_ACQUIRE);
+    r->d_state    = v.present ? (u32)v.state : 0u;
     r->d_active   = g_sc_client.reader_active;
     r->d_ready    = p9_transport_recv_ready(&g_sc_client.transport, NULL);
-    r->d_on_debug = r->reader->rendez_blocked_on == &r->reader->debug_rendez;
-    r->d_on_any   = r->reader->rendez_blocked_on != NULL;
+    r->d_on_debug = v.on_debug_rendez;
+    r->d_on_any   = v.blocked_on != NULL;
     r->midframe = r->d_run == 1u && r->d_active && r->d_state == THREAD_SLEEPING &&
                   r->d_on_any && !r->d_on_debug && !r->d_ready;
     if (r->midframe) r->stage = MF_STAGES;
@@ -1102,7 +1105,7 @@ static void mf_teardown(struct mf_rig *r) {
     if (r->reader && g_mf_run < 2u) {
         mf_send_tail(r);
         if (g_mf_proc) __atomic_store_n(&g_mf_proc->job_stop_req, 0, __ATOMIC_RELEASE);
-        (void)wakeup(&r->reader->debug_rendez);
+        test_thread_wake(g_mf_proc, r->reader_tid, true);
         TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
         if (g_mf_run < 2u) {
             p9_client_mark_devgone(&g_sc_client);
@@ -1110,13 +1113,12 @@ static void mf_teardown(struct mf_rig *r) {
         }
     }
     if (r->reader && g_mf_run >= 2u) {
-        test_kthread_join_free(r->reader, &g_mf_exited);
-        r->reader = NULL;
+        test_thread_join_last(g_mf_proc, &g_mf_exited);
+        if (test_proc_threads_freed(g_mf_proc)) r->reader = NULL;
     }
     if (r->reader) return;   // wedged: leak rather than free under it
     if (g_mf_proc) {
-        g_mf_proc->state = PROC_STATE_ZOMBIE;
-        proc_free(g_mf_proc);
+        test_proc_free_drained(g_mf_proc);
         g_mf_proc = NULL;
     }
     if (!r->cn) return;
@@ -1139,7 +1141,7 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void) {
     if (premise) {
         // The death, as the group-termination cascade delivers it.
         __atomic_store_n(&g_mf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
-        mf_wake(r.reader);
+        mf_wake(r.reader_tid);
         TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
         returned = g_mf_run >= 2u;
     }
@@ -1202,10 +1204,10 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
     if (premise) {
         // A job stop (^Z), as the tty fan delivers it to a sleeper.
         __atomic_store_n(&g_mf_proc->job_stop_req, 1, __ATOMIC_RELEASE);
-        mf_wake(r.reader);
+        mf_wake(r.reader_tid);
         TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u ||
-                              mf_parked_on(r.reader, &r.reader->debug_rendez));
-        parked    = mf_parked_on(r.reader, &r.reader->debug_rendez);
+                              mf_stop_parked(r.reader_tid));
+        parked    = mf_stop_parked(r.reader_tid);
         rx_parked = g_sc_client.rx_got;
         role_free = !g_sc_client.reader_active;
         // The server finishes the frame while the reader is stopped; the
@@ -1215,7 +1217,7 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
         rx_end = g_sc_client.rx_got;
         // The resume: the op returns the reply the pump stored.
         __atomic_store_n(&g_mf_proc->job_stop_req, 0, __ATOMIC_RELEASE);
-        (void)wakeup(&r.reader->debug_rendez);
+        test_thread_wake(g_mf_proc, r.reader_tid, true);
         TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
         returned = g_mf_run >= 2u;
         rc       = g_mf_rc;

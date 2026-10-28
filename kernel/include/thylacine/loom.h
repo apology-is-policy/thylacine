@@ -826,15 +826,18 @@ void loom_sqpoll_hold_exit_for_test(bool hold);
 
 // Loom-4c: the SQPOLL poll-thread entry + its lifecycle (LOOM.md 8.6). The
 // kthread is a kproc() thread (the console_mgr precedent) that drains the SQ +
-// drives the elected reader. loom_start_sqpoll spawns + readies it (sets
-// l->sqpoll on success); loom_free joins it. loom_sqpoll_main is the kthread
-// body (noreturn -- it exits via the EXITING terminal handshake, never returns
-// to its caller). Both touch only the still-allocated `struct Loom`.
-int  loom_start_sqpoll(struct Loom *l);
+// drives the elected reader. loom_start_sqpoll spawns + readies it, charged to
+// the user pool as `owner`'s thread (the Proc whose setup starts it, read only
+// inside the create), and sets l->sqpoll on success; loom_free joins it.
+// loom_sqpoll_main is the kthread body (noreturn -- it exits via the EXITING
+// terminal handshake, never returns to its caller). Both touch only the
+// still-allocated `struct Loom`.
+int  loom_start_sqpoll(struct Loom *l, struct Proc *owner);
 // Internal private executor admission. Caller retains l across the entire call.
-// Charges the original creator/image by permanent-stripes ticket. Not called by
-// setup/syscall dispatch until the remaining private protocol gates qualify.
-int loom_private_start_executor(struct Loom *l);
+// Charges the creator's thread budget by permanent-stripes ticket and the
+// executor's kernel memory to `owner`, which must be that creator (its stripes)
+// and stay allocated across the call: setup passes the calling Proc.
+int loom_private_start_executor(struct Loom *l, struct Proc *owner);
 
 #ifdef KERNEL_TESTS
 // Test knob: a nonzero value caps a fan-in waiter's client set below

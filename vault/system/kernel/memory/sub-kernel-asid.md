@@ -140,9 +140,9 @@ this layer prevents arriving by a different door:
 
 - the leaf user mappings were already invalidated by [[sub-kernel-vma]]'s
   all-ASID broadcast before the page table was destroyed;
-- no live CPU holds a dead Proc's TTBR0 — every Thread is reaped and spun
-  off-CPU before the Proc is freed — so nothing translates under the dropped
-  ASID;
+- no live CPU holds a dead Proc's TTBR0 — every Thread has switched out for
+  the last time and been freed before the Proc is freed ([[inv-i48]]) — so
+  nothing translates under the dropped ASID;
 - any eventual reuse of the value is gated by the rollover's per-CPU
   `flush_pending` local flush.
 

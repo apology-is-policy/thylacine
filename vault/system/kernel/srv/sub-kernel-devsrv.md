@@ -259,7 +259,9 @@ wrong-geometry or wrongly-caped connection in the new poster's backlog --
 a client must be caped exactly when the poster it lands with posted the
 service caped). A LIVE or RESERVING name is never displaced.
 
-**Tombstoning**: `exits()` → `srv_proc_exit_notify` → every LIVE entry
+**Tombstoning**: the poster's last live thread out (`proc_exit_last_out`, on
+either exit path, before the handle close; [[sub-kernel-death]]) →
+`srv_proc_exit_notify` → every LIVE entry
 whose `poster_stripes` matches flips to TOMBSTONED (identity cleared),
 its accept backlog is drained — each pending SrvConn collected under the
 lock, then torn down + unref'd OUTSIDE it so the blocked client wakes
@@ -390,8 +392,10 @@ ring memory at ≈32 MiB all-bulk).
 **Accept identity pin (2026-09-17).** `srv_accept_blocking(svc, stripes)`
 validates LIVE state and caller ownership, then acquires `accept_active` under
 the registry lock. A second concurrent accept fails instead of entering the
-single-waiter Rendez. Rebind and recycling both refuse an active pin. This is
-necessary because `exits_code` tombstones before its peer threads quiesce.
+single-waiter Rendez. Rebind and recycling both refuse an active pin. The
+tombstone comes only from the poster's last live thread out, after every
+accepter (a thread of the poster) has unwound (thread-model C5); the pin keeps
+that true without relying on the order.
 Every wake/EOF/interruption path releases the pin before returning; slot reuse
 cannot hide a tombstone from an old blocked accepter. The kernel regression
 runs a real blocked accept, checks concurrent refusal, wakes it through

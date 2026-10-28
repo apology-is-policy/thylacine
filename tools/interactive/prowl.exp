@@ -9,7 +9,7 @@
 #      THE SCREEN, reads /ctl/procs + /ctl/sched, and renders. A failed dance
 #      (fd 0 a dead pipe) -> prowl exits at once and the render assertions time out.
 #   2. prowl renders the banner (procs:/cpus:), the process table (the MEM(pg)
-#      header), and a REAL process (kproc, always pid 1) -- proving the kernel
+#      header), and a REAL process (kproc, always pid 0) -- proving the kernel
 #      telemetry was read + parsed + drawn as live data, not an empty list.
 #   3. `q` quits; ut restores the prompt mode + the screen (the panic=abort
 #      backstop), so the post-quit command runs at a clean prompt.
@@ -59,7 +59,7 @@ lc_expect_re {[0-9]+/[1-9][0-9]+ pg  free [1-9][0-9]*} "prowl-6: the pool meter'
 lc_expect "MEM(pg)" "prowl table header rendered"
 # prowl-6: the page-table column, right of MEM(pg) on the same header row.
 lc_expect "TBL" "prowl-6: the page-table column rendered"
-# A real process -- kproc is always pid 1, ALIVE, and the initial frame is
+# A real process -- kproc is always pid 0, ALIVE, and the initial frame is
 # pid-sorted (all %CPU 0 until the first delta) so kproc is at the top: proves
 # /ctl/procs was read + parsed + drawn as real data.
 lc_expect "kproc" "prowl process list populated with live telemetry"

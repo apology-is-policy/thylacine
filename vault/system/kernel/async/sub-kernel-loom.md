@@ -72,6 +72,7 @@ code:
   - kernel/include/thylacine/loom.h
   - kernel/include/thylacine/loom_service_abi.h
   - tools/check-loom-service-abi.py
+  - kernel/test/test_loom.c
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i32]
 validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-role, gate-smp, spec-loom-service, spec-loom-service-buffers]
@@ -409,6 +410,23 @@ The uncharge keys on a **flag**, not on the thread pointer: a setup that
 charged and then failed to start the thread still owes the refund, and keying
 on "is there a thread" would silently keep it.
 
+Its kernel memory is the creator's too (thread-model C6, ARCH 7.3.5):
+`loom_start_sqpoll(l, owner)` creates it with `thread_create_kthread_for(owner,
+...)`, so the stack and slot are charged to the user pool as that Proc's
+thread although it lives in kproc ([[sub-kernel-thread]]); a refused charge
+fails the setup `-T_E_NOMEM` through the same unwind as any start failure. The
+owner is the Proc whose setup starts the poller, passed in rather than stored:
+the Loom keeps no Proc pointer for it (the setup binds `owner` with the ring's
+charge, [[sub-kernel-loom]] "Who paid"), and the create reads it only inside
+the call, while the setup's own thread keeps it allocated. A NULL owner is
+refused `-T_E_INVAL`, so no SQPOLL thread is ever charged to nobody. The
+joiner's free (`loom_free`) returns the charge. A private ring's executor is
+created the same way by `loom_private_start_executor(l, owner)`, which also
+refuses an owner whose stripes are not the ring's creator's
+([[sub-kernel-loom-bridge]]).
+`kernel/test/test_loom.c` holds the `loom.*` suite; `loom.sqpoll_charges_thread_budget`
+pins the budget charge at the Proc's own `thread_budget`.
+
 ### Who paid — the I-32 ledger
 
 Loom's teardown is the one page-charge settlement point in the tree with **no
@@ -556,6 +574,11 @@ field offsets — size alone would let a same-size field reorder shift the layou
 the userspace mirror reads.
 
 ## Concurrency
+
+An SQPOLL kthread is charged to its creator's thread budget under the
+creator's thread lock (`proc_sqpoll_charge` / `proc_sqpoll_uncharge`,
+`loom_sqpoll_count`, [[lock-proc-threads]]), and its terminal commits through
+`thread_kthread_retire` with IRQs masked to its final switch.
 
 The ring lock is a leaf. It is taken under the engine's client lock (the
 completion path) and never the reverse; it nests nothing except brief atomics.

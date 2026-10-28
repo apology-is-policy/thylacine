@@ -36,7 +36,7 @@ Generated from note fields — do not edit between the markers
 | I-3 | [[inv-i3]] | spec | sub-kernel-territory | spec-territory, gate-smp |
 | I-30 | [[inv-i30]] | spec | sub-kernel-loom, sub-kernel-weft | spec-loom, spec-weft, gate-smp |
 | I-31 | [[inv-i31]] | spec | sub-kernel-asid | spec-asid, gate-smp |
-| I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content, sub-kernel-addrspace, sub-kernel-pagemap, sub-kernel-mm-phys, sub-kernel-mmu | gate-smp, spec-capacity |
+| I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-thread, sub-kernel-hwcap, sub-kernel-content, sub-kernel-addrspace, sub-kernel-pagemap, sub-kernel-mm-phys, sub-kernel-mmu | gate-smp, spec-capacity |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-spoor, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content | gate-smp |
 | I-34 | [[inv-i34]] | spec | sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant, sub-libdriver-discovery, sub-warden | spec-allowance, prose, gate-smp |
 | I-35 | [[inv-i35]] | spec | sub-corvus-authority, sub-corvus, sub-kernel-caps | spec-mandate, spec-mandate-commit, usr/lib/corvus-authority/src/tests.rs |
@@ -48,6 +48,7 @@ Generated from note fields — do not edit between the markers
 | I-43 | [[inv-i43]] | prose | sub-diorama, sub-kernel-vivarium, sub-viv | prose |
 | I-44 | [[inv-i44]] | spec | sub-kernel-addrspace | spec-cow, gate-smp |
 | I-45 | [[inv-i45]] | prose | sub-tapestryd | prose |
+| I-48 | [[inv-i48]] | spec | sub-kernel-thread, sub-kernel-sched, sub-kernel-proc, sub-kernel-death, sub-kernel-exec | spec-thread-reap, gate-smp |
 | I-5 | [[inv-i5]] | spec | sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic, sub-kernel-discovery | prose, gate-smp |
 | I-7 | [[inv-i7]] | spec | sub-kernel-burrow | spec-burrow, gate-smp |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |

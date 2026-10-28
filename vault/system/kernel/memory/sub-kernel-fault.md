@@ -161,6 +161,16 @@ reuse: the Burrow cannot be freed *or* have its allocator slot recycled under
 us. It is dropped exactly once, outside `vma_lock`, because the last reference
 may sleep.
 
+**Nothing past the EXITING commit sleeps (thread-model C3).** The FILE miss is
+the one fault arm that sleeps (the backing read, and the pin's last unref), so
+it refuses a current thread that is not RUNNING before it pins the Burrow. The
+exit's clear-child-tid store runs after the commit; a fault it takes there fails
+the store as on an unmapped page. No store reaches the arm today -- FILE
+mappings are never writable -- and the first writable private FILE mapping must
+revisit it, since a refused store loses the joiner's wake
+([[seam-exiting-tails-never-sleep]]). Regression:
+`demand_page.file_miss_refuses_exiting_thread`.
+
 ## Invariants enforced
 
 [[inv-i12]] — every install passes `vma->prot` through unchanged. The

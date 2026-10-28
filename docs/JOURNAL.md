@@ -22,6 +22,101 @@ needed the operator.
 
 
 ---
+## 2026-10-28 -- the thread model joins the async arc: who pays for a kernel thread that works for a user (corona)
+
+**What started it.** UPDATE 50's join list (yip 0261): aux's thread-model C6
+(aux-3 69456f5f8, pushed) charges a kernel thread's memory to the user it works
+for and replaces `PROC_THREAD_MAX` with a per-Proc budget, and corona's private
+Loom executor did neither. The conversions only make sense on a tree holding
+both, so the join is a merge of aux-3 into corona/async-memory 3e1516c23 (base:
+main a0128885b). `git merge-tree` counted 48 conflicted paths; aux said go
+ahead without waiting for aux-3-poll (0263).
+
+**The seam the join list did not name.** The list had two kernel items, the
+private executor and the private ticket. Resolving `loom_start_sqpoll` showed a
+third: C6 charges the SHARED SQPOLL poller to `l->sqpoll_owner`, a field
+corona's df458fae4 (2026-10-13) had removed in favour of the setup's `owner`
+binding. The merge's textual result referenced a field that no longer existed.
+Resolution: `loom_start_sqpoll(l, owner)` takes the setup's calling Proc,
+which the create reads only inside the call; the private executor takes the
+same argument and refuses an owner whose stripes are not the ring's creator's.
+
+**Two bits taken twice.** PROC_FLAG bit 12 (C6 `MAIN_TID`, corona
+`SESSION_REGISTRY`) and SPAWN_PERM bit 10 (C6 `MAY_RAISE_THREAD_BUDGET`,
+corona `SESSION_REGISTRY`). The flag collision would have failed the build
+anyway: `PROC_FLAGS_ALL` has a popcount alias check derived from its list. The
+perm collision would not: `SPAWN_PERM_ALL` had no such check, and the two
+defines conflicted only because they sat on adjacent lines. Had they been
+apart, a login granted the registry role would also have been granted the
+thread-budget raise. Corona's bits moved (14, 11), since aux-3 keeps
+its own; `SPAWN_PERM_ALL` gained the check.
+
+**What the merge lost before this one.** Restoring the audit rows showed the
+`VMO / BURROW` row missing from corona since its main merge c59c2a6fb, and two
+rows (Loom, Symlink) carried twice, one copy from each parent, neither a prefix
+of the other. Main itself carries tapestryd twice. Enqueued (OPEN-BUGS
+02:20Z); the next commit restores and folds them.
+
+**Evidence.**
+
+- Mac lease 03:12Z on. Host checkers 35/35 (the re-anchored
+  `test-sqpoll-ticket`: clean plus all 10 mutants, among them the new `cap`,
+  `budget` and `threadlock`; `test-srv-registry-abi` green after the audit's F1).
+- The first build failed three ways the textual merge could not show: the spawn
+  core's header lacked C6's `req_threads`; C6's id-space block had landed
+  inside a corona `#ifdef KERNEL_TESTS` block in proc.h, so the PRODUCTION
+  kernel lost `proc_id_alloc` and `PROC_ID_*`; and C1's production
+  `sched_runnable_count` now calls `sched_runnable_count_band`, which corona
+  had made test-only. Then `proc_alloc_in` had no production caller left
+  (-Werror unused-function). The placement check written before the build
+  compared only the enclosing FUNCTION of every added line; it was then also
+  run on the `#if` stack (no changes left besides the deliberate test-only dump).
+- Final tree: `tools/build.sh kernel && tools/test.sh` 2116/2116 (check-decls:
+  4215 names, 260 TUs); `tools/check-production.sh` rc 0 (KERNEL_TESTS=OFF
+  builds and links, 1449 names); qualification image (`--config ci --set
+  PRIVATE_ASYNC_QUAL=y`, lever line present) 2116/2116; `tools/test-fault.sh`
+  18/18.
+- Sabotages, each its own build: S1, both pollers created on kproc -> exactly
+  `loom.private_executor` and `loom.sqpoll_charges_thread_budget` FAIL, each on
+  its pool line (2114/2116); S2, the private ticket ignoring the budget ->
+  exactly `proc.stripes_smoke` ("ticket cap") and `loom.private_executor`
+  ("a full thread budget refuses the private executor").
+- The SMP gate (default-smp4 + ubsan-smp4) started at 04:45Z; the host
+  restarted before it was read, and the restart wiped /private/tmp: the gate
+  logs, the drafts and the SMP result with them. The figures above are the ones
+  read live before the restart. The SMP gate is OWED and runs next.
+
+**Wrong turns.** (1) The first gate run's suite read "2093/2093 PASS": test.sh
+runs check-production before it boots, the production build failed, nothing
+booted, and the script copied the boot log of the morning's run. The count was
+the tell (the merged registry has 2116). The script then deleted the log before
+each run and reported a missing one. (2) I edited the running gate script while
+its second run was still building; bash reads a script as it goes, so the run
+died on a syntax error. I had also started check-production by hand at the
+same time, so two builds overlapped. Nothing from that window is cited above.
+(3) The gate scripts and logs lived in the session scratchpad under
+/private/tmp, which a restart empties (the M-PIN lesson, now for evidence as
+well as commits); drafts and logs now go under work/oct28-join.
+
+**What "fixed" covers.** Every kernel thread that works for a user Proc is
+charged to that Proc's share of the user pool, both SQPOLL pollers included,
+and the private ticket admits on the same budget predicate as every other
+thread charge. The two colliding bits are separate, and a third perm collision
+would now fail the build. Not covered: the SMP gate (owed); join list item (d),
+main's test_proc.c:2571 prototype, which is on a main tip past this merge base;
+and aux-3-poll's proc_table_lock wrappers, which this tree's new walk site will
+meet at the next join.
+
+**Audit.** Fable 5.1 on Opus 5.5, start == end: 0/0/0/3 P3 + 1 OBS, all fixed or
+closed (the byte oracle at bit 10; four lines of prose; the private twin's
+missing settle-on-close leg; the OBS closed because both design docs carry a
+dated C1 amendment). Its "no gate runs the oracle" was wrong: test-host-checkers
+runs every tools/test-*.py by default.
+
+**Decisions.** None needed from the operator: the bit moves are on unmerged
+branches (the 0233 precedent), and the owner argument follows aux's own
+lifetime argument (0261 turn 3).
+
 ## 2026-10-28 -- a frame named after the function it never reached (corona)
 
 **What started it.** The P3 F2 gate log (2026-10-27, OPEN-BUGS 21:46Z) showed the
@@ -601,6 +696,54 @@ nothing reads (a vote is owed); at the join with aux-3, C5's three test
 hooks in the old local-prototype shape, and main's test_proc.c missing
 prototype.
 
+## 2026-10-27 (aux, Opus 5.5 1M) -- thread-model C6: one id space, a thread's kernel memory charged to the pool, a per-Proc thread budget
+
+**The ask.** The same overhaul (operator 10-20, 10-21). C6 is "limits and identity": votes 2-4 and 7 of 10-21 (never re-asked). C4's tgkill and C7's /proc/<pid>/thread/<tid> both name tids, so the id policy went first; C6 also owed C5's follow-up -- an execer from a non-main thread takes the pid.
+
+**Identity, spec-first (c6a 3362606b0 spec, 61943d02e code, 4947baff7 re-pin).** thread_reap.tla gained `pidtid` (the threads whose tid is the pid) and PidNamesOne (at most one linked thread holds the pid); BUGGY_PID_AT_CLAIM moves the pid in the claim hold, while the old main is still linked, and violates it in 12 states. Votes 2 and 3 force ONE counter: a main thread's tid is its pid, so a peer's tid must never equal another Proc's pid, and tkill/tgkill look tids up system-wide. The counter is a u64 (it cannot wrap), ids past 0x7fffffff are refused, draws start at 2 and init takes pid 1 by name (rfork_init, once; joey extincts if it is not 1) -- under one space the boot kthreads would otherwise push joey to ~ncpu+4, and ported daemons test getppid() == 1. A Proc's first thread takes the pid by a fetch_or on PROC_FLAG_MAIN_TID; the exec swap, alone under threads_lock, writes the pid into the execer. TLC 15:37Z: clean 9494 states (was 5894), all 14 buggy cfgs as named.
+
+**The pool charge (c6b 68b1c7faa, ece241dd0).** A user thread's stack block and slot (THREAD_POOL_PAGES = 9) were TCB-reserve memory; now `thread_new` charges them to the user pool at create, payer-attributed: the Proc, or the owner for an SQPOLL poller that lives in kproc (thread_create_kthread_for). kproc pays nothing; an exempt payer is counted, never refused. SELF-FOUND before any boot: the return sat in thread_destroy, after thread_reap_dead's unlink -- and once thread_count reads 0 a wait_pid frees the Proc and returns, so its caller could read the pool nine pages short. The reaper now returns the charge before the unlink. No test could see that order deterministically (tpr's last line only when the waiter won a race against thread_destroy), so 60d81ba5c added a KERNEL_TESTS watch that reads the pool as the reaper found it and at the unlink.
+
+**The budget (c6c caf5d8cae).** PROC_THREAD_MAX (256) is gone. `Proc.thread_budget`: default min(4096, hard max), hard max derived as pool pages / 9 so it cannot go stale; inherited by rfork; set at spawn by a SPAWN_EXT_THREADS tail after the cwd tail; lowering is free, raising needs MAY_RAISE_THREAD_BUDGET under the page budget's one-hop gate, past the hard max is refused, never clamped. The /proc status key is `threadcap:`, not `tbudget:`: joey's status reader is a substring match and `budget:` is the page budget's. Two pre-existing test legs had used literal ext bit 1 as "unknown"; both now derive the lowest unclaimed bit. A Go probe (300 goroutines each locked to an M) runs as a user: the default must fit, a budget of 256 must kill it with Go's "failed to create new OS thread" -- the control that shows the first run reached past 256. rfork's inheritance had no witness (every test that read a child's budget went through the spawn thunk's stamp); stb now rforks a grandchild after setting 64.
+
+**The lease (10-27 18:37Z-, on 60d81ba5c).** Predictions written 18:34Z, before any boot (~/projects/aux-gate/c6/PREDICTIONS.md). ci bake rc 0 with go-threads in the ramfs. Green 2047/2047 (2042 + C6's 5), "joey: go-threads OK" and "joey: probe thread-budget OK" once each; regreen bit-identical (ELF 059db78cda7b6443). Sabotage: T1 (no charge) reddened tkc + tpr; T2 (early uncharge out) only the new reap-order line -- tpr's racy last line stayed green, which is why the watch exists; T3 (poller charged to kproc) the two kthread_for lines; T5 (raise without authority) only the raise line; T6 (threads tail read at 104 after a cwd tail) every kernel test green and joey's probe FAILED both=-1 cwd=wrong, extincting the boot; T7 (exec leaves the tid) the execer line; T8 (every thread draws) ids_are_one_space + main's-tid line; T9 (rfork drops the budget) only the new rfork leg. ONE MISPREDICTION, T4 (admission a constant 256): four of the five named tests red (resource.thread_cap_ok, resource.thread_admit_exact, loom.sqpoll_charges_thread_budget, proc.cap_counts_live_threads' control), but I had named proc.reap_keeps_thread_cap_open where I meant the budget-32 test, and both of those assert only ROOM (one-at-a-time churn under the default; "an SQPOLL setup fits" after 31 finished workers). A loosened bound cannot redden a test that asserts room; the bound's own witnesses all turned. thread_reap TLC all as claimed; check-production PASS (joey rebuilt lean).
+SMP gate on 60d81ba5c: 50/50 across default smp1/4/8 and UBSan smp4/8, 0 corruption; the ci re-bake rc 0.
+
+**Round 1 (Fable 5.1, 0/0/1/2 + one pre-existing observation) and votes 10-11.** The reviewer read a frozen export of 60d81ba5c, because the sabotage loop was editing the reap tree while it ran. F1 was the one I had not seen: votes 2 and 3 together make one never-reused id space, so an unprivileged create/exit loop spends all 2^31 ids in hours, and after that nobody -- joey's respawns, login -- can create a process until reboot. Before C6 such churn spent only the tid space. The operator chose a TCB tail (vote 10): the last 2^20 ids are drawable only for an exempt creator or payer. The first sketch was wrong in a way the test caught on paper before any boot: with the old fetch-add, a user's REFUSED draws still advance the counter and would walk it through the tail, so the allocator now advances by compare-and-swap only when it grants (sabotage T12 restores the fetch-add and turns the counter line red). F2 was prose: three sites said the old main is "freed" at the swap where the code guarantees only that it left the list. F3: the exec test read the pid's holders before the claim and after the swap, so the spec's BUGGY_PID_AT_CLAIM read one holder at both; the doomed main now reads them inside the claim window. My first version of that leg had its own race -- a claim landing between the read and the die-check would kill main before it recorded -- so the die-check now runs only after the claim is seen, which cannot delay the death because proc_exec_dooms is exactly "claim set, not mine". The OBS (exec keeps clear_child_tid, since L-2a) was enqueued, then withdrawn as false (below). The poll-hook bound, which C6 raises 16x by default, is aux's next chunk by vote 11.
+
+**Lease 2a (79f886762, 19:47-19:51Z), then the Mac went back to corona.** corona had been queued 54 minutes behind a lease whose declared scope did not include a second round, so lease 2 ran only its five-minute half: suite 2048/2048 with both joey markers; T8b (re-anchored), T10 (the pid moved at the claim -- the runtime twin of the buggy cfg), T11 (no tail), T12 (refused draws advance), T13 (rfork draws as the TCB), T14 (thread draws ignore the payer) each red exactly where predicted, T14 including the older spent-space test; regreen bit-identical (c1f2d8a24e291dbf); check-production PASS. Lease 2b (20:00-20:53Z) ran the SMP gate on the landed tip 1c1f85336, whose code is 79f886762's: 50/50 across default smp1/4/8 and UBSan smp4/8, 0 corruption; the ci re-bake rc 0. While it ran, reading for the next chunk, I found the OBS was false: proc_exec_drop_image_state has set self->clear_child_tid = 0 since 4b78a21ca (main#243 F8, kernel/proc.c:5170), test_proc.c:2156 asserts it, and the execer is the thread that survives, main or not. I had enqueued the reviewer's grep claim without running it. Withdrawn in OPEN-BUGS and the closed list.
+
+---
+
+## 2026-10-27 (aux, Opus 5.5 1M) -- thread-model C5: exec with threads dooms its peers and waits to be alone
+
+**The ask.** The same overhaul (operator 10-20, 10-21). C5 is LINEAGE L-2b: an execve from a process with live peers used to fail with EAGAIN (the L-2a gate, `proc_exec_alone`); POSIX and Linux end the other threads and go on. The operator's first vote of the arc (10-21, decision 1) made it spec-first.
+
+**The mechanism, and why not the one LINEAGE named (c5a cacb03e31, c5b 30ba7567f).** LINEAGE sketched a per-thread die flag. Two things ruled it out. `group_exit_msg` is set once and never cleared (I-24), so the execer cannot be exempted from it without voiding a later real kill; and per-thread flags checked and set in two holds let two execers doom each other and end the process with no group death -- thread_reap.tla's new BUGGY_EXEC_PERTHREAD cfg fails DoomedNeverLast at 1325 states. What landed is Linux's `group_exec_task`: one per-Proc pointer, `exec_task`, claimed in one threads_lock hold after the new image is loaded and before the swap, refused when a group claim or another exec holds the process. `proc_exec_dooms(p, t)` is a pointer compare (ACQUIRE load, never a dereference) that every death predicate now reads beside `group_exit_msg`: `thread_die_pending`, `thread_group_death_pending`, the EL0-return die-check, the stop park's two death checks, `caught_candidate`. The claim wakes the doomed peers (`proc_death_wake_locked`, factored out of group termination) and sleeps death-only on `exec_rendez` until `live_threads == 1`; every decrement of the live count wakes it, including the unlink of a created thread that never ran. Only group death abandons it: a terminate latch is the new image's to meet, as POSIX keeps a pending signal across exec. The model: clean 5894 states, 13 buggy cfgs each failing as named.
+
+**SF-1, self-found before the round (c5c e8f40ec85).** The c5b note said "the execer is never parked while exec_task is set". It was false: the claim's wait went through `sleep_common`'s stop detour, so under a debugger stop the execer parked with the claim held while its doomed peers were EXITING. devproc's fully-stopped check skips EXITING threads, so it read the target as stopped and let register and kstack readers race the dying threads' final `sched()` (8a-1c F1 reopened); any stop also held the exec until resumed. Linux refuses a group stop while `group_exec_task` is set, and de_thread waits killable, not stoppable. Fix: `proc_stop_requested` reads false while a claim is held, and `devproc_target_fully_stopped_locked` refuses outright (ARCH 7.3.3 "Stops"; DEBUG-FS-DESIGN 5g).
+
+**The first boot extincted (lease A, 10-26 07:46Z; c5d 5ff5cfa0f).** The Mac's disk was 99% full at 07:33Z (4.45 GB free; the bake's floor is 6), so the first lease was released unused and the operator freed space. The first boot then died in pts.tty_tstp_stop_cont_seam: FAR 0x1b0, which is `offsetof(struct Proc, exec_task)`, at `proc_caught_note_walk_locked+0x2f4`. `caught_candidate` read `x->proc->exec_task`, and seven test fixtures link a static Thread with `proc == NULL` onto a real Proc. The walk already holds the Proc, so `caught_candidate` takes it as a parameter. Then: suite 2036/2036, six sabotage sets each red where predicted -- with one prediction miss worth keeping: removing `thread_die_pending`'s exec leg left the stop test green, because its stop-parked sleeper dies through the park's death-only sleep, which reads `thread_group_death_pending` instead.
+
+**Round 1 (Fable 5.1, 0/0/0/3 + one pre-existing observation) and vote 8.** F1: a doomed thread's own exit -- SYS_EXITS, exit_group, any trap but a page fault -- group-terminated and so vetoed the exec, where Linux's `do_group_exit` exits only that thread while `group_exec_task` is set. The operator voted "exit alone" (vote 8). F2 was missing witnesses, F3 a spec guard and two SPEC-TO-CODE errors. The observation (after the swap, a stop before the trapframe rewrite can park the execer and serve the old image's frame) predates C5 and is enqueued in OPEN-BUGS (10-26 08:10Z).
+
+**Exit alone forced a move (c5e 7b802b289).** `exits_term` ran the /srv, /cap and weft departures at its very top, before deciding anything; `thread_exit_self` ran them after the ZOMBIE publish. Under "exit alone", a doomed thread's `exits()` would have tombstoned the services of a process that lives on into the new image. The departures moved into one helper that only the last live thread runs, on both exit paths, before the ZOMBIE a reaper waits for. Five new tests (a doomed thread exiting, a terminate latch during the wait, a refused claim dropping the new image, a thread readied after the claim, a doomed vfork parent) plus devproc's exec leg.
+
+**A wrong turn: a false P1 from a truncated grep (10-26 09:09Z).** Checking the move, I grepped for the departure calls with `| head -20`, saw none on the kill path, and enqueued "kills skip the notifies" as a P1 in OPEN-BUGS. A count with the pickaxe showed the calls present below the cut. I withdrew the entry and wrote the lesson where I will see it: a grep piped through `head` is never a negative.
+
+**Lease B1 (10-26 09:41Z) found two of round 2's findings first.** The first boot was 2040/2041: the refused-claim test expected EXITED(0), but `proc_group_terminate` records 1 for any message but "ok" (6a12aa45e). Green then 2041/2041 with an identical regreen ELF, and every new test red under its own sabotage. One red was unpredicted: under the `thread_group_death_pending` sabotage, `wait_pid_concurrent_waiters_both_reap` failed. The vfork test's red path had orphaned its vfork child; with no init in the kernel suite, orphans go to kproc -- the runner's own Proc -- where a later test's wait-for-any reaped it. The runner now reaps it (95ea1c8d6). The pty_stop runs of that lease were invalid: my loop ran TLC without `-deadlock` (rc 11), unlike every check script.
+
+**Round 2 (Fable 5.1, 0/0/2/5) and one place I did not take the reviewer's fix (1cab1a35d).** P2-1 and P3-2 were the two the lease had already found and fixed. P3-1 was withdrawn with the lease's evidence: the readied test did go red under the die-check sabotage, because the fault path turns a dying thread's unresolved fault into FAULT_USER_DYING, which returns to the same broken die-check. P2-2: if the runner's 2 s budget lapsed while the child was still setting up, nobody disposed of the admitted-but-never-run thread, which kept the killed child from ever reaching ZOMBIE, and the suite hung instead of failing. The reviewer suggested readying a user thread and freeing a kernel one. Freeing either is wrong once every other thread has committed: the unlink drops `live_threads` to zero, and no thread is left to publish the ZOMBIE -- the same hang. Both are now readied after a kill (each meets the group death at its first die-check and leaves last), and the thread belongs to whichever side takes it first, by atomic exchange. P3-3: exit_group still claimed the group for a doomed caller; it now reads `proc_exec_dooms` and leaves alone. (1cab1a35d's message and comment said that read was exact because the claim is written under `g_proc_table_lock`; it is written under the thread lock only. The code is sound -- a claim taken just after the read is abandoned by the exit_group's group death, the order of an exit_group that came first -- and the comment now says so, at the same line count so the tested binary did not move.) P3-4: the move had put the weft release before the handle close, whose first step quiesces the process's devices; a weft pin can be a DMA Burrow's last reference, so the release now follows the close (RW-7 R3-F1), fixed on doctrine with no witness. P3-5: stale comments, and one that was not a comment.
+
+**Vote 9 (e8f1a5ef4).** The fault line ends "-- terminating Proc", which is false for a doomed thread that traps: only the thread ends. docs/ERRORS.md quotes the line and is ABI-bearing, so the wording went to the operator, who chose a variant for that case alone: "-- terminating thread (an exec holds the Proc)". `survives_a_doomed_exit`'s trapped peer now dies through the real fault path, and the test captures the line through the console drain.
+
+**The reboot.** The laptop's battery ran out overnight. /tmp went with it: my sabotage patcher, the predictions, lease B1's raw logs, the journal draft and the TLA+ jar. The commits were safe in the reap tree, and B1's results were in memory. The tooling is rebuilt under ~/projects/aux-gate/c5, which a reboot does not clear, and lease B2 reran every sabotage set on the final tip instead of only the ones the fixes touched.
+
+**Lease B2.** **Lease B2 (10-27 08:48-10:56Z, on e8f1a5ef4).** Suite 2041/2041 with both exec-probe markers (leg C, the userspace multi-thread exec, and L-2's E2E); the regreen rebuilt bit-identical (ELF ffed9775d4d99d67) and passed. All sixteen sabotage sets matched their written predictions: S1-S15 each reddened exactly the tests named and nothing else -- S2's reds included `survives_a_doomed_exit`, which I had marked unknown, and S9 reddened only the abandoned test. S14 (the child's setup outlasting the runner's 2 s budget) left the eight xc tests red and the suite complete; S14b, the same delay with the new disposals taken out, hung at `woken_by_an_abandoned_create` until the 300 s timeout -- so the fix, not luck, is what lets S14 finish. One prediction was wrong in form: I expected S13 to show four red lines in its test, but `TEST_EXPECT_EQ` is `TEST_ASSERT`, which returns at the first. thread_reap clean at 5894 states, all 13 buggy cfgs as named; pty_stop's two clean cfgs green and both buggy cfgs violating their named property (B1's runs had omitted `-deadlock`); SMP gate 50/50 (default at 1, 4 and 8 CPUs, UBSan at 4 and 8), 0 corruption; the `--config ci` re-bake clean. The corvus re-run (ServiceTombstone's code site moved) found a stale pin that is not C5's: SPEC-TO-CODE said 21,641,580 distinct states, and the clean cfg found 121,784,148. The pin was set on 2026-05-19; the next day's audit close added the append-only `connections_history` ledger to the model, and nothing checks the count, so it sat wrong for five months (re-pinned, 6ab58ef2d). My own miss: the run outlived the Mac lease's two-hour limit and I had not renewed it; corona, first in the queue, saw the runner alive, did not steal, and asked (yip 0254). death_wake.tla, whose cascade C5 moved into `proc_death_wake_locked`, ran on a short second lease: clean at 1422 distinct states (Safety and EventuallyReaps hold), and `death_wake_buggy` violates `NoLostDeathWake` as claimed. Its SPEC-TO-CODE walk row still said the walk runs under `g_proc_table_lock`, stale since C3; fixed.
+
+**Still open.** The pre-existing post-swap stop window (OPEN-BUGS 10-26 08:10Z). C6 must make an execer from a non-main thread take the pid, as Linux does (vote 3). P3-4 has no witness. corvus's buggy cfgs check the `Invariants` conjunction, so a re-run cannot show which conjunct each breaks.
+---
+
 ## 2026-10-26 -- no userspace without a strong seed (vote 18; corona)
 
 *What this run was for:* OPEN-BUGS P2, found 10-22 in the skip-as-pass
@@ -698,6 +841,7 @@ only CSPRNG consumer that discarded the refusal.
 - *The operator's decisions:* vote 18 (10-26).
 
 ---
+
 ## 2026-10-22/26 -- a kernel test skips only what the launcher did not declare (corona)
 
 *What this run was for:* OPEN-BUGS' M-PIN "kernel tests that need an initrd
@@ -1142,6 +1286,47 @@ two of them found.
   floor: my AS-R9 run binaries, and the build/ of the landed
   `thylacine-asr9` worktree.
 
+## 2026-10-22 (aux, Opus 5.5 1M) -- thread-model C1: an exited thread is freed by the switch that leaves it
+
+**The ask.** The same overhaul (operator 10-20, 10-21). C1 is the reclamation invariant the operator voted spec-first (10-21, decision 1): a thread is freed exactly once, only after its last switch-out, by its reaper -- for a user thread the resume path of that switch. It replaces the 10-20 interim fix, in which an exited thread waited for its Proc's next create (OpenRCT2 froze at 256 threads; libxml2's runtest failed).
+
+**C1a (1f7b2c03d).** thread_reap.tla gains SwitchOut / ReapUnlink / ReapUnlock, Exec's wait and WaitPid freeing only the Proc; ARCH 7.3.2; section-28 row I-48. Clean 3528 states; five buggy cfgs each fail as named (free on EXITING alone -> NoFreeOnCpu; a second reaper -> ExactlyOnce; exec once it is the only LIVE thread -> NoSwapWhileOnCpu; wait_pid's bare count read -> ProcFreedLast; the interim spawn sweep -> the liveness property ExitedThreadsFreed). 71f624fad fixed CLAUDE.md's I-47 row, which the invariant checker caught drifting from section 28.
+
+**C1b (3d1f051e1, WIP).** `sched_resume_tail` (kernel/sched.c) is now the one resume half; it decides `prev->state == THREAD_EXITING && prev->proc != kproc()` BEFORE the RELEASE clear of on_cpu -- after it, a sleeping prev could be woken, stolen, exit and be freed on another CPU first -- then releases the run-queue lock, then calls `thread_reap_dead` (kernel/thread.c) with IRQs masked. Deleted: proc_reap_exited_threads, its four callers, exec's off-CPU wait. The holder census (an Explore pass, 08:14Z) found the two unlocked test walks of p->threads, a test comment that licensed a UAF under C1 (`js_sole_thread`: "nothing frees that thread before the caller's wait_pid" -- false now; the pointer turned out unused after its release, the comment was corrected), and the unlocked run-tree walks behind /ctl's runnable count, enqueued (OPEN-BUGS 08:15Z P2) and pulled in as per-band counts under each lock. About a dozen user-Proc fixtures freed their own threads -- a double free now -- and were converted to joins by tid or by last thread, with the kernel-thread park made to extinct outside kproc so a missed conversion fails loudly. Frames of the reap chain by -fstack-usage: thread_reap_dead 48, thread_destroy 48, kmem_cache_free 64, free_pages 32; it can land on a thread asleep at the bottom of the deepest syscall (14,112 of 16,384 B).
+
+**A wrong turn caught before the Mac.** The resume note listed the dossiers to update, and the userspace prover was not among them. Sweeping the vault for the old behaviour found sub-pouch-thread describing `/pouch-hello-threads`' exited-counted leg: it asserted four JOINED workers still counted -- the interim timing, a positive control that C1 makes false. joey runs it every boot, so the first C1 boot would have died at rc 15, and join-churn's lower bound of 2 with it. The legs now pin C1: held-counted (held workers read 5), exited-freed (joined, nothing created, the count reads 1 within 5 s -- red if the reaper call is removed), join-churn 1..ncpu (a096bbedb). The lesson is the vault's own: a dossier quotes what it does not own -- grep for the old OUTPUT, not just the old function names.
+
+**The round (Fable 5.1, 0/0/1/2).** No production defect. F1 was the real one: C1 frees a user-Proc thread at its last switch-out, and about ten test files still held the pointer a create returned and read it after the thread could have parked and died -- `test_rendez`'s death and interrupt backrefs, `test_dying`, the poll and srvconn fixtures. e119b1cf1 reads every readied fixture thread by tid under its Proc's threads_lock and has each entry snapshot what it saw after its own sleep. F3 (b312b5bda): the fold test asserted `> 0`; the workers now record their run time (the slice in progress included, IRQs masked) and stack depth before exiting, and the fold must cover both.
+
+**What the round missed, and how the sweep was widened.** The round did not read the userspace prover or the test release paths (SA-1, SA-3..5 were mine). Auditing `test_thread_spawn.c` for F3 turned up one more freed read the F1 fix had walked past: the dying-group workers polled `g_dgs_main->state`, and main leaves by `thread_exit_self`, so its slot is freed under the poll (b312b5bda). Its shape -- a thread publishing `current_thread()` for another to read -- is not what the F1 sweep searched for (it followed the pointers creates returned), so I grepped for that shape across `kernel/test` and found a second: the closer's `xw_in_close` (5cf567528). The rest of that census is kernel threads, never-readied threads, the runner, nt_* fixtures, and birth_hold's launcher (whose reads all precede `gdone`).
+
+**Corona's window, and vote 7.** Telling corona that C1 deletes the function its merge calls, I got back a real finding: both exit paths wake the joiner (`thread_clear_child_tid_handoff`, proc.c:4668/4821) after the EXITING commit but before the final `sched()`, and the cap (`proc_thread_room_locked`) counted `thread_count`, which only the resume-path free lowers -- so a Proc at 256 that joins a worker and creates at once can be refused. C1's own tests wait for the free, not a join, so they could not see it. `thread_reap.tla` charged a dead unfreed thread on purpose (`CapExact` over `linked`), which made the fix a spec-first decision; the operator chose the live count (vote 7) over a create that waits out the lag. Spec, ARCH 7.3.2, the predicate, a deterministic witness and a sixth buggy cfg went in together; the I-32 dossier row still described the interim mechanism and was fixed with it. The lease I had queued for arrived while I was blocked on the question and lapsed after 600 s; re-armed.
+
+**The leases.** Round 2 (Fable, 0/1/1/2) found that three existing cap witnesses set their boundary through `thread_count`, which vote 7 had stopped reading -- the first build would have been red, and my self-audit had searched for `PROC_THREAD_MAX` everywhere except `kernel/test` (8c6f17639). On the Mac: TLC green at 4512 states; suite 2031/2031 at every tip; boot stack peak 10160, unchanged; SMP gate 50/50 with UBSan; 100,000 create/join twice with free memory moving 8 pages on the second run. The sabotage runs did their job twice over. An unpredicted red under the exec sabotage was a race in my own reclamation tests (the reaper counts its free after unlinking, so a read right after the list empties can come up short; e4326a488). The no-reap sabotage at first produced only an extinction: fixture Procs were freed after a timed-out join, so one broken reaper ended the suite before C1's own tests ran; it took three passes (e4326a488, a22cbfda7, d61aed343) before every fixture whose threads run leaked instead, and the four reclamation tests showed red. The storm row failed for a reason worth keeping: the SMP gate re-bakes `build/` with the bare default config, and a later kernel-only rebuild booted its Halcyon ramfs, so the ut prompt never came. What is still owed: joey's exited-freed leg red under the no-reap sabotage, the storm row on a fresh ci bake, libxml2's thread test and OpenRCT2 for 8 hours.
+---
+
+## 2026-10-22 (aux, Opus 5.5 1M) -- thread-model C3: each Proc's threads get their own lock
+
+**The ask.** The operator's thread-model overhaul (10-20: "no matter the cost"; 10-21: "the thread overhaul is just the right and important arc"). C3 is Fable's E-6: one global lock with interrupts off was taken twice per spawn, once per exit, once per tkill and across every /proc read. Operator vote 1 (10-21) made the thread lifecycle spec-first and named C3's lock as covered, so C3 split into C3a (spec + scripture, no code) and C3b (code).
+
+**C3a (920a1d727).** specs/thread_reap.tla: one Proc, threads unborn -> run -> exiting, the last out through a "closing" pc with every lock dropped. Every correct critical section is one action; each of five buggy cfgs splits exactly one in two (claim check vs link, cap check vs link, live-count read vs commit, a spawner that is not a RUNNING thread, ZOMBIE before the last commit). TLC 21:21Z: clean 158 distinct states (pinned in specs/check-thread-reap.sh), each buggy cfg violates the invariant it names; death_wake re-run as claimed. ARCH 7.3.1 written before any code.
+
+**Wrong turn caught before coding: the clear-child-tid store.** The plan (and Fable's design) moved the exit's ctid store before the EXITING commit, so it ran while the thread could still sleep. Reading proc_exec_alone (syscall.c ~10551) showed why the order exists: a joiner that reads the zeroed word must find the worker EXITING, or a pthread_join followed at once by execve gets a spurious EAGAIN from exec's sole-thread gate (Linux escapes this only because de_thread kills peers at exec -- C5 here). Revised: the store stays after the commit, and the one fault arm that can sleep (a FILE page-in) refuses a thread that is not RUNNING, so the store fails clean. OPEN-BUGS 21:15Z.
+
+**Bugs found on the way, both enqueued first.** (1) Both user spawn arms read `nt->tid` after `ready(nt)`; once runnable, the thread can exit and be freed by a sibling's reap before the spawner loads from it. Fixed by reading the tid first; no runtime witness (the freed slab still holds the old value). OPEN-BUGS 21:30Z. (2) #237 F1, an open P2 (a broken-pipe note never wakes sleeping peers) that lived only in its audit file, never in the queue; its 08-19 fix attempt broke boot for an unexplained reason. Enqueued 21:32Z, folded into C4 after the boot break is understood.
+
+**C3b (WIP 01e24b321, cb69dcfb6).** threads_lock + live_threads in struct Proc (432 bytes); one EXITING writer (thread_commit_exiting_locked) with a KERNEL_TESTS cross-check against the walk; spawn = unlinked alloc, then proc_thread_admit (claim + cap + link in one hold); the last-out tail = decide under the thread lock, drop, close, then GPTL { territory; commit under the nested thread lock; ZOMBIE }; exec, group_terminate, the note/stop/debug walkers, /proc, wait_pid and the tests moved. Under KERNEL_TESTS a per-CPU slot makes the one-lock-per-CPU rule and every `_locked` walker's precondition extinct on violation. Revised decisions 4 and 12: the reap of exited peers keeps one hold per peer (its 16 KiB stack scan stays under the lock, bounded to one stack).
+
+**Evidence.** All 20 changed files compiled to objects before the first lease (no new warning class, no mem* libcall, no dropped symbol). Lease 1 (10-21 22:18-22:33Z), on cb69dcfb6: ci suite 2027/2027 on the first boot; sabotage A four reds exactly -- the cap leg, the slot query, the fault guard, and the existing `p9_closer.kill_at_final_close_start_forces_it` with the last-out mark moved past its window (so that test still guards the C3 tail); B the claim leg + `EXTINCTION: threads_lock: a second Proc's thread lock on one CPU`; C `EXTINCTION: threads_lock: a _locked thread-list walker without its Proc's lock`; regreen 2027/2027 on a tree verified equal to cb69dcfb6; the five specs as claimed. Lease 2 (10-22 06:47-07:43Z), on b86a0dafa: 2028/2028; D and D2 each arm of the new wiring test red alone; SMP matrix 50/50, 0 corruption. Lease 3 (10-22 08:05-08:23Z), the `cpubench storm` measurement (vault `msr-thread-storm`): one storm alone, median 61,309 threads/s on a0128885b against 63,334 on C3, no change; four at once in four Procs, median per storm 96,613 against 146,176, 1.51x with disjoint ranges. The first run was wasted twice over, caught from its transcript: `cmd & cmd & wait` is not ut syntax (a background pipeline ends the command, so `cmd &;`), and the default storm (4 workers x 20 rounds, 80 threads, 4-13 ms, a 3x spread) was too small to measure; the rerun used 16 x 1000. One result line per log was cut mid-line by an interleaved write, so the parse matches the rate rather than the whole line, and 12 concurrent rates were found in each log. The rebuilt C3 image hashed identical to the measured one (d7c5e853).
+
+**A wrong turn in the harness, caught by reading every FAIL.** Set B showed one red it did not sabotage (the fault-guard test). The restore had copied the backups back with `shutil.copy2`, which keeps their old mtimes, so make kept set A's sabotaged `fault.o`. Set C, with the file touched, read that test green again. The restore now stamps fresh mtimes; a variant added to the stale-artifact lesson.
+
+**Audit.** Fable 5.1 r1 on a frozen snapshot of cb69dcfb6 (start == end): 0 P0 / 0 P1 / 1 P2 / 4 P3. F1 the binding section-28 cells still credited the global lock -- the C3a scripture had updated 7.3.1 and missed the cells CLAUDE.md calls authoritative. F5 is the old lesson again: the admit test drove the primitive, so an arm that skipped it would have stayed green; the new test claims the group at the top of the caller's own admit through a test hook, on both arms. All five addressed in b86a0dafa; not dirty.
+
+**Operator decisions.** Votes 5 (thread-directed notes, C4) and 6 (per-thread /proc directories, C7), both as recommended, asked while no lease was held. All six thread-model votes are in.
+
+**Rule slips.** Two scratch cleanups broke shell rules: one ran `rm -rf` through a shell variable, one listed and deleted in the same command. Both removed only my own dry-run copies. Recorded because the rules exist for the time it would not be.
+
 ## 2026-10-21 -- the dead publication helper deleted; its harness follows the live path (corona)
 
 - *AS-R9 is closed on main.* main ff'd to the vote-15 docs twins `cba52ec9f`
@@ -1194,6 +1379,7 @@ two of them found.
   verified pool and key, then checks them against the manifest. That avoids
   sending 2.5 GiB twice. The pi was released while I waited for the Mac to
   re-bake.
+
 
 ## 2026-10-21 (aux, Opus 5.5 1M) -- thread-model C7a: a manual debug stop reads main, not the newest thread
 

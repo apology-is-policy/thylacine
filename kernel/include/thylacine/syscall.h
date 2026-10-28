@@ -775,8 +775,10 @@ enum {
     // syscall_ret.c decodes [-4095, -2]):
     //   -EINVAL  bad alignment / out-of-bound entry_va / out-of-bound
     //            sp_va / out-of-bound tls_va / bad ptid_va / caller is kproc
-    //   -EAGAIN  per-Proc thread cap (PROC_THREAD_MAX) reached (#65, I-32)
-    //   -ENOMEM  kstack alloc fail / Thread cache alloc fail
+    //   -EAGAIN  the Proc's thread budget reached (#65, I-32; ARCH 7.3.5),
+    //            or the id space spent
+    //   -ENOMEM  the user pool refused the thread's charge, or the kstack /
+    //            Thread cache alloc failed
     // The ptid publish is best-effort: a fault writing *ptid_va (a buggy
     // caller; the address passed align+bound but is unmapped) is tolerated
     // -- the spawn still succeeds and the tid is returned in x0 -- mirroring
@@ -791,22 +793,21 @@ enum {
     // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
     //   (no args)
     //
-    // Atomically:
-    //   1. If clear_child_tid != 0 on this Thread (set via
+    // In order (thread_exit_self, proc.h):
+    //   1. Commit THREAD_EXITING under p->threads_lock; the LAST live
+    //      thread first closes the Proc's handles, then commits and
+    //      transitions the Proc to ZOMBIE (exit_status 0, or the group
+    //      claim's) + wakes the parent's child_waiters.
+    //   2. If clear_child_tid != 0 on this Thread (set via
     //      SYS_SET_TID_ADDRESS): uaccess_store_u32(0) at that user-VA +
-    //      torpor_wake(UINT32_MAX) on the same address. Best-effort —
-    //      a failed store (page unmapped) skips the wake but does not
-    //      extinct.
-    //   2. Mark self THREAD_EXITING under g_proc_table_lock.
-    //   3. If this is the LAST non-EXITING thread in the Proc, also
-    //      transition the Proc to ZOMBIE with exit_status = 0 + wake
-    //      parent's child_waiters (mirrors exits() with status 0).
-    //   4. yield via sched(); never returns.
+    //      torpor_wake(UINT32_MAX) on the same address. Best-effort --
+    //      a failed store skips the wake but does not extinct.
+    //   3. yield via sched(); never returns.
     //
-    // After-exit reaping: the Thread descriptor + kstack stay
-    // allocated, counted against PROC_THREAD_MAX, until the Proc's
-    // next thread create frees them (proc_reap_exited_threads) or,
-    // once the whole Proc is dead, wait_pid's reap does.
+    // After-exit reaping: the Thread descriptor + kstack are freed by
+    // the resume path of the thread's last switch-out (ARCH 7.3.2). It
+    // stops counting against the thread budget at step 1's commit, before
+    // step 2 wakes a joiner.
     //
     // Never returns to userspace — userspace must treat any return as
     // a kernel bug. The x0 the SVC dispatch writes on a fall-through
@@ -2902,7 +2903,15 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // acquires a gate, this bit needs the same one or it becomes a bypass. NOT a cap
 // (rfork does not propagate proc_flags).
 #define SPAWN_PERM_SEAL              (1u << 9)
-#define SPAWN_PERM_SESSION_REGISTRY (1u << 10)
+// SPAWN_PERM_MAY_RAISE_THREAD_BUDGET (thread-model C6, ARCH 7.3.5) stamps
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET on the child: the authority to spawn a
+// child whose thread budget (SPAWN_EXT_THREADS) exceeds the spawner's own. The
+// page-budget bit's rules exactly: gated one-hop (a console-attached granter
+// or a holder), a raise still bounded by proc_thread_budget_hard_max(),
+// lowering needs no authority, NOT a cap (rfork does not propagate it) though
+// the budget itself is inherited.
+#define SPAWN_PERM_MAY_RAISE_THREAD_BUDGET (1u << 10)
+#define SPAWN_PERM_SESSION_REGISTRY (1u << 11)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
@@ -2912,7 +2921,25 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SEAT_MANAGER | \
                                       SPAWN_PERM_SEAT_SERVICE | \
                                       SPAWN_PERM_SEAT_CLIENT | \
-                                      SPAWN_PERM_SEAL | SPAWN_PERM_SESSION_REGISTRY)
+                                      SPAWN_PERM_SEAL | \
+                                      SPAWN_PERM_MAY_RAISE_THREAD_BUDGET | \
+                                      SPAWN_PERM_SESSION_REGISTRY)
+// Derived from the list, as PROC_FLAGS_ALL's check is: the bits are disjoint iff
+// the union's popcount is the sum of theirs, so two perms given one bit fail here.
+_Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
+    __builtin_popcount(SPAWN_PERM_MAY_POST_SERVICE) +
+    __builtin_popcount(SPAWN_PERM_CONSOLE_TRUSTED) +
+    __builtin_popcount(SPAWN_PERM_CONSOLE_OWNER) +
+    __builtin_popcount(SPAWN_PERM_CONSOLE_RENDERER) +
+    __builtin_popcount(SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) +
+    __builtin_popcount(SPAWN_PERM_SESSION_HANGUP) +
+    __builtin_popcount(SPAWN_PERM_SEAT_MANAGER) +
+    __builtin_popcount(SPAWN_PERM_SEAT_SERVICE) +
+    __builtin_popcount(SPAWN_PERM_SEAT_CLIENT) +
+    __builtin_popcount(SPAWN_PERM_SEAL) +
+    __builtin_popcount(SPAWN_PERM_MAY_RAISE_THREAD_BUDGET) +
+    __builtin_popcount(SPAWN_PERM_SESSION_REGISTRY),
+    "two SPAWN_PERM_* bits alias");
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id
@@ -3000,7 +3027,14 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // cwd fails the spawn with chdir's errno and no child exists. Ungated: the cwd
 // is a name, re-resolved under the child's own identity at every use.
 #define SPAWN_EXT_CWD                (1u << 0)
-#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD)
+// SPAWN_EXT_THREADS: a struct sys_spawn_ext_threads sets the child's thread
+// budget (ARCH 7.3.5), as page_budget sets its page budget, except that the
+// tail's presence is the request: a budget of 0 is EINVAL (clear the bit to
+// inherit). At or below the spawner's own needs no authority; above it needs
+// PROC_FLAG_MAY_RAISE_THREAD_BUDGET; over proc_thread_budget_hard_max() is
+// refused (-1), never clamped.
+#define SPAWN_EXT_THREADS            (1u << 1)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -3840,6 +3874,21 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_len) == 8,
 _Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_flags) == 12,
                "sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
 
+// The SPAWN_EXT_THREADS tail, after the SPAWN_EXT_CWD tail when that bit is
+// set too, else directly after the record.
+struct sys_spawn_ext_threads {
+    u32 thread_budget;  // 1..proc_thread_budget_hard_max(); 0 -> T_E_INVAL
+    u32 threads_flags;  // must be 0 -> else -1, the unknown-bits rule
+};
+_Static_assert(sizeof(struct sys_spawn_ext_threads) == 8,
+               "struct sys_spawn_ext_threads is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "8 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, thread_budget) == 0,
+               "sys_spawn_ext_threads.thread_budget at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, threads_flags) == 4,
+               "sys_spawn_ext_threads.threads_flags at ABI offset 4");
+
 struct exception_context;
 
 // Dispatch entry called from arch/arm64/exception.c::exception_sync_lower_el
@@ -3849,8 +3898,8 @@ struct exception_context;
 //
 // SYS_EXITS doesn't return — it transitions through the kernel's exits()
 // path and sched()'s context-switch picks another thread. The user
-// thread is left in EXITING state until it is freed (wait_pid's reap,
-// or sooner a peer's thread create).
+// thread is left in EXITING state until the resume path of its last
+// switch-out frees it (ARCH 7.3.2).
 void syscall_dispatch(struct exception_context *ctx);
 
 struct Spoor;
@@ -3895,6 +3944,7 @@ struct srv_route;
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
 void apply_spawn_perms(struct Proc *p, u32 perm_flags);
 u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw);
+s64 exec_claim_or_drop_for_test(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe);
 s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);
 int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
                              u64 length, u64 *base_pa_out);
@@ -3927,6 +3977,7 @@ s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
                         char *joined, u32 joined_cap,
                         char *name, u32 name_cap);
 s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries);
+__attribute__((noreturn)) void sys_exit_group_for_test(u64 status);
 s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
 s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
 s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
@@ -3979,7 +4030,7 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const u32 *supp_gids, u32 supp_gid_count,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
-        const char *cwd, u32 cwd_len);
+        const char *cwd, u32 cwd_len, u32 req_threads);
 int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -4036,6 +4087,7 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
 s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                       u64 in_ordinal);
 s64 viv_accept_for_test(struct Proc *p, u64 fd);
+s64 viv_clone_thread_for_test(struct exception_context *ctx, const u64 *args);
 u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
                             u8 *dst, u64 dst_cap,
                             u64 *last_cookie_out);

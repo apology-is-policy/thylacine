@@ -402,7 +402,8 @@ struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
                                  const char *name, u8 name_len);
 #endif // KERNEL_TESTS
 
-// srv_proc_exit_notify — called from exits() for every exiting Proc. Any
+// srv_proc_exit_notify — called by every Proc's last live thread out
+// (kernel/proc.c proc_exit_last_out), on either exit path. Any
 // LIVE service whose poster is `p` (matched by stripes) is TOMBSTONED:
 // the name stays reserved, awaiting a joey-marked rebind. A Proc that
 // never posted is a cheap no-op scan. Maps to specs/corvus.tla

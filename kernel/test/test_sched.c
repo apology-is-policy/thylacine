@@ -234,6 +234,26 @@ void test_sched_runnable_count(void) {
         "thread_free of RUNNABLE thread restored count to 0");
 }
 
+// The runnable counts read per-band counts kept under each CPU's lock, not a
+// walk of trees whose threads a peer may be freeing. Each count must equal its
+// tree, compared under the lock, with a thread queued and after it leaves.
+void test_sched_run_counts_match_trees(void);
+void test_sched_run_counts_match_trees(void) {
+    bool entry = sched_run_counts_match_trees_for_test();
+    struct Thread *t = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    ready(t);
+    bool queued = sched_run_counts_match_trees_for_test();
+    unsigned n  = sched_runnable_count_band(SCHED_BAND_NORMAL);
+    thread_free(t);
+    bool after  = sched_run_counts_match_trees_for_test();
+
+    TEST_ASSERT(entry, "every band's count equals its tree at entry");
+    TEST_ASSERT(queued, "and with a thread queued");
+    TEST_EXPECT_EQ(n, 1u, "the queued thread is counted in its band");
+    TEST_ASSERT(after, "and after it left the tree");
+}
+
 // scheduler.runnable_count_excludes_idle (#857 regression)
 //   sched_runnable_count() reports runnable WORK and MUST exclude
 //   SCHED_BAND_IDLE. The per-CPU idle threads live in run_tree[BAND_IDLE] on
@@ -349,7 +369,8 @@ static void notify_test_thread(void) {
     // caller's obligation -- see the cleanup wait in
     // test_sched_notify_idle_peer_smoke, which exists because that inference
     // was once made the other way.
-    current_thread()->state = THREAD_EXITING;
+    (void)spin_lock_irqsave(NULL);   // thread_kthread_retire's contract: masked to sched()
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     sched();
     // Unreachable -- EXITING is never re-dispatched.
 }

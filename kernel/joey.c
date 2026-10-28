@@ -430,14 +430,15 @@ void joey_run(void) {
     // CAP_LOCK_PAGES + CAP_CSPRNG_READ to /sbin/corvus (and similarly
     // delegated caps to future child Procs). Plain rfork() would give
     // joey CAP_NONE; spawn-with-caps's AND would then return 0 for
-    // every cap bit. rfork_with_caps(CAP_ALL) gives joey the full v1.0
-    // capability ceiling so it can grant any subset to children. This
-    // matches the production-init pattern: joey is the trusted
-    // delegate that distributes caps per child's role.
-    int pid = rfork_with_caps(RFPROC, joey_thunk, &args, CAP_ALL);
+    // every cap bit. CAP_ALL gives joey the full v1.0 capability ceiling
+    // so it can grant any subset to children. This matches the
+    // production-init pattern: joey is the trusted delegate that
+    // distributes caps per child's role. rfork_init also makes joey pid 1.
+    int pid = rfork_init(joey_thunk, &args, CAP_ALL);
     if (pid < 0) {
-        extinction("joey: rfork_with_caps(RFPROC, joey_thunk) failed");
+        extinction("joey: rfork_init(joey_thunk) failed");
     }
+    if (pid != PROC_ID_INIT) extinction("joey: init is not pid 1");
 
     // #94: wait for joey BY PID. When joey exits early its daemon children
     // (stratumd / corvus / ptyfs / diorama / aurora) re-parent to kproc --

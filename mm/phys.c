@@ -417,16 +417,25 @@ static u32 pool_shortfall(u32 n) {
     return over > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)over;
 }
 
+// A refusal is first an offer to reclaim what the machine can spare (an idle
+// image's pages), asked for the whole shortfall at once; the charge is asked
+// again until it lands or nothing is left to reclaim. An exempt charge never
+// refuses, so the TCB never reclaims and never waits on it.
+bool capacity_charge(u32 npages, bool exempt) {
+    while (!pool_charge(npages, exempt)) {
+        if (!g_capacity_reclaim || g_capacity_reclaim(pool_shortfall(npages)) == 0) return false;
+    }
+    return true;
+}
+
+void capacity_uncharge(u32 npages) {
+    pool_uncharge(npages);
+}
+
 struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt) {
     if (order > MAX_ORDER) return NULL;
     u32 n = 1u << order;
-    // A refusal is first an offer to reclaim what the machine can spare (an
-    // idle image's pages), asked for the whole shortfall at once; the charge
-    // is asked again until it lands or nothing is left to reclaim. An exempt
-    // charge never refuses, so the TCB never reclaims and never waits on it.
-    while (!pool_charge(n, exempt)) {
-        if (!g_capacity_reclaim || g_capacity_reclaim(pool_shortfall(n)) == 0) return NULL;
-    }
+    if (!capacity_charge(n, exempt)) return NULL;
     struct page *p = alloc_pages(order, flags);
     if (!p) { pool_uncharge(n); return NULL; }
     // The tag rides the block's HEAD page: the descriptor the buddy keys

@@ -53,7 +53,9 @@ Alternatives considered:
 
 ## Factory authority and ABI
 
-Add `SPAWN_PERM_SESSION_REGISTRY` as bit 10, using the existing one-hop explicit
+Add `SPAWN_PERM_SESSION_REGISTRY` as bit 11 (bit 10 is thread-model C6's
+`SPAWN_PERM_MAY_RAISE_THREAD_BUDGET`; both were taken on unmerged branches and
+the join moved this one), using the existing one-hop explicit
 spawn-permission discipline. Bootstrap Joey is the initial grant root. Joey
 passes the role only to login; login does not pass it to a shell, compositor,
 home proxy or application. Rfork does not automatically inherit the role; exec may retain the calling
@@ -69,7 +71,7 @@ SYS_SRV_REGISTRY_NEW(source_fd, routes, route_count, flags) -> root_fd | -errno
 ```
 
 The number is unused in the inspected stable and unfinished stop branches;
-reserve it, bit 10 and all mirrors in the scripture/ABI commit before consumers.
+reserve it, bit 11 and all mirrors in the scripture/ABI commit before consumers.
 Update native-ceiling assertions and the C/Rust syscall mirrors together. The
 separate authority drafts reserve no conflicting kernel number in this base.
 Recheck Yip and refs immediately before assigning numbers. Internal Proc role bit 29 is reserved; the public

@@ -395,7 +395,7 @@ struct weft_binding {
     // WEAVE clunk-unmap: dev9p_close unmaps only when the closing Proc's pid
     // matches (an inherited-fd closer in another Proc leaves the mapping to
     // the mapper's own vma_drain -- the ring precedent). Sound as a bare pid:
-    // g_next_pid is a monotonic u32 (no reuse within any realizable runtime,
+    // pids are drawn once from the id space and never reused (proc_id_alloc,
     // the proc.c precedent), so a matched pid IS the mapping Proc.
     u32            map_pid;
     // Weft-6b-2: the kernel's PRIVATE trusted geometry of this ring (computed
@@ -448,8 +448,9 @@ struct Burrow *weft_share_claim(u64 share_id);
 
 // GC every UN-claimed share owned by `owner` (drops each registration pin). The
 // share_outlives_flow backstop: a netd that registered a ring but died before
-// the kernel claimed it must not leak the pinned ring Burrow. Called at the netd
-// Proc's exit (kernel/proc.c exit-notify, alongside srv/cap_proc_exit_notify).
+// the kernel claimed it must not leak the pinned ring Burrow. Called by every
+// Proc's last live thread out (kernel/proc.c proc_exit_last_out), after the
+// handle close has quiesced the Proc's devices.
 void weft_share_release_owner(struct Proc *owner);
 
 // G-2 (SYS_WEFT_UNSHARE; TAPESTRY.md §18.11 F3 + §18.12 R2-F5; closes the #289

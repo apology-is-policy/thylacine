@@ -163,8 +163,8 @@ reset itself.
 so a stale entry is reachable only under this address space's own ASID,
 and the rollover's per-CPU flush runs before that value can go live again
 ([[sub-kernel-asid]]). Each caller separately owes only "no CPU translates
-under this ASID *now*" — `proc_free` by having reaped and `on_cpu`-spun
-every thread, `proc_exec_replace` by writing the new TTBR0 (a *different*
+under this ASID *now*" — `proc_free` by running only after every thread has
+switched out for the last time and been freed ([[inv-i48]]), `proc_exec_replace` by writing the new TTBR0 (a *different*
 ASID) and `isb`-ing first. `vma_drain_in` issues **no TLBI at all**, measured
 at L-2; an earlier claim that it did was fiction.
 

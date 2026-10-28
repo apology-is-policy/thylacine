@@ -182,7 +182,7 @@ static void torpor_consumer_entry(void) {
                                                 g_torpor_timeout);
     g_torpor_done++;       // → 2: post-wait
     // #109: terminal EXITING park (was for(;;)sched()); reaped by the teardown.
-    test_kthread_park_terminal(&g_torpor_exited);
+    test_thread_park_terminal(&g_torpor_exited);
 }
 
 // Set up the per-test consumer fixture. Returns 0 on success, -1 on a
@@ -201,8 +201,7 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
 
     s64 r = sys_burrow_attach_for_proc(g_torpor_proc, PAGE_SIZE);
     if (r <= 0) {
-        g_torpor_proc->state = 2;            // ZOMBIE
-        proc_free(g_torpor_proc);
+        test_proc_free_drained(g_torpor_proc);
         g_torpor_proc = NULL;
         return -1;
     }
@@ -210,13 +209,12 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
     return 0;
 }
 
-// Tear down: free the consumer thread, then free the proc (which drains
-// its VMAs). Caller passes the consumer thread; safe to pass NULL.
+// Tear down: wait for the consumer thread to be freed, then free the proc
+// (which drains its VMAs). Caller passes the consumer thread; safe to pass NULL.
 static void torpor_consumer_teardown(struct Thread *consumer) {
-    if (consumer) test_kthread_join_free(consumer, &g_torpor_exited);
+    if (consumer) test_thread_join_last(g_torpor_proc, &g_torpor_exited);
     if (g_torpor_proc) {
-        g_torpor_proc->state = 2;            // ZOMBIE
-        proc_free(g_torpor_proc);
+        test_proc_free_drained(g_torpor_proc);
         g_torpor_proc = NULL;
     }
 }
@@ -317,6 +315,7 @@ void test_torpor_wait_wake_handoff(void) {
     struct Thread *consumer = thread_create(g_torpor_proc,
                                             torpor_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    int ctid = consumer->tid;
     ready(consumer);
 
     // Consumer: runs, increments to 1, takes torpor_lock, loads (0 == 0
@@ -324,12 +323,11 @@ void test_torpor_wait_wake_handoff(void) {
     // SLEEPING. SMP (#20): it may run on a peer CPU — yield until it is
     // observably SLEEPING (registration precedes the SLEEPING
     // transition, so SLEEPING implies registered).
-    TEST_YIELD_UNTIL(__atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE)
-                         == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(test_thread_sleeping(g_torpor_proc, ctid));
 
     TEST_EXPECT_EQ(g_torpor_done, 1u,
         "consumer must have run once before sleeping");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+    TEST_ASSERT(test_thread_sleeping(g_torpor_proc, ctid),
         "consumer must be SLEEPING inside torpor_wait");
 
     // WAKE: walks the bucket, finds the consumer's waiter, sets
@@ -382,7 +380,7 @@ static void torpor_consumer_a_entry(void) {
                                              /*expected=*/0,
                                              /*timeout_us=*/60ll * 1000000ll);
     g_torpor_done_a++;
-    test_kthread_park_terminal(&g_torpor_exited_a);  // #109: EXITING park
+    test_thread_park_terminal(&g_torpor_exited_a);  // #109: EXITING park
 }
 
 static void torpor_consumer_b_entry(void) {
@@ -391,7 +389,7 @@ static void torpor_consumer_b_entry(void) {
                                              /*expected=*/0,
                                              /*timeout_us=*/60ll * 1000000ll);
     g_torpor_done_b++;
-    test_kthread_park_terminal(&g_torpor_exited_b);  // #109: EXITING park
+    test_thread_park_terminal(&g_torpor_exited_b);  // #109: EXITING park
 }
 
 void test_torpor_wake_two_waiters_count_bound(void) {
@@ -412,6 +410,7 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     struct Thread *ca = thread_create(g_torpor_proc, torpor_consumer_a_entry);
     struct Thread *cb = thread_create(g_torpor_proc, torpor_consumer_b_entry);
     TEST_ASSERT(ca != NULL && cb != NULL, "thread_create failed");
+    int atid = ca->tid, btid = cb->tid;
     ready(ca);
     ready(cb);
 
@@ -423,10 +422,8 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     // until both are observably SLEEPING — registration precedes the
     // SLEEPING transition, so this also guarantees both are in the
     // bucket before the first WAKE (wake1 == 1 stays deterministic).
-    TEST_YIELD_UNTIL(__atomic_load_n(&ca->state, __ATOMIC_ACQUIRE)
-                         == THREAD_SLEEPING &&
-                     __atomic_load_n(&cb->state, __ATOMIC_ACQUIRE)
-                         == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(test_thread_sleeping(g_torpor_proc, atid) &&
+                     test_thread_sleeping(g_torpor_proc, btid));
 
     TEST_EXPECT_EQ(g_torpor_done_a, 1u, "consumer A reached pre-wait");
     TEST_EXPECT_EQ(g_torpor_done_b, 1u, "consumer B reached pre-wait");
@@ -480,10 +477,9 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(wake3, (s64)0,
         "third WAKE on emptied bucket returns 0");
 
-    test_kthread_join_free(ca, &g_torpor_exited_a);
-    test_kthread_join_free(cb, &g_torpor_exited_b);
-    g_torpor_proc->state = 2;        // ZOMBIE
-    proc_free(g_torpor_proc);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_torpor_exited_a, __ATOMIC_ACQUIRE));
+    test_thread_join_last(g_torpor_proc, &g_torpor_exited_b);
+    test_proc_free_drained(g_torpor_proc);
     g_torpor_proc = NULL;
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after both consumers freed");

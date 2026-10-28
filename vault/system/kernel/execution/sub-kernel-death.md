@@ -43,12 +43,12 @@ consequence of getting it wrong is a hang rather than a crash.
 
 | Entry | Caller state | Effect |
 |---|---|---|
-| `exits(msg)` | the Proc's own thread | terminate the *program*; with live peers, routes through the group cascade then self-exits |
+| `exits(msg)` | the Proc's own thread | terminate the *program*; with live peers, routes through the group cascade then self-exits; a thread another thread's exec has doomed leaves alone |
 | `thread_exit_self()` | any thread | terminate *this Thread*; the last live one out zombies the Proc |
 | `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b); `exits_note` on a name with no signal is an extinction |
 | `proc_group_terminate(p, sig, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait; `sig` is the death signal the claim records (0 for an exit) |
-| `el0_return_die_check()` | at every return-to-EL0 | if flagged, `thread_exit_self()` (noreturn) |
-| `proc_fault_terminate(name, addr)` | EL0 unhandled fault; a snare death a Proc chooses for itself (`SYS_POSTNOTE`'s self arm, the phenotype's `kill`; `addr` is then the SVC's ELR) | diagnose (`user fault:`, the line the gates watch) + `exits_note(snare:*)`; noreturn |
+| `el0_return_die_check()` | at every return-to-EL0 | if flagged, or another thread's exec holds the Proc, `thread_exit_self()` (noreturn) |
+| `proc_fault_terminate(name, addr)` | EL0 unhandled fault; a snare death a Proc chooses for itself (`SYS_POSTNOTE`'s self arm, the phenotype's `kill`; `addr` is then the SVC's ELR) | diagnose (`user fault:`, the line the gates watch; it ends `-- terminating thread (an exec holds the Proc)` for a doomed thread) + `exits_note(snare:*)`; noreturn |
 
 `proc_group_terminate`'s lock precondition is not stylistic: the cascade
 walks `p->threads`, and that list is mutated only under the table lock, so a
@@ -123,7 +123,9 @@ exit and a kill alike:
   its mount ref at its own exit). It is kernel-driven session-*lifecycle*
   termination, not a userspace cross-Proc kill — login lacks CAP_KILL by design,
   so I-26 is untouched. Its isolation (only genuine session members match) rests
-  on pids never recycling (`g_next_pid` is monotonic + extincts at INT_MAX); the
+  on pids never recycling (`proc_id_alloc`'s one id space is monotonic and
+  refuses past `PROC_ID_LAST`; an exec moves a pid between threads of one Proc,
+  never to another, [[sub-kernel-proc]]); the
   legate it mirrors keys on a dedicated non-reusable `legate_scope_id` instead —
   an implicit-vs-local dependency recorded at `session_hangup_cb` (arm-6 audit F1);
 - clearing `g_console_owner`, `g_console_trusted_proc`, `g_console_renderer`
@@ -178,8 +180,8 @@ the last one out (that one additionally zombies the Proc through the chokepoint
 above). An unmapped or unwritable tidptr **silently skips** both the store and the
 wake — via the `uaccess_store_u32` fixup ([[sub-kernel-uaccess]]) — rather than
 extincting: a departing Thread must not be able to crash the box with a bad address
-it registered earlier. The departed Thread itself is freed later, by its Proc's next
-thread create or by `wait_pid_for` ([[sub-kernel-thread]], a thread's end of life).
+it registered earlier. The departed Thread itself is freed by the resume path of its
+last switch-out ([[sub-kernel-thread]], a thread's end of life; [[inv-i48]]).
 
 **The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
 `exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype
@@ -219,8 +221,8 @@ Witnesses: `proc.wait_packed_signalled`, `proc.group_claim_decides_signal`,
 **A late `exits()` leaves as a peer (I-24).** The group's status is decided
 once, by the first claim. A thread that reaches `exits_code` after
 `group_exit_msg` is set -- an `exit_group` or kill it had not yet seen, or a
-fault it took while the group was dying -- finds the claim under
-`g_proc_table_lock` and leaves through `thread_exit_self`, as a peer does, so
+fault it took while the group was dying -- finds the claim under the Proc's
+thread lock and leaves through `thread_exit_self`, as a peer does, so
 the last thread out reaps with the claimed `exit_status`. `exits_code`'s own
 last-thread path used to record its code and msg over the claim. B-2c's
 `ls-jsc` showed the trigger (a JIT thread's page-in abandoned by jsc's own clean
@@ -232,7 +234,7 @@ same hold as the `PROC_FLAG_EXIT_CLOSING` mark, so a kill lands either before it
 (it forces the close, and the exit keeps its own status, Linux's `PF_EXITING`
 shape). `thread_exit_self`'s last-out follows the same rule
 ([[dec-2026-10-13-exit-wins-final-close]]): it reads the claim when it decides
-it is the last thread, under `g_proc_table_lock`, and publishes
+it is the last thread, under the Proc's thread lock, and publishes
 `PROC_FLAG_EXIT_CLOSING` in the same hold before it unlocks for the close; with
 no claim, the `SYS_THREAD_EXIT` convention (status 0, "ok") stands, and a later
 kill only forces the close. It used to read the claim after the close, so a kill
@@ -250,19 +252,51 @@ Witnesses of the claim itself: `proc.exits_in_dying_group_keeps_group_status`,
 `proc.fault_in_dying_group_keeps_group_status`. The fault side, which stopped
 the false `snare:bus` itself, is [[sub-kernel-fault]]'s `FAULT_USER_DYING`.
 
+**A doomed thread leaves alone (thread-model C5, operator vote 2026-10-26).**
+While another thread's exec holds the Proc (`Proc.exec_task`, ARCH 7.3.3,
+[[sub-kernel-proc]]), every thread but the execer is doomed:
+`proc_exec_dooms(p, t)` -- a pointer compare, never a dereference -- sits beside
+`group_exit_msg` in `thread_die_pending`, `thread_group_death_pending`, the
+EL0-return die-check and the stop park's two death checks. A doomed thread that
+ends itself leaves as a peer does, as Linux's `do_group_exit` does while
+`group_exec_task` is set: `exits_term` reads the claim, in the same thread-lock
+hold as the group claim, like a claim already made; `sys_exit_group_handler`
+reads it and makes no group claim (a claim taken just after that read is then
+abandoned by the exit_group's group death, as a kill during a claim abandons
+it -- the order of an exit_group that came first); and `proc_fault_terminate`'s line names the thread
+(operator vote 2026-10-27, docs/ERRORS.md). Such a thread is never the last live
+one -- the execer stays live until it swaps, and only a group death, read first,
+ends a claim early -- so it never publishes the ZOMBIE without a group claim.
+
+**What the last thread owes.** `proc_exit_last_out(p, close)` runs on both exit
+paths, in the window below, by the last live thread only: the Proc's /srv
+services are tombstoned and their backlogs drained to EOF
+([[sub-kernel-devsrv]]), its pending /cap grants dropped ([[sub-kernel-caps]]),
+then its handles close, then the weft shares the kernel never claimed are
+released with their pins ([[sub-kernel-weft]]) -- after the close, whose first
+step quiesces the Proc's devices, because a pin can be a DMA Burrow's last
+reference. Before C5 `exits()` ran the three departures at its very top, before
+deciding anything, and `thread_exit_self` after the ZOMBIE publish; under "leave
+alone" the first would have tombstoned the services of a Proc that lives on.
+Witnesses: `proc.exec_claim_survives_a_doomed_exit` (an exit, a fault and an
+exit_group by doomed threads; the claim returns, the service stays posted, the
+fault line is captured) and `proc.exec_claim_abandoned_on_group_death` (the
+killed Proc's last thread out tombstones its service).
+
 **The close-at-exit window** (#926, completed by #68). A Proc's fds must
 close when the *process* terminates, not when its parent later reaps it —
 otherwise a shell draining `$(cmd)`'s stdout to EOF hangs forever, because
 EOF needs the reap, the reap needs the parent's wait, and the wait is
 waiting on EOF. So the last live Thread out deliberately opens a window
-**before** the ZOMBIE flip: drop the lock, `proc_close_handles_at_exit`,
-re-take, assert the determination held. Three properties make it sound:
+**before** the ZOMBIE flip: drop the lock, `proc_exit_last_out` (the
+departures, `proc_close_handles_at_exit`, the weft release), re-take, assert the determination held. Three properties make it sound:
 
 - `t` is still RUNNING, so a **sleep-capable** close hook (a 9P clunk's
   Tclunk/Rclunk wait) is legal — sleeping while EXITING trips `sched()`'s
   assert;
-- `p` is still ALIVE, so `wait_pid_for` cannot reap and `thread_free` the closer
-  mid-close;
+- `t` has not committed, so nothing frees the closer mid-close (only the
+  resume path of its last switch-out frees it), and `p` is still ALIVE, so
+  `wait_pid_for` cannot free the Proc;
 - `live_peers == 0` means every peer has committed EXITING (whose residual
   execution never touches the handle table) and no new peer can spawn
   without a RUNNING thread.
@@ -281,7 +315,7 @@ keep the string wrapper -- runs the same core as every termination, and when
 its CAS on `group_exit_msg` loses (the group is already terminating), or the
 Proc carries `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`, so
 an `exits()` close, which sets no group exit message, counts as terminating;
-`exits()` publishes it first, under `g_proc_table_lock` before it drops the
+`exits()` publishes it first, under the thread lock (inside `g_proc_table_lock`) before it drops the
 lock for the close, so no kill falls between the exit's commitment and the
 mark -- witness `p9_closer.first_kill_forces_exits_close`),
 it ORs `PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the
@@ -452,8 +486,17 @@ each thread on its own single-waiter rendez.
 ## Concurrency
 
 Lock order, exhaustively:
-`g_proc_table_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
-plus the torpor leg `g_proc_table_lock → torpor_lock → g_timerwait → r->lock`.
+`g_proc_table_lock → p->threads_lock → wait_lock → g_timerwait.lock → r->lock → cs->lock`,
+plus the torpor leg `p->threads_lock → torpor_lock → g_timerwait → r->lock`
+([[lock-proc-threads]], thread-model C3). The exit decision is one hold of the
+thread lock: a non-last thread commits there and takes nothing else; the last
+thread reads the claim, marks the close, drops every lock for the handle close,
+then commits under the thread lock nested in `g_proc_table_lock` and publishes
+ZOMBIE in that same global hold, so `wait_pid_for` never sees a ZOMBIE with a
+thread still live (`thread_reap.tla` `ZombieImpliesAllExiting`). The
+clear-child-tid store follows the commit and cannot sleep: the FILE page-in
+refuses a thread that is not RUNNING ([[sub-kernel-fault]],
+[[seam-exiting-tails-never-sleep]]).
 `torpor_lock` and `wait_lock` never nest (torpor drops its lock before
 `tsleep`). `smp_resched_others` and the IPI handler take no locks. No ABBA.
 
@@ -590,8 +633,8 @@ What a change **must** re-establish:
 
 - **A single-thread guarantee bounds threads, and says nothing about other
   processes.** exec resets the signal dispositions, and for one release it did so
-  by *freeing* the table — reasoning from the exec-alone gate that there could be
-  only one reader. That gate bounds the *threads of this process*. It says
+  by *freeing* the table — reasoning from exec running alone that there could be
+  only one reader. That guarantee bounds the *threads of this process*. It says
   nothing whatever about other processes, and the note-post path reaches this
   process's table with somebody else as the poster on essentially every call: the
   child-exit note to a parent, an explicit post, the process-group fan, the
@@ -610,7 +653,7 @@ What a change **must** re-establish:
   that really does hold. The same exec path clears the hardware breakpoint and
   watchpoint slots under the same guarantee — and there the reasoning is sound,
   because a debugger can only have armed them while the target was fully stopped
-  and this is the only live thread. Same gate, one valid use and one invalid one,
+  and this is the only live thread. Same guarantee, one valid use and one invalid one,
   forty lines apart. A third use is valid for the same reason: exec clears the
   caught-note claim (2026-09-30; a sub-field of `proc_flags` until S-2 moved it
   to the high byte of `Proc.note_caught`), and a claim is taken

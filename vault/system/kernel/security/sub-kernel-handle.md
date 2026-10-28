@@ -300,8 +300,11 @@ explicitly named the fd it wants gone.
 it, and the window is argued closed rather than assumed small.** A flag
 parameter on `handle_alloc` would mean touching ~100 call sites for one
 bit. The gap between alloc and set is provably empty: only exec consumes
-the flag, execve refuses unless it is the Proc's only live thread, and the
-caller **is** a live thread mid-syscall — so no exec can run between them.
+the flag, exec's swap waits until it is the Proc's only live thread
+(`proc_exec_claim`, thread-model C5), and the caller **is** a live thread
+mid-syscall that cannot commit its exit before its own die-check at the
+call's end (no path between the alloc and the set reaches one) — so no exec
+can swap between them.
 
 **Fork copies the table, and what it declines to copy is the interesting
 half.** `handle_table_copy_into_hooked` carries rights verbatim (POSIX fork gives
@@ -325,7 +328,8 @@ slot, one object's table reference leaked, then a double release at close.
 
 `handle_table_free` deliberately takes **no** lock, and the justification is
 narrow enough that the code marks it a FOOTGUN: it runs only where exactly
-one live thread remains, and no production path ever touches a *foreign*
+one live thread remains (the last-out decision reads `live_threads == 1` under
+the Proc's thread lock, [[lock-proc-threads]]), and no production path ever touches a *foreign*
 ALIVE Proc's table, because every handle op derives its Proc from
 `current_thread()->proc`. A cross-Proc accessor — a `/proc/<pid>/fd` surface
 inspecting a live peer — breaks that premise. That is precisely why `#66c`

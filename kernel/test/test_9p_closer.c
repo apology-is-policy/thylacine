@@ -686,7 +686,7 @@ void test_p9_closer_first_kill_forces_exits_close(void) {
 // commit's unlock and the close, where only a mark published at the commit
 // lets a first kill find the close under way.
 static struct Proc   *volatile g_xw_proc;
-static struct Thread *volatile g_xw_thread;
+static volatile int            g_xw_tid;
 static volatile bool           g_xw_last_out;
 static volatile bool           g_xw_window;
 static volatile bool           g_xw_hook_ran;
@@ -705,7 +705,7 @@ static void xw_child(void *arg) {
     g_xc_fd = handle_alloc(self, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, g_t1_spoor);
     if (g_xc_fd < 0) { spoor_clunk(g_t1_spoor); exits_code(3, "no handle"); }
     if (g_xw_window) proc_exit_close_test_set_window_hook(xw_window_kill);
-    __atomic_store_n(&g_xw_thread, current_thread(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xw_tid, current_thread()->tid, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xw_proc, self, __ATOMIC_RELEASE);
     if (g_xw_last_out) thread_exit_self();
     exits_code(5, "five");
@@ -716,12 +716,13 @@ static bool xw_zombie(void) {
     return p && __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PROC_STATE_ZOMBIE;
 }
 
+// The child's thread is freed at its last switch-out (ARCH 7.3.2), which a
+// kill in the close window can bring before this runs, so it is read by tid.
 static bool xw_in_close(void) {
-    struct Proc   *p = __atomic_load_n(&g_xw_proc, __ATOMIC_ACQUIRE);
-    struct Thread *t = __atomic_load_n(&g_xw_thread, __ATOMIC_ACQUIRE);
-    return p && t &&
+    struct Proc *p = __atomic_load_n(&g_xw_proc, __ATOMIC_ACQUIRE);
+    return p &&
            (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_EXIT_CLOSING) &&
-           __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+           test_thread_sleeping(p, __atomic_load_n(&g_xw_tid, __ATOMIC_ACQUIRE));
 }
 
 struct xw_obs {
@@ -754,7 +755,7 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         g_t1_spoor    = w.f;                     // the child's handle table adopts it
         g_xc_fd       = -1;
         g_xw_proc     = NULL;
-        g_xw_thread   = NULL;
+        g_xw_tid      = 0;
         g_xw_last_out = last_out;
         g_xw_window   = window;
         g_xw_hook_ran = false;
@@ -1242,12 +1243,12 @@ static void self_pump_body(void) {
 
 void test_p9_closer_clunk_killed_while_self_pumping(void) {
     g_sp_a = NULL;
-    g_sp_dying.t = NULL;
+    g_sp_dying.proc = NULL;
     self_pump_body();
     // After a failed assertion the sender may still wait in A's recv: let it
     // go and reap it before its session goes. No assertion here (see above).
     if (g_stall.inited) stall_release(&g_stall);
-    if (g_sp_dying.t) {
+    if (g_sp_dying.proc) {
         test_dying_kill(&g_sp_dying);
         u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while (!__atomic_load_n(&g_sp_dying.exited, __ATOMIC_ACQUIRE) &&

@@ -337,8 +337,8 @@ void handle_table_free(struct HandleTable *t) {
     // #844: NO table lock here -- this is the teardown path. It is reached at
     // proc_free (all threads reaped), at orphan-table cleanup, AND (since
     // #926, generalized by #68) at BOTH at-exit close sites -- exits() and
-    // thread_exit_self's last-out -- where proc_count_live_peers_locked == 0
-    // was determined under g_proc_table_lock. thread_count may exceed 1
+    // thread_exit_self's last-out -- where live_threads == 1 (the closer
+    // alone) was determined under p->threads_lock. thread_count may exceed 1
     // there (unreaped EXITING peers -- it decrements only at reap), but
     // exactly ONE live thread (the closer) exists, an EXITING peer's
     // residual execution (clear-child-tid handoff + sched()) never touches
@@ -1188,7 +1188,7 @@ int handle_close_on_exec(struct Proc *p) {
     //     close the same slot twice, whatever a future caller does.
     //
     // The snapshot cannot go stale in the only caller that exists: execve
-    // refuses unless this is the Proc's sole live thread (proc_exec_alone,
+    // runs this only once it is the Proc's sole thread (proc_exec_claim,
     // re-checked inside proc_exec_replace), so no peer is running to open or
     // close anything while this walks. The clear-first form does not DEPEND on
     // that, which is the point of writing it this way.

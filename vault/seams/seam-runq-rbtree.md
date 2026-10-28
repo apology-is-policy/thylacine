@@ -18,10 +18,12 @@ pick is O(1) per band.
 ## Why it was deferred
 
 With realistic thread counts — tens, not thousands — the tree's O(log N)
-advantage is invisible, and the list is far easier to reason about in a
-structure that is walked lock-free by two diagnostics
-(`sched_runnable_count`, `sched_has_runnable_work`) and by the tests'
-failure dump (`sched_dump_runnable`). The API does not change when it is replaced.
+advantage is invisible, and the list is far easier to reason about. Only
+the band heads are read lock-free (`sched_has_runnable_work`); the run
+counts read per-band counters kept under the lock, and the tests' failure
+dump (`sched_dump_runnable`) walks under it (since 2026-10-22, when user
+threads began to be freed at the switch). The API does not change when it
+is replaced.
 
 ## Cost of leaving it
 

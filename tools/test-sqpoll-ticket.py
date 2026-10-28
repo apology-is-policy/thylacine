@@ -7,8 +7,10 @@ spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host
 MUTANTS=[
  ('image','p->as == c->as &&','true &&','wrong image refused'),
  ('zombie','p->state == PROC_STATE_ALIVE &&','true &&','zombie refused'),
- ('terminating','!p->group_exit_msg &&','true &&','terminating refused'),
- ('cap','(proc_resource_exempt(p) ||','(true || proc_resource_exempt(p) ||','shared cap enforced'),
+ ('terminating','__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&','true &&','terminating refused'),
+ ('cap','proc_thread_room_locked(p)) {','(proc_thread_room_locked(p) || true)) {','the Proc\'s own budget refuses'),
+ ('budget','__atomic_load_n(&p->thread_budget, __ATOMIC_RELAXED)','8u','the Proc\'s own budget refuses'),
+ ('threadlock','irq_state_t s = proc_threads_lock(p);\n    if (c->release) {','irq_state_t s = 0;\n    if (c->release) {','budget under the thread lock'),
  ('occupied','if (!ticket->stripes) {','if (true) {','occupied ticket refused'),
  ('consume','ticket->stripes = 0;','/* lost consumption */','refund survives exec'),
  ('identity','if (p->stripes != c->stripes) return 0;','if (false) return 0;','missing creator refused'),
@@ -17,9 +19,10 @@ MUTANTS=[
 def main():
  p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
  s=(ROOT/'kernel/proc.c').read_text();body=s[s.index('struct sqpoll_ticket_ctx {'):s.index('bool proc_child_cap_ok(')]
+ i=s.index('static bool proc_thread_room_locked(');room=s[i:s.index('\n}\n',i)+3]
  s=(ROOT/'kernel/include/thylacine/proc.h').read_text();decl=s[s.index('struct ProcSqpollTicket {'):s.index('#ifdef KERNEL_TESTS\n// proc_child_cap_ok')]
  cc,cc_extra=sanitizer_cc.select(a.logs)
- fixture=(ROOT/'tools/host-tests/sqpoll-ticket.c').read_text().replace('/* ACTUAL_DECL */',decl).replace('/* ACTUAL_BODY */',body)
+ fixture=(ROOT/'tools/host-tests/sqpoll-ticket.c').read_text().replace('/* ACTUAL_DECL */',decl).replace('/* ACTUAL_ROOM */',room).replace('/* ACTUAL_BODY */',body)
  with tempfile.TemporaryDirectory(prefix='sqpoll-ticket-') as tmp:
   for name,old,new,expected in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
    s=fixture

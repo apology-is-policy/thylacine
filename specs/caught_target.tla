@@ -37,15 +37,15 @@
 (*     published under the thread's wait_lock; the designation of a thread *)
 (*     is decided under the same lock, so EnterWait and Walk2 are atomic   *)
 (*     with respect to each other.                                         *)
-(*   - Walks are serialized (each holds g_proc_table_lock). A walk is two  *)
-(*     steps: Walk1 re-wakes the claim holders and picks a candidate;      *)
-(*     Walk2 re-checks it under its wait_lock and designates it. Threads   *)
-(*     move between the two; an exit cannot (its EXITING commit takes      *)
-(*     g_proc_table_lock). Triggers that arrive before a walk starts       *)
-(*     coalesce into that walk.                                            *)
-(*   - Walk2's re-check reads the wait's kind exactly (it is published    *)
+(*   - Walks are serialized (each holds the Proc's threads_lock). A walk   *)
+(*     is two steps: Walk1 re-wakes the claim holders and picks a          *)
+(*     candidate; Walk2 re-checks it under its wait_lock and designates    *)
+(*     it. Threads move between the two; an exit cannot (its EXITING       *)
+(*     commit takes threads_lock). Triggers that arrive before a walk      *)
+(*     starts coalesce into that walk.                                     *)
+(*   - Walk2's re-check reads the wait's kind exactly (it is published     *)
 (*     under the wait_lock Walk2 holds) and the exit exactly (it commits   *)
-(*     under g_proc_table_lock). The mask and the handler flag are the     *)
+(*     under threads_lock). The mask and the handler flag are the          *)
 (*     thread's own, written without either lock, so they read exactly     *)
 (*     only while the thread is blocked: an awake thread may be designated *)
 (*     on a stale read of either. Such a designee drops the designation at *)
@@ -266,7 +266,7 @@ Mask(t)       == /\ ts[t] = "pre" /\ t \notin own
                  /\ ts' = [ts EXCEPT ![t] = "deliver"]
                  /\ UNCHANGED <<inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
 
-\* The EXITING commit, under g_proc_table_lock (so never inside a walk). The
+\* The EXITING commit, under the threads_lock (so never inside a walk). The
 \* exit call is a new syscall, so no claim of its own is held.
 Exit(t)       == /\ ts[t] = "pre" /\ t \notin own /\ wpick = NONE
                  /\ ts' = [ts EXCEPT ![t] = "exited"]

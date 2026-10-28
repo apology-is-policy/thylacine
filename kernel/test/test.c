@@ -54,16 +54,97 @@
 // leak.
 // ---------------------------------------------------------------------------
 
-void test_kthread_park_terminal(volatile bool *exited) {
+static void test_park_terminal(volatile bool *exited) {
     // Mask preempt across the state-set..RELEASE..sched window so no IRQ-driven
     // reschedule fires between marking EXITING and switching away. The masked
     // DAIF is discarded when sched() resumes the next thread (it restores its
-    // own DAIF) -- this kthread never runs again, so there is nothing to undo.
+    // own DAIF) -- this thread never runs again, so there is nothing to undo.
     (void)spin_lock_irqsave(NULL);
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(exited, true, __ATOMIC_RELEASE);   // joiner's ACQUIRE pair
     sched();                                            // switch away permanently
-    extinction("test_kthread_park_terminal: returned from terminal sched");
+    extinction("test park: returned from terminal sched");
+}
+
+void test_kthread_park_terminal(volatile bool *exited) {
+    if (current_thread()->proc != kproc())
+        extinction("test_kthread_park_terminal from a user Proc's thread (use test_thread_park_terminal)");
+    test_park_terminal(exited);
+}
+
+void test_thread_park_terminal(volatile bool *exited) {
+    if (current_thread()->proc == kproc())
+        extinction("test_thread_park_terminal from a kernel thread (use test_kthread_park_terminal)");
+    test_park_terminal(exited);
+}
+
+bool test_proc_holds_tid(struct Proc *p, int tid) {
+    bool held = false;
+    irq_state_t s = proc_threads_lock(p);
+    for (const struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->tid == tid) { held = true; break; }
+    proc_threads_unlock(p, s);
+    return held;
+}
+
+bool test_proc_threads_freed(struct Proc *p) {
+    irq_state_t s = proc_threads_lock(p);
+    int n = __atomic_load_n(&p->thread_count, __ATOMIC_RELAXED);
+    proc_threads_unlock(p, s);
+    return n == 0;
+}
+
+struct Thread *test_thread_by_tid_locked(struct Proc *p, int tid) {
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->tid == tid) return x;
+    return NULL;
+}
+
+struct test_thread_view test_thread_view(struct Proc *p, int tid) {
+    struct test_thread_view v = { 0 };
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *x = test_thread_by_tid_locked(p, tid);
+    if (x) {
+        v.present         = true;
+        v.state           = (int)__atomic_load_n(&x->state, __ATOMIC_ACQUIRE);
+        v.blocked_on      = __atomic_load_n(&x->rendez_blocked_on, __ATOMIC_ACQUIRE);
+        v.on_debug_rendez = v.blocked_on == &x->debug_rendez;
+        v.switched_in_at  = __atomic_load_n(&x->switched_in_at, __ATOMIC_RELAXED);
+        v.nsched          = __atomic_load_n(&x->nsched, __ATOMIC_RELAXED);
+    }
+    proc_threads_unlock(p, s);
+    return v;
+}
+
+void test_thread_wake(struct Proc *p, int tid, bool debug) {
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *x = test_thread_by_tid_locked(p, tid);
+    if (x && debug) {
+        (void)wakeup(&x->debug_rendez);
+    } else if (x) {
+        irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+        struct Rendez *r = x->rendez_blocked_on;
+        if (r) (void)wakeup(r);
+        spin_unlock_irqrestore(&x->wait_lock, ws);
+    }
+    proc_threads_unlock(p, s);
+}
+
+bool test_thread_sleeping(struct Proc *p, int tid) {
+    struct test_thread_view v = test_thread_view(p, tid);
+    return v.present && v.state == THREAD_SLEEPING;
+}
+
+// Bounded like the kernel-thread join: on expiry TEST_ASSERT returns and the
+// caller must not free the Proc.
+void test_thread_join_reaped(struct Proc *p, int tid, volatile bool *exited) {
+    TEST_YIELD_UNTIL(__atomic_load_n(exited, __ATOMIC_ACQUIRE));
+    TEST_YIELD_UNTIL(!test_proc_holds_tid(p, tid));
+}
+
+void test_thread_join_last(struct Proc *p, volatile bool *exited) {
+    TEST_YIELD_UNTIL(__atomic_load_n(exited, __ATOMIC_ACQUIRE));
+    TEST_YIELD_UNTIL(test_proc_threads_freed(p));
 }
 
 void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
@@ -83,8 +164,9 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
 static void test_dying_entry(void *arg) {
     struct test_dying *d = (struct test_dying *)arg;
     d->fn(d->arg);
+    d->kstack = thread_kstack_used(current_thread(), NULL);
     __atomic_store_n(&d->done, true, __ATOMIC_RELEASE);
-    test_kthread_park_terminal(&d->exited);
+    test_thread_park_terminal(&d->exited);
 }
 
 bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
@@ -93,24 +175,26 @@ bool test_dying_start(struct test_dying *d, void (*fn)(void *arg), void *arg,
     d->arg    = arg;
     d->done   = false;
     d->exited = false;
-    d->t      = NULL;
+    d->kstack = 0;
+    d->tid    = 0;
     d->proc   = proc_alloc();
     if (!d->proc) return false;
     if (dead_now)
         __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
-    d->t = thread_create_with_arg(d->proc, test_dying_entry, d);
-    if (!d->t) {
+    struct Thread *t = thread_create_with_arg(d->proc, test_dying_entry, d);
+    if (!t) {
         d->proc->state = PROC_STATE_ZOMBIE;
         proc_free(d->proc);
         d->proc = NULL;
         return false;
     }
-    ready(d->t);
+    d->tid = t->tid;
+    ready(t);
     return true;
 }
 
 bool test_dying_parked(const struct test_dying *d) {
-    return __atomic_load_n(&d->t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+    return test_thread_sleeping(d->proc, d->tid);
 }
 
 bool test_dying_done(const struct test_dying *d) {
@@ -119,16 +203,14 @@ bool test_dying_done(const struct test_dying *d) {
 
 void test_dying_kill(struct test_dying *d) {
     __atomic_store_n(&d->proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
-    irq_state_t ws = spin_lock_irqsave(&d->t->wait_lock);
-    struct Rendez *r = d->t->rendez_blocked_on;
-    if (r) (void)wakeup(r);
-    spin_unlock_irqrestore(&d->t->wait_lock, ws);
+    test_thread_wake(d->proc, d->tid, false);
 }
 
+// On expiry TEST_ASSERT returns with d->proc still set: the thread may still be
+// running, so nothing it uses may be freed.
 void test_dying_reap(struct test_dying *d) {
-    TEST_YIELD_UNTIL(__atomic_load_n(&d->exited, __ATOMIC_ACQUIRE));
-    thread_free(d->t);
-    d->t = NULL;
+    test_thread_join_reaped(d->proc, d->tid, &d->exited);
+    TEST_YIELD_UNTIL(test_proc_threads_freed(d->proc));
     d->proc->state = PROC_STATE_ZOMBIE;         // proc_free precondition
     proc_free(d->proc);
     d->proc = NULL;
@@ -157,10 +239,15 @@ struct Proc *test_caught_proc(bool linux_pheno) {
     return p;
 }
 
-void test_caught_proc_free(struct Proc *p, const struct test_caught_leg *leg) {
-    if (!p || (leg && leg->stranded)) return;
+void test_proc_free_drained(struct Proc *p) {
+    if (!p || !test_proc_threads_freed(p)) return;
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+void test_caught_proc_free(struct Proc *p, const struct test_caught_leg *leg) {
+    if (!p || (leg && leg->stranded)) return;
+    test_proc_free_drained(p);
 }
 
 bool test_caught_post(struct Proc *p) {
@@ -185,28 +272,27 @@ static void test_caught_entry(void) {
     t->note_interruptible = false;     // syscall_dispatch, on the way out
     g_tc_rc = rc;
     __atomic_store_n(&g_tc_run, 2u, __ATOMIC_RELEASE);
-    test_kthread_park_terminal(&g_tc_exited);
+    test_thread_park_terminal(&g_tc_exited);
 }
 
 static bool test_caught_returned(void) {
     return __atomic_load_n(&g_tc_run, __ATOMIC_ACQUIRE) >= 2u;
 }
 
-static bool test_caught_blocked(struct Thread *t) {
+static bool test_caught_blocked(struct Proc *p, int tid) {
     return __atomic_load_n(&g_tc_run, __ATOMIC_ACQUIRE) == 1u &&
-           __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+           test_thread_sleeping(p, tid);
 }
 
 // Yield until the call returns or the thread sleeps -- with `seen` not 0, a
 // sleep after a switch-in later than `seen`: the thread ran, and rode out what
 // woke it. switched_in_at is stamped at every switch-in, so that is a positive
 // signal, not a quiet interval. Bounded; true iff it slept.
-static bool test_caught_settle(struct Thread *t, u64 seen) {
+static bool test_caught_settle(struct Proc *p, int tid, u64 seen) {
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
     while (!test_caught_returned() && timer_now_ns() < dl) {
-        if (test_caught_blocked(t) &&
-            (seen == 0 ||
-             __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED) != seen))
+        if (test_caught_blocked(p, tid) &&
+            (seen == 0 || test_thread_view(p, tid).switched_in_at != seen))
             return true;
         sched();
     }
@@ -219,13 +305,18 @@ static bool test_caught_settle(struct Thread *t, u64 seen) {
 // might bring -- data, a timer, a spurious wake -- and the leg still shows the
 // wait re-reading the pending note and riding it out. A wait that unwinds is
 // left to the walk: waking it here would hide a walk that failed to.
-static void test_caught_wake_holder(struct Thread *t) {
-    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
-    struct Rendez *r = t->rendez_blocked_on;
-    if (r && r != &t->debug_rendez &&
-        __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
-        wakeup(r);
-    spin_unlock_irqrestore(&t->wait_lock, ws);
+static void test_caught_wake_holder(struct Proc *p, int tid) {
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *t = test_thread_by_tid_locked(p, tid);
+    if (t) {
+        irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
+        struct Rendez *r = t->rendez_blocked_on;
+        if (r && r != &t->debug_rendez &&
+            __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
+            wakeup(r);
+        spin_unlock_irqrestore(&t->wait_lock, ws);
+    }
+    proc_threads_unlock(p, s);
 }
 
 struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
@@ -240,18 +331,19 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
     if (pre_post) leg.posted = test_caught_post(p);
     struct Thread *t = thread_create(p, test_caught_entry);
     if (!t) return leg;
+    int tid = t->tid;
     ready(t);
-    leg.parked = test_caught_settle(t, 0);
+    leg.parked = test_caught_settle(p, tid, 0);
     if (pre_post) {
         leg.prepped  = true;
         leg.rode_out = leg.parked;
     } else if (leg.parked) {
-        leg.prepped = !prep || (prep(arg) && test_caught_settle(t, 0));
+        leg.prepped = !prep || (prep(arg) && test_caught_settle(p, tid, 0));
         if (leg.prepped) {
-            u64 seen     = __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED);
+            u64 seen     = test_thread_view(p, tid).switched_in_at;
             leg.posted   = test_caught_post(p);
-            test_caught_wake_holder(t);
-            leg.rode_out = test_caught_settle(t, seen);
+            test_caught_wake_holder(p, tid);
+            leg.rode_out = test_caught_settle(p, tid, seen);
         }
     }
     leg.on_post = test_caught_returned();
@@ -265,8 +357,9 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
         }
     }
     leg.rc = g_tc_rc;
-    test_kthread_join_free(t, &g_tc_exited);
-    leg.joined = __atomic_load_n(&g_tc_exited, __ATOMIC_ACQUIRE);
+    test_thread_join_reaped(p, tid, &g_tc_exited);
+    leg.joined = __atomic_load_n(&g_tc_exited, __ATOMIC_ACQUIRE) &&
+                 !test_proc_holds_tid(p, tid);
     return leg;
 }
 
@@ -337,6 +430,7 @@ struct test_case g_tests[] = {
     { "fp.note_area_round_trip",       test_fp_note_area_round_trip,       false, NULL },
     { "scheduler.dispatch_smoke",      test_sched_dispatch_smoke,          false, NULL },
     { "scheduler.runnable_count",      test_sched_runnable_count,          false, NULL },
+    { "scheduler.run_counts_match_trees", test_sched_run_counts_match_trees, false, NULL },
     { "scheduler.runnable_count_excludes_idle",
                                        test_sched_runnable_count_excludes_idle, false, NULL },
     { "scheduler.preemption_smoke",    test_sched_preemption_smoke,        false, NULL },
@@ -535,6 +629,7 @@ struct test_case g_tests[] = {
     { "resource.spawn_budget_resolve", test_resource_spawn_budget_resolve,  false, NULL },
     { "resource.measured_compile_needs_raise", test_resource_measured_compile_needs_raise, false, NULL },
     { "resource.thread_cap_ok",        test_resource_thread_cap_ok,        false, NULL },
+    { "resource.thread_admit_exact",   test_resource_thread_admit_exact,   false, NULL },
     { "resource.child_cap_ok",         test_resource_child_cap_ok,         false, NULL },
     { "resource.child_count_tracks_list",
                                        test_resource_child_count_tracks_list, false, NULL },
@@ -819,6 +914,8 @@ struct test_case g_tests[] = {
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_read_error_dying_is_death",
                                        test_demand_page_file_read_error_dying_is_death, false, NULL },
+    { "demand_page.file_miss_refuses_exiting_thread",
+                                       test_demand_page_file_miss_refuses_exiting_thread, false, NULL },
     { "demand_page.file_read_revoked_latch_is_dying",
                                        test_demand_page_file_read_revoked_latch_is_dying, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
@@ -1188,15 +1285,34 @@ struct test_case g_tests[] = {
     { "proc.fault_in_dying_group_keeps_group_status", test_proc_fault_in_dying_group_keeps_group_status, false, NULL },
     { "proc.fault_in_dying_group_reaps_exited_packed", test_proc_fault_in_dying_group_reaps_exited_packed, false, NULL },
     { "proc.note_death_with_live_peer_reaps_signalled", test_proc_note_death_with_live_peer_reaps_signalled, false, NULL },
-    { "proc.reap_exited_threads_frees_peers",   test_proc_reap_exited_threads_frees_peers,   false, NULL },
+    { "proc.exited_threads_freed_at_switch",    test_proc_exited_threads_freed_at_switch,    false, NULL },
+    { "proc.exited_threads_bounded_by_cpus",    test_proc_exited_threads_bounded_by_cpus,    false, NULL },
     { "proc.reap_keeps_thread_cap_open",        test_proc_reap_keeps_thread_cap_open,        false, NULL },
-    { "proc.reap_before_sqpoll_charge",         test_proc_reap_before_sqpoll_charge,         false, NULL },
-    { "proc.reap_before_private_executor_charge", test_proc_reap_before_private_executor_charge, false, NULL },
+    { "proc.threads_lock_slot",                 test_proc_threads_lock_slot,                 false, NULL },
+    { "proc.spawn_arms_decide_at_the_admit",    test_proc_spawn_arms_decide_at_the_admit,    false, NULL },
+    { "proc.sqpoll_charge_after_finished_workers", test_proc_sqpoll_charge_after_finished_workers, false, NULL },
+    { "proc.private_executor_charge_after_finished_workers", test_proc_private_executor_charge_after_finished_workers, false, NULL },
+    { "proc.cap_counts_live_threads",           test_proc_cap_counts_live_threads,           false, NULL },
     { "proc.exit_tail_runs_to_its_end",         test_proc_exit_tail_runs_to_its_end,         false, NULL },
     { "proc.exec_waits_for_exiting_peer",       test_proc_exec_waits_for_exiting_peer,       false, NULL },
     { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },
     { "proc.spawn_refused_in_dying_proc",       test_proc_spawn_refused_in_dying_proc,       false, NULL },
     { "thread.tid_and_pid_spaces_refuse_when_spent", test_thread_tid_and_pid_spaces_refuse_when_spent, false, NULL },
+    { "proc.ids_are_one_space",                test_proc_ids_are_one_space,                false, NULL },
+    { "thread.id_space_keeps_a_tcb_tail",      test_thread_id_space_keeps_a_tcb_tail,      false, NULL },
+    { "proc.exec_from_a_peer_takes_the_pid",   test_proc_exec_from_a_peer_takes_the_pid,   false, NULL },
+    { "thread.kernel_memory_charged_to_the_pool", test_thread_kernel_memory_charged_to_the_pool, false, NULL },
+    { "thread.pool_refuses_users_keeps_tcb",   test_thread_pool_refuses_users_keeps_tcb,   false, NULL },
+    { "proc.exec_claim_dooms_every_other_thread", test_proc_exec_claim_dooms_every_other_thread, false, NULL },
+    { "proc.exec_claim_kills_sleeping_and_running_peers", test_proc_exec_claim_kills_sleeping_and_running_peers, false, NULL },
+    { "proc.exec_claim_abandoned_on_group_death", test_proc_exec_claim_abandoned_on_group_death, false, NULL },
+    { "proc.exec_claim_woken_by_an_abandoned_create", test_proc_exec_claim_woken_by_an_abandoned_create, false, NULL },
+    { "proc.exec_claim_does_not_hold_for_a_stop", test_proc_exec_claim_does_not_hold_for_a_stop, false, NULL },
+    { "proc.exec_claim_survives_a_doomed_exit", test_proc_exec_claim_survives_a_doomed_exit, false, NULL },
+    { "proc.exec_claim_holds_through_a_terminate_latch", test_proc_exec_claim_holds_through_a_terminate_latch, false, NULL },
+    { "proc.exec_claim_refused_drops_the_new_image", test_proc_exec_claim_refused_drops_the_new_image, false, NULL },
+    { "proc.exec_claim_kills_a_thread_readied_after_it", test_proc_exec_claim_kills_a_thread_readied_after_it, false, NULL },
+    { "proc.exec_claim_wakes_a_vfork_parent", test_proc_exec_claim_wakes_a_vfork_parent, false, NULL },
     { "thread.kstack_cache_reuses_without_guard_toggle", test_thread_kstack_cache_reuses_without_guard_toggle, false, NULL },
     { "thread.kstack_cache_keeps_the_guard",     test_thread_kstack_cache_keeps_the_guard,     false, NULL },
     { "thread.kstack_recycled_stack_is_fully_poisoned", test_thread_kstack_recycled_stack_is_fully_poisoned, false, NULL },
@@ -2764,6 +2880,7 @@ struct test_case g_tests[] = {
     { "spawn_cwd.child_born_in_cwd",           test_spawn_cwd_child_born_in_cwd,           false, NULL },
     { "spawn_cwd.image_joins_child_cwd",       test_spawn_cwd_image_joins_child_cwd,       false, NULL },
     { "spawn_cwd.refusals",                    test_spawn_cwd_refusals,                    false, NULL },
+    { "spawn_cwd.thread_budget_resolves",      test_spawn_cwd_thread_budget_resolves,      false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },

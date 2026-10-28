@@ -9,6 +9,8 @@ code:
   - kernel/test/test_syscall.c
   - usr/argwidth-probe/argwidth-probe.c
   - tools/check-arg-width.py
+  - kernel/test/test_spawn_cwd.c
+  - kernel/test/test_sys_spawn_full_argv.c
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
 validated-by: [prose, gate-smp, gate-interactive]
@@ -109,7 +111,7 @@ them. Only then is `x8` read and switched on.
 Most arms then behave as before: read arguments from `x0..x5`, call a handler,
 write the result to `x0`, return. Three arms never return — the two exit calls
 and the thread-exit call, which abandon the frame on the exiting thread's kernel
-stack until the reaper collects it. Three others take **the frame itself** and
+stack until the resume path of its last switch-out frees it ([[inv-i48]]). Three others take **the frame itself** and
 so break the uniform result-write; see below.
 
 An unknown number writes `-1` and returns.
@@ -268,9 +270,9 @@ arrives in two incompatible register layouts:
   three arguments explicitly and the native reader is a four-line register read.
 
 The gate-placement rule generalises to this shape and the code says so
-explicitly. In execve, the multi-thread gate sits in the core rather than in
-each front end **so it cannot be forgotten by one** — at the cost of a wasted
-argument copy on a refusing path, which is the right trade. The argument blob's
+explicitly. In execve, the multi-thread claim (thread-model C5; before it, an
+up-front refusal) sits in the core rather than in each front end **so it cannot
+be forgotten by one**. The argument blob's
 packing contract is validated in the core for the same reason and a sharper one:
 the stack builder *extincts* on a NUL count that disagrees with the argument
 count, so a mis-packed blob from either front end must become a clean `-EINVAL`
@@ -280,11 +282,12 @@ in either front end into an error return instead of a dead kernel.
 ### execve's ordering is the file's most consequential, and it is ordered by what can still fail
 
 The sequence is: copy both user-side vectors into kernel memory (after this the
-user addresses mean something else entirely) → gate → resolve the program in
-the **caller's** namespace, through the same helper every spawn uses so exec and
+user addresses mean something else entirely) → resolve the program in the
+**caller's** namespace, through the same helper every spawn uses so exec and
 spawn cannot diverge on what is executable → build the whole new image in a
-**detached** address space → commit → stamp identity → consume close-on-exec →
-rewrite the frame.
+**detached** address space → claim the process (`exec_claim_or_drop`: with live
+peers, doom them and wait until the caller is alone, [[sub-kernel-proc]]) →
+commit → stamp identity → consume close-on-exec → rewrite the frame.
 
 Two placements in that list are load-bearing and each carries its reason in the
 source:
@@ -293,6 +296,13 @@ source:
   load failure leaves it running its old image untouched. On failure the
   detached space is the only reference and its release drains whatever got
   mapped.
+- **The claim comes after the last thing that can fail.** A refused claim
+  (another exec, or a group death, holds the process) or one a group death
+  abandons means this thread is dying too, so its error never reaches EL0;
+  `exec_claim_or_drop` drops the new space and the program file and returns
+  EAGAIN, and the caller dies at its EL0-return die-check. Claimed earlier, a
+  load failure would have doomed the peers of a process that then keeps running
+  its old image.
 - **Everything that closes or renames happens *after* the last thing that can
   fail.** The name and executable-path stamps land after the commit, because a
   process advertising a program it is not running is worse than one that is
@@ -325,7 +335,9 @@ own environment.
 `SPAWN_PERM_*` bits the parent asks to stamp on the child — `MAY_POST_SERVICE`
 (the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
 `CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
-the I-32 `MAY_RAISE_PAGE_BUDGET` above, the arm-6 `SESSION_HANGUP` (below), and
+the I-32 `MAY_RAISE_PAGE_BUDGET` above and its thread twin
+`MAY_RAISE_THREAD_BUDGET` (bit 10, thread-model C6; the same one-hop gate, the
+thunk's `proc_mark_may_raise_thread_budget`), the arm-6 `SESSION_HANGUP` (below), and
 the (U) `SEAL` (bit 9; `NOTRACE` until the F5 widening) — which stamps
 `PROC_FLAG_NODUMP` and `PROC_FLAG_NOTRACE` through the same one-way setters
 `SYS_SET_DUMPABLE(0)` and `SYS_SET_TRACEABLE(0)` use. That keeps the SPAWN_PERM
@@ -533,6 +545,24 @@ carries `name`); the thunk installs it as the child's dot first, before it frees
 the args, and an allocation failure there ends the child (`fail-cwd`) with the
 thunk's other pre-EL0 failures. The spawner's own dot never moves: the child's
 Territory is rfork's clone.
+
+**The spawn's thread-budget tail (thread-model C6, ARCH 7.3.5).** When
+`ext_flags` carries `SPAWN_EXT_THREADS`, the handler reads the 8-byte
+`sys_spawn_ext_threads` tail (`thread_budget`, `threads_flags`) after the cwd
+tail when `SPAWN_EXT_CWD` is set too, else at the record's address + 104. It
+reads it before the cwd tail, as it allocates nothing: an unreadable tail is
+`T_E_FAULT`, a nonzero `threads_flags` -1 (the unknown-bits rule), a
+`thread_budget` of 0 `T_E_INVAL` (clear the bit to inherit). The gate site
+(`sys_spawn_full_argv_cwd_for_proc`, its trailing `req_threads`, 0 = inherit)
+resolves it with `proc_spawn_thread_budget_resolve` ([[sub-kernel-proc]]) and
+refuses -1 on a 0 answer; the args carry the decided budget and the thunk
+stores it in the child before EL0, while the thunk is the child's only thread,
+so no admission has read the value it replaces. A held spawn returns only
+after that stamp (it parks later), which is what lets a caller read the
+budget at once. Regressions: `spawn_cwd.thread_budget_resolves`
+(`kernel/test/test_spawn_cwd.c`, which holds the cwd tail's `spawn_cwd.*` too);
+the `sys_spawn_full_argv.*` validate legs (`kernel/test/test_sys_spawn_full_argv.c`); joey's `probe_thread_budget`
+([[sub-stratum-boot]]) drives the real ABI, both tails included.
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
@@ -942,13 +972,20 @@ gates conferring the *authority*; the raise it authorises is still bounded by
 the hard maximum. Both thread-create arms (`sys_thread_spawn_handler` and
 `viv_clone_thread`) first refuse a dying Proc -EAGAIN (`group_exit_msg` set: a
 thread made then would only die at its first die-check, after a kstack
-allocation, and the spawner dies at the call's own return), then free the
-Proc's exited peers
-(`proc_reap_exited_threads`, [[sub-kernel-thread]]), then ask
-`proc_thread_cap_ok`, so the thread cap counts what is alive plus what exited
-since the last create, not every thread the Proc ever ran. A create that then
-fails on a spent tid space answers EAGAIN, a system limit, not ENOMEM. The Loom SQPOLL
-setup, the budget's third consumer, frees them too before `proc_sqpoll_charge`.
+allocation, and the spawner dies at the call's own return), then pre-check
+`proc_thread_cap_ok`; both reads are lockless early refusals, and
+`proc_thread_admit` decides both exactly under [[lock-proc-threads]]. The cap
+counts live threads (`live_threads`, operator vote 7): a thread stops counting at
+its EXITING commit, and its joiner is woken only after that commit, so a Proc at
+the cap that has just joined a thread can start another at once, though the
+thread stays on the list until the resume path of its last switch-out frees it,
+at most one per CPU ([[inv-i48]], [[inv-i32]], [[sub-kernel-thread]]). A create
+that then fails on a spent id space answers EAGAIN, a system limit, not ENOMEM;
+one the user pool refuses (its stack and slot, [[sub-kernel-thread]]) answers
+ENOMEM. The cap is the Proc's `thread_budget` (thread-model C6; 4096 by
+default, was the fixed `PROC_THREAD_MAX` 256). The Loom SQPOLL setup, the
+budget's third consumer, charges through `proc_sqpoll_charge` against the same
+count.
 
 **[[inv-i34]]** — the three hardware-mint handlers carry the CreateBegin /
 CreateCommit pair described above. The allowance is what bounds them; this file
@@ -1239,6 +1276,14 @@ two inners (the section above).
 
 2026-09-24 (B): `SYS_ATTACH_9P_SRV` refuses the cape flag; the `/srv` cape is
 the poster's mark alone (the section above).
+
+[[chg-2026-10-22-thread-model-c1]]: the thread-create arms and the SQPOLL
+charge no longer free exited peers; the resume path of each one's last
+switch-out does.
+
+Thread-model C6 (2026-10-27): the `SPAWN_EXT_THREADS` tail and
+`SPAWN_PERM_MAY_RAISE_THREAD_BUDGET`; `SYS_SET_TID_ADDRESS` / VIV `gettid`
+answer a main thread's tid, which is now its pid.
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 
@@ -1757,9 +1802,14 @@ three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
 `EINVAL` first, as Linux does). The walk's context gained two fields:
 
 - `target_tid` (> 0): the target is the Proc holding that thread, found with
-  `proc_holds_tid_locked` under `g_proc_table_lock`, the lock every thread
-  list walk holds (#811); a `tgkill` whose tgid is a different Proc names no
-  thread (`ESRCH`).
+  `proc_holds_tid`, which walks the candidate's threads under its thread lock
+  ([[lock-proc-threads]]); a `tgkill` whose tgid is a different Proc names no
+  thread (`ESRCH`). Tids and pids are one id space (thread-model C6), so a tid
+  never equals another Proc's pid, and a main thread's tid is its pid, so
+  `tgkill(pid, pid)` names the main thread, as Linux programs assume. Both spawn arms build the thread unlinked and admit it with
+  `proc_thread_admit` (the claim and the cap again, then the link, in one hold),
+  after lockless pre-checks that spare a doomed spawn its allocation; each reads
+  the new tid before `ready()`.
 - `err`: with `result` -1, why, as `SYS_POSTNOTE` answers it since S-3 (below):
   `ESRCH` for a mismatched tgid, `EACCES` for the gate, `notes_post`'s own
   `EINVAL` or `EAGAIN`. `viv_kill` turns `EACCES` back into Linux's `EPERM`.

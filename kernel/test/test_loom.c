@@ -1987,8 +1987,8 @@ void test_loom_sqpoll_parks_on_cq_full(void) {
     test_proc_drop(p);
 }
 
-// Fid-lift audit F1: an SQPOLL kthread charges the CREATOR's PROC_THREAD_MAX
-// budget (I-32). The kthread runs under kproc (exempt), so pre-F1 an
+// Fid-lift audit F1: an SQPOLL kthread charges the CREATOR's thread budget
+// (I-32). The kthread runs under kproc (exempt), so pre-F1 an
 // unprivileged Proc could mint one 32-KiB-kstack kthread per ring, bounded only
 // by the handle table the fid lift just quadrupled. The budget is pre-loaded to
 // the boundary (the test_resource.c idiom) so only two real kthreads spawn:
@@ -2000,7 +2000,8 @@ void test_loom_sqpoll_charges_thread_budget(void) {
     p->principal_id = 1000u;                  // a real user -- NOT I-32 exempt
     u64 destroyed0 = loom_total_destroyed();
 
-    p->thread_count = PROC_THREAD_MAX - 1;    // boundary without 255 real threads
+    // The boundary without that many real threads; the cap reads the live count.
+    p->thread_count = p->live_threads = (int)p->thread_budget - 1;
 
     // Every reading is taken and the Proc dropped before any assertion: a failed
     // check (which returns) must not leave behind a Proc with a pre-loaded
@@ -2010,6 +2011,14 @@ void test_loom_sqpoll_charges_thread_budget(void) {
     // At cap-1: one SQPOLL setup fits and takes the charge.
     int at_cap1 = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd1);
     u64 charged = (u64)p->loom_sqpoll_count;
+    // The poller's stack and slot are the creator's too (ARCH 7.3.5), not kproc's.
+    u32 poller_pool = 0;
+    struct Handle h1;
+    if (at_cap1 == 0 && handle_get(p, fd1, &h1) == 0) {
+        struct Loom *l1 = (struct Loom *)h1.obj;
+        if (l1->sqpoll) poller_pool = l1->sqpoll->pool_pages;
+        handle_put(&h1);
+    }
     // At the cap: the next SQPOLL setup is REFUSED (pre-F1 it succeeded and the
     // kthread escaped the budget entirely). The refused ring never took a
     // charge, and its free must not settle one (sqpoll_charged gates the
@@ -2027,11 +2036,12 @@ void test_loom_sqpoll_charges_thread_budget(void) {
     u64 after_close = (u64)p->loom_sqpoll_count;
     int again = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd4);
 
-    p->thread_count = 0;                      // reset for proc_free's gate
+    p->thread_count = p->live_threads = 0;    // reset for proc_free's gate
     test_proc_drop(p);
 
     TEST_EXPECT_EQ(at_cap1, 0, "SQPOLL setup at cap-1 succeeds");
     TEST_EXPECT_EQ(charged, (u64)1, "kthread charged to the creator");
+    TEST_EXPECT_EQ(poller_pool, THREAD_POOL_PAGES, "the poller's kernel memory is charged to its creator");
     TEST_EXPECT_EQ(at_cap, -T_E_AGAIN, "SQPOLL setup at the thread cap answers -EAGAIN");
     TEST_EXPECT_EQ(after_refusal, (u64)1, "refusal did not over-settle");
     TEST_EXPECT_EQ(refused_freed, (u64)1, "the refused ring itself was reclaimed");
@@ -2276,7 +2286,7 @@ static void lwa_waiter_entry(void) {
     __atomic_store_n(&g_lwa_done, true, __ATOMIC_RELEASE);
     // The terminal EXITING handshake (the loom_sqpoll_main idiom).
     (void)spin_lock_irqsave(NULL);
-    current_thread()->state = THREAD_EXITING;
+    thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&g_lwa_exited, true, __ATOMIC_RELEASE);
     sched();
     extinction("lwa_waiter_entry: returned from terminal sched");
@@ -3115,13 +3125,21 @@ static const char *loom_executor_case(struct Loom **owner,struct Proc *creator,
     fd=handle_alloc(creator,KOBJ_LOOM,RIGHT_READ|RIGHT_WRITE,l);
     EX(fd>=0,"executor handle adopts ring root");*owner=NULL;
     EX(!handle_get(creator,fd,&observer),"executor observer lifetime");
+    u32 budget=creator->thread_budget;
+    __atomic_store_n(&creator->thread_budget,(u32)creator->live_threads+(u32)workers,__ATOMIC_RELEASE);
+    int full=loom_private_start_executor(l,creator);
+    __atomic_store_n(&creator->thread_budget,budget,__ATOMIC_RELEASE);
+    EX(full==-T_E_AGAIN && creator->loom_sqpoll_count==workers && !l->sqpoll,
+       "a full thread budget refuses the private executor");
     executor_probe.l=l;executor_probe.server[0]=server[0];executor_probe.server[1]=server[1];
     executor_probe.parks=0;executor_probe.injected=false;executor_probe.done=false;executor_probe.error=NULL;
     loom_private_close_hook_for_test(loom_executor_boundary);
-    EX(loom_start_sqpoll(l)==-T_E_OPNOTSUPP,"ordinary private worker activation remains refused");
-    EX(!loom_private_start_executor(l) && creator->loom_sqpoll_count==workers+1 &&
+    EX(loom_start_sqpoll(l,creator)==-T_E_OPNOTSUPP,"ordinary private worker activation remains refused");
+    EX(!loom_private_start_executor(l,creator) && creator->loom_sqpoll_count==workers+1 &&
        l->service_engine->worker_ticket.stripes==creator->stripes,"existing creator budget charges actual private worker");
-    EX(loom_private_start_executor(l)==-T_E_BUSY,"second private executor refused");
+    EX(l->sqpoll && l->sqpoll->pool_pages==THREAD_POOL_PAGES,
+       "the executor's kernel memory is charged to its creator");
+    EX(loom_private_start_executor(l,creator)==-T_E_BUSY,"second private executor refused");
     EX(loom_executor_wait_node(l,scope[1],LOOM_SERVICE_READY),"registered peer wake drives second scope without explicit progress");
     EX(__atomic_load_n(&executor_probe.done,__ATOMIC_ACQUIRE) && !executor_probe.error,
        executor_probe.error?executor_probe.error:"executor injected real registration-window replies");
@@ -3696,7 +3714,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        ._resv1={0,target.incarnation,scope.incarnation,0}}),"native CONNECT submission");
     NO(!loom_engine_get(l,scope,&held),"native operation observation pin");
     server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
-    NO(!loom_private_start_executor(l),"native operation worker starts");
+    NO(!loom_private_start_executor(l,creator),"native operation worker starts");
     NO(server==held->admission.conn,"stage native accepted peer identity");
     if(fault==9 || fault==10) {error=loom_native_stage_cancel(l,server,&peer,scope,100,&held,close_kind);goto done;}
     NO(loom_native_completion(l,server,&peer,100,(s32)scope.slot),
@@ -3913,7 +3931,7 @@ done:
 // the same ring/worker/registry alive across all1000 attempts.
 static const char *loom_native_reconnects(struct Loom *l,struct Proc *creator,
     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref targets[2],bool retain) {
-    if(loom_private_start_executor(l))return "reconnect worker start";
+    if(loom_private_start_executor(l,creator))return "reconnect worker start";
     spin_lock(&creator->as->lock);u32 pages=creator->as->page_count;
     spin_unlock(&creator->as->lock);
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
@@ -4088,7 +4106,7 @@ static const char *loom_protocol_fixture(u32 kind) {
     if (kind==10) {error=loom_control_cases(l,p,poster,reg,refs);goto done;}
     if (kind==11) {error=loom_executor_case(&l,p,poster,reg,refs,goal,base);goto done;}
     if (kind==12) {
-        PO(!loom_private_start_executor(l),"empty private executor starts once");
+        PO(!loom_private_start_executor(l,p),"empty private executor starts once");
         bool armed=false;u64 end=timer_now_ns()+5000000000ull;
         do {
             spin_lock(&l->lock);armed=l->service_engine->wait_active;spin_unlock(&l->lock);

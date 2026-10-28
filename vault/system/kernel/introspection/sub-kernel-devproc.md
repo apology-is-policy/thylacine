@@ -281,8 +281,15 @@ read whitelist and the file resolves fine and reads `-1` forever. The prior
 The dispatch above says *how* a field is served; several fields also pin *what
 the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
 
+- **`threadcap:` is the thread budget** (thread-model C6, ARCH 7.3.5): the
+  Proc's `thread_budget`, on its own line after `threads:`. Not `tbudget:`:
+  readers match a key as a substring (joey's `proc_status_field` does), and
+  `budget:` is the page budget's, so a key ending in it would be read for the
+  wrong line.
 - **`cpu_ns` is cumulative and monotonic** — the sum of every thread's `run_ns`
-  (`proc_cpu_ns`, walked under the table lock), so a monitor derives %CPU by
+  plus what the Proc's freed threads left (`proc_cpu_ns`, under
+  [[lock-proc-threads]]; `thread_reap_dead` folds a thread's time in the same
+  hold that unlinks it), so a monitor derives %CPU by
   diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel
   keeps no instantaneous-rate state. It deliberately excludes the running
   thread's in-flight slice since its last switch-in (under one slice, negligible
@@ -471,8 +478,8 @@ as it cannot catch a `/proc` kill.
 ### Fully-stopped is a conjunction, and death wins
 
 Cross-Proc reads of memory and registers require the target to be *fully
-stopped*: ALIVE, with a debug stop pending, with no pending group-exit message,
-and with every non-EXITING thread parked on its own `debug_rendez` **and**
+stopped*: ALIVE, with a debug stop pending, with no pending group-exit message
+and no exec claim, and with every non-EXITING thread parked on its own `debug_rendez` **and**
 off-CPU. Each conjunct closed a real failure:
 
 - the off-CPU spin, because a thread mid-context-switch still reads on-CPU while
@@ -483,6 +490,11 @@ off-CPU. Each conjunct closed a real failure:
 - the group-exit check, because a dying target's threads go EXITING (which the
   parked scan *skips*) and then write their context outside the global lock. Death
   wins over a stop, everywhere.
+- the exec-claim check (thread-model C5, SF-1), for the same reason: while
+  another thread's exec holds the target, its doomed threads go EXITING, so the
+  scan would read a parked execer as the whole target. No stop parks an exec
+  ([[sub-kernel-jobctl]]), and this refusal keeps it so for the readers.
+  Witness: `devproc.debug_regs`'s exec leg.
 
 ### The park predicate lied about a thread on its way out
 
@@ -668,6 +680,15 @@ poll round rather than caching a pointer, so a target reaped mid-wait is simply
 "not found" instead of a use-after-free. This is the single discipline that makes
 a cross-Proc control surface safe here, and it should not be traded away for the
 convenience of a cached pointer.
+
+The debug callbacks take the target's [[lock-proc-threads]] after the pid
+match and hold it from the fully-stopped check through every use of the
+focus `Thread *` (regs, kregs, the step arm, the kstack walk, `sched`); the
+step releases it before `proc_debug_resume`, which takes it itself. The focus
+is validated by pointer against the thread list under that lock.
+`thread_reap_dead`, which frees an exited thread at its last switch-out
+([[inv-i48]]), clears a focus naming that thread in the same hold, so a freed
+slot recycled into a new thread of the same Proc never matches a stale focus.
 
 Lock order, all nested *under* `g_proc_table_lock` and all acyclic on the same
 ground (each is a leaf; nothing held under it takes the global lock):

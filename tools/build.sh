@@ -688,7 +688,7 @@ EOF
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was
     # not present at build time (build_go_probes skipped); the joey go-hello
     # probe then degrades to "not spawned".
-    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" "ambush" "ambush-child" )
+    local go_bins=( "go-hello" "go-goroutines" "go-threads" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" "ambush" "ambush-child" )
     local go_release="$BUILD_DIR/go"
     for bin in "${go_bins[@]}"; do
         local src="$go_release/$bin"
@@ -919,6 +919,9 @@ build_go_probes() {
     #   go-goroutines -- Stage 2: GOMAXPROCS(4) workers, channels, WaitGroup,
     #                    sync/atomic, and a concurrent runtime.GC() (multi-M
     #                    SYS_THREAD_SPAWN + torpor sched-sync + STW GC + decommit).
+    #   go-threads    -- the thread budget (ARCH 7.3.5): 300 goroutines locked to
+    #                    300 Ms at once; joey runs it as a user under the default
+    #                    budget (must pass) and under 256 (must die).
     #   go-fs         -- Stage 3a: os/syscall file I/O (create/write/read/stat/
     #                    seek/readdir/rename/remove) against the post-pivot FS.
     #   go-exec       -- Stage 3b: os/exec (spawn a /bin coreutil via
@@ -937,14 +940,14 @@ build_go_probes() {
     #                    from proxy.golang.org through /net; build; run the
     #                    result). EXTERNAL-NETWORK dependent, like go-web.
     local probe
-    for probe in go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get ambush-child; do
+    for probe in go-hello go-goroutines go-threads go-fs go-exec go-net go-env go-web go-get ambush-child; do
         ( cd "$REPO_ROOT/usr/$probe" && \
           GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
             || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }
         echo "==> Go probe built: $go_out/$probe"
         ls -la "$go_out/$probe"
     done
-    ledger "go-hello + go-goroutines + go-fs + go-exec + go-net + go-env + go-web + go-get: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes + Stage 5 on-demand probes)"
+    ledger "go-hello + go-goroutines + go-threads + go-fs + go-exec + go-net + go-env + go-web + go-get: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes + Stage 5 on-demand probes)"
 }
 
 # Go Stage 8c-1: cross-compile the Ambush debugger -- the Thylacine port of Delve

@@ -10,6 +10,10 @@
 //                                  child's cwd, not the spawner's
 //   spawn_cwd.refusals             a bad cwd answers chdir's errno and makes no
 //                                  child; no spawn moves the spawner's cwd
+//   spawn_cwd.thread_budget_resolves the SPAWN_EXT_THREADS request, decided by
+//                                  the same entry: inherited, lowered freely,
+//                                  raised only with the authority, never past
+//                                  the hard max (ARCH 7.3.5)
 //
 // The handler's half -- the tail read from user memory only when ext_flags
 // announces it -- is joey's spawn-cwd probe, which drives the real ABI. The
@@ -50,7 +54,7 @@ static int sc_spawn_held(const char *name, const char *cwd) {
     return sys_spawn_full_argv_cwd_for_proc(current_thread()->proc,
             name, sc_len(name), NULL, 0u, 0u, NULL, 0u, CAP_NONE, 0u,
             false, 0u, 0u, NULL, 0u, NULL, 0u, 0u, SPAWN_DEBUG_HELD,
-            cwd, cwd ? sc_len(cwd) : 0u);
+            cwd, cwd ? sc_len(cwd) : 0u, 0u);
 }
 
 // Read the held child's cwd into `buf` ("" if it is gone).
@@ -194,7 +198,7 @@ void test_spawn_cwd_refusals(void) {
     // entry refuses it on its own).
     int em = sys_spawn_full_argv_cwd_for_proc(self, "/bin/hello", 10, NULL, 0u, 0u,
             NULL, 0u, CAP_NONE, 0u, false, 0u, 0u, NULL, 0u, NULL, 0u, 0u,
-            SPAWN_DEBUG_HELD, "", 0u);
+            SPAWN_DEBUG_HELD, "", 0u, 0u);
     int r_nf = (nf > 0) ? sc_release_and_reap(nf) : 0;
     int r_nd = (nd > 0) ? sc_release_and_reap(nd) : 0;
     int r_em = (em > 0) ? sc_release_and_reap(em) : 0;
@@ -210,4 +214,83 @@ void test_spawn_cwd_refusals(void) {
     TEST_EXPECT_EQ(r_nf + r_nd + r_em, 0, "no refused spawn left a child to reap");
     TEST_ASSERT(ga > 0 && sc_str_eq(after, "/"),
                 "no spawn, refused or not, moved the spawner's cwd");
+}
+
+// =============================================================================
+// spawn_cwd.thread_budget_resolves
+// =============================================================================
+//
+// The thread budget rides the same entry as the cwd, and a held child has
+// stamped both before it parks. Run in an rfork'd child, so the raise
+// authority it marks on itself dies with it.
+
+static volatile u32 g_stb_inherit, g_stb_lower, g_stb_raised, g_stb_hard;
+static volatile int g_stb_raise_refused, g_stb_over, g_stb_over_auth, g_stb_reaped;
+static volatile u32 g_stb_rforked;
+static volatile int g_stb_rfork_reaped;
+
+// A held spawn asking for `req` threads (0: no tail). The child's stamped
+// budget, or 0 when there is no child; the child is released and reaped.
+static u32 stb_budget(u32 req, int *rc) {
+    int pid = sys_spawn_full_argv_cwd_for_proc(current_thread()->proc,
+            "/bin/hello", 10, NULL, 0u, 0u, NULL, 0u, CAP_NONE, 0u,
+            false, 0u, 0u, NULL, 0u, NULL, 0u, 0u, SPAWN_DEBUG_HELD, NULL, 0u, req);
+    *rc = pid;
+    struct Proc *c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
+    u32 b = c ? __atomic_load_n(&c->thread_budget, __ATOMIC_ACQUIRE) : 0u;
+    if (pid > 0 && sc_release_and_reap(pid) == pid) g_stb_reaped++;
+    return b;
+}
+
+static void stb_grandchild(void *arg) {
+    (void)arg;
+    g_stb_rforked = __atomic_load_n(&current_thread()->proc->thread_budget, __ATOMIC_ACQUIRE);
+    exits("ok");
+}
+
+static void stb_entry(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    __atomic_store_n(&self->thread_budget, 64u, __ATOMIC_RELEASE);
+    int gc = rfork(RFPROC, stb_grandchild, NULL);
+    int gst = -1;
+    if (gc > 0 && wait_pid(&gst) == gc && gst == 0) g_stb_rfork_reaped = 1;
+    const u32 max = proc_thread_budget_hard_max();
+    int rc = 0;
+    g_stb_inherit = stb_budget(0u, &rc);
+    g_stb_lower   = stb_budget(32u, &rc);
+    (void)stb_budget(65u, &rc);
+    g_stb_raise_refused = rc;
+    (void)stb_budget(max + 1u, &rc);
+    g_stb_over = rc;
+    proc_mark_may_raise_thread_budget(self);
+    g_stb_raised = stb_budget(65u, &rc);
+    g_stb_hard   = stb_budget(max, &rc);
+    (void)stb_budget(max + 1u, &rc);
+    g_stb_over_auth = rc;
+    exits("ok");
+}
+
+void test_spawn_cwd_thread_budget_resolves(void) {
+    g_stb_inherit = g_stb_lower = g_stb_raised = g_stb_hard = 0;
+    g_stb_raise_refused = g_stb_over = g_stb_over_auth = 0;
+    g_stb_reaped = g_stb_rfork_reaped = 0;
+    g_stb_rforked = 0u;
+    int child_pid = rfork(RFPROC, stb_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    const u32 max = proc_thread_budget_hard_max();
+    TEST_ASSERT(max > 65u, "the pool holds more threads than the test asks for");
+    TEST_EXPECT_EQ(g_stb_rfork_reaped, 1, "an rfork'd grandchild ran and was reaped");
+    TEST_EXPECT_EQ(g_stb_rforked, 64u, "rfork carries the budget to the child");
+    TEST_EXPECT_EQ(g_stb_inherit, 64u, "no tail: the child inherits the spawner's budget");
+    TEST_EXPECT_EQ(g_stb_lower, 32u, "a lower budget needs no authority");
+    TEST_EXPECT_EQ(g_stb_raise_refused, -1, "a raise without the authority is refused");
+    TEST_EXPECT_EQ(g_stb_over, -1, "past the hard max is refused");
+    TEST_EXPECT_EQ(g_stb_raised, 65u, "with the authority the raise lands");
+    TEST_EXPECT_EQ(g_stb_hard, max, "up to the hard max");
+    TEST_EXPECT_EQ(g_stb_over_auth, -1, "and past it is refused even so, never clamped");
+    TEST_EXPECT_EQ(g_stb_reaped, 4, "each child made was reaped");
 }

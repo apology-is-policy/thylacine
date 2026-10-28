@@ -344,6 +344,7 @@ unsigned sched_runnable_count(void);
 #ifdef KERNEL_TESTS
 unsigned sched_runnable_count_band(unsigned band);
 void sched_dump_runnable(const char *tag);   // DEBUG (#857): all-CPU runnable set + RX-IRQ counters
+bool sched_run_counts_match_trees_for_test(void);
 #endif // KERNEL_TESTS
 
 // TI-4d work-conservation telemetry. A core that parks in WFI while a runqueue

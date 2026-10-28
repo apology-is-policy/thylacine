@@ -88,13 +88,16 @@ refused setup charges nothing.
 which charges the ring's pages with its metadata and records that charge on the
 ring Burrow. It then maps the ring and tags the VMA `VMA_FLAG_PRIVATE_RING` in
 one `as->lock` hold, so no clone can see the mapping untagged: fork omits a
-tagged VMA, and exec closes the ring. Next it starts the executor, whose charge
-counts against the Proc's thread budget. `thread_count` counts exited peers
-until they are freed and the charge's walk cannot free them, so a caller in
-that Proc first frees them (`proc_reap_exited_threads`), as the public SQPOLL
-setup does; without it a Proc that had joined its workers was refused -EAGAIN
-here and admitted on the public route (the main merge's audit F1, 2026-10-22;
-witness `proc.reap_before_private_executor_charge`). Then it fills
+tagged VMA, and exec closes the ring. Next it starts the executor
+(`loom_private_start_executor(l, p)`), whose charge counts against the Proc's
+thread budget beside its live threads, as the public SQPOLL charge does
+([[sub-kernel-proc]]), and whose stack and slot are charged to `p`'s share of
+the user pool ([[sub-kernel-thread]]). An exited peer stops counting at its
+EXITING commit and is freed by the switch that leaves it, so a Proc that has
+joined its workers is admitted with no reap first (witness
+`proc.private_executor_charge_after_finished_workers`, in the qualification
+image; `loom.private_executor` pins the refusal at a full budget and the
+pool charge in every image). Then it fills
 `*out`, including the receipt geometry in `_resv1[0..2]` when SERVICE_BUFFERS is
 set. Only then does it call `handle_alloc`. Once the handle is installed, a
 sibling thread may close it, so `l` is not touched again.

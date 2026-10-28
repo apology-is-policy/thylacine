@@ -116,11 +116,7 @@ int loom_private_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
         mapped = true;
     }
     spin_unlock(&as->lock);
-    // thread_count counts the Proc's exited peers until they are freed, so free
-    // them before the executor's charge, as the public SQPOLL setup and both
-    // thread-create arms do. Only a thread of p may.
-    if (!rc && p == current_thread()->proc) proc_reap_exited_threads();
-    if (!rc) rc = loom_private_start_executor(l);
+    if (!rc) rc = loom_private_start_executor(l, p);
 
     // Everything the caller learns is read before the handle exists: once it is
     // installed a sibling thread may close it. Only the reference taken for the

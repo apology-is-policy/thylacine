@@ -287,8 +287,8 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     }
 
     // prowl-1: cumulative on-CPU time (ns) as the trailing column -- the reader
-    // diffs it across polls for %CPU. proc_cpu_ns walks p->threads; safe here
-    // because format_procs runs under g_proc_table_lock (proc_for_each). Shown
+    // diffs it across polls for %CPU. proc_cpu_ns walks p->threads under
+    // p->threads_lock; format_procs pins p (proc_for_each). Shown
     // only to the row's owner or a hostowner (IMPERIUM-DESIGN 11.3 item 10): the
     // trusted episode's authority accrues it per key.
     n = fmt_str(s->buf, s->cap, s->off, "    ");
@@ -356,12 +356,12 @@ size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t
 // push its own frontier lower while we look.
 // ARCH 8.12 audit F2: the whole walk runs under g_proc_table_lock WITH IRQS
 // MASKED, and each thread's scan costs MORE the SHALLOWER the thread is (it
-// stops at the first touched word). PROC_THREAD_MAX is 256, so an unbounded
-// walk lets any Proc -- it needs no privilege to spawn threads, only the
-// READER is gated -- inflate that masked window without limit. Bound the total
-// at 1 MiB of loads: a normal system (tens of threads, ~1750 words each) never
-// reaches it, and a hostile one truncates VISIBLY rather than silently
-// reporting a shallower peak than the truth.
+// stops at the first touched word). A Proc's thread budget is 4096 by default
+// (ARCH 7.3.5), so an unbounded walk lets any Proc -- it needs no privilege to
+// spawn threads, only the READER is gated -- inflate that masked window without
+// limit. Bound the total at 1 MiB of loads: a normal system (tens of threads,
+// ~1750 words each) never reaches it, and a hostile one truncates VISIBLY
+// rather than silently reporting a shallower peak than the truth.
 enum { KSTACK_SCAN_BUDGET_WORDS = 131072u };
 
 struct kstack_fmt_state {

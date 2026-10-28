@@ -20,7 +20,7 @@ updated: 2026-10-27
 ---
 ## Registry creation is a role, not an Imperium capability
 
-The D7 factory uses explicit spawn permission bit 10 / Proc role bit 29.
+The D7 factory uses explicit spawn permission bit 11 / Proc flag bit 14.
 Neither POST_SERVICE nor TCB_DIAL nor SET_IDENTITY implies it; console
 attachment is insufficient too. Only a holder may explicitly delegate it.
 Bootstrap gives it to Joey, Joey gives it to login, and ordinary children do
@@ -262,7 +262,11 @@ tag — untidy, not a violation. The teardown walk is a tidiness sweep; the
 root dies on its own exit or self-terminates at `valid_until`. A member the
 sweep terminates dies as if killed: `proc_group_terminate(m, NOTE_SIG_KILL,
 "legate scope ended")` records `SIGKILL`, so a waiting parent's packed word
-reads `WIFSIGNALED` `SIGKILL` (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
+reads `WIFSIGNALED` `SIGKILL` (gcpark-b, 2026-10-12; [[sub-kernel-death]]). The
+sweep runs from `proc_become_zombie_locked` under `g_proc_table_lock` alone --
+the dying root's own thread lock already released -- and each member's
+termination takes that member's thread lock in turn ([[lock-proc-threads]]: one
+per CPU).
 
 **The arm-6 session hangup is this teardown's structural sibling, and is *not* a
 cap.** `proc_session_hangup_if_leader` ([[sub-kernel-death]]) rides the same
@@ -356,7 +360,8 @@ fail-closed sentinel; a zero or over-`u32` `session_id` is refused; a full
 table refuses rather than evicting a live grant. `/grant` and `/use` are
 write-only — reads return `-1`, as does any non-frame write length.
 
-`cap_proc_exit_notify` clears pending grants for a dying Proc's stripes, so
+`cap_proc_exit_notify` clears pending grants for a dying Proc's stripes (run
+by its last live thread out, `proc_exit_last_out`; [[sub-kernel-death]]), so
 a grant cannot outlive its intended target and be redeemed by a stripe
 collision later.
 
