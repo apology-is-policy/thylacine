@@ -148,7 +148,8 @@ offset, so a leg can clear the bit and leave a poisoned tail in place. It spawns
 runs:
 - the block arrives exactly;
 - with the bit clear, the poisoned tail is never read and the child carries
-  joey's environment;
+  joey's environment -- at +104, and behind a cwd tail (+120), a thread tail
+  (+112) and both (+128), the cwd still landing;
 - an empty block gives an empty environment;
 - a repeated name arrives once, with the later value;
 - the tail is read at +120 after a cwd tail, +112 after a thread tail and +128
@@ -157,7 +158,9 @@ Refused, with no child: a record with no `=` (-22), a `/` in a name (-22), an
 unterminated block (-22), a value past 4096 bytes (-7), a length past 32768
 (-7), a NULL pointer with a length (-14), a nonzero `env_flags` (-1) and the
 next unknown `ext_flags` bit (-1). joey's own environment is checked unchanged.
-Boot-fatal. `probe_spawn_cwd`'s derived unknown bit now skips bit 2.
+Boot-fatal. Both probes derive the next unknown bit from libt's
+`T_SPAWN_EXT_FLAGS_ALL`, which the mirror check holds to the kernel's, so a new
+tail cannot turn an "unknown bit" leg into a garbage-tail read.
 
 **go-threads, the budget against Go's M model.** Inside the go-goroutines
 success branch, `go_threads_run` spawns `/bin/go-threads` (300 goroutines,

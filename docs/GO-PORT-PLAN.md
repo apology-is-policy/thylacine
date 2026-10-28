@@ -406,9 +406,11 @@ the override became a `SYS_SPAWN_FULL_ARGV` tail (`SPAWN_EXT_ENV`), because no G
 answer could reach a child the kernel creates fully formed -- `startProcess` dropped
 `ProcAttr.Env`, so gopls's per-call `GOFLAGS`/`GOWORK`, `go generate`'s `GOFILE` and
 x/telemetry's `GO_TELEMETRY_CHILD` never arrived, and since `os.Setenv` is process-local
-nothing a Go program set reached its children either. `startProcess` sends
-`ProcAttr.Env` as the tail (`os/exec` fills it from `os.Environ()`, so a `Setenv` reaches
-a child as on Unix); `goenvs` still reads `/env` (ARCH §9.7). Composes I-1 + I-32; no new §28 invariant; prose-validated (the
+nothing a Go program set reached its children either. `startProcess` is to send
+`ProcAttr.Env` as the tail (`os/exec` fills it from `os.Environ()`, so a `Setenv` will
+reach a child as on Unix) -- OWED as env-b, which lands only once every tree carries the
+kernel half, since the fork is shared and an older kernel refuses the bit; `goenvs` still
+reads `/env` (ARCH §9.7). Composes I-1 + I-32; no new §28 invariant; prose-validated (the
 `env->lock` is the standard per-Proc-group pattern, Territory/allowance). The impl
 + the go-fork `goenvs` + the boot env-var setup + the focused audit are Stage 4a's
 kernel / go / bootenv / audit sub-chunks.

@@ -814,21 +814,28 @@ pub extern "C" fn rs_main() -> i64 {
     if write_env_beacon(b"rich") {
         c.pass("env BEACON=rich exported");
         // Now that our /env says rich: inherited it is rich, and env_remove and
-        // env_clear each keep it from the child.
+        // env_clear each keep it from the child. Removing a different name
+        // keeps it, so a removal that emptied the environment fails here.
         let inherited = rich_with(|_| {});
         let removed = rich_with(|cmd| {
             cmd.env_remove("BEACON");
         });
+        let other = rich_with(|cmd| {
+            cmd.env_remove("CS_OTHER");
+        });
         let cleared = rich_with(|cmd| {
             cmd.env_clear();
         });
-        match (inherited, removed, cleared) {
-            (Some(true), Some(false), Some(false)) => {
+        match (inherited, removed, other, cleared) {
+            (Some(true), Some(false), Some(true), Some(false)) => {
                 c.pass("env tail: env_remove and env_clear withhold BEACON")
             }
             _ => c.fail(
                 "env tail: env_remove and env_clear withhold BEACON",
-                &format!("inherited={:?} removed={:?} cleared={:?}", inherited, removed, cleared),
+                &format!(
+                    "inherited={:?} removed={:?} other-removed={:?} cleared={:?}",
+                    inherited, removed, other, cleared
+                ),
             ),
         }
         beacon_rich_vs_plain(

@@ -38,11 +38,11 @@
 // ENVIRONMENT: with no `env`/`env_remove`/`env_clear` the child inherits the
 // caller's /env whole (the kernel's copy at spawn). Any of the three makes the
 // spawn carry the T_SPAWN_EXT_ENV tail (ARCH 9.7): the caller's live /env, read
-// through /proc/<pid>/environ, with the changes applied in call order -- or only
-// the changes after `env_clear` -- becomes the child's whole environment. The
+// from /env itself, with the changes applied in call order -- or only the
+// changes after `env_clear` -- becomes the child's whole environment. The
 // caller's own /env never changes. A caller variable the flat form cannot carry
-// (a name holding '=', a value holding a NUL) is absent from that read, so it
-// does not reach a child given the tail.
+// (a name holding '=', a value holding a NUL) does not reach a child given the
+// tail.
 //
 // DEFERRED:
 //   - Status decoding beyond `success() == (status == 0)` and
@@ -51,7 +51,7 @@
 //     them lands then.
 
 use crate::err::{Error, Result};
-use crate::fs::{File, OpenOptions};
+use crate::fs::{read_dir, File, OpenOptions};
 use crate::handle::{Handle, Rights};
 use crate::io::{Read, Write};
 use crate::{
@@ -104,26 +104,36 @@ struct PreparedStdio {
 
 
 // The T_SPAWN_EXT_ENV block for `plan`: NUL-terminated "NAME=VALUE" records.
-// The base is the caller's LIVE /env -- /proc/<pid>/environ renders it in
-// exactly this shape -- unless `env_clear` was called. A key that is empty or holds '='
-// or a NUL, or a value holding a NUL, cannot be encoded and is refused here
-// rather than sent mangled.
+// The base is the caller's LIVE /env, listed and read variable by variable (no
+// /proc needed: /env is the process's own), unless `env_clear` was called. A
+// key that is empty or holds '=' or a NUL, or a value holding a NUL, cannot be
+// encoded and is refused here rather than sent mangled.
 fn env_block(plan: &EnvPlan) -> Result<Vec<u8>> {
     let mut vars: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     if !plan.clear {
-        let mut f = File::open(&alloc_crate::format!("/proc/{}/environ", crate::identity::pid()))?;
-        let mut live: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            let n = f.read(&mut chunk)?;
-            if n == 0 {
-                break;
+        for entry in read_dir("/env")? {
+            let name = entry?.into_file_name();
+            if name.as_bytes().contains(&b'=') {
+                continue; // the flat form cannot carry it
             }
-            live.extend_from_slice(&chunk[..n]);
-        }
-        for rec in live.split(|&b| b == 0).filter(|r| !r.is_empty()) {
-            let eq = rec.iter().position(|&b| b == b'=').ok_or(Error::InvalidArgument)?;
-            vars.push((rec[..eq].to_vec(), rec[eq + 1..].to_vec()));
+            let mut f = match File::open(&alloc_crate::format!("/env/{}", name)) {
+                Ok(f) => f,
+                Err(Error::NotFound) => continue, // unset since the listing
+                Err(e) => return Err(e),
+            };
+            let mut val: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = f.read(&mut chunk)?;
+                if n == 0 {
+                    break;
+                }
+                val.extend_from_slice(&chunk[..n]);
+            }
+            if val.contains(&0) {
+                continue; // the flat form cannot carry it
+            }
+            vars.push((name.into_bytes(), val));
         }
     }
     for (key, val) in &plan.ops {

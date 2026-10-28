@@ -415,6 +415,10 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // environment as NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd
 // and thread tails whose bits are set.
 #define T_SPAWN_EXT_ENV                (1u << 2)
+// Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
+// refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
+// mask to the kernel's.
+#define T_SPAWN_EXT_FLAGS_ALL          (T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.

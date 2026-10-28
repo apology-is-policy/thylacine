@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -274,6 +274,13 @@ environment. #140 built the frame half. The lasting asymmetry: the **native**
 `SYS_EXECVE` has no envp argument and *preserves* — it projects the caller's own
 `/env` onto the new stack; the **Linux** `viv_execve` follows POSIX, so an empty
 envp now means an empty environment, not an inherited one.
+
+A spawn's exec projects the child's own `/env` the same way, and since
+2026-10-28 that group is either rfork's copy of the spawner's or the one a
+`SPAWN_EXT_ENV` tail named, which the spawn thunk installs before it calls exec
+([[sub-kernel-syscall-dispatch]], [[dec-2026-10-28-spawn-env]]). The projection
+itself is unchanged; only the ordering in the thunk makes the frame carry the
+named environment, and `spawn_env.child_gets_block` reads the frame to pin it.
 
 ## Data structures
 

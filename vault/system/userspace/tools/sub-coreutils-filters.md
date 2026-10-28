@@ -330,8 +330,9 @@ report a symlink as a plain file even where the mode string shows `l`.
   rich Beacon frame only when `BEACON=rich` reaches it. Before the run's own
   `BEACON` is written, the frame is absent with no tail, present with
   `env("BEACON", "rich")`, and the smoke's own `BEACON` is still unset after.
-  After it is written, the frame is present when inherited and absent under
-  `env_remove("BEACON")` and under `env_clear()`. The environment tail also
+  After it is written, the frame is present when inherited and under
+  `env_remove` of another name (so a removal that emptied the environment
+  fails), and absent under `env_remove("BEACON")` and under `env_clear()`. The environment tail also
   makes `env`'s `NAME=VALUE COMMAND` form expressible, which the utility still
   refuses (the enqueued item above).
 

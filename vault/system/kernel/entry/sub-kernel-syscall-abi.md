@@ -98,7 +98,11 @@ more would make a child exec could not start. Mirrors: libt `T_SPAWN_EXT_ENV`,
 `T_SYS_SPAWN_ENV_DATA_MAX` + `struct t_sys_spawn_ext_env`; libthyla-rs
 `T_SPAWN_EXT_ENV`, `T_SYS_SPAWN_ENV_DATA_MAX` + `TSpawnExtEnv`, sent by
 `Command::env`, `env_remove` and `env_clear` ([[sub-libthyla-rs]]);
-`tools/check-spawn-args-mirrors.py` holds both to the kernel's layout. The Go
+`tools/check-spawn-args-mirrors.py` holds both to the kernel's layout. Both
+libraries also mirror `SPAWN_EXT_FLAGS_ALL` (`T_SPAWN_EXT_FLAGS_ALL`), and the
+same check holds their `T_SPAWN_EXT_*` members to the kernel's names and bits
+and each mask to exactly those members, proving each rule on a mutation (a
+member dropped, a mask missing one, a kernel member no mirror has). The Go
 fork and pouch do not send it yet: the fork is shared by every tree, and a
 kernel without bit 2 refuses the bit, so it waits until every tree carries
 the kernel half. What the tail does is [[sub-kernel-syscall-dispatch]]'s and

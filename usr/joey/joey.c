@@ -4972,7 +4972,7 @@ static int probe_spawn_cwd(void) {
     long r_em  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 0, 0);
     long r_fl  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 4, 1);
     // The lowest bit no tail claims, derived so a new tail cannot make it known.
-    const unsigned int known = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV;
+    const unsigned int known = T_SPAWN_EXT_FLAGS_ALL;
     long r_bit = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD | (~known & (known + 1u)),
                             "/bin", 4, 0);
     long refused[5] = { r_nf, r_nd, r_em, r_fl, r_bit };
@@ -5238,6 +5238,24 @@ static int probe_spawn_env(void) {
     int p_ok = pp > 0 && senv_eq(got, gp, mine, ml);
     if (pp > 0 && !scwd_kill_reap(pp)) unreaped++;
 
+    // The same control behind each earlier tail: the poison sits at +120, +112
+    // and +128, where a kernel that took another tail's bit for the env bit
+    // would read it.
+    unsigned int pcombos[3] = { T_SPAWN_EXT_CWD, T_SPAWN_EXT_THREADS,
+                                T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS };
+    int pcombo_ok = 1;
+    for (int k = 0; k < 3; k++) {
+        long pc = senv_spawn(pcombos[k], 3u, (const char *)0, 0xFFFFFFFFu, 0xFFFFFFFFu);
+        long gc = (pc > 0) ? senv_environ(pc, got, sizeof(got)) : -1;
+        int ok = pc > 0 && senv_eq(got, gc, mine, ml);
+        if ((pcombos[k] & T_SPAWN_EXT_CWD) && ok) {
+            long cl = scwd_child_cwd(pc, cwdb, sizeof(cwdb));
+            ok = cl > 0 && scwd_eq(cwdb, "/bin");
+        }
+        if (!ok) pcombo_ok = 0;
+        if (pc > 0 && !scwd_kill_reap(pc)) unreaped++;
+    }
+
     // (b) An empty block is an empty environment.
     long pe = senv_spawn(T_SPAWN_EXT_ENV, 0u, (const char *)0, 0u, 0u);
     long ge = (pe > 0) ? senv_environ(pe, got, sizeof(got)) : -1;
@@ -5279,7 +5297,7 @@ static int probe_spawn_env(void) {
     senv_big[0] = 'B'; senv_big[1] = '=';
     for (unsigned int i = 0; i < ENV_PROBE_VALUE + 1u; i++) senv_big[2 + i] = 'v';
     senv_big[3 + ENV_PROBE_VALUE] = '\0';
-    const unsigned int known = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV;
+    const unsigned int known = T_SPAWN_EXT_FLAGS_ALL;
     long r_eq  = senv_spawn(T_SPAWN_EXT_ENV, 0u, noeq, sizeof(noeq) - 1, 0u);
     long r_sl  = senv_spawn(T_SPAWN_EXT_ENV, 0u, slash, sizeof(slash) - 1, 0u);
     long r_un  = senv_spawn(T_SPAWN_EXT_ENV, 0u, unterm, sizeof(unterm) - 1, 0u);
@@ -5297,7 +5315,7 @@ static int probe_spawn_env(void) {
     long un = (edir >= 0 && marked) ? t_unlink(edir, "PE_JOEY", 7, 0u) : -1;
     if (edir >= 0) (void)t_close(edir);
 
-    if (!marked || ml <= 0 || !a_ok || !p_ok || pe <= 0 || ge != 0 || !d_ok || !combo_ok ||
+    if (!marked || ml <= 0 || !a_ok || !p_ok || !pcombo_ok || pe <= 0 || ge != 0 || !d_ok || !combo_ok ||
         r_eq != -22 || r_sl != -22 || r_un != -22 || r_val != -7 || r_len != -7 ||
         r_ptr != -14 || r_fl != -1 || r_bit != -1 || !mine_kept || un != 0 || unreaped) {
         t_putstr("joey: spawn-env probe FAILED marked=");
@@ -5306,6 +5324,7 @@ static int probe_spawn_env(void) {
         t_putstr(itoa_dec(ml, nb, sizeof(nb)));
         t_putstr(a_ok ? " block=ok" : " block=WRONG");
         t_putstr(p_ok ? " inherit=ok" : " inherit=WRONG");
+        t_putstr(pcombo_ok ? " poison-behind-tails=ok" : " poison-behind-tails=WRONG");
         t_putstr(" empty=");
         t_putstr(itoa_dec(ge, nb, sizeof(nb)));
         t_putstr(d_ok ? " dup=ok" : " dup=WRONG");
@@ -5334,7 +5353,7 @@ static int probe_spawn_env(void) {
         t_putstr("\n");
         return -1;
     }
-    t_putstr("joey: probe spawn-env OK (block exact, inherit without the bit, empty, repeat, after each earlier tail; 8 refusals)\n");
+    t_putstr("joey: probe spawn-env OK (block exact, inherit without the bit behind every tail combination, empty, repeat, after each earlier tail; 8 refusals)\n");
     return 0;
 }
 

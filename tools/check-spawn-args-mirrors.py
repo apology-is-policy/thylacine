@@ -350,6 +350,48 @@ def u64_class_errs(text, struct=None):
     return errs
 
 
+# The ext_flags word: each mirror defines the kernel's SPAWN_EXT_* members at the
+# same bits, and its FLAGS_ALL mask names exactly those members -- a probe that
+# derives "the next unknown bit" from a mask missing a member sends a bit the
+# kernel reads a tail for.
+EXT_FLAG_FORMS = {
+    "kernel": (r"^#define\s+SPAWN_EXT_(\w+)\s+\(1u\s*<<\s*(\d+)\)",
+               r"^#define\s+SPAWN_EXT_FLAGS_ALL\s+\(([^)]*)\)", "SPAWN_EXT_"),
+    "libt": (r"^#define\s+T_SPAWN_EXT_(\w+)\s+\(1u\s*<<\s*(\d+)\)",
+             r"^#define\s+T_SPAWN_EXT_FLAGS_ALL\s+\(([^)]*)\)", "T_SPAWN_EXT_"),
+    "libthyla-rs": (r"^pub const T_SPAWN_EXT_(\w+): u32 = 1 << (\d+);",
+                    r"^pub const T_SPAWN_EXT_FLAGS_ALL: u32 = ([^;]*);", "T_SPAWN_EXT_"),
+}
+
+
+def ext_flags(text, label):
+    """(members {name: bit}, the FLAGS_ALL mask's member names) for one source."""
+    member, mask, prefix = EXT_FLAG_FORMS[label]
+    members = {m.group(1): int(m.group(2)) for m in re.finditer(member, text, re.M)}
+    m = re.search(mask, text, re.M)
+    if not members or not m:
+        raise CheckError(f"{label}: no ext_flags members or no FLAGS_ALL mask")
+    names = {n.strip()[len(prefix):] for n in m.group(1).split("|")
+             if n.strip().startswith(prefix)}
+    return members, names
+
+
+def ext_flag_errs(texts):
+    kmembers, knames = ext_flags(texts["kernel"], "kernel")
+    errs = []
+    if knames != set(kmembers):
+        errs.append(f"kernel: ext flag mask names {sorted(knames)}, members are "
+                    f"{sorted(kmembers)}")
+    for label in ("libt", "libthyla-rs"):
+        members, names = ext_flags(texts[label], label)
+        if members != kmembers:
+            errs.append(f"{label}: ext flag members {members} != kernel {kmembers}")
+        if names != set(kmembers):
+            errs.append(f"{label}: ext flag mask names {sorted(names)}, kernel "
+                        f"members are {sorted(kmembers)}")
+    return errs
+
+
 def check(texts, go_text):
     """Every mismatch, as messages; raises CheckError on an unreadable source."""
     kernel = kernel_layout(texts["kernel"])
@@ -366,6 +408,7 @@ def check(texts, go_text):
         errs += [f"go fork: declares a record tail type {t} that EXT_TAILS does "
                  f"not hold to the kernel -- list it beside its kernel tail"
                  for t in GO_TAIL.findall(go_text) if t not in listed]
+    errs += ext_flag_errs(texts)
     for kstruct, mirrors in EXT_TAILS:
         ktail = kernel_layout(texts["kernel"], kstruct)
         errs += u64_class_errs(texts["kernel"], kstruct)
@@ -500,6 +543,23 @@ def self_test(texts, go_text):
                                f"addr) == {off}, \"\");\n")
         if t["kernel"] == texts["kernel"] or not reported(t, go_text, "not named *_va"):
             missed.append(f"a {kstruct} 8-byte field without the _va suffix")
+    # The ext_flags word: a mirror missing a member, a mask missing one, and a
+    # kernel member no mirror has yet must each be reported as such.
+    t = dict(texts)
+    t["libt"] = re.sub(r"^#define\s+T_SPAWN_EXT_ENV\s.*$", "", texts["libt"], count=1, flags=re.M)
+    if t["libt"] == texts["libt"] or not reported(t, go_text, "ext flag"):
+        missed.append("a libt ext flag member dropped")
+    t = dict(texts)
+    t["libthyla-rs"] = re.sub(r"(T_SPAWN_EXT_FLAGS_ALL: u32 = [^;]*?)\s*\|\s*T_SPAWN_EXT_ENV",
+                              r"\1", texts["libthyla-rs"], count=1)
+    if t["libthyla-rs"] == texts["libthyla-rs"] or not reported(t, go_text, "ext flag mask"):
+        missed.append("a libthyla-rs ext flag mask missing a member")
+    t = dict(texts)
+    t["kernel"] = re.sub(r"^(#define\s+SPAWN_EXT_FLAGS_ALL\s+\([^)]*)\)",
+                         r"\1 | SPAWN_EXT_NEXT)\n#define SPAWN_EXT_NEXT (1u << 9)",
+                         texts["kernel"], count=1, flags=re.M)
+    if t["kernel"] == texts["kernel"] or not reported(t, go_text, "ext flag members"):
+        missed.append("a kernel ext flag member no mirror defines")
     first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
                     if n.endswith("_va"))
     t = dict(texts)
@@ -546,7 +606,7 @@ def main():
     print(f"spawn-args mirror check: kernel {size} B / {len(lay)} fields, every "
           f"u64 classified; "
           f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}; "
-          f"tails: {tails}")
+          f"tails: {tails}; ext flag members + mask ok (libt, libthyla-rs)")
     return 0
 
 

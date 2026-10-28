@@ -1613,10 +1613,10 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         proc_set_name(p, exe->path->s, (size_t)exe->path->len);
 
     // #140: the spawn paths project the CHILD's own environment, and it is
-    // already the right one -- rfork_internal ran env_clone_into before this
-    // thunk started, so p->env is the inherited copy. No parent access is
-    // needed or wanted; a spawn that wants a DIFFERENT environment sets it
-    // through /env on the child, which is what the namespace is for.
+    // already the right one -- p->env is rfork's copy (env_clone_into ran
+    // before this thunk started), or the group a SPAWN_EXT_ENV tail named,
+    // which the thunk installed (env_install) before calling here. No parent
+    // access is needed or wanted.
     char *env_data = NULL;
     u32 env_len = 0, envc = 0;
     if (exec_stage_env(p, &env_data, &env_len, &envc) != 0) {

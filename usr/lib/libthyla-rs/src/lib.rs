@@ -562,6 +562,10 @@ pub const T_SPAWN_EXT_THREADS: u32 = 1 << 1;
 // NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd and thread tails
 // whose bits are set.
 pub const T_SPAWN_EXT_ENV: u32 = 1 << 2;
+// Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
+// refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
+// mask to the kernel's.
+pub const T_SPAWN_EXT_FLAGS_ALL: u32 = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV;
 
 /// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
 /// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
