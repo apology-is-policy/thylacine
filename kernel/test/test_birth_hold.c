@@ -28,6 +28,13 @@
 //                                      held, even on a frame whose SP note
 //                                      delivery refuses, and dies of the note
 //                                      once released
+//   first_entry.spawn_into_stop_parks  a thread spawned while its Proc has a
+//                                      stop pending parks before its first
+//                                      instruction; with no stop the same
+//                                      thread reaches EL0 (thread-model C7)
+//   first_entry.exec_into_stop_parks   an exec'd image whose Proc has a stop
+//                                      pending parks at its entry on a fresh
+//                                      frame; with no stop it runs
 //
 // The devproc half (stop converts, start and detach release, the implicit
 // close keeps) is devproc.debug_birth_hold_ctl, beside the other ctl tests.
@@ -37,6 +44,8 @@
 #include "../../arch/arm64/exception.h"   // struct exception_context: the birth frame
 
 #include <thylacine/caps.h>
+#include <thylacine/devramfs.h>
+#include <thylacine/exec.h>
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -56,6 +65,7 @@ extern int sys_spawn_full_argv_debug_for_proc(
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags);
 bool devproc_all_threads_parked(struct Proc *target);
+s64  sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
 
 void test_birth_hold_validate_req(void);
 void test_birth_hold_publication_mark(void);
@@ -65,6 +75,8 @@ void test_birth_hold_orphan_rule(void);
 void test_birth_hold_birth_wait_survives_latch(void);
 void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
+void test_first_entry_spawn_into_stop_parks(void);
+void test_first_entry_exec_into_stop_parks(void);
 
 // Not a mark value: a child that never ran must not read as NONE (0), or every
 // "born NONE" control would pass on a child that did nothing.
@@ -939,4 +951,239 @@ void test_birth_hold_held_spawn_death_wins(void) {
     TEST_ASSERT(st != 0, "the child died of the kill (bad SP)");
     TEST_ASSERT(bh_str_eq(msg, "killed"),
         "the kill, not the interrupt, ended the stopped child (bad SP)");
+}
+
+// =============================================================================
+// first_entry.spawn_into_stop_parks / first_entry.exec_into_stop_parks
+// =============================================================================
+//
+// Every first entry to EL0 takes the EL0-return tail (thread-model C7, F-7), so
+// a stop pending when a thread is born parks it before its first instruction,
+// as it parks a running thread at its next return. Each test runs its arm twice,
+// one variable apart: with the stop pending, and without it, where the same
+// thread must reach EL0 -- else "it never ran" would pass for "it parked". The
+// stop is the job owner's flag, set directly, as the delivery's own store sets
+// it; the tail reads the two owners' flags as one.
+
+// The spawn gates accept these; nothing maps them, so a thread that reaches EL0
+// dies of an instruction abort at its first fetch -- the control arm's proof.
+#define FE_USER_ENTRY 0x400000u
+#define FE_USER_SP    0x7fff0000u
+
+static volatile s64 g_fe_tid;
+
+// The Proc's kernel-entry main thread: it makes the stop pending, or not, and
+// spawns through the native arm. The group's end is the test's to bring (the
+// kill at the park, or the fault of a thread that reached EL0); this thread
+// leaves with it.
+static void fe_spawn_main(void *arg) {
+    struct Proc *p = current_thread()->proc;
+    if (arg)
+        __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
+    s64 tid = sys_thread_spawn_for_test(FE_USER_ENTRY, FE_USER_SP, 0, 0, 0);
+    __atomic_store_n(&g_fe_tid, tid, __ATOMIC_RELEASE);
+    if (tid <= 0)
+        exits("fe-spawn");
+    while (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL)
+        sched();
+    thread_exit_self();
+}
+
+struct fe_parked {
+    struct Proc *c;
+    int          tid;    // 0: the Proc's head thread
+    bool         birth;  // the published frame is a fresh first-entry frame
+    u64          elr, sp, nsched;
+};
+
+// The thread asleep on its own debug_rendez, read under the lock while the
+// Proc is ALIVE, with what its published frame holds.
+static bool fe_parked_read(struct fe_parked *w) {
+    bool parked = false;
+    irq_state_t s = proc_table_lock_acquire();
+    if (w->c->state == PROC_STATE_ALIVE) {
+        irq_state_t ts = proc_threads_lock(w->c);
+        struct Thread *th = w->tid ? test_thread_by_tid_locked(w->c, w->tid)
+                                   : w->c->threads;
+        if (th) {
+            irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+            parked = __atomic_load_n(&th->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+                     th->rendez_blocked_on == &th->debug_rendez;
+            spin_unlock_irqrestore(&th->wait_lock, ws);
+            const struct exception_context *f = th->debug_trapframe;
+            if (parked && f) {
+                w->birth = bh_frame_is_birth(f);
+                w->elr   = f->elr;
+                w->sp    = f->sp;
+            }
+            w->nsched = __atomic_load_n(&th->nsched, __ATOMIC_RELAXED);
+        }
+        proc_threads_unlock(w->c, ts);
+    }
+    proc_table_lock_release(s);
+    return parked;
+}
+
+static bool fe_parked_pred(void *arg) {
+    return fe_parked_read((struct fe_parked *)arg);
+}
+
+static bool fe_tid_known(void *arg) {
+    (void)arg;
+    return __atomic_load_n(&g_fe_tid, __ATOMIC_ACQUIRE) != 0;
+}
+
+static bool fe_has_prefix(const char *s, const char *prefix) {
+    while (*prefix && *s == *prefix) { s++; prefix++; }
+    return *prefix == '\0';
+}
+
+// The kill a parked thread must die of, then the reap; the exit message names
+// what ended the Proc.
+static int fe_kill_and_reap(int pid, struct Proc *c, int *st, bool *killed,
+                            char *msg, size_t msg_len) {
+    irq_state_t s = proc_table_lock_acquire();
+    if (c->state == PROC_STATE_ALIVE)
+        proc_group_terminate(c, NOTE_SIG_KILL, "killed");
+    proc_table_lock_release(s);
+    return bh_reap_with_msg(pid, c, st, killed, msg, msg_len);
+}
+
+void test_first_entry_spawn_into_stop_parks(void) {
+    // (a) A stop pending at the spawn: the thread parks at its first entry, on
+    //     a fresh frame at its entry, stays parked, and dies of the kill there.
+    __atomic_store_n(&g_fe_tid, 0, __ATOMIC_RELEASE);
+    int pid = rfork(RFPROC, fe_spawn_main, (void *)1);
+    struct Proc *c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
+    bool known = c && bh_wait(fe_tid_known, NULL, BH_BUDGET_NS);
+    s64 tid = __atomic_load_n(&g_fe_tid, __ATOMIC_ACQUIRE);
+    struct fe_parked w = { .c = c, .tid = (int)tid };
+    bool parked = known && tid > 0 && bh_wait(fe_parked_pred, &w, BH_BUDGET_NS);
+    bool quiet = false;
+    if (parked) {
+        // Never switched in again across the window: a woken thread is readied
+        // at once, so its dispatch count would move.
+        u64 since = w.nsched;
+        u64 deadline = timer_now_ns() + BH_QUIET_NS;
+        while (timer_now_ns() < deadline)
+            sched();
+        quiet = fe_parked_read(&w) && w.nsched == since;
+    }
+    int st = -1, reaped = -1;
+    bool killed = false;
+    char msg[32];
+    msg[0] = '\0';
+    if (c)
+        reaped = fe_kill_and_reap(pid, c, &st, &killed, msg, sizeof(msg));
+    TEST_ASSERT(pid > 0 && c != NULL, "rfork made the spawning Proc");
+    TEST_ASSERT(known && tid > 0, "the spawn under a pending stop returned a tid");
+    TEST_ASSERT(parked, "the spawned thread parked at its first entry");
+    TEST_ASSERT(w.birth, "its published frame is a fresh first-entry frame");
+    TEST_EXPECT_EQ(w.elr, (u64)FE_USER_ENTRY, "its stopped PC is the spawn's entry");
+    TEST_EXPECT_EQ(w.sp, (u64)FE_USER_SP, "its SP is the spawn's stack");
+    TEST_ASSERT(quiet, "it stayed parked: never switched in again");
+    TEST_EXPECT_EQ(reaped, pid, "the killed Proc was reaped");
+    TEST_ASSERT(!killed, "the kill ended the Proc inside the budget");
+    TEST_ASSERT(bh_str_eq(msg, "killed"),
+        "the kill ended the Proc: the thread never reached EL0, where its first "
+        "fetch faults");
+
+    // (b) The control, one variable away: no stop. The same thread reaches EL0
+    //     and dies of the fetch at its unmapped entry.
+    __atomic_store_n(&g_fe_tid, 0, __ATOMIC_RELEASE);
+    pid = rfork(RFPROC, fe_spawn_main, NULL);
+    c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
+    known = c && bh_wait(fe_tid_known, NULL, BH_BUDGET_NS);
+    tid = __atomic_load_n(&g_fe_tid, __ATOMIC_ACQUIRE);
+    st = -1;
+    reaped = -1;
+    killed = false;
+    msg[0] = '\0';
+    if (c)
+        reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
+    TEST_ASSERT(pid > 0 && c != NULL, "rfork made the control's spawning Proc");
+    TEST_ASSERT(known && tid > 0, "the control's spawn returned a tid");
+    TEST_EXPECT_EQ(reaped, pid, "the control Proc was reaped");
+    TEST_ASSERT(!killed, "the control's thread ended the Proc on its own");
+    TEST_ASSERT(fe_has_prefix(msg, "snare:"),
+        "with no stop the spawned thread reached EL0 and faulted at its entry");
+}
+
+// Copied out of the cpio, whose data is only 4-aligned, for the ELF loader's
+// header cast (test_userspace_ramfs.c).
+#define FE_BLOB_MAX 16384
+static _Alignas(16) u8 g_fe_blob[FE_BLOB_MAX];
+
+struct fe_exec_args {
+    size_t size;
+    bool   stop;
+};
+
+static volatile u64 g_fe_entry;
+
+// Exec /hello from a kernel-entry thread. The stop is made pending after the
+// exec and before the first instruction -- the window a debugger's stop or a
+// terminal's suspend can land in while a spawned child is still in its kernel
+// thunk -- so nothing the exec does can park first.
+__attribute__((noreturn))
+static void fe_exec_thunk(void *arg) {
+    const struct fe_exec_args *ea = (const struct fe_exec_args *)arg;
+    struct Proc *p = current_thread()->proc;
+    u64 entry = 0, sp = 0;
+    if (exec_setup(p, g_fe_blob, ea->size, &entry, &sp) != 0)
+        exits("fe-exec");
+    __atomic_store_n(&g_fe_entry, entry, __ATOMIC_RELEASE);
+    if (ea->stop)
+        __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
+    userland_enter(entry, sp);
+}
+
+void test_first_entry_exec_into_stop_parks(void) {
+    const void *cpio = NULL;
+    size_t size = 0;
+    int lrc = devramfs_lookup("bin/hello", &cpio, &size);
+    TEST_ASSERT(lrc == 0 && size > 0, "/hello is in the ramfs");
+    TEST_ASSERT(size <= FE_BLOB_MAX, "/hello fits the aligned copy");
+    const u8 *src = (const u8 *)cpio;
+    for (size_t i = 0; i < size; i++)
+        g_fe_blob[i] = src[i];
+
+    // (a) A stop pending at the first entry: the image parks at its entry, on
+    //     a fresh frame, and dies of the kill there.
+    __atomic_store_n(&g_fe_entry, 0, __ATOMIC_RELEASE);
+    struct fe_exec_args args = { .size = size, .stop = true };
+    int pid = rfork(RFPROC, fe_exec_thunk, &args);
+    struct Proc *c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
+    struct fe_parked w = { .c = c, .tid = 0 };
+    bool parked = c && bh_wait(fe_parked_pred, &w, BH_BUDGET_NS);
+    u64 entry = __atomic_load_n(&g_fe_entry, __ATOMIC_ACQUIRE);
+    int st = -1, reaped = -1;
+    bool killed = false;
+    char msg[32];
+    msg[0] = '\0';
+    if (c)
+        reaped = fe_kill_and_reap(pid, c, &st, &killed, msg, sizeof(msg));
+    TEST_ASSERT(pid > 0 && c != NULL, "rfork made the exec'ing Proc");
+    TEST_ASSERT(parked, "the image parked at its first entry");
+    TEST_ASSERT(w.birth, "its published frame is a fresh first-entry frame");
+    TEST_ASSERT(entry != 0, "the exec published its entry");
+    TEST_EXPECT_EQ(w.elr, entry, "its stopped PC is the image's entry");
+    TEST_EXPECT_EQ(reaped, pid, "the killed Proc was reaped");
+    TEST_ASSERT(!killed, "the kill ended the Proc inside the budget");
+    TEST_ASSERT(bh_str_eq(msg, "killed"),
+        "the kill ended the Proc: /hello never ran, else it exits 0");
+
+    // (b) The control: no stop, and /hello runs to its clean exit.
+    args.stop = false;
+    pid = rfork(RFPROC, fe_exec_thunk, &args);
+    c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
+    st = -1;
+    reaped = -1;
+    killed = false;
+    if (c)
+        reaped = bh_reap_or_kill(pid, c, &st, &killed);
+    TEST_ASSERT(pid > 0 && c != NULL, "rfork made the control's exec'ing Proc");
+    TEST_EXPECT_EQ(reaped, pid, "the control Proc was reaped");
+    TEST_ASSERT(!killed, "the control ran without the fallback kill");
+    TEST_EXPECT_EQ(st, 0, "with no stop /hello ran to a clean exit");
 }

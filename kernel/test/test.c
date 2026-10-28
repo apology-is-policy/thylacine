@@ -1180,6 +1180,8 @@ void test_birth_hold_orphan_rule(void);
 void test_birth_hold_birth_wait_survives_latch(void);
 void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
+void test_first_entry_spawn_into_stop_parks(void);
+void test_first_entry_exec_into_stop_parks(void);
 void test_spawn_cwd_child_born_in_cwd(void);
 void test_spawn_cwd_image_joins_child_cwd(void);
 void test_spawn_cwd_refusals(void);
@@ -4914,6 +4916,8 @@ struct test_case g_tests[] = {
     { "birth_hold.birth_wait_survives_latch",  test_birth_hold_birth_wait_survives_latch,  false, NULL },
     { "birth_hold.held_spawn_parks",           test_birth_hold_held_spawn_parks,           false, NULL },
     { "birth_hold.held_spawn_death_wins",      test_birth_hold_held_spawn_death_wins,      false, NULL },
+    { "first_entry.spawn_into_stop_parks",     test_first_entry_spawn_into_stop_parks,     false, NULL },
+    { "first_entry.exec_into_stop_parks",      test_first_entry_exec_into_stop_parks,      false, NULL },
     { "spawn_cwd.child_born_in_cwd",           test_spawn_cwd_child_born_in_cwd,           false, NULL },
     { "spawn_cwd.image_joins_child_cwd",       test_spawn_cwd_image_joins_child_cwd,       false, NULL },
     { "spawn_cwd.refusals",                    test_spawn_cwd_refusals,                    false, NULL },
