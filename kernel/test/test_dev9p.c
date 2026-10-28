@@ -1405,9 +1405,10 @@ void test_dev9p_dirfid_suspect_not_reparked(void) {
 
 // L1d: dev9p_create must invalidate the PARENT's cached dentries (own-write) so a
 // stale NEGATIVE entry for the created name cannot serve ENOENT for the new file.
-// The parent's si_cvers does NOT bump on a create (Stratum stores dirents in a
-// separate index -- verified src/fs/fs.c), so own-write invalidation is the SOLE
-// coherence mechanism (no parent-cvers gate). Non-vacuous: fails if the
+// The parent's si_cvers is no reliable dirent version (Stratum stamps the parent
+// best-effort after the dirent is published -- src/fs/fs.c
+// fs_stamp_parent_dir_locked), so own-write invalidation is the SOLE coherence
+// mechanism (no parent-cvers gate). Non-vacuous: fails if the
 // dev9p_create -> larder_dentry_invalidate_name hook is missing.
 void test_dev9p_create_invalidates_negative_dentry(void) {
     struct Spoor *root = make_open_client_and_root();

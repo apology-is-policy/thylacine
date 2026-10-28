@@ -174,9 +174,11 @@ struct larder_attr_ent {
 // A cached name->child binding (the Plan 9 dentry). Keyed by (parent_qid_path,
 // name[0..name_len)). A NEGATIVE entry caches "name does not exist in parent"
 // (the failed-lookup-storm win). NO content-version field: a name-binding is a
-// PARENT-dirent fact, and Stratum surfaces no directory-content version that
-// tracks a dirent change (a child create/unlink does not bump the parent's
-// si_cvers -- verified src/fs/fs.c; only rename stamps the parent mtime), so the
+// PARENT-dirent fact, and the parent's si_cvers is no reliable dirent version.
+// Stratum stamps the parent's mtime and ctime on a child create or unlink, which
+// bumps its si_cvers, but only best-effort after the dirent is published (a
+// failed stamp leaves the version unmoved -- src/fs/fs.c
+// fs_stamp_parent_dir_locked), so the
 // dentry cache is NOT cvers-gated -- its sole coherence is own-write invalidation
 // (larder_dentry_invalidate_name on a create/rename/unlink -- the mutated name
 // only, siblings preserved; LARDER-DESIGN §4).

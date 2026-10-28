@@ -173,12 +173,14 @@ Three sub-caches share the owner + key:
    (the L1d ground-truth correction — see §4).** Unlike an attr or a page (each
    validated by its OWN file's `cvers`), a name→child binding is a fact about
    the PARENT directory's dirent set, and Stratum does not surface a
-   directory-content version that tracks dirent changes: verified in the Stratum
-   tree (`src/fs/fs.c`), a child **create** and **unlink** touch only the
-   separate dirent index and do **not** run `stm_inode_set` on the parent inode,
-   so the parent's `si_cvers` does **not** bump on a create/unlink (only
-   **rename** stamps the parent mtime → bumps it). The parent's content-version
-   is therefore an unreliable signal for a dirent change, so the dentry cache's
+   directory-content version that reliably tracks dirent changes. Until Stratum
+   `af7f8a5` a child **create** and **unlink** touched only the separate dirent
+   index, so the parent's `si_cvers` did not bump (only **rename** stamped the
+   parent). Since then the parent's mtime and ctime are stamped through
+   `stm_inode_set`, which bumps `si_cvers`, but best-effort after the dirent is
+   published: a failed stamp leaves the version unmoved (`src/fs/fs.c`
+   `fs_stamp_parent_dir_locked`). The parent's content-version is therefore an
+   unreliable signal for a dirent change, so the dentry cache's
    sole coherence mechanism is own-write invalidation (never a parent-cvers
    compare).
 
@@ -254,13 +256,14 @@ The cache is **coherent to close-to-open**, keyed on a true **content-version**
 - **Dentries (positive AND negative) are coherent by own-write invalidation,
   NOT by a cvers gate** (the L1d ground-truth correction). A name→child binding
   (or a negative "no such name") is a fact about the PARENT directory's dirent
-  set. Ground truth (verified in Stratum `src/fs/fs.c`): a child **create** and
-  **unlink** touch only the separate dirent index — the parent inode is never
-  `stm_inode_set`, so the parent's `si_cvers` does **not** bump (only **rename**
-  stamps the parents' mtime → bumps them). So the parent's content-version does
-  not track a create/unlink, and a cvers compare against it would falsely match
-  a stale negative dentry after a create (serve `ENOENT` for a now-existing
-  file). The dentry cache therefore drops a directory's cached dentries on every
+  set. Ground truth (Stratum `src/fs/fs.c`): until `af7f8a5` a child **create**
+  and **unlink** touched only the separate dirent index, so the parent's
+  `si_cvers` did not bump (only **rename** stamped the parents); since then the
+  parent is stamped, which bumps it, but best-effort after the dirent is
+  published. So the parent's content-version does not reliably track a
+  create/unlink, and a cvers compare against it could falsely match a stale
+  negative dentry after a create whose stamp failed (serve `ENOENT` for a
+  now-existing file). The dentry cache therefore drops a directory's cached dentries on every
   guest **create / rename / unlink** in that directory (the guest holds the
   parent's `qid.path` at each mutation site — the same L1c own-write discipline,
   now scanning by parent). Under single-writer this is **absolute** (own-writes
@@ -479,8 +482,8 @@ on the real `si_cvers`).
   `(parent, name)` binding ONLY — siblings preserved, the whole-parent drop that
   forced sibling re-walks retired; O(1) via the serve's hash). **Coherence is
   own-write invalidation, NOT a cvers gate** — the L1d ground-truth correction
-  (§4): Stratum's parent `si_cvers` does not bump on a child create/unlink, so a
-  cvers gate would falsely match a stale negative; the dentry cache is
+  (§4): Stratum's parent `si_cvers` bumps on a child create/unlink only through a
+  best-effort stamp, so a cvers gate could falsely match a stale negative; the dentry cache is
   `fs_cache.tla`'s `Read`+`OwnWrite` subset (the attr discipline keyed by
   `(parent,name)` — per-token, so name-specific invalidation is the faithful
   realization). Tests: `larder.dentry_*` (10, incl. the `dentry_invalidate_name`
@@ -603,16 +606,19 @@ proven-in-principle to delivered.
 - **Dentry external-writer window (L1d).** Unlike attr/page entries (each
   revalidated at open by its own file's `cvers`), a **dentry** has no
   content-version to revalidate against: Stratum surfaces no directory-content
-  version that tracks dirent changes (a create/unlink does not bump the parent
-  `si_cvers` — §4 ground truth). So an out-of-band create/unlink in a directory
+  version that reliably tracks dirent changes (a create/unlink bumps the parent
+  `si_cvers` only through a best-effort stamp — §4 ground truth). So an out-of-band create/unlink in a directory
   is not caught by a cvers revalidation; a stale dentry (a name→child that a
   peer renamed, or a negative entry a peer filled) is bounded only by LRU
   eviction or the guest's own next mutation of that directory. Under
   single-writer (the v1.0 model) this is moot — own-writes invalidate. The v1.x
-  tightening is a true directory-content-version in Stratum (stamp the parent
-  inode on create/unlink, at a parent-COW cost on the create/unlink-heavy build
-  path — deliberately NOT paid at v1.0), which would then let a `walk_attrs`
-  revalidate a parent's dentries by its `cvers`, exactly as attr/page do today.
+  tightening is a directory-content-version Stratum guarantees. Since Stratum
+  `af7f8a5` it stamps the parent inode on create/unlink, so the parent-COW cost
+  on the create/unlink-heavy build path is now paid (Stratum's create dossier,
+  30.6), but the stamp is best-effort after the dirent is published, and a
+  write that lands the parent's current times is elided with no bump. A stamp
+  that always moves the version would let a `walk_attrs` revalidate a parent's
+  dentries by its `cvers`, exactly as attr/page do today.
 - **Page-cache v1.x refinements (all perf/memory, none correctness).** (a)
   *Over-invalidation on write*: `dev9p_write` drops **every** cached page of the
   file (`larder_page_invalidate` by `qid.path`), not just the written range —

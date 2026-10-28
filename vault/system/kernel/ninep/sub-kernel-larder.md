@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -204,10 +204,11 @@ attr/page installs + the snapshot witness key on the file.
 - **The dentry cache has NO version and NO cvers gate** (the L1d
   ground-truth correction): a name→child binding is a fact about the
   PARENT's dirent set, and Stratum surfaces no directory-content version
-  that tracks a dirent change (a child create/unlink never runs
-  `stm_inode_set` on the parent, so the parent `si_cvers` does not bump;
-  only rename stamps it). A parent-cvers gate would FALSELY MATCH a stale
-  negative dentry after a create. Sole coherence: name-specific own-write
+  that reliably tracks a dirent change (since Stratum `af7f8a5` a child
+  create/unlink stamps the parent's mtime and ctime, which bumps its
+  `si_cvers`, but best-effort after the dirent is published: a failed
+  stamp leaves it unmoved). A parent-cvers gate could FALSELY MATCH a
+  stale negative dentry after a create. Sole coherence: name-specific own-write
   invalidation. Negative entries (`→ ENOENT`) are first-class — the
   failed-lookup-storm win.
 - **Own pages bypass the cvers gate** (G1): no post-flush cvers is
