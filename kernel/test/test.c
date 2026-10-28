@@ -1189,6 +1189,10 @@ void test_spawn_cwd_thread_budget_resolves(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
+void test_devproc_thread_files_name_their_thread(void);
+void test_devproc_thread_step_names_its_thread(void);
+void test_devproc_thread_dir_gated(void);
+void test_devproc_readdir_lists_every_dir(void);
 void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
@@ -3506,6 +3510,10 @@ struct test_case g_tests[] = {
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
+    { "devproc.thread_files_name_their_thread", test_devproc_thread_files_name_their_thread, false, NULL },
+    { "devproc.thread_step_names_its_thread",  test_devproc_thread_step_names_its_thread,  false, NULL },
+    { "devproc.thread_dir_gated",              test_devproc_thread_dir_gated,              false, NULL },
+    { "devproc.readdir_lists_every_dir",       test_devproc_readdir_lists_every_dir,       false, NULL },
     { "devproc.debug_kregs_kstack_wait",       test_devproc_debug_kregs_kstack_wait,       false, NULL },
     { "devproc.debug_kstack_settled",          test_devproc_debug_kstack_settled,          false, NULL },
     { "devproc.debug_step_cancel_on_stop",     test_devproc_debug_step_cancel_on_stop,     false, NULL },

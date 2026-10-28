@@ -72,6 +72,8 @@
 //
 // path = 0                         => root /proc directory (QTDIR).
 // path = (pid << 32) | subkind     => per-pid object, subkind != 0.
+// path = (tid << 32) | PQS_TID_FLAG | subkind, with qid.vers = pid
+//                                  => per-thread object (DEBUG-FS-DESIGN 5h).
 //
 // Subkinds form a closed set; PROC_QSUB_RESERVED == 0 marks the root.
 
@@ -97,7 +99,16 @@ enum {
     PQS_MAPS     = 15,       // /proc/<pid>/maps             (QTFILE; VIVARIUM V-4b-2; RO, the VMA table)
     PQS_ENVIRON  = 16,       // /proc/<pid>/environ          (QTFILE; VIVARIUM V-4b-6; RO, owner-or-CAP_HOSTOWNER)
     PQS_IMPERIUM = 17,       // /proc/<pid>/imperium         (QTFILE; IM-2; RO, owner-or-CAP_HOSTOWNER: the legate scope + what flows)
+    PQS_THREAD_DIR = 18,     // /proc/<pid>/thread/          (QTDIR; thread-model C7, DEBUG-FS-DESIGN 5h)
+    PQS_TID_DIR  = 19,       // /proc/<pid>/thread/<tid>/    (QTDIR; per-thread, under PQS_TID_FLAG)
 };
+
+// Marks a per-thread path. Its qid.vers carries the pid, as Plan 9's devproc
+// keeps it (PID(q) = q.vers): both ids run to 31 bits, so the path has no room
+// for the pid beside the tid and the kind. A main thread's tid is its pid (one
+// id space, ARCH 7.3.4), so without the flag /proc/<pid>/thread/<pid>/regs and
+// /proc/<pid>/regs -- thread <pid>, and the focus -- would share a path.
+#define PQS_TID_FLAG 0x80000000u
 
 #define PROC_QID_ROOT_PATH  0ULL
 
@@ -110,7 +121,27 @@ static inline int proc_qid_pid(u64 path) {
 }
 
 static inline u32 proc_qid_kind(u64 path) {
-    return (u32)path;
+    return (u32)path & ~PQS_TID_FLAG;
+}
+
+static inline bool proc_qid_is_tid(u64 path) {
+    return ((u32)path & PQS_TID_FLAG) != 0;
+}
+
+static inline u64 tid_qid_make(int tid, u32 subkind) {
+    return ((u64)(u32)tid << 32) | PQS_TID_FLAG | (u64)subkind;
+}
+
+// The pid a qid names: the path's high half for a per-pid object, the version
+// for a per-thread one.
+static inline int devproc_qid_pid(const struct Qid *q) {
+    return proc_qid_is_tid(q->path) ? (int)q->vers : proc_qid_pid(q->path);
+}
+
+// The tid a per-thread qid names, or -1 for a per-pid object, whose debug files
+// report the focus, else main. Ids never go below 0, and 0 itself is kproc's.
+static inline int devproc_qid_tid(const struct Qid *q) {
+    return proc_qid_is_tid(q->path) ? (int)(u32)(q->path >> 32) : -1;
 }
 
 // =============================================================================
@@ -143,6 +174,20 @@ static const struct proc_pid_file g_proc_pid_files[] = {
 
 #define PROC_PID_FILE_COUNT \
     (sizeof(g_proc_pid_files) / sizeof(g_proc_pid_files[0]))
+
+// The per-thread files (DEBUG-FS-DESIGN 5h): the Proc-level kinds of the same
+// names, read for the named thread instead of the focus.
+static const struct proc_pid_file g_proc_tid_files[] = {
+    { "regs",   PQS_REGS   },
+    { "fpregs", PQS_FPREGS },
+    { "kregs",  PQS_KREGS  },
+    { "kstack", PQS_KSTACK },
+};
+
+#define PROC_TID_FILE_COUNT \
+    (sizeof(g_proc_tid_files) / sizeof(g_proc_tid_files[0]))
+
+#define PROC_THREAD_DIR_NAME "thread"
 
 // =============================================================================
 // Tiny formatters (no libc; inline for the synthetic-text fields).
@@ -806,24 +851,76 @@ static bool parse_decimal(const char *s, int *out) {
 // Returns true on success (filling *out_qid); false on miss. Special
 // names: ".." goes up.
 
-static bool walk_one(u64 cur_path, const char *name,
+static bool devproc_name_eq(const char *a, const char *b) {
+    int j = 0;
+    while (a[j] && b[j] && a[j] == b[j]) j++;
+    return a[j] == 0 && b[j] == 0;
+}
+
+static bool devproc_debug_authorized_locked(const struct Proc *caller,
+                                            const struct Proc *target);
+static struct Thread *devproc_tid_thread_locked(struct Proc *target, int tid);
+
+// Who may list /proc/<pid>/thread/ and walk to a tid (DEBUG-FS-DESIGN 5h): the
+// target's owner or a CAP_HOSTOWNER holder (OQ-4, the gate on sched, which
+// already discloses every tid), or a caller debug-authorized for it (I-39). The
+// walk is gated with the listing: the tid set is what the gate protects, and a
+// walk that answered for any tid would give it away one probe at a time. The
+// caller holds g_proc_table_lock, as both predicates require.
+static bool devproc_threads_visible_locked(const struct Proc *caller,
+                                           const struct Proc *target) {
+    return devproc_owner_or_hostowner(caller, target) ||
+           devproc_debug_authorized_locked(caller, target);
+}
+
+struct devproc_tidwalk_ctx {
+    int          pid;
+    int          tid;
+    struct Proc *caller;
+    bool         found;
+};
+
+static int devproc_tidwalk_cb(struct Proc *target, void *arg) {
+    struct devproc_tidwalk_ctx *w = (struct devproc_tidwalk_ctx *)arg;
+    if (target->pid != w->pid) return 0;
+    if (devproc_threads_visible_locked(w->caller, target)) {
+        irq_state_t ts = proc_threads_lock(target);
+        w->found = devproc_tid_thread_locked(target, w->tid) != NULL;
+        proc_threads_unlock(target, ts);
+    }
+    return 1;
+}
+
+static bool walk_one(const struct Qid *cur, const char *name,
                      struct Qid *out_qid) {
     out_qid->path = 0;
     out_qid->vers = 0;
     out_qid->type = 0;
     out_qid->pad[0] = out_qid->pad[1] = out_qid->pad[2] = 0;
 
-    // ".." — go up one level.
+    u64  cur_path = cur->path;
+    u32  cur_kind = proc_qid_kind(cur_path);
+    bool cur_tid  = proc_qid_is_tid(cur_path);
+
+    // ".." — go up one level: a file to its directory, a directory to the one
+    // that lists it, the root to itself (the dev's root is the apex).
     if (name[0] == '.' && name[1] == '.' && name[2] == '\0') {
-        if (cur_path == PROC_QID_ROOT_PATH) {
-            // root's parent is itself (the dev's root is the apex).
-            out_qid->path = PROC_QID_ROOT_PATH;
-            out_qid->type = QTDIR;
+        out_qid->type = QTDIR;
+        if (cur_tid) {
+            int pid = devproc_qid_pid(cur);
+            if (cur_kind == PQS_TID_DIR) {
+                out_qid->path = proc_qid_make(pid, PQS_THREAD_DIR);
+            } else {
+                out_qid->path = tid_qid_make(devproc_qid_tid(cur), PQS_TID_DIR);
+                out_qid->vers = (u32)pid;
+            }
             return true;
         }
-        // From any /proc/<pid>/ dir or file, ".." → root.
-        out_qid->path = PROC_QID_ROOT_PATH;
-        out_qid->type = QTDIR;
+        if (cur_path == PROC_QID_ROOT_PATH || cur_kind == PQS_PID_DIR) {
+            out_qid->path = PROC_QID_ROOT_PATH;
+            return true;
+        }
+        out_qid->path = proc_qid_make(proc_qid_pid(cur_path), PQS_PID_DIR);
         return true;
     }
 
@@ -838,16 +935,44 @@ static bool walk_one(u64 cur_path, const char *name,
         return true;
     }
 
-    // From /proc/<pid>/: name should be one of the known files.
-    u32 cur_kind = proc_qid_kind(cur_path);
+    // From /proc/<pid>/thread/<tid>/: one of the per-thread files.
+    if (cur_tid) {
+        if (cur_kind != PQS_TID_DIR) return false;
+        for (size_t i = 0; i < PROC_TID_FILE_COUNT; i++) {
+            if (devproc_name_eq(g_proc_tid_files[i].name, name)) {
+                out_qid->path = tid_qid_make(devproc_qid_tid(cur), g_proc_tid_files[i].kind);
+                out_qid->vers = cur->vers;
+                out_qid->type = QTFILE;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // From /proc/<pid>/thread/: a decimal tid, gated, of a live thread.
+    if (cur_kind == PQS_THREAD_DIR) {
+        struct devproc_tidwalk_ctx w = { .pid = proc_qid_pid(cur_path), .found = false };
+        if (!parse_decimal(name, &w.tid)) return false;
+        struct Thread *self = current_thread();
+        w.caller = self ? self->proc : NULL;
+        proc_for_each(devproc_tidwalk_cb, &w);
+        if (!w.found) return false;
+        out_qid->path = tid_qid_make(w.tid, PQS_TID_DIR);
+        out_qid->vers = (u32)w.pid;
+        out_qid->type = QTDIR;
+        return true;
+    }
+
+    // From /proc/<pid>/: name should be one of the known files, or thread/.
     if (cur_kind == PQS_PID_DIR) {
+        int pid = proc_qid_pid(cur_path);
+        if (devproc_name_eq(PROC_THREAD_DIR_NAME, name)) {
+            out_qid->path = proc_qid_make(pid, PQS_THREAD_DIR);
+            out_qid->type = QTDIR;
+            return true;
+        }
         for (size_t i = 0; i < PROC_PID_FILE_COUNT; i++) {
-            const char *f = g_proc_pid_files[i].name;
-            // strcmp inline (no libc).
-            int j = 0;
-            while (f[j] && name[j] && f[j] == name[j]) j++;
-            if (f[j] == 0 && name[j] == 0) {
-                int pid = proc_qid_pid(cur_path);
+            if (devproc_name_eq(g_proc_pid_files[i].name, name)) {
                 out_qid->path = proc_qid_make(pid, g_proc_pid_files[i].kind);
                 out_qid->type = QTFILE;
                 return true;
@@ -910,7 +1035,7 @@ static struct Walkqid *devproc_walk(struct Spoor *c, struct Spoor *nc,
     int n = 0;
     for (int i = 0; i < nname; i++) {
         struct Qid next;
-        if (!walk_one(cur->qid.path, name[i], &next)) {
+        if (!walk_one(&cur->qid, name[i], &next)) {
             break;        // miss; stop and return what we have
         }
         cur->qid = next;
@@ -969,7 +1094,9 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_EXE:
     case PQS_CWD:
     case PQS_MAPS:    return T_S_IFREG | 0444u;   // V-4a-0 / V-4b-1 / V-4b-2: info files, ns's posture
-    case PQS_PID_DIR: return T_S_IFDIR | 0555u;
+    case PQS_PID_DIR:
+    case PQS_THREAD_DIR:
+    case PQS_TID_DIR: return T_S_IFDIR | 0555u;
     default:          return 0u;                  // no type, no perms -- see stat_native
     }
 }
@@ -991,6 +1118,7 @@ static u32 devproc_mode_for_kind(u32 kind) {
 // was a UAF). A non-zero callback return early-stops at the matched pid.
 struct devproc_stat_ctx {
     int  pid;
+    int  tid;        // a per-thread object's thread, which must still be live; -1 = none
     bool found;
     u32  uid;
     u32  gid;
@@ -998,6 +1126,12 @@ struct devproc_stat_ctx {
 static int devproc_stat_cb(struct Proc *p, void *arg) {
     struct devproc_stat_ctx *s = (struct devproc_stat_ctx *)arg;
     if (p->pid != s->pid) return 0;          // continue
+    if (s->tid >= 0) {
+        irq_state_t ts = proc_threads_lock(p);
+        bool live = devproc_tid_thread_locked(p, s->tid) != NULL;
+        proc_threads_unlock(p, ts);
+        if (!live) return 1;                  // the named thread has gone
+    }
     s->found = true;
     s->uid   = p->principal_id;
     s->gid   = p->primary_gid;
@@ -1030,7 +1164,7 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
         return 0;
     }
     u32 kind = proc_qid_kind(path);
-    int pid  = proc_qid_pid(path);
+    int pid  = devproc_qid_pid(&c->qid);
 
     u32 mode = devproc_mode_for_kind(kind);
     // A qid whose subkind this Dev cannot classify is not a typeless file; it
@@ -1040,7 +1174,8 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     // is exactly the failure the type bits above exist to prevent.
     if (mode == 0)                   return -1;
 
-    struct devproc_stat_ctx s = { .pid = pid, .found = false, .uid = 0, .gid = 0 };
+    struct devproc_stat_ctx s = { .pid = pid, .tid = devproc_qid_tid(&c->qid),
+                                  .found = false, .uid = 0, .gid = 0 };
     proc_for_each(devproc_stat_cb, &s);           // snapshot the owner under the lock
     if (!s.found)                    return -1;   // gone since walk
 
@@ -1052,7 +1187,8 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     out->nlink    = 1;
     out->blksize  = 4096;
     out->qid_path = path;
-    out->qid_type = (kind == PQS_PID_DIR) ? QTDIR : QTFILE;
+    out->qid_type = (kind == PQS_PID_DIR || kind == PQS_THREAD_DIR ||
+                     kind == PQS_TID_DIR) ? QTDIR : QTFILE;
     return 0;
 }
 
@@ -1353,7 +1489,12 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (off < 0) return -1;
 
     u32 kind = proc_qid_kind(c->qid.path);
-    int  pid = proc_qid_pid(c->qid.path);
+    int  pid = devproc_qid_pid(&c->qid);
+
+    // A per-thread object reads only through its four debug paths below; its
+    // directory lists through readdir.
+    if (proc_qid_is_tid(c->qid.path) && kind != PQS_REGS && kind != PQS_FPREGS &&
+        kind != PQS_KREGS && kind != PQS_KSTACK) return -1;
 
     // mem is a VA-addressed cross-Proc read (I-39 + stopped-only), not a
     // formatted info file -- its own path (gamma), before the format dispatch.
@@ -1370,7 +1511,8 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
     // for commands). Validate the kind BEFORE the lookup so the callback only
     // formats the readable file kinds.
-    if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
+    if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR ||
+        kind == PQS_THREAD_DIR) return -1;
     // NOTE: this whitelist is the FOURTH place a new readable file must be
     // registered (after g_proc_pid_files, devproc_read_cb, and proc_qid_mode),
     // and the only one whose omission fails SILENTLY as a plain -1 rather than
@@ -1932,7 +2074,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
     if (!t || !t->proc) return -1;
 
     struct devproc_mem_ctx m = {
-        .target_pid = proc_qid_pid(c->qid.path),
+        .target_pid = devproc_qid_pid(&c->qid),
         .caller     = t->proc,
         .vaddr      = (u64)off,
         .kbuf       = buf,
@@ -1987,6 +2129,29 @@ struct Thread *devproc_focus_thread(struct Proc *target) {
     return proc_main_thread_locked(target);
 }
 
+// The thread a per-thread file names (DEBUG-FS-DESIGN 5h): the live thread
+// `tid` of `target`, or NULL once it has exited or left the Proc. Every lookup
+// of a thread by tid walks the list under target->threads_lock (ARCH 7.3.1),
+// and the caller holds it across its whole use of the result -- the pin
+// devproc_focus_thread relies on. An EXITING thread is never returned, for
+// devproc_focus_thread's reason: apply_regs and the step verb have no EXITING
+// gate of their own. Ids are never reused but by an exec's pid move, which
+// happens with the old main already off the list, so one thread answers.
+static struct Thread *devproc_tid_thread_locked(struct Proc *target, int tid) {
+    ASSERT_TL_HELD(target);
+    for (struct Thread *th = target->threads; th; th = th->next_in_proc)
+        if (th->tid == tid)
+            return th->state == THREAD_EXITING ? NULL : th;
+    return NULL;
+}
+
+// The thread a debug file reports: the named one for a per-thread file
+// (tid >= 0), else the focus, else main.
+static struct Thread *devproc_named_thread(struct Proc *target, int tid) {
+    return tid >= 0 ? devproc_tid_thread_locked(target, tid)
+                    : devproc_focus_thread(target);
+}
+
 // Build the target focus thread's regs (the EL0 trapframe at the kstack top) or
 // fpregs (t->ctx's saved FP/SIMD) into `out`. Returns the struct size, or 0 on
 // failure (no live thread / no kstack). The trapframe is at kstack_base +
@@ -1997,11 +2162,12 @@ struct Thread *devproc_focus_thread(struct Proc *target) {
 // I-39 + fully-stopped (so on_cpu==false: the frame + ctx are settled, not being
 // written by a live cpu_switch_context).
 // `raw` admits kregs's kernel half (the CAP_DEBUG/CAP_HOSTOWNER tier; see below).
-static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out, bool raw) {
-    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else main)
+// `tid` names the thread of a per-thread file; -1 reads the focus, else main.
+static long devproc_build_regs(struct Proc *target, int tid, u32 kind, u8 *out, bool raw) {
+    struct Thread *th = devproc_named_thread(target, tid);   // 8c-2 #95: the M at the stop (else main)
     // 8a-1c holotype F1 (defense-in-depth): never read an EXITING thread's
     // ctx/trapframe -- it is running its exit path (the final sched() writes
-    // t->ctx). devproc_focus_thread never selects one, and a user Proc's thread
+    // t->ctx). devproc_named_thread never selects one, and a user Proc's thread
     // is marked EXITING only under the threads_lock this caller holds, so the
     // state clause is unreachable and no test can redden it: defense in depth
     // only. The witnesses are the selector's (devproc.debug_regs leg c).
@@ -2079,9 +2245,9 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out, bool raw)
 // saved SPSR is kept (step-related SPSR.SS is 8a-2). fpregs: all fields (no
 // privilege bits). Caller holds g_proc_table_lock + target->threads_lock + gated
 // fully-stopped.
-static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
+static void devproc_apply_regs(struct Proc *target, int tid, u32 kind, const u8 *in) {
     if (kind == PQS_KREGS) return;   // 8a-1b-gamma-3: kregs is RO (no write path routes here; defensive)
-    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: write the M at the stop (else main)
+    struct Thread *th = devproc_named_thread(target, tid);   // 8c-2 #95: write the M at the stop (else main)
     if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return;
 
     if (kind == PQS_REGS) {
@@ -2108,6 +2274,7 @@ static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
 
 struct devproc_regs_ctx {
     int          target_pid;
+    int          tid;       // the per-thread file's thread; -1 = the focus, else main
     struct Proc *caller;
     u32          kind;      // PQS_REGS or PQS_FPREGS
     void        *kbuf;      // the kernel staging buffer
@@ -2152,14 +2319,14 @@ static long devproc_regs_locked(struct Proc *target, struct devproc_regs_ctx *r)
     // devproc_debug_authorized and the kstack reader.
     bool raw = (__atomic_load_n(&r->caller->caps, __ATOMIC_ACQUIRE)
                 & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
-    long size = devproc_build_regs(target, r->kind, scratch, raw);
+    long size = devproc_build_regs(target, r->tid, r->kind, scratch, raw);
     if (size == 0)       return -1;   // no live thread / no kstack
     if (r->off >= size)  return 0;    // off past EOF -> 0
     long avail = size - (long)r->off;
     long cnt = (r->n < avail) ? r->n : avail;
     if (r->is_write) {
         for (long i = 0; i < cnt; i++) scratch[r->off + i] = ((const u8 *)r->kbuf)[i];
-        devproc_apply_regs(target, r->kind, scratch);
+        devproc_apply_regs(target, r->tid, r->kind, scratch);
     } else {
         for (long i = 0; i < cnt; i++) ((u8 *)r->kbuf)[i] = scratch[r->off + i];
     }
@@ -2174,7 +2341,8 @@ static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is
     if (!t || !t->proc) return -1;
 
     struct devproc_regs_ctx r = {
-        .target_pid = proc_qid_pid(c->qid.path),
+        .target_pid = devproc_qid_pid(&c->qid),
+        .tid        = devproc_qid_tid(&c->qid),
         .caller     = t->proc,
         .kind       = proc_qid_kind(c->qid.path),
         .kbuf       = buf,
@@ -2198,7 +2366,7 @@ enum ctl_verb {
     CTL_VERB_STOP,     // 8a-1b-beta: park the target's threads; block until stopped/exit
     CTL_VERB_START,    // 8a-1b-beta: resume the target (non-blocking)
     CTL_VERB_WAITSTOP, // 8a-1b-beta: block until the target is stopped/exits
-    CTL_VERB_STEP,     // 8a-2b-2: single-step the focus thread one instruction; block until re-stopped
+    CTL_VERB_STEP,     // 8a-2b-2: single-step the focus thread (5h: or `step <tid>`'s) one instruction; block until re-stopped
     CTL_VERB_HWVERIFY, // 8a-2a: arm ("hwverify <hexva>") / disarm ("hwverify off") the self-scoped HW-breakpoint verify
     CTL_VERB_HWBREAK,  // 8a-2b-1: arm a real per-Proc HW breakpoint ("hwbreak <hexva>"; slot-owner + stopped-only)
     CTL_VERB_HWRMBREAK,// 8a-2b-1: disarm a per-Proc HW breakpoint ("hwrmbreak <hexva>")
@@ -2292,6 +2460,33 @@ static enum hwverify_arg parse_hwverify_arg(const char *s, long n, u64 *va_out) 
 // Delegates to the hwverify scan (verb-skip + separator + optional-0x hex +
 // overflow guard); a numeric token yields the VA, and "off" (not a VA) is
 // correctly rejected. Returns true + *va_out on success.
+// `step`'s optional operand (DEBUG-FS-DESIGN 5h): the tid of the thread to step.
+// *tid_out is -1 when there is none -- the focus, else main, as before. A
+// decimal under the walk's rules (parse_decimal: no leading zero, at most
+// 2^31 - 1) names a thread; anything else after the verb refuses the write.
+static bool parse_ctl_step_tid(const char *s, long n, int *tid_out) {
+    *tid_out = -1;
+    long i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    while (i < n && s[i] != ' '  && s[i] != '\t' && s[i] != '\n' &&
+                    s[i] != '\r' && s[i] != '\0') i++;            // the verb
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i >= n || s[i] == '\n' || s[i] == '\r' || s[i] == '\0') return true;
+    long start = i;
+    u64 v = 0;
+    while (i < n && s[i] >= '0' && s[i] <= '9') {
+        v = v * 10 + (u64)(s[i] - '0');
+        if (v > 0x7fffffffu) return false;
+        i++;
+    }
+    long len = i - start;
+    if (len == 0 || (len > 1 && s[start] == '0')) return false;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i < n && s[i] != '\n' && s[i] != '\r' && s[i] != '\0') return false;
+    *tid_out = (int)v;
+    return true;
+}
+
 static bool parse_ctl_hexva(const char *s, long n, u64 *va_out) {
     u64 v = 0;
     if (parse_hwverify_arg(s, n, &v) != HWVERIFY_ARG_VA) return false;
@@ -2667,6 +2862,7 @@ static int devproc_hwwatch_walk_cb(struct Proc *target, void *arg) {
 // instruction; the caller then blocks until fully-stopped.
 struct devproc_step_ctx {
     int           target_pid;
+    int           tid;      // `step <tid>`'s thread; -1 = the focus, else main
     struct Proc  *caller;   // I-39
     struct Spoor *ctl;      // must == target->debug_owner (slot ownership)
     int           result;   // 0 not found, +1 armed+resumed, -T_E_ACCES refused, -1 not-stopped / no-thread / not the slot owner
@@ -2685,7 +2881,9 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
         s->result = -1;
         return 1;
     }
-    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (step targets it), else main
+    // 8c-2 #95: the M at the stop (step targets it), else main; `step <tid>`
+    // names its thread (DEBUG-FS-DESIGN 5h).
+    struct Thread *th = devproc_named_thread(target, s->tid);
     if (!th) {                                                                       // no thread to step
         proc_threads_unlock(target, ts);
         s->result = -1;
@@ -2714,6 +2912,23 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     proc_debug_resume(target);
     s->result = 1;
     return 1;
+}
+
+// Test hooks (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): step's operand parse, and one arming
+// pass of the step verb, since the write itself blocks until the target
+// re-stops.
+bool devproc_parse_step_tid_for_test(const char *s, long n, int *tid_out);
+bool devproc_parse_step_tid_for_test(const char *s, long n, int *tid_out) {
+    return parse_ctl_step_tid(s, n, tid_out);
+}
+
+int devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoor *ctl);
+int devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoor *ctl) {
+    struct devproc_step_ctx s = { .target_pid = pid, .tid = tid, .caller = caller,
+                                  .ctl = ctl, .result = 0 };
+    proc_for_each(devproc_step_walk_cb, &s);
+    return s.result;
 }
 
 // Scan a target (by pid) for full debug-stop. state: -1 gone/not-found, 0
@@ -2842,11 +3057,12 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 // link-relative -> reveals no slide), which IS the "why is it hung" diagnostic.
 // (8b-1d holotype F1: without this, an unprivileged owner reads its own koff off a
 // settled focus thread -- 8b widened the pre-existing 8a owner-attach-and-stop path.)
-static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap, bool raw) {
-    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else main)
+static size_t devproc_format_kstack(struct Proc *target, int tid, char *buf, size_t cap,
+                                    bool raw) {
+    struct Thread *th = devproc_named_thread(target, tid);   // 8c-2 #95: the M at the stop (else main)
     // 8a-1c holotype F1 (defense-in-depth): never walk an EXITING thread's
     // ctx/kstack -- it is executing its exit path on that stack. Unreachable
-    // through devproc_focus_thread, as in devproc_build_regs.
+    // through devproc_named_thread, as in devproc_build_regs.
     if (!th || th->state == THREAD_EXITING || !th->kstack_base) return 0;
     if (th->kstack_size <= THREAD_KSTACK_GUARD_SIZE) return 0;   // no usable region
     // 8b: a running thread has no meaningful saved frame (live regs are in HW).
@@ -2900,6 +3116,7 @@ static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap, 
 
 struct devproc_kstack_ctx {
     int          target_pid;
+    int          tid;       // the per-thread file's thread; -1 = the focus, else main
     struct Proc *caller;
     char        *buf;
     size_t       cap;
@@ -2928,7 +3145,14 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     bool raw = (__atomic_load_n(&k->caller->caps, __ATOMIC_ACQUIRE)
                 & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
     irq_state_t ts = proc_threads_lock(target);
-    k->total  = devproc_format_kstack(target, k->buf, k->cap, raw);
+    if (k->tid >= 0 && !devproc_tid_thread_locked(target, k->tid)) {
+        // A per-thread file whose thread has gone reads as not found, as a reaped
+        // Proc's files do; the focus fallback, with no thread, reads empty.
+        proc_threads_unlock(target, ts);
+        k->result = -1;
+        return 1;
+    }
+    k->total  = devproc_format_kstack(target, k->tid, k->buf, k->cap, raw);
     proc_threads_unlock(target, ts);
     k->result = 1;
     return 1;
@@ -2943,7 +3167,8 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
 
     char content[DEBUG_KSTACK_BUF];
     struct devproc_kstack_ctx k = {
-        .target_pid = proc_qid_pid(c->qid.path),
+        .target_pid = devproc_qid_pid(&c->qid),
+        .tid        = devproc_qid_tid(&c->qid),
         .caller     = t->proc,
         .buf        = content,
         .cap        = sizeof(content),
@@ -3041,7 +3266,7 @@ static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (n > DEVPROC_ENVIRON_READ_MAX) n = DEVPROC_ENVIRON_READ_MAX;
 
     struct devproc_environ_ctx k = {
-        .target_pid = proc_qid_pid(c->qid.path),
+        .target_pid = devproc_qid_pid(&c->qid),
         .caller     = t->proc,
         .buf        = buf,
         .n          = n,
@@ -3168,7 +3393,7 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
 
-    int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc, NULL);
+    int ev = devproc_wait_block(devproc_qid_pid(&c->qid), t->proc, NULL);
     if (ev < 0) return devproc_walk_fail(ev);   // refused, or caller death-interrupted
     const char *msg = (ev == 1) ? "stopped\n" : "exited\n";
 
@@ -3193,6 +3418,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (n < 0) return -1;
 
     u32 kind = proc_qid_kind(c->qid.path);
+    // A per-thread object writes only its register files.
+    if (proc_qid_is_tid(c->qid.path) && kind != PQS_REGS && kind != PQS_FPREGS) return -1;
     // mem: a VA-addressed cross-Proc write (I-39 + stopped-only + W^X). `off` is
     // the target VA -- NOT ignored, unlike the ctl control message below.
     if (kind == PQS_MEM) return devproc_mem_rw(c, (void *)buf, n, off, true);
@@ -3232,7 +3459,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // per-thread install via a stopped debuggee). "off" disarms; a hex VA
         // (user-half, 4-byte aligned) arms bp0. The delivery result is read back
         // from this same ctl file (devproc_read_cb PQS_CTL).
-        int target = proc_qid_pid(c->qid.path);
+        int target = devproc_qid_pid(&c->qid);
         if (target != t->proc->pid) return -1;    // self-test only
         u64 va = 0;
         switch (parse_hwverify_arg((const char *)buf, n, &va)) {
@@ -3249,7 +3476,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
 
     if (v == CTL_VERB_ATTACH || v == CTL_VERB_DETACH) {
         struct devproc_debug_ctx d = {
-            .target_pid = proc_qid_pid(c->qid.path),
+            .target_pid = devproc_qid_pid(&c->qid),
             .caller     = t->proc,
             .ctl        = c,
             .verb       = v,
@@ -3261,7 +3488,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
 
     if (v == CTL_VERB_STOP || v == CTL_VERB_START || v == CTL_VERB_WAITSTOP ||
         v == CTL_VERB_EXITKILL) {
-        int pid = proc_qid_pid(c->qid.path);
+        int pid = devproc_qid_pid(&c->qid);
         enum debug_runctl op = (v == CTL_VERB_STOP)     ? DBG_RC_STOP     :
                                (v == CTL_VERB_START)    ? DBG_RC_START    :
                                (v == CTL_VERB_EXITKILL) ? DBG_RC_EXITKILL : DBG_RC_WAITSTOP;
@@ -3277,12 +3504,16 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     }
 
     if (v == CTL_VERB_STEP) {
-        // 8a-2b-2: single-step the focus thread one instruction. Arm + resume under
+        // 8a-2b-2: single-step the focus thread, or the one `step <tid>` names
+        // (DEBUG-FS-DESIGN 5h), one instruction. Arm + resume under
         // the lock, then block (outside the lock) until the target re-stops (the
         // step completed) / exits / the slot is released; -1 only if the CALLER was
         // death-interrupted, -T_E_SRCH if the target died or the slot went first.
-        int pid = proc_qid_pid(c->qid.path);
-        struct devproc_step_ctx s = { .target_pid = pid, .caller = t->proc, .ctl = c, .result = 0 };
+        int pid = devproc_qid_pid(&c->qid);
+        int tid;
+        if (!parse_ctl_step_tid((const char *)buf, n, &tid)) return -1;
+        struct devproc_step_ctx s = { .target_pid = pid, .tid = tid, .caller = t->proc,
+                                      .ctl = c, .result = 0 };
         proc_for_each(devproc_step_walk_cb, &s);
         if (s.result != 1) return devproc_walk_fail(s.result);
         // Block until the step COMPLETES + the target RE-stops. Must poll
@@ -3313,7 +3544,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         bool add = (v == CTL_VERB_HWBREAK);
         struct debug_hw *spare = add ? (struct debug_hw *)kzalloc(sizeof(struct debug_hw), 0) : NULL;
         struct devproc_hwbp_ctx h = {
-            .target_pid = proc_qid_pid(c->qid.path),
+            .target_pid = devproc_qid_pid(&c->qid),
             .caller     = t->proc,
             .ctl        = c,
             .add        = add,
@@ -3342,7 +3573,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         if (va == 0 || va >= UACCESS_USER_VA_TOP) return -1;   // user-half only
         struct debug_hw *spare = add ? (struct debug_hw *)kzalloc(sizeof(struct debug_hw), 0) : NULL;
         struct devproc_hwwatch_ctx h = {
-            .target_pid = proc_qid_pid(c->qid.path),
+            .target_pid = devproc_qid_pid(&c->qid),
             .caller     = t->proc,
             .ctl        = c,
             .add        = add,
@@ -3363,7 +3594,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // (unlike the debug STOP/WAITSTOP): the flag is set + the reschedule IPI
         // issued, and the target parks at its own stop checkpoint asynchronously.
         struct devproc_job_ctx j = {
-            .target_pid = proc_qid_pid(c->qid.path),
+            .target_pid = devproc_qid_pid(&c->qid),
             .caller     = t->proc,
             .resume     = (v == CTL_VERB_RESUME),
             .result     = 0,
@@ -3373,7 +3604,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     }
 
     struct devproc_kill_ctx k = {
-        .target_pid = proc_qid_pid(c->qid.path),
+        .target_pid = devproc_qid_pid(&c->qid),
         .caller     = t->proc,
         .result     = 0,
     };
@@ -3393,6 +3624,186 @@ static void devproc_remove(struct Spoor *c) {
 static int devproc_wstat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     return -1;
+}
+
+// =============================================================================
+// readdir (DEBUG-FS-DESIGN 5h; seam-932's devproc half).
+// =============================================================================
+//
+// The root lists the pids, a pid directory its files and thread/, a thread
+// directory the live tids, a tid directory its four files. A cookie is the
+// entry's resume point, strictly increasing and never 0 (the readdir contract):
+// the id plus one for a pid or a tid, the position plus one in a fixed
+// directory. An id listing keeps no snapshot between calls: each pass takes the
+// next run of ids at or above the cookie, ascending, under the lock, so an id
+// created during a listing appears when it lies past the cookie and one that
+// ends is not listed again. Ids are never reused but by an exec's pid move,
+// which keeps the pid in use (ARCH 7.3.4), so no cookie names two objects.
+
+#define DEVPROC_READDIR_BATCH 16
+
+// The smallest ids >= lo seen so far, ascending, at most DEVPROC_READDIR_BATCH.
+struct devproc_idbatch {
+    u32 lo;
+    u32 n;
+    int id[DEVPROC_READDIR_BATCH];
+};
+
+static void devproc_idbatch_offer(struct devproc_idbatch *b, int v) {
+    if (v < 0 || (u32)v < b->lo) return;
+    if (b->n == DEVPROC_READDIR_BATCH && v >= b->id[b->n - 1]) return;
+    u32 i = (b->n < DEVPROC_READDIR_BATCH) ? b->n++ : b->n - 1;   // full: the largest goes
+    while (i > 0 && b->id[i - 1] > v) {
+        b->id[i] = b->id[i - 1];
+        i--;
+    }
+    b->id[i] = v;
+}
+
+struct devproc_pidlist_ctx {
+    struct Proc           *caller;
+    struct devproc_idbatch b;
+};
+
+// A caller running as none sees only its own pid (the /ctl/procs rule).
+static int devproc_pidlist_cb(struct Proc *p, void *arg) {
+    struct devproc_pidlist_ctx *l = (struct devproc_pidlist_ctx *)arg;
+    if (!devproc_none_walled(l->caller, p)) devproc_idbatch_offer(&l->b, p->pid);
+    return 0;
+}
+
+struct devproc_tidlist_ctx {
+    int                    pid;
+    struct Proc           *caller;
+    long                   result;   // 0 not found, 1 listed, -T_E_ACCES refused
+    struct devproc_idbatch b;
+};
+
+static int devproc_tidlist_cb(struct Proc *target, void *arg) {
+    struct devproc_tidlist_ctx *l = (struct devproc_tidlist_ctx *)arg;
+    if (target->pid != l->pid) return 0;
+    if (!devproc_threads_visible_locked(l->caller, target)) {
+        l->result = -T_E_ACCES;
+        return 1;
+    }
+    // A user Proc's thread turns EXITING only under this lock, so the state read
+    // here is stable for the pass (devproc_focus_thread's argument).
+    irq_state_t ts = proc_threads_lock(target);
+    for (struct Thread *th = target->threads; th; th = th->next_in_proc)
+        if (th->state != THREAD_EXITING) devproc_idbatch_offer(&l->b, th->tid);
+    proc_threads_unlock(target, ts);
+    l->result = 1;
+    return 1;
+}
+
+// One 9P2000.L dirent, the wire format the SYS_READDIR handler parses: qid(13:
+// type, vers, path) + offset(8 LE) + type(1) + name_len(2 LE) + name. devenv and
+// devpci write vers 0; a per-thread qid carries the pid there. Returns the entry
+// size, or 0 if it does not fit (whole entries only).
+static long devproc_emit_dirent(u8 *out, long cap, long pos, u64 qpath, u32 qvers,
+                                u8 qtype, u64 cookie, const char *name, u32 nlen) {
+    long entry = 24 + (long)nlen;
+    if (pos + entry > cap) return 0;
+    out[pos + 0] = qtype;
+    for (int b = 0; b < 4; b++) out[pos + 1 + b]  = (u8)(qvers >> (8 * b));
+    for (int b = 0; b < 8; b++) out[pos + 5 + b]  = (u8)(qpath >> (8 * b));
+    for (int b = 0; b < 8; b++) out[pos + 13 + b] = (u8)(cookie >> (8 * b));
+    out[pos + 21] = qtype;
+    out[pos + 22] = (u8)(nlen & 0xffu);
+    out[pos + 23] = (u8)((nlen >> 8) & 0xffu);
+    for (u32 i = 0; i < nlen; i++) out[pos + 24 + (long)i] = (u8)name[i];
+    return entry;
+}
+
+static u32 devproc_cstr_len(const char *s) {
+    u32 n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+// A pid or tid directory: its fixed entries, by position.
+static long devproc_readdir_fixed(struct Spoor *c, u8 *out, long n, s64 off) {
+    bool tid_dir = proc_qid_is_tid(c->qid.path);
+    int  pid     = devproc_qid_pid(&c->qid);
+    int  tid     = devproc_qid_tid(&c->qid);
+    struct devproc_stat_ctx s = { .pid = pid, .tid = tid, .found = false };
+    proc_for_each(devproc_stat_cb, &s);
+    if (!s.found) return -1;                       // the Proc, or the thread, has gone
+
+    const struct proc_pid_file *files = tid_dir ? g_proc_tid_files : g_proc_pid_files;
+    u64 nfiles = tid_dir ? PROC_TID_FILE_COUNT : PROC_PID_FILE_COUNT;
+    u64 total  = nfiles + (tid_dir ? 0 : 1);       // a pid directory also lists thread/
+    long pos = 0;
+    for (u64 i = (u64)off; i < total; i++) {
+        const char *name;
+        u64 qpath;
+        u8  qtype;
+        if (i < nfiles) {
+            name  = files[i].name;
+            qpath = tid_dir ? tid_qid_make(tid, files[i].kind)
+                            : proc_qid_make(pid, files[i].kind);
+            qtype = QTFILE;
+        } else {
+            name  = PROC_THREAD_DIR_NAME;
+            qpath = proc_qid_make(pid, PQS_THREAD_DIR);
+            qtype = QTDIR;
+        }
+        long e = devproc_emit_dirent(out, n, pos, qpath, tid_dir ? (u32)pid : 0u, qtype,
+                                     i + 1, name, devproc_cstr_len(name));
+        if (e == 0) return pos == 0 ? -1 : pos;    // resume from the last cookie
+        pos += e;
+    }
+    return pos;
+}
+
+// The root or a thread directory: ids at or above `off`, ascending.
+static long devproc_readdir_ids(struct Spoor *c, u8 *out, long n, s64 off) {
+    if ((u64)off > PROC_ID_LAST) return 0;         // past the last id
+    bool root = c->qid.path == PROC_QID_ROOT_PATH;
+    int  pid  = root ? 0 : devproc_qid_pid(&c->qid);
+    struct Thread *self = current_thread();
+    struct Proc *caller = self ? self->proc : NULL;
+    u32 lo = (u32)off;
+    long pos = 0;
+    for (;;) {
+        struct devproc_idbatch b;
+        if (root) {
+            struct devproc_pidlist_ctx l = { .caller = caller, .b = { .lo = lo, .n = 0 } };
+            proc_for_each(devproc_pidlist_cb, &l);
+            b = l.b;
+        } else {
+            struct devproc_tidlist_ctx l = { .pid = pid, .caller = caller, .result = 0,
+                                             .b = { .lo = lo, .n = 0 } };
+            proc_for_each(devproc_tidlist_cb, &l);
+            if (l.result != 1) return pos > 0 ? pos : (l.result < 0 ? l.result : -1);
+            b = l.b;
+        }
+        for (u32 i = 0; i < b.n; i++) {
+            char name[12];
+            size_t nlen = fmt_udec(name, sizeof(name), 0, (u64)b.id[i]);
+            u64 qpath = root ? proc_qid_make(b.id[i], PQS_PID_DIR)
+                             : tid_qid_make(b.id[i], PQS_TID_DIR);
+            long e = devproc_emit_dirent(out, n, pos, qpath, root ? 0u : (u32)pid, QTDIR,
+                                         (u64)b.id[i] + 1, name, (u32)nlen);
+            if (e == 0) return pos == 0 ? -1 : pos;    // resume from the last cookie
+            pos += e;
+        }
+        if (b.n < DEVPROC_READDIR_BATCH) return pos;   // nothing above the last id
+        lo = (u32)b.id[b.n - 1] + 1;
+    }
+}
+
+static long devproc_readdir(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf) return -1;
+    if (n <= 0)     return 0;
+    if (off < 0)    return -1;
+    u64 path = c->qid.path;
+    u32 kind = proc_qid_kind(path);
+    if (path == PROC_QID_ROOT_PATH || kind == PQS_THREAD_DIR)
+        return devproc_readdir_ids(c, (u8 *)buf, n, off);
+    if (kind == PQS_PID_DIR || kind == PQS_TID_DIR)
+        return devproc_readdir_fixed(c, (u8 *)buf, n, off);
+    return -1;                                     // a file does not enumerate
 }
 
 static struct Spoor *devproc_power(struct Spoor *c, int on) {
@@ -3431,6 +3842,7 @@ struct Dev devproc = {
     .bread    = devproc_bread,
     .write    = devproc_write,
     .bwrite   = devproc_bwrite,
+    .readdir  = devproc_readdir,
 
     .remove   = devproc_remove,
     .wstat    = devproc_wstat,
