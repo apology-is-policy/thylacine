@@ -216,7 +216,6 @@ impl Lsp {
             dead: false,
         };
         if l.send(&init).is_err() {
-            l.shutdown();
             return None;
         }
         Some(l)
@@ -247,8 +246,9 @@ impl Lsp {
             Ok(()) => Ok(()),
             Err(_) => {
                 // A broken stdin means the server is gone; do not keep writing
-                // into a dead pipe on every keystroke.
-                self.dead = true;
+                // into a dead pipe on every keystroke. A dead server is dropped
+                // and never polled again, so this is the last chance to reap it.
+                self.reap();
                 Err(())
             }
         }

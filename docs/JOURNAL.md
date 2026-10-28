@@ -201,6 +201,39 @@ the child alive, which also shows the birth-hold rule stays quiet after
 corruption. joey's new line read `signal=9` for the abandoned debuggee and
 `status=0` for the phenotype probe's orphan in the same boot.
 
+**Nora's debug sessions end through Ambush (10:10-11:25Z).** The second half of what OPEN-BUGS 338 found: Nora's
+`Dap::shutdown` killed Ambush straight after the disconnect, the shape dap-probe had. An old dap-nora transcript
+(thylacine-b3e, 2026-09-10) settles that it is not hypothetical: `proc: orphan pid=2417 name="ambush-child" (parent
+pid=2416 name="ambush" exiting)` right after `:kill`.
+- The fix had to respect NORA-IDE-UX section 6, "never block the UI on a round-trip", so `:kill` and `:debug` over a
+  live session end asynchronously: the session is marked ending and reaped at Ambush's stdout EOF, and the event loop's
+  poll takes the session's 2 s deadline as its one timeout. A quit waits in a bounded loop, since no later wake comes.
+  `terminated` (not ending) still kills at once: I read ambush's proc_thylacine.go:351 to check that a self-exited
+  debuggee is reaped before `terminated` is sent, so that kill strands nothing.
+- Reading `send` for the fix turned up a second defect: a failed write set `dead` without kill or wait, and `reap()`
+  returns early on `dead`, so the child was never collected -- in both hosts. Enqueued (10:17Z) and folded in.
+- The same census over 206 old interactive transcripts found gopls killed at once at exit with its `go` child orphaned
+  (nora-demo). Different mechanism and gate: enqueued (10:24Z), not fixed here.
+- The gate's first green run failed leg 1 on all three attempts, and the transcript showed why: the orderly end worked
+  (the final status was drawn, no orphan line), but kaua's cell diff skipped column 69, where "ending the debug
+  session ..." and "debug session ended" both hold an `e`, and the token arrived as `debug session ` + a cursor move +
+  `nded`. I had checked the texts for same-column characters beforehand, assuming left alignment; the status line
+  centres its message. That check was a stub of the format, and the real log was the oracle (the M-PIN). With the
+  centring modelled (it reproduces column 69 exactly), "ending debugging ..." shares no column with the final text.
+  A split token can only time out, so the hazard costs a run, never a false pass.
+- The Fable 5.1 round (0/0/1/2) found what the gates could not: the quit's bound trusted `Instant`, whose documented
+  fallback is a clock reading zero, so a wedged Ambush could hang nora's exit with the alt-screen up. The fix uses the
+  poll's own timeout as the second clock (a timed poll that returns nothing has spent the grace by the kernel's timer).
+  Its witness needed a mutant that simulates the dead clock: with the fallback the wedged session dies at 2022 ms,
+  without it never.
+- A second axis on the reds: the gate now names the ms from the leg's send to the orphan line. Kill-at-once lands at 4
+  ms, the deadline's kill at 2002 ms, so the wedge mutant proves the deadline fired rather than something else.
+- Wrong turns besides the token: I edited mut.py while a chain was running (no invocation after the edit, checked by
+  mtime), and the stuck mutants first ran as "unknown stage" because run.sh's stage list was not updated -- the chain
+  printed it, the results were re-run.
+Lease 10:24-11:21Z: final green (sha a4c55323) PASS on attempt 1 with 0 orphan lines after `:print`; suite 2116/2116;
+reds kill/relaunch/quit/wedge each at their own leg; stuck 2022 ms, stucknofix no end within 30 s.
+
 ## 2026-10-28 -- a frame named after the function it never reached (corona)
 
 **What started it.** The P3 F2 gate log (2026-10-27, OPEN-BUGS 21:46Z) showed the

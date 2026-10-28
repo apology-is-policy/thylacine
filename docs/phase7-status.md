@@ -2593,3 +2593,37 @@ the kernel is unchanged.
   the two legs scoped). Not dirty.
 - **Still open, owned.** Nora's `DapHost::shutdown` has the same kill-at-once shape (OPEN-BUGS 2026-10-28T08:35Z);
   it needs the `dap-nora.exp` gate on a ci image.
+
+## Nora's debug sessions end through Ambush — 2026-10-28
+
+OPEN-BUGS "Nora's debug shutdown never lets ambush end its own debuggee" (corona, 2026-10-28T08:35Z) and "a failed send
+to a nora server marks it dead without reaping it" (10:17Z). Userspace only; the kernel is unchanged.
+
+- **The cause.** `Dap::shutdown`, used by `:kill`, by `:debug` over a live session and by nora's exit, sent DAP
+  `disconnect(terminateDebuggee)` and killed Ambush at once -- the shape dap-probe had before OPEN-BUGS 338. Delve answers
+  a disconnect only after it has killed and reaped the debuggee, so the kill raced that, and the kernel's EXITKILL ended
+  the debuggee and reparented it to init. A 2026-09-10 dap-nora transcript shows `proc: orphan pid=2417
+  name="ambush-child" (parent pid=2416 name="ambush" exiting)` straight after `:kill`.
+- **The end now goes through Ambush.** `:kill` and `:debug` over a live session are asynchronous (NORA-IDE-UX section 6,
+  never block the UI on a round-trip): the session is marked ending, its pipes stay polled, everything but the
+  disconnect's answer is dropped, and Ambush is reaped at its stdout EOF. The event loop's poll takes the session's
+  deadline (2 s after the disconnect) as its one timeout; past it nora kills Ambush and EXITKILL ends the debuggee.
+  `:debug` over a live session waits for the old one to be reaped, then starts. A quit waits for the same end in a
+  bounded poll of its own.
+- **A failed send reaps.** `Dap::send` and `Lsp::send` set the dead flag on a write error without a kill or a wait, and
+  `reap()` returns early on that flag, so a child that broke its stdin was never collected. Both now reap.
+- **Verification.** Mac lease 10:24-11:21Z, a `--config ci` worktree (logs `work/oct28-nora/`). Final source (dap_host sha
+  a4c55323): dap-nora PASS on attempt 1, all three teardown legs, no orphan line and no joey adopted-orphan reap after
+  nora's `:print`; suite 2116/2116. Red, each mutant putting one path back to kill-at-once: `:kill` fails leg 1, `:debug`
+  over a live session fails leg 2, quit fails leg 3, each on the `ambush-child` orphan line; with the timed gate, the
+  `:kill` mutant's orphan lands 4 ms after the send and a no-disconnect (wedged) mutant's 2002 ms after, the deadline.
+  A clock that never advances: with the timed-out-poll fallback the wedged session is still killed at 2022 ms; without
+  it, never (leg 1 times out at 30 s, no orphan). The first green run failed leg 1 on all three attempts on a split
+  token, not on the fix (see the journal). Kernel byte-unchanged; no SMP gate (nora is not on the boot path).
+- **Audit.** Round 1 Fable 5.1 (start == end): 0 P0 / 0 P1 / 1 P2 / 2 P3. F1 [P2] fixed: the quit's bounded wait
+  trusted only this process's clock reads; a poll that waited out the deadline with nothing ready now ends the grace by
+  the kernel's timer. F2 [P3] closed: the failed-send reap adds a trigger to the pre-existing kill-refused hang, which
+  cannot arise while nora has `/proc` (it reads `/proc/<pid>/kstack` every stop). F3 [P3] fixed: the dossier says the
+  deadline fallback still prints the orphan line. Not dirty.
+- **Still open, owned.** `Lsp::shutdown` kills gopls at once at exit; a nora-demo transcript shows its `go` child
+  orphaned (OPEN-BUGS 2026-10-28T10:24Z).

@@ -15,7 +15,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: []
 created: 2026-08-03
-updated: 2026-10-21
+updated: 2026-10-28
 area: userspace
 ---
 ## Purpose
@@ -108,13 +108,41 @@ A dead server contributes an empty descriptor list, so its fds are never polled
 again — safe by construction rather than by bookkeeping, because the set is
 rebuilt every round rather than mutated.
 
+The poll has exactly one timeout. While a debug session is ending (below), the
+round blocks no longer than that session's deadline, and every wake checks the
+deadline. A debugger that never answers is still killed on time, without a
+general tick.
+
 ### Neither child may outlive the editor
 
-Both hosts carry the same lifecycle: a dead flag, a reaper that kills and waits
-once, and an orderly shutdown that sends the protocol's goodbye, closes stdin so
-the child sees EOF, then kills and waits **unconditionally**. The reason is
-stated rather than assumed — an orphaned language server holds the workspace, and
-an orphaned debugger holds its debuggee along with its stop.
+Both hosts carry a dead flag and a reaper that kills and waits once. A failed
+write to a child reaps it on the spot: the session is then dropped and never
+polled again, so it is the last chance to collect the child. The reason is stated
+rather than assumed — an orphaned language server holds the workspace, and an
+orphaned debugger holds its debuggee along with its stop.
+
+The language server's shutdown sends the protocol's goodbye, closes stdin, then
+kills and waits **unconditionally**.
+
+The debugger is ended differently, because killing it first strands its
+debuggee. `:kill`, a `:debug` over a live session, and quitting the editor all
+send DAP `disconnect` with `terminateDebuggee`. Delve answers only after it has
+killed the debuggee and reaped it, then exits, and nora reaps Ambush at its
+stdout EOF; the status reads "debug session ended" only on that path. `:kill` and
+`:debug` never block on it (NORA-IDE-UX section 6): the session is marked ending,
+its descriptors stay in the poll, every other debug verb answers "debug session
+ending", and a `:debug` waits for the old session to be reaped before it starts
+the new one. A quit has no later wake to finish on, so it waits for the same end
+in a bounded poll of its own. Either way the bound is two seconds from the
+disconnect. Past it nora kills Ambush, and the kernel's die-with-launcher rule
+(EXITKILL, I-39) ends the debuggee, so on that path the console still shows the
+debuggee's orphan line: it is the fallback for a debugger that never answers. The
+deadline does not trust this process's clock alone: a poll that waited out the
+session's remaining time with nothing ready has spent the grace by the kernel's
+timer, so a clock read that never advances cannot make the bound disappear. Before 2026-10-28 every one of these
+paths killed Ambush straight after the disconnect, and the kernel ended the
+debuggee each time; `dap-nora.exp`'s three teardown legs now fail on the kernel's
+`proc: orphan ... name="ambush-child"` line.
 
 Starting a server is entirely optional. An absent binary, an unclaimed file
 suffix, or a confined namespace all mean "no language server", which is a fully
@@ -205,7 +233,8 @@ the Invariants section otherwise reads as "no kernel surface at all":
 - **`Dap`'s session state** — the current phase, thread and frame, the cached
   stack, the variable tree, the goroutine list, a bounded console scrollback, the
   breakpoint lists, and the debuggee's pid (used to read the kernel half of the
-  unified stack).
+  unified stack). While it ends: when the disconnect was sent, whether Delve
+  answered it, and a `:debug` program waiting to start.
 - No shared state, no globals beyond the allocator.
 
 ## Concurrency
@@ -243,8 +272,8 @@ A file that cannot be read before the screen is acquired prints to the cooked
 console and exits, so the message is visible; after the screen is up, the same
 failure becomes a status line. A missing file is not an error — it is a new
 buffer, created on save. A server that cannot start is a status line and a
-supported state. A broken pipe reaps the session. Losing stdin exits cleanly
-rather than spinning.
+supported state. A broken pipe reaps the session (kill, then wait) before the
+session is dropped. Losing stdin exits cleanly rather than spinning.
 
 Saves are durable: create-truncate, write, then sync. A server that rejects the
 sync is tolerated, since the bytes are already written and the barrier is
@@ -282,7 +311,9 @@ twice.
   screen.
 - **A new child must be shut down on every exit path**, with an unconditional
   kill and wait. The stated hazard is real: an orphan holds a resource the user
-  cannot see.
+  cannot see. For a child that holds another process, as the debugger holds its
+  debuggee, the kill is the bounded fallback after the child's own end, never the
+  first step: a kill first hands the held process to the kernel.
 - **A new poll source must join the one descriptor set.** There is no tick to
   fall back on, so a source that is not polled produces a message that never
   repaints.
@@ -348,6 +379,14 @@ twice.
   under the debugger printing an escape sequence has it delivered to the terminal
   intact. This layer is where such text enters, so it is the natural place to
   sanitize even though the omission is shared with the renderer. Task #130.
+
+- **The language server is still killed at once at exit.** The shutdown sends
+  the goodbye and the exit notification back to back and kills gopls straight
+  after, so a `go` child gopls is running is orphaned to init (seen in a
+  nora-demo transcript: `proc: orphan ... name="go" (parent ... name="gopls"
+  exiting)`). The debugger's bounded end is the shape to follow; whether gopls
+  waits for its own children on a clean exit is unread. Queued: OPEN-BUGS
+  2026-10-28T10:24Z.
 
 ## Provenance
 

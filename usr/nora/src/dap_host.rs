@@ -29,6 +29,14 @@
 //     "stopped at <func>" status and the frame id that `:print` evaluates in,
 //     and caches the frames for `:bt`. No live-watch faster than a step
 //     (NORA-IDE-UX section 7): the stack refreshes on stop, never continuously.
+//
+//   * A session ENDS through Ambush, not around it. `:kill`, a new `:debug`
+//     and a quit send `disconnect(terminateDebuggee)`; Delve answers only after
+//     it has killed and reaped the debuggee, then exits, and the session is
+//     reaped at its stdout EOF. Killing Ambush first would leave the debuggee
+//     to the kernel's die-with-launcher rule (EXITKILL, I-39) and orphan it to
+//     init. A debugger that has not exited `END_GRACE` after the disconnect is
+//     killed, and EXITKILL ends the debuggee.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -36,11 +44,13 @@ use alloc::vec::Vec;
 
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::slurp_capped;
+use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
+use libthyla_rs::time::{Duration, Instant};
 
 use parley::dap;
 use parley::dapc::{self, Action, StackFrame};
-use parley::transport::{Ready, Server, Tag};
+use parley::transport::{Mux, Ready, Server, Tag};
 
 use nora::debug::{DebugView, GoroutineRow, StackRow};
 use nora::editor::{DapRequest, Editor};
@@ -75,6 +85,11 @@ const CONSOLE_MAX: usize = 200;
 /// Read cap for `/proc/<pid>/kstack` -- the kernel bounds the file to
 /// `DEBUG_KSTACK_MAX_FRAMES` symbolized lines, comfortably under this.
 const KSTACK_CAP: usize = 16 * 1024;
+
+/// How long an ending session may take to exit after its disconnect before it
+/// is killed. Delve's part is one kill and one reap, milliseconds; the bound
+/// only matters for a wedged debugger.
+const END_GRACE: Duration = Duration::from_millis(2000);
 
 /// Poll tags. fd 0 is TAG_STDIN (0) and gopls owns 1/2 (lsp_host); the DAP pipes
 /// take 3/4 so all four sources share one poll(2).
@@ -146,6 +161,13 @@ pub struct Dap {
     /// The session died / its stream broke: stop polling it and drop it. The
     /// editor keeps working.
     dead: bool,
+    /// When the disconnect was sent: the session is ending, and only its exit
+    /// or `END_GRACE` matters. `None` while live.
+    ending: Option<Instant>,
+    /// Ambush answered the disconnect, so it has ended the debuggee itself.
+    disconnected: bool,
+    /// A `:debug` issued while this session was live, started once it is reaped.
+    relaunch: Option<String>,
     /// The debuggee's OS pid (from the DAP `process` event), the handle for
     /// reading its `/proc/<pid>/kstack`. `None` until the event lands.
     debuggee_pid: Option<i64>,
@@ -205,11 +227,13 @@ impl Dap {
             func_bps: Vec::new(),
             line_bps: Vec::new(),
             dead: false,
+            ending: None,
+            disconnected: false,
+            relaunch: None,
             debuggee_pid: None,
             kernel_frames: Vec::new(),
         };
         if d.send(&init).is_err() {
-            d.shutdown();
             ed.set_status(String::from("debugger handshake failed"));
             return None;
         }
@@ -244,8 +268,10 @@ impl Dap {
         }
         match self.srv.send(msg) {
             Ok(()) => Ok(()),
+            // A dead session is dropped and never polled again, so a broken
+            // pipe is the last chance to collect Ambush.
             Err(_) => {
-                self.dead = true;
+                self.reap();
                 Err(())
             }
         }
@@ -268,9 +294,7 @@ impl Dap {
                         Ok(false) => {}
                         // EOF or a read error: the debugger exited.
                         Ok(true) | Err(_) => {
-                            ed.set_status(String::from("debugger exited"));
-                            ed.set_debug_view(None); // collapse the dashboard
-                            self.reap();
+                            self.on_exit(ed);
                             return true;
                         }
                     }
@@ -290,9 +314,7 @@ impl Dap {
                     }
                 }
                 if r.hup && !self.dead {
-                    ed.set_status(String::from("debugger exited"));
-                    ed.set_debug_view(None);
-                    self.reap();
+                    self.on_exit(ed);
                     return true;
                 }
                 // One dashboard refresh per wake (not per message): the tiles
@@ -320,7 +342,21 @@ impl Dap {
             Err(_) => return false,
         };
         let act = self.cl.handle(msg);
+        if self.ending.is_some() {
+            self.on_ending_action(act);
+            return false;
+        }
         self.on_action(act, ed)
+    }
+
+    /// While ending, only the disconnect's answer matters: Ambush has ended the
+    /// debuggee, and closing stdin covers a server that waits for EOF before
+    /// exiting. Stops, stacks and the trailing `terminated` are dropped.
+    fn on_ending_action(&mut self, act: Action) {
+        if act == Action::Ack("disconnect") {
+            self.disconnected = true;
+            self.srv.close_stdin();
+        }
     }
 
     /// Advance the session for one classified action. Returns repaint-worthy.
@@ -543,6 +579,10 @@ impl Dap {
     /// Act on a user `:` debug command. `Launch` is handled by the binary (it
     /// creates the session); everything here operates on the live one.
     pub fn command(&mut self, req: DapRequest, ed: &mut Editor) {
+        if self.ending.is_some() {
+            ed.set_status(String::from("debug session ending"));
+            return;
+        }
         match req {
             // Handled at the binary level; a defensive no-op if it reaches here.
             DapRequest::Launch(_) => {}
@@ -579,14 +619,18 @@ impl Dap {
             DapRequest::CollapseVar(idx) => self.collapse_var(idx),
 
             DapRequest::Kill => {
-                self.shutdown();
+                self.end();
                 ed.set_debug_view(None); // collapse the dashboard
-                ed.set_status(String::from("debug session ended"));
+                ed.set_status(String::from(if self.dead {
+                    "debugger exited"
+                } else {
+                    "ending debugging ..."
+                }));
             }
         }
         // Reflect the command in the dashboard (running/stopped, a new
-        // breakpoint). `shutdown` set `dead`, so a `:kill` does not re-open it.
-        if !self.dead {
+        // breakpoint). Not once `:kill` has begun the end.
+        if !self.dead && self.ending.is_none() {
             self.publish(ed);
         }
     }
@@ -892,7 +936,9 @@ impl Dap {
         s
     }
 
-    /// Reap a session that already exited or whose stream broke.
+    /// Reap a session that already exited or whose stream broke. The kill is a
+    /// no-op for an Ambush that has exited, and ends one that only broke its
+    /// stream.
     fn reap(&mut self) {
         if self.dead {
             return;
@@ -902,19 +948,88 @@ impl Dap {
         let _ = self.srv.wait();
     }
 
-    /// Orderly shutdown (`:kill` / nora exit): DAP disconnect+terminate, close
-    /// stdin so Ambush sees EOF, then make sure it is gone. `kill`+`wait` are
-    /// unconditional -- a debugger ignoring the goodbye must not outlive the
-    /// editor holding its debuggee.
-    pub fn shutdown(&mut self) {
-        if !self.dead {
-            let bye = self.cl.disconnect(true);
-            let _ = self.send(&bye);
-            self.srv.close_stdin();
+    /// Ambush closed its stdout. After an answered disconnect this is the
+    /// orderly end.
+    fn on_exit(&mut self, ed: &mut Editor) {
+        ed.set_status(String::from(if self.disconnected {
+            "debug session ended"
+        } else {
+            "debugger exited"
+        }));
+        ed.set_debug_view(None); // collapse the dashboard
+        self.reap();
+    }
+
+    /// Ask Ambush to end the session (`disconnect`, terminating the debuggee).
+    /// The answer and the exit land on later poll-wakes (`on_exit`), or
+    /// `on_deadline` kills it.
+    fn end(&mut self) {
+        if self.dead || self.ending.is_some() {
+            return;
         }
-        self.dead = true;
-        let _ = self.srv.kill();
-        let _ = self.srv.wait();
+        self.ending = Some(Instant::now());
+        let bye = self.cl.disconnect(true);
+        let _ = self.send(&bye);
+    }
+
+    /// `:debug` while this session is live: nora holds one session, so this one
+    /// ends first and the event loop starts `program` once it is reaped.
+    pub fn relaunch(&mut self, program: String, ed: &mut Editor) {
+        self.end();
+        self.relaunch = Some(program);
+        ed.set_debug_view(None);
+        ed.set_status(String::from("ending debugging ..."));
+    }
+
+    /// The program a `relaunch` queued, once this session is reaped.
+    pub fn take_relaunch(&mut self) -> Option<String> {
+        self.relaunch.take()
+    }
+
+    /// While ending, the longest the event loop may block before `on_deadline`
+    /// is due, in milliseconds (rounded up, so the wake is never early).
+    pub fn deadline_ms(&self) -> Option<u32> {
+        if self.dead {
+            return None;
+        }
+        let left = END_GRACE.saturating_sub(self.ending?.elapsed());
+        let ms = (left.as_nanos() + 999_999) / 1_000_000;
+        Some(ms.min(u32::MAX as u128) as u32)
+    }
+
+    /// Kill a session still running `END_GRACE` after its disconnect. Returns
+    /// true when the editor should repaint. `timed_out` says the caller's poll
+    /// waited out `deadline_ms` with nothing ready: the grace is spent by the
+    /// kernel's timer even if this process's clock reads do not advance.
+    pub fn on_deadline(&mut self, timed_out: bool, ed: &mut Editor) -> bool {
+        match self.ending {
+            Some(since) if !self.dead && (timed_out || since.elapsed() >= END_GRACE) => {
+                ed.set_status(String::from("debugger did not end the session; killed it"));
+                ed.set_debug_view(None);
+                self.reap();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End the session at nora exit and wait for it here, since no later
+    /// poll-wake will come. Bounded by `END_GRACE`, then killed: a debugger
+    /// ignoring the goodbye must not outlive the editor holding its debuggee.
+    pub fn shutdown(&mut self, ed: &mut Editor) {
+        self.end();
+        let mut mux = Mux::new();
+        while let Some(ms) = self.deadline_ms() {
+            let ready = match mux.poll(&self.poll_fds(), PollTimeout::Millis(ms)) {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            for r in &ready {
+                self.on_ready(r, ed);
+            }
+            self.on_deadline(ready.is_empty(), ed);
+        }
+        self.reap();
     }
 }
 
