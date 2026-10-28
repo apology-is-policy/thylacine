@@ -169,3 +169,6 @@
 # 0050 (signal chunk S-3): raise()/kill(self) of SIGSEGV/SIGBUS/SIGILL/SIGFPE post
 # the snare to self and die of that signal; kill() reads ESRCH/EPERM, not EIO.
 0050-pouch-self-fault-signals-errnos.patch
+# 0051 (env-c, vote 28): posix_spawn sends envp as the SPAWN_EXT_ENV tail, the
+# child's whole environment; the tail's refusals return their errno.
+0051-pouch-spawn-env.patch

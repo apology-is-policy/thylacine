@@ -20,6 +20,7 @@ compares every mirror with it field by field:
   libthyla-rs  usr/lib/libthyla-rs/src/lib.rs          struct TSpawnArgs
   pouch        usr/lib/pouch/patches/0026-pouch-process.patch
                                                        struct pouch_spawn_args
+               (its env tail, struct pouch_spawn_ext_env, is in 0051)
   go fork      $GOFORK/src/syscall/exec_thylacine.go   type spawnArgs
 
 The in-tree mirrors must match names, offsets and sizes: two same-size fields
@@ -78,8 +79,12 @@ EXT_TAILS = [
     ("sys_spawn_ext_threads", [("libt", "t_sys_spawn_ext_threads", "c"),
                                ("libthyla-rs", "TSpawnExtThreads", "rust")]),
     ("sys_spawn_ext_env", [("libt", "t_sys_spawn_ext_env", "c"),
-                           ("libthyla-rs", "TSpawnExtEnv", "rust")]),
+                           ("libthyla-rs", "TSpawnExtEnv", "rust"),
+                           ("pouch-env", "pouch_spawn_ext_env", "patch")]),
 ]
+# Tail mirrors that live outside the MIRRORS files: pouch's env tail comes in its
+# own patch, after the one that mirrors the record.
+TAIL_SOURCES = {"pouch-env": "usr/lib/pouch/patches/0051-pouch-spawn-env.patch"}
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
 C_SIZES = {
@@ -376,6 +381,13 @@ def ext_flags(text, label):
     return members, names
 
 
+# Pouch names only the bits it sends, so each must be the kernel's member of
+# that name at the kernel's bit; it keeps no mask.
+EXT_FLAG_SUBSETS = {
+    "pouch-env": r"^\+#define\s+POUCH_SPAWN_EXT_(\w+)\s+\(1u\s*<<\s*(\d+)\)",
+}
+
+
 def ext_flag_errs(texts):
     kmembers, knames = ext_flags(texts["kernel"], "kernel")
     errs = []
@@ -389,6 +401,15 @@ def ext_flag_errs(texts):
         if names != set(kmembers):
             errs.append(f"{label}: ext flag mask names {sorted(names)}, kernel "
                         f"members are {sorted(kmembers)}")
+    for label, form in EXT_FLAG_SUBSETS.items():
+        members = {m.group(1): int(m.group(2))
+                   for m in re.finditer(form, texts[label], re.M)}
+        if not members:
+            errs.append(f"{label}: defines no ext flag member")
+        for name, bit in members.items():
+            if kmembers.get(name) != bit:
+                errs.append(f"{label}: ext flag member {name} is bit {bit}, kernel "
+                            f"has {kmembers.get(name)}")
     return errs
 
 
@@ -560,6 +581,11 @@ def self_test(texts, go_text):
                          texts["kernel"], count=1, flags=re.M)
     if t["kernel"] == texts["kernel"] or not reported(t, go_text, "ext flag members"):
         missed.append("a kernel ext flag member no mirror defines")
+    t = dict(texts)
+    t["pouch-env"] = re.sub(r"^(\+#define\s+POUCH_SPAWN_EXT_ENV\s+\(1u\s*<<\s*)\d+",
+                            r"\g<1>3", texts["pouch-env"], count=1, flags=re.M)
+    if t["pouch-env"] == texts["pouch-env"] or not reported(t, go_text, "ext flag member ENV"):
+        missed.append("a pouch ext flag member at the wrong bit")
     first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
                     if n.endswith("_va"))
     t = dict(texts)
@@ -572,6 +598,8 @@ def self_test(texts, go_text):
 def main():
     texts = {KERNEL[0]: (ROOT / KERNEL[1]).read_text()}
     for label, rel, _, _ in MIRRORS:
+        texts[label] = (ROOT / rel).read_text()
+    for label, rel in TAIL_SOURCES.items():
         texts[label] = (ROOT / rel).read_text()
     gofork = pathlib.Path(os.environ.get(
         "GOFORK", str(pathlib.Path.home() / "projects" / "go-thylacine")))
@@ -606,7 +634,8 @@ def main():
     print(f"spawn-args mirror check: kernel {size} B / {len(lay)} fields, every "
           f"u64 classified; "
           f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}; "
-          f"tails: {tails}; ext flag members + mask ok (libt, libthyla-rs)")
+          f"tails: {tails}; ext flag members + mask ok (libt, libthyla-rs), "
+          f"bits ok ({', '.join(EXT_FLAG_SUBSETS)})")
     return 0
 
 

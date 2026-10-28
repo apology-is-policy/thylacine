@@ -4,7 +4,6 @@
  * Superseded by a union bind of /clade/bin onto /bin when MAFTER walking
  * lands (territory.h reserves it for v1.x). */
 #include <errno.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -13,6 +12,8 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
+
+extern char **environ;
 
 #define TARGET "/clade/bin/tyr-glquake"
 
@@ -41,9 +42,9 @@ static long thyla_open(long dirfd, const char *name, unsigned long len,
  * CANNOT cross it (probed, not assumed) -- open the post (attach), walk ctl
  * from the conn root, and read the leading "virgl 1" that says the host GL
  * came up. Pouch fds are kernel handles 1:1, so musl read/close work on
- * them. The choice rides a /env write, not setenv: pouch environ is a
- * startup snapshot OF /env (patch 0025), so only the device write survives
- * the exec below and clones into a spawned child. An explicit
+ * them. The choice is a setenv: both arms below pass environ, and the
+ * spawn's envp becomes the child's whole /env (patch 0051), so the game and
+ * everything it spawns inherit it. An explicit
  * GALLIUM_DRIVER anywhere in the inherited environment wins -- this is a
  * default, not an override; osmesa still falls back loudly if the seam
  * dies before screen create. */
@@ -52,7 +53,6 @@ static void prefer_virgl_when_present(void)
     char buf[16];
     long root, ctl;
     ssize_t n;
-    int fd;
 
     if (getenv("GALLIUM_DRIVER"))
         return;
@@ -70,13 +70,9 @@ static void prefer_virgl_when_present(void)
     buf[n] = '\0';
     if (strncmp(buf, "virgl 1", 7) != 0)
         return;
-    fd = open("/env/GALLIUM_DRIVER", O_WRONLY | O_CREAT, 0666);
-    if (fd < 0)
-        return;
-    if (write(fd, "virpipe", 7) != 7)
-        fprintf(stderr, "tyr-glquake: short /env write -- "
+    if (setenv("GALLIUM_DRIVER", "virpipe", 1) != 0)
+        fprintf(stderr, "tyr-glquake: setenv failed -- "
                         "staying on the software rasteriser\n");
-    close(fd);
 }
 
 static pid_t g_child;
@@ -107,7 +103,7 @@ int main(int argc, char **argv)
     signal(SIGINT, forward_interrupt);
     signal(SIGTERM, forward_interrupt);
     pid_t pid = 0;
-    if (posix_spawn(&pid, TARGET, NULL, NULL, argv, NULL) == 0) {
+    if (posix_spawn(&pid, TARGET, NULL, NULL, argv, environ) == 0) {
         int st = 0;
         g_child = pid;
         /* WNOHANG + a short sleep instead of a blocking wait: a CAUGHT note

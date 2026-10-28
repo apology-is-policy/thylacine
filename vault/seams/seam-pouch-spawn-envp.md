@@ -2,12 +2,13 @@
 id: seam-pouch-spawn-envp
 type: seam
 title: "`posix_spawn`'s `envp` argument is ignored; the child inherits `/env`"
-status: open
+status: closed
 surface: [sub-pouch-process]
 opened-by: chg-2026-07-23-cl1b-process
 tracker: "CL-1b"
 created: 2026-08-01
 updated: 2026-10-28
+closed-by: chg-2026-10-28-spawn-env
 ---
 ## Owed
 

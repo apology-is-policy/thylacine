@@ -1,7 +1,7 @@
 ---
 id: sub-tyrquake
 type: sub
-title: "TyrQuake — the GL Quake port: the ramfs launcher, the GPU-preference /env write, and the two boundary-line patches"
+title: "TyrQuake — the GL Quake port: the ramfs launcher, the GPU preference, and the two boundary-line patches"
 parent: moc-userspace
 code: [usr/ports/tyrquake/tyr-glquake-launcher.c, usr/ports/tyrquake/patches/0001-tyrquake-nosound-guard.patch, usr/ports/tyrquake/patches/0002-tyrquake-condebug-fd.patch]
 audit: light
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/LLVM-DESIGN.md"]
 created: 2026-09-07
-updated: 2026-09-07
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -38,26 +38,29 @@ passed through unchanged.
 
 ## Mechanism
 
-### The launcher prefers the GPU through a surviving /env write
+### The launcher prefers the GPU through its environ
 
-`prefer_virgl_when_present` (`tyr-glquake-launcher.c`, `:50`) is the Warp-4 GPU
+`prefer_virgl_when_present` (`tyr-glquake-launcher.c`, `:51`) is the Warp-4 GPU
 preference and does **no** capability work. If `GALLIUM_DRIVER` is already set
 it returns immediately (`:57-58`) — an explicit choice is a default it must not
 override. Otherwise it attaches `/srv/warp`, walks `ctl`, and reads a leading
-`virgl 1` (`:62-71`); on a match it writes `virpipe` to `/env/GALLIUM_DRIVER`
-via `open(..., O_WRONLY|O_CREAT) + write` (`:73-79`). It rides a **/env write**
-(patch 0025's environ snapshot), not `setenv`, precisely so the value survives
-the exec/spawn into the pool binary. There is no CAP_JIT here — that is acquired
+`virgl 1` (`:62-71`); on a match it `setenv`s `GALLIUM_DRIVER=virpipe`
+(`:73-75`). Until 2026-10-28 it wrote `/env/GALLIUM_DRIVER` instead, because
+pouch's `posix_spawn` dropped its `envp` and only a device write reached the
+child. The spawn now passes `environ`, which becomes the child's whole `/env`
+(patch 0051, [[sub-pouch-process]]), so the value reaches the game and whatever
+it spawns. The `execv` arm passes `environ` too, and will carry it only if
+pouch's `execve` honours `envp` once it exists. There is no CAP_JIT here — that is acquired
 later, by the SDL GL backend, on the program's own behalf ([[sub-sdl-port]]).
 
 ### The launch is execve-first, spawn-and-forward as the fallback
 
-`main` (`:90`) calls the GPU preference, then tries `execv(TARGET, argv)`
-(`:94`) as the primary arm. Because pouch had no `execve` until LINEAGE L-6
-(patch 0026), a return from `execv` is expected on older builds: it then
-installs `forward_interrupt` on SIGINT/SIGTERM (`:107-108`, which `kill`s the
-child), `posix_spawn`s the target (`:110`), and reaps with a
-`waitpid(WNOHANG)` + `usleep(50 ms)` poll loop (`:119-126`) — the 50 ms is the
+`main` (`:86`) calls the GPU preference, then tries `execv(TARGET, argv)`
+(`:90`) as the primary arm. Pouch's `execve` is still the ENOSYS sentinel
+(patch 0026), so `execv` returns today: the launcher then
+installs `forward_interrupt` on SIGINT/SIGTERM (`:103-104`, which `kill`s the
+child), `posix_spawn`s the target with `environ` (`:106`), and reaps with a
+`waitpid(WNOHANG)` + `usleep(50 ms)` poll loop (`:115-122`) — the 50 ms is the
 ^C-forwarding latency bound. It returns the child's `WEXITSTATUS`, or 127 if the
 target is unreachable.
 
@@ -127,6 +130,9 @@ reap-poll granularity, which bounds ^C latency, not throughput.
 - **The GPU preference must stay a default, never an override.** An explicit
   `GALLIUM_DRIVER` must win; a change that unconditionally writes `virpipe`
   would silently redirect a user who chose otherwise.
+- **The preference reaches the game only through the envp it is spawned
+  with.** A spawn passing NULL (an empty environment) or a hand-built envp
+  without `GALLIUM_DRIVER` drops it silently.
 - **The per-line close in `Sys_DebugLog` is not removable.** It is the I-38
   publish point; folding it into a held descriptor for "efficiency" makes the
   log unreadable to a concurrent tail.

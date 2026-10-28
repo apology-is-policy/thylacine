@@ -29,8 +29,8 @@ Two translations are load-bearing:
     forwarded verbatim. (Until gcpark-b a plain wait read the RAW exit status
     and was repacked as an exit, so a killed child read WIFEXITED 1.)
 
-envp is inherited via the /env clone (the passed posix_spawn envp is a v1.x
-lift: a SYS_SPAWN_FULL_ARGV ext_flags tail). dup2/dup3 onto a chosen
+envp was inherited via the /env clone here; 0051 sends it as the
+SYS_SPAWN_FULL_ARGV SPAWN_EXT_ENV tail. dup2/dup3 onto a chosen
 target fd have NO kernel primitive (handle_dup is lowest-free only) and NO
 runtime toolchain path needs one (posix_spawn resolves file_actions
 statically) -- the onto-target case is a documented ENOSYS seam; old==new is a

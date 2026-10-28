@@ -1,0 +1,188 @@
+pouch boundary-line patch 0051 - posix_spawn sends envp as the child's whole environment (env-c, operator vote 28).
+
+0026 dropped envp: a child's environment was the kernel's rfork copy of the
+spawner's /env, so a caller that passed a different environment got its own,
+and a setenv never reached a child (seam-pouch-spawn-envp). The kernel's
+SYS_SPAWN_FULL_ARGV now takes a SPAWN_EXT_ENV tail (ext_flags bit 2,
+dec-2026-10-28-spawn-env) whose NUL-packed NAME=VALUE records are the child's
+whole /env. Two files:
+
+  src/internal/_pouch_process.h  POUCH_SPAWN_EXT_ENV, POUCH_SPAWN_ENV_DATA_MAX,
+      struct pouch_spawn_ext_env (the kernel's sys_spawn_ext_env, every field
+      pinned; tools/check-spawn-args-mirrors.py holds it to the kernel), and
+      struct pouch_spawn_env_rec, the record with the tail directly after it.
+  src/process/posix_spawn.c      packs envp the way it packs argv and always
+      sends the tail: a later record for a name replaces an earlier one, and a
+      NULL envp is an empty environment, as Linux's execve reads it. A block
+      past 32 KiB is E2BIG here; the kernel's refusals of the tail (a record
+      with no '=', a name /env refuses, a value past 4096, a 65th name) come
+      back as their errno instead of the record's flat ENOENT.
+
+The witness is pouch-hello-spawn's test 3: a block with a repeated name, the
+caller's environ after a setenv, a NULL envp, and four refusals that make no
+child, against a variable that is in the parent's /env but not its environ.
+
+--- a/src/internal/_pouch_process.h
++++ b/src/internal/_pouch_process.h
+@@ -24,6 +24,7 @@
+ #define POUCH_SPAWN_MAX_FDS        16u
+ #define POUCH_SPAWN_ARGV_MAX      512u
+ #define POUCH_SPAWN_ARGV_DATA_MAX 65536u
++#define POUCH_SPAWN_ENV_DATA_MAX  32768u
+ 
+ /* Kernel WAIT_* flag values (proc.h). NOTE: WAIT_CONTINUED is 4, but Linux
+  * musl's WCONTINUED is 8 -- the wait shim translates, it does not pass raw.
+@@ -103,6 +104,28 @@
+ _Static_assert(__builtin_offsetof(struct pouch_spawn_args, pheno_flags)    ==  96, "pheno_flags@96");
+ _Static_assert(__builtin_offsetof(struct pouch_spawn_args, debug_flags)    == 100, "debug_flags@100");
+ 
++/* The SPAWN_EXT_ENV tail (struct sys_spawn_ext_env): ext_flags bit 2 names
++ * the child's whole environment. Tails sit after the record in bit order, so
++ * with no cwd or thread tail it is the record's next 16 bytes. */
++#define POUCH_SPAWN_EXT_ENV (1u << 2)
++struct pouch_spawn_ext_env {
++	unsigned long long env_va;         /* 0 -- may be 0 when env_len is 0 */
++	unsigned int env_len;              /* 8 -- the records, NULs included */
++	unsigned int env_flags;            /* 12 -- must be 0 */
++};
++_Static_assert(sizeof(struct pouch_spawn_ext_env) == 16,
++	"struct pouch_spawn_ext_env must match the kernel sys_spawn_ext_env ABI");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_ext_env, env_va)    ==  0, "env_va@0");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_ext_env, env_len)   ==  8, "env_len@8");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_ext_env, env_flags) == 12, "env_flags@12");
++
++struct pouch_spawn_env_rec {
++	struct pouch_spawn_args args;
++	struct pouch_spawn_ext_env env;
++};
++_Static_assert(__builtin_offsetof(struct pouch_spawn_env_rec, env) == 104,
++	"the env tail must sit directly after the 104-byte record");
++
+ /* Shared helpers (_pouch_process.c). */
+ hidden int __pouch_pipe(int fd[2]);
+ hidden int __pouch_wait(int pid, int *status, int options);
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -9,9 +9,9 @@
+  * i, contiguous, lowest-free). The dominant toolchain pattern (open/dup2 a
+  * redirect onto fd 0/1/2, close a temp) resolves to {0,1,2}.
+  *
+- * envp is inherited via the kernel /env clone (env_clone_into), NOT the passed
+- * envp -- a per-child override would be a SYS_SPAWN_FULL_ARGV ext_flags
+- * tail. attr (SETSID/SETPGROUP/RESETIDS/SETSIG*) has no post-spawn child
++ * envp is the child's whole environment, sent as the SYS_SPAWN_FULL_ARGV
++ * SPAWN_EXT_ENV tail: the child's /env holds exactly its NAME=VALUE strings.
++ * attr (SETSID/SETPGROUP/RESETIDS/SETSIG*) has no post-spawn child
+  * hook and is ignored: a fresh Thylacine child inherits the parent's
+  * session/pgroup/identity and starts with default note dispositions, so the
+  * toolchain's (unset) attr is satisfied by construction.
+@@ -35,6 +35,11 @@
+ #undef realloc
+ #include "_pouch_process.h"
+ 
++/* The kernel answers a refused env tail with -T_E_*, whose values are the
++ * Linux errnos (docs/ERRORS.md); posix_spawn returns that value as it is. */
++_Static_assert(E2BIG == 7 && ENOMEM == 12 && EFAULT == 14 && EINVAL == 22,
++	"T_E_2BIG / T_E_NOMEM / T_E_FAULT / T_E_INVAL must equal this libc's errnos");
++
+ /* The largest child-fd slot a file_action may target. A file_action that
+  * targets a higher slot (very unusual) fails EBADF rather than silently
+  * dropping. The dup2 SOURCE may be any parent fd; sources >= this are used
+@@ -60,7 +65,6 @@
+ 	char *const argv[restrict], char *const envp[restrict])
+ {
+ 	(void)attr;    /* no post-spawn child hook; see the file header */
+-	(void)envp;    /* inherited via /env; the passed envp is a v1.x lift  */
+ 
+ 	if (!path || !path[0]) return EINVAL;
+ 	size_t name_len = strlen(path);
+@@ -83,6 +87,7 @@
+ 	int opened[PSPAWN_MAXSLOT];   /* parent fds WE opened (close after spawn) */
+ 	int nopened = 0;
+ 	char *argv_buf = 0;
++	char *env_buf = 0;
+ 	int ec = 0;
+ 
+ 	if (fa && fa->__actions) {
+@@ -178,26 +183,59 @@
+ 		}
+ 	}
+ 
++	/* --- NUL-packed envp records, the same packing as argv. A later record
++	 * for a name replaces an earlier one in the child. A NULL envp is an
++	 * empty environment, as Linux's execve reads it. --- */
++	size_t env_len = 0;
++	if (envp) {
++		for (size_t i = 0; envp[i]; i++) {
++			env_len += strlen(envp[i]) + 1;
++			if (env_len > POUCH_SPAWN_ENV_DATA_MAX) { ec = E2BIG; goto done; }
++		}
++	}
++	if (env_len) {
++		env_buf = malloc(env_len);
++		if (!env_buf) { ec = ENOMEM; goto done; }
++		size_t off = 0;
++		for (size_t i = 0; envp[i]; i++) {
++			size_t l = strlen(envp[i]);
++			/* The argv buffer's defensive bound, for the same UB. */
++			if (off + l + 1 > env_len) { ec = E2BIG; goto done; }
++			memcpy(env_buf + off, envp[i], l);
++			env_buf[off + l] = 0;
++			off += l + 1;
++		}
++		env_len = off;
++	}
++
+ 	/* --- the spawn. cap_mask = ~0 -> inherit all caps (the kernel intersects
+ 	 * with the parent's, stripping elevation-only per I-2). All other fields
+-	 * zero: perm_flags 0, identity/allowance inherit. --- */
+-	struct pouch_spawn_args sa;
+-	memset(&sa, 0, sizeof sa);
+-	sa.name_va       = (unsigned long long)(uintptr_t)path;
+-	sa.argv_data_va  = (unsigned long long)(uintptr_t)argv_buf;
+-	sa.fd_list_va    = fd_count ? (unsigned long long)(uintptr_t)fd_list : 0;
+-	sa.name_len      = (unsigned int)name_len;
+-	sa.argv_data_len = (unsigned int)argv_len;
+-	sa.argc          = argc;
+-	sa.fd_count      = fd_count;
+-	sa.cap_mask      = ~0ULL;
++	 * zero: perm_flags 0, identity/allowance inherit. The env tail is the
++	 * only one announced, so it directly follows the record. --- */
++	struct pouch_spawn_env_rec rec;
++	memset(&rec, 0, sizeof rec);
++	struct pouch_spawn_args *sa = &rec.args;
++	sa->name_va       = (unsigned long long)(uintptr_t)path;
++	sa->argv_data_va  = (unsigned long long)(uintptr_t)argv_buf;
++	sa->fd_list_va    = fd_count ? (unsigned long long)(uintptr_t)fd_list : 0;
++	sa->name_len      = (unsigned int)name_len;
++	sa->argv_data_len = (unsigned int)argv_len;
++	sa->argc          = argc;
++	sa->fd_count      = fd_count;
++	sa->cap_mask      = ~0ULL;
++	sa->ext_flags     = POUCH_SPAWN_EXT_ENV;
++	rec.env.env_va    = env_len ? (unsigned long long)(uintptr_t)env_buf : 0;
++	rec.env.env_len   = (unsigned int)env_len;
+ 
+-	long r = __syscall1(SYS_thyla_spawn_full_argv, (long)(uintptr_t)&sa);
++	long r = __syscall1(SYS_thyla_spawn_full_argv, (long)(uintptr_t)&rec);
+ 	if (r < 0) {
+ 		/* Kernel flat -1: name not resolvable / bad ELF / OOM / a listed fd
+ 		 * not KOBJ_SPOOR. ENOENT is the dominant + clearest posix_spawn
+-		 * failure (binary not found); the exact cause is collapsed at v1.0. */
+-		ec = ENOENT;
++		 * failure (binary not found); the exact cause is collapsed at v1.0.
++		 * The env tail's refusals carry their errno instead (E2BIG, EINVAL,
++		 * EFAULT, ENOMEM): an environment the kernel will not hold is not a
++		 * missing binary. */
++		ec = (r < -1) ? (int)-r : ENOENT;
+ 	} else {
+ 		if (res) *res = (pid_t)r;
+ 		ec = 0;
+@@ -205,6 +243,7 @@
+ 
+ done:
+ 	free(argv_buf);
++	free(env_buf);
+ 	for (int i = 0; i < nopened; i++) close(opened[i]);
+ 	return ec;
+ }

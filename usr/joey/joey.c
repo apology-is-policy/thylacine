@@ -6967,8 +6967,8 @@ int main(void) {
     // === /pouch-hello-env orchestration (Clade CL-1b-0: the pouch-env crt
     // boundary line, patch 0025) ===
     // Proves a POUCH process reads its environment through getenv()/environ,
-    // populated by __pouch_env_init from the /env device (envp[0] is NULL for
-    // every pouch program). joey sets PGENV1 + PGENVNUM on its OWN /env; the
+    // populated by __pouch_env_init from the /env device (exec's envp is the
+    // same /env, projected). joey sets PGENV1 + PGENVNUM on its OWN /env; the
     // child inherits a COPY via env_clone_into (Plan 9 copy-on-rfork) and the
     // crt reads them into __environ before main. joey UNSETs them after the
     // spawn so they do not leak into the login session. Pre-pivot: /env is

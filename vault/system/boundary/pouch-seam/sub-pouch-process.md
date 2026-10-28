@@ -5,6 +5,8 @@ parent: moc-pouch-seam
 title: "Process lifecycle — posix_spawn, wait, pipe, the environ populate, the terminators"
 code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
+  - usr/lib/pouch/patches/0051-pouch-spawn-env.patch
+  - usr/pouch-hello/pouch-hello-spawn.c
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
   - usr/lib/pouch/patches/0025-pouch-env.patch
@@ -17,7 +19,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-28
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -77,7 +79,9 @@ is a Burrow.
 
 - `posix_spawn(res, path, fa, attr, argv, envp)` →
   `SYS_SPAWN_FULL_ARGV` (49) after resolving `fa` statically.
-  `posix_spawnp` PATH-searches first.
+  `posix_spawnp` PATH-searches first. `envp` is the child's whole
+  environment, sent as the `SPAWN_EXT_ENV` tail (0051); a NULL `envp` is an
+  empty one.
 - `waitpid` / `wait4` → `SYS_WAIT_PID` (22), with flag and status-word
   translation; `wait4`'s `rusage` is zero-filled.
 - `pipe` / `pipe2` → `SYS_PIPE` (8) through a bespoke two-register asm
@@ -164,13 +168,25 @@ audit can reason about the hot-path change alone. 0013 adds an opt-in
 assertion fires, written with a direct `SYS_write` so it survives a
 corrupted heap.
 
-**The environment lives in `/env`, not `envp`.** The kernel writes
-`envp[0] = NULL` for every program, so `__pouch_env_init` — called from
-`__libc_start_main` after `__init_libc` (malloc + TLS up) and before the
-ctors (so a constructor's `getenv` sees it) — readdirs `/env`, reads each
-value, and builds a `"NAME=value"` vector for `__environ`. Fail-soft:
-a missing `/env` leaves the kernel's empty envp. `/env` stays the source
-of truth; a later `setenv` mutates only this in-process copy.
+**The environment lives in `/env`, and pouch reads it there.** `exec`
+projects a program's `/env` onto its stack as `envp` (#140), but
+`__pouch_env_init` — called from `__libc_start_main` after `__init_libc`
+(malloc + TLS up) and before the ctors (so a constructor's `getenv` sees
+it) — readdirs `/env`, reads each value, and builds its own `"NAME=value"`
+vector for `__environ`. Fail-soft: a missing `/env` leaves `__environ` as the
+projected `envp`, which holds the same variables. `/env` stays the source of
+truth. A later `setenv` mutates only this in-process copy, and it reaches a
+child only through the `envp` the child is spawned with.
+
+**`posix_spawn` sends `envp` (env-c, 2026-10-28).** It packs `envp` the way
+it packs `argv`, as NUL-terminated records, and always announces the tail, so
+a `struct pouch_spawn_ext_env` directly follows the record. The child's
+`/env` is exactly those records, built by the spawner's kernel before rfork
+([[dec-2026-10-28-spawn-env]]). A later record for a name replaces an earlier
+one, and nothing of the parent's `/env` carries over. A NULL `envp` is an
+empty environment, as Linux's `execve` takes it, rather than an inherited
+one. A caller that passes `environ` therefore hands its child whatever
+`setenv` changed, which closes the seam's second half.
 
 **The memory seam lives in [[sub-pouch-mem]] since B-1b.** Here `mmap` was
 one argument wide (0003: the anonymous subset only, demand-zero RW whatever
@@ -186,7 +202,9 @@ sets `ctx.brk = -1`, and metadata allocation routes through mmap permanently
 `struct pouch_spawn_args` — a hand-mirrored **104-byte** copy of the
 kernel's `sys_spawn_args`, pinned by **twenty-one** `_Static_assert`s: one
 on the size and **one per field offset**. `struct __dirstream` (unchanged)
-for the `/env` scan.
+for the `/env` scan. `struct pouch_spawn_ext_env` (0051) mirrors the kernel's
+16-byte `sys_spawn_ext_env`, its size and every offset pinned, and
+`struct pouch_spawn_env_rec` is the record with that tail at offset 104.
 
 **A size assert cannot see a field-order mismatch, and that is why the
 offsets exist.** Swap two same-width fields and the struct is still the
@@ -218,9 +236,10 @@ has nothing checking it.
 
 **`_pad_envp` is `ext_flags` (2026-10-06).** The record's word at offset 44
 announces tails after the record ([[sub-kernel-syscall-abi]]); the patch renames
-it and pouch still zero-fills it, so no pouch spawn sends a tail.
-`posix_spawn_file_actions_addchdir` is not wired to the cwd tail, and the
-`envp` argument would be a tail of its own ([[seam-pouch-spawn-envp]]).
+it. Since 0051 pouch sets one bit in it, `SPAWN_EXT_ENV`, and
+`tools/check-spawn-args-mirrors.py` reads the tail struct out of 0051 and holds
+`POUCH_SPAWN_EXT_ENV` to the kernel's bit. `posix_spawn_file_actions_addchdir`
+is still not wired to the cwd tail.
 
 ### The asserts all held and the binaries were wrong anyway
 
@@ -271,9 +290,16 @@ slot count, because many opens can target the same bounded slot.
 
 ## Error paths
 
-`ENOENT` for every `SYS_SPAWN_FULL_ARGV` failure (name not resolvable /
+`ENOENT` for every refusal of the spawn record (name not resolvable /
 bad ELF / OOM / a listed fd not a Spoor — collapsed at v1.0); `E2BIG`
-for argv overflow; `EMFILE` for fd-list overflow and for pipe failure;
+for argv overflow; `EMFILE` for fd-list overflow and for pipe failure.
+A refused env tail returns the kernel's errno as it is: `EINVAL` for a record
+with no `=`, an empty name, a name of 64 bytes or more, or a `/` in a name;
+`E2BIG` for a value past 4096 bytes or a 65th name; `EFAULT`; `ENOMEM`. Pouch
+refuses a block past 32 KiB with `E2BIG` before the call. These are the
+kernel's negative T_E values, and a `_Static_assert` pins `E2BIG`, `ENOMEM`,
+`EFAULT` and `EINVAL` to them, so only the record's flat `-1` still collapses
+to `ENOENT`;
 `ECHILD` for every wait failure. A failed assertion or `abort()` is not an
 error return: the program dies of `snare:abort` and its parent reads
 `SIGABRT`. `MAP_FAILED` + `ENOSYS` for the refused
@@ -320,8 +346,7 @@ per process. Every `malloc` past mallocng's first is userspace-only.
 ## Seams
 
 [[seam-pouch-dup2-target]] (freopen / login_tty / daemon / wordexp are
-non-functional) · [[seam-pouch-spawn-envp]] (the passed `envp` is ignored;
-the child inherits `/env` via the kernel clone).
+non-functional). Closed: [[seam-pouch-spawn-envp]] (0051).
 
 ## Caveats
 
@@ -346,7 +371,8 @@ retargeted to `SYS_BURROW_ATTACH_LAZY` at #321) →
 [[chg-2026-07-23-cl1b0-env]] (0025) →
 [[chg-2026-07-23-cl1b-process]] (0026) →
 gcpark-b (2026-10-12: 0011 `brk #0xab06`, 0012 assert → `abort()`, 0026
-`POUCH_WAIT_PACKED` and the verbatim status word).
+`POUCH_WAIT_PACKED` and the verbatim status word) →
+[[chg-2026-10-28-spawn-env]] (0051, `envp` as the `SPAWN_EXT_ENV` tail).
 
 The 104-byte widening, the twenty offset pins, and the stale-archive
 relink are [[chg-2026-08-16-pouch-offset-pins]].
