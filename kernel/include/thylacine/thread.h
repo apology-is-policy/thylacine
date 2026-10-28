@@ -841,14 +841,15 @@ struct Thread *thread_create_kthread_for(struct Proc *owner,
 // user_sp_va, with x0 = user_arg and TPIDR_EL0 = user_tls_va.
 //
 // SLUB-allocates the Thread descriptor + 16 KiB kstack (same kstack
-// layout as the EL1-side helpers); ctx is laid out so the first
-// cpu_switch_context into the new thread lands at thread_user_trampoline,
-// which release-pairs sched_finish_task_switch + unmasks IRQs + erets
-// to EL0 at user_entry_va.
+// layout as the EL1-side helpers) and builds the thread's EL0 frame at the
+// top of the kstack; the first cpu_switch_context into the new thread lands
+// at thread_user_trampoline, which takes the EL0-return tail over that frame
+// (thread-model C7), so a thread spawned into a stopped Proc parks before its
+// first instruction.
 //
 // Caller-provided values are NOT validated here — the syscall handler
-// is responsible for the user-VA bound + alignment checks. The kernel
-// trampoline programs them verbatim into ELR_EL1 / SP_EL0 / TPIDR_EL0;
+// is responsible for the user-VA bound + alignment checks. They are
+// programmed verbatim into the frame's ELR / SP_EL0 and ctx's TPIDR_EL0;
 // a malformed address will fault at EL0 (which translates into a
 // user-mode extinction for the misbehaving Proc, not a kernel issue).
 //
@@ -910,9 +911,9 @@ void fork_frame_init(struct exception_context *dst,
 // `ctx` syscall_dispatch already holds. It is copied (via fork_frame_init)
 // onto the top of the child's own fresh kernel stack, exactly where
 // KERNEL_ENTRY would have built it, and ctx.sp points at it; the child's
-// first switch-in lands in thread_fork_trampoline, which runs the same
-// first-entry die-check thread_user_trampoline does and then falls into the
-// SHARED exception-return path rather than a second hand-rolled eret.
+// first switch-in lands in thread_user_trampoline, which takes the shared
+// EL0-return tail over that frame, exactly as a spawned thread's first entry
+// does (thread-model C7).
 //
 // FP/SIMD is inherited from the LIVE registers (fp_save_area), not from the
 // caller's saved Context -- the caller is running, so its Context holds

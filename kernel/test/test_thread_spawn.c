@@ -195,10 +195,19 @@ void test_thread_create_user_ctx_layout(void) {
     struct Thread *t = thread_create_user(p, entry, sp, arg, tls);
     TEST_ASSERT(t != NULL, "thread_create_user failed");
 
-    TEST_EXPECT_EQ(t->ctx.x19, sp,    "ctx.x19 = user_sp_va");
-    TEST_EXPECT_EQ(t->ctx.x20, arg,   "ctx.x20 = user_arg");
-    TEST_EXPECT_EQ(t->ctx.x21, entry, "ctx.x21 = user_entry_va");
-    TEST_EXPECT_EQ(t->ctx.x22, tls,   "ctx.x22 = user_tls_va");
+    // Thread-model C7: the first entry erets from a frame at the kstack top
+    // through the EL0-return tail, not from parked registers.
+    struct exception_context *cf = (struct exception_context *)(uintptr_t)
+        ((u64)(uintptr_t)t->kstack_base + THREAD_KSTACK_TOTAL_SIZE - sizeof(*cf));
+    TEST_EXPECT_EQ(t->ctx.sp, (u64)(uintptr_t)cf, "ctx.sp = the frame at the kstack top");
+    TEST_EXPECT_EQ(cf->elr, entry, "frame ELR = user_entry_va");
+    TEST_EXPECT_EQ(cf->sp, sp, "frame SP_EL0 = user_sp_va");
+    TEST_EXPECT_EQ(cf->regs[0], arg, "frame x0 = user_arg");
+    TEST_EXPECT_EQ(cf->spsr, 0ull, "frame SPSR = EL0t, DAIF clear");
+    u64 others = 0;
+    for (int i = 1; i < 31; i++) others |= cf->regs[i];
+    TEST_EXPECT_EQ(others, 0ull, "every other GPR is zero (no kernel state crosses)");
+    TEST_EXPECT_EQ(t->ctx.tpidr_el0, tls, "ctx.tpidr_el0 = user_tls_va");
     TEST_EXPECT_EQ(t->ctx.lr,
                    (u64)(uintptr_t)thread_user_trampoline,
                    "ctx.lr = thread_user_trampoline");

@@ -27,7 +27,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-#include "../arch/arm64/exception.h" // LINEAGE L-3b: struct exception_context -- the forked child's EL0 frame
+#include "../arch/arm64/exception.h" // struct exception_context -- a first entry's EL0 frame
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/timer.h"   // #101: timer_now_ns for the test-window spin hook
 #include "../mm/phys.h"
@@ -628,27 +628,33 @@ struct Thread *thread_create_kthread_for(struct Proc *owner,
     return thread_create_internal(kproc(), owner, (void *)(uintptr_t)entry, arg);
 }
 
-// P6-pouch-threads (sub-chunk 9): create a Thread that on first dispatch
-// erets to EL0 — the substrate for pthread_create.
-//
-// Same body as thread_create_internal but ctx.lr points at
-// thread_user_trampoline (not thread_trampoline) and the four user-mode
-// arguments are parked in the callee-saved ctx slots that
-// cpu_switch_context reloads before `ret`:
-//
-//   ctx.x19 = user_sp_va    — SP_EL0 install before eret
-//   ctx.x20 = user_arg      — moved to x0 (AAPCS64 arg-0) before eret
-//   ctx.x21 = user_entry_va — moved to ELR_EL1 before eret
-//   ctx.x22 = user_tls_va   — written to TPIDR_EL0 before eret
-//
-// thread_user_trampoline (arch/arm64/context.S) consumes those four
-// slots, does the userland_enter dance inline (so x0 = arg survives the
-// GPR-zeroing sweep), and erets. See its asm comment for the discipline.
-//
-// The kstack layout (16 KiB usable + 16 KiB guard) is identical to the
-// EL1-side helpers; trampoline runs at EL1 for the brief window between
-// schedule-in and eret. The kstack stays valid past the eret because
-// every later exception (syscall, IRQ, fault) lands on it.
+// The EL0 frame a thread's first entry erets from, carved off the TOP of its
+// own fresh kernel stack: the exact address KERNEL_ENTRY would have put it at
+// had the thread taken a real exception (SP_EL1 at entry, minus
+// EXCEPTION_CTX_SIZE). thread_user_trampoline hands it to the shared
+// EL0-return tail, whose KERNEL_EXIT loads are sp-relative and whose
+// `add sp, sp, #EXCEPTION_CTX_SIZE` lands exactly on the stack top, as from
+// any other return. sizeof(struct exception_context) is EXCEPTION_CTX_SIZE
+// (288), a multiple of 16, and THREAD_KSTACK_TOTAL_SIZE is page-aligned, so
+// the frame is 16-aligned without rounding -- checked rather than assumed,
+// because a misaligned SP at the eret is an alignment fault at EL1 with the
+// frame half-restored.
+static struct exception_context *thread_first_frame(void *kalloc_base) {
+    u64 ktop = (u64)(uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE;
+    struct exception_context *cf =
+        (struct exception_context *)(uintptr_t)(ktop - sizeof(*cf));
+    if (((u64)(uintptr_t)cf & 15u) != 0)
+        extinction("thread_first_frame: misaligned first exception frame");
+    return cf;
+}
+
+// P6-pouch-threads (sub-chunk 9): a Thread whose first dispatch enters EL0 --
+// the substrate for pthread_create. Its frame is a fresh one (every field zero,
+// ELR = entry, SPSR = EL0t with DAIF clear, SP_EL0 = sp; el0_birth_frame_init)
+// with x0 = arg, and TPIDR_EL0 comes from ctx, which cpu_switch_context loads
+// at the switch-in. The first switch-in lands in thread_user_trampoline, which
+// takes the EL0-return tail over the frame (thread-model C7, F-7), so a thread
+// spawned into a stopped Proc parks before its first instruction.
 //
 // TTBR0 is baked to the kernel value (ASID 0) at create exactly as in
 // thread_create_internal (RW-1 B-F1); the rolling-ASID user value is installed
@@ -669,13 +675,13 @@ struct Thread *thread_alloc_user(struct Proc *proc,
     if (!t) return NULL;
     void *kalloc_base = t->kstack_base;
 
-    // Park the four user-mode args in callee-saved ctx slots.
-    t->ctx.x19 = user_sp_va;
-    t->ctx.x20 = user_arg;
-    t->ctx.x21 = user_entry_va;
-    t->ctx.x22 = user_tls_va;
+    struct exception_context *cf = thread_first_frame(kalloc_base);
+    el0_birth_frame_init(cf, user_entry_va, user_sp_va);
+    cf->regs[0] = user_arg;
+
+    t->ctx.sp  = (u64)(uintptr_t)cf;
     t->ctx.lr  = (u64)(uintptr_t)thread_user_trampoline;
-    t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
+    t->ctx.tpidr_el0 = user_tls_va;
     // RW-1 B-F1: kernel TTBR0 (ASID 0); the pre-hook installs the rolling-ASID
     // user value before the first switch. See thread_create_internal.
     t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
@@ -731,31 +737,14 @@ struct Thread *thread_alloc_forked(struct Proc *proc,
     if (!t) return NULL;
     void *kalloc_base = t->kstack_base;
 
-    // Carve the child's EL0 frame off the TOP of its own fresh kernel stack --
-    // the exact address KERNEL_ENTRY would have put it at had the child taken a
-    // real exception (SP_EL1 at entry, minus EXCEPTION_CTX_SIZE). That is what
-    // lets thread_fork_trampoline hand the child to the SHARED exception-return
-    // path instead of open-coding a second eret: KERNEL_EXIT's loads are
-    // sp-relative and its `add sp, sp, #EXCEPTION_CTX_SIZE` lands exactly on
-    // the stack top, as from any other return.
-    //
-    // sizeof(struct exception_context) is EXCEPTION_CTX_SIZE (288), a multiple
-    // of 16, and THREAD_KSTACK_TOTAL_SIZE is page-aligned, so the frame is
-    // 16-aligned without rounding -- asserted rather than assumed, because a
-    // misaligned SP at the eret is an alignment fault at EL1 with the frame
-    // half-restored.
-    u64 ktop = (u64)(uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE;
-    struct exception_context *cf =
-        (struct exception_context *)(uintptr_t)(ktop - sizeof(*cf));
-    if (((u64)(uintptr_t)cf & 15u) != 0)
-        extinction("thread_create_forked: misaligned child exception frame");
+    struct exception_context *cf = thread_first_frame(kalloc_base);
     fork_frame_init(cf, frame, child_sp);
 
     // The trampoline runs on this same stack BELOW the frame, so its own C
     // calls cannot disturb it.
     t->ctx.sp  = (u64)(uintptr_t)cf;
-    t->ctx.lr  = (u64)(uintptr_t)thread_fork_trampoline;
-    // Programmed VERBATIM, exactly as thread_create_user does. The "0 means
+    t->ctx.lr  = (u64)(uintptr_t)thread_user_trampoline;
+    // Programmed VERBATIM, exactly as thread_alloc_user does. The "0 means
     // inherit the caller's TLS" ABI decision belongs to the syscall handler,
     // which has the caller in scope; resolving it here would need this layer to
     // read a live system register on the caller's behalf.

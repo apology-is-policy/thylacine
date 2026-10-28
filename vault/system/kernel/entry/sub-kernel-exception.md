@@ -7,7 +7,6 @@ code:
   - arch/arm64/vectors.S
   - arch/arm64/exception.c
   - arch/arm64/exception.h
-  - arch/arm64/userland.S
 audit: hard
 guarded-by: [inv-i21, inv-i13, inv-i24, inv-i39]
 validated-by: [spec-sched-ctxsw, prose, gate-smp, gate-interactive]

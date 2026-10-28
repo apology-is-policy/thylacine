@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**550 owned · 46 unowned · 596 files (92% owned) · ~11917 unswept lines.**
+**549 owned · 46 unowned · 595 files (92% owned) · ~11886 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **78 files, ~38616 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,12 +73,12 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38616 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 12 | 17 | 2725 |
-| kernel | 130 | 13 | 1977 |
+| kernel | 130 | 13 | 1946 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 28 | 1 | 196 |
-| arch | 41 | 2 | 146 |
+| arch | 40 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/lib | 70 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
@@ -141,9 +141,9 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38616 lin
 | kernel/include/thylacine/spinlock.h | 275 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
+| kernel/include/thylacine/context.h | 170 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |

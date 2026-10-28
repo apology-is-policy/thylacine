@@ -530,21 +530,18 @@ struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
 int exec_stage_env(struct Proc *p, char **data_out, u32 *len_out,
                    u32 *count_out);
 
-// Kernel→EL0 transition (asm in arch/arm64/userland.S). Sets
-// ELR_EL1 = entry_pc, SP_EL0 = user_sp, SPSR_EL1 = 0 (PSTATE = EL0t,
-// all DAIF clear), zeros every GPR, then eret. Never returns —
-// transitions atomically to EL0.
-//
-// At v1.0 P3-Ed this is the only path from kernel to EL0. Phase 5+
-// syscall-return path uses the existing exception-exit ERET via
-// .Lexception_return for the syscall-return case.
+// A kernel-entry thread's first entry to EL0 (asm in arch/arm64/vectors.S;
+// thread-model C7). Builds a fresh EL0 frame below the caller's stack (every
+// field zero, ELR = entry_pc, SPSR = EL0t with DAIF clear, SP_EL0 = user_sp)
+// and takes the EL0-return tail over it -- the preempt check, the die-check,
+// the stop leg, the notes leg -- before KERNEL_EXIT erets. Never returns.
 __attribute__((noreturn))
 extern void userland_enter(u64 entry_pc, u64 user_sp);
 
 // The birth hold's first entry (asm in arch/arm64/vectors.S; DEBUG-FS-DESIGN
-// 5f): the same (entry_pc, user_sp) contract, but it builds the EL0 frame and
-// takes the EL0-return tail over it, parking at the birth park while the child
-// is held. Only a SPAWN_DEBUG_HELD child's thunk calls it. Never returns.
+// 5f): userland_enter's frame and tail, with the birth park as its stop leg,
+// so the child also parks while it is held. Only a SPAWN_DEBUG_HELD child's
+// thunk calls it. Never returns.
 __attribute__((noreturn))
 extern void userland_enter_held(u64 entry_pc, u64 user_sp);
 

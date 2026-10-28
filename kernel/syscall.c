@@ -10957,7 +10957,7 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
 
     // Only the PARENT reaches here. The child never returns from this call at
     // all: it is a separate Thread whose first switch-in lands in
-    // thread_fork_trampoline and erets onto its own copy of `ctx` with
+    // thread_user_trampoline and erets onto its own copy of `ctx` with
     // regs[0] == 0.
     return (s64)pid;
 }

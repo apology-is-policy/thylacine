@@ -352,72 +352,77 @@ _exception_vectors:
     KERNEL_EXIT
 
 // ---------------------------------------------------------------------------
-// thread_fork_trampoline — LINEAGE L-3b. Initial ctx.lr for a Thread created
-// by thread_create_forked; the child half of rfork(RFPROC|RFMEM).
+// The first entry to EL0 (thread-model C7, F-7). Every thread's first EL0
+// instruction is reached the way every later one is: from a saved EL0 frame,
+// through the EL0-return tail -- the preempt check, the die-check, the stop leg
+// and the notes leg -- and KERNEL_EXIT. A thread born into a stopped Proc
+// therefore parks before its first instruction, one born into a dying group
+// dies, and a note pending at its birth is met there; a first entry that erets
+// straight from registers runs EL0 code until its first trap. Three shapes
+// build the frame, and all take the one tail:
 //
-// The third first-switch-in shape, and the only one that RESTORES rather than
-// constructs. thread_trampoline blr's a kernel entry; thread_user_trampoline
-// erets to a fresh (entry, sp, arg); this one has no entry point at all,
-// because the raw fork contract has none — the child resumes exactly where its
-// parent was, distinguished only by x0. So the whole body is "release, check
-// for death, take the normal exception return".
+//   thread_user_trampoline -- the first switch-in of a thread whose frame its
+//       creator built at the top of its kstack: a spawned thread
+//       (thread_alloc_user: a fresh frame of zeros, ELR = entry, SP_EL0 = sp,
+//       x0 = arg) and a forked one (thread_alloc_forked: the parent's frame,
+//       x0 = 0, its own sp). Restoring a copied frame and starting a fresh one
+//       are the same act here.
+//   userland_enter -- a kernel-entry thread's first eret (an exec thunk): the
+//       frame is carved below the caller's stack and built by
+//       el0_birth_frame_init, as a fresh thread's is.
+//   userland_enter_held -- userland_enter's held twin (DEBUG-FS-DESIGN 5f),
+//       whose stop leg is the birth park.
 //
-// **Why it lives HERE and not in context.S**: it branches to
-// .Lexception_return, which is deliberately a LOCAL label so no kernel caller
-// can invoke KERNEL_EXIT on whatever happens to sit on the current SP and eret
-// to an attacker-shaped ELR/SPSR. Branching from INSIDE vectors.S is exactly
-// the use that label's own comment sanctions ("Phase 2's recoverable
-// sync-fault paths will branch here from within vectors.S the same way the IRQ
-// slot does"), and reusing the one audited exit is worth more on this surface
-// than keeping the trampolines in one file: KERNEL_EXIT is, in its own words,
-// "the single most load-bearing exit in the kernel".
+// They live HERE, not in context.S, because they end in .Lel0_return, a LOCAL
+// label: no kernel caller outside this file can eret on whatever sits on the
+// current SP, and reusing the one audited exit beats a second hand-rolled one
+// on the tree's most load-bearing path. KERNEL_EXIT loads every GPR from the
+// frame, so a fresh frame of zeros is the guarantee the old register sweeps
+// gave: no kernel register state crosses into EL0.
 //
-// On entry, sp IS the child's frame — thread_create_forked placed it at the
-// top of the child's fresh kstack, the same address KERNEL_ENTRY would have
-// chosen. So KERNEL_EXIT's sp-relative loads and its closing
-// `add sp, sp, #EXCEPTION_CTX_SIZE` behave precisely as on a real return, and
-// the two C calls below run on the same stack BELOW the frame, unable to
-// disturb it.
-//
-// DAIF: reached IRQ-masked (sched() switches under irqsave, and
-// cpu_switch_context preserves DAIF), which is the state KERNEL_EXIT documents
-// as its precondition. The mask is re-asserted explicitly after the C calls
-// anyway — it costs one instruction and makes the #713 property local rather
-// than inherited: there must be NO interruptible window between installing
-// ELR_EL1 and the eret, and here that window is entirely inside KERNEL_EXIT.
-//
-// No GPR-zeroing sweep, unlike thread_user_trampoline — and that is the point,
-// not an omission. A fresh thread must not inherit kernel register residue
-// across EL1→EL0, but this child is CONTINUING its parent's userspace frame:
-// every GPR it loads came from the parent's own EL0 state, so x1..x30 are
-// values userspace already had. Zeroing them would break the fork, not
-// harden it.
+// DAIF: every tail leg runs masked and KERNEL_EXIT inherits the mask (#713; the
+// stop and notes legs assert it). The trampoline arrives masked (sched()
+// switches under irqsave and cpu_switch_context preserves DAIF) and re-masks
+// locally anyway, so the property does not lean on a caller's discipline. The
+// two enter functions are called from C with IRQs on: the frame is built
+// unmasked, then everything is masked for the tail.
 // ---------------------------------------------------------------------------
-.globl thread_fork_trampoline
-.type thread_fork_trampoline, %function
-thread_fork_trampoline:
-    bti     c
 
-    /* Release the run-tree lock prev held when switching to us — the same
+// Carve an EL0 frame below the current SP and build a fresh one in it:
+// x0 = entry_pc, x1 = user_sp on entry; sp = the frame afterwards. SP stays
+// 16-aligned (EXCEPTION_CTX_SIZE is 18 x 16), and after the eret SP_EL1 is
+// back where the caller left it, so every later EL0 entry of the thread
+// lands its frame where this one is.
+.macro EL0_FIRST_FRAME
+    sub     sp, sp, #EXCEPTION_CTX_SIZE
+    mov     x2, x1                       /* user_sp */
+    mov     x1, x0                       /* entry_pc */
+    mov     x0, sp                       /* the frame */
+    bl      el0_birth_frame_init
+.endm
+
+// ctx.sp is the frame: the switch-in's `ret` lands here on the stack its
+// creator built, and the tail's C calls run below the frame, unable to
+// disturb it.
+.globl thread_user_trampoline
+.type thread_user_trampoline, %function
+thread_user_trampoline:
+    bti     c
+    /* Release the run-tree lock prev held when switching to us -- the
      * discipline every trampoline and the sched() resume path share. */
     bl      sched_finish_task_switch
+    msr     daifset, #0xf
+    b       .Lel0_return
+.size thread_user_trampoline, . - thread_user_trampoline
 
-    /* #811 (#809-audit F3): first-entry group-termination die-check, exactly
-     * as thread_user_trampoline does it. A child forked while its parent's
-     * group is already terminating would otherwise run EL0 code until its next
-     * trap; el0_return_die_check is noreturn on the die path, so the eret
-     * window below is never entered on it (I-24: no Thread runs at EL0 after
-     * its Proc is ZOMBIE). Runs BEFORE the daifset window, as a C call must. */
-    bl      el0_return_die_check
-
-    /* #713: mask everything through the eret. KERNEL_EXIT installs elr/spsr
-     * and erets in one masked instant, so no IRQ can overwrite ELR_EL1 between
-     * them. Belt-and-braces — we arrive masked — but stated locally so the
-     * property does not depend on a caller's discipline. */
-    msr     daifset,   #0xf
-
-    b       .Lexception_return
-.size thread_fork_trampoline, . - thread_fork_trampoline
+.globl userland_enter
+.type userland_enter, %function
+userland_enter:
+    bti     c
+    EL0_FIRST_FRAME
+    msr     daifset, #0xf
+    b       .Lel0_return
+.size userland_enter, . - userland_enter
 
 // ---------------------------------------------------------------------------
 // userland_enter_held -- the birth hold (DEBUG-FS-DESIGN 5f; I-39). The first
@@ -425,42 +430,24 @@ thread_fork_trampoline:
 // returns. The held spawn thunk calls it where every other spawn calls
 // userland_enter.
 //
-// userland_enter erets straight from registers, with no frame and no stop
-// check, so nothing can stop a child before its first instruction. This
-// instead BUILDS the EL0 frame that first instruction would have been
-// interrupted with and takes the ordinary EL0-return tail over it: the preempt
-// check, the die-check, the stop leg -- here the birth park, which also holds
-// while the child is held -- then note delivery. A debugger that converts the hold
-// therefore finds a real saved frame (regs reads the entry, a regs write lands
-// in the frame, a step arms SPSR.SS in it), and KERNEL_EXIT erets from that
-// frame when the child is released.
+// The same frame as userland_enter's and the same tail, but its stop leg is
+// the birth park, which also holds while the child is held. A debugger that
+// converts the hold therefore finds a real saved frame (regs reads the entry, a
+// regs write lands in the frame, a step arms SPSR.SS in it), and KERNEL_EXIT
+// erets from that frame when the child is released. It spells the tail out
+// rather than branching to .Lel0_return, whose stop leg is the plain stop
+// check.
 //
-// Why it lives HERE and not in userland.S: thread_fork_trampoline's reason. It
-// ends in the local .Lexception_return, the one audited exit, and that label
-// is deliberately unreachable from outside this file.
-//
-// The frame is carved below the caller's stack, so after the eret SP_EL1 is
-// exactly where userland_enter leaves it, and every later EL0 entry of this
-// thread lands its frame where it would have without the hold. SP stays
-// 16-aligned (EXCEPTION_CTX_SIZE is 18 x 16).
-//
-// DAIF: the frame is built with IRQs on (a plain C call, as userland_enter's
-// die-check), then everything is masked for the tail -- the precondition every
-// tail call asserts (#713) and the state KERNEL_EXIT requires. The birth park
-// comes before the notes leg, as the stop check does at the sync tail
-// (DEBUG-FS-DESIGN 4.2): neither park ends for a latched interrupt (5g), and
-// the notes leg takes the note as the park returns. The tail is straight-line;
-// the notes leg's own re-passes are bounded by its budget.
+// The birth park comes before the notes leg, as the stop check does at the
+// sync tail (DEBUG-FS-DESIGN 4.2): neither park ends for a latched interrupt
+// (5g), and the notes leg takes the note as the park returns. The tail is
+// straight-line; the notes leg's own re-passes are bounded by its budget.
 // ---------------------------------------------------------------------------
 .globl userland_enter_held
 .type userland_enter_held, %function
 userland_enter_held:
     bti     c
-    sub     sp, sp, #EXCEPTION_CTX_SIZE
-    mov     x2, x1                       /* user_sp */
-    mov     x1, x0                       /* entry_pc */
-    mov     x0, sp                       /* the frame */
-    bl      el0_birth_frame_init
+    EL0_FIRST_FRAME
     msr     daifset, #0xf
     bl      preempt_check_irq
     bl      el0_return_die_check         /* I-24: noreturn if the Proc is group-terminating */

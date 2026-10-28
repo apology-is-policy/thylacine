@@ -5586,15 +5586,12 @@ void proc_group_kill(struct Proc *p) {
 }
 
 void el0_return_die_check(void) {
-    // NO interrupt-state assert here, and the absence is deliberate: this
-    // function HAS NO UNIFORM interrupt-state contract. Some callers arrive
-    // masked (.Lel0_return, which both lower-EL vectors take, and
-    // thread_fork_trampoline), but userland_enter calls it UNMASKED ON
-    // PURPOSE -- userland.S puts it before the `msr daifset, #0xf` precisely
-    // so a die-path exit never enters that window (#713-safe by placement).
-    // The property belongs to the PATH, not to this function; it is asserted
-    // in el0_return_stop_check, which only .Lel0_return's legs call, on the way
-    // to KERNEL_EXIT under an INHERITED mask.
+    // NO interrupt-state assert here. Every EL0 path calls it masked -- the
+    // EL0-return tail (both lower-EL vectors and every first entry since
+    // thread-model C7), the birth tail, and the notes leg's re-pass -- but the
+    // kernel tests call it from kernel-entry threads with IRQs on. The
+    // property belongs to the PATH: el0_return_stop_check and the notes leg
+    // assert it on the way to KERNEL_EXIT under an INHERITED mask.
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;
@@ -5606,10 +5603,9 @@ void el0_return_die_check(void) {
     // all). Undetected it pins this CPU non-preemptible forever -- the sched()
     // assert needs a sleep, and a CPU-bound EL0 loop never sleeps. Checked
     // FIRST: the die path below calls thread_exit_self -> sched(), which would
-    // report the leak as a misleading "lock-across-sleep". Runs on BOTH EL0
-    // return tails (sync + IRQ, vectors.S); a leak on the first-enter path
-    // (userland_enter, no die-check) is caught at the thread's next kernel
-    // round-trip. One load on an already-hot line + a predictable branch.
+    // report the leak as a misleading "lock-across-sleep". Runs on every EL0
+    // return (sync, IRQ, and each thread's first entry; vectors.S). One load
+    // on an already-hot line + a predictable branch.
     if (t->preempt_count != 0u)
         sched_report_el0_leak();
 

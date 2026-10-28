@@ -2338,10 +2338,11 @@ void proc_job_cont_proc(struct Proc *m);
 struct exception_context;
 void el0_return_stop_check(struct exception_context *ctx);
 
-// The birth hold's first entry (DEBUG-FS-DESIGN 5f), both called from
-// userland_enter_held (vectors.S). el0_birth_frame_init builds the initial EL0
-// frame: every field zero, then ELR = entry, SPSR = EL0t with DAIF clear, SP_EL0
-// = sp. el0_birth_park is the birth tail's stop leg: it announces the arrival,
+// A first entry's frame and the birth hold's park (DEBUG-FS-DESIGN 5f;
+// thread-model C7). el0_birth_frame_init builds the initial EL0 frame of every
+// first entry (userland_enter, userland_enter_held, thread_alloc_user): every
+// field zero, then ELR = entry, SPSR = EL0t with DAIF clear, SP_EL0 = sp.
+// el0_birth_park, called from userland_enter_held, is the birth tail's stop leg: it announces the arrival,
 // then parks while the hold OR any stop owner holds, re-checking death on every
 // wake. It returns only to proceed to the notes leg and the eret: group death
 // ends the thread in the park, and a latched interrupt does not end it -- a held

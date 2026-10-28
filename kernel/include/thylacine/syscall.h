@@ -762,8 +762,9 @@ enum {
     // Allocates a new Thread + 16 KiB kstack in the CALLING Proc (same
     // pgtable_root + ASID — the new thread shares the caller's address
     // space). The new Thread is registered on the run-tree as RUNNABLE;
-    // the first dispatch lands at thread_user_trampoline which erets to
-    // EL0 at entry_va running on sp_va with TPIDR_EL0 = tls_va + x0 = arg.
+    // the first dispatch lands at thread_user_trampoline, which takes the
+    // EL0-return tail over a frame entering EL0 at entry_va on sp_va with
+    // x0 = arg (TPIDR_EL0 = tls_va from ctx).
     //
     // Returns the new thread's tid (positive int) on success. Returns
     // negative -errno on failure (Linux/musl-numeric; pouch's

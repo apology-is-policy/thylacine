@@ -50,7 +50,6 @@ set(KERNEL_SRCS
     ../arch/arm64/hwdebug.c
     ../arch/arm64/alternatives.c
     ../arch/arm64/context.S
-    ../arch/arm64/userland.S
     ../arch/arm64/psci.c
     ../arch/arm64/asid.c
     ../lib/dtb.c
