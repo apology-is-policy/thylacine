@@ -48,7 +48,7 @@ override. Otherwise it attaches `/srv/warp`, walks `ctl`, and reads a leading
 (`:73-75`). Until 2026-10-28 it wrote `/env/GALLIUM_DRIVER` instead, because
 pouch's `posix_spawn` dropped its `envp` and only a device write reached the
 child. The spawn now passes `environ`, which becomes the child's whole `/env`
-(patch 0051, [[sub-pouch-process]]), so the value reaches the game and whatever
+(patch 0064, [[sub-pouch-process]]), so the value reaches the game and whatever
 it spawns. The `execv` arm passes `environ` too, and will carry it only if
 pouch's `execve` honours `envp` once it exists. There is no CAP_JIT here — that is acquired
 later, by the SDL GL backend, on the program's own behalf ([[sub-sdl-port]]).

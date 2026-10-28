@@ -105,7 +105,7 @@ run_demo paced "/clade/bin/tyr-glquake -window -nosound +timedemo demo1"
 
 # The rp5 env wrapper (the glq-165/#159 pattern): compiled in-guest because
 # ut has no export (#151). It setenvs and spawns with environ -- a NULL envp
-# is an empty environment since pouch 0051, so a /env write would not carry.
+# is an empty environment since pouch 0064, so a /env write would not carry.
 lc_send "echo 'long write(int,const void*,long);' > rp5.c"
 sleep 1
 lc_send "echo 'int posix_spawn(int*,const char*,void*,void*,char*const*,char*const*);int waitpid(int,int*,int);' >> rp5.c"

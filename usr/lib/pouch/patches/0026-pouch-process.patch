@@ -29,7 +29,7 @@ Two translations are load-bearing:
     forwarded verbatim. (Until gcpark-b a plain wait read the RAW exit status
     and was repacked as an exit, so a killed child read WIFEXITED 1.)
 
-envp was inherited via the /env clone here; 0051 sends it as the
+envp was inherited via the /env clone here; 0064 sends it as the
 SYS_SPAWN_FULL_ARGV SPAWN_EXT_ENV tail. dup2/dup3 onto a chosen
 target fd have NO kernel primitive (handle_dup is lowest-free only) and NO
 runtime toolchain path needs one (posix_spawn resolves file_actions

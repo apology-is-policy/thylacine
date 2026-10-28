@@ -92,7 +92,7 @@ lc_login michael correct-horse-battery-staple-v1
 
 # rp7: the forwarding unpace wrapper (rp6) + two probe affordances. `-n`
 # gates the nopace setenv so BOTH legs ride the same wrapper (both spawn
-# with environ: a NULL envp is an empty environment since 0051), and
+# with environ: a NULL envp is an empty environment since 0064), and
 # the spawn prints the pid ANCHOR the autopsy sweeps from. 45/110 are
 # '-'/'n' -- char literals cannot survive the single-quoted echo
 # transport.

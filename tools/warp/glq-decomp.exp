@@ -218,7 +218,7 @@ set qpid [expr {[info exists ::lc_vm_pid] ? $::lc_vm_pid : [exp_pid]}]
 
 # rp6: the FORWARDING unpace wrapper (the launcher's #197/#199 shape --
 # signal forward + WNOHANG/usleep reap -- grafted onto rp5's setenv; it
-# spawns with environ, as a NULL envp is an empty environment since 0051).
+# spawns with environ, as a NULL envp is an empty environment since 0064).
 lc_send "echo 'long write(int,const void*,long);' > rp6.c"
 sleep 1
 lc_send "echo 'int posix_spawn(int*,const char*,void*,void*,char*const*,char*const*);int waitpid(int,int*,int);' >> rp6.c"

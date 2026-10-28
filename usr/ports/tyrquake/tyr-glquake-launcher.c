@@ -43,7 +43,7 @@ static long thyla_open(long dirfd, const char *name, unsigned long len,
  * from the conn root, and read the leading "virgl 1" that says the host GL
  * came up. Pouch fds are kernel handles 1:1, so musl read/close work on
  * them. The choice is a setenv: both arms below pass environ, and the
- * spawn's envp becomes the child's whole /env (patch 0051), so the game and
+ * spawn's envp becomes the child's whole /env (patch 0064), so the game and
  * everything it spawns inherit it. An explicit
  * GALLIUM_DRIVER anywhere in the inherited environment wins -- this is a
  * default, not an override; osmesa still falls back loudly if the seam

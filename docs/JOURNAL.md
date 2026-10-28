@@ -28,7 +28,9 @@ needed the operator.
 15:19Z: patch 0026's `posix_spawn` did `(void)envp`, so a ported program
 that spawned a child with a different environment got its own instead, and
 a `setenv` never reached a child. env-a (2805c8d4f) gave the spawn record an
-environment tail; env-c is pouch's sender. Code a2693024e, patch 0051.
+environment tail; env-c is pouch's sender. Code a2693024e, patch 0064 (landed as 0051;
+renamed so b3's own 0051-0063 keep their numbers, agreed with main on yip
+0269).
 
 **The semantic, and a heritage claim read wrong first.** `envp` becomes the
 child's whole environment; the open question was a NULL `envp`. I first
@@ -72,7 +74,7 @@ the NULL leg, the rest green. Each matched its prediction leg for leg.
 control -- the shim answers every kernel failure with ECHILD, so a selector
 that could never find a child would pass it; the block leg now reaps through
 `waitpid(-1)`. F2: the mirror checker read pouch's tail and bit only from
-0051, blind to a later patch editing them; it now scans the rest of the
+0064, blind to a later patch editing them; it now scans the rest of the
 series. F3: the dossier said the errno assert pins pouch's values to the
 kernel's; it compares musl's with literals -- reworded, and the checker now
 holds the kernel's four `T_E_*` to the same numbers. After the fixes: suite
@@ -84,13 +86,21 @@ the glquake virgl gate's script and found it still describing the launcher's
 rp5, glq-decomp's rp6, glq-wedge-probe's rp7): C typed into the guest by
 expect, writing `/env/SDL_THYLACINE_NOPACE` and spawning with a NULL envp.
 My caller census had grepped C sources, and these are C inside `.exp`
-strings. Under 0051 their games would have started with an empty
+strings. Under 0064 their games would have started with an empty
 environment, run paced, and reported that as the unpaced figure -- a wrong
 number, not a failure. They now `setenv` and pass `environ`; each was
 reconstructed from its script, cross-compiled for aarch64 and its symbols
 resolved in pouch's `libc.a`, but not run (all three need a `/clade` bake;
 enqueued). **A census of callers covers every language the call can be
 written in, including code a script types.**
+
+**A number collision found before the merge.** An OPEN-BUGS line naming a
+different 0051 (b3's vectored-I/O patch) led to b3's tree: b3 already holds pouch patches 0051-0063, three of them
+editing `posix_spawn.c`. On scratch copies b3's series applies to
+`third_party/musl`, and my patch on top of it fails one hunk at `-F 0` (the
+header comment b3 rewrote); the five code hunks apply unchanged. Main gave
+corona 0064 (yip 0269), and a version rebased onto b3's 0063 is in
+`work/oct28-envc/b3-merge/` for the merge.
 
 **Still open.** env-b: the Go fork sends `ProcAttr.Env`, once main, b3 and
 aux-3 carry bit 2. The glquake virgl run on thyla-pi, which is the end-to-end

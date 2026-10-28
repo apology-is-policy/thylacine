@@ -2720,9 +2720,10 @@ dec-2026-10-28-spawn-env, the audit row "The spawn environment tail").
 ## env-c: pouch's posix_spawn sends envp (SPAWN_EXT_ENV) -- 2026-10-28
 
 Closes seam-pouch-spawn-envp, pouch's third of OPEN-BUGS 15:19Z (P1). The kernel and libthyla-rs halves are env-a above;
-the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e; patch 0051.
+the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e; patch 0064 (landed as 0051, renamed after b3's
+0051-0063 with main's agreement, yip 0269).
 
-- **The semantic.** `envp` is the child's whole environment: 0051 packs it the way argv is packed and always announces
+- **The semantic.** `envp` is the child's whole environment: 0064 packs it the way argv is packed and always announces
   the tail (`ext_flags = POUCH_SPAWN_EXT_ENV`, a `struct pouch_spawn_ext_env` at record+104). A later record for a name
   replaces an earlier one; nothing of the parent's `/env` carries over; a NULL `envp` is empty (Linux, and Plan 9 APE's
   `execve`: RFCENVG, then `/env` written only `if(envp)`). A block past 32 KiB is `E2BIG` before the call; the kernel's
@@ -2733,9 +2734,9 @@ the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e
   its crt read it, so only an inheriting child holds it. Legs: a block with a repeated name; `environ` after two
   `setenv`s (exact count); a NULL envp (count 0); four refusals with their errnos and `waitpid(-1)` ECHILD after them,
   its positive twin the block leg's `waitpid(-1)` reap. Every leg reports before the run fails.
-- **Checker.** `check-spawn-args-mirrors.py` reads pouch's tail struct from 0051 (`TAIL_SOURCES`), holds
+- **Checker.** `check-spawn-args-mirrors.py` reads pouch's tail struct from 0064 (`TAIL_SOURCES`), holds
   `POUCH_SPAWN_EXT_ENV` to the kernel's bit, fails if any other series patch edits a pouch spawn mirror, and holds the
-  kernel's `T_E_2BIG`/`NOMEM`/`FAULT`/`INVAL` to 7/12/14/22, the musl values 0051's `_Static_assert` pins.
+  kernel's `T_E_2BIG`/`NOMEM`/`FAULT`/`INVAL` to 7/12/14/22, the musl values 0064's `_Static_assert` pins.
 - **Verification.** Mac lease 22:11-22:41Z (logs `work/oct28-envc/`): suite 2120/2120 on a2693024e with
   `pouch-hello-spawn: ... env block/environ/empty ok, 4 refusals -- ALL SPAWN TESTS PASS`; no tail -> seven reds
   (block and environ read 4, count, NULL, the three kernel refusals), the 32 KiB pre-check green; refusals collapsed to

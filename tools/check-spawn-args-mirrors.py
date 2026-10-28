@@ -20,7 +20,7 @@ compares every mirror with it field by field:
   libthyla-rs  usr/lib/libthyla-rs/src/lib.rs          struct TSpawnArgs
   pouch        usr/lib/pouch/patches/0026-pouch-process.patch
                                                        struct pouch_spawn_args
-               (its env tail, struct pouch_spawn_ext_env, is in 0051)
+               (its env tail, struct pouch_spawn_ext_env, is in 0064)
   go fork      $GOFORK/src/syscall/exec_thylacine.go   type spawnArgs
 
 The in-tree mirrors must match names, offsets and sizes: two same-size fields
@@ -84,12 +84,12 @@ EXT_TAILS = [
 ]
 # Tail mirrors that live outside the MIRRORS files: pouch's env tail comes in its
 # own patch, after the one that mirrors the record.
-TAIL_SOURCES = {"pouch-env": "usr/lib/pouch/patches/0051-pouch-spawn-env.patch"}
+TAIL_SOURCES = {"pouch-env": "usr/lib/pouch/patches/0064-pouch-spawn-env.patch"}
 # The files above are read as patches, not as the series' result, so a later
 # patch that edits a pouch mirror would go unseen; every other patch in the
 # series must leave them alone.
 POUCH_SERIES = "usr/lib/pouch/patches"
-POUCH_MIRROR_PATCHES = {"0026-pouch-process.patch", "0051-pouch-spawn-env.patch"}
+POUCH_MIRROR_PATCHES = {"0026-pouch-process.patch", "0064-pouch-spawn-env.patch"}
 POUCH_MIRROR_NAME = re.compile(
     r"^[+-](?![+-]{2}).*(\bstruct\s+pouch_spawn_(?:args|ext_env|env_rec)\b|\bPOUCH_SPAWN_EXT_\w+)", re.M)
 # posix_spawn returns a refused tail's -T_E value as this libc's errno, which

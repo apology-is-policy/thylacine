@@ -5,7 +5,7 @@ parent: moc-pouch-seam
 title: "Process lifecycle — posix_spawn, wait, pipe, the environ populate, the terminators"
 code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
-  - usr/lib/pouch/patches/0051-pouch-spawn-env.patch
+  - usr/lib/pouch/patches/0064-pouch-spawn-env.patch
   - usr/pouch-hello/pouch-hello-spawn.c
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
@@ -80,7 +80,7 @@ is a Burrow.
 - `posix_spawn(res, path, fa, attr, argv, envp)` →
   `SYS_SPAWN_FULL_ARGV` (49) after resolving `fa` statically.
   `posix_spawnp` PATH-searches first. `envp` is the child's whole
-  environment, sent as the `SPAWN_EXT_ENV` tail (0051); a NULL `envp` is an
+  environment, sent as the `SPAWN_EXT_ENV` tail (0064); a NULL `envp` is an
   empty one.
 - `waitpid` / `wait4` → `SYS_WAIT_PID` (22), with flag and status-word
   translation; `wait4`'s `rusage` is zero-filled.
@@ -202,7 +202,7 @@ sets `ctx.brk = -1`, and metadata allocation routes through mmap permanently
 `struct pouch_spawn_args` — a hand-mirrored **104-byte** copy of the
 kernel's `sys_spawn_args`, pinned by **twenty-one** `_Static_assert`s: one
 on the size and **one per field offset**. `struct __dirstream` (unchanged)
-for the `/env` scan. `struct pouch_spawn_ext_env` (0051) mirrors the kernel's
+for the `/env` scan. `struct pouch_spawn_ext_env` (0064) mirrors the kernel's
 16-byte `sys_spawn_ext_env`, its size and every offset pinned, and
 `struct pouch_spawn_env_rec` is the record with that tail at offset 104.
 
@@ -236,8 +236,8 @@ has nothing checking it.
 
 **`_pad_envp` is `ext_flags` (2026-10-06).** The record's word at offset 44
 announces tails after the record ([[sub-kernel-syscall-abi]]); the patch renames
-it. Since 0051 pouch sets one bit in it, `SPAWN_EXT_ENV`, and
-`tools/check-spawn-args-mirrors.py` reads the tail struct out of 0051, holds
+it. Since 0064 pouch sets one bit in it, `SPAWN_EXT_ENV`, and
+`tools/check-spawn-args-mirrors.py` reads the tail struct out of 0064, holds
 `POUCH_SPAWN_EXT_ENV` to the kernel's bit, and fails if any other patch in the
 series edits a pouch spawn mirror (it reads patches, not the series' result). `posix_spawn_file_actions_addchdir`
 is still not wired to the cwd tail.
@@ -349,7 +349,7 @@ per process. Every `malloc` past mallocng's first is userspace-only.
 ## Seams
 
 [[seam-pouch-dup2-target]] (freopen / login_tty / daemon / wordexp are
-non-functional). Closed: [[seam-pouch-spawn-envp]] (0051).
+non-functional). Closed: [[seam-pouch-spawn-envp]] (0064).
 
 ## Caveats
 
@@ -375,7 +375,7 @@ retargeted to `SYS_BURROW_ATTACH_LAZY` at #321) →
 [[chg-2026-07-23-cl1b-process]] (0026) →
 gcpark-b (2026-10-12: 0011 `brk #0xab06`, 0012 assert → `abort()`, 0026
 `POUCH_WAIT_PACKED` and the verbatim status word) →
-[[chg-2026-10-28-spawn-env]] (0051, `envp` as the `SPAWN_EXT_ENV` tail).
+[[chg-2026-10-28-spawn-env]] (0064, `envp` as the `SPAWN_EXT_ENV` tail).
 
 The 104-byte widening, the twenty offset pins, and the stale-archive
 relink are [[chg-2026-08-16-pouch-offset-pins]].
