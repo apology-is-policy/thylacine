@@ -84,7 +84,13 @@ of the other. Main itself carries tapestryd twice. Enqueued (OPEN-BUGS
 - The SMP gate (default-smp4 + ubsan-smp4) started at 04:45Z; the host
   restarted before it was read, and the restart wiped /private/tmp: the gate
   logs, the drafts and the SMP result with them. The figures above are the ones
-  read live before the restart. The SMP gate is OWED and runs next.
+  read live before the restart.
+- The SMP gate, rerun after the commit on 851226393 (this merge plus the
+  commits below; Mac lease 07:17-08:06Z): default-smp4 10/10 PASS and
+  ubsan-smp4 10/10 PASS, 0 corruption, 0 external-kill, 0 timing, 0 other
+  (`ci-smp-gate: PASS`; work/oct28-join/smp-20261028T071746Z/smp.log). Both
+  kernels were rebuilt by the gate, which mattered: build/ still held the S2
+  sabotage kernel.
 
 **Wrong turns.** (1) The first gate run's suite read "2093/2093 PASS": test.sh
 runs check-production before it boots, the production build failed, nothing
@@ -102,7 +108,7 @@ well as commits); drafts and logs now go under work/oct28-join.
 charged to that Proc's share of the user pool, both SQPOLL pollers included,
 and the private ticket admits on the same budget predicate as every other
 thread charge. The two colliding bits are separate, and a third perm collision
-would now fail the build. Not covered: the SMP gate (owed); join list item (d),
+would now fail the build. Not covered: join list item (d),
 main's test_proc.c:2571 prototype, which is on a main tip past this merge base;
 and aux-3-poll's proc_table_lock wrappers, which this tree's new walk site will
 meet at the next join.
@@ -116,6 +122,46 @@ runs every tools/test-*.py by default.
 **Decisions.** None needed from the operator: the bit moves are on unmerged
 branches (the 0233 precedent), and the owner argument follows aux's own
 lifetime argument (0261 turn 3).
+
+**After the merge, while queued for the Mac (06:49-07:15Z).** The last
+duplicated audit row, tapestryd G-3, was a reading problem until it was
+measured. The two copies share their first 39519 and last 1611 characters;
+each carries one addendum the other lacks (FRAME-INTENT, 09-04; H-4d-1, 09-05).
+41aa30da3 keeps both in date order. The OPEN-BUGS item also asked for a check,
+and two now run in every build:
+- check-audit-rows (9dea42aac, 3e2a624f1) fails on a duplicated first cell,
+  and on an unpushed merge that lost a row, dropped one side's change to a row,
+  or copied a row, if the tree still shows it. Its first run flagged two rows
+  at c59c2a6fb that corona had taken from an older copy of main's text. The
+  bases carry those rows under another title, so nothing anchors a judgement,
+  and the one-side rule now judges only rows every merge base carries. A scan
+  of 20 historical merges found one more loss, 05250a274's "stay-stopped
+  rule", which that merge's resolution had retitled rather than lost; a LOST
+  report now names such a candidate. I committed the checker before staging
+  its last edit, which 3e2a624f1 carries.
+- check-test-registry (851226393) is the second half of the 10-27 entry about
+  the devcap test that never ran: a defined test that g_tests does not name
+  fails the build. At a3144a8c5^ it fails on exactly that test. Its commit
+  message says the 10 static definitions are helpers; one of them is
+  test_harness_skip_line_composes_clean, a registered test defined static in
+  test.c beside g_tests, which the check rightly allows.
+
+Then a sweep of OPEN-BUGS entries that name corona: twenty-one status lines
+flipped, each with the commit or log that shows it. Eighteen said ENQUEUED or
+IN PROGRESS for work closed days ago; two closed with the commits above (the
+audit rows, the devcap guard). The last was still open and needed no lease: the
+10-06 D7 login-probe `eaccess`. In the preserved red log the refused install
+is the fourth, a second session installing the first user's home dataset
+again, which is the case Stratum 61dde37's session leases exist to permit; the
+green log prints "D7 second same-user session ready" at the same step. A
+stratumd built without 61dde37 refuses it deterministically, so the race
+candidate the entry kept open is refuted.
+
+The SMP gate's last boot also answered an older entry (OPEN-BUGS 10-06
+23:45Z): the debugged ambush-child is still orphaned when ambush exits
+(test-boot.log:2780, adopted by pid 1) and reaped with status=1 after
+`Thylacine boot OK` (:9356), with nothing saying whether that is the designed
+EXITKILL or a teardown failure. It stays open with this measurement.
 
 ## 2026-10-28 -- a frame named after the function it never reached (corona)
 
