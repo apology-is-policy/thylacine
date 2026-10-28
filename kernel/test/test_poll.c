@@ -24,6 +24,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>        // dev9p_poll_test_under_lock
 #include <thylacine/devsrv.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
@@ -2174,6 +2175,125 @@ void test_poll_one_hook_per_list_per_call(void) {
     drop_test_proc(p);
 }
 
+// Which hook the dedupe keeps, for two objects on one list (a pipe's read and
+// write ends share the ring's list). A write after the read end's sample starts
+// a walk that parks, past TDD_FILL hooks pushed ahead of the read end's, before
+// the write end registers; the write end's hook goes on at the head, behind the
+// walk. Only the EARLIER hook is still ahead of that walk, so dropping it
+// instead of the later one leaves the poller asleep with the byte unread.
+#define TDD_FILL POLL_WAKE_BATCH
+static struct Rendez      g_tdd_fill_r[TDD_FILL];
+static struct poll_waiter g_tdd_fill[TDD_FILL];
+static struct Spoor      *g_tdd_rd;
+static struct Spoor      *g_tdd_wr;
+static hidx_t             g_tdd_fd_wr;
+static struct Thread     *g_tdd_poller;
+static struct Thread     *g_tdd_writer;
+static volatile bool      g_tdd_go, g_tdd_parked, g_tdd_released, g_tdd_writer_exited;
+static volatile u32       g_tdd_batches, g_tdd_hooks_at_release;
+static volatile bool      g_tdd_staged;
+
+static bool tdd_wait(volatile bool *flag) {
+    u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (timer_now_ns() >= deadline) return false;
+        sched();
+    }
+    return true;
+}
+
+static void tdd_scan(u64 i) {
+    if (current_thread() != g_tdd_poller || g_tdd_staged) return;
+    if (i == 0) {
+        for (u32 k = 0; k < TDD_FILL; k++)
+            (void)g_tdd_rd->dev->poll(g_tdd_rd, POLLIN, &g_tdd_fill[k]);
+        __atomic_store_n(&g_tdd_go, true, __ATOMIC_RELEASE);
+        (void)tdd_wait(&g_tdd_parked);
+        return;
+    }
+    g_tdd_hooks_at_release = pipe_poll_hooks_for_test(g_tdd_rd);
+    g_tdd_staged = true;
+    __atomic_store_n(&g_tdd_released, true, __ATOMIC_RELEASE);
+}
+
+static void tdd_batch(struct poll_waiter_list *l) {
+    (void)l;
+    if (current_thread() != g_tdd_writer) return;
+    g_tdd_batches++;
+    __atomic_store_n(&g_tdd_parked, true, __ATOMIC_RELEASE);
+    (void)tdd_wait(&g_tdd_released);
+}
+
+static void tdd_writer_entry(void) {
+    if (tdd_wait(&g_tdd_go)) {
+        static const u8 byte = 0x5A;
+        (void)g_tdd_wr->dev->write(g_tdd_wr, &byte, 1, 0);
+    }
+    test_kthread_park_terminal(&g_tdd_writer_exited);
+}
+
+static void consumer_poll_both_ends_entry(void) {
+    struct pollfd pfds[2] = {
+        { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
+        { .fd = g_tdd_fd_wr, .events = 0,      .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_pollee_proc, pfds, 2, -1);
+    g_poll_revents = pfds[0].revents;
+    __atomic_store_n(&g_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_poll_exited);
+}
+
+void test_poll_dedupe_keeps_the_earlier_hook(void);
+void test_poll_dedupe_keeps_the_earlier_hook(void) {
+    struct Proc *p = make_test_proc();
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    hidx_t hrd = install_spoor(p, rd, RIGHT_READ);
+    hidx_t hwr = install_spoor(p, wr, RIGHT_WRITE);
+    TEST_ASSERT(hrd >= 0 && hwr >= 0, "fds installed");
+    for (u32 k = 0; k < TDD_FILL; k++) {
+        rendez_init(&g_tdd_fill_r[k]);
+        poll_waiter_init(&g_tdd_fill[k], &g_tdd_fill_r[k]);
+    }
+
+    g_tdd_rd = rd; g_tdd_wr = wr; g_tdd_fd_wr = hwr;
+    g_pollee_proc = p; g_pollee_fd = hrd;
+    g_poll_result = -999; g_poll_exited = false; g_poll_revents = 0;
+    g_tdd_go = g_tdd_parked = g_tdd_released = g_tdd_writer_exited = false;
+    g_tdd_staged = false; g_tdd_batches = 0; g_tdd_hooks_at_release = 0;
+    g_tdd_writer = thread_create(kproc(), tdd_writer_entry);
+    g_tdd_poller = thread_create(kproc(), consumer_poll_both_ends_entry);
+    TEST_ASSERT(g_tdd_writer && g_tdd_poller, "thread_create");
+    g_poll_scan_hook = tdd_scan;
+    g_poll_wake_batch_hook = tdd_batch;
+    ready(g_tdd_writer);
+    ready(g_tdd_poller);
+
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    bool woke = __atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999;
+    g_poll_scan_hook = NULL;
+    g_poll_wake_batch_hook = NULL;
+    __atomic_store_n(&g_tdd_released, true, __ATOMIC_RELEASE);
+    if (!woke) {
+        static const u8 again = 0x5B;   // a fresh walk from the head frees it
+        (void)wr->dev->write(wr, &again, 1, 0);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
+    }
+    test_kthread_join_free(g_tdd_writer, &g_tdd_writer_exited);
+    test_kthread_join_free(g_tdd_poller, &g_poll_exited);
+    for (u32 k = 0; k < TDD_FILL; k++) poll_waiter_list_unregister(&g_tdd_fill[k]);
+
+    TEST_ASSERT(g_tdd_parked && g_tdd_batches == 1u,
+        "the write's walk parked once, behind the hooks ahead of the read end's");
+    TEST_EXPECT_EQ(g_tdd_hooks_at_release, TDD_FILL + 1u,
+        "the write end's hook was dropped: one of this call's hooks is listed");
+    TEST_ASSERT(woke, "the walk begun before the second registration woke the poller");
+    TEST_EXPECT_EQ(g_poll_result, 1L, "the read end reports ready");
+    TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "with POLLIN");
+    TEST_EXPECT_EQ(pipe_poll_hooks_for_test(rd), 0u, "nothing is left on the ring's list");
+    drop_test_proc(p);
+}
+
 // =============================================================================
 // Walks owed under the table lock (vote 13; specs/poll_owed.tla).
 // =============================================================================
@@ -2438,6 +2558,46 @@ void test_poll_deferred_walk_runs_at_the_outermost_release(void) {
     poll_wake_deferred(&g_tpd);
     TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "unlocked, the walk runs in the call");
     TEST_ASSERT(g_tpd.chain == NULL, "and owes nothing");
+    tpw_teardown();
+}
+
+// The dev9p poll lock defers through its own wrappers: an event under it owes
+// the walk, and the walk runs at its release with no lock counted on this
+// thread -- the spin lock dropped before the drain, not after.
+static bool g_tdl_owed;
+static u32  g_tdl_reached_held;
+static bool g_tdl_counted;
+
+static void tdl_owe(void *arg) {
+    struct poll_deferred *d = (struct poll_deferred *)arg;
+    poll_wake_deferred(d);
+    g_tdl_owed = d->chain == &current_thread()->lock_owed;
+    g_tdl_reached_held = tpd_reached(TPW_N);
+}
+
+static void tdl_check_batch(struct poll_waiter_list *l) {
+    tpd_check_batch(l);
+    if (current_thread()->preempt_count != 0u) g_tdl_counted = true;
+}
+
+void test_poll_dev9p_poll_lock_defers_its_walks(void);
+void test_poll_dev9p_poll_lock_defers_its_walks(void) {
+    tpw_setup(TPW_N);
+    poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
+    TEST_ASSERT(!irqs_masked(), "the test runs with IRQs on (else the IRQ check is empty)");
+    g_tdl_owed = false; g_tdl_reached_held = 0; g_tdl_counted = false;
+    g_poll_wake_batch_hook = tdl_check_batch;
+    dev9p_poll_test_under_lock(tdl_owe, &g_tpd);
+    g_poll_wake_batch_hook = NULL;
+
+    TEST_ASSERT(g_tdl_owed, "an event under the poll lock owes its walk to the thread");
+    TEST_EXPECT_EQ(g_tdl_reached_held, 0u, "nothing was walked under the lock");
+    TEST_EXPECT_EQ(tpd_reached(TPW_N), TPW_N, "the release walked every hook");
+    TEST_EXPECT_EQ(g_tpw_batches, (TPW_N - 1u) / POLL_WAKE_BATCH, "one walk, in batches");
+    TEST_ASSERT(!g_tdl_counted, "between batches this thread counts no lock (unlocked first)");
+    TEST_ASSERT(g_tpw_ok, "between batches: depth 0, IRQs on, the bookmark listed");
+    TEST_ASSERT(g_tpd.chain == NULL && current_thread()->lock_owed.head == NULL &&
+                current_thread()->defer_depth == 0, "nothing is owed after the release");
     tpw_teardown();
 }
 

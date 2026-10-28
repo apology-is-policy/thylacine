@@ -753,3 +753,15 @@ bool dev9p_poll_test_gc_release(void) {
     return __atomic_exchange_n(&g_dev9p_poll_test_gc, (int)DEV9P_POLL_GC_RUN,
                                __ATOMIC_ACQ_REL) != (int)DEV9P_POLL_GC_RUN;
 }
+
+#ifdef KERNEL_TESTS
+void dev9p_poll_test_under_lock(void (*fn)(void *), void *arg) {
+    dpl_lock();
+    fn(arg);
+    dpl_unlock();
+}
+
+bool dev9p_poll_test_lock_held(void) {
+    return __atomic_load_n(&g_dev9p_poll_lock.value, __ATOMIC_RELAXED) != 0;
+}
+#endif

@@ -600,8 +600,11 @@ bool poll_test_snap_bound_release(void);
 // Tests only: run between two batches of a wake, with the list lock dropped
 // and the walk's bookmark listed; NULL runs nothing.
 extern void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
-// The test runner's release, after every test: clears the hook and says
-// whether a test left it set -- every later wake would run it.
+// Tests only: run in sys_poll_for_proc after entry i's scan and dedupe, before
+// entry i + 1's; NULL runs nothing.
+extern void (*volatile g_poll_scan_hook)(u64 i);
+// The test runner's release, after every test: clears both hooks and says
+// whether a test left one set -- every later wake or poll would run it.
 bool poll_test_wake_hook_release(void);
 // Tests only: the hooks on `l` (bookmarks not counted), under its lock.
 u32 poll_waiter_list_count_for_test(struct poll_waiter_list *l);

@@ -380,4 +380,11 @@ void dev9p_poll_test_gc(enum dev9p_poll_test_gc_mode mode);
 bool dev9p_poll_gc_held_for_test(void);
 bool dev9p_poll_test_gc_release(void);
 
+#ifdef KERNEL_TESTS
+// Tests only: run fn(arg) holding the poll lock through its own wrappers, so a
+// walk owed inside drains at their release; and whether that lock is held now.
+void dev9p_poll_test_under_lock(void (*fn)(void *), void *arg);
+bool dev9p_poll_test_lock_held(void);
+#endif
+
 #endif  // THYLACINE_DEV9P_H

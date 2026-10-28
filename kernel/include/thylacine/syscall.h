@@ -2844,6 +2844,22 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SEAT_CLIENT | \
                                       SPAWN_PERM_SEAL | \
                                       SPAWN_PERM_MAY_RAISE_THREAD_BUDGET)
+// Disjoint iff the popcount of the union is the sum of the popcounts, derived
+// from the list as PROC_FLAGS_ALL's check is: two branches once took bit 10
+// each, and a merge that keeps both definitions compiles silently without it.
+_Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
+    __builtin_popcount(SPAWN_PERM_MAY_POST_SERVICE) +
+    __builtin_popcount(SPAWN_PERM_CONSOLE_TRUSTED) +
+    __builtin_popcount(SPAWN_PERM_CONSOLE_OWNER) +
+    __builtin_popcount(SPAWN_PERM_CONSOLE_RENDERER) +
+    __builtin_popcount(SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) +
+    __builtin_popcount(SPAWN_PERM_SESSION_HANGUP) +
+    __builtin_popcount(SPAWN_PERM_SEAT_MANAGER) +
+    __builtin_popcount(SPAWN_PERM_SEAT_SERVICE) +
+    __builtin_popcount(SPAWN_PERM_SEAT_CLIENT) +
+    __builtin_popcount(SPAWN_PERM_SEAL) +
+    __builtin_popcount(SPAWN_PERM_MAY_RAISE_THREAD_BUDGET),
+    "SPAWN_PERM_* bits alias");
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

@@ -2275,6 +2275,7 @@ void test_poll_wake_batches_owe_only_older_hooks(void);
 void test_poll_wake_steps_over_another_walks_bookmark(void);
 void test_poll_wake_bookmark_alone_reads_empty(void);
 void test_poll_one_hook_per_list_per_call(void);
+void test_poll_dedupe_keeps_the_earlier_hook(void);
 void test_poll_owed_walk_runs_at_the_table_release(void);
 void test_poll_owed_records_chain_once_and_cancel(void);
 void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void);
@@ -2282,6 +2283,7 @@ void test_poll_notes_post_under_the_table_lock_owes_its_walk(void);
 void test_poll_reap_cancels_the_walks_owed_to_a_proc(void);
 void test_poll_cons_episode_walks_owed_under_the_table_lock(void);
 void test_poll_deferred_walk_runs_at_the_outermost_release(void);
+void test_poll_dev9p_poll_lock_defers_its_walks(void);
 void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void);
 void test_poll_deferred_walks_a_dying_owner_at_once(void);
 void test_poll_deferred_await_waits_out_an_owed_walk(void);
@@ -4792,6 +4794,7 @@ struct test_case g_tests[] = {
     { "poll.wake_steps_over_another_walks_bookmark", test_poll_wake_steps_over_another_walks_bookmark, false, NULL },
     { "poll.wake_bookmark_alone_reads_empty", test_poll_wake_bookmark_alone_reads_empty, false, NULL },
     { "poll.one_hook_per_list_per_call", test_poll_one_hook_per_list_per_call, false, NULL },
+    { "poll.dedupe_keeps_the_earlier_hook", test_poll_dedupe_keeps_the_earlier_hook, false, NULL },
     { "poll.owed_walk_runs_at_the_table_release", test_poll_owed_walk_runs_at_the_table_release, false, NULL },
     { "poll.owed_records_chain_once_and_cancel", test_poll_owed_records_chain_once_and_cancel, false, NULL },
     { "poll.owed_walk_owes_only_hooks_behind_the_bookmark", test_poll_owed_walk_owes_only_hooks_behind_the_bookmark, false, NULL },
@@ -4799,6 +4802,7 @@ struct test_case g_tests[] = {
     { "poll.reap_cancels_the_walks_owed_to_a_proc", test_poll_reap_cancels_the_walks_owed_to_a_proc, false, NULL },
     { "poll.cons_episode_walks_owed_under_the_table_lock", test_poll_cons_episode_walks_owed_under_the_table_lock, false, NULL },
     { "poll.deferred_walk_runs_at_the_outermost_release", test_poll_deferred_walk_runs_at_the_outermost_release, false, NULL },
+    { "poll.dev9p_poll_lock_defers_its_walks", test_poll_dev9p_poll_lock_defers_its_walks, false, NULL },
     { "poll.deferred_ref_owner_holds_a_ref_across_the_walk", test_poll_deferred_ref_owner_holds_a_ref_across_the_walk, false, NULL },
     { "poll.deferred_walks_a_dying_owner_at_once", test_poll_deferred_walks_a_dying_owner_at_once, false, NULL },
     { "poll.deferred_await_waits_out_an_owed_walk", test_poll_deferred_await_waits_out_an_owed_walk, false, NULL },

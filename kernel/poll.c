@@ -213,10 +213,12 @@ bool poll_waiter_list_empty(struct poll_waiter_list *l) {
 
 #ifdef KERNEL_TESTS
 void (*volatile g_poll_wake_batch_hook)(struct poll_waiter_list *l);
+void (*volatile g_poll_scan_hook)(u64 i);
 
 bool poll_test_wake_hook_release(void) {
-    bool left = g_poll_wake_batch_hook != NULL;
+    bool left = g_poll_wake_batch_hook != NULL || g_poll_scan_hook != NULL;
     g_poll_wake_batch_hook = NULL;
+    g_poll_scan_hook = NULL;
     return left;
 }
 
@@ -843,6 +845,10 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
                           expired ? NULL : &waiters[i], &held[i], &snaps[i]);
             poll_hook_once(waiters, i);
             if (snaps[i].remote) any_remote = true;
+#ifdef KERNEL_TESTS
+            void (*scan_hook)(u64) = g_poll_scan_hook;
+            if (scan_hook) scan_hook(i);
+#endif
         }
 
         // SETTLE, then take in the answers. The verdict waits for every
