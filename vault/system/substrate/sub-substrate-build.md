@@ -20,6 +20,7 @@ code:
   - tools/configure.sh
   - tools/test-configure.sh
   - tools/check-flag-words.py
+  - tools/check-audit-rows.py
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -27,7 +28,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -606,3 +607,20 @@ the invariant registry check: fatal, no skip switch, self-testing (it refuses to
 run if its own planted cases do not read as expected). It fails a build that
 casts a raw syscall argument to a narrower type with no full-width check first
 (ERRORS.md principle 6; [[sub-kernel-syscall-dispatch]]).
+
+## The audit-trigger row check (2026-10-28)
+
+`build_ramfs` runs `tools/check-audit-rows.py` after the argument width check:
+fatal, no skip switch, its self-test first. A session finds its row in
+`docs/AUDIT-TRIGGERS.md` by the first cell, so the check fails a build when a
+first cell occurs twice, or when an unpushed merge (reachable from HEAD, not
+from any origin ref) lost a row its parents carried or dropped one parent's
+change to a row whole, and the tree being built still shows it. It compares
+each row against every merge base; a row whose first cell differs from the
+base's has no anchor, so only the loss and copy halves judge it. A resolution
+that meant it names the row in an `Audit-row-dropped:` or
+`Audit-row-one-side:` trailer, on the merge or any later unpushed commit. A
+row the resolution retitled reads as lost; the report names the merge's new
+row that opens the same way.
+`--merge REV` reads one merge of history unfiltered: at the corona main merge
+c59c2a6fb it reports the lost VMO / BURROW row and the four rows it copied.

@@ -894,6 +894,17 @@ DOSBOXCONF
         || { echo "==> argument width check FAILED -- a raw syscall argument is" >&2
              echo "    narrowed with no full-width check first" >&2
              exit 1; }
+
+    # A session finds its audit row by the first cell. Merges lost the
+    # VMO / BURROW row and copied five others with divergent addenda, and
+    # nothing failed (OPEN-BUGS 2026-10-28T02:20Z). Fatal, self-testing,
+    # sub-second.
+    echo "==> audit-trigger row check"
+    python3 "$REPO_ROOT/tools/check-audit-rows.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-audit-rows.py" \
+        || { echo "==> audit-trigger row check FAILED -- a row is duplicated, or an" >&2
+             echo "    unpushed merge dropped one and this tree still lacks it" >&2
+             exit 1; }
 }
 
 # GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe
