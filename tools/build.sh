@@ -376,6 +376,15 @@ build_kernel() {
         || { echo "==> cross-file declaration check FAILED -- see .claude/rules/kernel-code.md," >&2
              echo "    \"Cross-file declarations\"" >&2
              exit 1; }
+    # A test g_tests does not name never runs, and no count notices
+    # (devcap.clearance_audio_graph, 51 days; OPEN-BUGS 2026-10-27T07:48Z).
+    # Textual, so it runs in every configuration. Fatal, self-testing.
+    echo "==> kernel test registry check"
+    python3 "$REPO_ROOT/tools/check-test-registry.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-test-registry.py" \
+        || { echo "==> kernel test registry check FAILED -- register the test in" >&2
+             echo "    kernel/test/test.c's g_tests and test_registry.h" >&2
+             exit 1; }
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
     ledger "kernel ELF: BUILT ($build_type, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
     ls -la "$KERNEL_BUILD/thylacine.elf"

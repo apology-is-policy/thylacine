@@ -21,6 +21,7 @@ code:
   - tools/test-configure.sh
   - tools/check-flag-words.py
   - tools/check-audit-rows.py
+  - tools/check-test-registry.py
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -624,3 +625,16 @@ row the resolution retitled reads as lost; the report names the merge's new
 row that opens the same way.
 `--merge REV` reads one merge of history unfiltered: at the corona main merge
 c59c2a6fb it reports the lost VMO / BURROW row and the four rows it copied.
+
+## The kernel test registry check (2026-10-28)
+
+`build_kernel` runs `tools/check-test-registry.py` after the cross-file
+declaration check, in every configuration (it reads the sources, not the
+build): fatal, self-test first. A kernel test runs only if
+`kernel/test/test.c`'s `g_tests` names it, so the check fails a build when a
+non-static `void test_*(void)` under `kernel/test/` or a `test_registry.h`
+declaration is not an entry, when an entry's function or name appears twice,
+or when an entry has no definition its pattern parses (so a definition it
+cannot read fails instead of escaping). `test_devcap_clearance_audio_graph`
+ran zero times for 51 days that way; the check fails the tree just before its
+registration (a3144a8c5^) on exactly that test.
