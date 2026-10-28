@@ -29,16 +29,30 @@
 //   * The pipe fds are registered in the SAME poll(2) as fd 0, so an arriving
 //     diagnostic wakes the loop exactly like a keystroke. There is no tick: a
 //     message that nothing polls for is a message that never repaints.
+//
+//   * A server ENDS through its own goodbye, not around it. At nora's exit
+//     `shutdown` goes out and its answer is awaited, then `exit`, and the
+//     server is reaped once it closes its stdout. gopls answers `shutdown`
+//     only after reaping the go commands it cancels, so killing it first
+//     orphans its running `go list` to init. But gopls runs `shutdown` only
+//     after the handlers queued ahead of it, and `initialized` holds the queue
+//     for the whole first workspace load: an answer not back in `ANSWER_GRACE`
+//     escalates to closing stdin. On that EOF gopls closes its stdout FIRST,
+//     then cancels the load and reaps its go commands, then exits, so nora
+//     waits for the exit itself, never just the EOF. A server still running
+//     `END_GRACE` after the request is killed.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use libthyla_rs::env;
 use libthyla_rs::fs;
+use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
+use libthyla_rs::time::{self, Duration, Instant};
 
 use parley::lsp::{self, Action};
-use parley::transport::{Ready, Server, Tag};
+use parley::transport::{Mux, Ready, Server, Tag};
 
 use nora::diag::{Diagnostics, LineDiag, Severity};
 use nora::editor::{Candidate, Editor, LspRequest};
@@ -122,6 +136,53 @@ fn lang_for(path: &str) -> Option<&'static ServerSpec> {
 /// handful of components above a source file in any sane layout; the cap keeps
 /// a pathological path from walking to `/` one stat at a time.
 const ROOT_SEARCH_DEPTH: usize = 32;
+
+/// How long nora's exit waits for the answer to `shutdown` before it closes the
+/// server's stdin instead. Queued behind gopls's first workspace load, the
+/// answer took 13.2 s for a quit 0.4 s after `initialized` (TCG); most come
+/// within 3 s.
+const ANSWER_GRACE: Duration = Duration::from_secs(5);
+/// How long nora's exit waits, from the request, for the server to close its
+/// stdout before killing it.
+const END_GRACE: Duration = Duration::from_secs(30);
+/// Polls in a row across which the clock reads the same, taken as the grace
+/// spent: a monotonic clock that does not advance must not make a server that
+/// keeps writing hold nora's exit for good.
+const STALL_POLLS: u32 = 10_000;
+/// A wait where there is nothing to poll: between checks that the server has
+/// exited (an exit is not a pollable event), and before retrying a failed poll.
+const NAP_MS: u32 = 5;
+
+/// How nora's exit ended the server, for its exit line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// `shutdown` answered, `exit` sent, stdout closed.
+    Goodbye,
+    /// No answer within `ANSWER_GRACE`; stdin closed, then stdout closed
+    /// unanswered.
+    Disconnect,
+    /// Stdout closed before the answer, stdin still open: it left by itself.
+    Eof,
+    /// Killed at `END_GRACE`.
+    Grace,
+    /// A write, a read or the stream failed, and the server was killed.
+    Broken,
+    /// It had already died.
+    Dead,
+}
+
+impl End {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            End::Goodbye => "goodbye",
+            End::Disconnect => "disconnect",
+            End::Eof => "eof",
+            End::Grace => "grace",
+            End::Broken => "broken",
+            End::Dead => "dead",
+        }
+    }
+}
 
 /// Poll tags. fd 0 keeps tag 0 so the stdin arm reads naturally.
 pub const TAG_STDIN: Tag = 0;
@@ -236,6 +297,11 @@ impl Lsp {
 
     pub fn is_dead(&self) -> bool {
         self.dead
+    }
+
+    /// The server's name, for status messages.
+    pub fn name(&self) -> &'static str {
+        self.lang.name
     }
 
     fn send(&mut self, msg: &parley::json::Value) -> Result<(), ()> {
@@ -374,7 +440,8 @@ impl Lsp {
                 );
                 true
             }
-            Action::Ignored => false,
+            // `shutdown` goes out only at exit, where `goodbye_output` reads.
+            Action::ShutDown(_) | Action::Ignored => false,
         }
     }
 
@@ -598,24 +665,167 @@ impl Lsp {
         let _ = self.srv.wait();
     }
 
-    /// Orderly shutdown at nora exit: the LSP goodbye, then close stdin so a
-    /// well-behaved server sees EOF, then make sure it is really gone.
-    ///
-    /// `kill` + `wait` are unconditional on purpose. A server that ignores the
-    /// protocol goodbye would otherwise outlive the editor as an orphan
-    /// holding the workspace open.
-    pub fn shutdown(&mut self) {
-        if !self.dead {
-            let bye = self.cl.shutdown();
-            let _ = self.send(&bye);
-            let exit = self.cl.exit();
-            let _ = self.send(&exit);
-            self.srv.close_stdin();
+    /// End the server at nora exit and wait for it here, since no later
+    /// poll-wake will come. Bounded by `END_GRACE`, then killed: a server
+    /// ignoring the goodbye must not outlive the editor holding the workspace.
+    pub fn shutdown(&mut self) -> End {
+        if self.dead {
+            return End::Dead;
         }
-        self.dead = true;
-        let _ = self.srv.kill();
-        let _ = self.srv.wait();
+        let since = Instant::now();
+        let bye = self.cl.shutdown();
+        let end = match self.send(&bye) {
+            Ok(()) => match self.await_close(since) {
+                End::Goodbye | End::Disconnect | End::Eof if !self.await_exit(since) => End::Grace,
+                e => e,
+            },
+            Err(()) => End::Broken,
+        };
+        self.reap();
+        end
     }
+
+    /// The server closed its stdout: wait out the rest of `END_GRACE` for it to
+    /// exit by itself. gopls closes stdout before it shuts its session down, so
+    /// a kill here could still orphan its `go list`. Counted in naps, so a clock
+    /// that does not advance still ends it. Stdin is closed first, so a server
+    /// that reads it for an exit cue is released. True once it has exited
+    /// (reaped).
+    fn await_exit(&mut self, since: Instant) -> bool {
+        self.srv.close_stdin();
+        let mut naps = ms_left(since, END_GRACE) / NAP_MS;
+        loop {
+            match self.srv.try_wait() {
+                Ok(Some(_)) => {
+                    self.dead = true;
+                    return true;
+                }
+                Ok(None) if naps > 0 => {
+                    naps -= 1;
+                    let _ = time::sleep(Duration::from_millis(NAP_MS as u64));
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Serve the goodbye until the server closes its stdout. Until the answer
+    /// arrives the wait is `ANSWER_GRACE`, then stdin is closed and the wait runs
+    /// on to `END_GRACE`. An empty timed poll spends a grace whatever this
+    /// process's clock reads, and so does a long run of polls it reads no time
+    /// across.
+    fn await_close(&mut self, since: Instant) -> End {
+        let mut mux = Mux::new();
+        let mut err_open = true;
+        let mut answered = false;
+        let mut disconnected = false;
+        let mut last = since.elapsed();
+        let mut stalls = 0u32;
+        loop {
+            let limit = if answered || disconnected { END_GRACE } else { ANSWER_GRACE };
+            let ms = ms_left(since, limit);
+            // A poll error cannot be a note's EINTR: poll does not EINTR a native
+            // Proc (kernel notes.c, proc_caught_note_eintr_ready). Whatever it
+            // is, nap and poll again; the graces and the stall count bound it.
+            let ready = if ms == 0 {
+                Some(Vec::new())
+            } else {
+                let err_fd = if err_open { self.srv.stderr_fd() } else { -1 };
+                let fds = [(self.srv.stdout_fd(), TAG_LSP_OUT), (err_fd, TAG_LSP_ERR)];
+                mux.poll(&fds, PollTimeout::Millis(ms)).ok()
+            };
+            let now = since.elapsed();
+            if now == last {
+                stalls += 1;
+            } else {
+                stalls = 0;
+                last = now;
+            }
+            if stalls > STALL_POLLS || ready.as_ref().is_some_and(|r| r.is_empty()) {
+                if limit == END_GRACE {
+                    return End::Grace;
+                }
+                self.srv.close_stdin();
+                disconnected = true;
+                stalls = 0;
+                continue;
+            }
+            let Some(ready) = ready else {
+                let _ = time::sleep(Duration::from_millis(NAP_MS as u64));
+                continue;
+            };
+            for r in &ready {
+                if r.tag == TAG_LSP_ERR {
+                    // A closed pipe polls readable forever: stop asking.
+                    err_open = matches!(self.srv.drain_stderr(), Ok(false));
+                } else if r.tag == TAG_LSP_OUT && self.goodbye_output(&mut answered) {
+                    return if self.dead {
+                        End::Broken
+                    } else if answered {
+                        End::Goodbye
+                    } else if disconnected {
+                        End::Disconnect
+                    } else {
+                        End::Eof
+                    };
+                }
+            }
+        }
+    }
+
+    /// Read the server's stdout during the goodbye: answer what it asks, and
+    /// send `exit` once `shutdown` is answered. True once stdout has closed or
+    /// the stream broke (the server is then reaped).
+    fn goodbye_output(&mut self, answered: &mut bool) -> bool {
+        match self.srv.pump() {
+            Ok(false) => {}
+            Ok(true) => return true,
+            Err(_) => {
+                self.reap();
+                return true;
+            }
+        }
+        loop {
+            let body = match self.srv.next_frame() {
+                Ok(Some(b)) => b,
+                Ok(None) => return false,
+                Err(_) => {
+                    self.reap();
+                    return true;
+                }
+            };
+            let msg = match parley::json::Value::parse(&body) {
+                Ok(v) => parley::jsonrpc::classify(v),
+                Err(_) => continue,
+            };
+            match msg.map(|m| self.cl.handle(m)) {
+                // Past `exit` stdin is closed and the write fails; stdout's EOF,
+                // not a refused reply, is what ends the wait.
+                Ok(Action::Send(reply)) => {
+                    let _ = self.srv.send(&reply);
+                }
+                // An answer can come after the disconnect closed stdin; the
+                // write then fails harmlessly.
+                Ok(Action::ShutDown(_)) => {
+                    *answered = true;
+                    let exit = self.cl.exit();
+                    let _ = self.srv.send(&exit);
+                    self.srv.close_stdin();
+                }
+                _ => {}
+            }
+            if self.dead {
+                return true;
+            }
+        }
+    }
+}
+
+/// Milliseconds of `limit` left since `since`, rounded up so a wake is never
+/// early.
+fn ms_left(since: Instant, limit: Duration) -> u32 {
+    let left = limit.saturating_sub(since.elapsed());
+    ((left.as_nanos() + 999_999) / 1_000_000).min(u32::MAX as u128) as u32
 }
 
 

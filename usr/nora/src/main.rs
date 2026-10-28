@@ -36,6 +36,7 @@ use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::{slurp_capped, Write};
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::{Command, Stdio};
+use libthyla_rs::time::Instant;
 use libthyla_rs::{t_fsync, t_putstr};
 
 use kaua::event::Event;
@@ -172,7 +173,16 @@ pub extern "C" fn rs_main() -> i64 {
     // workspace, and an orphaned Ambush holds its debuggee (and the ptrace
     // stop). Compose #68 close-at-exit.
     if let Some(mut l) = lsp {
-        l.shutdown();
+        // The goodbye can take seconds (gopls answers behind its first
+        // workspace load): say so rather than sit on the last frame.
+        if !l.is_dead() {
+            ed.set_status(format!("ending {} ...", l.name()));
+            let _ = redraw(&mut term, &mut ed);
+        }
+        let t0 = Instant::now();
+        let end = l.shutdown();
+        // Beside `nora: EXIT`, for the serial log: nora-demo.exp keys on it.
+        t_putstr(&format!("nora: lsp end={} ms={}\n", end.as_str(), t0.elapsed().as_millis()));
     }
     if let Some(mut d) = dap {
         d.shutdown(&mut ed);

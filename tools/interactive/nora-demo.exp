@@ -15,6 +15,18 @@
 # TCG (the LS-CI default): nora's launch CPR handshake is reliable on TCG and
 # breaks under HVF (bug_nora_hvf_cpr_handshake), so this reads the rendered
 # source on TCG. No debugger here -- dap-nora proves the debug loop.
+#
+# A .go buffer starts gopls, so every quit here also ends a language server,
+# often while its first workspace load still runs `go list`. nora's exit must
+# let gopls end itself: by the LSP goodbye, or, when the answer to `shutdown`
+# is stuck behind that load, by closing gopls's stdin (gopls then cancels the
+# load and reaps its go commands). A gopls killed instead leaves its running
+# child to init, and the kernel says so on the console: `proc: orphan pid=N
+# name="go" (parent pid=M name="gopls" exiting)`. Each checked quit asserts
+# nora's own account, `nora: lsp end=goodbye|disconnect ms=N` (any other end,
+# such as a kill at the grace, fails), and fails on that orphan line through
+# nora leaving its screen, the shell's echo, and a quiet window after (the
+# kernel's line and nora's output reach the console by different paths).
 
 source [file join [file dirname [info script]] lib.exp]
 
@@ -36,11 +48,80 @@ sleep 3
 lc_expect "a small tour" "the demo source opens + renders in nora"
 lc_pass "nora-demo: the baked demo is reachable + opens in nora (nora /goroot/demo/nora-demo.go)"
 
-# Leave nora. Then a line typed behind `:q!` belongs to the shell: kaua reads one
-# byte at a time and nora stops at the Enter that quits it, so the next command,
-# typed straight after, is never taken into the editor.
-send ":q!\r"
-sleep 1
+set ::nd_orphan_re {orphan pid=[0-9]+ name="[^"]*" \(parent pid=[0-9]+ name="gopls"}
+set ::nd_end_re {nora: lsp end=([a-z]+) ms=([0-9]+)\r?\n}
+proc nd_ms {} { return [expr {[clock milliseconds] - $::nd_t0}] }
+
+# Quit the nora on screen and check that gopls ended through its goodbye.
+# `token` must be unique per call: the shell's echo of it is the positive
+# control that nora exited.
+proc nd_quit_clean {token phase} {
+    set orphan "$phase: an orphan whose parent is gopls"
+    lc_raw_send ":q!\r" "$phase: :q!"
+    set ::nd_t0 [clock milliseconds]
+    set timeout 45
+    expect {
+        -re $::nd_orphan_re  { lc_fail "$orphan (\[$expect_out(0,string)\], [nd_ms] ms after :q!)" }
+        -re $::nd_end_re     {
+            set end $expect_out(1,string)
+            set ms $expect_out(2,string)
+            if {$end ne "goodbye" && $end ne "disconnect"} {
+                lc_fail "$phase: nora ended gopls by '$end' after $ms ms, not by its goodbye"
+            }
+            # An answer later than nora's 5 s escalation cannot be a goodbye:
+            # by then nora has closed gopls's stdin, and gopls exits unanswered.
+            # (A disconnect has no tighter bound: gopls's own shutdown after it
+            # took up to 7.6 s on TCG.)
+            if {$end eq "goodbye" && $ms >= 7000} {
+                lc_fail "$phase: a goodbye after $ms ms -- nora never escalated at 5 s"
+            }
+            lc_step "saw: $phase -- end=$end after $ms ms"
+        }
+        -re {EXTINCTION:}    { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout              { lc_fail "$phase: no 'nora: lsp end=' line within 45 s of :q!" }
+        eof                  { lc_fail "unexpected EOF during '$phase'" }
+    }
+    expect {
+        -re $::nd_orphan_re  { lc_fail "$orphan (\[$expect_out(0,string)\], [nd_ms] ms after :q!)" }
+        -ex "\x1b\[?1049l"   { lc_step "saw: $phase -- nora left its screen [nd_ms] ms after :q!" }
+        -re {EXTINCTION:}    { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout              { lc_fail "$phase: nora never left its screen after :q!" }
+        eof                  { lc_fail "unexpected EOF during '$phase'" }
+    }
+    lc_send "echo $token"
+    expect {
+        -re $::nd_orphan_re  { lc_fail "$orphan (\[$expect_out(0,string)\], [nd_ms] ms after :q!)" }
+        -re "\n$token"       { lc_step "saw: $phase -- nora exited, ut ran the echo" }
+        -re {EXTINCTION:}    { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout              { lc_fail "timeout (45s) waiting for the echo of \[$token\] during '$phase'" }
+        eof                  { lc_fail "unexpected EOF during '$phase'" }
+    }
+    set timeout 4
+    expect {
+        -re $::nd_orphan_re  { lc_fail "$orphan (\[$expect_out(0,string)\], [nd_ms] ms after :q!) after nora exited" }
+        -re {EXTINCTION:}    { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout              { lc_step "saw: $phase -- no gopls orphan within 4 s" }
+        eof                  { lc_fail "unexpected EOF during '$phase' (quiet window)" }
+    }
+}
+
+# The quit of the nora opened above, about 3 s into gopls's life: the quit that
+# orphaned `go` before the goodbye existed. Then quits at 1-4 s after the first
+# frame. gopls runs no go command until nora's `initialized`, sent once it has
+# answered `initialize`, so a quit at the first frame alone would rarely find
+# one to orphan.
+nd_quit_clean "nd-gb-0" "goodbye 0: :q! 3 s after the open"
+for {set i 1} {$i <= 4} {incr i} {
+    lc_send "nora /goroot/demo/nora-demo.go"
+    lc_expect "a small tour" "goodbye $i: nora is up"
+    sleep $i
+    nd_quit_clean "nd-gb-$i" "goodbye $i: :q! $i s after the first frame"
+}
+lc_pass "nora-demo: 5 quits let gopls end itself (goodbye or disconnect, no orphaned go command)"
+
+# A line typed behind `:q!` belongs to the shell: kaua reads one byte at a time
+# and nora stops at the Enter that quits it, so the next command, typed straight
+# after, is never taken into the editor.
 lc_quit_typeahead nora "nora /goroot/demo/nora-demo.go" "a small tour" ":q!\r" nrta 3
 lc_pass "nora-demo: a line typed ahead behind :q! reaches the shell whole, in 3 of 3 rounds"
 lc_quit

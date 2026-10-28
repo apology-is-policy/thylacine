@@ -46,7 +46,7 @@ use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::slurp_capped;
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
-use libthyla_rs::time::{Duration, Instant};
+use libthyla_rs::time::{self, Duration, Instant};
 
 use parley::dap;
 use parley::dapc::{self, Action, StackFrame};
@@ -90,6 +90,12 @@ const KSTACK_CAP: usize = 16 * 1024;
 /// is killed. Delve's part is one kill and one reap, milliseconds; the bound
 /// only matters for a wedged debugger.
 const END_GRACE: Duration = Duration::from_millis(2000);
+/// Polls in a row across which the clock reads the same, taken as the grace
+/// spent at exit: a clock that does not advance must not let a debugger that
+/// keeps writing hold nora's exit for good.
+const STALL_POLLS: u32 = 10_000;
+/// The wait before retrying a failed poll at exit.
+const POLL_RETRY_NAP: Duration = Duration::from_millis(5);
 
 /// Poll tags. fd 0 is TAG_STDIN (0) and gopls owns 1/2 (lsp_host); the DAP pipes
 /// take 3/4 so all four sources share one poll(2).
@@ -998,12 +1004,13 @@ impl Dap {
     }
 
     /// Kill a session still running `END_GRACE` after its disconnect. Returns
-    /// true when the editor should repaint. `timed_out` says the caller's poll
-    /// waited out `deadline_ms` with nothing ready: the grace is spent by the
-    /// kernel's timer even if this process's clock reads do not advance.
-    pub fn on_deadline(&mut self, timed_out: bool, ed: &mut Editor) -> bool {
+    /// true when the editor should repaint. `spent` says the grace is over by a
+    /// measure other than this process's clock: the caller's poll waited out
+    /// `deadline_ms` with nothing ready (the kernel's timer), or at exit the
+    /// clock read the same across `STALL_POLLS` polls.
+    pub fn on_deadline(&mut self, spent: bool, ed: &mut Editor) -> bool {
         match self.ending {
-            Some(since) if !self.dead && (timed_out || since.elapsed() >= END_GRACE) => {
+            Some(since) if !self.dead && (spent || since.elapsed() >= END_GRACE) => {
                 ed.set_status(String::from("debugger did not end the session; killed it"));
                 ed.set_debug_view(None);
                 self.reap();
@@ -1019,15 +1026,28 @@ impl Dap {
     pub fn shutdown(&mut self, ed: &mut Editor) {
         self.end();
         let mut mux = Mux::new();
+        let mut last = self.ending.map(|t| t.elapsed());
+        let mut stalls = 0u32;
         while let Some(ms) = self.deadline_ms() {
-            let ready = match mux.poll(&self.poll_fds(), PollTimeout::Millis(ms)) {
-                Ok(r) => r,
-                Err(_) => break,
-            };
-            for r in &ready {
+            // A poll error cannot be a note's EINTR: poll does not EINTR a native
+            // Proc (kernel notes.c, proc_caught_note_eintr_ready). Whatever it
+            // is, nap and poll again; the grace and the stall count bound it.
+            let ready = mux.poll(&self.poll_fds(), PollTimeout::Millis(ms)).ok();
+            if ready.is_none() {
+                let _ = time::sleep(POLL_RETRY_NAP);
+            }
+            for r in ready.iter().flatten() {
                 self.on_ready(r, ed);
             }
-            self.on_deadline(ready.is_empty(), ed);
+            let now = self.ending.map(|t| t.elapsed());
+            if now == last {
+                stalls += 1;
+            } else {
+                stalls = 0;
+                last = now;
+            }
+            let timed_out = ready.is_some_and(|r| r.is_empty());
+            self.on_deadline(timed_out || stalls > STALL_POLLS, ed);
         }
         self.reap();
     }

@@ -41,6 +41,7 @@ mirrors:
   - "tools/warp/boot-probe.sh"
   - "tools/interactive/lib.exp"
   - "tools/interactive/dap-nora.exp"
+  - "tools/interactive/nora-demo.exp (EXTINCTION: only — the gopls goodbye legs at each quit)"
   - "tools/interactive/rust-std-hello.exp (EXTINCTION: only — track R's std-on-device gate)"
   - "tools/interactive/lantern.exp (EXTINCTION: only — the deck presenter's gate)"
   - "tools/interactive/ls-halcyon-lantern.exp (EXTINCTION: only — the deck presenter in a Halcyon tile)"

@@ -2627,3 +2627,46 @@ to a nora server marks it dead without reaping it" (10:17Z). Userspace only; the
   deadline fallback still prints the orphan line. Not dirty.
 - **Still open, owned.** `Lsp::shutdown` kills gopls at once at exit; a nora-demo transcript shows its `go` child
   orphaned (OPEN-BUGS 2026-10-28T10:24Z).
+
+## Nora ends gopls through its goodbye -- 2026-10-28
+
+OPEN-BUGS "Nora's LSP shutdown kills gopls at once; its `go` child is orphaned" (corona, 2026-10-28T10:24Z). Userspace
+only; the kernel is unchanged.
+
+- **The cause.** `Lsp::shutdown` sent `shutdown` and `exit` back to back, closed stdin and killed gopls at once. gopls
+  answers `shutdown` only after cancelling and reaping the go commands its snapshots run, so the kill orphaned a running
+  `go list` to init: `proc: orphan pid=2422 name="go" (parent pid=2415 name="gopls" exiting)` after a 2026-09-10 quit.
+- **The goodbye now runs (operator vote 27, "nora escalates").** nora sends `shutdown` and waits up to 5 s for the answer,
+  then `exit`. gopls handles messages in order and `initialized` holds the queue for the whole first workspace load, so
+  an early quit's answer waits for the load (13.2 s measured on TCG for a quit 0.4 s after `initialized`); an answer not
+  back in 5 s escalates to closing gopls's stdin, on which gopls shuts itself down (cancelling the load, reaping `go`)
+  and exits. On that path gopls closes its stdout BEFORE its session shutdown, so nora waits for the exit itself, never
+  the EOF alone (Fable r2 F1, measured). A server not exited 30 s after the request is killed. `parley::lsp` surfaces the
+  answer as `Action::ShutDown`. nora prints `nora: lsp end=goodbye|disconnect|eof|grace|broken|dead ms=N` beside its
+  `nora: EXIT` line and shows `ending gopls ...` while it waits.
+- **Bounds that do not trust the clock.** An empty timed poll spends a grace; so does a run of 10 000 polls across which
+  the clock reads no time (also added to `Dap::shutdown`); the exit wait counts naps. A failed poll is retried after a
+  5 ms nap (it cannot be a note's EINTR: poll does not deliver one to a native Proc).
+- **lsp-probe** (boot-fatal) runs the same goodbye: the answer must be Ok, then gopls must close stdout and exit by
+  itself with status 0 within 10 s.
+- **Verification.** Mac leases 11:45-12:06Z, 12:24-13:05Z, 14:03-14:43Z and from 14:47Z on a `--config ci`
+  worktree (logs `work/oct28-gopls/`). Final source (lsp_host sha e66d86e4): nora-demo PASS on attempt 1 -- five
+  quits ending goodbye 2412 ms, disconnect 9694, goodbye 184, 1560, 14, no gopls-parented orphan; go6 PASS; suite
+  2116/2116 with `lsp-probe: [gopls] goodbye OK ... status 0`. Reds, each for its stated reason (run.sh WITNESS lines):
+  the old kill-at-once exit orphans `go` 13 ms after `:q!`; no `exit` after the answer is killed at the grace (30013 ms);
+  the same on a clock that never advances ends on the kernel-timed poll (32459 ms); with that poll and the stall count
+  ignored it never ends (45 s timeout); without the escalation's stdin close a goodbye comes after 11084 ms; lsp-probe
+  without `exit` fails "stdout still open after exit", and `exit` with no `shutdown` fails on status 1. The escalation
+  forced at 1 ms passes 5/5, every quit `disconnect` (10-7086 ms). killnow, stuck, stucknofix, the forced escalation and
+  exitonly ran on 3826de5f, which differs from the final source only in the end label's order (an answer now outranks
+  the disconnect) and the gate's bound; noexit on round 1's source (the probe is unchanged since). A diagnostic build
+  (60 s grace, a per-step timeline) measured the 13.2 s answer. Kernel byte-unchanged; no SMP gate (userspace only).
+- **Audit.** Three Fable 5.1 rounds (start == end each). r1 0/0/1/4: the gate's PASS was satisfiable by the grace kill
+  (now the end line), shutdown queues behind the first load (vote 27), the stall bound; gopls's imports refresh enqueued.
+  r2 0/1/0/7, dirty: F1 [P1] the kill at stdout EOF raced gopls's disconnect-path shutdown and orphaned `go` (measured
+  twice), fixed by waiting for the exit; pump errors reap; per-stage witness lines; the disconnect must end in < 10 s;
+  a gopls pre-load re-run window enqueued. r3 0/0/0/4, clean: the EINTR premise behind r2's retry was false (comments
+  corrected, the retry naps), stdin closed before the exit wait, witness discipline per mutant.
+- **Enqueued.** OPEN-BUGS 11:42Z (stderr EOF spins the main loops), 11:43Z (blocking writes to a server), 12:01Z (a `go`
+  child of `go` orphaned mid-session), 12:22Z x2 (gopls's imports refresh; a disconnect during `initialized`'s `go env`),
+  13:02Z (gopls's pre-load re-run window).

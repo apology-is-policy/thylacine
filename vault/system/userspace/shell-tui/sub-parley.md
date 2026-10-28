@@ -68,6 +68,10 @@ hang a server blocking on the reply, so an unrecognized method gets the
 protocol-correct refusal (`-32601` for LSP, a `success:false` response for
 DAP).
 
+The answer to `shutdown` is `Action::ShutDown`, carrying the server's message
+if it refused, rather than `Ignored`: a host ending a server waits for that
+answer before it sends `exit`.
+
 ## Mechanism
 
 **Latest-wins, on the LSP side only.** Minting a hover / definition /
@@ -213,7 +217,12 @@ probes exist to close that gap against a real peer.
   commonly publishes `[]` before the type-check finishes). The PASS line's
   `auto-replies=0` is a *measured* fact, not a gap: the client declares no
   `workspace.configuration` and no dynamic registration, so gopls has nothing to
-  ask and the `Action::Send` arm is wired-but-unexercised on purpose.
+  ask and the `Action::Send` arm is wired-but-unexercised on purpose. It then
+  ends the session the way nora's exit does: `shutdown`, its answer, `exit`.
+  gopls must close its stdout and then exit by itself with status 0 within ten
+  seconds; it exits 1 on an `exit` that arrives before `shutdown` completed.
+  Until 2026-10-28 the probe sent the two back to back and killed gopls at
+  once, the shape that orphaned nora's `go list` (see [[sub-nora-host]]).
 
 - **`dap-probe` — the live Ambush round-trip.** The only prior end-to-end DAP
   proof (`ambush dap-selftest`) ran *in-process* over a Go `net.Pipe`, never
@@ -256,9 +265,6 @@ boot) is what caught it.
 - Only integer request ids are minted. JSON-RPC permits string ids; a *server*
   request's id is echoed back verbatim (`Incoming::Request` keeps it as a raw
   `Value`), so string ids work in the direction they occur.
-- `Pending::Shutdown`'s response maps to `Action::Ignored`, so a host cannot
-  distinguish "shutdown acknowledged" from "unmatched id". Harmless today —
-  the documented sequence is to send `exit` after it either way.
 - v1.0 resolution of a definition result takes the first `Location` of an array
   and ignores the rest.
 

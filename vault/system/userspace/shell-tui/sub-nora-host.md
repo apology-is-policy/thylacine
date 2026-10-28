@@ -121,8 +121,36 @@ polled again, so it is the last chance to collect the child. The reason is state
 rather than assumed — an orphaned language server holds the workspace, and an
 orphaned debugger holds its debuggee along with its stop.
 
-The language server's shutdown sends the protocol's goodbye, closes stdin, then
-kills and waits **unconditionally**.
+The language server ends itself too. At exit nora sends LSP `shutdown`, waits
+for its answer, then sends `exit` and closes stdin, and once the server has
+closed its stdout nora waits for it to exit by itself before reaping it. gopls answers `shutdown` only after it has cancelled the go
+commands its workspace snapshots run and reaped them (on Thylacine the interrupt
+note gopls posts ends a `go` at once), so a `go list` in flight is ended by gopls
+instead of orphaned. The answer can be slow: gopls handles messages in order,
+and `initialized` holds the queue until the first workspace load has finished,
+so a quit 0.4 s after `initialized` was answered only after 13.2 s on TCG. Most
+quits take one to three seconds. If no answer has come five seconds after the
+request, nora closes the server's stdin instead. On that EOF gopls closes its
+stdout first, then shuts its session down (cancelling the load and reaping its
+go commands), then exits: so the EOF alone is never taken as the end, and nora
+waits for the exit. Thirty seconds after the request a server that has still
+not exited is killed. The answer and stdout waits also end on a timed poll that
+waits out its rest with nothing ready, or on a long run of polls across which
+the clock reads no time; the exit wait (stdin closed first) counts naps, so a
+clock that does not advance still ends it. A failed poll is retried after a
+nap: it cannot be a note's EINTR, which poll does not deliver to a native
+Proc. Server requests that arrive
+meanwhile are answered, stderr leaves the poll at its EOF, and the status line
+reads `ending gopls ...`. nora then prints `nora: lsp end=<how> ms=<n>` beside its
+`nora: EXIT` line: `goodbye`, `disconnect`, `eof` (it left unasked), `grace` (the
+kill), `broken` or `dead`. Before 2026-10-28 nora sent the goodbye and the exit
+back to back and killed gopls at once, which orphaned its running `go` to init.
+`nora-demo.exp` now requires `goodbye` (within 7 s: an answer later than the
+escalation cannot be one) or `disconnect` after each of five quits, and fails on
+the kernel's `proc: orphan ... (parent ... name="gopls"` line. After a disconnect
+gopls took up to 7.6 s on TCG to finish its own shutdown and exit. And
+`lsp-probe` requires gopls to answer `shutdown` and exit by itself with status 0
+on every boot ([[sub-parley]]).
 
 The debugger is ended differently, because killing it first strands its
 debuggee. `:kill`, a `:debug` over a live session, and quitting the editor all
@@ -139,7 +167,9 @@ disconnect. Past it nora kills Ambush, and the kernel's die-with-launcher rule
 debuggee's orphan line: it is the fallback for a debugger that never answers. The
 deadline does not trust this process's clock alone: a poll that waited out the
 session's remaining time with nothing ready has spent the grace by the kernel's
-timer, so a clock read that never advances cannot make the bound disappear. Before 2026-10-28 every one of these
+timer, so a clock read that never advances cannot make the bound disappear;
+at exit, a long run of polls across which the clock reads no time counts the
+same, so a debugger that keeps writing cannot hold the exit open. Before 2026-10-28 every one of these
 paths killed Ambush straight after the disconnect, and the kernel ended the
 debuggee each time; `dap-nora.exp`'s three teardown legs now fail on the kernel's
 `proc: orphan ... name="ambush-child"` line.
@@ -312,8 +342,8 @@ twice.
 - **A new child must be shut down on every exit path**, with an unconditional
   kill and wait. The stated hazard is real: an orphan holds a resource the user
   cannot see. For a child that holds another process, as the debugger holds its
-  debuggee, the kill is the bounded fallback after the child's own end, never the
-  first step: a kill first hands the held process to the kernel.
+  debuggee and gopls its go commands, the kill is the bounded fallback after the
+  child's own end, never the first step: a kill first orphans the held process.
 - **A new poll source must join the one descriptor set.** There is no tick to
   fall back on, so a source that is not polled produces a message that never
   repaints.
@@ -380,13 +410,18 @@ twice.
   intact. This layer is where such text enters, so it is the natural place to
   sanitize even though the omission is shared with the renderer. Task #130.
 
-- **The language server is still killed at once at exit.** The shutdown sends
-  the goodbye and the exit notification back to back and kills gopls straight
-  after, so a `go` child gopls is running is orphaned to init (seen in a
-  nora-demo transcript: `proc: orphan ... name="go" (parent ... name="gopls"
-  exiting)`). The debugger's bounded end is the shape to follow; whether gopls
-  waits for its own children on a clean exit is unread. Queued: OPEN-BUGS
-  2026-10-28T10:24Z.
+- **A server that closes its stderr while it runs would spin the poll.** The
+  steady-state handlers ignore stderr's EOF, and a closed pipe polls readable
+  for good; gopls, clangd and Ambush keep fd 2 open, so it is latent. The exit
+  goodbye already drops stderr at EOF. Queued: OPEN-BUGS 2026-10-28T11:42Z.
+- **gopls can still orphan a `go` that is not nora's doing.** Its imports refresh,
+  scheduled thirty seconds or more after the view is created, runs `go list -m`
+  that gopls's shutdown does not wait for; and a disconnect that lands while
+  `initialized` still runs `go env` lets gopls exit around it. Both are gopls-side.
+  Queued: OPEN-BUGS 2026-10-28T12:22Z (two entries).
+- **A write to a server blocks.** A full-document sync to a server that has
+  stopped reading blocks the loop once the pipe is full, against NORA-IDE-UX
+  section 6. Queued: OPEN-BUGS 2026-10-28T11:43Z.
 
 ## Provenance
 

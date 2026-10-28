@@ -234,6 +234,39 @@ pid=2416 name="ambush" exiting)` right after `:kill`.
 Lease 10:24-11:21Z: final green (sha a4c55323) PASS on attempt 1 with 0 orphan lines after `:print`; suite 2116/2116;
 reds kill/relaunch/quit/wedge each at their own leg; stuck 2022 ms, stucknofix no end within 30 s.
 
+**Nora ends gopls through its goodbye (11:27Z-15:06Z).** OPEN-BUGS 10:24Z: nora's exit killed gopls at once and orphaned
+its `go list`. Reading gopls first settled the shape: `Session.Shutdown` cancels the snapshots and waits `snapshotWG`,
+so the answer to `shutdown` comes only after the go commands are reaped; waiting for it is the fix. The same
+kill-at-once shape sat in lsp-probe, which now asserts the goodbye on every boot (answer Ok, self-exit, status 0).
+- Wrong turn 1: I dropped a "wait for the server's own exit after its stdout EOF" step because no gate could see it.
+  Fable round 2 then found the path that makes it load-bearing: on a disconnect gopls closes stdout BEFORE its session
+  shutdown, and nora's kill at the EOF orphaned `go` -- measured twice in my own chain (disconnectnow 8 ms after `:q!`,
+  stuck at 10.3 s). The lesson is the converse of the witness rule: an unwitnessed step is a reason to find its
+  witness, not to delete it. The step is back (`await_exit`), and `disconnectnow` is its witness.
+- Wrong turn 2: a 10 s grace from gopls's "5 s interrupt wait". The first green ended one quit at 10059 ms, the grace's
+  kill passing as a goodbye. A diagnostic build (60 s grace, a per-step timeline) measured 13.2 s for a quit 0.4 s after
+  `initialized`, and Fable r1 found why: gopls handles messages in order and `initialized` blocks until the first load
+  ends, so `shutdown` waits for a load it cannot cancel (minutes when cold). Upstream gopls is the same. The operator
+  chose escalation (vote 27): answer 5 s, then close stdin, kill at 30 s, no fork change. The "5 s interrupt" was wrong
+  too: Thylacine's Go runtime catches no notes, so the interrupt kills `go` at once.
+- The diagnostic's process census read `kids=[]` everywhere, including during a 13 s load: it had no positive control,
+  so it was discarded, not read as "no children". gopls's trace was lost to `grep -h`, which Thylacine's grep lacks.
+- I broke a binding rule: I edited `run.sh` while the chain was executing it; the exitonly stage's tail hit a syntax
+  error. The sources were verified by hash afterwards; that stage's red was re-run. The exitonly mutant was itself
+  racy (closing stdin with `exit` lets gopls's disconnect path win, exit 0); it keeps stdin open now.
+- Round 3 found round 2's EINTR premise false (poll never EINTRs a native Proc); I had adopted it without re-deriving
+  it. The retry stays, with a nap, and the comments say the true contract.
+- Wrong turn 3: round 2's F5 asked for a red on the escalation's timing, and I bounded a disconnect at 10 s. The next
+  green failed a correct nora three times out of three: after the disconnect gopls took 5.7-7.6 s to finish its own
+  shutdown (11124 / 12639 / 10676 ms in all, no orphan). The bound was a guess. The discriminator that holds is the
+  label: past 5 s a correct nora has closed stdin and gopls exits unanswered, so an answered goodbye can only come in
+  under 7 s; the `noescalate` mutant's late goodbye (11084 ms) fails that. The end label now ranks an answer first.
+- Final (14:47Z-15:06Z): nora-demo PASS on attempt 1 (goodbye 2412, disconnect 9694, goodbye 184 / 1560 / 14 ms), go6
+  PASS, suite 2116/2116; every red for its stated reason, read from its WITNESS line, and the escalation forced at 1 ms
+  5/5 `disconnect`. Fable 5.1 three rounds: r1 0/0/1/4, r2 0/1/0/7 (dirty), r3 0/0/0/4 (clean).
+Enqueued on the way: the stderr-EOF spin and blocking writes in nora's server hosts, a `go` child of `go` orphaned
+mid-session, and three gopls-fork residuals (imports refresh, `go env` during a disconnect, a pre-load re-run window).
+
 ## 2026-10-28 -- a frame named after the function it never reached (corona)
 
 **What started it.** The P3 F2 gate log (2026-10-27, OPEN-BUGS 21:46Z) showed the

@@ -28,6 +28,9 @@
 //      some error-shaped thing arrived. An empty first publish is expected and
 //      waited through, not a failure (servers commonly publish `[]` before the
 //      analysis completes; a synthetic test would never model that).
+//   6. the goodbye nora's exit runs: `shutdown`, its answer, `exit`, and the
+//      server must then exit BY ITSELF with status 0. That is what lets nora
+//      reap it instead of killing it mid-`go list`.
 //
 // WHY A TABLE (CL-6). The chain above is protocol, not language: every step is
 // the same for gopls and for clangd, and the only things that differ are which
@@ -68,7 +71,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
-use libthyla_rs::time::Instant;
+use libthyla_rs::time::{self, Duration, Instant};
 use libthyla_rs::{env, fs, t_exits, t_putstr};
 
 use parley::json::Value;
@@ -262,6 +265,13 @@ const POLL_MS: u32 = 5_000;
 /// hang in the boot log -- the difference between "waiting" and "wedged" should
 /// never have to be guessed.
 const HEARTBEAT_MS: u64 = 20_000;
+/// How long the goodbye may take: the answer to `shutdown`, then the exit. The
+/// probe says goodbye after its diagnostic, so gopls's first workspace load,
+/// which `shutdown` would otherwise queue behind, is over.
+const GOODBYE_MS: u64 = 10_000;
+/// Between checks that the server has exited once its stdout closed. An exit
+/// is not a pollable event, and gopls closes stdout before it returns.
+const EXIT_NAP_MS: u64 = 5;
 
 const TAG_OUT: Tag = 1;
 const TAG_ERR: Tag = 2;
@@ -520,7 +530,7 @@ fn run_session(spec: &ProbeSpec) {
                                     t_putstr("MiB");
                                 }
                                 t_putstr(")\n");
-                                shutdown(&mut cl, &mut srv);
+                                goodbye(spec, &mut cl, &mut srv, &mut mux);
                                 return;
                             }
                         }
@@ -724,18 +734,103 @@ fn dispatch(
     }
 }
 
-/// The orderly LSP goodbye, then make sure the child is really gone: a server
-/// that ignores the protocol shutdown would otherwise outlive the probe as an
-/// orphan holding the workspace -- and with two sessions in one process, an
-/// orphaned first server would still be indexing while the second runs.
-fn shutdown(cl: &mut lsp::Client, srv: &mut Server) {
+/// The goodbye nora's exit runs: `shutdown`, its answer, `exit`, then the
+/// server must close its stdout and exit by itself with status 0 within
+/// `GOODBYE_MS`. gopls exits 1 on an `exit` that arrives before `shutdown`.
+fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut Mux) {
+    let t0 = Instant::now();
     let bye = cl.shutdown();
-    let _ = srv.send(&bye);
-    let exit = cl.exit();
-    let _ = srv.send(&exit);
-    srv.close_stdin();
+    if srv.send(&bye).is_err() {
+        end_failed(spec, srv, "send shutdown");
+    }
+    let mut answered = false;
+    let mut err_open = true;
+    'out: loop {
+        if t0.elapsed().as_millis() as u64 > GOODBYE_MS {
+            end_failed(spec, srv, if answered { "stdout still open after exit" } else { "no answer to shutdown" });
+        }
+        // A closed pipe polls readable forever, so stderr leaves the set at EOF.
+        let err_fd = if err_open { srv.stderr_fd() } else { -1 };
+        let fds = [(srv.stdout_fd(), TAG_OUT), (err_fd, TAG_ERR)];
+        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+            Ok(r) => r,
+            Err(_) => end_failed(spec, srv, "mux.poll (goodbye)"),
+        };
+        for r in &ready {
+            if r.tag == TAG_ERR {
+                err_open = matches!(srv.drain_stderr(), Ok(false));
+                continue;
+            }
+            match srv.pump() {
+                Ok(false) => {}
+                Ok(true) => break 'out,
+                Err(_) => end_failed(spec, srv, "pump (goodbye)"),
+            }
+            loop {
+                let body = match srv.next_frame() {
+                    Ok(Some(b)) => b,
+                    Ok(None) => break,
+                    Err(_) => end_failed(spec, srv, "frame decode (goodbye)"),
+                };
+                let msg = match Value::parse(&body).ok().and_then(|v| parley::jsonrpc::classify(v).ok()) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                match cl.handle(msg) {
+                    Action::Send(reply) => {
+                        let _ = srv.send(&reply);
+                    }
+                    Action::ShutDown(Ok(())) => {
+                        answered = true;
+                        let exit = cl.exit();
+                        if srv.send(&exit).is_err() {
+                            end_failed(spec, srv, "send exit");
+                        }
+                        srv.close_stdin();
+                    }
+                    Action::ShutDown(Err(_)) => end_failed(spec, srv, "the server refused shutdown"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if !answered {
+        end_failed(spec, srv, "stdout closed before shutdown was answered");
+    }
+    loop {
+        match srv.try_wait() {
+            Ok(Some(st)) => {
+                if !st.success() {
+                    t_putstr("lsp-probe: FAIL [");
+                    t_putstr(spec.name);
+                    t_putstr("] -- the server exited by itself with status ");
+                    print_u32(st.raw() as u32);
+                    t_putstr(", want 0\n");
+                    unsafe { t_exits(1) }
+                }
+                t_putstr("lsp-probe: [");
+                t_putstr(spec.name);
+                t_putstr("] goodbye OK -- shutdown answered, exited by itself with status 0 (");
+                print_u32(t0.elapsed().as_millis() as u32);
+                t_putstr("ms)\n");
+                return;
+            }
+            Ok(None) => {}
+            Err(_) => end_failed(spec, srv, "try_wait"),
+        }
+        if t0.elapsed().as_millis() as u64 > GOODBYE_MS {
+            end_failed(spec, srv, "the server closed its stdout but did not exit");
+        }
+        let _ = time::sleep(Duration::from_millis(EXIT_NAP_MS));
+    }
+}
+
+/// Kill and reap the server, then fail: unlike `fail`, the server here is the
+/// thing that misbehaved, and it must not run on through the rest of the boot.
+fn end_failed(spec: &ProbeSpec, srv: &mut Server, msg: &str) -> ! {
     let _ = srv.kill();
     let _ = srv.wait();
+    fail(spec, msg)
 }
 
 /// Hover bodies are markdown blocks; the boot log wants one informative line.
