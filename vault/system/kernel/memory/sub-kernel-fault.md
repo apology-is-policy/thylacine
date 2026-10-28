@@ -51,7 +51,7 @@ a wedged FS server as a segfault in the victim.
 
 **Kernel-side classification runs first, in a fixed order**, and every branch
 extincts: stack-guard hit, W^X violation in the kernel image, translation
-fault, permission fault, access-flag fault, catch-all. The order encodes
+fault, permission fault, access-flag fault, alignment fault, catch-all. The order encodes
 specificity — a guard-page hit is a stack overflow, and saying so is worth more
 than "unhandled translation fault at 0xffff…".
 
@@ -647,6 +647,16 @@ from the kernel header — sharing the constant would restore the tautology.
 The access-flag arm is defensive: this kernel sets the access flag eagerly, so
 those faults should not occur. Classifying them anyway means the day one appears
 it is named rather than landing in the catch-all.
+
+The alignment arm (2026-10-27) names the fault a pre-MMU read takes: before the
+MMU every access is to Device memory, where an unaligned access always takes an
+Alignment fault, and since the boot CPU's vectors are installed before its first
+C call ([[sub-kernel-boot-entry]]) such a fault reaches this handler instead of
+wedging. It extincts `unhandled kernel alignment fault` with the address; the
+catch-all printed the ESR instead. That body is tooling ABI: `tools/test-fault.sh`'s
+`vbar_pre_reloc` and `vbar_pre_mmu` match it ([[abi-boot-banner]]). A
+synchronous external abort from the kernel still reaches the catch-all, which
+prints the ESR: no variant can provoke one on every host.
 
 ## Provenance
 

@@ -77,8 +77,8 @@ typedef enum {
 // the source. Caller follows up with gic_attach + gic_enable_irq for
 // each desired IRQ, then unmasks IRQs at the PSTATE level.
 //
-// Must run AFTER dtb_init and AFTER exception_init (so an unexpected
-// IRQ during bring-up routes through the vector table cleanly).
+// Must run AFTER dtb_init, with the vector table installed (start.S does
+// it before any C), so an unexpected IRQ during bring-up routes cleanly.
 //
 // On v2 or v3 detection: configures and returns true (extincts only on a
 // malformed DTB GIC node or vmalloc exhaustion mapping the MMIO).

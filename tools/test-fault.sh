@@ -46,6 +46,22 @@
 #                     seen only where one to Device memory never completes:
 #                     measured under HVF on Apple silicon and KVM on thyla-pi's
 #                     A72 (zero bytes); TCG completes it and passes.
+#   vbar_pre_reloc, vbar_pre_mmu — an unaligned load with stage 1 off, so
+#                     an Alignment fault on Device memory: in kaslr_init before
+#                     the image is relocated, and at the top of
+#                     build_page_tables after. Only the vectors start.S
+#                     installs at their PA before the first C call can print it
+#                     (without them: zero bytes) →
+#                     "EXTINCTION: unhandled kernel alignment fault" with
+#                     "console-claim: skipped with the MMU off" and the ELR
+#                     symbolized as "fault_test_unaligned_load+0x" (a live
+#                     frame's PA ELR rebased by the dump).
+#   vbar_boot_main  — a write to kernel text at the top of boot_main, before
+#                     the banner and before exception_vectors_verify →
+#                     "EXTINCTION: PTE violates W^X" with no banner line (the
+#                     fault came before it); the banner's text is read from
+#                     kernel/main.c, so a reworded banner cannot leave the
+#                     check looking for a line that no longer exists.
 #   no_entropy      — no provoker in the build: the LAUNCH leaves the kernel
 #                     no strong entropy source (TCG -cpu cortex-a72 has no
 #                     RNDR; THYLACINE_NO_RNG=1 attaches no virtio-rng), and the
@@ -81,9 +97,18 @@ BUILD_DIR_BASE="$REPO_ROOT/build"
 # host load, e.g. taskpolicy -b).
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
+# The boot banner's fixed tail, read from the source that prints it: the
+# vbar_boot_main forbid. Read, not restated, because a negative check on a stale
+# literal passes forever.
+BANNER_TAIL="$(sed -n 's/^ *uart_puts("Thylacine v" THYLACINE_VERSION_STRING "\(.*\)\\n");$/\1/p' "$REPO_ROOT/kernel/main.c")"
+if [[ -z "$BANNER_TAIL" || "$BANNER_TAIL" == *$'\n'* ]]; then
+    echo "test-fault.sh: cannot read the boot banner's line from kernel/main.c" >&2
+    exit 2
+fi
+
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off no_entropy"
+ALL_VARIANTS="canary_smash wxe_violation wxe_install_kernel wxe_install_block wxe_install_gib wxe_install_user bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter extinction_mmu_off vbar_pre_reloc vbar_pre_mmu vbar_boot_main no_entropy"
 
 # Launcher settings a variant boots under, word-split into run-vm.sh's
 # environment. Empty = the caller's own.
@@ -117,6 +142,11 @@ require_for() {
         # turns into a name.
         extinction_mmu_off) printf '%s\n' "console-claim: skipped with the MMU off" \
                                            "  extinction+0x" ;;
+        # The same report, and the faulting PC named: a live frame's ELR taken
+        # before the MMU is a PA, which only the dump's rebase turns into one.
+        vbar_pre_reloc|vbar_pre_mmu)
+                            printf '%s\n' "console-claim: skipped with the MMU off" \
+                                           "  fault_test_unaligned_load+0x" ;;
         *)                  echo "" ;;
     esac
 }
@@ -127,6 +157,9 @@ forbid_for() {
         extinction_peer_chatter) echo "console-claim: taken with irqs on" ;;
         # The ring is not claimed before the MMU, so no ring report is true.
         extinction_mmu_off) echo "console-ring:" ;;
+        # The banner: a fault after it could have come after the vectors'
+        # verify too, which would prove nothing about start.S's install.
+        vbar_boot_main)   echo "$BANNER_TAIL" ;;
         # The suite's first line: a refusal printed after it came too late.
         no_entropy)       echo "  tests:" ;;
         # The provoker's own line: the encode returned.
@@ -152,6 +185,8 @@ expected_for() {
         el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
         extinction_peer_chatter) echo "EXTINCTION: peer chatter: this banner must reach the wire whole" ;;
         extinction_mmu_off) echo "EXTINCTION: PTE violates W^X at install (kernel page)" ;;
+        vbar_pre_reloc|vbar_pre_mmu) echo "EXTINCTION: unhandled kernel alignment fault" ;;
+        vbar_boot_main)  echo "EXTINCTION: PTE violates W^X" ;;
         no_entropy)      echo "EXTINCTION: CSPRNG unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed entropy; refusing to start userspace" ;;
         # ROUND F6: the variant REACHES cons_tx_claim_for_dump's
         # already-ours arm but could not FAIL if it were wrong -- delete that
@@ -314,11 +349,11 @@ for variant in $selected; do
                 fail=$((fail + 1))
                 echo "==> [$variant] FAIL: saw '$expect' but not '$missing'"
                 echo "    the banner printed, but not by the path the variant exists to prove"
-            elif [[ -n "$forbid" ]] && grep -qF "$forbid" "$log_file"; then
+            elif [[ -n "$forbid" ]] && grep -qF -- "$forbid" "$log_file"; then
                 fail=$((fail + 1))
                 echo "==> [$variant] FAIL: saw '$expect' but ALSO '$forbid'"
                 echo "    the banner printed, but not the way the variant exists to prove:"
-                grep -F "$forbid" "$log_file" | head -2 | sed 's/^/    /'
+                grep -F -- "$forbid" "$log_file" | head -2 | sed 's/^/    /'
             else
                 pass=$((pass + 1))
                 required="$(require_for "$variant" | sed '/^$/d' | sed "s/.*/'&'/" | paste -sd, -)"

@@ -374,7 +374,10 @@ its asserts (whose folded extinction runs there first), hung with no
 nothing under HVF on Apple silicon and under KVM on thyla-pi's Cortex-A72, where
 the boot CPU spun at the claim's `stlxr` forever. With the MMU off,
 `extinction()` now takes the console without an atomic ([[sub-kernel-halls]]),
-and the variant prints the banner and the dump on both.
+and the variant prints the banner and the dump on both. A second provoker sits at
+the same place for `vbar_pre_mmu`: an unaligned load (an Alignment fault, since
+every access is to Device memory) that only the boot CPU's PA vectors, installed
+before the first C call, turn into a line ([[sub-kernel-boot-sequence]]).
 
 **The ASID argument is vestigial** on the install and uninstall paths and is
 documented as such at each — the invalidates are all-ASID. It is retained for a

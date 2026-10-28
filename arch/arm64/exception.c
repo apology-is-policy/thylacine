@@ -232,13 +232,17 @@ void exception_unexpected(struct exception_context *ctx, u64 vector_idx) {
 }
 
 // ---------------------------------------------------------------------------
-// exception_init.
+// exception_vectors_verify. Without start.S's install a fault before this point
+// vectors through a reset-UNKNOWN VBAR_EL1 and wedges with no line, and a
+// re-set here would hide that it was missing.
 // ---------------------------------------------------------------------------
 
-void exception_init(void) {
-    u64 vbar = (u64)(uintptr_t)_exception_vectors;
-    __asm__ __volatile__("msr vbar_el1, %0\n" "isb\n"
-                         :: "r" (vbar) : "memory");
+void exception_vectors_verify(void) {
+    u64 vbar;
+    __asm__ __volatile__("mrs %0, vbar_el1" : "=r"(vbar));
+    if (vbar != (u64)(uintptr_t)_exception_vectors)
+        extinction_with_addr("VBAR_EL1 is not the high-VA vector table start.S installs",
+                             (uintptr_t)vbar);
 }
 
 // ---------------------------------------------------------------------------

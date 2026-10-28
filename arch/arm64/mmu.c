@@ -52,6 +52,7 @@
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
 #include <thylacine/extinction.h>   // extinction (P3-Bb mmu_map_mmio guards)
+#include <thylacine/fault_test.h>   // fault_test_unaligned_load (the vbar_pre_mmu variant)
 #include <thylacine/smp.h>          // g_secondary_boot_stacks (P5-secondary-stack-guard)
 #include <thylacine/spinlock.h>     // spin_lock_irqsave(NULL): bare IRQ mask (#806 BBM window)
 #include <thylacine/types.h>
@@ -338,6 +339,9 @@ _Static_assert((PTE_KERN_TEXT & PTE_GP) != 0,
 #define PL011_BASE_FALLBACK 0x09000000ull
 
 static void build_page_tables(u64 slide) {
+#ifdef THYLACINE_FAULT_TEST_vbar_pre_mmu
+    fault_test_unaligned_load();
+#endif
 #ifdef THYLACINE_FAULT_TEST_extinction_mmu_off
     // A W+X leaf encoded with stage 1 still off: its extinction must reach the
     // wire through extinction()'s MMU-off path (tools/test-fault.sh).

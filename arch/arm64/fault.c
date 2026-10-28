@@ -341,6 +341,14 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
                              (uintptr_t)fi->vaddr);
     }
 
+    // 5.5. Alignment fault (kernel-mode). An unaligned access to Device
+    //      memory always takes one, and before the MMU every access is to
+    //      Device memory: a misaligned field read in pre-MMU C lands here.
+    if (!fi->from_user && fi->is_alignment) {
+        extinction_with_addr("unhandled kernel alignment fault",
+                             (uintptr_t)fi->vaddr);
+    }
+
     // 6. User-mode fault — demand paging via the VMA tree (P3-Dc).
     //
     //    Routes through `userland_demand_page` which performs vma_lookup,

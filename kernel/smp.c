@@ -47,7 +47,7 @@ __attribute__((aligned(64)))
 volatile u8 g_cpu_stage[DTB_MAX_CPUS * SMP_MAILBOX_BYTES];
 
 // P2-Cb: per-CPU "fully initialized at high VA" flag. Set by
-// per_cpu_main after VBAR_EL1 + TPIDR_EL1 are configured. The
+// per_cpu_main after VBAR_EL1 is verified and TPIDR_EL1 configured. The
 // stricter "alive" signal — secondary's PAC + MMU work and the C
 // runtime is reachable.
 volatile u8 g_cpu_alive[DTB_MAX_CPUS];
@@ -436,8 +436,8 @@ unsigned smp_cpu_online_count(void) {
 //   - Long-branch via kaslr_high_va_addr to this function.
 //
 // Sets up the remaining per-CPU state:
-//   1. VBAR_EL1 — exception vector table (shared with primary at v1.0;
-//      P2-Cd may give each CPU its own routing table for IRQ affinity).
+//   1. VBAR_EL1 — verified, not set: secondary_entry installed the vector
+//      table (shared with the primary) before the long branch here.
 //   2. TPIDR_EL1 — per-CPU current_thread pointer. NULL at P2-Cb (no
 //      per-CPU run tree yet); P2-Cd or later assigns each CPU's idle
 //      thread.
@@ -499,14 +499,8 @@ void per_cpu_main(int cpu_idx) {
     // any EL0 code, which the idle-loop entry below guarantees.
     hw_cpu_ident_detect((unsigned)cpu_idx);
 
-    // VBAR_EL1 — install the kernel exception vector table. ISB so
-    // any subsequent exception sees the new VBAR.
-    u64 vbar = (u64)(uintptr_t)_exception_vectors;
-    __asm__ __volatile__(
-        "msr vbar_el1, %0\n"
-        "isb\n"
-        :: "r"(vbar) : "memory"
-    );
+    // secondary_entry installed VBAR_EL1 before the long branch here (#214).
+    exception_vectors_verify();
 
     // P2-Cd: allocate this CPU's idle thread + park in TPIDR_EL1.
     // The idle thread doesn't own a kstack — it runs on the per-CPU

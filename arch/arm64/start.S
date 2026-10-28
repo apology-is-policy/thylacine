@@ -248,6 +248,22 @@ _real_start:
     // the architecturally well-defined write.
     msr     sp_el0, xzr
 
+    // 4.7. Install the exception vectors at their load PA before the first
+    //      C call. VBAR_EL1 resets to an UNKNOWN value, so without this a
+    //      fault in pre-MMU C (a DTB parse taking an Alignment fault on Device
+    //      memory) would vector into nothing and wedge with no line; with it,
+    //      the fault reaches fault.c and extinction() prints with the MMU
+    //      off. The PA stays fetchable
+    //      after mmu_enable through the TTBR0 identity, until step 8.75 moves
+    //      VBAR to the high VA. Only the boot CPU: a secondary must take no
+    //      exception with the MMU off, because the MMU-off extinction path
+    //      skips the console claim on the premise that one CPU runs then
+    //      (extinction.c extinction_mmu_off).
+    adrp    x0, _exception_vectors
+    add     x0, x0, :lo12:_exception_vectors
+    msr     vbar_el1, x0
+    isb
+
     // 5. Save DTB pointer. BSS is now cleared; this write sticks.
     adrp    x0, _saved_dtb_ptr
     add     x0, x0, :lo12:_saved_dtb_ptr
@@ -335,6 +351,18 @@ _real_start:
     add     x0, x0, :lo12:_boot_stack_top
     bl      kaslr_high_va_addr              // x0 = HIGH VA of _boot_stack_top
     mov     sp, x0                          // SP_EL1 := HIGH VA boot-stack top
+    isb
+
+    // 8.75. Move the vectors to their high VA before boot_main, as the
+    //       secondary path does (#214): boot_main retires the TTBR0 identity
+    //       that keeps step 4.7's PA vectors fetchable, and a handler entered
+    //       from high-VA code should run there too. Nothing in C installs
+    //       VBAR: boot_main's exception_vectors_verify extincts if this
+    //       install is missing.
+    adrp    x0, _exception_vectors
+    add     x0, x0, :lo12:_exception_vectors
+    bl      kaslr_high_va_addr              // x0 = HIGH VA of the vectors
+    msr     vbar_el1, x0
     isb
 
     // 9. Long-branch to high VA. Compute the runtime high VA of
@@ -719,8 +747,10 @@ secondary_entry:
     // this CPU. Previously per_cpu_main did it — leaving every fault
     // between MMU-on and per_cpu_main vectoring through a reset-UNKNOWN
     // VBAR_EL1: a silent wedge on real silicon. With VBAR live, a
-    // bring-up fault reaches fault.c and prints. per_cpu_main's own
-    // install stays (idempotent re-set of the same value).
+    // bring-up fault reaches fault.c and prints. per_cpu_main's
+    // exception_vectors_verify extincts if this install is missing.
+    // Before it, this CPU's only C is the frameless mmu_program_this_cpu,
+    // run with the MMU off and no vectors on purpose (step 4.7).
     adrp    x0, _exception_vectors
     add     x0, x0, :lo12:_exception_vectors
     bl      kaslr_high_va_addr              // x0 = HIGH VA of the vectors

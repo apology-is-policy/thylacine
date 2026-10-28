@@ -185,7 +185,7 @@ void *smp_bootcpu_idle_stack_top(void);
 
 // P2-Cb: per-CPU main. Called from secondary_entry asm trampoline at
 // the kernel's high VA after PAC + MMU + per-CPU stack are live.
-// Sets VBAR_EL1 to the kernel vector table, TPIDR_EL1 to NULL (no
+// Verifies VBAR_EL1 holds the kernel vector table, sets TPIDR_EL1 to NULL (no
 // per-CPU current thread at P2-Cb), flips g_cpu_alive[idx], and
 // enters an idle WFI loop indefinitely. Noreturn.
 //

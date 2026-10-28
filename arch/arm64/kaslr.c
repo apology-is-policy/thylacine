@@ -2,13 +2,11 @@
 // R_AARCH64_RELATIVE relocations, and reports the chosen slide back to
 // the boot stub for TTBR1 mapping and the high-VA long-branch.
 //
-// At P1-C-extras Part B with -fpie + -fdirect-access-external-data, the
-// kernel emits zero R_AARCH64_RELATIVE entries (all references are
-// PC-relative). The relocation walker therefore terminates after a
-// single header inspection. The infrastructure is in place for future
-// code that introduces absolute pointer references (e.g., function
-// pointer tables in static data); each such reference will land in
-// .rela.dyn automatically and be patched here.
+// Code references are PC-relative (-fpie + -fdirect-access-external-data),
+// but pointers in static data (function-pointer tables, string tables) are
+// absolute: each lands in .rela.dyn as an R_AARCH64_RELATIVE entry (4997 on
+// 2026-10-27) whose slot the linker leaves 0, and is patched here. Until the
+// walk, such a pointer reads 0; after it, a high VA unmapped until the MMU.
 //
 // Per ARCHITECTURE.md §5.3 (KASLR), §6.2 (memory layout), §24
 // (hardening), invariant I-16.
@@ -18,6 +16,7 @@
 #include <stdint.h>
 #include <thylacine/canary.h>
 #include <thylacine/dtb.h>
+#include <thylacine/fault_test.h>   // fault_test_unaligned_load (the vbar_pre_reloc variant)
 #include <thylacine/types.h>
 
 #include "sections.h"
@@ -164,13 +163,9 @@ static void apply_relocations(u64 slide) {
             // address — a silent runtime fault later. Fail loudly at
             // boot so the build-time misconfiguration surfaces here.
             //
-            // We can't extinction at this point (running pre-MMU,
-            // pre-UART-on, no exception handler); fall through to a
-            // bare halt. The next kernel build run from a developer
-            // can grep .rela.dyn for the unsupported type. (Future
-            // P1-I refinement: emit a recognizable signature on the
-            // UART before halting; PL011 may or may not be reachable
-            // depending on QEMU vs Pi 5 firmware state at this point.)
+            // The brk reaches the EL1-sync handler through the vectors
+            // start.S installed at their PA, which extincts with the MMU
+            // off ("brk instruction") with the walk in its backtrace.
             __asm__ __volatile__("brk #0xab" ::: "memory");
         }
         rel++;
@@ -187,13 +182,12 @@ static void apply_relocations(u64 slide) {
 // value at prologue (saved on the stack) and the runtime cookie at
 // epilogue (loaded from __stack_chk_guard) — mismatch.
 //
-// Functions called from kaslr_init BEFORE canary_init runs (mix64,
-// dtb_get_chosen_*, read_cntpct, apply_relocations of which there
-// are zero entries today) all complete and pop their frames before
-// __stack_chk_guard changes — they read the magic value consistently
-// at prologue + epilogue. After canary_init returns, all subsequent
-// callers of kaslr_init's continuation read the runtime cookie
-// consistently.
+// Functions called from kaslr_init BEFORE canary_init runs (dtb_init,
+// dtb_get_chosen_*, read_cntpct, mix64) all complete and pop their
+// frames before __stack_chk_guard changes — they read the magic value
+// consistently at prologue + epilogue. apply_relocations, and every
+// function entered after canary_init returns, reads the runtime cookie
+// at both ends.
 __attribute__((no_stack_protector))
 u64 kaslr_init(void) {
     u64 raw = 0;
@@ -212,6 +206,9 @@ u64 kaslr_init(void) {
     if (!dtb_is_ready()) {
         (void)dtb_init((paddr_t)_saved_dtb_ptr);
     }
+#ifdef THYLACINE_FAULT_TEST_vbar_pre_reloc
+    fault_test_unaligned_load();
+#endif
 
     // Try DTB sources in priority order: kaslr-seed (UEFI on bare
     // metal), then rng-seed (QEMU virt and most UEFI environments),

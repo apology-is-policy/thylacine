@@ -124,8 +124,8 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on twelve of them.** `tools/test-fault.sh` runs fifteen
-variants (`ALL_VARIANTS`), and its `expected_for` case matches twelve bodies:
+that one gate depends on thirteen of them.** `tools/test-fault.sh` runs eighteen
+variants (`ALL_VARIANTS`), and its `expected_for` case matches thirteen bodies:
 `EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, and since
 2026-10-27 `... PTE violates W^X at install (kernel page)`, `... (kernel L2
 block)`, `... (kernel L1 block)` and `... (user page)` (the
@@ -140,7 +140,10 @@ this banner must reach the wire whole` (`extinction_peer_chatter`, which
 console byte fails it), and, since 2026-10-26, `EXTINCTION: CSPRNG unseeded:
 neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed entropy;
 refusing to start userspace` (`no_entropy`, printed by `kernel/main.c`'s vote-18 refusal
-on a launch with no strong entropy source). The comment directly above it says "Keep the
+on a launch with no strong entropy source), and, since 2026-10-27, `EXTINCTION:
+unhandled kernel alignment fault` (`vbar_pre_reloc` and `vbar_pre_mmu`, printed by
+`arch/arm64/fault.c`'s alignment arm for a fault taken with the MMU off;
+`vbar_boot_main` expects the `PTE violates W^X` body). The comment directly above it says "Keep the
 case below in sync with this" — an instruction to a person, inside the file,
 which is the weakest form of the guarantee ([[dec-2026-08-15-cutover]]).
 Reword one of those messages for clarity and the corresponding
@@ -477,7 +480,7 @@ That is the implementation track's call.
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
-  fourteen matched variants (twelve bodies), which is not what "the prefix is the
+  eighteen matched variants (thirteen bodies), which is not what "the prefix is the
   ABI" leads a reader to expect.
 - **Settled 2026-09-25** (the item the 2026-09 recount left open): the
   `el1_sync_runaway` body is already in the pinned set. `test-fault.sh` lists

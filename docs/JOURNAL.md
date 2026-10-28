@@ -22,6 +22,102 @@ needed the operator.
 
 
 ---
+## 2026-10-27/28 -- the boot CPU's vectors, from before its first C call (corona)
+
+**What started it.** P3 F2's self-audit (the entry below) noticed that `start.S`
+installed VBAR_EL1 only on the secondary path (#214). The boot CPU got it at
+`exception_init`, `kernel/main.c:443`, after the DTB parse, the console remap,
+the feature probes, `phys_init`, the DTB relocation and `slub_init`, and never
+before the MMU. A fault in any of those vectored through a reset-UNKNOWN base.
+Enqueued as a P3, "read, not reproduced".
+
+**Reproduced first.** Three fault variants, one per state the boot CPU passes
+through before its old install:
+
+- `vbar_pre_reloc`: an unaligned load in `kaslr_init`, MMU off, image not yet
+  relocated;
+- `vbar_pre_mmu`: the same load at the top of `build_page_tables`, image
+  relocated;
+- `vbar_boot_main`: a write to kernel text at the top of `boot_main`, MMU on.
+
+With stage 1 off every access is to Device memory, where an unaligned one always
+takes an Alignment fault, the realistic pre-MMU fault (a misaligned DTB field).
+With `start.S`'s installs removed, all three printed 156 bytes in 40 s under HVF:
+`run-vm.sh`'s two header lines and not one guest byte (batch r0). The same images
+under KVM on thyla-pi's A72 printed zero bytes in 20 s, and gdb found cpu0 at PC
+`0x200` on a `udf #0`. VBAR had reset to 0, so the fault vectored into
+zero-filled flash, whose `udf` traps to `0x200` again, forever.
+
+**The fix.** `start.S` installs VBAR_EL1 twice on the boot CPU. First at the
+vectors' load PA right after the BSS clear, before the first C call, so a
+pre-MMU fault reaches `fault.c` and extinction's MMU-off path prints it. Then at
+the high VA before the long branch to `boot_main`, as the secondary path does,
+because `boot_main` later retires the TTBR0 identity that keeps the PA fetchable.
+A secondary still installs only the high VA, after its MMU is on: the MMU-off
+extinction path skips the console claim on the premise that one CPU runs then,
+so a secondary must take no exception with the MMU off. `exception_init` became
+`exception_vectors_verify`: C installs nothing, and a missing install extincts
+every boot instead of reopening the window.
+
+**What it changed elsewhere.** The previous chunk's audit (F3) had ruled that the
+dump never rebases an ELR, "a real one is a high VA". With pre-MMU vectors that
+premise is false: a live frame's ELR is a PA there. The flag became `ran_here`
+and covers a live frame's ELR; the variants require
+`  fault_test_unaligned_load+0x`, which only that rebase prints.
+
+**The audit** (Fable 5.1 on Opus 5.5, start == end) returned 0/0/0/4 P3, all
+fixed:
+
+- F1: audit row 24 and the Halls dossier still stated both retired premises.
+- F2: ten comments now false, three of them mine (`exception_init re-sets the
+  same value`). Also `kaslr.c`'s header claimed zero relocations; there are 4997.
+- F3: I had pinned the catch-all body `unclassified kernel fault (ESR)` as ABI
+  while `fault_info` already decodes `is_alignment`. There is now an alignment
+  arm, `unhandled kernel alignment fault`, and that is the pinned body.
+- F4: the `vbar_boot_main` forbid was the banner literal restated in the script;
+  it is now read from `kernel/main.c`.
+
+The auditor's census of all 4997 relocation targets found none on the pre-MMU
+fault path, so the "no relocated pointer" claim is measured, not read.
+
+**A check that failed open, in my own first green run.** `vbar_boot_main`'s
+forbid, `-dev booting...`, starts with a dash. `grep -qF "$forbid"` read it as
+`-d ev...`, failed with "unknown --directories option", and the `&&` chain took
+the failure as "absent": PASS. The forbid greps now take `--`, and sabotage s5
+(the provoker moved after the verify, banner printed) went red on it.
+
+**Two stale facts found on the way.**
+
+- `sub-kernel-kaslr` said the relocation section was empty and its walker had
+  never run; measured, 4997 entries, walked every boot.
+- `docs/AUDIT-TRIGGERS.md` carried the Exception-entry and Halls rows twice. The
+  older copies were strict prefixes of the newer, and a grep found the stale
+  Halls row first. The older copies are deleted.
+
+**Evidence.**
+
+- HVF, Mac leases 22:03-22:50Z and 22:58-00:03Z.
+- Red before the fix (r0): all three variants, zero guest bytes.
+- Sabotages, one claim each:
+  - s1, the PA install removed: the two pre-MMU variants show zero bytes, while
+    `vbar_boot_main` passes on the high-VA install.
+  - s2, the high-VA install removed: the boot CPU's verify extincts,
+    `VBAR_EL1 ... 0x4009f000` (the PA).
+  - s4, the secondary's install removed: the secondary's verify extincts with
+    `0x0`.
+  - s3, the live-ELR rebase removed: FAIL on `fault_test_unaligned_load+0x`.
+  - s5, the boot_main provoker moved after the verify: FAIL on the forbid.
+  - a1, the alignment arm removed: wrong extinction, the catch-all's
+    `unclassified kernel fault (ESR) 0x...96000021`.
+- t1, TCG: both pre-MMU variants pass, so QEMU 10.0.2 checks Device-memory
+  alignment.
+- Clean, on the final tree: `tools/test-fault.sh` 18/18;
+  `tools/build.sh kernel && tools/test.sh` 2091/2091 PASS.
+- r0, s1-s5 and t1 ran before the audit fixes; a1 and the clean gates after.
+- thyla-pi KVM (A72), Pi leases 22:56-22:58Z and 23:58-23:59Z: red (r0
+  images) zero bytes in 20 s with cpu0 at `0x200`; green (the final images) all
+  three print their line and a symbolized dump, cpu0 parked in `_torpor`.
+
 ## 2026-10-27 -- an extinction before the MMU that printed nothing, on both machines we have (corona)
 
 **What started it.** The kernel-declarations audit (r1 F2, Fable 5.1) read the

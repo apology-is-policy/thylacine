@@ -46,12 +46,12 @@ struct exception_context {
 // note handler's entry clears it; the saved context keeps it (ARCH 7.6.4).
 #define SPSR_EL1_BTYPE (3ull << 10)
 
-// Set VBAR_EL1 to the kernel exception vector table. Call from
-// boot_main once MMU is on and the kernel is running at high VA.
-//
-// Until exception_init runs, exceptions are undefined behavior
-// (boot path takes care not to trigger any).
-void exception_init(void);
+// start.S installs VBAR_EL1: on the boot CPU at the vectors' PA before its
+// first C call, then at the high VA before boot_main; on a secondary at the
+// high VA before per_cpu_main (its earlier C, the frameless
+// mmu_program_this_cpu, runs with none). boot_main and per_cpu_main call this
+// to extinct if the value is anything but the high-VA vector table.
+void exception_vectors_verify(void);
 
 // C handlers called by vectors.S. The vector table is laid out as
 // 4 "EL source" groups × 4 "exception type" entries each = 16 total.

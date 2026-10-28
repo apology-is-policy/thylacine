@@ -237,6 +237,15 @@ bool boot_mark_complete(void) {
 }
 
 void boot_main(void) {
+#ifdef THYLACINE_FAULT_TEST_vbar_boot_main
+    // A W^X fault before the banner and before exception_vectors_verify: only
+    // the vectors start.S installed can turn it into an EXTINCTION line.
+    {
+        volatile char *text = _kernel_start;
+        __asm__ __volatile__("" : "+r"(text));
+        *text = (char)0xCC;
+    }
+#endif
     // #806 probe: paint the unused boot stack first thing, before any deep
     // call uses it. boot_stack_report() (post-suite) reads the high-water.
     boot_stack_paint();
@@ -432,15 +441,11 @@ void boot_main(void) {
     // kfree / kmem_cache_*.
     slub_init();
 
-    // Phase 4: arm the exception vector table (P1-F). After this,
-    // synchronous faults route through arch/arm64/exception.c —
-    // boot-stack guard region accesses → extinction("kernel stack
-    // overflow"); kernel-image permission faults → extinction(
-    // "PTE violates W^X"); other sync faults → extinction with
-    // ESR/FAR/ELR diagnostic. The IRQ slot is wired by P1-G below.
-    // FIQ / SError + lower-EL group remain unexpected (Phase 2
-    // wires up the lower-EL group when userspace lands).
-    exception_init();
+    // Phase 4: the exception vector table (P1-F). start.S installed it before
+    // the first C call (at its PA, then at its high VA before boot_main), so
+    // every fault above already routed through arch/arm64/exception.c. The IRQ
+    // slot is wired by P1-G below.
+    exception_vectors_verify();
 
     // Phase 5: bring up the GIC, ARM generic timer, and route the
     // timer IRQ (PPI 11 → INTID 27, the virtual timer) through. After this the kernel

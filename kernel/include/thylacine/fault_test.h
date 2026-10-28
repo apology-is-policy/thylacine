@@ -11,4 +11,10 @@
 // without a fault-test define.
 void fault_test_run(void);
 
+#if defined(THYLACINE_FAULT_TEST_vbar_pre_reloc) || defined(THYLACINE_FAULT_TEST_vbar_pre_mmu)
+// An unaligned load, called with stage 1 off: kaslr_init's (image unrelocated)
+// and build_page_tables' (relocated) sites.
+void fault_test_unaligned_load(void);
+#endif
+
 #endif // THYLACINE_FAULT_TEST_H

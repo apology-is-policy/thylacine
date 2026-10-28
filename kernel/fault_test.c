@@ -376,6 +376,27 @@ static void provoke_extinction_peer_chatter(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// vbar_pre_reloc / vbar_pre_mmu / vbar_boot_main -- a fault before
+// exception_vectors_verify, when only the vectors start.S installed can turn it
+// into an EXTINCTION line. The two pre-MMU variants call the load below: with stage 1
+// off every access is to Device memory, where an unaligned one always takes an
+// Alignment fault (the realistic pre-MMU fault: a misaligned DTB field). Its own
+// frame, so the dump's ELR names it. vbar_boot_main's provoker is the top of
+// boot_main.
+// ---------------------------------------------------------------------------
+
+#if defined(THYLACINE_FAULT_TEST_vbar_pre_reloc) || defined(THYLACINE_FAULT_TEST_vbar_pre_mmu)
+__attribute__((noinline))
+void fault_test_unaligned_load(void) {
+    static u64 word;
+    u64 v;
+    u64 p = (u64)(uintptr_t)&word + 1u;
+    __asm__ __volatile__("ldr %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    (void)v;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.

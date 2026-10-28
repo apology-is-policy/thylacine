@@ -437,3 +437,18 @@ new `require_for` names what the expected line cannot: the report line
 `console-claim: skipped with the MMU off` and a symbolized `extinction+0x` frame
 (before the MMU every code address is physical, and only the dump's rebase names
 it). Without the fix the variant printed nothing, on HVF and on thyla-pi's KVM.
+
+**The vectors before the first C call (2026-10-27, later).** Arming the vector
+table is no longer a step of this sequence: `start.S` installs it before
+`kaslr_init` and again at the high VA before `boot_main`
+([[sub-kernel-boot-entry]]), and the step that used to install it,
+`exception_init`, became `exception_vectors_verify`, which extincts if the table
+is not installed. Every step this note lists before it -- the DTB parse, the
+console remap, the feature probes, the physical allocator, the DTB relocation,
+the slab allocator -- used to fault into a reset-UNKNOWN vector base and hang
+silently; now each prints. Three fault variants witness it, provoked from
+`fault_test_unaligned_load` (`kernel/fault_test.c`) and the top of `boot_main`:
+`vbar_pre_reloc` in `kaslr_init` before the relocation walk, `vbar_pre_mmu` at
+the top of `build_page_tables`, both `EXTINCTION: unhandled kernel alignment
+fault` with the MMU off; `vbar_boot_main`, `EXTINCTION: PTE violates W^X` with the
+banner forbidden (its text read from this file's banner line).

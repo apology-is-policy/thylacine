@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 5"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -158,10 +158,22 @@ must be genuinely leaf, and the constraint is documented at the call rather than
 assumed — with the compiler's output checked, since leaf-ness is a property of
 what was generated and not of what was written.
 
-**The vector base is installed here, before any C runs.** It had previously been
-left at its UNKNOWN reset value until later in bring-up, which meant a fault
-taken by a secondary in that window vectored somewhere arbitrary — the failure
-mode being silence, since a wrong vector base does not report anything.
+**The vector base is installed here, before any C runs, on every CPU.** It used
+to stay at its UNKNOWN reset value until later in bring-up: on a secondary until
+`per_cpu_main` (fixed by #214), and on the boot CPU until 2026-10-27, when
+`exception_init` set it only after the allocators were up. A fault in that window
+vectored somewhere arbitrary, and the failure mode was silence, since a wrong
+vector base reports nothing. The boot CPU now installs it twice. At the load PA,
+right after the BSS clear and before the first C call, so a fault in pre-MMU C
+reaches `fault.c` and prints through the extinction path's MMU-off arm; the PA
+stays fetchable after `mmu_enable` through the TTBR0 identity. Then at the high
+VA, before the long branch to `boot_main`, because `boot_main` later retires that
+identity. A secondary installs only the high VA, after its MMU is on: it must
+take no exception with the MMU off, since the MMU-off extinction path skips the
+console claim on the premise that one CPU runs then. C installs nothing:
+`exception_vectors_verify`, called by `boot_main` and `per_cpu_main`, extincts
+unless VBAR_EL1 already holds the high-VA table, so a lost install fails every
+boot instead of reopening the silent window.
 
 ## Invariants enforced
 

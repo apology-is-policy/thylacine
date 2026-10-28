@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -38,6 +38,21 @@ it does not return, because it extincted the machine or terminated the Proc.
 Four slots are live. Two carry kernel exceptions (synchronous, interrupt), two
 carry EL0 exceptions (synchronous, interrupt). The other twelve route to a
 diagnostic that names which one fired and halts.
+
+**The table is live before any C runs (2026-10-27).** `start.S` installs
+VBAR_EL1 itself ([[sub-kernel-boot-entry]]): on the boot CPU at the table's load
+PA before the first C call, then at the high VA before `boot_main`; on a
+secondary at the high VA after its MMU is on. There is no `exception_init`.
+`exception_vectors_verify`, called by `boot_main` and `per_cpu_main`, installs
+nothing and extincts unless VBAR_EL1 holds the high-VA table, so a lost install
+fails every boot instead of reopening a window in which a fault vectors through
+a reset-UNKNOWN base and wedges with no line. Before the MMU the synchronous slot
+runs at the PA with every data access to Device memory; the path to the line
+reads no pointer in static data (0 before the relocation walk, an unmapped high
+VA after) and takes no exclusive, and the line prints through the extinction
+path's MMU-off arm ([[sub-kernel-halls]]). Witnessed by `tools/test-fault.sh`'s
+`vbar_pre_reloc`, `vbar_pre_mmu` and `vbar_boot_main`: without the installs all
+three printed zero bytes, under HVF and under KVM on thyla-pi.
 
 ## Mechanism
 

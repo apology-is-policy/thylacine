@@ -375,12 +375,27 @@ Skipping the claim is sound because only the boot CPU runs C with the MMU off: a
 secondary's MMU-off window is `start.S` and the frameless
 `mmu_program_this_cpu`. The dump's code addresses were physical there and printed
 as their own "link" addresses; `halls_code_link_addr` rebases a return address
-inside the image's PA range (never an ELR, which is a high VA when real and
-leftover when stale), so the pre-MMU dump names its frames: `extinction+0x60`, then `_real_start+0xf4`. The frame between, `mmu_enable`, reads as `mmu_retire_ttbr0_identity+0x0`: its last instruction is the noreturn call, so its return address is the first byte of the next function, a backtrace property of every dump (OPEN-BUGS, 2026-10-27).
-HX-I1 does not hold there: the boot CPU has no vectors before `exception_init`,
-so a fault inside the pre-MMU dump would wedge rather than reach the guard (the
-OPEN-BUGS VBAR item, 2026-10-27). Every read that dump makes today is RAM: the
-boot stack and `.rodata`. Tests:
-`halls.code_link_addr_rebases_the_image_pa`, and `tools/test-fault.sh`'s
+inside the image's PA range (and, since the vectors below, a live frame's ELR;
+never a stale one), so the pre-MMU dump names its frames: `extinction+0x60`, then `_real_start+0xf4`. The frame between, `mmu_enable`, reads as `mmu_retire_ttbr0_identity+0x0`: its last instruction is the noreturn call, so its return address is the first byte of the next function, a backtrace property of every dump (OPEN-BUGS, 2026-10-27).
+Tests: `halls.code_link_addr_rebases_the_image_pa`, and `tools/test-fault.sh`'s
 `extinction_mmu_off`, which requires the report line and a symbolized
 `extinction+0x` frame besides the banner.
+
+**Vectors before the MMU (2026-10-27, later).** The boot CPU now has vectors from
+before its first C call: `start.S` installs VBAR_EL1 at their load PA, then at
+the high VA before `boot_main` ([[sub-kernel-boot-entry]]). So a fault with the
+MMU off reaches `fault.c` and this dump, and two things above changed. A live
+frame's ELR can be a PA now (the faulting code ran there), so `halls_emit_code_addr`'s
+flag, renamed `ran_here`, is set for the ELR line and backtrace `#0` of a live
+frame as well as for return addresses; a stale ELR (a bare extinction) is still
+never rebased. And HX-I1 holds before the MMU: a fault inside the pre-MMU dump
+re-enters through the vectors, meets the #806 guard and then
+`extinction_reentry_guard` at depth 2 with the owner set by the MMU-off claim,
+prints the recursive banner and parks; depth 3 reaches `el1_sync_runaway`, whose
+claim-or-own and ring claim take their MMU-off arms. The fault path reads no
+relocated pointer before the MMU, in either image state (the audit's census of
+all 4997 relocation targets found none in the objects on the path; the
+unexpected-vector name table is a relative lookup table). Witnesses:
+`test-fault.sh`'s `vbar_pre_reloc` and `vbar_pre_mmu` require
+`  fault_test_unaligned_load+0x`, which only the live-ELR rebase prints (with the
+rebase removed for the ELR, `vbar_pre_reloc` fails on it).
