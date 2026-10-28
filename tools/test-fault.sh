@@ -18,7 +18,11 @@
 #                     "EXTINCTION: PTE violates W^X at install (kernel page)",
 #                     "(kernel L2 block)", "(kernel L1 block)", "(user page)"
 #   bti_fault       — Branch Target Exception (FEAT_BTI required) →
-#                     "EXTINCTION: BTI fault (...)"
+#                     "EXTINCTION: BTI fault (...)" with the ELR named
+#                     "  _bti_unguarded_target+0x0": the exception is taken
+#                     at the target's first instruction, which a dump naming
+#                     a live ELR at a call would print as the symbol before
+#                     it
 #   kstack_overflow — per-thread kstack guard page fires (P2-Dc) →
 #                     "EXTINCTION: kernel stack overflow"
 #   secondary_stack_guard — secondary-CPU boot-stack guard page fires
@@ -40,12 +44,19 @@
 #                     stage 1 still off: the banner must come from extinction's
 #                     MMU-off path, which takes no exclusive →
 #                     "EXTINCTION: PTE violates W^X at install (kernel page)"
-#                     with "console-claim: skipped with the MMU off" and a
-#                     symbolized "  extinction+0x" frame present and no
-#                     "console-ring:" line. An exclusive left on that path is
-#                     seen only where one to Device memory never completes:
-#                     measured under HVF on Apple silicon and KVM on thyla-pi's
-#                     A72 (zero bytes); TCG completes it and passes.
+#                     with "console-claim: skipped with the MMU off", a
+#                     symbolized "  extinction+0x" frame and a
+#                     "  mmu_enable+0x" frame present and no "console-ring:"
+#                     line. mmu_enable's last instruction is the call to
+#                     extinction, so its return address is the next
+#                     function's first byte: only a dump that names a return
+#                     address at its call names that frame mmu_enable (measured
+#                     on the 2026-10-28 image; a reshaped mmu_enable whose call
+#                     is not last no longer tells the two apart). An exclusive
+#                     left on that path is seen only where one to Device
+#                     memory never completes: measured under HVF on Apple
+#                     silicon and KVM on thyla-pi's A72 (zero bytes); TCG
+#                     completes it and passes.
 #   vbar_pre_reloc, vbar_pre_mmu — an unaligned load with stage 1 off, so
 #                     an Alignment fault on Device memory: in kaslr_init before
 #                     the image is relocated, and at the top of
@@ -139,14 +150,18 @@ require_for() {
     case "$1" in
         # The MMU-off claim's own report, and a pre-MMU frame symbolized: before
         # the MMU every code address is a PA, which only the dump's PA rebase
-        # turns into a name.
+        # turns into a name. mmu_enable ends in its call to extinction, so its
+        # frame is named only when a return address is named at its call.
         extinction_mmu_off) printf '%s\n' "console-claim: skipped with the MMU off" \
-                                           "  extinction+0x" ;;
+                                           "  extinction+0x" "  mmu_enable+0x" ;;
         # The same report, and the faulting PC named: a live frame's ELR taken
         # before the MMU is a PA, which only the dump's rebase turns into one.
         vbar_pre_reloc|vbar_pre_mmu)
                             printf '%s\n' "console-claim: skipped with the MMU off" \
                                            "  fault_test_unaligned_load+0x" ;;
+        # A live ELR names the instruction it took, here a function's first:
+        # named at a call instead, it would read as the symbol before it.
+        bti_fault)          echo "  _bti_unguarded_target+0x0" ;;
         *)                  echo "" ;;
     esac
 }

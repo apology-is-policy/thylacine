@@ -22,6 +22,9 @@
 
 #include "../../arch/arm64/mmu.h"        // 8a-1b-gamma-1: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
 #include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
+#include "../../arch/arm64/halls.h"
+#include "../../arch/arm64/halls_symtab.h"
+#include "../../arch/arm64/kaslr.h"
 #include "../../mm/phys.h"               // alloc_pages / free_pages
 
 #include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
@@ -2945,6 +2948,100 @@ void test_devproc_debug_kstack_settled(void) {
     // F3: the only thread EXITING -> empty (the death-adjacent guard; the relaxed
     // gate no longer rejects a dying target, so the selection must refuse it).
     TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: every thread EXITING -> empty read (never walk a dying thread)");
+}
+
+static void put_str(char *b, size_t cap, size_t *n, const char *s) {
+    while (*s && *n + 1 < cap) b[(*n)++] = *s++;
+    b[*n] = '\0';
+}
+
+// devproc's fmt_hex form: "0x" and the minimal lowercase digits.
+static void put_hex(char *b, size_t cap, size_t *n, u64 v) {
+    char d[16];
+    int m = 0;
+    do { u64 x = v & 0xfu; d[m++] = (char)(x < 10u ? ('0' + x) : ('a' + (x - 10u))); v >>= 4; } while (v);
+    put_str(b, cap, n, "0x");
+    while (m && *n + 1 < cap) b[(*n)++] = d[--m];
+    b[*n] = '\0';
+}
+
+// kstack names a saved LR at its call, and frame 0 at itself. Both frames hold
+// the same address, a function's first instruction, read from the real symbol
+// table: as frame 0 it is a never-run thread's resume PC (its trampoline's
+// entry), named proc_alloc+0x0; as frame 1 it is the return address of a call
+// that ended the function before it, which is where the frame is.
+void test_devproc_debug_kstack_names_returns_at_call(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *caller = tt->proc;
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
+                "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the owner axis prints names only)");
+
+    u64 code = (u64)(uintptr_t)proc_alloc;
+    u64 link = halls_link_addr(code, kaslr_get_offset());
+    u64 entry_off = 1, call_off = 1;
+    const char *entry_name = halls_symbolize(link, &entry_off);
+    const char *call_name  = halls_symbolize(link - 4u, &call_off);
+    TEST_ASSERT(entry_name && entry_off == 0u,
+                "proc_alloc's entry is a symbol start in the linked table (not the stub)");
+    TEST_ASSERT(call_name != (const char *)0, "a symbol owns the instruction before it");
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc debug target");
+    tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    struct page *kstk = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!kstk) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
+    TEST_ASSERT(kstk != NULL, "alloc synthetic kstack");
+    u8 *kbase = (u8 *)pa_to_kva(page_to_pa(kstk));
+
+    // One frame record whose next fp ends the walk: frames #0 and #1.
+    u8 *fp0 = kbase + THREAD_KSTACK_TOTAL_SIZE - 256;
+    *(volatile u64 *)fp0       = 0;
+    *(volatile u64 *)(fp0 + 8) = code;
+
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic             = THREAD_MAGIC;
+    th.state             = THREAD_SLEEPING;
+    th.kstack_base       = kbase;
+    th.kstack_size       = THREAD_KSTACK_TOTAL_SIZE;
+    th.on_cpu            = false;
+    th.rendez_blocked_on = NULL;
+    th.next_in_proc      = NULL;
+    th.ctx.fp            = (u64)(uintptr_t)fp0;
+    th.ctx.lr            = code;
+
+    tgt->threads        = &th;
+    tgt->debug_stop_req = 0;
+    proc_test_link(tgt);
+
+    char sbuf[256]; for (size_t i = 0; i < sizeof(sbuf); i++) sbuf[i] = 0;
+    long slen = -999;
+    struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (ks) { slen = devproc.read(ks, sbuf, (long)sizeof(sbuf) - 1, 0); spoor_clunk(ks); }
+
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;
+    free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    char want[256];
+    size_t wn = 0;
+    put_str(want, sizeof(want), &wn, "#0  ");
+    put_str(want, sizeof(want), &wn, entry_name);
+    put_str(want, sizeof(want), &wn, "+0x0\n#1  ");
+    put_str(want, sizeof(want), &wn, call_name);
+    put_str(want, sizeof(want), &wn, "+");
+    put_hex(want, sizeof(want), &wn, call_off + 4u);
+    put_str(want, sizeof(want), &wn, "\n");
+
+    TEST_ASSERT(wn + 1 < sizeof(want), "the expected text fits");
+    TEST_EXPECT_EQ(slen, (long)wn, "kstack is the two named frames");
+    TEST_ASSERT(streq(sbuf, want),
+                "frame 0 named at its address, frame 1 at its call with the return address's offset");
 }
 
 // =============================================================================

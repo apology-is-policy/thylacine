@@ -603,7 +603,14 @@ Its output then splits on capability: raw slid kernel addresses reveal the KASLR
 slide (an I-16 secret gated elsewhere behind `CAP_HOSTOWNER`), so the raw
 columns go only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier. The owner axis gets the
 symbolic `name+offset` form, which is link-relative and therefore
-slide-independent — and which *is* the "why is it hung" diagnostic. `kregs` splits the
+slide-independent — and which *is* the "why is it hung" diagnostic. Frame 0 is the
+thread's resume PC and is named at itself (a thread that has never run resumes at
+its trampoline's first instruction); every later frame is a saved return address and
+is named at its call, the instruction before it, with the return address's own
+offset, so `name+off` equals the link column the debugger tier sees and a frame whose
+call ends its function (a noreturn callee) is not named after the next one
+([[sub-kernel-halls]]; `devproc.debug_kstack_names_returns_at_call`, 2026-10-28).
+`kregs` splits the
 same way: its kernel half (`x19`–`x28`, `fp`, `lr`, `sp`) is filled only for that tier,
 because a parked thread's `lr` is the return into `sched` and gives away the slide as
 surely as a raw frame; the owner axis reads those fields as zero and keeps `tpidr_el0`

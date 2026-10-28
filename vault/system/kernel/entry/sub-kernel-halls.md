@@ -54,16 +54,20 @@ by the exception entry wrappers in [[sub-kernel-exception]]. Enter returns the
 previous value; leave restores it, so a nested exception does not clobber an
 outer frame.
 
-Five pure helpers, exposed because they are the testable part:
+Six pure helpers, exposed because they are the testable part:
 `halls_fp_is_sane` (the frame-pointer gate), `halls_frame_is_live` (the
 plausibility gate on the per-CPU slot), `halls_link_addr` (remove the slide),
 `halls_code_link_addr` (the dump's form: rebase an address inside the image's
-physical range onto the link base, else remove the slide), and
-`halls_symbolize_table` (the symbol lookup over an explicit table).
+physical range onto the link base, else remove the slide),
+`halls_symbolize_table` (the symbol lookup over an explicit table) and
+`halls_symbolize_return_table` (the same lookup for a return address, which is
+named at its call).
 
 `halls_walk_kernel_frames` — the live-thread twin of the backtrace, for the
 debugger's kernel-stack read in [[sub-kernel-devproc]]. Takes **explicit**
-bounds and returns canonical return addresses.
+bounds and returns canonical addresses: the resume PC, then the saved return
+addresses. The reader names the first with `halls_symbolize` and the rest with
+`halls_symbolize_return`.
 
 ## Mechanism
 
@@ -376,7 +380,7 @@ secondary's MMU-off window is `start.S` and the frameless
 `mmu_program_this_cpu`. The dump's code addresses were physical there and printed
 as their own "link" addresses; `halls_code_link_addr` rebases a return address
 inside the image's PA range (and, since the vectors below, a live frame's ELR;
-never a stale one), so the pre-MMU dump names its frames: `extinction+0x60`, then `_real_start+0xf4`. The frame between, `mmu_enable`, reads as `mmu_retire_ttbr0_identity+0x0`: its last instruction is the noreturn call, so its return address is the first byte of the next function, a backtrace property of every dump (OPEN-BUGS, 2026-10-27).
+never a stale one), so the pre-MMU dump names its frames: `extinction`, `mmu_enable` (named at its call; see "Return addresses are named at their call" below), then `_real_start`.
 Tests: `halls.code_link_addr_rebases_the_image_pa`, and `tools/test-fault.sh`'s
 `extinction_mmu_off`, which requires the report line and a symbolized
 `extinction+0x` frame besides the banner.
@@ -385,10 +389,10 @@ Tests: `halls.code_link_addr_rebases_the_image_pa`, and `tools/test-fault.sh`'s
 before its first C call: `start.S` installs VBAR_EL1 at their load PA, then at
 the high VA before `boot_main` ([[sub-kernel-boot-entry]]). So a fault with the
 MMU off reaches `fault.c` and this dump, and two things above changed. A live
-frame's ELR can be a PA now (the faulting code ran there), so `halls_emit_code_addr`'s
-flag, renamed `ran_here`, is set for the ELR line and backtrace `#0` of a live
-frame as well as for return addresses; a stale ELR (a bare extinction) is still
-never rebased. And HX-I1 holds before the MMU: a fault inside the pre-MMU dump
+frame's ELR can be a PA now (the faulting code ran there), so `halls_emit_code_addr`
+rebases the ELR line and backtrace `#0` of a live frame (`HALLS_CODE_PC`) as
+well as return addresses (`HALLS_CODE_RET`); a stale ELR (`HALLS_CODE_STALE`, a
+bare extinction) is still never rebased. And HX-I1 holds before the MMU: a fault inside the pre-MMU dump
 re-enters through the vectors, meets the #806 guard and then
 `extinction_reentry_guard` at depth 2 with the owner set by the MMU-off claim,
 prints the recursive banner and parks; depth 3 reaches `el1_sync_runaway`, whose
@@ -399,3 +403,35 @@ unexpected-vector name table is a relative lookup table). Witnesses:
 `test-fault.sh`'s `vbar_pre_reloc` and `vbar_pre_mmu` require
 `  fault_test_unaligned_load+0x`, which only the live-ELR rebase prints (with the
 rebase removed for the ELR, `vbar_pre_reloc` fails on it).
+
+**Return addresses are named at their call (2026-10-28).** A return address is
+the instruction after its call. When that call is its function's last
+instruction, as a call to a noreturn function (`extinction`, `_torpor`) can be,
+the return address is the next function's first byte, and the dump used to name
+the frame after that next function: the `extinction_mmu_off` image printed
+`mmu_enable`'s frame as `mmu_retire_ttbr0_identity+0x0`, because `mmu_enable`
+ends in `bl extinction`. `halls_symbolize_return` looks the name up at the call,
+four bytes back, and prints the return address's own offset from it, so
+`name+off` still equals the link column beside it (gdb's frame names, Linux's
+`%pB`); that frame now reads `mmu_enable+0x18`, and a frame whose call is not
+last prints exactly as before. `halls_emit_code_addr` takes the kind of address
+it prints: a return address (the walked frames and the LR line) is named at
+its call; a live frame's ELR names the instruction it took, since a fault's
+ELR is the faulting instruction and an interrupt's is the next one to run; a
+stale ELR is neither rebased nor named at a call. The LR line reads x30 as a
+return address, which it is not in one window: after `cpu_switch_context`'s
+`ret` has entered a never-run thread's trampoline, x30 is the trampoline's first
+instruction, and an exception there prints the symbol before it with its size as
+the offset (the raw and link columns are beside it). The common case goes the
+other way: `extinction` ends in `bl _torpor`, so a dump taken in `_torpor` has
+x30 one past `extinction`'s end, which only the call-site lookup names. The kernel-stack read in
+[[sub-kernel-devproc]] applies the same rule from its second frame on; its
+first is a resume PC, which for a thread that has never run is its trampoline's
+first instruction. Tests: `halls.symbolize_return_table` (a synthetic table
+with the call at a function's end), `devproc.debug_kstack_names_returns_at_call`
+(the linked table), and two fault variants, one per kind: `extinction_mmu_off`
+requires a `  mmu_enable+0x` frame (a return address), and `bti_fault` requires
+`  _bti_unguarded_target+0x0` (a live ELR at a function's first instruction,
+which the call-site lookup would name after `__stack_chk_fail`). The first rests
+on `mmu_enable` ending in its call; if it is ever reshaped so the call is not
+last, that variant no longer tells the two namings apart.

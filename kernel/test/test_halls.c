@@ -179,3 +179,39 @@ void test_halls_symbolize_table(void) {
     s = halls_symbolize_table(tab, 3u, names, base, base + 0x100000000ull, &off);
     TEST_ASSERT(s == (const char *)0,    "offset > u32 -> NULL");
 }
+
+// A return address is named at its call. alpha's last instruction is a call at
+// 0x3c, so its return address 0x40 is beta's first byte: the frame is alpha's,
+// and the offset printed is the return address's own (0x40 - 0x10).
+void test_halls_symbolize_return_table(void) {
+    static const char names[] = "alpha\0beta\0gamma";   // offs 0, 6, 11
+    static const struct halls_sym tab[] = {
+        { 0x010u, 0u },    // "alpha"
+        { 0x040u, 6u },    // "beta"
+        { 0x100u, 11u },   // "gamma"
+    };
+    const u64 base = 0xffffa00000080000ull;
+    u64 off = 0xdeadu;
+    const char *s;
+
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x040u, &off);
+    TEST_ASSERT(s == &names[0],          "ra at beta's first byte -> alpha (the call's function)");
+    TEST_EXPECT_EQ(off, 0x30u,           "-> alpha+0x30, the return address's own offset");
+
+    // Inside a function the call's name is the return address's.
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x05cu, &off);
+    TEST_ASSERT(s == &names[6],          "ra 0x5c -> beta");
+    TEST_EXPECT_EQ(off, 0x1cu,           "ra 0x5c -> beta+0x1c");
+
+    // No symbol owns an instruction before the first one.
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x010u, &off);
+    TEST_ASSERT(s == (const char *)0,    "ra at the first symbol's start -> NULL");
+
+    // The call's address must not wrap: with a base this high, 2 - 4 would
+    // land inside the u32 window and name gamma.
+    s = halls_symbolize_return_table(tab, 3u, names, 0xffffffff00000000ull, 2u, &off);
+    TEST_ASSERT(s == (const char *)0,    "ra below one instruction -> NULL");
+
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x040u, (u64 *)0);
+    TEST_ASSERT(s == &names[0],          "a NULL out_off still names the frame");
+}

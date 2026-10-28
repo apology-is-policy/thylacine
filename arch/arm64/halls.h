@@ -94,8 +94,10 @@ u64 halls_code_link_addr(u64 addr, u64 kaslr_offset, u64 pa_start, u64 pa_end);
 // unlike the dying-machine halls_dump path -- this is fault-safe on the live
 // debug path (there is no HX-I1 guard to catch a bad read there). A SEPARATE
 // function from halls_backtrace so the audited dump path stays byte-unchanged.
-// Returns the frame count (>= 1 when max >= 1). Symbolize each result via
-// halls_link_addr (KASLR) + halls_symbolize (halls_symtab.h).
+// Returns the frame count (>= 1 when max >= 1). Translate each result via
+// halls_link_addr (KASLR), then name out[0] with halls_symbolize and out[1..]
+// with halls_symbolize_return (halls_symtab.h). out[0] is not named at a call:
+// a thread that has never run resumes at its trampoline's first instruction.
 unsigned halls_walk_kernel_frames(u64 pc, u64 start_fp, u64 lo, u64 hi,
                                   u64 *out, unsigned max);
 

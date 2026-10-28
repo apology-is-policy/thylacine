@@ -22,6 +22,85 @@ needed the operator.
 
 
 ---
+## 2026-10-28 -- a frame named after the function it never reached (corona)
+
+**What started it.** The P3 F2 gate log (2026-10-27, OPEN-BUGS 21:46Z) showed the
+pre-MMU dump naming `mmu_enable`'s frame `mmu_retire_ttbr0_identity+0x0`. The
+final VBAR tree's own `extinction_mmu_off` log (23:46Z) still did: frame #2,
+`0x4009a0b0  link 0xffffa0000009a0b0  mmu_retire_ttbr0_identity+0x0`.
+`llvm-objdump` on that image: `mmu_enable` is six instructions at
+`0xffffa0000009a098`, the last `bl extinction` at `...0ac`. The return address
+`...0b0` is the next function's first instruction, and the dump looked the
+return address up as it was.
+
+**The choice of offset.** The resume note said "print the call's offset (the
+addr2line/gdb convention)". On reading the conventions that was wrong in its
+second half: gdb's `bt` shows the return address and finds the function from
+`pc - 1`; Linux's `%pB` (used by `/proc/<pid>/stack`) looks up `addr - 1` and
+prints `addr`'s own offset. Printing the return address's offset keeps
+`name+off` equal to the link column beside it, and leaves every frame whose call
+is not last byte-identical to before. The name is looked up at `ra - 4`, the call
+itself (A64 instructions are four bytes).
+
+**Which addresses are return addresses.** The resume note said "split ran_here
+into rebase_pa and is_ret". Two bools would allow a combination that never
+occurs (named at its call but not rebased), so the flag became a three-valued
+kind: a stale ELR (neither), a live frame's ELR (rebased, named at itself: a
+fault's ELR is the faulting instruction, an interrupt's the next one to run),
+and a return address (both): the walked frames and the LR line.
+`/proc/<pid>/kstack` names frame 0 at itself and the rest at their calls. Frame 0
+is `t->ctx.lr`: for a switched-out thread the return from `cpu_switch_context`
+(both call sites, `sched.c:1624` and `thread.c:955`, have code after the call),
+but for a thread that has never run it is its trampoline's first instruction
+(`thread.c:458/558/643/734`), which the call-site lookup would misname.
+
+**The audit** (Fable 5.1 on Opus 5.5, start == end) returned 0/0/0/3 P3, all
+fixed:
+
+- F1: the LR line is not always a return address. Just after
+  `cpu_switch_context`'s `ret` has entered a never-run thread's trampoline, x30
+  is the trampoline's entry, and an exception there now prints the symbol
+  before it. Kept as a return address: the opposite case is the common one
+  (`extinction` ends in `bl _torpor`, so a dump taken in `_torpor` has x30 one
+  past `extinction`). Documented in `halls.c`, the dossier and row 22 (o).
+- F2: no witness pinned the PC kind. A live ELR passed as a return address
+  survived every test, because every variant's ELR sat mid-function. `bti_fault`
+  takes its exception at `_bti_unguarded_target`'s first instruction, so it now
+  requires `  _bti_unguarded_target+0x0`; named at a call it reads
+  `__stack_chk_fail+0x18`.
+- F3: audit rows 22 and 120 did not carry the rule. Both are amended.
+
+**Evidence.**
+
+- Red on the base tree: 34d1b6cac's `extinction_mmu_off` log (23:46Z), frame #2
+  `mmu_retire_ttbr0_identity+0x0`.
+- Mac lease 00:34Z-01:46Z. Batch 1:
+  - Clean: suite 2093/2093 (two new tests). `extinction_mmu_off` PASS, frame
+    #2 `0x4009a0b0  link 0xffffa0000009a0b0  mmu_enable+0x18`.
+  - B1, the lookup reverted: both new tests FAIL, `extinction_mmu_off` FAIL
+    (`mmu_retire_ttbr0_identity+0x0` again).
+  - B2, kstack frames 1.. named at themselves plus the wrap guard dropped:
+    the kstack test FAIL, the unit test FAIL on the wrap case.
+  - B3, kstack frame 0 named at its call plus the dump's walked frames passed
+    as PCs: the kstack test FAIL, `extinction_mmu_off` FAIL.
+  - B4, the +4 dropped: both new tests FAIL on the offset.
+- Batch 2: after the audit fixes.
+  - B5, a live ELR named at its call: `bti_fault` FAIL, ELR
+    `__stack_chk_fail+0x18`.
+  - Clean, on the final tree: `tools/test-fault.sh` 18/18 PASS (`bti_fault`
+    `_bti_unguarded_target+0x0`, `extinction_mmu_off` `mmu_enable+0x18`);
+    `tools/build.sh kernel && tools/test.sh` 2093/2093 PASS.
+- Row 22 (l), the compiled code (batch 1's clean ELF): the inlined lookups load
+  the symbol count (u32), the link base (u64, 8-aligned) and the table's u32
+  entries, and form the names base with adrp+add. No pointer is loaded from
+  static data, and the only ldur/stur is the canary slot at `[x29,#-8]`.
+
+**What "fixed" covers.** Every return address the dump and `kstack` print is
+named after the function that made the call. The LR line keeps one known
+exception (F1). The `extinction_mmu_off` witness discriminates only while
+`mmu_enable` ends in its call; the unit and kstack tests do not depend on any
+layout.
+
 ## 2026-10-27/28 -- the boot CPU's vectors, from before its first C call (corona)
 
 **What started it.** P3 F2's self-audit (the entry below) noticed that `start.S`

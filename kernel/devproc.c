@@ -2828,7 +2828,11 @@ static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap, 
         u64 addr = frames[i];
         u64 link = halls_link_addr(addr, koff);
         u64 soff = 0;
-        const char *name = halls_symbolize(link, &soff);   // .rodata table; NULL if unresolved
+        // .rodata table; NULL if unresolved. Frames 1.. are return addresses,
+        // named at their call; frame 0 is a resume PC (a never-run thread's is
+        // its trampoline's first instruction).
+        const char *name = i == 0 ? halls_symbolize(link, &soff)
+                                  : halls_symbolize_return(link, &soff);
         size_t r;
         r = fmt_str(buf, cap, off, "#");        if (!r) return ls; off += r;
         r = fmt_udec(buf, cap, off, i);         if (!r) return ls; off += r;
