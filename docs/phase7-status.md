@@ -2568,3 +2568,28 @@ before the code, on aux-3-c6.
 - **Still open, owned.** The poll_waiter_list hook bound (OPEN-BUGS P2; C6 raised its per-Proc factor 16x): aux's
   next chunk by vote 11. A refused first create burns the main tid only in a hand-built test Proc (rfork frees the
   Proc on failure).
+
+## Debug teardown witnesses: dap-probe asserts how its debuggee ends — 2026-10-28
+
+OPEN-BUGS "ambush-child orphan" (corona, 2026-10-06; re-measured 2026-10-28 on 851226393). Userspace only;
+the kernel is unchanged.
+
+- **The cause.** dap-probe sent DAP `disconnect(terminateDebuggee)` and killed ambush at once. Delve answers a
+  disconnect only after its kill of the launched child returns and its blocking reap collects it, so the kill raced
+  that path and the kernel's EXITKILL ended the child instead: an orphan line every boot, reaped by joey as
+  `status=1`, and nothing asserted.
+- **dap-probe steps 6 and 7.** Step 6 awaits the disconnect response and requires the debuggee's `/proc` entry gone
+  (positive control first: the pid from the `process` event is a live `ambush-child` of this ambush); ambush must
+  exit 0 by itself. Step 7 abandons a second launched session (ambush killed, no disconnect, no detach) and requires
+  the child to reach ZOMBIE with signal 9 -- EXITKILL's, since `stop` has converted the birth hold.
+- **joey's orphan sweep reads the packed wait word** (operator vote 2026-10-28; `docs/ERRORS.md` "The wait status"):
+  `signal=N` for a death by note, `status=N` for an exit. No ABI change.
+- **Verification.** Lease 09:09-10:06Z (logs `work/oct28-338/`): green suite 2116/2116 with step 6, step 7
+  and joey's `signal=9` line; red A (dap-probe with the old kill-at-once shutdown) fails step 6 on the debuggee
+  still present (ZOMBIE); red B (an ambush fork clone without its `exitkill` write) passes step 6 and fails step 7 at
+  the budget, the child still alive; SMP gate default-smp4 10/10 + ubsan-smp4 10/10, 0 corruption.
+- **Audit.** Round 1 Fable 5.1 (start == end): 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed before the commit (Go's os/exec
+  is a packed caller; `bail` never waits on a refused kill; step 7's claim qualified against the birth-hold rule;
+  the two legs scoped). Not dirty.
+- **Still open, owned.** Nora's `DapHost::shutdown` has the same kill-at-once shape (OPEN-BUGS 2026-10-28T08:35Z);
+  it needs the `dap-nora.exp` gate on a ci image.

@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Session factory handoff
 
@@ -348,6 +348,23 @@ diagnostic in precisely the branch whose diagnostic mattered most. The
 kernel now waits by pid (#94), so joey's own status is what the extinction
 reports.
 
+**The adopted-orphan reaper.** A Proc whose parent exits is reparented to joey,
+and its zombie waits in joey's children until joey reaps it.
+`reap_adopted_orphans` drains every zombie that is ready with a non-blocking
+wait-any and never blocks: it stops at 0 (live children remain) or -1 (none).
+It cannot take a child joey is tracking, because every wait joey makes for a
+child it spawned is by pid, and the sweep runs only between session waits in the
+getty loop, never between a spawn and its wait. Each reap prints one line. A pid
+in the daemon registry is labelled `DAEMON EXITED`, a registry that overflowed
+is labelled UNKNOWN, and anything else is an adopted orphan; the kernel's
+adoption line (`proc: orphan pid=... name=...`) names which Proc it was. The
+sweep asks for the packed wait word, so the line ends `signal=N` for a death by
+note and `status=N` for an exit (operator vote 2026-10-28; docs/ERRORS.md "The
+wait status"). The raw word reads 1 for every kill, which once let a debuggee
+ended by EXITKILL, a faulted daemon and a program that exited 1 print the same
+line. dap-probe leaves one orphan on purpose, its abandoned debuggee
+([[sub-parley]]), which this sweep reaps as `signal=9`.
+
 ## Data structures
 
 The spawn is one `t_sys_spawn_args`: flat NUL-separated argv (14 strings,
@@ -474,14 +491,15 @@ event-driven; no timing constant appears in this path.
   this dossier.
 
   The rest of the file is init's other jobs and nothing in the vault describes
-  any of them: the long-lived-daemon registry and the adopted-orphan reaper; the
+  any of them: the long-lived-daemon registry (the adopted-orphan reaper that
+  reads it is under Mechanism since 2026-10-28); the
   ~850-line identity-daemon bringup and its wire helpers; the boundary-line smoke
   suite; the exec, fork and foreign-shell gates; the login and recovery
   end-to-end runs; the **session getty loop, which is what init actually spends
   its life doing**; the language-toolchain and GL gates; and seven numbered
   regression probes. Searching the vault for the terms that name these — the
   foreign-shell gate, the identity-daemon bringup, the smoke suite, the
-  toolchain gate, the orphan reaper's own function — returns **zero notes each**.
+  toolchain gate — returns **zero notes each**.
   The 2026-09-04/05 churn enlarged exactly this region: the session getty loop
   gained the login-spawned per-user `halcyond --session` bootstrap (KT-1.5d-1a),
   and the smoke suite gained a kaua-term transport boot-prove and the VIVARIUM

@@ -310,7 +310,10 @@ sign-off 2026-10-27).
 
 **The raw word**, when the caller passes no flag but `WAIT_WNOHANG`: the exit
 status alone, so a death by note reads 1. The native callers that predate the
-packed word keep it: joey, libthyla-rs's `Child::wait`, Go's `os/exec`.
+packed word keep it: joey's waits for the children it spawns and libthyla-rs's
+`Child::wait`. joey's sweep of the orphans it adopts asks for
+the packed word, so its line reads `signal=9` for a killed orphan and
+`status=1` only for one that exited 1 (operator vote 2026-10-28).
 
 **The packed word**, when the caller passes `WAIT_UNTRACED`, `WAIT_CONTINUED`
 or `WAIT_PACKED`: the Linux `wait(2)` layout, so Pouch's `W*` macros decode it
@@ -328,7 +331,8 @@ The core-dump bit (0x80) is never set: Thylacine writes no core files.
 `WAIT_PACKED` (8) asks for the packed word without asking for stop or continue
 reports. Pouch's `waitpid` and the phenotype `wait4` always pass it, so a Pouch
 or Linux parent sees `WIFSIGNALED` and `WTERMSIG` for a child that died of a
-note. ut packs every wait: its job-control wait passes `WAIT_UNTRACED`, and
+note. Go's `os/exec` passes it too (`syscall.WaitProcess`), so the `Waitmsg` a Go
+parent gets from `ProcessState.Sys()` carries the signal. ut packs every wait: its job-control wait passes `WAIT_UNTRACED`, and
 every other wait (a command substitution, a pipeline's members, a script or
 `ut -c` without job control, `wait`, the background reaper) passes
 `WAIT_PACKED`. So `$status` is the code for an exit and 128 plus the signal for

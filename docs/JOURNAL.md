@@ -163,6 +163,44 @@ The SMP gate's last boot also answered an older entry (OPEN-BUGS 10-06
 `Thylacine boot OK` (:9356), with nothing saying whether that is the designed
 EXITKILL or a teardown failure. It stays open with this measurement.
 
+**OPEN-BUGS 338, the ambush-child orphan (08:12-10:06Z).** The entry asked for two
+things: an assertion that dap-probe's debuggee is gone after its shutdown, and a
+reaper line that tells EXITKILL from other deaths, possibly by returning the
+exit message from wait. Reading before writing changed both halves. The wait ABI
+already carries enough: `WAIT_PACKED` returns the signal, and
+/proc/<pid>/status shows a zombie's `state`, `exit` and `signal`. So nothing
+needed a format break, and the only question for the operator was whether
+joey's orphan sweep should read the packed word, since ERRORS.md names joey as a
+raw-word caller (vote 26: yes). The reading also found the cause, which the
+entry had not: dap-probe killed ambush straight after sending the disconnect.
+Delve answers a disconnect only after its kill and its blocking reap
+(server.go onDisconnectRequest -> processGroup.kill -> reapChild's cmd.Wait), so
+the kill raced the debugger's own teardown, and EXITKILL ended the child every
+boot. The orphan line was the probe's doing, not the design's.
+- dap-probe now waits for the disconnect response and requires the debuggee's
+  /proc entry gone, after a positive control that the pid is a live
+  ambush-child of this ambush. A second session is abandoned on purpose, and
+  the child must reach ZOMBIE with signal 9.
+- Nora's DapHost::shutdown has the same kill-at-once shape. Enqueued, not
+  fixed here: it needs the dap-nora.exp gate on a ci image.
+- I first planned the leg-B red witness as a kernel sabotage of EXITKILL. A
+  failing kernel test extincts the boot (main.c:893) before any probe runs, so
+  that red would have come from devproc.debug_exitkill_terminates_on_close,
+  not from dap-probe. The witness became a private APFS clone of the ambush
+  fork without its `exitkill` write.
+- Fable 5.1 round: 0/0/0/4 P3, all fixed. F1 found a stale claim I had carried
+  forward while rewriting the sentence: Go's os/exec has read the packed word
+  since go-thylacine 3471e2a. F3 found that step 7's fingerprint is also the
+  birth-hold orphan rule's; only the `stop` conversion
+  (test_birth_hold.c:705) makes it EXITKILL's.
+
+Lease 09:09-10:06Z: green, then both reds exactly where predicted (A: the
+debuggee still present as a ZOMBIE; B: step 6 passed, step 7 timed out with
+the child alive, which also shows the birth-hold rule stays quiet after
+`stop`), then the SMP gate, default-smp4 10/10 and ubsan-smp4 10/10, 0
+corruption. joey's new line read `signal=9` for the abandoned debuggee and
+`status=0` for the phenotype probe's orphan in the same boot.
+
 ## 2026-10-28 -- a frame named after the function it never reached (corona)
 
 **What started it.** The P3 F2 gate log (2026-10-27, OPEN-BUGS 21:46Z) showed the

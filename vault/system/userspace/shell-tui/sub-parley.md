@@ -24,7 +24,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -226,6 +226,19 @@ probes exist to close that gap against a real peer.
   memory (`0x0AABB00DCAFE0001` = `768901734683508737`). That single assertion
   proves `dapc` classifies real Ambush frames, sequences the handshake against a
   real backend, and that the stdio transport carries DAP as faithfully as LSP.
+  It then checks how the debuggee ends, both ways. `disconnect(terminateDebuggee)`
+  must be answered with the child already reaped: Delve replies only after its
+  kill and its blocking reap, and pids are never reused, so the pid from the
+  `process` event must have no `/proc` entry. The probe checks that pid as a
+  live `ambush-child` of this ambush first, so an absent entry cannot be a wrong
+  pid. ambush must then exit 0 by itself. A second session launches and then
+  kills ambush with no disconnect, the way a crashed debugger dies, and the
+  child must reach ZOMBIE with signal 9 in `/proc/<pid>/status`. Only the
+  kernel's EXITKILL can end it there: the `stop` ambush sent at launch already
+  converted the birth hold, whose orphan rule would otherwise kill it with the
+  same signal. Until 2026-10-28 the probe killed ambush
+  straight after sending the disconnect, so EXITKILL ended every debuggee
+  unasserted, and a broken teardown read exactly like a working one.
 
 **Each probe's exit code is the gate, and that is load-bearing rather than
 hygiene.** joey gates the boot on exit 0, so a probe failure reddens the build;

@@ -3797,10 +3797,16 @@ static int do_recover_e2e(void) {
 // can be consumed here iff its by-pid wait has not started yet, which the
 // call placement avoids: the sweep runs only between session waits in the
 // getty loop, never between a spawn and its by-pid wait.
+//
+// The packed word, unlike the raw one, tells a death by note from an exit: the
+// raw word reads 1 for every kill, so a debuggee ended by EXITKILL, a daemon
+// that faulted and a program that exited 1 all printed the same line. A
+// stop/continue report needs WAIT_UNTRACED/WAIT_CONTINUED, so this wait sees
+// exits only.
 static void reap_adopted_orphans(void) {
     for (;;) {
         int st = 0;
-        long r = t_wait_pid_for(-1, WAIT_WNOHANG, &st);
+        long r = t_wait_pid_for(-1, WAIT_WNOHANG | WAIT_PACKED, &st);
         if (r <= 0) break;
         // #80: decide the case instead of hedging. The audit-F3 neutral wording
         // existed only because joey could not tell an adopted orphan from one
@@ -3824,8 +3830,13 @@ static void reap_adopted_orphans(void) {
             t_putstr("joey: reaped adopted orphan pid=");
         }
         t_putstr(itoa_dec(r, nb, sizeof(nb)));
-        t_putstr(" status=");
-        t_putstr(itoa_dec(st, nb, sizeof(nb)));
+        if (WAIT_IF_SIGNALED(st)) {
+            t_putstr(" signal=");
+            t_putstr(itoa_dec(WAIT_TERMSIG(st), nb, sizeof(nb)));
+        } else {
+            t_putstr(" status=");
+            t_putstr(itoa_dec(WAIT_EXITSTATUS(st), nb, sizeof(nb)));
+        }
         t_putstr("\n");
     }
 }
