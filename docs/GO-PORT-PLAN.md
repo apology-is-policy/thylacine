@@ -401,7 +401,14 @@ reads `/env` via readdir; structurally the plan9 `goenvs`, dirent-parse adapted)
 "almost verbatim" holding for the *shape*; **(2)** inheritance rides the kernel
 clone (a `go build` sub-process inherits `$GOROOT` etc. exactly as it inherits the
 namespace) — the `os/exec` explicit-`Cmd.Env` *override* is a Go-side seam, never a
-kernel ABI change. Composes I-1 + I-32; no new §28 invariant; prose-validated (the
+kernel ABI change. **Amended 2026-10-28 (operator vote 28, `dec-2026-10-28-spawn-env`):**
+the override became a `SYS_SPAWN_FULL_ARGV` tail (`SPAWN_EXT_ENV`), because no Go-side
+answer could reach a child the kernel creates fully formed -- `startProcess` dropped
+`ProcAttr.Env`, so gopls's per-call `GOFLAGS`/`GOWORK`, `go generate`'s `GOFILE` and
+x/telemetry's `GO_TELEMETRY_CHILD` never arrived, and since `os.Setenv` is process-local
+nothing a Go program set reached its children either. `startProcess` sends
+`ProcAttr.Env` as the tail (`os/exec` fills it from `os.Environ()`, so a `Setenv` reaches
+a child as on Unix); `goenvs` still reads `/env` (ARCH §9.7). Composes I-1 + I-32; no new §28 invariant; prose-validated (the
 `env->lock` is the standard per-Proc-group pattern, Territory/allowance). The impl
 + the go-fork `goenvs` + the boot env-var setup + the focused audit are Stage 4a's
 kernel / go / bootenv / audit sub-chunks.
@@ -625,7 +632,7 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   `lp_thylacine.go` (`LookPath`; `findExecutable` checks exists-and-not-a-dir,
   NOT the POSIX 0111 bit — thylacine gates exec on namespace X-search +
   `OEXEC`) + `path/filepath/path_thylacine.go`. `ProcAttr.Dir` is fail-closed
-  `ENOSYS` (no spawn-time chdir); `Env` is silently dropped (G15). `usr/go-exec`
+  `ENOSYS` (no spawn-time chdir); `Env` is silently dropped (G15; the `SPAWN_EXT_ENV` tail of 2026-10-28 is its fix). `usr/go-exec`
   runs POST-pivot (it execs the `/bin` coreutils, reachable via the `/bin`
   bind):
 
