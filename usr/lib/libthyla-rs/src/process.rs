@@ -40,7 +40,9 @@
 // spawn carry the T_SPAWN_EXT_ENV tail (ARCH 9.7): the caller's live /env, read
 // through /proc/<pid>/environ, with the changes applied in call order -- or only
 // the changes after `env_clear` -- becomes the child's whole environment. The
-// caller's own /env never changes.
+// caller's own /env never changes. A caller variable the flat form cannot carry
+// (a name holding '=', a value holding a NUL) is absent from that read, so it
+// does not reach a child given the tail.
 //
 // DEFERRED:
 //   - Status decoding beyond `success() == (status == 0)` and
@@ -488,7 +490,8 @@ impl Command {
         self
     }
 
-    /// Remove `key` from the child's environment.
+    /// Remove `key` from the child's environment. A key `env` would refuse
+    /// fails `spawn` the same way.
     pub fn env_remove(&mut self, key: impl Into<String>) -> &mut Command {
         self.env_plan().ops.push((key.into(), None));
         self

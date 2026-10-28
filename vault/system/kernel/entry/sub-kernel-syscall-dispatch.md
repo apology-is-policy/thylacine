@@ -10,6 +10,7 @@ code:
   - usr/argwidth-probe/argwidth-probe.c
   - tools/check-arg-width.py
   - kernel/test/test_spawn_cwd.c
+  - kernel/test/test_spawn_env.c
   - kernel/test/test_sys_spawn_full_argv.c
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
@@ -21,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Session registry factory
 
@@ -563,6 +564,32 @@ budget at once. Regressions: `spawn_cwd.thread_budget_resolves`
 (`kernel/test/test_spawn_cwd.c`, which holds the cwd tail's `spawn_cwd.*` too);
 the `sys_spawn_full_argv.*` validate legs (`kernel/test/test_sys_spawn_full_argv.c`); joey's `probe_thread_budget`
 ([[sub-stratum-boot]]) drives the real ABI, both tails included.
+
+**The spawn's environment tail (2026-10-28, [[dec-2026-10-28-spawn-env]]).**
+When `ext_flags` carries `SPAWN_EXT_ENV`, the handler reads the 16-byte
+`sys_spawn_ext_env` tail at the record's address + 104 plus the cwd tail's 16
+and the thread tail's 8 when their bits are set. It checks the fields before it
+allocates anything: an unreadable tail is `T_E_FAULT`, a nonzero `env_flags`
+-1 (the unknown-bits rule), an `env_len` past `SYS_SPAWN_ENV_DATA_MAX`
+`T_E_2BIG`, a block that is not user memory `T_E_FAULT`. After the cwd copy it
+copies the records once into a kmalloc'd buffer, and nothing reads the user
+block again, so a peer thread rewriting it cannot change a record between the
+check and the use. The gate site is now `sys_spawn_full_argv_env_for_proc`
+(`sys_spawn_full_argv_cwd_for_proc` became the kernel-test wrapper with no
+environment). After every gate and the cwd it builds the child's environment
+with `env_from_block` ([[sub-kernel-content]]), so a malformed block fails the
+spawn with that errno before any child exists. The body hands the built group
+to the child in the spawn args; a refused spawn returns it to the gate site,
+which frees it. The thunk installs it first, before the cwd and before
+`exec_setup_from_spoor` projects `/env` onto the new stack: an install cannot
+fail, and once it has run the group is the child's and is freed with it on
+every exit below. The spawner's own environment never changes. Regressions:
+`spawn_env.*` (`kernel/test/test_spawn_env.c`: the parse and its refusals, the
+in-place refill, a held child's environment against the block, the inherit
+control and an empty block, and refused spawns that make no child); the
+`sys_spawn_full_argv.validate_req` leg for the new bit; joey's
+`probe_spawn_env` ([[sub-stratum-boot]]) drives the real ABI, the tail after
+each earlier tail included.
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
@@ -1737,9 +1764,10 @@ unmarked. An unheld spawn keeps `rfork_with_caps` and the path it always had.
 stopped being ALIVE, or left the caller's children. The parent it waits on is
 `current_thread()->proc`, the Proc `rfork` forked, which a kernel test's `p` is
 not always. A caller killed while waiting unwinds (#811), and its own death then
-kills the child through the orphan rule. `sys_spawn_full_argv_cwd_for_proc`,
-its no-cwd wrapper `sys_spawn_full_argv_debug_for_proc` and the budget wrapper
-under that are the kernel-test entries, declared where the tests call them.
+kills the child through the orphan rule. `sys_spawn_full_argv_env_for_proc`,
+its no-environment wrapper `sys_spawn_full_argv_cwd_for_proc`, the no-cwd
+wrapper `sys_spawn_full_argv_debug_for_proc` and the budget wrapper under that
+are the kernel-test entries, declared where the tests call them.
 
 ## `viv_wait4` answers a caught note with EINTR (2026-10-05)
 

@@ -9,8 +9,9 @@
 //   spawn_env.install_refills    env_install empties and refills an existing
 //                                group in place (same struct, same devno, fresh
 //                                ids) and publishes into a Proc with none
-//   spawn_env.child_gets_block   a held child's /env is exactly the block; with
-//                                no tail it is a copy of the spawner's; an empty
+//   spawn_env.child_gets_block   a held child's /env is exactly the block, and so
+//                                is the envp its exec frame carries; with no
+//                                tail it is a copy of the spawner's; an empty
 //                                block is an empty environment; the spawner's
 //                                own /env never changes
 //   spawn_env.refusals           a refused block makes no child and leaves the
@@ -34,6 +35,10 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/exec.h>
+#include <thylacine/addrspace.h>
+#include <thylacine/burrow.h>
+#include <thylacine/page.h>
+#include <thylacine/vma.h>
 
 #include "../../mm/slub.h"          // kmalloc: the over-long value
 
@@ -239,6 +244,37 @@ static long se_child_env(int pid, char *out) {
     return c ? env_render_environ(c, 0, out, SE_RENDER_MAX) : -1;
 }
 
+// The top page of a held child's stack, where exec put its frame's strings.
+// exec fills the stack Burrow's slot and leaves the PTE to the first fault, so
+// the child's page tables show a hole until it runs: read the slot itself,
+// under the space's lock, while the held child runs nothing. PAGE_SIZE, 0 when
+// the slot is not resident, or -1 when the child is gone.
+static long se_child_frame(int pid, u8 *out) {
+    struct Proc *c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
+    if (!c || !c->as) return -1;
+    u64 va = EXEC_USER_STACK_TOP - PAGE_SIZE;
+    long n = 0;
+    irq_state_t s = spin_lock_irqsave(&c->as->lock);
+    struct Vma *v = vma_lookup_in(c->as, va);
+    struct page *pg = (v && v->burrow)
+        ? burrow_lazy_slot_for_test(v->burrow,
+                                    (size_t)((v->burrow_offset + (va - v->vaddr_start)) / PAGE_SIZE))
+        : NULL;
+    if (pg) {
+        const u8 *src = (const u8 *)pa_to_kva(page_to_pa(pg));
+        for (u64 i = 0; i < PAGE_SIZE; i++) out[i] = src[i];
+        n = (long)PAGE_SIZE;
+    }
+    spin_unlock_irqrestore(&c->as->lock, s);
+    return n;
+}
+
+static bool se_holds(const u8 *hay, long n, const char *needle, long nl) {
+    for (long i = 0; i + nl <= n; i++)
+        if (se_bytes_eq((const char *)hay + i, needle, nl)) return true;
+    return false;
+}
+
 // Release the held child and reap it within the budget; one still unreaped then
 // is killed. The reaped pid, or <= 0.
 static int se_release_and_reap(int pid) {
@@ -280,16 +316,20 @@ void test_spawn_env_child_gets_block(void) {
     struct Proc *self = current_thread()->proc;
     char mine[SE_RENDER_MAX], mine_after[SE_RENDER_MAX];
     char c_blk[SE_RENDER_MAX], c_inh[SE_RENDER_MAX], c_emp[SE_RENDER_MAX], c_dup[SE_RENDER_MAX];
+    static u8 f_blk[PAGE_SIZE], f_inh[PAGE_SIZE];   // off the kstack
+    static const char mark_rec[] = "SE_SPAWNER=here";   // with its NUL
     u64 mark = se_spawner_mark(self);
     long ml = env_render_environ(self, 0, mine, SE_RENDER_MAX);
 
     static const char blk[] = "SE_A=1\0SE_B=two\0";
     int p_blk = se_spawn_held(true, blk, sizeof(blk) - 1);
     long n_blk = se_child_env(p_blk, c_blk);
+    long fn_blk = se_child_frame(p_blk, f_blk);
     int r_blk = se_release_and_reap(p_blk);
 
     int p_inh = se_spawn_held(false, NULL, 0u);
     long n_inh = se_child_env(p_inh, c_inh);
+    long fn_inh = se_child_frame(p_inh, f_inh);
     int r_inh = se_release_and_reap(p_inh);
 
     int p_emp = se_spawn_held(true, NULL, 0u);
@@ -310,6 +350,17 @@ void test_spawn_env_child_gets_block(void) {
     TEST_EXPECT_EQ(n_blk, (long)sizeof(blk) - 1, "the child's environment is the block's size");
     TEST_ASSERT(n_blk > 0 && se_bytes_eq(c_blk, blk, n_blk),
                 "and exactly the block: nothing of the spawner's carried over");
+    // The frame: exec projected the group the thunk had already installed. The
+    // inheriting child's frame is the control that the read sees a frame's
+    // environment at all.
+    TEST_EXPECT_EQ(fn_inh, (long)PAGE_SIZE, "premise: the inheriting child's frame page is resident");
+    TEST_EXPECT_EQ(fn_blk, (long)PAGE_SIZE, "premise: the block child's frame page is resident");
+    TEST_ASSERT(se_holds(f_inh, fn_inh, mark_rec, (long)sizeof(mark_rec)),
+                "the control: an inheriting child's exec frame carries the spawner's variable");
+    TEST_ASSERT(se_holds(f_blk, fn_blk, blk, (long)sizeof(blk) - 1),
+                "the block child's exec frame carries the block");
+    TEST_ASSERT(!se_holds(f_blk, fn_blk, mark_rec, (long)sizeof(mark_rec)),
+                "and not the spawner's variable: installed before exec projected /env");
     TEST_ASSERT(p_inh > 0, "the control: a spawn with no tail makes a child");
     TEST_EXPECT_EQ(n_inh, ml, "with no tail the child's environment is the spawner's size");
     TEST_ASSERT(n_inh > 0 && se_bytes_eq(c_inh, mine, n_inh), "and a copy of it");

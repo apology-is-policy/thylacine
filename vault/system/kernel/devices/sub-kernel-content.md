@@ -23,7 +23,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-10-26
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -172,6 +172,30 @@ same-process (no gate, and say why) or cross-process (carry the gate). **What is
 forbidden is a caller that does neither** — which is a stronger obligation than
 the original, not a relaxation of it.
 
+**A spawner can name its child's environment, and the child's group is then
+refilled in place, never replaced** (2026-10-28, [[dec-2026-10-28-spawn-env]]).
+The spawn record's environment tail ([[sub-kernel-syscall-abi]]) carries
+NUL-terminated `NAME=VALUE` records, the same shape exec projects. The spawner
+builds a detached environment from them with `env_from_block` before any child
+exists, so a refusal makes none: a record with no `=` or a name the
+environment's own create would refuse is `T_E_INVAL`, a value past 4096 bytes or
+a 65th name `T_E_2BIG`. The first `=` ends a name. A later record for a name
+replaces the earlier value in the earlier slot, which is what writing the file
+twice does, so a repeat is never a second entry and never counts against the
+ceiling.
+
+The child's thunk hands the built group over with `env_install`, before exec
+projects it and before the child's first instruction. A child with no group
+adopts it by compare-and-exchange. A child that has one -- rfork's copy of its
+spawner's -- has that group emptied and refilled under its own lock, and the new
+entries take ids from that group's counter, past every id it issued. **Swapping
+the pointer would have been the simpler code and a use-after-free:** the
+introspection device's flat-block read loads a process's group with no reference
+and then takes its lock, so a reader that loaded the copy just before a swap
+would lock freed memory. Refilling keeps the struct, its lock and its minted
+device number where every reader already points. The install is only sound
+while the thunk is the process's one thread, which is the only place it runs.
+
 **The boot filesystem manufactures directories that contain nothing.** A mount
 needs somewhere to land — a graft onto a path that does not resolve is not a
 mount — and the boot root is a read-only archive, so a mount point cannot be
@@ -274,6 +298,11 @@ The environment's lazy allocation is a **compare-and-exchange**, because two pee
 threads of one process can both find no environment and both allocate; the loser
 frees its own and adopts the winner's.
 
+The spawn tail's install is the one writer that empties a whole group. It holds
+the group's lock across the empty and the refill, so a cross-process block read
+sees the old environment or the new one and never a mix; the built group it
+drains is reachable from no process, so its own fields need no lock.
+
 ## Invariants enforced
 
 **[[inv-i1]]** — the environment is per-process content behind a global mount, so
@@ -295,7 +324,8 @@ pins `lib/` to 0755 whatever the host's umask, because every principal's search
 crosses it on the way to the loader.
 
 **[[inv-i32]]** — the environment's 64-variable and 4096-byte-per-value ceilings
-are this invariant in its smallest form, and the ramfs table cap is the same idea
+are this invariant in its smallest form -- the spawn tail's parse applies the same
+two, so a spawner cannot hand a child more than it could write itself -- and the ramfs table cap is the same idea
 applied to a boot-time input; an overflow is now a failing test, not only a boot
 line.
 
@@ -315,7 +345,8 @@ of `devramfs.load_complete` on the boot archive.
 Returning failure to the caller: a walk step from a file; a byte read of any of
 the three directories, or of an archive directory; a
 write to the read-only boot filesystem; an environment operation naming an id
-that no longer exists; a create anywhere but the environment root; a random read
+that no longer exists; a create anywhere but the environment root; a spawn
+environment block that is unterminated, malformed or over a ceiling; a random read
 before the source is ready; a first directory entry too large for the caller's
 buffer, which must be an error rather than zero because zero already means
 end-of-directory.
@@ -369,7 +400,8 @@ round-trip every megabyte.
 ## Seams
 
 The boot archive is still never freed. Environment sharing across a fork is
-reserved but not built — a child always gets a copy. The environment is one
+reserved but not built — a child gets a copy, unless its spawner names a
+different environment in the spawn record's tail, and then exactly that. The environment is one
 level; the ramfs has been a tree since B-1d. Symlinks in the archive are still
 refused (`mkcpio.py` never emits one: a link to a file packs the file's bytes, a
 link to a directory is skipped).

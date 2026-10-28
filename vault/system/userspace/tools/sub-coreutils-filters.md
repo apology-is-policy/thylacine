@@ -49,7 +49,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-25
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -325,6 +325,15 @@ report a symlink as a plain file even where the mode string shows `l`.
   and a leg pins that a bare `env` reaches the utility; while the initrd was
   flat, the same name met the `/env` device and the utility could not be
   reached before the pivot ([[dec-2026-09-25-initrd-bin-directory]]).
+  Two legs pin `Command::env` end to end (2026-10-28,
+  [[dec-2026-10-28-spawn-env]]): `ls --beacon=always /bin/version` writes a
+  rich Beacon frame only when `BEACON=rich` reaches it. Before the run's own
+  `BEACON` is written, the frame is absent with no tail, present with
+  `env("BEACON", "rich")`, and the smoke's own `BEACON` is still unset after.
+  After it is written, the frame is present when inherited and absent under
+  `env_remove("BEACON")` and under `env_clear()`. The environment tail also
+  makes `env`'s `NAME=VALUE COMMAND` form expressible, which the utility still
+  refuses (the enqueued item above).
 
 - **Thirty-six separate flag loops.** Consistency across them is
   maintained by hand. The `--help` and usage-error behaviour *is* shared,

@@ -49,7 +49,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-28
 ---
 ## Dedicated service owner (October 2)
 
@@ -360,6 +360,20 @@ None crossing a boundary; every ABI record belongs to
   bad `dir` fails `spawn` with chdir's error and the caller's cwd never moves; a
   relative program name is looked up from `dir`
   ([[sub-kernel-syscall-dispatch]]).
+- **`Command::env`, `env_remove`, `env_clear`** (2026-10-28,
+  [[dec-2026-10-28-spawn-env]]) -- the child's environment. With none of the
+  three, the record carries no tail and the child gets the kernel's copy of the
+  caller's `/env`. Any of them makes `spawn` send the `T_SPAWN_EXT_ENV` tail
+  (`TSpawnExtEnv`, at +104, or at +120 after a cwd tail, each pairing one
+  `#[repr(C)]` record). Its block is the caller's live `/env`, read through
+  `/proc/<pid>/environ` (native devproc has no `/proc/self`; a process is never
+  sealed against itself), with the calls applied in order -- or only the calls
+  after `env_clear` -- and it becomes the child's whole environment. The
+  caller's own `/env` never changes. A key that is empty or holds `=` or a NUL,
+  or a value holding a NUL, fails `spawn` with `InvalidArgument` before the
+  syscall; a key `/env` would refuse fails it in the kernel. A caller variable
+  the flat form cannot carry is absent from the read, so a child given the tail
+  does not get it.
 - **`Command::debug_held`** (2026-09-29) — spawns the child held
   ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
   image and parked before its first instruction, and the child runs only when a

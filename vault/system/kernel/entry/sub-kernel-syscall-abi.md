@@ -21,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 ## Session registry factory ABI
 
@@ -85,6 +85,24 @@ hand). The authority to raise it, `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit
 10), is in `SPAWN_PERM_ALL` and, like bit 4, mirrored in neither library: no
 native caller confers it. What the tail does is
 [[sub-kernel-syscall-dispatch]]'s (ARCH 7.3.5).
+`SPAWN_EXT_ENV` (bit 2, 2026-10-28, [[dec-2026-10-28-spawn-env]]) announces a
+`struct sys_spawn_ext_env` after the cwd and thread tails whose bits are set,
+else at +104: `env_va` (u64; may be 0 when the length is), `env_len` (u32,
+0..`SYS_SPAWN_ENV_DATA_MAX`, 32768 bytes, past it `T_E_2BIG`) and `env_flags`
+(u32, must be 0), 16 bytes. The block is the argv packing, NUL-terminated
+`NAME=VALUE` records, and it is the child's whole environment: nothing of the
+spawner's carries over, and a length of 0 is an empty one. The bound is
+`EXEC_ENV_DATA_MAX`, asserted equal in `kernel/syscall.c`, because exec projects
+the group onto the child's stack and refuses a larger one; a tail that admitted
+more would make a child exec could not start. Mirrors: libt `T_SPAWN_EXT_ENV`,
+`T_SYS_SPAWN_ENV_DATA_MAX` + `struct t_sys_spawn_ext_env`; libthyla-rs
+`T_SPAWN_EXT_ENV`, `T_SYS_SPAWN_ENV_DATA_MAX` + `TSpawnExtEnv`, sent by
+`Command::env`, `env_remove` and `env_clear` ([[sub-libthyla-rs]]);
+`tools/check-spawn-args-mirrors.py` holds both to the kernel's layout. The Go
+fork and pouch do not send it yet: the fork is shared by every tree, and a
+kernel without bit 2 refuses the bit, so it waits until every tree carries
+the kernel half. What the tail does is [[sub-kernel-syscall-dispatch]]'s and
+[[sub-kernel-content]]'s (ARCH 9.7).
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
@@ -697,6 +715,10 @@ preserved. The private Loom encodings remain reserved and setup remains refused;
 ## Provenance
 
 [[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
+
+2026-10-28 (vote 28): `SPAWN_EXT_ENV` (bit 2) + `sys_spawn_ext_env` +
+`SYS_SPAWN_ENV_DATA_MAX`, and `T_E_2BIG`'s emitter list in `errno.h` names the
+tail. No number changed; the record stays 104 bytes.
 
 2026-10-27 (thread-model C6): `SPAWN_EXT_THREADS` + `sys_spawn_ext_threads`
 and `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit 10); `SYS_THREAD_SPAWN` answers

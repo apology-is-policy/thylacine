@@ -138,6 +138,27 @@ budget (-22) and an unknown `threads_flags` bit (-1) are refused -- joey holds
 no raise authority, as for the page budget. Each child is killed and reaped.
 Boot-fatal.
 
+**The spawn environment tail, through the real ABI (2026-10-28,
+[[dec-2026-10-28-spawn-env]]).** `probe_spawn_env` runs after the thread
+budget probe. It first sets `PE_JOEY=here` in joey's own `/env`, so the
+spawner's environment and the block cannot read alike, and unsets it after.
+Each record (`union senv_record`) always writes the environment tail at its
+offset, so a leg can clear the bit and leave a poisoned tail in place. It spawns
+`/bin/hello` held and reads each child's `/proc/<pid>/environ` before the child
+runs:
+- the block arrives exactly;
+- with the bit clear, the poisoned tail is never read and the child carries
+  joey's environment;
+- an empty block gives an empty environment;
+- a repeated name arrives once, with the later value;
+- the tail is read at +120 after a cwd tail, +112 after a thread tail and +128
+  after both, and the cwd still lands.
+Refused, with no child: a record with no `=` (-22), a `/` in a name (-22), an
+unterminated block (-22), a value past 4096 bytes (-7), a length past 32768
+(-7), a NULL pointer with a length (-14), a nonzero `env_flags` (-1) and the
+next unknown `ext_flags` bit (-1). joey's own environment is checked unchanged.
+Boot-fatal. `probe_spawn_cwd`'s derived unknown bit now skips bit 2.
+
 **go-threads, the budget against Go's M model.** Inside the go-goroutines
 success branch, `go_threads_run` spawns `/bin/go-threads` (300 goroutines,
 each locked to its own M at once) as principal 1000, so the budget applies
