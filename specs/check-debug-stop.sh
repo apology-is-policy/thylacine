@@ -27,7 +27,8 @@ STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
 CLEAN="debug_stop:12830
-debug_stop_held:17330"
+debug_stop_held:17330
+debug_stop_spawn:-"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="debug_stop_buggy_lost_stop:NoLostStop
@@ -38,7 +39,8 @@ debug_stop_buggy_convert_clears_first:NoEL0WhileHeld
 debug_stop_buggy_no_death_recheck:NoEL0WhileHeld
 debug_stop_buggy_birth_latch_erets:NoEL0WhileHeld
 debug_stop_buggy_tail_latch_erets:NoLostStop
-debug_stop_buggy_spawner_latch_returns:SpawnReturnsAfterBirth"
+debug_stop_buggy_spawner_latch_returns:SpawnReturnsAfterBirth
+debug_stop_buggy_spawn_at_el0:NoEL0BornStopped"
 
 # action: cfg, the action property that must be the one reported
 ACTION="debug_stop_buggy_no_death_recheck_tail:NoEretIntoDeath

@@ -156,11 +156,16 @@ CONSTANTS
     BUGGY_BIRTH_LATCH_ERETS,        \* TRUE = the birth park leaves on the latch and erets
     BUGGY_TAIL_LATCH_ERETS,         \* TRUE = the tail park leaves on the latch and erets
     BUGGY_LATCH_ENDS_STOP,          \* TRUE = a park ends its Thread on the latch
-    BUGGY_SPAWNER_LATCH_RETURNS     \* TRUE = the birth wait returns on the spawner's latch
+    BUGGY_SPAWNER_LATCH_RETURNS,    \* TRUE = the birth wait returns on the spawner's latch
+    Spawned,                        \* the Threads a running Thread spawns later (thread-model C7)
+    BUGGY_SPAWN_AT_EL0              \* TRUE = a spawned Thread's first entry skips the tail
 
 ASSUME Cardinality(Threads) >= 1
 \* A held child has executed nothing, so it has made no Threads: only its head.
 ASSUME HELD => Cardinality(Threads) = 1
+\* A spawn needs a running parent, so some Thread exists from the start.
+ASSUME Spawned \subseteq Threads /\ Threads \ Spawned # {}
+ASSUME HELD => Spawned = {}
 
 \* Wake sources that can target a parked ("stopped") Thread:
 \*   "start"   -- the debugger's `start` verb (resume_req)
@@ -190,7 +195,10 @@ Sources == {"start", "release", "death", "intr"}
 \*   "breg"     -- holds wait_lock: register + observe the hold and the stop
 \*   "bstopped" -- parked at the birth park (registered/findable, confirmable)
 BirthPCs == {"unborn", "btail", "bloop", "bacq", "breg", "bstopped"}
-PCs == {"el0", "tail", "acq", "reg", "obs_run", "obs_stop", "stopped", "dead", "sleep"}
+\*   "nascent"  -- a Thread of Spawned not yet created: on no list, so no stop
+\*                 waits for it and no death needs it
+PCs == {"el0", "tail", "acq", "reg", "obs_run", "obs_stop", "stopped", "dead", "sleep",
+        "nascent"}
        \cup BirthPCs
 
 HoldVals  == {"none", "unborn", "parked"}
@@ -221,15 +229,16 @@ VARIABLES
     licensed,     \* ghost: the child may run -- its hold was released, or its
                   \* converted stop resumed (TRUE from the start when ~HELD)
     latch,        \* an interrupt-terminate is latched on the target (LS-5c)
-    slatch        \* one is latched on the held spawn's spawner, inside its wait
+    slatch,       \* one is latched on the held spawn's spawner, inside its wait
+    born          \* ghost: the Threads spawned while a stop was requested
 
-\* The variables the tail's own actions never write: the birth hold's, and the
-\* two latches.
-bvars == <<hold, spc, swake, cstep, licensed, latch, slatch>>
+\* The variables the tail's own actions never write: the birth hold's, the
+\* two latches, and the spawn ghost.
+bvars == <<hold, spc, swake, cstep, licensed, latch, slatch, born>>
 
 vars == <<pc, gflag, sflag, attached, dbg_live, detach_req,
           resume_req, release_req, exitkill, wlock, confirmed, fired,
-          hold, spc, swake, cstep, licensed, latch, slatch>>
+          hold, spc, swake, cstep, licensed, latch, slatch, born>>
 
 WokenOf(t) == \E s \in Sources : fired[t][s]
 Active(s)  == \/ (s = "start"   /\ resume_req)
@@ -261,7 +270,10 @@ LatchExit(t, erets, parked) ==
     ELSE IF BUGGY_LATCH_ENDS_STOP THEN [pc EXCEPT ![t] = "dead"]
     ELSE [pc EXCEPT ![t] = parked]
 
-ChildAlive == \E t \in Threads : pc[t] # "dead"
+ChildAlive == \E t \in Threads : pc[t] \notin {"dead", "nascent"}
+
+\* The Threads on the Proc's list: every one a stop must park.
+Live == {t \in Threads : pc[t] # "nascent"}
 
 \* spawn_birth_released: the child reached its park or had its hold released
 \* (anything but "unborn"), or is dead.
@@ -310,9 +322,11 @@ TypeOk ==
     /\ licensed \in BOOLEAN
     /\ latch \in BOOLEAN
     /\ slatch \in BOOLEAN
+    /\ born \subseteq Threads
 
 Init ==
-    /\ pc = [t \in Threads |-> IF HELD THEN "unborn" ELSE "tail"]
+    /\ pc = [t \in Threads |-> IF t \in Spawned THEN "nascent"
+                               ELSE IF HELD THEN "unborn" ELSE "tail"]
     /\ gflag = FALSE
     /\ sflag = FALSE
     /\ attached = FALSE
@@ -331,6 +345,7 @@ Init ==
     /\ licensed = ~HELD
     /\ latch = FALSE
     /\ slatch = FALSE
+    /\ born = {}
 
 (***************************************************************************)
 (* ============================ THREAD ACTIONS =========================== *)
@@ -351,7 +366,7 @@ TailStep(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, spc, cstep, licensed, latch, slatch>>
+                   hold, spc, cstep, licensed, latch, slatch, born>>
 
 (* CORRECT: acquire the wait_lock (free -- the debugger's confirm-walk isn't  *)
 (* mid-access on t) before touching registration/observation.               *)
@@ -385,7 +400,7 @@ RegisterObserve(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch, born>>
 
 (* BUGGY: the register happens AFTER the out-of-lock observe. A Thread that   *)
 (* observed sflag=FALSE proceeds to EL0 even if the debugger has since set    *)
@@ -434,7 +449,7 @@ ResumeThread(t) ==
     /\ fired' = [fired EXCEPT ![t] = [s \in Sources |-> FALSE]]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch, born>>
 
 (* A Thread running at EL0 makes a blocking syscall and SLEEPS (off-cpu on some *)
 (* non-debug rendez -- a futex/torpor wait, a pipe/poll/read block). Enabled    *)
@@ -514,7 +529,7 @@ RequestStop ==
                      /\ UNCHANGED <<hold, swake>>
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   spc, licensed, latch, slatch>>
+                   spc, licensed, latch, slatch, born>>
 
 (* The conversion's second store, still inside the stop's lock section.    *)
 ConvertFinish ==
@@ -528,7 +543,7 @@ ConvertFinish ==
     /\ cstep' = "idle"
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   spc, licensed, latch, slatch>>
+                   spc, licensed, latch, slatch, born>>
 
 (* The EC-path hardware fire (a bp / wp hit or a single-step completion) also  *)
 (* requests the whole-Proc stop. Unlike the discretionary `stop` verb this is  *)
@@ -579,13 +594,13 @@ StartResume ==
     /\ attached
     /\ Quiet
     /\ sflag
-    /\ confirmed = Threads
+    /\ confirmed = Live
     /\ sflag' = FALSE
     /\ resume_req' = TRUE
     /\ licensed' = TRUE
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    release_req, exitkill, wlock, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, swake, cstep, latch, slatch>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, latch, slatch, born>>
 
 (* The `start` verb on a held target no stop has converted: RELEASE the hold *)
 (* (cleared before the resume's wake, so the woken park observes it gone).  *)
@@ -601,7 +616,7 @@ StartRelease ==
     /\ licensed' = TRUE
     /\ SpawnerWakeOnClear
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
-                   release_req, exitkill, wlock, confirmed, fired, spc, cstep, latch, slatch>>
+                   release_req, exitkill, wlock, confirmed, fired, spc, cstep, latch, slatch, born>>
 
 (* An explicit `detach` request.                                            *)
 DetachReq ==
@@ -671,11 +686,11 @@ ReleaseSlot ==
     /\ attached' = FALSE
     /\ confirmed' = {}
     /\ IF BUGGY_STRAND_ON_CLOSE
-         THEN UNCHANGED <<sflag, release_req, gflag, hold, swake, licensed>>
+         THEN UNCHANGED <<sflag, release_req, gflag, hold, swake, licensed, born>>
          ELSE IF (~BUGGY_EXITKILL_IGNORED /\ exitkill /\ ~dbg_live /\ ~detach_req)
                 THEN /\ sflag' = FALSE
                      /\ gflag' = TRUE
-                     /\ UNCHANGED <<release_req, hold, swake, licensed>>
+                     /\ UNCHANGED <<release_req, hold, swake, licensed, born>>
                 ELSE /\ sflag' = FALSE
                      /\ release_req' = TRUE
                      /\ hold' = IF detach_req THEN "none" ELSE hold
@@ -683,7 +698,7 @@ ReleaseSlot ==
                      /\ IF hold' # hold THEN SpawnerWakeOnClear ELSE UNCHANGED swake
                      /\ UNCHANGED gflag
     /\ UNCHANGED <<pc, dbg_live, detach_req, resume_req, exitkill, wlock, fired,
-                   spc, cstep, latch, slatch>>
+                   spc, cstep, latch, slatch, born>>
 
 (***************************************************************************)
 (* ============================= DEATH PATH ============================== *)
@@ -726,6 +741,29 @@ WakeFrom(t, s) ==
     /\ UNCHANGED bvars
 
 (***************************************************************************)
+(* ================================ SPAWN ================================ *)
+(***************************************************************************)
+
+(* A running Thread spawns t (SYS_THREAD_SPAWN, the phenotype's clone): t    *)
+(* joins the list, so every later stop waits for it. Its first entry runs    *)
+(* the EL0-return tail before its first instruction -- the frame-building   *)
+(* first entry (thread-model C7, F-7) -- so a Thread born into a stop parks *)
+(* and one born into a death dies. BUGGY_SPAWN_AT_EL0 is the pre-C7 entry:  *)
+(* the trampoline erets straight to the entry and the stop waits for the    *)
+(* Thread's first trap. A dying group admits no spawn (C0's F-8 refusal);   *)
+(* a death published just after the admission meets the tail's die-check.   *)
+(* Discretionary: nothing forces a program to spawn.                        *)
+Spawn(t) ==
+    /\ pc[t] = "nascent"
+    /\ \E p \in Threads : pc[p] = "el0"
+    /\ ~gflag
+    /\ pc' = [pc EXCEPT ![t] = IF BUGGY_SPAWN_AT_EL0 THEN "el0" ELSE "tail"]
+    /\ born' = IF sflag THEN born \cup {t} ELSE born
+    /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, licensed, latch, slatch>>
+
+(***************************************************************************)
 (* ============================= BIRTH PATH ============================== *)
 (***************************************************************************)
 
@@ -750,7 +788,7 @@ BirthMark(t) ==
     /\ pc' = [pc EXCEPT ![t] = "bloop"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   spc, cstep, licensed, latch, slatch>>
+                   spc, cstep, licensed, latch, slatch, born>>
 
 (* The park loop's top: death wins, on every pass.                           *)
 BirthLoop(t) ==
@@ -761,7 +799,7 @@ BirthLoop(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, spc, cstep, licensed, latch, slatch>>
+                   hold, spc, cstep, licensed, latch, slatch, born>>
 
 BirthAcquire(t) ==
     /\ pc[t] = "bacq"
@@ -793,7 +831,7 @@ BirthRegisterObserve(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch, born>>
 
 (* A woken birth park goes back to its loop top, never to the ordinary tail: *)
 (* the thread has no instruction to return to yet. The latch's wake alone,   *)
@@ -814,7 +852,7 @@ BirthResume(t) ==
     /\ fired' = [fired EXCEPT ![t] = [s \in Sources |-> FALSE]]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch, born>>
 
 (* An interrupt-terminate is posted to the target and latched (LS-5c: armed *)
 (* on the note's commit when nothing in the target catches it; the ghost is *)
@@ -823,11 +861,11 @@ BirthResume(t) ==
 (* inside a conversion. Discretionary: nothing forces one to arrive.        *)
 PostInterrupt ==
     /\ ~latch
-    /\ \E t \in Threads : pc[t] # "dead"
+    /\ \E t \in Threads : pc[t] \notin {"dead", "nascent"}
     /\ latch' = TRUE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, swake, cstep, licensed, slatch>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, licensed, slatch, born>>
 
 (***************************************************************************)
 (* =========================== THE SPAWNER ============================== *)
@@ -843,7 +881,7 @@ SpawnerScan ==
     /\ swake' = FALSE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch, slatch>>
+                   hold, cstep, licensed, latch, slatch, born>>
 
 SpawnerWakeUp ==
     /\ spc = "asleep"
@@ -852,7 +890,7 @@ SpawnerWakeUp ==
     /\ swake' = FALSE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch, slatch>>
+                   hold, cstep, licensed, latch, slatch, born>>
 
 (* The spawner exits -- after its spawn returned, or killed inside it. At its *)
 (* ZOMBIE transition the orphan rule terminates a child whose hold is still  *)
@@ -868,7 +906,7 @@ SpawnerDie ==
          ELSE UNCHANGED gflag
     /\ UNCHANGED <<pc, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch, slatch>>
+                   hold, cstep, licensed, latch, slatch, born>>
 
 (* An interrupt-terminate latched on the SPAWNER inside its birth wait (the   *)
 (* ghost `slatch`). The wait sleeps death-only (5g), so the latch's wake is   *)
@@ -882,7 +920,7 @@ PostSpawnerInterrupt ==
     /\ slatch' = TRUE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, swake, cstep, latch, licensed>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, latch, licensed, born>>
 
 (* BUGGY_SPAWNER_LATCH_RETURNS: the latch's wake ends the wait, and the       *)
 (* spawn returns with its child unreleased -- await_child_release's break     *)
@@ -895,7 +933,7 @@ SpawnerLatchReturn ==
     /\ swake' = FALSE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch, slatch>>
+                   hold, cstep, licensed, latch, slatch, born>>
 
 Next ==
     \/ \E t \in Threads : TailStep(t)
@@ -931,6 +969,7 @@ Next ==
     \/ SpawnerDie
     \/ PostSpawnerInterrupt
     \/ SpawnerLatchReturn
+    \/ \E t \in Threads : Spawn(t)
 
 (* Weak fairness on the mechanical progress actions (the Threads' handshake,  *)
 (* re-entry, resume, and every wake / slot release). The debugger's           *)
@@ -980,7 +1019,17 @@ NoLostStop ==
 (* stopped, no Thread is executing at EL0 -- the frozen window a coherent     *)
 (* mem/reg read relies on is real.                                          *)
 NoEL0AfterStopped ==
-    (confirmed = Threads) => (\A t \in Threads : pc[t] # "el0")
+    (confirmed = Live) => (\A t \in Threads : pc[t] # "el0")
+
+(* NoEL0BornStopped (thread-model C7, F-7): a Thread spawned while a stop is *)
+(* requested executes no EL0 instruction while that stop stands. The spawn  *)
+(* puts it on the list, so the stop must park it as it parks every other    *)
+(* Thread -- at its first checkpoint, which the frame-building first entry  *)
+(* makes the one before its first instruction. BUGGY_SPAWN_AT_EL0 breaks it: *)
+(* the new Thread runs until its first trap. The model has one stop episode *)
+(* (a release is never re-armed), so the ghost need not forget a Thread.    *)
+NoEL0BornStopped ==
+    \A t \in born : sflag => pc[t] # "el0"
 
 (* ExactlyOnceResume: a parked Thread receives at most one wakeup. The        *)
 (* single-wake latch keeps a start racing a detach/close from double-waking   *)
@@ -1040,6 +1089,7 @@ Safety ==
     /\ StopImpliesOwned
     /\ NoEL0WhileHeld
     /\ SpawnReturnsAfterBirth
+    /\ NoEL0BornStopped
 
 (* DeathWinsOverStop (liveness): once a group termination is published, every *)
 (* Thread eventually dies -- even against a live debugger holding a stop.     *)
@@ -1047,7 +1097,7 @@ Safety ==
 (* guarantee it; stop-before-die breaks it (a parked Thread re-parks on the   *)
 (* death-wake resume and never dies).                                       *)
 EventuallyAllDead ==
-    gflag ~> (\A t \in Threads : pc[t] = "dead")
+    gflag ~> (\A t \in Threads : pc[t] \in {"dead", "nascent"})
 
 (* NoStrand (liveness): if the debugger releases its slot or dies while       *)
 (* holding a stop, the target is eventually resumed -- no debugger can strand *)
@@ -1071,7 +1121,7 @@ EventuallyResumed ==
 (* NoStrand: for a launched target "not stranded" means dead, not resumed (and   *)
 (* EventuallyResumed still holds -- "dead" is not "stopped").                    *)
 EventuallyLaunchedDies ==
-    (exitkill /\ ~dbg_live /\ ~detach_req) ~> (\A t \in Threads : pc[t] = "dead")
+    (exitkill /\ ~dbg_live /\ ~detach_req) ~> (\A t \in Threads : pc[t] \in {"dead", "nascent"})
 
 (* EventuallyStopSettles (liveness -- the multi-thread-stop COMPLETES): once a   *)
 (* stop is requested and owned, the target eventually SETTLES -- either every    *)
@@ -1087,7 +1137,7 @@ EventuallyLaunchedDies ==
 (* (a sleeper is off-cpu, never confirmable, so NoEL0AfterStopped stays vacuous); *)
 (* this is purely the hang.                                                       *)
 EventuallyStopSettles ==
-    (sflag /\ attached) ~> ( \/ (\A t \in Threads : pc[t] \in {"stopped", "bstopped", "dead"})
+    (sflag /\ attached) ~> ( \/ (\A t \in Threads : pc[t] \in {"stopped", "bstopped", "dead", "nascent"})
                              \/ ~sflag )
 
 (* EventuallyHoldResolved (liveness -- the NoStrand analog for the hold): a   *)
