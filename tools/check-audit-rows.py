@@ -110,16 +110,25 @@ def trailers(messages):
 
 
 def check_merge(rev):
-    """B on one merge commit: (findings, result table)."""
+    """B on one merge commit: (findings, result table, its new first cells)."""
     parents = git("rev-list", "--parents", "-n", "1", rev).split()[1:]
     if len(parents) == 2:
         bases = git("merge-base", "--all", *parents).split()
     else:
         bases = git("merge-base", "--octopus", *parents).split()
     result = table_at(rev)
-    found = merge_findings([table_at(b) for b in bases],
-                           [table_at(p) for p in parents], result)
-    return found, result
+    inputs = [table_at(b) for b in bases + parents]
+    found = merge_findings(inputs[:len(bases)], inputs[len(bases):], result)
+    return found, result, set(result).difference(*inputs)
+
+
+def retitled(cell, new):
+    """A first cell the merge made that opens like `cell`: a resolution that
+    retitled the row reads as LOST, so the report names the candidate."""
+    for n in sorted(new):
+        if len(cell) >= 40 and n[:40] == cell[:40]:
+            return f" (the merge has a new row opening the same way -- if that is this row retitled, the trailer says so: '{n[:60]}...')"
+    return ""
 
 
 def excused(kind, cell, excuse):
@@ -194,11 +203,12 @@ def main(argv):
     if argv[:1] == ["--self-test"]:
         return self_test()
     if argv[:1] == ["--merge"] and len(argv) == 2:
-        found, _ = check_merge(argv[1])
+        found, _, new = check_merge(argv[1])
         excuse = trailers(git("log", "-1", "--format=%B", argv[1]))
         for kind, cell in found:
             tag = " (excused by trailer)" if excused(kind, cell, excuse) else ""
-            print(f"{kind}: {cell[:100]}{tag}")
+            hint = retitled(cell, new) if kind == "LOST" else ""
+            print(f"{kind}: {cell[:100]}{tag}{hint}")
         return 1 if any(not excused(k, c, excuse) for k, c in found) else 0
 
     problems = []
@@ -226,11 +236,12 @@ def main(argv):
         merges, scope = [], "no git history, so the merge half did not run"
 
     for m in merges:
-        found, result = check_merge(m)
+        found, result, new = check_merge(m)
         for kind, cell in unrepaired(found, result, tree, excuse):
+            hint = retitled(cell, new) if kind == "LOST" else ""
             problems.append(f"merge {m[:9]} {kind}: '{cell[:100]}' -- still so "
                             f"in this tree; restore it, or name it in an "
-                            f"Audit-row-* trailer if the resolution meant it")
+                            f"Audit-row-* trailer if the resolution meant it{hint}")
 
     if problems:
         print("FAIL: the audit-trigger row set is damaged")
