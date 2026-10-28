@@ -120,7 +120,8 @@
 //
 // Emitted today by the environment bounds ONLY (EXEC_ENV_MAX /
 // EXEC_ENV_DATA_MAX, in both the /env projection and the vivarium
-// envp walk). The neighbouring ARGV bounds still answer T_E_INVAL: that
+// envp walk; and the SPAWN_EXT_ENV tail's, which reach the same data bound
+// plus /env's own ENV_VALUE_MAX and ENV_MAX_ENTRIES). The neighbouring ARGV bounds still answer T_E_INVAL: that
 // is a LANDED native ABI (SYS_EXECVE, L-2a) whose error code is its own
 // deliberate decision, reserved to the #142 rollout rather than changed
 // as a side effect of adding envp. The asymmetry is tracked, not

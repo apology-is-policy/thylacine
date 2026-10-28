@@ -35,11 +35,14 @@
 //   - `Stdio::Null`    — NOT IMPLEMENTED at v1 (no kernel /dev/null
 //     analog whose fd we can supply without an extra open).
 //
+// ENVIRONMENT: with no `env`/`env_remove`/`env_clear` the child inherits the
+// caller's /env whole (the kernel's copy at spawn). Any of the three makes the
+// spawn carry the T_SPAWN_EXT_ENV tail (ARCH 9.7): the caller's live /env, read
+// through /proc/<pid>/environ, with the changes applied in call order -- or only
+// the changes after `env_clear` -- becomes the child's whole environment. The
+// caller's own /env never changes.
+//
 // DEFERRED:
-//   - `env` / environment variables: a per-child override would be a
-//     SYS_SPAWN_FULL_ARGV record tail that `ext_flags` announces; none
-//     exists yet, so the environment is inherited wholesale (no
-//     per-Command override).
 //   - Status decoding beyond `success() == (status == 0)` and
 //     `code() == Some(status)`. Signal-terminated processes are
 //     surfaced via t::notes (U-2e); status decode that distinguishes
@@ -48,10 +51,10 @@
 use crate::err::{Error, Result};
 use crate::fs::{File, OpenOptions};
 use crate::handle::{Handle, Rights};
-use crate::io::Write;
+use crate::io::{Read, Write};
 use crate::{
     t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, TSpawnExtCwd,
-    T_SPAWN_ALLOWANCE_SET, T_SPAWN_DEBUG_HELD, T_SPAWN_EXT_CWD,
+    TSpawnExtEnv, T_SPAWN_ALLOWANCE_SET, T_SPAWN_DEBUG_HELD, T_SPAWN_EXT_CWD, T_SPAWN_EXT_ENV,
     T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
     T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
@@ -95,6 +98,56 @@ struct PreparedStdio {
     child_fd: i32,
     keep_through_syscall: Option<File>,
     parent_keeps: Option<File>,
+}
+
+
+// The T_SPAWN_EXT_ENV block for `plan`: NUL-terminated "NAME=VALUE" records.
+// The base is the caller's LIVE /env -- /proc/<pid>/environ renders it in
+// exactly this shape -- unless `env_clear` was called. A key that is empty or holds '='
+// or a NUL, or a value holding a NUL, cannot be encoded and is refused here
+// rather than sent mangled.
+fn env_block(plan: &EnvPlan) -> Result<Vec<u8>> {
+    let mut vars: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    if !plan.clear {
+        let mut f = File::open(&alloc_crate::format!("/proc/{}/environ", crate::identity::pid()))?;
+        let mut live: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = f.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            live.extend_from_slice(&chunk[..n]);
+        }
+        for rec in live.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+            let eq = rec.iter().position(|&b| b == b'=').ok_or(Error::InvalidArgument)?;
+            vars.push((rec[..eq].to_vec(), rec[eq + 1..].to_vec()));
+        }
+    }
+    for (key, val) in &plan.ops {
+        let k = key.as_bytes();
+        if k.is_empty() || k.contains(&b'=') || k.contains(&0) {
+            return Err(Error::InvalidArgument);
+        }
+        let at = vars.iter().position(|(name, _)| name.as_slice() == k);
+        match (val, at) {
+            (Some(v), _) if v.as_bytes().contains(&0) => return Err(Error::InvalidArgument),
+            (Some(v), Some(i)) => vars[i].1 = v.as_bytes().to_vec(),
+            (Some(v), None) => vars.push((k.to_vec(), v.as_bytes().to_vec())),
+            (None, Some(i)) => {
+                vars.remove(i);
+            }
+            (None, None) => {}
+        }
+    }
+    let mut block = Vec::new();
+    for (name, val) in &vars {
+        block.extend_from_slice(name);
+        block.push(b'=');
+        block.extend_from_slice(val);
+        block.push(0);
+    }
+    Ok(block)
 }
 
 fn resolve_stdio(stdio: &mut Stdio, slot_index: u32) -> Result<PreparedStdio> {
@@ -220,6 +273,17 @@ pub struct Command {
     // The cwd the child is born with (the T_SPAWN_EXT_CWD tail); None inherits
     // the caller's.
     cwd: Option<String>,
+    // The child's environment changes (the T_SPAWN_EXT_ENV tail); None inherits
+    // the caller's /env whole.
+    env: Option<EnvPlan>,
+}
+
+// What the caller asked of the child's environment: start from nothing (after
+// `env_clear`) or from the caller's live /env, then apply each (name, value)
+// set -- or (name, None) removal -- in call order.
+struct EnvPlan {
+    clear: bool,
+    ops: Vec<(String, Option<String>)>,
 }
 
 // The record with its cwd tail, laid out as the kernel reads it: the tail at
@@ -230,6 +294,22 @@ struct SpawnRecordCwd {
     cwd:  TSpawnExtCwd,
 }
 const _: () = assert!(core::mem::offset_of!(SpawnRecordCwd, cwd) == 104);
+
+// The record with its environment tail alone, and after the cwd tail (tails
+// follow in bit order).
+#[repr(C)]
+struct SpawnRecordEnv {
+    base: TSpawnArgs,
+    env:  TSpawnExtEnv,
+}
+const _: () = assert!(core::mem::offset_of!(SpawnRecordEnv, env) == 104);
+#[repr(C)]
+struct SpawnRecordCwdEnv {
+    base: TSpawnArgs,
+    cwd:  TSpawnExtCwd,
+    env:  TSpawnExtEnv,
+}
+const _: () = assert!(core::mem::offset_of!(SpawnRecordCwdEnv, env) == 120);
 
 impl Command {
     /// Construct a Command that will spawn the binary at path `name`. The
@@ -252,6 +332,7 @@ impl Command {
             allowance: None, // step 5: inherit the caller's allowance by default
             debug_held: false, // 5f: run from the first instruction, as ever
             cwd: None,       // inherit the caller's working directory
+            env: None,       // inherit the caller's environment
         }
     }
 
@@ -398,6 +479,34 @@ impl Command {
         self
     }
 
+    /// Set `key` to `val` in the child's environment. The caller's own
+    /// environment is untouched. A key that is empty or holds `=` or a NUL, or
+    /// a value holding a NUL, fails `spawn` with `InvalidArgument`; a key `/env`
+    /// refuses (one holding `/`, or 64 bytes or more) fails it in the kernel.
+    pub fn env(&mut self, key: impl Into<String>, val: impl Into<String>) -> &mut Command {
+        self.env_plan().ops.push((key.into(), Some(val.into())));
+        self
+    }
+
+    /// Remove `key` from the child's environment.
+    pub fn env_remove(&mut self, key: impl Into<String>) -> &mut Command {
+        self.env_plan().ops.push((key.into(), None));
+        self
+    }
+
+    /// Give the child none of the caller's variables, nor any set before this
+    /// call: only what `env` sets afterwards.
+    pub fn env_clear(&mut self) -> &mut Command {
+        let plan = self.env_plan();
+        plan.clear = true;
+        plan.ops.clear();
+        self
+    }
+
+    fn env_plan(&mut self) -> &mut EnvPlan {
+        self.env.get_or_insert_with(|| EnvPlan { clear: false, ops: Vec::new() })
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -483,6 +592,20 @@ impl Command {
         };
         let allow_flags = if allow_desc.is_some() { T_SPAWN_ALLOWANCE_SET } else { 0 };
 
+        // The environment block, when the caller changed the environment: owned
+        // here, so alive through the syscall like argv_buf.
+        let env_buf: Option<Vec<u8>> = match &self.env {
+            Some(plan) => Some(env_block(plan)?),
+            None => None,
+        };
+        let mut ext_flags = 0u32;
+        if self.cwd.is_some() {
+            ext_flags |= T_SPAWN_EXT_CWD;
+        }
+        if env_buf.is_some() {
+            ext_flags |= T_SPAWN_EXT_ENV;
+        }
+
         let args_record = TSpawnArgs {
             name_va: self.name.as_ptr() as u64,
             argv_data_va: argv_buf.as_ptr() as u64,
@@ -492,7 +615,7 @@ impl Command {
             argc,
             fd_count: fd_list.len() as u32,
             perm_flags: self.perm_flags as u32,
-            ext_flags: if self.cwd.is_some() { T_SPAWN_EXT_CWD } else { 0 },
+            ext_flags,
             cap_mask: self.cap_mask,
             principal_id: id_pid,
             primary_gid: id_gid,
@@ -516,24 +639,35 @@ impl Command {
         // end). PreparedStdio's keep_through_syscall Files hold any child-end
         // fds alive across the SVC. The kernel copies all data before returning.
         //
-        // With a cwd the record travels with its tail: `record` owns both, and
-        // `dir` (borrowed from self.cwd) outlives the call; the kernel copies
-        // the path before it returns.
-        let rc = match &self.cwd {
-            Some(dir) => {
-                let record = SpawnRecordCwd {
-                    base: args_record,
-                    cwd: TSpawnExtCwd {
-                        cwd_va: dir.as_ptr() as u64,
-                        cwd_len: dir.len() as u32,
-                        cwd_flags: 0,
-                    },
-                };
-                // The pointer is the whole record's, so it covers the tail the
-                // kernel reads past the base.
+        // With a cwd or an environment the record travels with its tails:
+        // `record` owns them, and `dir` (borrowed from self.cwd) and env_buf
+        // outlive the call; the kernel copies both before it returns.
+        let cwd_tail = self.cwd.as_ref().map(|dir| TSpawnExtCwd {
+            cwd_va: dir.as_ptr() as u64,
+            cwd_len: dir.len() as u32,
+            cwd_flags: 0,
+        });
+        let env_tail = env_buf.as_ref().map(|b| TSpawnExtEnv {
+            env_va: if b.is_empty() { 0 } else { b.as_ptr() as u64 },
+            env_len: b.len() as u32,
+            env_flags: 0,
+        });
+        // Each pointer is the whole record's, so it covers the tails the kernel
+        // reads past the base.
+        let rc = match (cwd_tail, env_tail) {
+            (Some(cwd), Some(env)) => {
+                let record = SpawnRecordCwdEnv { base: args_record, cwd, env };
+                unsafe { t_spawn_full_argv(&record as *const SpawnRecordCwdEnv as *const TSpawnArgs) }
+            }
+            (Some(cwd), None) => {
+                let record = SpawnRecordCwd { base: args_record, cwd };
                 unsafe { t_spawn_full_argv(&record as *const SpawnRecordCwd as *const TSpawnArgs) }
             }
-            None => unsafe { t_spawn_full_argv(&args_record as *const _) },
+            (None, Some(env)) => {
+                let record = SpawnRecordEnv { base: args_record, env };
+                unsafe { t_spawn_full_argv(&record as *const SpawnRecordEnv as *const TSpawnArgs) }
+            }
+            (None, None) => unsafe { t_spawn_full_argv(&args_record as *const _) },
         };
         let pid_or_err = Error::from_syscall_return(rc);
 

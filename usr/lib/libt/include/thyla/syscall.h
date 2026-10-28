@@ -411,11 +411,17 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // T_SPAWN_EXT_THREADS: a struct t_sys_spawn_ext_threads sets the child's thread
 // budget (ARCH 7.3.5), after the cwd tail when both are set.
 #define T_SPAWN_EXT_THREADS            (1u << 1)
+// T_SPAWN_EXT_ENV: a struct t_sys_spawn_ext_env names the child's whole
+// environment as NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd
+// and thread tails whose bits are set.
+#define T_SPAWN_EXT_ENV                (1u << 2)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 #define T_SYS_SPAWN_ARGV_MAX        512u
 #define T_SYS_SPAWN_ARGV_DATA_MAX   65536u
+// Mirror SYS_SPAWN_ENV_DATA_MAX: the T_SPAWN_EXT_ENV tail's records, in bytes.
+#define T_SYS_SPAWN_ENV_DATA_MAX    32768u
 
 // SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
 // in kernel/include/thylacine/syscall.h. The 80-byte ABI shape is pinned
@@ -538,6 +544,22 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_threads, thread_budget)
                "t_sys_spawn_ext_threads.thread_budget at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_threads, threads_flags) == 4,
                "t_sys_spawn_ext_threads.threads_flags at ABI offset 4");
+
+// The T_SPAWN_EXT_ENV tail (mirror struct sys_spawn_ext_env;
+// tools/check-spawn-args-mirrors.py compares the two).
+struct t_sys_spawn_ext_env {
+    unsigned long  env_va;           // 0  — the records; may be 0 when env_len is 0
+    unsigned int   env_len;          // 8  — 0..T_SYS_SPAWN_ENV_DATA_MAX incl. the NULs
+    unsigned int   env_flags;        // 12 — must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_env) == 16,
+               "t_sys_spawn_ext_env must be 16 bytes (the kernel's tail)");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_va) == 0,
+               "t_sys_spawn_ext_env.env_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_len) == 8,
+               "t_sys_spawn_ext_env.env_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_flags) == 12,
+               "t_sys_spawn_ext_env.env_flags at ABI offset 12");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

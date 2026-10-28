@@ -3034,7 +3034,19 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
 // PROC_FLAG_MAY_RAISE_THREAD_BUDGET; over proc_thread_budget_hard_max() is
 // refused (-1), never clamped.
 #define SPAWN_EXT_THREADS            (1u << 1)
-#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS)
+// SPAWN_EXT_ENV: a struct sys_spawn_ext_env names the child's WHOLE environment
+// (ARCH 9.7; dec-2026-10-28-spawn-env): env_len bytes of NUL-terminated
+// "NAME=VALUE" records at env_va, the argv packing. The child's /env holds
+// exactly those records, in place of the copy of the spawner's; a later record
+// for a name replaces an earlier one, and env_len 0 is an empty environment.
+// The spawner's kernel builds the child's group before any child exists, so a
+// refusal makes no child: -T_E_2BIG for env_len past SYS_SPAWN_ENV_DATA_MAX, a
+// value past ENV_VALUE_MAX or more than ENV_MAX_ENTRIES names; -T_E_INVAL for an
+// unterminated block, a record with no '=', or a name /env refuses (empty, at
+// least ENV_NAME_MAX bytes, or holding a '/'); -1 for env_flags != 0. Ungated:
+// the spawner could write the same variables into its own /env before spawning.
+#define SPAWN_EXT_ENV                (1u << 2)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -3465,6 +3477,12 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // (EXEC_USER_STACK_SIZE; 1 MiB until B-1b) with all but that to spare.
 #define SYS_SPAWN_ARGV_DATA_MAX  65536u
 
+// Maximum bytes of the SPAWN_EXT_ENV tail's records. It is the bound exec holds
+// a child's environment to when it projects /env onto the new image's stack
+// (EXEC_ENV_DATA_MAX; syscall.c asserts the two equal), so the tail admits no
+// environment the child could not be exec'd with.
+#define SYS_SPAWN_ENV_DATA_MAX   32768u
+
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the
 // Plan 9 + 9P2000.L practical cap for a single path element; bounds the
 // kernel-stack scratch + the per-byte uaccess loop. 255 = the Linux
@@ -3889,6 +3907,25 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, thread_budget) =
 _Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, threads_flags) == 4,
                "sys_spawn_ext_threads.threads_flags at ABI offset 4");
 
+// The SPAWN_EXT_ENV tail, after the cwd and thread tails whose bits are set, else
+// directly after the record. Every tail before it is a multiple of 8 bytes, so
+// env_va is always 8-aligned.
+struct sys_spawn_ext_env {
+    u64 env_va;         // user-VA of the records; may be 0 when env_len is 0
+    u32 env_len;        // 0..SYS_SPAWN_ENV_DATA_MAX bytes incl. the NULs; past it -> T_E_2BIG
+    u32 env_flags;      // must be 0 -> else -1, the unknown-bits rule
+};
+_Static_assert(sizeof(struct sys_spawn_ext_env) == 16,
+               "struct sys_spawn_ext_env is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "16 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_va) == 0,
+               "sys_spawn_ext_env.env_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_len) == 8,
+               "sys_spawn_ext_env.env_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_flags) == 12,
+               "sys_spawn_ext_env.env_flags at ABI offset 12");
+
 struct exception_context;
 
 // Dispatch entry called from arch/arm64/exception.c::exception_sync_lower_el
@@ -4031,6 +4068,17 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
         const char *cwd, u32 cwd_len, u32 req_threads);
+int sys_spawn_full_argv_env_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags,
+        const char *cwd, u32 cwd_len, u32 req_threads,
+        bool env_set, const char *env_block, u32 env_len);
 int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,

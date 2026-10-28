@@ -67,6 +67,31 @@ fn run_tool(name: &str, args: &[&str], input: &[u8]) -> Option<Ran> {
     Some(converse(&mut child, input, LEAVE_BOUND))
 }
 
+/// `run_tool` with the child's environment changed by `edit` (the
+/// T_SPAWN_EXT_ENV tail); the caller's own /env is untouched.
+fn run_tool_env(name: &str, args: &[&str], edit: impl Fn(&mut Command)) -> Option<Ran> {
+    let mut cmd = Command::new(name);
+    for a in args {
+        cmd.arg(*a);
+    }
+    edit(&mut cmd);
+    cmd.stdin(Stdio::Piped).stdout(Stdio::Piped).stderr(Stdio::Piped);
+    let mut child = spawn(name, &mut cmd)?;
+    Some(converse(&mut child, b"", LEAVE_BOUND))
+}
+
+/// Does `ls --beacon=always /bin/version`, its environment changed by `edit`,
+/// emit the rich object frame? Which tier a coreutil emits is the tier its own
+/// $BEACON names, so the answer says whether BEACON=rich reached the child.
+/// None when the run failed.
+fn rich_with(edit: impl Fn(&mut Command)) -> Option<bool> {
+    const NEEDLE: &[u8] = b"\x1b]1936;v1;obj;type=path;ref=/bin/version";
+    match run_tool_env("ls", &["--beacon=always", "/bin/version"], edit) {
+        Some(Ran { code: Some(0), out, .. }) => Some(out.windows(NEEDLE.len()).any(|w| w == NEEDLE)),
+        _ => None,
+    }
+}
+
 /// Spawn `cmd`, first saying why when it cannot be: the check that wanted it
 /// then fails as "spawn failed".
 fn spawn(name: &str, cmd: &mut Command) -> Option<Child> {
@@ -769,8 +794,43 @@ pub extern "C" fn rs_main() -> i64 {
     // advertised tier; the pipe dc no longer gates). Asserts: the frames are
     // ON the wire, and stripping them yields the plain emission byte-exactly
     // (the P1 identity, in-guest).
+    // Command::env carries a variable to the child alone (the spawn's
+    // environment tail, ARCH 9.7). Before /env/BEACON is written: the control
+    // (no change) is plain, BEACON=rich through env() is rich, and our own /env
+    // still has no BEACON afterwards.
+    let plain = rich_with(|_| {});
+    let given = rich_with(|cmd| {
+        cmd.env("BEACON", "rich");
+    });
+    let leaked = libthyla_rs::env::var("BEACON");
+    match (plain, given, &leaked) {
+        (Some(false), Some(true), None) => c.pass("env tail: BEACON=rich reaches only the child"),
+        _ => c.fail(
+            "env tail: BEACON=rich reaches only the child",
+            &format!("control rich={:?} with-env rich={:?} ours={:?}", plain, given, leaked),
+        ),
+    }
+
     if write_env_beacon(b"rich") {
         c.pass("env BEACON=rich exported");
+        // Now that our /env says rich: inherited it is rich, and env_remove and
+        // env_clear each keep it from the child.
+        let inherited = rich_with(|_| {});
+        let removed = rich_with(|cmd| {
+            cmd.env_remove("BEACON");
+        });
+        let cleared = rich_with(|cmd| {
+            cmd.env_clear();
+        });
+        match (inherited, removed, cleared) {
+            (Some(true), Some(false), Some(false)) => {
+                c.pass("env tail: env_remove and env_clear withhold BEACON")
+            }
+            _ => c.fail(
+                "env tail: env_remove and env_clear withhold BEACON",
+                &format!("inherited={:?} removed={:?} cleared={:?}", inherited, removed, cleared),
+            ),
+        }
         beacon_rich_vs_plain(
             &mut c,
             "ls rich strips to plain",

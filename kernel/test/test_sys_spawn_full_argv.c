@@ -238,6 +238,9 @@ void test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits(void) {
     req.ext_flags = SPAWN_EXT_THREADS;
     TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), 0,
         "SPAWN_EXT_THREADS passes validate too");
+    req.ext_flags = SPAWN_EXT_ENV;
+    TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), 0,
+        "SPAWN_EXT_ENV passes validate too");
     // The lowest bit no tail claims, derived so a new tail cannot make it known.
     const u32 unknown = ~(u32)SPAWN_EXT_FLAGS_ALL & ((u32)SPAWN_EXT_FLAGS_ALL + 1u);
     req.ext_flags = SPAWN_EXT_FLAGS_ALL | unknown;

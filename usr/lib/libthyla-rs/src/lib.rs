@@ -474,6 +474,8 @@ pub const T_S_IFLNK: u32              = 0o120000;
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 pub const T_SYS_SPAWN_ARGV_MAX: usize        = 512;
 pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 65536;
+// Mirror SYS_SPAWN_ENV_DATA_MAX: the T_SPAWN_EXT_ENV tail's records, in bytes.
+pub const T_SYS_SPAWN_ENV_DATA_MAX: usize    = 32768;
 
 // Maximum binary name length (mirror SYS_SPAWN_NAME_MAX).
 pub const T_SPAWN_NAME_MAX: usize    = 256;
@@ -556,6 +558,10 @@ pub const T_SPAWN_EXT_CWD: u32 = 1 << 0;
 // T_SPAWN_EXT_THREADS: a TSpawnExtThreads sets the child's thread budget (ARCH
 // 7.3.5), after the cwd tail when both are set.
 pub const T_SPAWN_EXT_THREADS: u32 = 1 << 1;
+// T_SPAWN_EXT_ENV: a TSpawnExtEnv names the child's whole environment as
+// NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd and thread tails
+// whose bits are set.
+pub const T_SPAWN_EXT_ENV: u32 = 1 << 2;
 
 /// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
 /// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
@@ -578,6 +584,18 @@ pub struct TSpawnExtThreads {
 }
 const _: () = assert!(core::mem::size_of::<TSpawnExtThreads>() == 8);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtThreads, threads_flags) == 4);
+
+/// The T_SPAWN_EXT_ENV tail (mirror `struct sys_spawn_ext_env`;
+/// tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtEnv {
+    pub env_va:    u64, // 0 — the records; may be 0 when env_len is 0
+    pub env_len:   u32, // 8 — 0..T_SYS_SPAWN_ENV_DATA_MAX incl. the NULs
+    pub env_flags: u32, // 12 — must be 0
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtEnv>() == 16);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_len) == 8);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_flags) == 12);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;

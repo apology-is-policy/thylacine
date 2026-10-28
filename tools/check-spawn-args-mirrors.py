@@ -77,6 +77,8 @@ EXT_TAILS = [
                            ("libthyla-rs", "TSpawnExtCwd", "rust")]),
     ("sys_spawn_ext_threads", [("libt", "t_sys_spawn_ext_threads", "c"),
                                ("libthyla-rs", "TSpawnExtThreads", "rust")]),
+    ("sys_spawn_ext_env", [("libt", "t_sys_spawn_ext_env", "c"),
+                           ("libthyla-rs", "TSpawnExtEnv", "rust")]),
 ]
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
