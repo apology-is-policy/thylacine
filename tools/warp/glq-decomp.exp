@@ -217,8 +217,9 @@ lc_login michael correct-horse-battery-staple-v1
 set qpid [expr {[info exists ::lc_vm_pid] ? $::lc_vm_pid : [exp_pid]}]
 
 # rp6: the FORWARDING unpace wrapper (the launcher's #197/#199 shape --
-# signal forward + WNOHANG/usleep reap -- grafted onto rp5's /env write).
-lc_send "echo 'int open(const char*,int,int);long write(int,const void*,long);int close(int);long strlen(const char*);' > rp6.c"
+# signal forward + WNOHANG/usleep reap -- grafted onto rp5's setenv; it
+# spawns with environ, as a NULL envp is an empty environment since 0051).
+lc_send "echo 'long write(int,const void*,long);' > rp6.c"
 sleep 1
 lc_send "echo 'int posix_spawn(int*,const char*,void*,void*,char*const*,char*const*);int waitpid(int,int*,int);' >> rp6.c"
 sleep 1
@@ -226,11 +227,11 @@ lc_send "echo 'int kill(int,int);int usleep(unsigned);typedef void(*sh)(int);sh 
 sleep 1
 lc_send "echo 'int gp=0;void fwd(int s){if(gp>0)kill(gp,s);}' >> rp6.c"
 sleep 1
-lc_send "echo 'int wf(const char*p,const char*s){int f=open(p,65,438);if(f<0)return 1;write(f,s,strlen(s));close(f);return 0;}' >> rp6.c"
+lc_send "echo 'int setenv(const char*,const char*,int);extern char**environ;int wf(const char*n,const char*s){return setenv(n,s,1);}' >> rp6.c"
 sleep 1
-lc_send "echo 'int main(int c,char**v){if(wf(\"/env/SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);' >> rp6.c"
+lc_send "echo 'int main(int c,char**v){if(wf(\"SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);' >> rp6.c"
 sleep 1
-lc_send "echo 'signal(2,fwd);signal(15,fwd);int p=0;if(posix_spawn(&p,v\[1\],0,0,v+1,0))return 9;gp=p;' >> rp6.c"
+lc_send "echo 'signal(2,fwd);signal(15,fwd);int p=0;if(posix_spawn(&p,v\[1\],0,0,v+1,environ))return 9;gp=p;' >> rp6.c"
 sleep 1
 lc_send "echo 'for(;;){int st=0;int r=waitpid(p,&st,1);if(r==p)break;if(r<0)return 1;usleep(50000);}return 0;}' >> rp6.c"
 sleep 1
@@ -252,8 +253,8 @@ proc run_leg {leg zoom} {
     lc_send "./rp6 /bin/tyr-glquake -window -width $DW -height $DH -nosound +timedemo demo1"
     set timeout 60
     expect {
-        "nopace set" { lc_step "$leg: rp6 env write confirmed" }
-        timeout      { lc_fail "$leg: rp6 never confirmed the /env write (60s)" }
+        "nopace set" { lc_step "$leg: rp6 nopace setenv confirmed" }
+        timeout      { lc_fail "$leg: rp6 never confirmed the nopace setenv (60s)" }
     }
     # The window's arrival splits the layout: two visible leaves.
     set timeout 900

@@ -91,7 +91,8 @@ lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
 # rp7: the forwarding unpace wrapper (rp6) + two probe affordances. `-n`
-# gates the nopace /env write so BOTH legs ride the same wrapper, and
+# gates the nopace setenv so BOTH legs ride the same wrapper (both spawn
+# with environ: a NULL envp is an empty environment since 0051), and
 # the spawn prints the pid ANCHOR the autopsy sweeps from. 45/110 are
 # '-'/'n' -- char literals cannot survive the single-quoted echo
 # transport.
@@ -103,7 +104,7 @@ lc_send "echo 'int kill(int,int);int usleep(unsigned);int getpid(void);int dprin
 sleep 1
 lc_send "echo 'typedef void(*sh)(int);sh signal(int,sh);int gp=0;void fwd(int s){if(gp>0)kill(gp,s);}' >> rp7.c"
 sleep 1
-lc_send "echo 'int wf(const char*p,const char*s){int f=open(p,65,438);if(f<0)return 1;write(f,s,strlen(s));close(f);return 0;}' >> rp7.c"
+lc_send "echo 'int setenv(const char*,const char*,int);extern char**environ;int wf(const char*n,const char*s){return setenv(n,s,1);}' >> rp7.c"
 sleep 1
 lc_send "echo 'long topen(long d,const char*n,unsigned long l,unsigned long m){register long x0 __asm__(\"x0\")=d;' >> rp7.c"
 sleep 1
@@ -123,9 +124,9 @@ lc_send "echo 'write(1,\"warpctl-begin\\n\",14);write(1,b,n);write(1,\"warpctl-e
 sleep 1
 lc_send "echo 'int i=1;if(c>1&&v\[1\]\[0\]==45&&v\[1\]\[1\]==110){' >> rp7.c"
 sleep 1
-lc_send "echo 'if(wf(\"/env/SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);i=2;}' >> rp7.c"
+lc_send "echo 'if(wf(\"SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);i=2;}' >> rp7.c"
 sleep 1
-lc_send "echo 'signal(2,fwd);signal(15,fwd);int p=0;if(posix_spawn(&p,v\[i\],0,0,v+i,0))return 9;gp=p;' >> rp7.c"
+lc_send "echo 'signal(2,fwd);signal(15,fwd);int p=0;if(posix_spawn(&p,v\[i\],0,0,v+i,environ))return 9;gp=p;' >> rp7.c"
 sleep 1
 lc_send "echo 'dprintf(1,\"rp7 pid=%d child=%d\\n\",getpid(),p);' >> rp7.c"
 sleep 1
@@ -216,8 +217,8 @@ proc run_probe_leg {tag paced} {
         lc_send "./rp7 -n /bin/tyr-glquake -window -width $DW -height $DH -nosound +timedemo demo1 &"
         set timeout 60
         expect {
-            "nopace set" { lc_step "$tag: rp7 env write confirmed" }
-            timeout      { lc_fail "$tag: rp7 never confirmed the /env write" }
+            "nopace set" { lc_step "$tag: rp7 nopace setenv confirmed" }
+            timeout      { lc_fail "$tag: rp7 never confirmed the nopace setenv" }
         }
     }
     set timeout 60

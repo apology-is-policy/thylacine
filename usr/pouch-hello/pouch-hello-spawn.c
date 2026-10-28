@@ -52,15 +52,16 @@ static int env_leg(int ok, const char *what, int got, int rc) {
 }
 
 // Spawn self in `mode` with `envp`; the child's exit byte, or -1 with *rc set
-// when posix_spawn refused, or -2 when the reap went wrong.
+// when posix_spawn refused, or -2 when the reap went wrong. `any` reaps through
+// waitpid(-1), so the closing ECHILD check has a twin that matched a child.
 static int env_child(const char *self, const char *mode, char *const envp[],
-                     int *rc) {
+                     int *rc, int any) {
 	char *av[] = { (char *)self, (char *)mode, NULL };
 	pid_t pid = -1;
 	*rc = posix_spawn(&pid, self, NULL, NULL, av, envp);
 	if (*rc != 0) return -1;
 	int st = 0;
-	if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) return -2;
+	if (waitpid(any ? -1 : pid, &st, 0) != pid || !WIFEXITED(st)) return -2;
 	return WEXITSTATUS(st);
 }
 
@@ -188,19 +189,19 @@ int main(int argc, char **argv) {
 	int erc = 0, bad = 0;
 	char *blk[] = { (char *)"PHS_MARK=rich", (char *)"PHS_DUP=first",
 	                (char *)"PHS_DUP=last", NULL };
-	int got = env_child(self, "envchk", blk, &erc);
+	int got = env_child(self, "envchk", blk, &erc, 1);
 	bad |= env_leg(got == (ENV_MARK | ENV_DUP), "env block (want 3)", got, erc);
 
 	// Two setenvs: a child that inherited /env instead would hold pcount + 1
 	// (PHS_PARENT), so only the sent environ counts pcount + 2.
 	if (setenv("PHS_SET", "yes", 1) != 0 || setenv("PHS_SET2", "yes", 1) != 0)
 		return fail("setenv", 0);
-	got = env_child(self, "envchk", environ, &erc);
+	got = env_child(self, "envchk", environ, &erc, 0);
 	bad |= env_leg(got == ENV_SET, "env environ (want 8)", got, erc);
-	got = env_child(self, "envcount", environ, &erc);
+	got = env_child(self, "envcount", environ, &erc, 0);
 	bad |= env_leg(got == pcount + 2, "env environ count", got, erc);
 
-	got = env_child(self, "envcount", NULL, &erc);
+	got = env_child(self, "envcount", NULL, &erc, 0);
 	bad |= env_leg(got == 0, "env NULL envp not empty", got, erc);
 
 	// Refusals: each makes no child and names its errno. The kernel refuses
@@ -221,7 +222,7 @@ int main(int argc, char **argv) {
 		{ "env value past 4096", bigv, E2BIG }, { "env block past 32 KiB", hugev, E2BIG },
 	};
 	for (unsigned i = 0; i < sizeof refuse / sizeof refuse[0]; i++) {
-		got = env_child(self, "envcount", refuse[i].envp, &erc);
+		got = env_child(self, "envcount", refuse[i].envp, &erc, 0);
 		bad |= env_leg(got == -1 && erc == refuse[i].want, refuse[i].what, got, erc);
 	}
 	int stz = 0;

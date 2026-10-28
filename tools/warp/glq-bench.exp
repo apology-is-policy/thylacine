@@ -2,7 +2,7 @@
 # Warp-1 llvmpipe baseline on the GL host (GPU-DESIGN.md section 12; the
 # measurement caveat in GPU-HOST-SETUP.md section 0.1). One boot, three
 # timedemos on the SAME binaries: paced (input-quiet is valid post-#164),
-# then unpaced x2 via the rp5 /env wrapper (#151: no interactive export).
+# then unpaced x2 via the rp5 env wrapper (#151: no interactive export).
 # Every figure this prints is a number FOR THIS HOST -- quote it with the
 # host attached, never against another host's anchor.
 #
@@ -103,17 +103,18 @@ proc run_demo {tag cmd} {
 # Paced first: the shipped-config number (the 60 Hz clock is the cap).
 run_demo paced "/clade/bin/tyr-glquake -window -nosound +timedemo demo1"
 
-# The rp5 /env wrapper (the glq-165/#159 pattern verbatim): compiled
-# in-guest because ut has no export (#151).
-lc_send "echo 'int open(const char*,int,int);long write(int,const void*,long);int close(int);long strlen(const char*);' > rp5.c"
+# The rp5 env wrapper (the glq-165/#159 pattern): compiled in-guest because
+# ut has no export (#151). It setenvs and spawns with environ -- a NULL envp
+# is an empty environment since pouch 0051, so a /env write would not carry.
+lc_send "echo 'long write(int,const void*,long);' > rp5.c"
 sleep 1
 lc_send "echo 'int posix_spawn(int*,const char*,void*,void*,char*const*,char*const*);int waitpid(int,int*,int);' >> rp5.c"
 sleep 1
-lc_send "echo 'int wf(const char*p,const char*s){int f=open(p,65,438);if(f<0)return 1;write(f,s,strlen(s));close(f);return 0;}' >> rp5.c"
+lc_send "echo 'int setenv(const char*,const char*,int);extern char**environ;int wf(const char*n,const char*s){return setenv(n,s,1);}' >> rp5.c"
 sleep 1
-lc_send "echo 'int main(int c,char**v){if(wf(\"/env/SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);' >> rp5.c"
+lc_send "echo 'int main(int c,char**v){if(wf(\"SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);' >> rp5.c"
 sleep 1
-lc_send "echo 'int p=0;if(posix_spawn(&p,v\[1\],0,0,v+1,0))return 9;int s=0;waitpid(p,&s,0);return 0;}' >> rp5.c"
+lc_send "echo 'int p=0;if(posix_spawn(&p,v\[1\],0,0,v+1,environ))return 9;int s=0;waitpid(p,&s,0);return 0;}' >> rp5.c"
 sleep 1
 # In-guest clang under TCG is slow; the sentinel echoes only once the
 # prompt returns (the glq-165 finish pattern), bounded at 600 s.

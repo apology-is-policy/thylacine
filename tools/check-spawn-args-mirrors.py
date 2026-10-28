@@ -85,6 +85,17 @@ EXT_TAILS = [
 # Tail mirrors that live outside the MIRRORS files: pouch's env tail comes in its
 # own patch, after the one that mirrors the record.
 TAIL_SOURCES = {"pouch-env": "usr/lib/pouch/patches/0051-pouch-spawn-env.patch"}
+# The files above are read as patches, not as the series' result, so a later
+# patch that edits a pouch mirror would go unseen; every other patch in the
+# series must leave them alone.
+POUCH_SERIES = "usr/lib/pouch/patches"
+POUCH_MIRROR_PATCHES = {"0026-pouch-process.patch", "0051-pouch-spawn-env.patch"}
+POUCH_MIRROR_NAME = re.compile(
+    r"^[+-](?![+-]{2}).*(\bstruct\s+pouch_spawn_(?:args|ext_env|env_rec)\b|\bPOUCH_SPAWN_EXT_\w+)", re.M)
+# posix_spawn returns a refused tail's -T_E value as this libc's errno, which
+# holds only while the kernel's values are the Linux ones (docs/ERRORS.md).
+KERNEL_ERRNO = "kernel/include/thylacine/errno.h"
+POUCH_ERRNOS = {"T_E_2BIG": 7, "T_E_NOMEM": 12, "T_E_FAULT": 14, "T_E_INVAL": 22}
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
 C_SIZES = {
@@ -430,6 +441,14 @@ def check(texts, go_text):
                  f"not hold to the kernel -- list it beside its kernel tail"
                  for t in GO_TAIL.findall(go_text) if t not in listed]
     errs += ext_flag_errs(texts)
+    for m in POUCH_MIRROR_NAME.finditer(texts["pouch-series"]):
+        errs.append(f"pouch series: a patch outside {sorted(POUCH_MIRROR_PATCHES)} edits "
+                    f"a spawn mirror: {m.group(0).strip()[:80]}")
+    for name, want in POUCH_ERRNOS.items():
+        m = re.search(r"^#define\s+%s\s+(\d+)\b" % name, texts["kernel-errno"], re.M)
+        if not m or int(m.group(1)) != want:
+            errs.append(f"kernel errno: {name} is {m.group(1) if m else 'undefined'}, but "
+                        f"pouch's posix_spawn returns it as the Linux errno {want}")
     for kstruct, mirrors in EXT_TAILS:
         ktail = kernel_layout(texts["kernel"], kstruct)
         errs += u64_class_errs(texts["kernel"], kstruct)
@@ -586,6 +605,15 @@ def self_test(texts, go_text):
                             r"\g<1>3", texts["pouch-env"], count=1, flags=re.M)
     if t["pouch-env"] == texts["pouch-env"] or not reported(t, go_text, "ext flag member ENV"):
         missed.append("a pouch ext flag member at the wrong bit")
+    t = dict(texts)
+    t["pouch-series"] = texts["pouch-series"] + "\n-#define POUCH_SPAWN_EXT_ENV (1u << 2)\n+#define POUCH_SPAWN_EXT_ENV (1u << 3)\n"
+    if not reported(t, go_text, "edits a spawn mirror"):
+        missed.append("a later pouch patch that edits a spawn mirror")
+    t = dict(texts)
+    t["kernel-errno"] = re.sub(r"^(#define\s+T_E_2BIG\s+)7\b", r"\g<1>8", texts["kernel-errno"],
+                               count=1, flags=re.M)
+    if t["kernel-errno"] == texts["kernel-errno"] or not reported(t, go_text, "T_E_2BIG is 8"):
+        missed.append("a kernel T_E value pouch returns as a Linux errno, renumbered")
     first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
                     if n.endswith("_va"))
     t = dict(texts)
@@ -601,6 +629,12 @@ def main():
         texts[label] = (ROOT / rel).read_text()
     for label, rel in TAIL_SOURCES.items():
         texts[label] = (ROOT / rel).read_text()
+    series_dir = ROOT / POUCH_SERIES
+    names = [ln.strip() for ln in (series_dir / "series").read_text().splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    texts["pouch-series"] = "\n".join((series_dir / n).read_text() for n in names
+                                       if n not in POUCH_MIRROR_PATCHES)
+    texts["kernel-errno"] = (ROOT / KERNEL_ERRNO).read_text()
     gofork = pathlib.Path(os.environ.get(
         "GOFORK", str(pathlib.Path.home() / "projects" / "go-thylacine")))
     go_path = gofork / GO_REL
@@ -635,7 +669,8 @@ def main():
           f"u64 classified; "
           f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}; "
           f"tails: {tails}; ext flag members + mask ok (libt, libthyla-rs), "
-          f"bits ok ({', '.join(EXT_FLAG_SUBSETS)})")
+          f"bits ok ({', '.join(EXT_FLAG_SUBSETS)}); no other pouch patch edits a "
+          f"mirror; kernel T_E values pouch returns ok")
     return 0
 
 

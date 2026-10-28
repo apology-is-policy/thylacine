@@ -237,8 +237,9 @@ has nothing checking it.
 **`_pad_envp` is `ext_flags` (2026-10-06).** The record's word at offset 44
 announces tails after the record ([[sub-kernel-syscall-abi]]); the patch renames
 it. Since 0051 pouch sets one bit in it, `SPAWN_EXT_ENV`, and
-`tools/check-spawn-args-mirrors.py` reads the tail struct out of 0051 and holds
-`POUCH_SPAWN_EXT_ENV` to the kernel's bit. `posix_spawn_file_actions_addchdir`
+`tools/check-spawn-args-mirrors.py` reads the tail struct out of 0051, holds
+`POUCH_SPAWN_EXT_ENV` to the kernel's bit, and fails if any other patch in the
+series edits a pouch spawn mirror (it reads patches, not the series' result). `posix_spawn_file_actions_addchdir`
 is still not wired to the cwd tail.
 
 ### The asserts all held and the binaries were wrong anyway
@@ -297,9 +298,11 @@ A refused env tail returns the kernel's errno as it is: `EINVAL` for a record
 with no `=`, an empty name, a name of 64 bytes or more, or a `/` in a name;
 `E2BIG` for a value past 4096 bytes or a 65th name; `EFAULT`; `ENOMEM`. Pouch
 refuses a block past 32 KiB with `E2BIG` before the call. These are the
-kernel's negative T_E values, and a `_Static_assert` pins `E2BIG`, `ENOMEM`,
-`EFAULT` and `EINVAL` to them, so only the record's flat `-1` still collapses
-to `ENOENT`;
+kernel's negative T_E values, which docs/ERRORS.md defines as the Linux
+errnos: a `_Static_assert` pins this libc's `E2BIG`, `ENOMEM`, `EFAULT` and
+`EINVAL` to the Linux numbers, and `tools/check-spawn-args-mirrors.py` holds
+the kernel's four `T_E_*` to the same ones. Only the record's flat `-1` still
+collapses to `ENOENT`;
 `ECHILD` for every wait failure. A failed assertion or `abort()` is not an
 error return: the program dies of `snare:abort` and its parent reads
 `SIGABRT`. `MAP_FAILED` + `ENOSYS` for the refused

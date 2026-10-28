@@ -2716,3 +2716,35 @@ dec-2026-10-28-spawn-env, the audit row "The spawn environment tail").
 - **Enqueued / next.** env-b (the Go fork sends `ProcAttr.Env`; after main, b3 and aux-3 carry this kernel half);
   env-c (pouch `posix_spawn` sends `envp`; closes seam-pouch-spawn-envp); the telemetry boot-confirm (12:01Z);
   OPEN-BUGS 15:19Z P3 (the sidecar is not detached on thylacine).
+
+## env-c: pouch's posix_spawn sends envp (SPAWN_EXT_ENV) -- 2026-10-28
+
+Closes seam-pouch-spawn-envp, pouch's third of OPEN-BUGS 15:19Z (P1). The kernel and libthyla-rs halves are env-a above;
+the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e; patch 0051.
+
+- **The semantic.** `envp` is the child's whole environment: 0051 packs it the way argv is packed and always announces
+  the tail (`ext_flags = POUCH_SPAWN_EXT_ENV`, a `struct pouch_spawn_ext_env` at record+104). A later record for a name
+  replaces an earlier one; nothing of the parent's `/env` carries over; a NULL `envp` is empty (Linux, and Plan 9 APE's
+  `execve`: RFCENVG, then `/env` written only `if(envp)`). A block past 32 KiB is `E2BIG` before the call; the kernel's
+  refusals (`-T_E_INVAL`/`2BIG`/`FAULT`/`NOMEM`) return as their errno; the record's flat -1 stays `ENOENT`.
+- **The one caller the semantic broke.** tyr-glquake's launcher wrote `/env/GALLIUM_DRIVER` and spawned with a NULL
+  envp, which worked only while pouch ignored envp; it now `setenv`s the driver and passes `environ`.
+- **Witness.** pouch-hello-spawn test 3 (boot-fatal through joey): `PHS_PARENT` is written into the parent's `/env` after
+  its crt read it, so only an inheriting child holds it. Legs: a block with a repeated name; `environ` after two
+  `setenv`s (exact count); a NULL envp (count 0); four refusals with their errnos and `waitpid(-1)` ECHILD after them,
+  its positive twin the block leg's `waitpid(-1)` reap. Every leg reports before the run fails.
+- **Checker.** `check-spawn-args-mirrors.py` reads pouch's tail struct from 0051 (`TAIL_SOURCES`), holds
+  `POUCH_SPAWN_EXT_ENV` to the kernel's bit, fails if any other series patch edits a pouch spawn mirror, and holds the
+  kernel's `T_E_2BIG`/`NOMEM`/`FAULT`/`INVAL` to 7/12/14/22, the musl values 0051's `_Static_assert` pins.
+- **Verification.** Mac lease 22:11-22:41Z (logs `work/oct28-envc/`): suite 2120/2120 on a2693024e with
+  `pouch-hello-spawn: ... env block/environ/empty ok, 4 refusals -- ALL SPAWN TESTS PASS`; no tail -> seven reds
+  (block and environ read 4, count, NULL, the three kernel refusals), the 32 KiB pre-check green; refusals collapsed to
+  ENOENT plus a NULL envp inheriting -> the three refusals errno=2 and the NULL leg. After the fixes, suite 2120/2120.
+  No SMP gate: no kernel change (the path was gated 30/30 at env-a); the next runs with env-b.
+- **The Warp unpace wrappers.** glq-bench's rp5, glq-decomp's rp6 and glq-wedge-probe's rp7 (C typed into the guest)
+  wrote `/env/SDL_THYLACINE_NOPACE` and spawned with a NULL envp; they now `setenv` and pass `environ`. Compiled and
+  symbol-resolved against pouch's libc on the host; their first run needs a `/clade` bake (enqueued).
+- **Audit.** Fable 5.1 round 1 (start == end), 0/0/0/3, clean; all three fixed: the ECHILD leg's positive control (F1);
+  the checker's series scan (F2); the errno wording and the kernel's T_E values held by the checker (F3).
+- **Enqueued / next.** env-b; the glquake virgl run on thyla-pi (`GALLIUM_DRIVER` reaching the game end to end); the
+  wrappers' first run on a `/clade` bake; OPEN-BUGS 21:09Z P3s (quarry's driver via `Command::env`; the stale pouch patches README).

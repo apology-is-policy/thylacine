@@ -22,6 +22,82 @@ needed the operator.
 
 
 ---
+## 2026-10-28 -- pouch's posix_spawn stops dropping envp (corona)
+
+**What it closes.** seam-pouch-spawn-envp, pouch's third of OPEN-BUGS
+15:19Z: patch 0026's `posix_spawn` did `(void)envp`, so a ported program
+that spawned a child with a different environment got its own instead, and
+a `setenv` never reached a child. env-a (2805c8d4f) gave the spawn record an
+environment tail; env-c is pouch's sender. Code a2693024e, patch 0051.
+
+**The semantic, and a heritage claim read wrong first.** `envp` becomes the
+child's whole environment; the open question was a NULL `envp`. I first
+wrote that Plan 9's APE leaves `/env` alone on NULL, so a NULL would inherit.
+Its `execve` source says otherwise: `_RFORK(RFCENVG)`, then `/env` is written
+only `if(envp)` -- a NULL envp is an EMPTY environment, as on Linux. **A
+heritage claim is read from the artifact, not recalled.** Pouch follows both.
+
+**A new semantic voids a caller that named the old one.** Grepping every
+in-tree `posix_spawn` caller's envp before fixing the meaning: all passed
+`environ` except tyr-glquake's launcher, which wrote `/env/GALLIUM_DRIVER`
+and spawned with NULL -- correct only because pouch ignored envp. Under the
+new semantic its game would have started with an empty environment and lost
+the virgl preference silently. It now `setenv`s the driver and passes
+`environ` (`tyr-glquake-launcher.c:73-75`, `:106`). Pouch's `popen` and
+`system` already pass `__environ`.
+
+**The witness, and three ways it first could not fail.** pouch-hello-spawn
+test 3 writes `PHS_PARENT` into the parent's `/env` after its crt read
+`/env`, so only an inheriting child can hold it; legs: a block with a
+repeated name, the caller's `environ` after `setenv`, a NULL envp, four
+refusals and no child left. Caught before the build: (1) the count leg read
+`pcount+1` under inheritance too, so it could not see the no-tail sabotage --
+two `setenv`s make it `pcount+2`; (2) the parent's `/env` create used
+`O_TRUNC`, a flag no prior caller proved on devenv -- dropped to the
+launcher's proven `O_WRONLY|O_CREAT`; (3) the witness returned at its first
+red, so a sabotage would show one leg -- every leg now reports before the
+run fails.
+
+**Evidence.** Mac lease 22:11-22:41Z, logs `work/oct28-envc/`. Suite 1 on
+a2693024e: 2120/2120 with `pouch-hello-spawn: ... env block/environ/empty
+ok, 4 refusals -- ALL SPAWN TESTS PASS`. Sabotage, each set its own build
+and boot: pouch never announcing the tail -> seven reds (block and environ each read 4, i.e. `PHS_PARENT` inherited; the
+count; the NULL leg; the three kernel refusals making a child), the 32 KiB
+pre-check green because it never reaches the kernel; refusals collapsed to
+`ENOENT` plus a NULL envp inheriting -> the three refusals with `errno=2` and
+the NULL leg, the rest green. Each matched its prediction leg for leg.
+
+**The audit.** Fable 5.1 reviewing Opus 5.5 (start == end) on a2693024e:
+0/0/0/3, clean. F1: the "no child left" leg's `waitpid(-1)` had no positive
+control -- the shim answers every kernel failure with ECHILD, so a selector
+that could never find a child would pass it; the block leg now reaps through
+`waitpid(-1)`. F2: the mirror checker read pouch's tail and bit only from
+0051, blind to a later patch editing them; it now scans the rest of the
+series. F3: the dossier said the errno assert pins pouch's values to the
+kernel's; it compares musl's with literals -- reworded, and the checker now
+holds the kernel's four `T_E_*` to the same numbers. After the fixes: suite
+2120/2120, the block leg reaping through `waitpid(-1)`.
+
+**The caller my census missed.** Writing this entry's evidence, I went to
+the glquake virgl gate's script and found it still describing the launcher's
+`/env` write -- and beside it, three in-guest unpace wrappers (glq-bench's
+rp5, glq-decomp's rp6, glq-wedge-probe's rp7): C typed into the guest by
+expect, writing `/env/SDL_THYLACINE_NOPACE` and spawning with a NULL envp.
+My caller census had grepped C sources, and these are C inside `.exp`
+strings. Under 0051 their games would have started with an empty
+environment, run paced, and reported that as the unpaced figure -- a wrong
+number, not a failure. They now `setenv` and pass `environ`; each was
+reconstructed from its script, cross-compiled for aarch64 and its symbols
+resolved in pouch's `libc.a`, but not run (all three need a `/clade` bake;
+enqueued). **A census of callers covers every language the call can be
+written in, including code a script types.**
+
+**Still open.** env-b: the Go fork sends `ProcAttr.Env`, once main, b3 and
+aux-3 carry bit 2. The glquake virgl run on thyla-pi, which is the end-to-end
+proof that `GALLIUM_DRIVER` reaches the game through `environ`. quarry still
+sets its driver through its own `/env` where `Command::env` now would (P3),
+and the pouch patches README is stale (P3), both in OPEN-BUGS 21:09Z.
+
 ## 2026-10-28 -- the go that orphaned a go was a go the environment never reached (corona)
 
 **What started it.** OPEN-BUGS 12:01Z: every ls-ci boot reported one `go`

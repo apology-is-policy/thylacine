@@ -80,8 +80,8 @@ child, against a variable that is in the parent's /env but not its environ.
  #undef realloc
  #include "_pouch_process.h"
  
-+/* The kernel answers a refused env tail with -T_E_*, whose values are the
-+ * Linux errnos (docs/ERRORS.md); posix_spawn returns that value as it is. */
++/* A refused env tail returns -T_E_*; check-spawn-args-mirrors.py holds those
++ * to the Linux values asserted here, so the value is this libc's errno. */
 +_Static_assert(E2BIG == 7 && ENOMEM == 12 && EFAULT == 14 && EINVAL == 22,
 +	"T_E_2BIG / T_E_NOMEM / T_E_FAULT / T_E_INVAL must equal this libc's errnos");
 +

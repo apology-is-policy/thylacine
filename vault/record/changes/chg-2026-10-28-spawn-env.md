@@ -4,7 +4,7 @@ type: chg
 title: "The spawn environment tail: a spawner names its child's whole environment (env-a kernel + native, env-c pouch)"
 date: 2026-10-28
 arc: arc-go-ide
-commits: ["7bf17edb5", "24e245c26", "3d6a29fb7", "530ddd916", "2805c8d4f", "*(pending)*"]
+commits: ["7bf17edb5", "24e245c26", "3d6a29fb7", "530ddd916", "2805c8d4f", "a2693024e", "*(pending)*"]
 touched:
   - sub-kernel-syscall-abi
   - sub-kernel-syscall-dispatch
