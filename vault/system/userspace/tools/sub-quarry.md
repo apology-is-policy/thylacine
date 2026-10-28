@@ -42,11 +42,12 @@ driver even where the build default would match, because the mesa fork falls
 back loudly and a bench row that relied on fallback order would mislabel a
 fallen-back run.
 
-**The driver rides `/env`, not the spawn ABI.** quarry writes `GALLIUM_DRIVER`
-into its own environment, the child inherits a deep copy at spawn
-(`env_clone_into`), and the old value is put back after. It predates the
-spawn record's environment tail ([[dec-2026-10-28-spawn-env]]); `Command::env`
-would now hand the child the driver without quarry touching its own `/env`.
+**The driver rides the spawn's environment.** Each launch sets
+`GALLIUM_DRIVER` on the `Command` (`Command::env`), which sends it in the spawn
+record's environment tail ([[dec-2026-10-28-spawn-env]]): the child's `/env` is
+quarry's own plus the pin, and quarry's `/env` is never written. Until
+2026-10-28 quarry wrote the variable into its own `/env`, spawned, and put the
+old value back, because no spawn carried an environment.
 
 **The console is borrowed, then lent.** quarry owns the screen on fd 1 and reads
 keys on fd 0 through kaua ([[sub-kaua]]); it never touches consctl, and `ut`
@@ -84,7 +85,8 @@ ran paced, and records the engine's `GL_RENDERER` line and its count of
 **Legs are `key[@WxH][:paced]`.** An explicit list selects, orders and sizes the
 legs: order because a within-boot drift makes a late leg read low (#168, #232),
 size so one boot sweeps a renderer across modes. A bench leg is UNPACED by
-default (`SDL_THYLACINE_NOPACE=1`, set around the spawn like the driver),
+default (`SDL_THYLACINE_NOPACE=1` on the `Command`, like the driver; a paced
+leg removes an inherited one, so its pace-witness line cannot lie),
 because a paced present waits on the compositor's frame tick and the number
 stops being the renderer's; `:paced` measures the delivered rate. Play keeps
 sound on; a bench runs `-nosound` so the audio path cannot move the figure.
@@ -112,8 +114,8 @@ until it ends — they wait in the console — and the menu handles them after.
 ## Invariants enforced
 
 No §28 invariant is on this line: quarry is an unprivileged program with no
-capability of its own. It writes its own `/env` (which its children inherit)
-and the engine's console log.
+capability of its own. It writes the engine's console log; its children's
+environment is set per spawn, and its own `/env` is left alone.
 
 ## Error paths
 
@@ -134,9 +136,11 @@ engine's.
 - **Does a row still say only what it proved?** The `hw-gl` probe and the
   explicit driver pin are what keep a llvmpipe fallback from carrying a
   hardware label.
-- **Is the environment restored on every path?** The driver and the pace flag
-  are put back after the spawn whether it succeeded or not, so quarry's own
-  environment ends as it began.
+- **Does the child get exactly the environment the leg names?** The driver
+  and the pace flag are set on the `Command`, never in quarry's `/env`, so a
+  failed spawn has nothing to restore. A paced leg must `env_remove` the pace
+  flag; dropping that turns an inherited `SDL_THYLACINE_NOPACE` into a paced
+  label on an unpaced run.
 - **Is every leg bounded?** By the deadline and the bounded reap; the one
   unbounded step is the `/proc/<pid>/ctl` kill write, which the markers expose.
 - **Does the menu stop reading at Quit and Play?** It returns from the burst on
