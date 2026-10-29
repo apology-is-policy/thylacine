@@ -328,7 +328,8 @@ static struct Spoor *lock_owner_remove_locked(struct HandleTable *t,
     last->users   = 0;
     last->granted = 0;
     last->dead    = 0;
-    t->nlockowners--;
+    // Stored atomically: lock_owners_on_close reads the count without t->lock.
+    __atomic_store_n(&t->nlockowners, t->nlockowners - 1, __ATOMIC_RELAXED);
     return sp;
 }
 
@@ -375,7 +376,8 @@ int handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
         drop = n;
         rc = -T_E_NOLCK;
     } else {
-        e = &t->lockowners[t->nlockowners++];
+        e = &t->lockowners[t->nlockowners];
+        __atomic_store_n(&t->nlockowners, t->nlockowners + 1, __ATOMIC_RELAXED);
         e->spoor   = n;            // the mint's reference becomes the table's
         e->users   = 1;
         e->granted = 0;
@@ -470,6 +472,9 @@ u32 handle_lock_owner_count(struct Proc *p) {
 static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
                                  void *obj) {
     if (kind != KOBJ_SPOOR || !obj) return;
+    // Read without t->lock. An entry inserted before the slot was emptied (both
+    // under t->lock) is visible here; one inserted after was taken after this
+    // close, and the post-grant fd re-check covers a take through this fd.
     if (__atomic_load_n(&t->nlockowners, __ATOMIC_RELAXED) == 0) return;
     struct Spoor *c = (struct Spoor *)obj;
 
