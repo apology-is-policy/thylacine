@@ -3,7 +3,7 @@ id: sub-kernel-sched-smp
 type: sub
 parent: moc-kernel-scheduling
 title: "The SMP protocol — on_cpu, work-stealing, the idle, and the tickless park"
-code: ["kernel/sched.c", "kernel/smp.c", "arch/arm64/context.S"]
+code: ["kernel/sched.c", "kernel/smp.c", "arch/arm64/context.S", "kernel/include/thylacine/context.h"]
 audit: hard
 guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9, inv-i48]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, spec-thread-reap, gate-smp]

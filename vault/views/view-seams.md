@@ -26,6 +26,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
+| [[seam-poll-dedupe-direction-test]] | closed | sub-kernel-poll | fnd-pollwalk-r1-f2 | aux follow-up after the poll chunk |
 | [[seam-poll-hooks-per-list]] | closed | sub-kernel-poll | fnd-b0poll-r7-f1 | v1.x |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-pouch-guard-pages]] | closed | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
@@ -80,7 +81,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-nuname-trust-stamp]] | open | sub-kernel-syscall-dispatch, sub-kernel-ninep-attach | chg-2026-09-06-9p-identity-absorb | v1.x (the n_uname trust-stamp seam family) |
-| [[seam-poll-dedupe-direction-test]] | open | sub-kernel-poll | fnd-pollwalk-r1-f2 | aux follow-up after the poll chunk |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
 | [[seam-poll-srv-registry-retain]] | open | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |

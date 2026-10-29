@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -496,7 +496,9 @@ per-call errno approximation built on top of it.
   signalled wait from an older one that exits 0 just the same. A leg
   replaced changes the marker as surely as one added: the threads census
   traded `exited-counted` for `held-counted,exited-freed` when exited
-  threads began to be freed at the switch (2026-10-22, [[sub-pouch-thread]]).
+  threads began to be freed at the switch (2026-10-22, [[sub-pouch-thread]]),
+  and gained `mask` with 0065 (2026-10-29: a new thread starts with its
+  creator's signal mask).
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

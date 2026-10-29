@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**549 owned · 46 unowned · 595 files (92% owned) · ~11886 unswept lines.**
+**550 owned · 45 unowned · 595 files (92% owned) · ~11716 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **78 files, ~38874 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,7 +73,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38874 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 12 | 17 | 2725 |
-| kernel | 130 | 13 | 1946 |
+| kernel | 131 | 12 | 1776 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
@@ -143,7 +143,6 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38874 lin
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| kernel/include/thylacine/context.h | 170 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |

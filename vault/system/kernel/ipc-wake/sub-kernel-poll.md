@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-poll-walk, spec-poll-owed, spec-poll-defer, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -474,7 +474,9 @@ number: every snapshot is sent before the settle waits.
 - One hook per list per call (`poll_hook_once`) keeps the EARLIER hook: it was
   listed before the later entry's sample, so it covers every mutation that
   sample missed; keeping the later one loses a wake when two different objects
-  share the list ([[seam-poll-dedupe-direction-test]]).
+  share the list. `poll.dedupe_keeps_the_earlier_hook` puts two objects on one
+  list and mutates the first between the two registrations (thread-model C7-0;
+  [[seam-poll-dedupe-direction-test]], closed).
 - The drain of a deferred record clears `chain` and lists the bookmark in ONE
   hold of the list lock; split, a WAIT owner's free sees neither and frees under
   the walk (split_pop).
@@ -489,9 +491,9 @@ number: every snapshot is sent before the settle waits.
 
 ## Seams
 
-[[seam-poll-srv-registry-retain]] · [[seam-poll-heap-waiters]] ·
-[[seam-poll-dedupe-direction-test]]. Closed: [[seam-poll-hooks-per-list]]
-(2026-10-28, by the span).
+[[seam-poll-srv-registry-retain]] · [[seam-poll-heap-waiters]]. Closed:
+[[seam-poll-hooks-per-list]] (2026-10-28, by the span),
+[[seam-poll-dedupe-direction-test]] (2026-10-29, thread-model C7-0).
 
 ## Caveats
 

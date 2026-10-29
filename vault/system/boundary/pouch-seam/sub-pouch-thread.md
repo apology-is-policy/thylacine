@@ -15,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -245,6 +245,15 @@ the caller's Proc).
   CPU still finishing. joey runs it as the system principal, which the cap
   exempts, so only the count shows a leak there; with no reap at all the leg
   read 310 (2026-10-20).
+- **A new thread starts with its creator's signal mask** (POSIX; thread-model
+  C7, operator vote 2026-10-29). `pthread_create` blocks every application
+  signal across `SYS_THREAD_SPAWN`, the kernel starts the thread with that mask,
+  and the thread's first act restores its creator's own: `start()` and
+  `start_c11()` call `__restore_sigs(&args->sig_mask)` (0065), where `start()`
+  used the `SYS_rt_sigprocmask` sentinel (ENOSYS) and so ran every thread
+  unmasked, and upstream's `start_c11()` restores nothing. The `mask` leg makes a
+  thread while main blocks SIGINT (it reads SIGINT blocked) and, as the control,
+  one while SIGINT is open (it reads it open).
 - C11 `thrd_create` (the `start_c11` path) is patched but untested.
 
 ## Provenance

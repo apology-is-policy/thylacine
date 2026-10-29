@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -120,27 +120,27 @@ launcher. The cost is that the spawner waits while its child loads.
 ### The birth tail: a frame first, then the ordinary return
 
 A held child's thunk calls `userland_enter_held` where every other spawn calls
-`userland_enter`. The difference is the whole mechanism. `userland_enter` erets
-straight from registers. `userland_enter_held` carves an exception frame below
-the thunk's stack, zeroes it, and writes three fields: the return address is
+`userland_enter`. Both build the same frame (since thread-model C7, when
+`userland_enter` stopped returning to EL0 straight from registers): an exception frame
+carved below the thunk's stack, zeroed, with three fields written: the return address is
 the image's entry, the saved processor state is EL0 with interrupts clear, and
 the EL0 stack pointer is the user stack. That is the frame the first
 instruction would have been interrupted with. It then masks and runs the
 ordinary EL0-return sequence over that frame: the preempt check, the
-die-check, the park, which here is `el0_birth_park`, and then note delivery,
+die-check, the stop leg -- which in `userland_enter_held` is the birth park,
+`el0_birth_park`, where `userland_enter` takes the ordinary one -- and then note delivery,
 so a note posted while the child is held meets it as the park returns
 (DEBUG-FS-DESIGN 4.2).
 The thread finally leaves through the shared `.Lexception_return`, so
 `KERNEL_EXIT` erets from the frame. A register the debugger wrote while the
 child was parked, or a step it armed, takes effect.
 
-The routine lives in `vectors.S`, beside the fork trampoline, for that
-trampoline's reason: it ends at a label local to that file, the one audited
-return to EL0. [[sub-kernel-exception]] treats it as the fifth way into
-userspace and the second one that adds no `eret`. Because the frame is carved
-below the thunk's stack, the kernel stack pointer after the `eret` is exactly
-where `userland_enter` would have left it, and every later EL0 entry of the
-thread lands its frame at the usual place.
+The routine lives in `vectors.S`, beside `userland_enter` and the first-entry
+trampoline, for their shared reason: they end at a label local to that file,
+the one audited return to EL0. [[sub-kernel-exception]] lists the first-entry
+shapes, all of which leave through that one `KERNEL_EXIT`. Because the frame is
+carved below the thunk's stack, the kernel stack pointer after the `eret` is
+where every later EL0 entry of the thread lands its frame.
 
 `el0_birth_park` announces the arrival first: under the table lock it moves
 the mark from UNBORN to PARKED, which wakes the spawner. When the hold was
@@ -419,9 +419,10 @@ park.
   orphan rule's cover, so the mark has to be in place first. `/ambush-probe`
   stage C witnesses the held launch: its init script prints `regs` at the launch
   stop, and the PC must be the program's ELF entry. A launch that raced has
-  always left the entry behind. A child spawned running is stopped at its first
-  trap, because `userland_enter` does not look for a stop, so it reads at the
-  entry only when an interrupt is already pending at its first eret. A held
+  always left the entry behind. A child spawned running stops wherever the stop
+  meets it: at its entry only when the stop is already pending at its first
+  entry (every first entry takes the stop leg since thread-model C7), else at its
+  next trap. A held
   child that dies loading comes back from the spawn already dead, and the kernel
   refuses to kill a dead Proc, so a failed launch reaps it without waiting for a
   kill; stage D launches such a program and requires the reap.

@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44, inv-i48]
 validated-by: [spec-scheduler, spec-sched-alpha, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -136,8 +136,9 @@ from its own `sched()`; switched out there instead, an EXITING thread never runs
 again (`sched()` does not requeue it), so the rest of its exit tail is lost, and
 a last thread out skips the srv, cap and weft notifies. Only a tail with neither
 the preempt count nor the in-syscall marker (below) set is exposed: a
-kthread-shaped entry running its exit with interrupts on (`userland_enter`'s
-die-check, an exec failure's exit). The check returns without consuming
+kthread-shaped entry running its exit with interrupts on (an exec failure's
+exit; `userland_enter`'s die-check was one until thread-model C7, and now runs on
+the EL0-return tail with interrupts masked). The check returns without consuming
 `need_resched`, like the other two; the thread's own `sched()` takes the switch.
 Every dispatch sets the incoming thread RUNNING, the per-CPU idles included, so
 nothing that is actually running is skipped.

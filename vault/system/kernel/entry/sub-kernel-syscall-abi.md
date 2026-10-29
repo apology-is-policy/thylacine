@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -612,6 +612,13 @@ be one 4 KiB staging buffer per round trip.
 ## Provenance
 
 [[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
+
+2026-10-29 (thread-model C7): `SYS_THREAD_SPAWN` starts a thread with its
+creator's note mask (operator vote; a semantics change with no number or record
+change), and the `SYS_NOTE_MASK` comment says a new thread starts with its
+creator's mask and a native exec clears it. libthyla-rs's startup comment now
+says every thread inherits main's `pipe` mask. C7-0 added a compile-time check
+that `SPAWN_PERM_ALL` is the union of the named bits, none aliasing another.
 
 2026-10-27 (thread-model C6): `SPAWN_EXT_THREADS` + `sys_spawn_ext_threads`
 and `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit 10); `SYS_THREAD_SPAWN` answers

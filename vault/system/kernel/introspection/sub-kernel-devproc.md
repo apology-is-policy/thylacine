@@ -6,6 +6,7 @@ title: "/proc — per-process state and the debug control surface"
 code:
   - kernel/devproc.c
   - kernel/test/test_devproc.c
+  - kernel/test/test_devproc_thread.c
 audit: hard
 guarded-by: [inv-i26, inv-i39]
 validated-by: [spec-debug-stop, spec-pty-stop, prose, gate-smp]
@@ -19,7 +20,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -613,6 +614,65 @@ because a parked thread's `lr` is the return into `sched` and gives away the sli
 surely as a raw frame; the owner axis reads those fields as zero and keeps `tpidr_el0`
 (2026-09-24 -- kregs had gone to the owner axis unconditionally since 8a).
 
+### A tid names its thread; one gate guards the set of tids (thread-model C7)
+
+`/proc/<pid>/thread/` lists a Proc's live threads and `/proc/<pid>/thread/<tid>/`
+holds four files, `regs`, `fpregs`, `kregs` and `kstack` (DEBUG-FS-DESIGN 5h).
+A per-thread object's qid path is `(tid << 32) | PQS_TID_FLAG | kind`, and its
+`qid.vers` carries the pid -- Plan 9 devproc's own trick, since the high half no
+longer has room for both. Every decode site goes through `devproc_qid_pid` /
+`devproc_qid_tid`, never `path >> 32`, so a tid can never be read as a pid.
+Every use re-resolves pid -> Proc under `g_proc_table_lock` (`proc_for_each`) and
+then the tid in that Proc's list under [[lock-proc-threads]]
+(`devproc_tid_thread_locked`, which never returns an EXITING thread).
+
+The per-thread files add no reader of their own. Each reuses the Proc-level
+callback with a named tid where the Proc-level file passes `-1`
+(`devproc_named_thread`: the named thread, else the focus, else main), so every
+gate a Proc-level file has -- I-39, the seals, fully-stopped for the register
+files, the off-CPU rule for `kstack` -- is the same code on both. Two rules are
+the layer's own:
+
+- **A thread that has gone answers not found, never its focus.** An open
+  per-thread file or tid directory whose thread has exited reads `-1`
+  (`regs`, `kstack`, the directory's listing); falling back to the focus would
+  silently show another thread's state under the departed tid's name.
+- **A thread object writes only its register files** (`devproc_write`'s first
+  gate). The walk makes no thread `ctl` or `mem`; the gate refuses one forged
+  from the qids it does make, so the debug slot stays owned by the Proc-level
+  `ctl` alone (vote 2026-10-29: no per-thread ctl).
+
+The listing and the walk to a tid share one gate,
+`devproc_threads_visible_locked`: the owner or `CAP_HOSTOWNER` (the
+`/proc/<pid>/sched` gate, which already lists every thread) OR debug authority
+(I-39, so a `CAP_DEBUG` debugger reaches the files it may read; that axis refuses
+kproc and NOTRACE). The set of tids is what the gate protects: a walk that
+answered for any tid would disclose the set one guess at a time, so a tid behind
+the gate and a tid that does not exist both answer not found. `..` from a tid
+directory goes to `thread/`, and from any pid file to its pid directory.
+
+A debugger steps one thread with `step <tid>` on the Proc's `ctl`
+(`parse_ctl_step_tid`; `step` alone keeps the focus). The step arms the named
+thread and resumes the whole Proc: peers run until the stepped thread's
+single-step trap re-stops the Proc and focuses it, and the breakpoint step-over
+is per thread (`hwdebug_switch_in` applies it only to the armed thread), so no
+peer runs past a breakpoint unseen. That is GDB's default; Linux's
+`PTRACE_SINGLESTEP` keeps peers stopped.
+
+### readdir is a cursor over the live table, with no snapshot
+
+`ls` on devproc was `EOPNOTSUPP` until C7 (seam-932's devproc half). The root
+lists pids -- a caller running as none sees only its own (the `/ctl/procs`
+rule) -- a pid directory its files and `thread/`, a thread directory its live
+tids, a tid directory its four files. An id listing keeps nothing between calls:
+each pass takes the next `DEVPROC_READDIR_BATCH` (16) ids at or above the cookie,
+ascending, under the lock, and one call may run several passes. The cookie is
+the id plus one (the position plus one in a fixed directory), so it is strictly
+increasing and never 0. Ids are never reused but by an exec's pid move, which
+keeps the pid in use (ARCH 7.3.4), so no cookie ever names two objects; an id
+created mid-listing appears if it lies past the cookie, and one that ends is not
+listed again. A directory whose Proc or thread has gone lists as `-1`.
+
 ## `status` gained `tables:` and `file:` (2026-09-23; B-1a' audits F1 and F8)
 
 `/proc/<pid>/status` reports, after `pages:` (the address space's holder
@@ -808,16 +868,23 @@ performance backlog.
 - **A new per-pid file needs all four registrations.** The read whitelist is the
   one that fails silently.
 - **A new gated file must format nothing on denial.**
+- **Every qid decode goes through `devproc_qid_pid` / `devproc_qid_tid`.** A raw
+  `path >> 32` reads a tid as a pid on a per-thread object.
+- **A per-thread reader whose tid has gone must refuse, never fall back.** The
+  focus fallback belongs to the Proc-level file's `-1` only.
+- **The listing and the walk share their gate.** A walk gated more loosely than
+  the listing is an oracle for the set of tids.
+- **A thread object writes only `regs` and `fpregs`.** A new per-thread kind
+  that is writable joins that list; a control kind never does.
 
 ## Seams
 
-- **Per-thread files.** Registers, stack and step all operate on a single
-  *focus* thread — the thread that trapped, or main (the oldest thread not
-  exiting) absent one; never an exiting thread, and nothing when every thread
-  is exiting. A
-  `/proc/<pid>/thread/<tid>/` layer is unbuilt, and until it exists a
-  multi-threaded target is inspected one thread at a time.
-- **Single-step resumes the whole process.** Peers briefly run during a step.
+- **The Proc-level register files still name one thread** -- the focus (the
+  thread that trapped), else main; the per-thread layer above names the rest.
+  The Ambush port reads only the Proc-level files; teaching it the per-thread
+  layer is the debugger's change.
+- **Single-step resumes the whole process, by design.** Peers run until the
+  re-stop; only the named thread is held to one instruction (above).
 - **`wait` is level-triggered**: an already-stopped target returns immediately
   rather than delivering one message per stop edge.
 - **Deep renders truncate.** `ns` with long mount paths, `maps` with many
@@ -857,7 +924,10 @@ performance backlog.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption) · [[chg-2026-10-06-cpu-time-gate]].
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption) · [[chg-2026-10-06-cpu-time-gate]] · thread-model C7 (2026-10-29: the per-thread
+layer, `step <tid>`, readdir; operator votes no per-thread ctl, readdir in C7,
+`..` from a pid file to its pid directory; Fable r1 F2's departed-thread and
+forged-ctl legs).
 
 ## The ctl `kill` forces a final close already under way (2026-10-07)
 

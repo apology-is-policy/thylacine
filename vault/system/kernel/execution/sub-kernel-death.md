@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -693,6 +693,8 @@ fallback — Fable out of credits): SOUND 0/0/0/2 P3 — F1 fixed (the `sid==pid
 isolation's dependency on non-recycling pids documented at `session_hangup_cb`),
 F2 tracked (the `setsid`-daemon residual, Mechanism + Caveats above). SMP gate
 40 boots, 0 corruption; ls-imperium arms 0-6 PASS.
+
+2026-10-29 (thread-model C7): `el0_return_die_check` now runs on every first entry as well -- a spawned, forked or exec'd thread's first entry takes the EL0-return tail -- so "at every return-to-EL0" above has no exception left ([[sub-kernel-exception]]).
 
 ## PCI claims retained by register mappings (2026-09-17)
 

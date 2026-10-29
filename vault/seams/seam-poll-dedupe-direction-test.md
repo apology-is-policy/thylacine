@@ -2,12 +2,13 @@
 id: seam-poll-dedupe-direction-test
 type: seam
 title: "No test tells which hook poll_hook_once keeps when two objects share one list"
-status: open
+status: closed
 surface: [sub-kernel-poll]
 opened-by: fnd-pollwalk-r1-f2
 tracker: "aux follow-up after the poll chunk"
 created: 2026-10-28
-updated: 2026-10-28
+updated: 2026-10-29
+closed-by: chg-2026-10-29-thread-model-c7
 ---
 ## Owed
 
@@ -21,6 +22,14 @@ sample but before the second's registration reaches only the earlier hook.
 
 A KERNEL_TESTS hook between two entries' scans in the poll core, mutating the
 first entry's object there, with the second entry on the same list.
+
+## Closed (2026-10-29, thread-model C7-0)
+
+`poll.dedupe_keeps_the_earlier_hook` puts two different objects on one list and
+mutates the first between its sample and the second's registration, through a
+KERNEL_TESTS hook in the poll core: a poller whose dedupe kept the later hook
+sleeps through that mutation. Run red first (the sabotage that keeps the later
+hook fails it) and green on the tip.
 
 ## The risk while open
 

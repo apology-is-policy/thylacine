@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -35,6 +35,18 @@ be interpreted as an ordinary foreground interrupt. The held process-table
 lock to note-queue lock ordering is unchanged; episode ownership is specified
 in [[sub-kernel-cons]].
 
+**A new thread starts with its creator's mask (2026-10-29, operator vote;
+thread-model C7; ARCH 7.6.2).** Both spawn arms -- `SYS_THREAD_SPAWN` and the
+phenotype's clone -- copy the creating thread's `note_mask` into the new thread
+before the admit links it, as POSIX `pthread_create` does. The queue is
+Proc-directed, and since C7 every first entry takes the EL0-return tail, whose
+notes leg runs before the entry's first instruction: a thread born unmasked would
+take a note every other thread masks -- a `pipe` queued while all of them mask it
+-- before it could mask itself. Before the vote a native thread started at zero
+(the rfork rule, which still governs a new Proc), and the Go runtime, whose
+`minit` makes a syscall before it masks `pipe`, died at its next new M. Only the
+mask crosses: the handler snapshot a fork copies stays behind, since a new thread
+runs on its own stack, not inside a handler.
 
 Three paths, **one queue**:
 

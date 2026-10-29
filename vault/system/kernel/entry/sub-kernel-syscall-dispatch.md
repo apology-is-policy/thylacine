@@ -17,7 +17,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -950,7 +950,10 @@ the hard maximum. Both thread-create arms (`sys_thread_spawn_handler` and
 thread made then would only die at its first die-check, after a kstack
 allocation, and the spawner dies at the call's own return), then pre-check
 `proc_thread_cap_ok`; both reads are lockless early refusals, and
-`proc_thread_admit` decides both exactly under [[lock-proc-threads]]. The cap
+`proc_thread_admit` decides both exactly under [[lock-proc-threads]]. Both copy
+the creating thread's `note_mask` into the new thread before that admit links it
+(operator vote 2026-10-29, POSIX `pthread_create`; [[sub-kernel-notes]]): no
+reader reaches an unlinked thread, and the mask is owner-written after. The cap
 counts live threads (`live_threads`, operator vote 7): a thread stops counting at
 its EXITING commit, and its joiner is woken only after that commit, so a Proc at
 the cap that has just joined a thread can start another at once, though the
