@@ -76,9 +76,23 @@ PASS, against run 2's red at 10 s. thyla-pi, post-audit build (the tree being co
 clangd+headers' goodbye 11476 ms, clangd 9556, gopls 1024, lsp-probe PASS, boot OK
 (`pi3-smoke-boot.log`).
 
-**Still open.** OPEN-BUGS 00:42Z: `build/.config` misrecords bake options set
-through a `THYLACINE_*` environment variable, and that blocks the Warp
-image-trap fix (23:14Z).
+**f4ac80cb7: the image record stops lying (02:28-02:36Z).** `build/.config`
+recorded `CHUNK_CLADE = n` for my `THYLACINE_BAKE_CLADE=1` bake: the D-b shim
+honours a caller's variable, but the record kept the value it beat
+(OPEN-BUGS 00:42Z). `bc_export`, which only build.sh calls, now writes an
+honoured value back; making the emitter read the environment would have leaked
+the shell into the profiles configure.sh writes through it. The witness
+T-emit-honored fails on HEAD's script and passes with the fix; a default build
+passes the suite 2120/2120. Checking it end to end, I ran
+`build.sh --show-config --build-dir=<scratch>`, and it rewrote the real
+`build/.config` with a config nothing had been built from: `--build-dir` moves
+the kernel, not the record. I restored the record with the build's own flags
+and enqueued the side effect (OPEN-BUGS 02:30Z). **A command named "show" can
+still write.**
+
+**Still open.** The Warp image traps (OPEN-BUGS 23:14Z), which the truthful
+record now makes fixable. The rp5/rp6/rp7 wrappers' first run.
+`--show-config` writing the record (02:30Z).
 
 ## 2026-10-28 -- pouch's posix_spawn stops dropping envp (corona)
 
