@@ -49,12 +49,12 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
                           struct t_file_lock *test) {
     if (!proc_owner) return c->dev->lock(c, type, start, len, test);
 
-    struct Spoor *owner = NULL;
-    int rc;
-    if (test || type == SYS_FILE_LOCK_UN) {
-        rc = handle_lock_owner_get(p, c, /*mint=*/false, &owner);
+    bool take = !test && type != SYS_FILE_LOCK_UN;
+    for (int tries = 0; ; tries++) {
+        struct Spoor *owner = NULL;
+        int rc = handle_lock_owner_get(p, c, /*mint=*/take, &owner);
         if (rc != 0) return rc;
-        if (!owner && !test) return 0;   // the Proc holds nothing on the file
+        if (!owner && !test) return 0;   // an unlock: the Proc holds nothing on the file
         if (!owner) {
             // The Proc holds nothing on the file, so any fresh owner asks the
             // question F_GETLK asks: which lock of ANOTHER owner is in the way.
@@ -67,15 +67,20 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
             spoor_clunk(tmp);
             return rc;
         }
-        if (!test) handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
-    } else {
-        rc = handle_lock_owner_get(p, c, /*mint=*/true, &owner);
-        if (rc != 0) return rc;
+        if (type == SYS_FILE_LOCK_UN && !test)
+            handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
+        rc = owner->dev->lock(owner, type, start, len, test);
+        if (rc == -T_E_STALE && tries == 0) {
+            // The entry's file has died, and its number may now name c's file
+            // (a server reuses freed inode numbers), which is how the entry was
+            // found for c. Its locks died with it: retire it, and ask again.
+            handle_lock_owner_retire(p, owner);
+            handle_lock_owner_put(p, owner, false);
+            continue;
+        }
+        handle_lock_owner_put(p, owner, rc == 0 && take);
+        return rc;
     }
-    rc = owner->dev->lock(owner, type, start, len, test);
-    handle_lock_owner_put(p, owner,
-                          rc == 0 && !test && type != SYS_FILE_LOCK_UN);
-    return rc;
 }
 
 // Does descriptor `fd` still name `c`? Linux re-checks this after a POSIX lock

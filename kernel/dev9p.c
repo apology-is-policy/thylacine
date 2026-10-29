@@ -2240,19 +2240,69 @@ static int lock_wire_errno(int rc) {
     return rc;
 }
 
-// Land c's staged writes (its write-behind run, and a run another thread is
-// flushing) so that a lock released after this returns covers them. A close
-// that may not wait skips it: its run goes to a closer with its clunk.
-static int dev9p_lock_sync(struct Spoor *c, u32 how) {
+// The flush a release owes when its thread may not wait, queued alone on the
+// session's closer. The job holds c, so c's fid stays bound until it has run.
+struct dev9p_lock_flush_job {
+    struct p9_close_job job;     // first: the closer hands back this pointer
+    struct Spoor       *c;
+};
+
+static int dev9p_lock_flush_job_run(struct p9_close_job *job,
+                                    struct p9_client *cl, u32 fid) {
+    (void)cl;
+    (void)fid;
+    struct Spoor *c = ((struct dev9p_lock_flush_job *)job)->c;
     struct dev9p_priv *p = priv_of(c);
-    if (!p || how != DEV_LOCK_SYNC_RELEASE) return 0;
-    if (!p->wb_eligible || !close_may_wait()) return 0;
+    if (!p) return 0;
     int rc = 0;
     spin_lock(&p->wb_lock);
     if (p->wb_len || p->wb_flushers)
         rc = wb_flush_locked(p, c->qid.path);
     spin_unlock(&p->wb_lock);
     return rc;
+}
+
+static void dev9p_lock_flush_job_release(struct p9_close_job *job) {
+    struct dev9p_lock_flush_job *j = (struct dev9p_lock_flush_job *)job;
+    spoor_clunk(j->c);
+    kfree(j);
+}
+
+// Land c's staged writes (its write-behind run, and a run another thread is
+// flushing) so that a lock released after this returns covers them. A thread
+// that may not wait (a death is pending) hands the flush to the session's
+// closer instead. Its release cannot be sent either and goes to the closer
+// after the flush, which serves a session's entries in order. c's own last
+// close would hand its run over with its clunk, but c may outlive this thread:
+// another Proc can share the open file.
+static int dev9p_lock_sync(struct Spoor *c, u32 how) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || how != DEV_LOCK_SYNC_RELEASE || !p->wb_eligible) return 0;
+    int rc = 0;
+    if (close_may_wait()) {
+        spin_lock(&p->wb_lock);
+        if (p->wb_len || p->wb_flushers)
+            rc = wb_flush_locked(p, c->qid.path);
+        spin_unlock(&p->wb_lock);
+        if (close_may_wait()) return rc;   // a death mid-flush keeps the run
+    }
+    spin_lock(&p->wb_lock);
+    bool staged = p->wb_len || p->wb_flushers;
+    spin_unlock(&p->wb_lock);
+    if (!staged) return 0;
+    if (!p->fid_owned || !p->attached_owner) return -T_E_IO;   // a test's bare client
+    struct dev9p_lock_flush_job *j = kmalloc(sizeof(*j), 0);
+    if (!j) return -T_E_NOMEM;
+    j->job.run     = dev9p_lock_flush_job_run;
+    j->job.release = dev9p_lock_flush_job_release;
+    j->c           = c;
+    spoor_ref(c);
+    if (p9_attached_defer_close(p->attached_owner, P9_NOFID, &j->job) != 0) {
+        spoor_clunk(c);            // the caller's reference keeps it open
+        kfree(j);
+        return -T_E_NOMEM;
+    }
+    return 0;
 }
 
 static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
@@ -2328,16 +2378,54 @@ static struct Spoor *dev9p_lock_owner(struct Spoor *c, int *err) {
         return NULL;
     }
     np->fid_locks = true;
+    // A clone names its source's file: the identity carries over.
+    __atomic_store_n(&np->lock_gen, __atomic_load_n(&p->lock_gen, __ATOMIC_RELAXED),
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&np->lock_ident,
+                     __atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
     nc->aux = np;
     return nc;
 }
 
-// One file of one server: the same session and qid.path. Two live fids naming
-// one qid.path name one incarnation (the server keeps a node a fid names).
+// One file of one server: the same session, qid.path and, when both fids have
+// learned it, inode generation. Stratum does not keep a file a fid names: an
+// unlinked file dies, its fids answer ESTALE, and the next file created can
+// take its inode number. Two live fids with one qid.path name one file, but a
+// dead file's fid shares the number with its successor, and only the
+// generation tells them apart. A fid that has not learned it matches by number
+// (dev9p_lock_ident says when the generation must be learned first).
 static bool dev9p_lock_same_file(struct Spoor *a, struct Spoor *b) {
     struct dev9p_priv *pa = priv_of(a);
     struct dev9p_priv *pb = priv_of(b);
-    return pa && pb && pa->client == pb->client && a->qid.path == b->qid.path;
+    if (!pa || !pb || pa->client != pb->client || a->qid.path != b->qid.path)
+        return false;
+    if (__atomic_load_n(&pa->lock_ident, __ATOMIC_ACQUIRE) != DEV9P_IDENT_GEN ||
+        __atomic_load_n(&pb->lock_ident, __ATOMIC_ACQUIRE) != DEV9P_IDENT_GEN)
+        return true;
+    return __atomic_load_n(&pa->lock_gen, __ATOMIC_RELAXED) ==
+           __atomic_load_n(&pb->lock_gen, __ATOMIC_RELAXED);
+}
+
+// Learn the generation of the file c's fid names, once; a file keeps it for
+// life. Two threads may both ask, and both store what the server said.
+static int dev9p_lock_ident(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -T_E_NOLCK;
+    // A cached open has no fid to ask through: it matches by number until it
+    // keeps its open-time generation (Boosty B-3h3).
+    if (p->cached_open || p->fid == P9_NOFID) return 0;
+    if (__atomic_load_n(&p->lock_ident, __ATOMIC_ACQUIRE) != DEV9P_IDENT_UNKNOWN)
+        return 0;
+    struct p9_attr a;
+    int rc = p9_client_getattr(p->client, p->fid, P9_GETATTR_GEN, &a);
+    if (rc != 0) return lock_wire_errno(rc);
+    if (a.valid & P9_GETATTR_GEN) {
+        __atomic_store_n(&p->lock_gen, a.gen, __ATOMIC_RELAXED);
+        __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_GEN, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&p->lock_ident, (u8)DEV9P_IDENT_NONE, __ATOMIC_RELEASE);
+    }
+    return 0;
 }
 
 static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
@@ -2699,6 +2787,7 @@ struct Dev dev9p = {
     .lock_owner     = dev9p_lock_owner,
     .lock_same_file = dev9p_lock_same_file,
     .lock_sync      = dev9p_lock_sync,
+    .lock_ident     = dev9p_lock_ident,
     .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
 
     .remove   = dev9p_remove,

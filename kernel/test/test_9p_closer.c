@@ -37,6 +37,7 @@
 void test_p9_closer_dying_close_delivers_tclunk(void);
 void test_p9_closer_exit_close_hands_off_tclunk(void);
 void test_p9_closer_dying_close_hands_off_staged_run(void);
+void test_p9_closer_dying_lock_release_flushes_shared_run(void);
 void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
@@ -462,6 +463,61 @@ void test_p9_closer_dying_close_hands_off_staged_run(void) {
     TEST_EXPECT_EQ(st.dropped, base.dropped, "no entry was dropped");
     TEST_EXPECT_EQ(st.sent, base.sent + 1, "a closer sent the Tclunk");
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+// B-3h (ARCH 9.6.11): a killed lock holder's release. The open file's staged
+// run, which another Proc still shares (so no close of it hands the run over),
+// is written by a closer before the lock fid's Tclunk releases the lock. The
+// dying thread can send neither: its flush goes to the closer as a job alone,
+// and its Tclunk after it.
+static struct Spoor *g_lr_owner;
+
+static void lr_release(void *arg) {
+    (void)arg;
+    (void)dev9p.lock_sync(g_t1_spoor, DEV_LOCK_SYNC_RELEASE);
+    spoor_clunk(g_lr_owner);
+}
+
+void test_p9_closer_dying_lock_release_flushes_shared_run(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w);
+    bool started = false;
+    u32 ofid = P9_NOFID;
+    if (opened) {
+        int err = 0;
+        g_lr_owner = dev9p.lock_owner(w.f, &err);
+        if (g_lr_owner) {
+            ofid = ((struct dev9p_priv *)g_lr_owner->aux)->fid;
+            g_t1_spoor = w.f;
+            started = test_dying_start(&g_wbc_thread, lr_release, NULL, /*dead_now=*/true);
+            if (started) {
+                TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+                test_dying_reap(&g_wbc_thread);
+            }
+            TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, ofid));
+            TEST_YIELD_UNTIL_SOFT(closer_quiet());
+        }
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;   // before the shared file's own close
+    int crc = w.f ? spoor_clunk_rc(w.f) : 0;
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(ofid != P9_NOFID, "a lock fid minted from it");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)rec.nwrite, 1ull, "a closer wrote the shared run");
+    TEST_EXPECT_EQ((u64)rec.write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)rec.write_sum, (u64)wbc_sum(), "the bytes write() took");
+    TEST_ASSERT(srv_clunked(&rec, ofid), "the lock fid's Tclunk was sent");
+    TEST_ASSERT(rec.write_at < rec.clunk_at, "after the run landed");
+    TEST_ASSERT(!srv_clunked(&rec, w.fid), "and the shared file stayed open");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one job ran");
+    TEST_EXPECT_EQ(st.sent, base.sent + 1, "one Tclunk sent: the lock fid's");
+    TEST_EXPECT_EQ(st.dropped, base.dropped, "and the job alone asked for none");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "the shared file's close later loses nothing");
 }
 
 // A plain exit close waits for its server (I-38: the parent's wait returns after

@@ -726,6 +726,8 @@ void test_filelock_bound(void);
 void test_filelock_close_mid_call(void);
 void test_filelock_proc_test_owner(void);
 void test_filelock_fork_exec_dup_teardown(void);
+void test_filelock_stale_entry_retired(void);
+void test_filelock_reused_number(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -1749,6 +1751,8 @@ void test_9p_wire_treaddir_round_trip(void);
 void test_9p_wire_dirent_unpack(void);
 void test_9p_wire_tstatfs_round_trip(void);
 void test_9p_wire_tfsync_round_trip(void);
+void test_9p_wire_tlock_round_trip(void);
+void test_9p_wire_tgetlock_round_trip(void);
 void test_9p_wire_rreaddir_data_cap_enforced(void);
 void test_9p_wire_tsymlink_round_trip(void);
 void test_9p_wire_tmknod_round_trip(void);
@@ -2045,6 +2049,14 @@ void test_dev9p_create_group_from_parent(void);
 void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
+void test_dev9p_lock_wire_and_status(void);
+void test_dev9p_lock_grant_drops_larder(void);
+void test_dev9p_lock_unlock_flushes_first(void);
+void test_dev9p_lock_test_answers(void);
+void test_dev9p_lock_owner_clone(void);
+void test_dev9p_lock_owner_never_parks(void);
+void test_dev9p_lock_cached_open_refuses(void);
+void test_dev9p_lock_ident_generation(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -2088,6 +2100,7 @@ void test_p9_attached_ctl_registry(void);       // #210: sessions registry + dem
 void test_p9_closer_dying_close_delivers_tclunk(void);
 void test_p9_closer_exit_close_hands_off_tclunk(void);
 void test_p9_closer_dying_close_hands_off_staged_run(void);
+void test_p9_closer_dying_lock_release_flushes_shared_run(void);
 void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
@@ -3030,6 +3043,8 @@ struct test_case g_tests[] = {
     { "filelock.close_mid_call", test_filelock_close_mid_call, false, NULL },
     { "filelock.proc_test_owner", test_filelock_proc_test_owner, false, NULL },
     { "filelock.fork_exec_dup_teardown", test_filelock_fork_exec_dup_teardown, false, NULL },
+    { "filelock.stale_entry_retired", test_filelock_stale_entry_retired, false, NULL },
+    { "filelock.reused_number", test_filelock_reused_number, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
@@ -4079,6 +4094,8 @@ struct test_case g_tests[] = {
     { "9p_wire.dirent_unpack",         test_9p_wire_dirent_unpack,         false, NULL },
     { "9p_wire.tstatfs_round_trip",    test_9p_wire_tstatfs_round_trip,    false, NULL },
     { "9p_wire.tfsync_round_trip",     test_9p_wire_tfsync_round_trip,     false, NULL },
+    { "9p_wire.tlock_round_trip",      test_9p_wire_tlock_round_trip,      false, NULL },
+    { "9p_wire.tgetlock_round_trip",   test_9p_wire_tgetlock_round_trip,   false, NULL },
     { "9p_wire.rreaddir_data_cap_enforced",
                                        test_9p_wire_rreaddir_data_cap_enforced,
                                                                            false, NULL },
@@ -4574,6 +4591,14 @@ struct test_case g_tests[] = {
     { "dev9p.client_init_clears_ends", test_dev9p_client_init_clears_ends, false, NULL },
     { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },
+    { "dev9p.lock_wire_and_status",    test_dev9p_lock_wire_and_status,    false, NULL },
+    { "dev9p.lock_grant_drops_larder", test_dev9p_lock_grant_drops_larder, false, NULL },
+    { "dev9p.lock_unlock_flushes_first", test_dev9p_lock_unlock_flushes_first, false, NULL },
+    { "dev9p.lock_test_answers",       test_dev9p_lock_test_answers,       false, NULL },
+    { "dev9p.lock_owner_clone",        test_dev9p_lock_owner_clone,        false, NULL },
+    { "dev9p.lock_owner_never_parks",  test_dev9p_lock_owner_never_parks,  false, NULL },
+    { "dev9p.lock_cached_open_refuses", test_dev9p_lock_cached_open_refuses, false, NULL },
+    { "dev9p.lock_ident_generation",   test_dev9p_lock_ident_generation,   false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
@@ -4635,6 +4660,8 @@ struct test_case g_tests[] = {
                                        test_p9_closer_exit_close_hands_off_tclunk, false, NULL },
     { "p9_closer.dying_close_hands_off_staged_run",
                                        test_p9_closer_dying_close_hands_off_staged_run, false, NULL },
+    { "p9_closer.dying_lock_release_flushes_shared_run",
+                                       test_p9_closer_dying_lock_release_flushes_shared_run, false, NULL },
     { "p9_closer.forced_exit_close_hands_off_flush",
                                        test_p9_closer_forced_exit_close_hands_off_flush, false, NULL },
     { "p9_closer.kthread_close_hands_off_staged_run",

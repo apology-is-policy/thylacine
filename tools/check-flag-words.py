@@ -45,6 +45,9 @@ WORDS = [
     ('spawn ext flags',       SYSCALL_H,   r'SPAWN_EXT_\w+',       32),
     ('walk-create mode word', SYSCALL_H,   r'SYS_WALK_CREATE_\w+', 32),
     ('9P attach flags',       SYSCALL_H,   r'SYS_ATTACH_9P_\w+',   32),
+    # The op word's lock types are values inside TYPE_MASK, not bits: only
+    # the mask and the flags above it own bits.
+    ('file-lock op flags',    SYSCALL_H,   r'SYS_FILE_LOCK_(?!(?:RD|WR|UN)\b)\w+', 32),
     ('mount flags',           TERRITORY_H, r'M[A-Z]+(?:_[A-Z]+)*', 32),
 ]
 

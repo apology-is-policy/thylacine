@@ -198,12 +198,16 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 // the entry, and drops the entry unless a lock call is using it. Bounded (I-32):
 // a new file past the bound answers -T_E_NOLCK.
 //
-// `users` counts lock calls between handle_lock_owner_get and _put. Only a close
-// (or the table's teardown) removes an entry, and a close removes it only when
-// no call is using it: the server orders the close's unlock against an in-flight
-// call's request, so either order is a true history (the close before the
-// request, or the request before the close), and an entry left behind holds
-// nothing a later close or the teardown will not drop.
+// `users` counts lock calls between handle_lock_owner_get and _put, and an entry
+// is removed only when no call is using it: by a close (or the table's
+// teardown), or by the put that leaves unused an entry that holds nothing (never
+// granted, or retired). A close's removal waits for its users because the
+// server orders the close's unlock against an in-flight call's request, so
+// either order is a true history (the close before the request, or the request
+// before the close), and an entry left behind holds nothing a later close or
+// the teardown will not drop. A RETIRED entry's file has died: its fid answered
+// ESTALE, the server dropped its locks with the file, and the file's number may
+// now name another file, so a retired entry is never found again.
 #define PROC_LOCK_OWNER_MAX 128
 
 struct Spoor;
@@ -211,7 +215,8 @@ struct Spoor;
 struct lock_owner_ent {
     struct Spoor *spoor;    // ref-held by the table; NULL = free
     u32           users;
-    u32           granted;  // a lock was ever granted on it (else it holds none)
+    u16           granted;  // a lock was ever granted on it (else it holds none)
+    u16           dead;     // retired: never found, removed when unused
 };
 
 struct HandleTable {
@@ -541,16 +546,24 @@ int handle_get_status(struct Proc *p, hidx_t h, struct handle_status *out);
 //
 // handle_lock_owner_get -- find the Proc's lock owner for c's file and mark it
 // in use; with `mint`, create it through c's Dev when there is none (outside the
-// table lock; a peer's racing insert is adopted). 0 with *out ref-held, or with
-// *out NULL when there is none and `mint` is false; -T_E_NOLCK when c's Dev
-// serves no locks or the table is full; else the mint's errno. Every 0 with a
-// non-NULL *out pairs with exactly one handle_lock_owner_put, whose `granted`
-// says the call's lock was taken. An entry no call ever took a lock on holds
-// none, so the put that leaves it unused removes it: a slot is spent only on
-// an owner that has locked something.
+// table lock; a peer's racing insert is adopted). c learns its file's identity
+// first (Dev.lock_ident), so an entry naming the file that took the number of
+// c's dead one is not found for it. 0 with *out ref-held, or with *out NULL
+// when there is none and `mint` is false; -T_E_NOLCK when c's Dev serves no
+// locks or the table is full; -T_E_STALE when c's file has died; else the
+// mint's errno. Every 0 with a non-NULL *out pairs with exactly one
+// handle_lock_owner_put, whose `granted` says the call's lock was taken. An
+// entry no call ever took a lock on holds none, so the put that leaves it
+// unused removes it: a slot is spent only on an owner that has locked
+// something.
 int  handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
                            struct Spoor **out);
 void handle_lock_owner_put(struct Proc *p, struct Spoor *owner, bool granted);
+
+// Retire owner's entry: its fid answered ESTALE, so its file has died. A later
+// get never finds it, and the put that leaves it unused removes it. Between a
+// get and its put.
+void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner);
 
 // Run Dev.lock_sync(how) on every Spoor in p's table that names owner's file.
 // May sleep; takes no lock across a sync.

@@ -364,7 +364,7 @@ struct Dev {
     bool           (*remote)(struct Spoor *c);
 
     // File locks (B-3h; ARCH 9.6.11). The lock state lives in the file's
-    // server; these slots only forward to it. All four are NULL-permitted
+    // server; these slots only forward to it. The first four are NULL-permitted
     // together: a Dev with no .lock answers SYS_FILE_LOCK -T_E_NOLCK. Each
     // returns 0 or a specific -T_E_* (a server errno bounded first, the
     // dev9p_wire_errno discipline).
@@ -379,14 +379,21 @@ struct Dev {
     //     never published as a descriptor; only the Proc owner table holds
     //     it. NULL with *err set on failure.
     //   lock_same_file(a, b) -- do a and b name one file of one server? Called
-    //     under the handle-table spinlock: it must not block.
+    //     under the handle-table spinlock: it must not block. It may answer by
+    //     what the two Spoors already know of their files.
     //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
     //     before a lock on its file is dropped.
+    //   lock_ident(c) -- learn what lock_same_file needs to tell c's file from
+    //     a file that has since taken its number (dev9p: the inode generation,
+    //     asked of the server once per Spoor). 0, or -T_E_STALE when c's file
+    //     has died. May block. NULL-permitted: lock_same_file then answers
+    //     alone.
     int            (*lock)(struct Spoor *c, u32 type, u64 start, u64 len,
                            struct t_file_lock *test);
     struct Spoor  *(*lock_owner)(struct Spoor *c, int *err);
     bool           (*lock_same_file)(struct Spoor *a, struct Spoor *b);
     int            (*lock_sync)(struct Spoor *c, u32 how);
+    int            (*lock_ident)(struct Spoor *c);
 
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)

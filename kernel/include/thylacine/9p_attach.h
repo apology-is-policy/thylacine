@@ -231,7 +231,9 @@ struct p9_close_job {
 };
 
 // p9_attached_defer_clunk with a job that runs before the Tclunk. On -1 the
-// caller still owns the job, and the fid stays bound.
+// caller still owns the job, and the fid stays bound. fid P9_NOFID queues the
+// job alone, with no Tclunk: writes that must reach the server before an entry
+// queued after it, since the closer serves a session's entries in order.
 int p9_attached_defer_close(struct p9_attached *a, u32 fid,
                             struct p9_close_job *job);
 

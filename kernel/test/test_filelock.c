@@ -30,6 +30,8 @@ void test_filelock_bound(void);
 void test_filelock_close_mid_call(void);
 void test_filelock_proc_test_owner(void);
 void test_filelock_fork_exec_dup_teardown(void);
+void test_filelock_stale_entry_retired(void);
+void test_filelock_reused_number(void);
 
 // -----------------------------------------------------------------------------
 // The fake Dev.
@@ -62,6 +64,13 @@ static u32            g_lk_sync_last_seq;
 static struct Spoor  *g_lk_synced[8];
 static hidx_t         g_lk_close_fd = -1;  // close this fd inside the next .lock
 static u8             g_lk_owner_tag;      // aux of a minted owner
+static struct Spoor  *g_lk_stale;          // .lock on this Spoor answers ESTALE
+static u64            g_lk_stale_path;     // != 0: every .lock on this path does
+static struct Spoor  *g_lk_dead;           // .lock_ident on this Spoor answers ESTALE
+static u32            g_lk_idents;         // .lock_ident calls that asked the "server"
+// A fake Spoor's generation is its qid.vers once .lock_ident has learned it (0
+// = not yet); the file's true one is registered here (default 1).
+static struct { struct Spoor *s; u32 gen; } g_lk_gens[8];
 
 static struct Dev g_lk_dev;
 
@@ -76,6 +85,26 @@ static void lk_reset(void) {
     g_lk_un_seq = g_lk_sync_n = g_lk_sync_last_seq = 0;
     for (u32 i = 0; i < 8; i++) g_lk_synced[i] = NULL;
     g_lk_close_fd = -1;
+    g_lk_stale = NULL;
+    g_lk_stale_path = 0;
+    g_lk_dead = NULL;
+    for (u32 i = 0; i < 8; i++) { g_lk_gens[i].s = NULL; g_lk_gens[i].gen = 0; }
+    g_lk_idents = 0;
+}
+
+static void lk_set_gen(struct Spoor *s, u32 gen) {
+    for (u32 i = 0; i < 8; i++)
+        if (!g_lk_gens[i].s || g_lk_gens[i].s == s) {
+            g_lk_gens[i].s = s;
+            g_lk_gens[i].gen = gen;
+            return;
+        }
+}
+
+static u32 lk_true_gen(struct Spoor *s) {
+    for (u32 i = 0; i < 8; i++)
+        if (g_lk_gens[i].s == s) return g_lk_gens[i].gen;
+    return 1;
 }
 
 static u64 lk_end(u64 start, u64 len) {
@@ -108,6 +137,10 @@ static int lk_lock(struct Spoor *c, u32 type, u64 start, u64 len,
         g_lk_close_fd = -1;
         handle_close(current_thread()->proc, fd);
     }
+    // A fid of a file that has died (the server answers ESTALE; its records
+    // went with the file).
+    if (c == g_lk_stale || (g_lk_stale_path && c->qid.path == g_lk_stale_path))
+        return -T_E_STALE;
     u64 end = lk_end(start, len);
     g_lk_last_spoor = c;
     g_lk_last_type  = type;
@@ -168,8 +201,18 @@ static struct Spoor *lk_lock_owner(struct Spoor *c, int *err) {
     return o;
 }
 
+// dev9p's rule: the number, and the generation when both have learned it.
 static bool lk_same_file(struct Spoor *a, struct Spoor *b) {
-    return a->qid.path == b->qid.path;
+    if (a->qid.path != b->qid.path) return false;
+    return a->qid.vers == 0 || b->qid.vers == 0 || a->qid.vers == b->qid.vers;
+}
+
+static int lk_ident(struct Spoor *c) {
+    if (c->qid.vers != 0) return 0;
+    g_lk_idents++;
+    if (c == g_lk_dead) return -T_E_STALE;
+    c->qid.vers = lk_true_gen(c);
+    return 0;
 }
 
 static int lk_sync(struct Spoor *c, u32 how) {
@@ -199,6 +242,7 @@ static struct Dev g_lk_dev = {
     .lock_owner     = lk_lock_owner,
     .lock_same_file = lk_same_file,
     .lock_sync      = lk_sync,
+    .lock_ident     = lk_ident,
 };
 
 static struct Dev g_lk_nolock_dev = {
@@ -397,6 +441,13 @@ static void proc_owner_body(struct lk_fix *f, int a, int b, int c) {
     TEST_EXPECT_EQ(lk_call(f, c, W | P, 0, 0), (s64)0, "a second file");
     TEST_EXPECT_EQ(g_lk_mints, 2u, "mints a second owner");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 2u, "two entries");
+    TEST_EXPECT_EQ(g_lk_sync_n, 0u, "no take landed anything");
+    TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_UN | P, 0, 0), (s64)0,
+                   "the Proc unlocks file 1 through A");
+    TEST_ASSERT(lk_synced(f->sp[a]) && lk_synced(f->sp[b]) && !lk_synced(f->sp[c]),
+                "after landing the writes of every open of file 1, and only file 1");
+    TEST_ASSERT(g_lk_sync_last_seq < g_lk_un_seq, "before the unlock was sent");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 2u, "the entry stays");
 }
 
 void test_filelock_proc_owner(void) {
@@ -675,4 +726,120 @@ void test_filelock_fork_exec_dup_teardown(void) {
     bool clunked = g_lk_owner_closes == closes + 1;
     if (parent) { parent->state = PROC_STATE_ZOMBIE; proc_free(parent); }
     if (held) TEST_ASSERT(clunked, "the child's teardown clunked its owner");
+}
+
+// -----------------------------------------------------------------------------
+// A dead file's entry: its fid answers ESTALE, and its number may now name the
+// file the call is about (a server reuses inode numbers).
+// -----------------------------------------------------------------------------
+
+static void stale_entry_body(struct lk_fix *f, int a, int b) {
+    const u64 P = SYS_FILE_LOCK_PROC;
+    TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_WR | P, 0, 1), (s64)0, "the Proc locks the file through a");
+    struct Spoor *dead = g_lk_last_spoor;
+    TEST_EXPECT_EQ(lk_call(f, b, SYS_FILE_LOCK_WR | P, 10, 1), (s64)0, "control: a take through b");
+    TEST_ASSERT(g_lk_last_spoor == dead && g_lk_mints == 1u, "control: it shares the live entry");
+
+    g_lk_stale = dead;
+    TEST_EXPECT_EQ(lk_call(f, b, SYS_FILE_LOCK_WR | P, 20, 1), (s64)0,
+                   "once the entry's fid answers ESTALE, a take is still granted");
+    struct Spoor *fresh = g_lk_last_spoor;
+    TEST_ASSERT(fresh != dead && g_lk_mints == 2u, "through a fresh owner");
+    TEST_EXPECT_EQ(g_lk_owner_closes, 1u, "the dead entry's owner is closed");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "and only the fresh entry is left");
+
+    g_lk_stale = fresh;
+    TEST_EXPECT_EQ(lk_call(f, b, SYS_FILE_LOCK_UN | P, 0, 0), (s64)0,
+                   "an unlock through a dead entry answers 0");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "and retires it");
+    TEST_EXPECT_EQ(g_lk_owner_closes, 2u, "closing its owner");
+    g_lk_stale = NULL;
+
+    TEST_EXPECT_EQ(lk_call(f, b, SYS_FILE_LOCK_WR | P, 0, 1), (s64)0, "a fresh entry");
+    g_lk_stale = g_lk_last_spoor;
+    u32 m = g_lk_mints;
+    TEST_EXPECT_EQ(lk_call(f, b, SYS_FILE_LOCK_RD | SYS_FILE_LOCK_TEST | P, 0, 1), -(s64)T_E_FAULT,
+                   "a test through a dead entry runs (its answer faults on kproc)");
+    TEST_EXPECT_EQ(g_lk_mints, m + 1u, "asked as a temporary owner");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "with the dead entry retired");
+    g_lk_stale = NULL;
+
+    // The descriptor's own file has died too: one retry, then ESTALE.
+    TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_WR | P, 0, 1), (s64)0, "an entry again");
+    g_lk_stale_path = 1;
+    u32 calls = g_lk_calls;
+    m = g_lk_mints;
+    TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_WR | P, 5, 1), -(s64)T_E_STALE,
+                   "a take on a file that died answers ESTALE");
+    TEST_EXPECT_EQ(g_lk_calls, calls + 2u, "after exactly one retry");
+    TEST_EXPECT_EQ(g_lk_mints, m + 1u, "through one fresh mint");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "leaving no entry");
+    g_lk_stale_path = 0;
+}
+
+void test_filelock_stale_entry_retired(void) {
+    struct lk_fix f;
+    lk_fix_init(&f);
+    int a = lk_open(&f, &g_lk_dev, 1, RW);
+    int b = lk_open(&f, &g_lk_dev, 1, RW);
+    if (a >= 0 && b >= 0) stale_entry_body(&f, a, b);
+    else test_fail("filelock: fixture allocation failed");
+    g_lk_stale = NULL;
+    g_lk_stale_path = 0;
+    lk_teardown(&f, 1);
+}
+
+// -----------------------------------------------------------------------------
+// A file's number outlives it: Stratum gives a dead file's inode number to the
+// next file created, so a descriptor of a dead file and an entry for the file
+// that took its number match by number alone. The generation tells them apart.
+// -----------------------------------------------------------------------------
+
+static void reused_number_body(struct lk_fix *f, int y, int y2, int x, int xk) {
+    const u64 P = SYS_FILE_LOCK_PROC;
+    lk_set_gen(f->sp[y], 2);
+    lk_set_gen(f->sp[y2], 2);
+    lk_set_gen(f->sp[x], 1);
+    f->sp[xk]->qid.vers = 1;        // learned while its file was alive
+    g_lk_dead = f->sp[x];
+    TEST_EXPECT_EQ(lk_call(f, y, SYS_FILE_LOCK_WR | P, 0, 0), (s64)0, "the Proc locks file Y");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "one entry, for Y");
+    TEST_EXPECT_EQ(lk_held_on(7), 1u, "Y's lock is held");
+
+    u32 m = g_lk_mints, calls = g_lk_calls;
+    TEST_EXPECT_EQ(lk_call(f, x, SYS_FILE_LOCK_WR | P, 0, 0), -(s64)T_E_STALE,
+                   "a Proc lock through the dead file's descriptor answers ESTALE");
+    TEST_ASSERT(g_lk_mints == m && g_lk_calls == calls,
+                "and reaches neither Y's entry nor the server's table");
+    TEST_EXPECT_EQ(lk_call(f, x, SYS_FILE_LOCK_UN | P, 0, 0), -(s64)T_E_STALE,
+                   "so does its unlock, which leaves Y's lock alone");
+    TEST_EXPECT_EQ(lk_held_on(7), 1u, "Y's lock is still held");
+
+    u32 asked = g_lk_idents;
+    lk_close_fd(f, x);
+    TEST_EXPECT_EQ(g_lk_idents, asked + 1u, "its close asks which file it named");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "and keeps Y's entry");
+    TEST_EXPECT_EQ(lk_held_on(7), 1u, "and Y's lock");
+    asked = g_lk_idents;
+    lk_close_fd(f, xk);
+    TEST_EXPECT_EQ(g_lk_idents, asked, "a dead file's descriptor that knows its generation needs no question");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "and its close keeps Y's entry too");
+
+    // The control, one variable away: a live descriptor of Y that never locked.
+    lk_close_fd(f, y2);
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "closing another descriptor of Y drops the entry");
+    TEST_EXPECT_EQ(lk_held_on(7), 0u, "and Y's lock");
+}
+
+void test_filelock_reused_number(void) {
+    struct lk_fix f;
+    lk_fix_init(&f);
+    int y  = lk_open(&f, &g_lk_dev, 7, RW);
+    int y2 = lk_open(&f, &g_lk_dev, 7, RW);
+    int x  = lk_open(&f, &g_lk_dev, 7, RW);
+    int xk = lk_open(&f, &g_lk_dev, 7, RW);
+    if (y >= 0 && y2 >= 0 && x >= 0 && xk >= 0) reused_number_body(&f, y, y2, x, xk);
+    else test_fail("filelock: fixture allocation failed");
+    g_lk_dead = NULL;
+    lk_teardown(&f, 7);
 }

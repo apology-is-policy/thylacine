@@ -237,6 +237,11 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
                    (int)VIV_ENOSYS,
                    "rt_sigpending stays ENOSYS -- consumed before native 136, SYS_LSTAT");
+    // rt_sigtimedwait (137) shares its number with SYS_FILE_LOCK (votes 34-35);
+    // its ENOSYS row keeps a Linux Proc's call from taking a lock.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
+                   (int)VIV_ENOSYS,
+                   "rt_sigtimedwait stays ENOSYS -- consumed before native 137, SYS_FILE_LOCK");
 
     // VIVARIUM 6.29: the sleep rows. Until them both FORWARDed to ENOSYS, and
     // musl's sleep() and usleep() returned at once.

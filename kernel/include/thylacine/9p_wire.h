@@ -569,6 +569,7 @@ struct p9_statfs {
 #define P9_GETATTR_UID        0x00000004ull
 #define P9_GETATTR_GID        0x00000008ull
 #define P9_GETATTR_BASIC      0x000007FFull
+#define P9_GETATTR_GEN        0x00001000ull
 #define P9_GETATTR_ALL        0x00003FFFull
 
 // Tgetattr: request attributes for `fid`. `request_mask` is a hint; the

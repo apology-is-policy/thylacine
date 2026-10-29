@@ -103,6 +103,14 @@ void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
+void test_dev9p_lock_wire_and_status(void);
+void test_dev9p_lock_grant_drops_larder(void);
+void test_dev9p_lock_unlock_flushes_first(void);
+void test_dev9p_lock_test_answers(void);
+void test_dev9p_lock_owner_clone(void);
+void test_dev9p_lock_owner_never_parks(void);
+void test_dev9p_lock_cached_open_refuses(void);
+void test_dev9p_lock_ident_generation(void);
 
 extern struct Dev devnone;
 
@@ -179,6 +187,9 @@ static u32  g_create_mode;           // M8: the mode the last Tlcreate / Tmkdir 
 static u32  g_ga_mode = 0100644u;    // M8: the mode every attribute reply reports
 static u32  g_ga_gid = 0x5678u;      // F-5: the gid every Rgetattr reports
 static u32  g_ga_fail_ecode;         // != 0: every Tgetattr answers Rlerror(ecode)
+static u64  g_ga_gen;                // B-3h: the generation every Rgetattr reports
+static u32  g_tgetattr_seen;         // B-3h: Tgetattrs since the last lock_wire_reset
+static u64  g_tgetattr_mask;         // B-3h: the last Tgetattr's request mask
 static u32  g_create_ga_fail;        // F-5: m8_wire_mode's create alone runs under it
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
@@ -230,6 +241,54 @@ static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
 static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
 static u32  g_wga_lerror_ecode;  // != 0: the NEXT Twalkgetattr answers Rlerror, then clears
 
+// B-3h file locks: what the last Tlock / Tgetlock / zero-name Twalk carried,
+// and the answers the responder gives. lock_wire_reset() restores them all.
+static u32  g_tlock_seen, g_tlock_last_seq, g_tgetlock_seen;
+static u32  g_tlock_fid, g_tlock_flags, g_tlock_proc_id;
+static u8   g_tlock_type;
+static u64  g_tlock_start, g_tlock_len;
+static u16  g_tlock_cid_len;
+static u8   g_tlock_status;            // the Rlock status (0 = SUCCESS)
+static u32  g_tlock_fail_ecode;        // != 0: every Tlock answers Rlerror(ecode)
+static u32  g_tgetlock_fid;
+static u8   g_tgetlock_type;
+static u64  g_tgetlock_start, g_tgetlock_len;
+static u8   g_gl_type = 2;             // the Rgetlock answer (2 = UNLCK)
+static u64  g_gl_start, g_gl_len;
+static u32  g_tgetlock_fail_ecode;     // != 0: every Tgetlock answers Rlerror(ecode)
+static u32  g_twalk_clone_seen, g_twalk_clone_fid, g_twalk_clone_newfid;
+static u32  g_twalk_clone_fail_ecode;  // != 0: the NEXT zero-name Twalk answers Rlerror, then clears
+
+static void lock_wire_reset(void) {
+    g_tlock_seen = g_tlock_last_seq = g_tgetlock_seen = 0;
+    g_tlock_fid = g_tlock_flags = g_tlock_proc_id = 0;
+    g_tlock_type = 0xff;
+    g_tlock_start = g_tlock_len = 0;
+    g_tlock_cid_len = 0xffff;
+    g_tlock_status = P9_LOCK_SUCCESS;
+    g_tlock_fail_ecode = 0;
+    g_tgetlock_fid = 0;
+    g_tgetlock_type = 0xff;
+    g_tgetlock_start = g_tgetlock_len = 0;
+    g_gl_type = P9_LOCK_TYPE_UNLCK;
+    g_gl_start = g_gl_len = 0;
+    g_tgetlock_fail_ecode = 0;
+    g_twalk_clone_seen = g_twalk_clone_fid = g_twalk_clone_newfid = 0;
+    g_twalk_clone_fail_ecode = 0;
+    g_ga_gen = 0;
+    g_tgetattr_seen = 0;
+    g_tgetattr_mask = 0;
+}
+
+static int lock_rlerror(u8 *resp, size_t resp_cap, u16 tag, u32 ec) {
+    if (resp_cap < P9_HDR_LEN + 4) return -1;
+    resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+    resp[4] = P9_RLERROR;
+    resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+    for (int i = 0; i < 4; i++) resp[7 + i] = (u8)(ec >> (8 * i));
+    return 11;
+}
+
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
 // but adds Rclunk handling for the close path.
@@ -271,6 +330,16 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // fid(4) + newfid(4) = 15; nwname at 15..17.
         if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
         u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
+        if (nwname == 0) {
+            g_twalk_clone_seen++;
+            g_twalk_clone_fid    = le32_at(req + 7);
+            g_twalk_clone_newfid = le32_at(req + 11);
+            if (g_twalk_clone_fail_ecode) {
+                u32 ec = g_twalk_clone_fail_ecode;
+                g_twalk_clone_fail_ecode = 0;
+                return lock_rlerror(resp, resp_cap, tag, ec);
+            }
+        }
         if (g_twalk_enoent_n > 0 && nwname > 0) {
             g_twalk_enoent_n--;
             size_t etotal = P9_HDR_LEN + 4;
@@ -555,6 +624,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TGETATTR) {
+        g_tgetattr_seen++;
+        if (req_len >= P9_HDR_LEN + 4 + 8) g_tgetattr_mask = le64_at(req + 11);
         if (g_ga_fail_ecode) {
             u32 ec = g_ga_fail_ecode;
             size_t etotal = P9_HDR_LEN + 4;
@@ -591,7 +662,9 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[o] = 0x00; resp[o + 1] = 0x01; o += 8;          // size = 0x100
         resp[o] = 0x00; resp[o + 1] = 0x10; o += 8;          // blksize = 4096
         resp[o] = 1; o += 8;                                 // blocks = 1
-        o += 8 * 8 + 2 * 8;                                  // a/m/c/b times + gen + dv = 0
+        o += 8 * 8;                                          // a/m/c/b times = 0
+        for (int b = 0; b < 8; b++) resp[o + b] = (u8)(g_ga_gen >> (8 * b));
+        o += 8 + 8;                                          // gen; data_version = 0
         (void)o;                                             // o == total here
         return (int)total;
     }
@@ -696,6 +769,53 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
         return (int)P9_HDR_LEN;
     }
+    if (type == P9_TLOCK) {
+        // Tlock body: fid@7 type@11 flags@12 start@16 length@24 proc_id@32
+        // client_id@36 (len:u16 + bytes).
+        if (req_len < P9_HDR_LEN + 4 + 1 + 4 + 8 + 8 + 4 + 2) return -1;
+        g_tlock_seen++;
+        g_tlock_last_seq = g_wire_seq;
+        g_tlock_fid     = le32_at(req + 7);
+        g_tlock_type    = req[11];
+        g_tlock_flags   = le32_at(req + 12);
+        g_tlock_start   = le64_at(req + 16);
+        g_tlock_len     = le64_at(req + 24);
+        g_tlock_proc_id = le32_at(req + 32);
+        g_tlock_cid_len = (u16)(req[36] | ((u16)req[37] << 8));
+        if (g_tlock_fail_ecode)
+            return lock_rlerror(resp, resp_cap, tag, g_tlock_fail_ecode);
+        if (resp_cap < P9_HDR_LEN + 1) return -1;
+        resp[0] = 8; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RLOCK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = g_tlock_status;
+        return 8;
+    }
+    if (type == P9_TGETLOCK) {
+        // Tgetlock body: fid@7 type@11 start@12 length@20 proc_id@28
+        // client_id@32.
+        if (req_len < P9_HDR_LEN + 4 + 1 + 8 + 8 + 4 + 2) return -1;
+        g_tgetlock_seen++;
+        g_tgetlock_fid   = le32_at(req + 7);
+        g_tgetlock_type  = req[11];
+        g_tgetlock_start = le64_at(req + 12);
+        g_tgetlock_len   = le64_at(req + 20);
+        if (g_tgetlock_fail_ecode)
+            return lock_rlerror(resp, resp_cap, tag, g_tgetlock_fail_ecode);
+        // Rgetlock: type@7 start@8 length@16 proc_id@24 client_id@28 ("srv").
+        size_t total = P9_HDR_LEN + 1 + 8 + 8 + 4 + 2 + 3;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RGETLOCK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = g_gl_type;
+        for (int i = 0; i < 8; i++) resp[8 + i]  = (u8)(g_gl_start >> (8 * i));
+        for (int i = 0; i < 8; i++) resp[16 + i] = (u8)(g_gl_len >> (8 * i));
+        resp[24] = 7; resp[25] = 0; resp[26] = 0; resp[27] = 0;
+        resp[28] = 3; resp[29] = 0;
+        resp[30] = 's'; resp[31] = 'r'; resp[32] = 'v';
+        return (int)total;
+    }
     return -1;
 }
 
@@ -708,6 +828,7 @@ static struct Spoor *make_open_client_and_root(void) {
     // test that failed between setting one and restoring it left it set.
     g_ga_mode = 0100644u;
     g_ga_fail_ecode = 0;
+    lock_wire_reset();
     if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                             dev9p_responder, NULL) != 0) return NULL;
     if (p9_client_init(&g_client, /*root_fid=*/0, 8192,
@@ -5397,4 +5518,489 @@ void test_dev9p_origin_format_ns(void) {
     spoor_unref(bare);
 
     spoor_unref(mp); spoor_unref(conn); spoor_unref(other); spoor_unref(anon); spoor_unref(a);
+}
+
+// =============================================================================
+// B-3h file locks (ARCH 9.6.11): dev9p's half over the loopback -- what
+// crosses the wire, how each answer maps, and the caches kept honest around a
+// lock. The owner table and the call are test_filelock.c's.
+// =============================================================================
+
+// `fileA` walked and opened ORDWR on the fixture's client, or NULL.
+static struct Spoor *lk_open_file(struct Spoor *root) {
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    const char *names[1] = { "fileA" };
+    struct Walkqid *w = dev9p.walk(root, nc, names, 1);
+    if (!w) { nc->aux = NULL; spoor_unref(nc); return NULL; }
+    walkqid_free(w);
+    struct Spoor *o = dev9p.open(nc, 2 /*ORDWR*/);
+    if (!o) { spoor_clunk(nc); return NULL; }
+    return o;
+}
+
+// The async Rclunk a close left unread: the loopback holds one reply.
+static void lk_close(struct Spoor *c) {
+    u32 pre = g_clunk_seen;
+    spoor_clunk(c);
+    if (g_clunk_seen != pre) (void)p9_client_reader_pump_ready(&g_client);
+}
+
+static void lock_wire_and_status_body(struct Spoor *f) {
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && fp->fid != P9_NOFID && !fp->cached_open,
+                "an open, fid-backed file");
+    lock_wire_reset();
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 100, 20, NULL), 0ll,
+                   "SUCCESS -> 0");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "one Tlock");
+    TEST_EXPECT_EQ(g_tlock_fid, fp->fid, "on the open file's own fid");
+    TEST_EXPECT_EQ((u32)g_tlock_type, (u32)P9_LOCK_TYPE_WRLCK, "the type crosses unchanged");
+    TEST_EXPECT_EQ(g_tlock_flags, 0u, "never the BLOCK flag: the kernel does the waiting");
+    TEST_EXPECT_EQ(g_tlock_start, 100ull, "start");
+    TEST_EXPECT_EQ(g_tlock_len, 20ull, "length");
+    TEST_EXPECT_EQ(g_tlock_proc_id, 0u, "no proc_id: the fid is the owner");
+    TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "no client_id");
+
+    static const struct { u8 status; u32 type; s64 want; const char *what; } st[] = {
+        { P9_LOCK_BLOCKED, SYS_FILE_LOCK_RD, -T_E_AGAIN, "BLOCKED -> EAGAIN" },
+        { P9_LOCK_ERROR,   SYS_FILE_LOCK_WR, -T_E_NOLCK, "ERROR -> ENOLCK" },
+        { P9_LOCK_GRACE,   SYS_FILE_LOCK_WR, -T_E_NOLCK, "GRACE -> ENOLCK" },
+        { 9,               SYS_FILE_LOCK_WR, -T_E_NOLCK, "a status 9P2000.L has not -> ENOLCK" },
+        { P9_LOCK_BLOCKED, SYS_FILE_LOCK_UN, -T_E_NOLCK, "an unlock answered BLOCKED -> ENOLCK, not EAGAIN" },
+    };
+    for (u32 i = 0; i < sizeof(st) / sizeof(st[0]); i++) {
+        g_tlock_status = st[i].status;
+        TEST_EXPECT_EQ((s64)dev9p.lock(f, st[i].type, 0, 0, NULL), st[i].want, st[i].what);
+    }
+    g_tlock_status = P9_LOCK_SUCCESS;
+
+    // A server without locks answers ENOSYS or EOPNOTSUPP: ENOLCK. Its EBADF
+    // is a verdict on its own fid, never the caller's descriptor: EIO.
+    static const struct { u32 ecode; s64 want; const char *what; } le[] = {
+        { T_E_NOLCK,     -T_E_NOLCK, "Rlerror ENOLCK -> ENOLCK" },
+        { T_E_NOSYS,     -T_E_NOLCK, "Rlerror ENOSYS -> ENOLCK" },
+        { T_E_OPNOTSUPP, -T_E_NOLCK, "Rlerror EOPNOTSUPP -> ENOLCK" },
+        { T_E_BADF,      -T_E_IO,    "Rlerror EBADF -> EIO" },
+        { T_E_ACCES,     -T_E_ACCES, "Rlerror EACCES crosses as itself" },
+    };
+    for (u32 i = 0; i < sizeof(le) / sizeof(le[0]); i++) {
+        g_tlock_fail_ecode = le[i].ecode;
+        TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), le[i].want, le[i].what);
+    }
+    g_tlock_fail_ecode = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll,
+                   "control: the same unlock is granted once the server answers");
+}
+
+void test_dev9p_lock_wire_and_status(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *f = lk_open_file(root);
+    if (f) {
+        lock_wire_and_status_body(f);
+        lock_wire_reset();
+        lk_close(f);
+    } else {
+        test_fail("open fileA");
+    }
+    teardown(root);
+}
+
+static void lk_seed(u64 q) {
+    static const u8 pg[8] = { 'L', 'A', 'S', 'T', 'H', 'O', 'L', 'D' };
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.mode = 0100644u;
+    struct larder *l = &g_client.larder;
+    larder_attr_install(l, larder_gen_snapshot(l), q, /*cvers=*/1, &st);
+    larder_page_install(l, larder_gen_snapshot(l), q, 0, /*cvers=*/1, pg, 8);
+}
+
+static bool lk_attr_cached(u64 q) {
+    struct t_stat st; u64 s0 = 0;
+    return larder_attr_serve(&g_client.larder, q, &st, &s0);
+}
+
+static bool lk_page_cached(u64 q) {
+    u8 b[8]; u64 s0 = 0;
+    return larder_page_serve(&g_client.larder, q, 0, 0, 8, 1, b, &s0) == 8;
+}
+
+static void lock_grant_drops_larder_body(struct Spoor *f) {
+    u64 q = f->qid.path;
+    lock_wire_reset();
+    lk_seed(q);
+    TEST_ASSERT(lk_attr_cached(q) && lk_page_cached(q), "seeded: attr + page cached");
+
+    g_tlock_status = P9_LOCK_BLOCKED;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), (s64)-T_E_AGAIN,
+                   "a refused take");
+    g_tlock_status = P9_LOCK_SUCCESS;
+    TEST_ASSERT(lk_attr_cached(q) && lk_page_cached(q),
+                "control: a refused take drops nothing");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll, "an unlock");
+    TEST_ASSERT(lk_attr_cached(q) && lk_page_cached(q), "an unlock drops nothing");
+    struct t_file_lock ans = { 0 };
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, &ans), 0ll, "a test");
+    TEST_ASSERT(lk_attr_cached(q) && lk_page_cached(q), "a test drops nothing");
+
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "a granted WR");
+    TEST_ASSERT(!lk_attr_cached(q), "the grant drops the file's attr");
+    TEST_ASSERT(!lk_page_cached(q), "the grant drops the file's pages");
+
+    lk_seed(q);
+    TEST_ASSERT(lk_attr_cached(q) && lk_page_cached(q), "re-seeded");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll, "a granted RD");
+    TEST_ASSERT(!lk_attr_cached(q) && !lk_page_cached(q), "a read lock revalidates too");
+}
+
+void test_dev9p_lock_grant_drops_larder(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *f = lk_open_file(root);
+    if (f) {
+        lock_grant_drops_larder_body(f);
+        lock_wire_reset();
+        lk_close(f);
+    } else {
+        test_fail("open fileA");
+    }
+    larder_destroy(&g_client.larder);
+    teardown(root);
+}
+
+static void lock_unlock_flushes_first_body(struct Spoor *f) {
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && fp->wb_eligible, "a write-behind open");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    lock_wire_reset();
+
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "take");
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk, 256, 0), 256ll, "stage under the lock");
+    TEST_EXPECT_EQ(g_twrite_seen, 0u, "staged, not sent");
+    g_twrite_pat_on = true;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll, "unlock");
+    TEST_EXPECT_EQ(g_twrite_seen, 1u, "the unlock flushed the run");
+    TEST_EXPECT_EQ(g_twrite_cap_len, 256u, "all of it");
+    TEST_ASSERT(g_twrite_pat_ok, "the staged bytes");
+    TEST_EXPECT_EQ(g_tlock_seen, 2u, "take + unlock");
+    TEST_ASSERT(g_twrite_last_seq < g_tlock_last_seq,
+                "the flush Twrite precedes the unlock's Tlock");
+
+    // A take sends no staged bytes: only a release needs them on the server.
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 256, 128, 256), 128ll, "stage again");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "take again");
+    TEST_EXPECT_EQ(g_twrite_seen, 1u, "a take flushes nothing");
+    TEST_EXPECT_EQ((s64)dev9p.lock_sync(f, DEV_LOCK_SYNC_RELEASE), 0ll,
+                   "lock_sync(RELEASE)");
+    TEST_EXPECT_EQ(g_twrite_seen, 2u, "lock_sync(RELEASE) flushes the run");
+
+    // A flush that fails still releases: the lock must not outlive the
+    // holder's unlock, and the error latches for the next write or fsync.
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 384, 64, 384), 64ll, "stage a third time");
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    u32 tl = g_tlock_seen;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll,
+                   "the unlock is sent despite the failed flush");
+    TEST_EXPECT_EQ(g_tlock_seen, tl + 1u, "one more Tlock");
+    TEST_EXPECT_EQ((s64)dev9p.fsync(f, 0), -28ll, "the flush error latched");
+}
+
+void test_dev9p_lock_unlock_flushes_first(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (loose)");
+    lock_unlock_flushes_first_body(f);
+    g_twrite_fail_ecode = 0;
+    g_twrite_pat_on = false;
+    lock_wire_reset();
+    (void)spoor_clunk_rc(f);
+    wb_test_end(root);
+}
+
+static void lock_test_answers_body(struct Spoor *f) {
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL, "priv");
+    lock_wire_reset();
+    struct t_file_lock ans;
+
+    for (size_t i = 0; i < sizeof(ans); i++) ((u8 *)&ans)[i] = 0xEE;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 50, 10, &ans), 0ll,
+                   "nothing in the way");
+    TEST_EXPECT_EQ(g_tgetlock_seen, 1u, "one Tgetlock");
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "and no Tlock: a test changes nothing");
+    TEST_EXPECT_EQ(g_tgetlock_fid, fp->fid, "on the file's fid");
+    TEST_EXPECT_EQ((u32)g_tgetlock_type, (u32)P9_LOCK_TYPE_WRLCK, "the asked type");
+    TEST_EXPECT_EQ(g_tgetlock_start, 50ull, "the asked start");
+    TEST_EXPECT_EQ(g_tgetlock_len, 10ull, "the asked length");
+    TEST_EXPECT_EQ((u32)ans.type, (u32)SYS_FILE_LOCK_UN, "answer: UN");
+    TEST_EXPECT_EQ(ans.start, 50ull, "the asked range echoed: start");
+    TEST_EXPECT_EQ(ans.len, 10ull, "the asked range echoed: len");
+    TEST_EXPECT_EQ(ans.pid, -1, "pid -1: an owner here is not a process");
+
+    g_gl_type = P9_LOCK_TYPE_WRLCK; g_gl_start = 40; g_gl_len = 30;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_RD, 50, 10, &ans), 0ll, "a conflict");
+    TEST_EXPECT_EQ((u32)g_tgetlock_type, (u32)P9_LOCK_TYPE_RDLCK, "RD asked");
+    TEST_EXPECT_EQ((u32)ans.type, (u32)SYS_FILE_LOCK_WR, "the conflicting lock's type");
+    TEST_EXPECT_EQ(ans.start, 40ull, "its start, not the asked one");
+    TEST_EXPECT_EQ(ans.len, 30ull, "its length");
+    TEST_EXPECT_EQ(ans.pid, -1, "pid -1");
+
+    g_gl_type = P9_LOCK_TYPE_RDLCK; g_gl_start = 0; g_gl_len = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, &ans), 0ll, "a read conflict");
+    TEST_EXPECT_EQ((u32)ans.type, (u32)SYS_FILE_LOCK_RD, "RD reported");
+    TEST_EXPECT_EQ(ans.len, 0ull, "to EOF reported as 0");
+
+    g_gl_type = 7;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, &ans), (s64)-T_E_IO,
+                   "a type 9P2000.L has not -> EIO");
+    g_gl_type = P9_LOCK_TYPE_UNLCK;
+
+    g_tgetlock_fail_ecode = T_E_NOSYS;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, &ans), (s64)-T_E_NOLCK,
+                   "Tgetlock Rlerror ENOSYS -> ENOLCK");
+    g_tgetlock_fail_ecode = T_E_BADF;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, &ans), (s64)-T_E_IO,
+                   "Tgetlock Rlerror EBADF -> EIO");
+    g_tgetlock_fail_ecode = 0;
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "no test ever sent a Tlock");
+}
+
+void test_dev9p_lock_test_answers(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *f = lk_open_file(root);
+    if (f) {
+        lock_test_answers_body(f);
+        lock_wire_reset();
+        lk_close(f);
+    } else {
+        test_fail("open fileA");
+    }
+    teardown(root);
+}
+
+static void lock_owner_clone_body(struct Spoor *root, struct Spoor *f) {
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL, "priv");
+    lock_wire_reset();
+    int err = 0;
+    struct Spoor *o = dev9p.lock_owner(f, &err);
+    TEST_ASSERT(o != NULL, "an owner minted");
+    struct dev9p_priv *op = dev9p_priv_of(o);
+    bool shape = op != NULL && op->fid != P9_NOFID && op->fid != fp->fid &&
+                 op->fid_owned && op->fid_locks && (o->flag & COPEN) == 0 &&
+                 o->qid.path == f->qid.path && op->client == fp->client;
+    bool walk = g_twalk_clone_seen == 1 && g_twalk_clone_fid == fp->fid &&
+                op != NULL && g_twalk_clone_newfid == op->fid;
+    bool same = dev9p.lock_same_file(f, o) && dev9p.lock_same_file(o, f);
+    bool other_file = dev9p.lock_same_file(root, f);
+    u32 tl = g_tlock_seen;
+    int lrc = dev9p.lock(o, SYS_FILE_LOCK_WR, 0, 0, NULL);
+    bool on_own_fid = op != NULL && g_tlock_seen == tl + 1u && g_tlock_fid == op->fid;
+    bool other_client = true;
+    if (op) {
+        struct p9_client *cl = op->client;
+        op->client = (struct p9_client *)(void *)&g_loopback;   // compared only
+        other_client = dev9p.lock_same_file(f, o);
+        op->client = cl;
+    }
+    u32 c0 = g_clunk_seen;
+    lk_close(o);
+    TEST_ASSERT(shape, "its own owned fid, unopened, naming the same file, marked a lock fid");
+    TEST_ASSERT(walk, "minted by one zero-name Twalk from the open fid into its fid");
+    TEST_ASSERT(same, "lock_same_file: the open file and its owner, both ways");
+    TEST_ASSERT(!other_file, "lock_same_file: another qid.path is another file");
+    TEST_ASSERT(!other_client, "lock_same_file: another session is another file");
+    TEST_EXPECT_EQ((s64)lrc, 0ll, "a lock through the owner");
+    TEST_ASSERT(on_own_fid, "is sent on the owner's fid");
+    TEST_EXPECT_EQ(g_clunk_seen, c0 + 1u, "its close clunks the fid (the server drops its locks)");
+
+    // A server that refuses the clone of an open fid: no owner, ENOLCK.
+    g_twalk_clone_fail_ecode = T_E_INVAL;
+    err = 0;
+    o = dev9p.lock_owner(f, &err);
+    g_twalk_clone_fail_ecode = 0;
+    if (o) lk_close(o);
+    TEST_ASSERT(o == NULL, "a refused clone mints nothing");
+    TEST_EXPECT_EQ((s64)err, (s64)-T_E_NOLCK, "and answers ENOLCK");
+    err = 0;
+    o = dev9p.lock_owner(f, &err);
+    if (o) lk_close(o);
+    TEST_ASSERT(o != NULL, "control: the same mint succeeds once the server admits the clone");
+}
+
+void test_dev9p_lock_owner_clone(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *f = lk_open_file(root);
+    if (f) {
+        lock_owner_clone_body(root, f);
+        lock_wire_reset();
+        lk_close(f);
+    } else {
+        test_fail("open fileA");
+    }
+    teardown(root);
+}
+
+// A lock fid holds locks until its clunk, so it must never be donated to the
+// dir-fid cache: an unopened DIRECTORY fid on a cacheable session is exactly
+// the shape dev9p_close parks.
+static void lock_owner_never_parks_body(struct Spoor *root) {
+    struct Spoor *d = spoor_clone(root);
+    TEST_ASSERT(d != NULL, "clone");
+    struct Walkqid *w = dev9p.walk(root, d, NULL, 0);
+    if (!w) { d->aux = NULL; spoor_unref(d); test_fail("clone-walk"); return; }
+    walkqid_free(w);
+    bool dir_shape = (d->qid.type & QTDIR) && (d->flag & COPEN) == 0;
+    u32 c0 = g_clunk_seen;
+    lk_close(d);
+    TEST_ASSERT(dir_shape, "an unopened directory");
+    TEST_EXPECT_EQ(g_clunk_seen, c0, "control: its close parks the fid (no Tclunk)");
+
+    d = spoor_clone(root);
+    TEST_ASSERT(d != NULL, "clone 2");
+    w = dev9p.walk(root, d, NULL, 0);
+    if (!w) { d->aux = NULL; spoor_unref(d); test_fail("clone-walk 2"); return; }
+    walkqid_free(w);
+    int err = 0;
+    struct Spoor *o = dev9p.lock_owner(d, &err);
+    bool odir = o && (o->qid.type & QTDIR) && (o->flag & COPEN) == 0;
+    c0 = g_clunk_seen;
+    if (o) lk_close(o);
+    u32 c1 = g_clunk_seen;
+    lk_close(d);
+    TEST_ASSERT(o != NULL && odir, "an owner of the same unopened-directory shape");
+    TEST_EXPECT_EQ(c1, c0 + 1u, "a lock fid's close clunks it, never parks it");
+}
+
+void test_dev9p_lock_owner_never_parks(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    lock_owner_never_parks_body(root);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+static void lock_cached_open_refuses_body(struct Spoor *root) {
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    co_prime(root, "fileA", 5);
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 5 + 1);
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data, (u32)sizeof(data));
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co != NULL, "a cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    bool fidless = cp != NULL && cp->cached_open && cp->fid == P9_NOFID;
+    lock_wire_reset();
+    struct t_file_lock ans = { 0 };
+    int r_take = dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL);
+    int r_test = dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, &ans);
+    int r_un   = dev9p.lock(co, SYS_FILE_LOCK_UN, 0, 0, NULL);
+    int err = 0;
+    struct Spoor *o = dev9p.lock_owner(co, &err);
+    u32 wire = g_tlock_seen + g_tgetlock_seen + g_twalk_clone_seen;
+    if (o) lk_close(o);
+    spoor_clunk(co);
+    TEST_ASSERT(fidless, "fidless");
+    TEST_EXPECT_EQ((s64)r_take, (s64)-T_E_NOLCK, "a take on a cached open: ENOLCK");
+    TEST_EXPECT_EQ((s64)r_test, (s64)-T_E_NOLCK, "a test: ENOLCK");
+    TEST_EXPECT_EQ((s64)r_un, (s64)-T_E_NOLCK, "an unlock: ENOLCK");
+    TEST_ASSERT(o == NULL, "no owner minted from a fidless open");
+    TEST_EXPECT_EQ((s64)err, (s64)-T_E_NOLCK, "ENOLCK");
+    TEST_EXPECT_EQ(wire, 0u, "nothing crossed the wire");
+}
+
+void test_dev9p_lock_cached_open_refuses(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    lock_cached_open_refuses_body(root);
+    lock_wire_reset();
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// A dead file's fid shares its inode number with the next file created, so a
+// lock fid and a descriptor are the same file only if their generations agree
+// once both have learned them. dev9p asks the server once per Spoor.
+static void lock_ident_body(struct Spoor *f) {
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && fp->lock_ident == DEV9P_IDENT_UNKNOWN,
+                "an open file that has not learned its generation");
+    lock_wire_reset();
+    g_ga_valid = P9_GETATTR_BASIC | P9_GETATTR_GEN;
+    g_ga_gen   = 0x1234567890ull;
+    TEST_EXPECT_EQ((s64)dev9p.lock_ident(f), 0ll, "lock_ident");
+    TEST_EXPECT_EQ(g_tgetattr_seen, 1u, "asks with one Tgetattr");
+    TEST_ASSERT((g_tgetattr_mask & P9_GETATTR_GEN) != 0, "for the generation");
+    TEST_ASSERT(fp->lock_ident == DEV9P_IDENT_GEN && fp->lock_gen == 0x1234567890ull,
+                "and keeps it");
+    TEST_EXPECT_EQ((s64)dev9p.lock_ident(f), 0ll, "again");
+    TEST_EXPECT_EQ(g_tgetattr_seen, 1u, "without asking again");
+
+    int err = 0;
+    struct Spoor *o = dev9p.lock_owner(f, &err);
+    TEST_ASSERT(o != NULL, "an owner");
+    struct dev9p_priv *op = dev9p_priv_of(o);
+    bool inherits = op && op->lock_ident == DEV9P_IDENT_GEN && op->lock_gen == fp->lock_gen;
+    bool same = dev9p.lock_same_file(f, o);
+    u64 g = op ? op->lock_gen : 0;
+    if (op) op->lock_gen = g + 1;          // the file that took a dead one's number
+    bool other_gen = dev9p.lock_same_file(f, o);
+    if (op) op->lock_ident = DEV9P_IDENT_UNKNOWN;
+    bool unknown_side = dev9p.lock_same_file(f, o);
+    if (op) { op->lock_ident = DEV9P_IDENT_GEN; op->lock_gen = g; }
+    lk_close(o);
+    TEST_ASSERT(inherits, "the owner inherits its source's generation");
+    TEST_ASSERT(same, "same number, same generation: the same file");
+    TEST_ASSERT(!other_gen, "same number, another generation: another file");
+    TEST_ASSERT(unknown_side, "a side that has not learned it matches by number");
+}
+
+// A dead file's fid answers ESTALE and learns nothing; a server that reports
+// no generation leaves identity to the number.
+static void lock_ident_refusals_body(struct Spoor *f) {
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL, "priv");
+    lock_wire_reset();
+    g_ga_fail_ecode = T_E_STALE;
+    int rc = dev9p.lock_ident(f);
+    g_ga_fail_ecode = 0;
+    TEST_EXPECT_EQ((s64)rc, (s64)-T_E_STALE, "a dead file's fid: ESTALE");
+    TEST_ASSERT(fp->lock_ident == DEV9P_IDENT_UNKNOWN, "and nothing learned");
+    g_ga_valid = P9_GETATTR_BASIC;
+    TEST_EXPECT_EQ((s64)dev9p.lock_ident(f), 0ll, "a server without generations");
+    TEST_ASSERT(fp->lock_ident == DEV9P_IDENT_NONE, "is recorded as such");
+    TEST_EXPECT_EQ(g_tgetattr_seen, 2u, "one question each");
+    TEST_EXPECT_EQ((s64)dev9p.lock_ident(f), 0ll, "and not asked again");
+    TEST_EXPECT_EQ(g_tgetattr_seen, 2u, "no third question");
+}
+
+void test_dev9p_lock_ident_generation(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *f = lk_open_file(root);
+    struct Spoor *g = f ? lk_open_file(root) : NULL;
+    if (f && g) {
+        lock_ident_body(f);
+        lock_ident_refusals_body(g);
+    } else {
+        test_fail("open fileA twice");
+    }
+    g_ga_valid = 0x7ffu;
+    g_ga_fail_ecode = 0;
+    lock_wire_reset();
+    if (g) lk_close(g);
+    if (f) lk_close(f);
+    teardown(root);
 }

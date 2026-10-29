@@ -2854,13 +2854,17 @@ has no byte-range locks, so the semantics are Linux's, and the wire is
 **The call.** `SYS_FILE_LOCK = 137` (x0 `fd`, x1 `op`, x2 `start`, x3 `len`,
 x4 `out`). `op` holds the type (`LOCK_RD` 0, `LOCK_WR` 1, `LOCK_UN` 2) and three
 bits: `LOCK_WAIT` (0x10), `LOCK_TEST` (0x20) and `LOCK_PROC` (0x40). Any other
-bit answers `EINVAL`. `len` 0 means to the end of the file, as in `struct
-flock`; a range that would pass 2^64 answers `EINVAL`. `LOCK_WR` needs a
-descriptor open for writing and `LOCK_RD` one open for reading (`EBADF`), as
-POSIX asks. TEST asks for neither. The answer is 0 or `-EAGAIN` (held by another
-owner), `-ENOLCK`, `-EBADF`, `-EINVAL` or `-EINTR`. A file whose Dev serves no
-locks answers `ENOLCK`, as Linux's NFS does without its lock daemon. In v1.0
-only dev9p serves them.
+bit answers `EINVAL`, and so does TEST with `LOCK_UN` or `LOCK_WAIT` (`F_GETLK`
+asks about a lock to take, and has nothing to wait for). `len` 0 means to the
+end of the file, as in `struct flock`; a range that would pass 2^64 answers
+`EINVAL`. `LOCK_WR` needs a descriptor open for writing and `LOCK_RD` one open
+for reading (`EBADF`), as POSIX asks. TEST asks for neither. A navigation-only
+(`O_PATH`) descriptor answers `EBADF`, as Linux's `fcntl` does. The answer is 0
+or `-EAGAIN` (held by another owner), `-ENOLCK`, `-EBADF`, `-EINVAL`, `-EINTR`,
+`-EFAULT` (TEST's `out` cannot be written) or `-ESTALE` (the file has died: an
+unlinked file's fid). A server's `EBADF` is a verdict on its own fid and
+crosses as `EIO`. A file whose Dev serves no locks answers `ENOLCK`, as Linux's
+NFS does without its lock daemon. In v1.0 only dev9p serves them.
 
 **Two owners.** A lock belongs to exactly one owner, and two owners conflict
 when their ranges overlap and either lock is a write lock.
@@ -2872,22 +2876,53 @@ when their ranges overlap and either lock is a write lock.
   programs by default.
 - **The Proc** (`LOCK_PROC`). This is POSIX `F_SETLK`. Linux's POSIX owner is
   the descriptor table, and here the descriptor table is the Proc's handle
-  table. For each file it locks, the Proc holds one extra fid, clone-walked from
-  the descriptor that took the lock, and the lock is taken on that fid. The
-  fids are kept with the handle table: the Proc's threads share them, rfork does
-  not copy them (the child starts with none), and exec keeps them. Closing any
-  of the Proc's descriptors on that file drops all of them. So does the handle
-  table's teardown at exit. "That file" means the same 9P session, `qid.path`
-  and inode generation. The same file reached through two sessions is two files
-  here, an edge Linux has no counterpart for. The table is bounded per Proc
-  (I-32); past the bound a new file answers `ENOLCK`.
+  table. For each file it locks, the Proc holds one extra fid, a zero-name
+  clone of the descriptor's fid, and the lock is taken on that fid. The server
+  must admit the clone of an open fid. Stratum does, for a zero-name walk into
+  a distinct new fid, since B-3h; many 9P servers refuse every walk from an
+  open fid, and on such a server a Proc lock answers `ENOLCK`. The fids are
+  kept with the handle table: the Proc's threads share them, rfork does not
+  copy them (the child starts with none), and exec keeps them. The table is
+  bounded per Proc (I-32); past the bound a new file answers `ENOLCK`, and a
+  take the server refuses spends no slot.
+  - **Closing any of the Proc's descriptors on that file drops all of them**,
+    and so does the handle table's teardown at exit. The close lands the
+    staged writes of every open of the file the table holds, then unlocks the
+    whole file through the Proc's fid and waits for the answer, then drops the
+    fid. A lock call another thread has in flight on that fid keeps it until
+    the call returns. The server orders the close's unlock against the call's
+    request, so either order is a true history, and what the call took is
+    dropped by a later close or the teardown.
+  - **A lock granted after its descriptor was closed** by another thread is
+    unlocked again and answers `EBADF`, as Linux's `fcntl` re-checks the
+    descriptor after a grant. Otherwise the lock would outlive the close that
+    should have dropped it.
+  - **"That file"** means the same 9P session, `qid.path` and inode
+    generation. Stratum does not keep a file a fid names: an unlinked file
+    dies, its fids answer `ESTALE`, and the next file created can take its
+    inode number and so its `qid.path`. A descriptor learns its file's
+    generation from the server once (`Rgetattr`), the first time it takes part
+    in a Proc lock, or when its close finds an entry with its number; a Proc
+    fid inherits the generation of the descriptor it was cloned from. So a
+    dead file's descriptor neither locks through, nor drops, the entry of the
+    file that took its number: its lock answers `ESTALE`, and its close leaves
+    the entry alone. A Proc fid that answers `ESTALE` anyway (its own file has
+    died, or the server reports no generation) is retired, and the call is
+    asked once more with a new fid; the dead file's locks died with it. The
+    same file reached through two sessions is two files here, an edge Linux has
+    no counterpart for.
 
 **Waiting.** Stratum never waits. A conflict answers BLOCKED, and 9P2000.L
 leaves the retry to the client. Without `LOCK_WAIT` the call answers `EAGAIN`.
-With it, the kernel retries with a bounded backoff, and a note ends the wait
-with `EINTR` (the wait is marked interruptible, section 8.8.3, whose Linux list already
-names `F_SETLKW`); a kill unwinds it as it unwinds every sleep (8.8.1). Neither Stratum nor the kernel detects deadlock, so a waiting lock
-never answers `EDEADLK`. Linux's OFD locks do not detect it either.
+With it, the kernel retries with a bounded backoff (1 ms, doubling to 64 ms),
+and a note ends the wait with `EINTR` (the wait is marked interruptible,
+section 8.8.3, whose Linux list already names `F_SETLKW`); a kill unwinds it as
+it unwinds every sleep (8.8.1). Section 8.8.3 admits only a Linux-phenotype
+caller's caught note so far: until its item 11c gives native callers the
+opt-in, a native or Pouch caller's wait ends only at the grant or a kill, so
+an `alarm()` cannot time out a Pouch `F_SETLKW` (OPEN-BUGS, 2026-10-29).
+Neither Stratum nor the kernel detects deadlock, so a waiting lock never
+answers `EDEADLK`. Linux's OFD locks do not detect it either.
 
 **Testing.** `LOCK_TEST` sends `Tgetlock` and changes nothing. If the lock
 would be granted, it writes `LOCK_UN` to `out`. If not, it writes the first
@@ -2919,7 +2954,13 @@ writes, as with NFS and Linux's v9fs, so:
 - **Releasing a lock** flushes the write-behind run first: the open's own run
   for an open-file lock, or the run of every open of the file in the Proc's
   table for a Proc lock. This applies to an unlock and to the close that drops
-  a lock, and the release is sent after the flush returns.
+  a lock, and the release is sent after the flush returns. A flush that fails
+  still releases: the error latches on the open, for its next write, `fsync` or
+  close. A thread a death has reached can send neither, so its flush goes to
+  the session's closer as a job of its own and its release follows it there;
+  the closer serves a session in order (FID-LIFECYCLE section 9). This covers
+  an open another Proc still shares, whose run no close of this Proc hands
+  over.
 
 **Pouch.**
 - `fcntl` `F_SETLK`, `F_SETLKW` and `F_GETLK` use the Proc owner.
@@ -2934,6 +2975,11 @@ writes, as with NFS and Linux's v9fs, so:
   interact. Linux's NFS client behaves the same; Linux's local filesystems
   keep them apart.
 - Vivarium's `fcntl` lock family still answers ENOSYS; it can reuse this call.
+
+**File maps.** Pouch serves only `MAP_PRIVATE` file maps; `MAP_SHARED` answers
+`ENOSYS`. A lock does not revalidate a private map, whose view of later
+changes to the file POSIX leaves unspecified. SQLite's memory-mapped I/O is
+off by default and needs `MAP_SHARED`.
 
 **Invariant posture.** No new section-28 invariant. It composes:
 - **I-11**: a lock fid's identity is stable for its owner's life.

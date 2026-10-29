@@ -531,6 +531,12 @@ session (operator vote 2026-09-29).
   waiting as long as the server takes, drops the file's cached attributes and
   pages, sends the Tclunk, and frees the run and its budget charge. A session
   that died meanwhile takes the run with it, as it takes its fids.
+- A job may also be queued alone, with no fid (`P9_NOFID`; B-3h, ARCH
+  9.6.11): writes that must reach the server before an entry queued after
+  them. A die-pending lock holder's release queues the flush of an open file
+  another Proc still shares, then the lock fid's Tclunk, which its death
+  refuses too. The closer runs the job and sends no Tclunk for it; a failed
+  flush stays latched on the open file, which still holds its run.
 
 **A flushed request's reply is honoured** (flush(5)). The client flushes a
 request only when its owner has died or been interrupted by a note, so

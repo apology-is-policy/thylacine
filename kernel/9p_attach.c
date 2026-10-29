@@ -733,14 +733,19 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
         bool jlost = jrc != 0 && p9_client_fid_held(a->client, e->fid);
         if (jlost) p9_close_flush_failed(e->fid, jrc);
 
-        int  rc   = closer_send(self, a, e->fid);
+        // A job alone (fid P9_NOFID) has no Tclunk to send, and loses no
+        // bytes when it fails: they stay with the open file it wrote for.
+        bool clunk = e->fid != P9_NOFID;
+        int  rc   = clunk ? closer_send(self, a, e->fid) : 0;
         bool live = rc != 0 && p9_client_fid_held(a->client, e->fid);
         if (live) p9_clunk_refused(e->fid, rc);
 
         spin_lock(&g_closer_lock);
-        if (rc == 0)   g_closer_st.sent++;
-        else if (live) g_closer_st.refused++;
-        else           g_closer_st.dropped++;     // the session died: its fids too
+        if (clunk) {
+            if (rc == 0)   g_closer_st.sent++;
+            else if (live) g_closer_st.refused++;
+            else           g_closer_st.dropped++; // the session died: its fids too
+        }
         if (e->job)    g_closer_st.jobs++;
         if (jlost)     g_closer_st.job_errors++;
         g_closer_st.pending--;

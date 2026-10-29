@@ -105,7 +105,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_ISCONN`    | 106   | `EISCONN`    | Already connected: a second `connect()` on a connected socket |
 | `T_E_NOTCONN`   | 107   | `ENOTCONN`   | Not connected: `getpeername()` / `shutdown()` on a socket that never connected |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
-| `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` cannot name its file (B-3h). Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
+| `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: the file a fid named has died (Stratum answers it for an unlinked file's fid), or a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` cannot name its file (B-3h). Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
 | `T_E_CONNREFUSED` | 111 | `ECONNREFUSED` | Connection refused: netd rejected the dial, or the data open failed after the connect verb was accepted |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
@@ -806,3 +806,23 @@ cannot make hard links. Before the vote they reached the unimplemented-call
 sentinel and answered `ENOSYS`. Ported code falls back on `EPERM`:
 fontconfig's cache lock takes a directory lock instead (Boosty B-3g). Plan 9's
 APE answers `EMLINK`. `EPERM` is the answer the ported code is tested against.
+
+### File locks (operator votes 34-35, 2026-10-29)
+
+Operator votes 34 and 35 (`dec-2026-10-29-b3h-file-locks`; ARCH 9.6.11).
+SYS_FILE_LOCK (137) answers 0, or -T_E_AGAIN when another owner's lock is in
+the way of a take without `LOCK_WAIT`. It answers -T_E_INVAL for an op bit it
+does not know, a type past `LOCK_UN`, TEST with `LOCK_UN` or `LOCK_WAIT`, and a
+range whose last byte would pass 2^64. It answers -T_E_BADF for a handle that
+names no Spoor, a navigation-only (`T_OPATH`) descriptor, a `LOCK_RD` take on a
+descriptor not open for reading or a `LOCK_WR` take on one not open for
+writing, and a Proc lock granted after another thread closed its descriptor
+(the lock is dropped again first). It answers -T_E_NOLCK for a Dev that serves
+no locks, a Proc whose lock table is full, a server that answers ERROR or GRACE
+or does not serve Tlock (`ENOSYS`/`EOPNOTSUPP`), a server that refuses the
+zero-name clone a Proc lock needs, and, until Boosty B-3h3, a fidless cached
+open. A TEST whose `out` cannot be written answers -T_E_FAULT, and a wait a
+caught note ends answers -T_E_INTR (Linux phenotype only until ARCH 8.8.3's
+item 11c). A server's errno crosses by value inside [-4095,-2], -T_E_STALE
+for an unlinked file's fid among them, except its `EBADF`, which reads
+-T_E_IO.

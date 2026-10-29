@@ -309,7 +309,8 @@ static struct lock_owner_ent *lock_owner_find_locked(struct HandleTable *t,
     if (!d || !d->lock_same_file) return NULL;
     for (u32 i = 0; i < t->nlockowners; i++) {
         struct lock_owner_ent *e = &t->lockowners[i];
-        if (e->spoor->dev == d && d->lock_same_file(e->spoor, c)) return e;
+        if (!e->dead && e->spoor->dev == d && d->lock_same_file(e->spoor, c))
+            return e;
     }
     return NULL;
 }
@@ -324,6 +325,7 @@ static struct Spoor *lock_owner_remove_locked(struct HandleTable *t,
     last->spoor   = NULL;
     last->users   = 0;
     last->granted = 0;
+    last->dead    = 0;
     t->nlockowners--;
     return sp;
 }
@@ -335,6 +337,12 @@ int handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
     struct Dev *d = c ? c->dev : NULL;
     if (!d || !d->lock || !d->lock_owner || !d->lock_same_file)
         return -T_E_NOLCK;
+    // Settle which file c names before any entry is compared with it: an
+    // entry may name the file that took the number of c's dead one.
+    if (d->lock_ident) {
+        int ir = d->lock_ident(c);
+        if (ir != 0) return ir;
+    }
 
     spin_lock(&t->lock);
     struct lock_owner_ent *e = lock_owner_find_locked(t, c);
@@ -369,6 +377,7 @@ int handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
         e->spoor   = n;            // the mint's reference becomes the table's
         e->users   = 1;
         e->granted = 0;
+        e->dead    = 0;
         spoor_ref(n);              // and this one the caller's
         *out = n;
     }
@@ -388,13 +397,27 @@ void handle_lock_owner_put(struct Proc *p, struct Spoor *owner, bool granted) {
         if (e->spoor != owner) continue;
         if (e->users == 0) extinction("handle_lock_owner_put: entry not in use");
         if (granted) e->granted = 1;
-        if (--e->users == 0 && !e->granted)
+        if (--e->users == 0 && (!e->granted || e->dead))
             drop = lock_owner_remove_locked(t, e);
         break;
     }
     spin_unlock(&t->lock);
     spoor_clunk(owner);            // the caller's reference
-    if (drop) spoor_clunk(drop);   // the table's: no lock was ever taken on it
+    if (drop) spoor_clunk(drop);   // the table's: it holds no lock
+}
+
+void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
+    if (!owner) return;
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    spin_lock(&t->lock);
+    for (u32 i = 0; i < t->nlockowners; i++) {
+        struct lock_owner_ent *e = &t->lockowners[i];
+        if (e->spoor != owner) continue;
+        if (e->users == 0) extinction("handle_lock_owner_retire: entry not in use");
+        e->dead = 1;
+        break;
+    }
+    spin_unlock(&t->lock);
 }
 
 // The per-slot walk: one slot per lock hold, so no sync runs under the lock.
@@ -447,6 +470,20 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
     if (kind != KOBJ_SPOOR || !obj) return;
     if (__atomic_load_n(&t->nlockowners, __ATOMIC_RELAXED) == 0) return;
     struct Spoor *c = (struct Spoor *)obj;
+
+    // An entry found by number alone may name the file that took the number
+    // of c's dead one, so a candidate makes c learn its identity first (a
+    // round trip at most once per Spoor, and only on a match). If c's file
+    // has died and it never learned it, no entry can be shown to name it: a
+    // live one names another file, and a dead one holds no lock.
+    struct Dev *cd = c->dev;
+    if (cd && cd->lock_ident) {
+        spin_lock(&t->lock);
+        bool candidate = lock_owner_find_locked(t, c) != NULL;
+        spin_unlock(&t->lock);
+        if (!candidate) return;
+        if (cd->lock_ident(c) == -T_E_STALE) return;
+    }
 
     struct Spoor *owner = NULL;
     spin_lock(&t->lock);

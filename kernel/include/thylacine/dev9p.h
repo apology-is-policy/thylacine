@@ -86,6 +86,13 @@ extern struct Dev dev9p;
 // root_fid) directly (no p9_attached wrapper), attached_owner stays
 // NULL and dev9p_close skips the unref. The fid_owned semantics still
 // apply: walks from those test roots clunk their fid as today.
+// What dev9p_priv.lock_gen holds.
+enum dev9p_lock_ident_state {
+    DEV9P_IDENT_UNKNOWN = 0,   // not asked yet
+    DEV9P_IDENT_GEN     = 1,   // lock_gen is the file's generation
+    DEV9P_IDENT_NONE    = 2,   // the server reports none: identity by qid.path
+};
+
 struct dev9p_priv {
     u32                magic;
     struct p9_client  *client;     // pointer to the client; lifecycle managed externally
@@ -109,6 +116,12 @@ struct dev9p_priv {
     // server-side locks: its close clunks it, and never parks it in the
     // dir-fid cache, where a later consumer would inherit the locks.
     bool               fid_locks;
+    // B-3h: the inode generation of the file the fid names, learned once by
+    // dev9p_lock_ident (a file keeps its generation for life; a file that
+    // takes a dead one's inode number gets a new one). lock_ident is a
+    // dev9p_lock_ident_state, published with release after lock_gen.
+    u64                lock_gen;
+    u8                 lock_ident;
     // #99 (#102 errno-loss): the last dev9p_create failure's real errno, in the
     // syscall passthrough range (e.g. -T_E_EXIST on a racing/duplicate create).
     // Transient create-path state: born 0 (kzalloc), set by dev9p_create on a
