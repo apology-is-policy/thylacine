@@ -2584,7 +2584,7 @@ they read a stopped frame, off the race surface).
 |---|---|---|---|---|
 | `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` + `EventuallyLaunchedDies` + `EventuallyStopSettles` + `NoEretIntoDeath` + `ParkEndsOnlyInDeath` | clean | 12830 |
 | `debug_stop_held.cfg` | `HELD` (1 Thread) | the above + `EventuallyHoldResolved` + `BirthWaitReleases` + `HoldMonotone` | clean | 17330 |
-| `debug_stop_spawn.cfg` | `Spawned = {t2}` (2 Threads, t2 nascent) | as `debug_stop.cfg` | clean | *(unmeasured: TLC owed at the C7 gate)* |
+| `debug_stop_spawn.cfg` | `Spawned = {t2}` (2 Threads, t2 nascent) | as `debug_stop.cfg` | clean | 24485 |
 | `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 1480 |
 | `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | 128 |
 | `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | 720 |
@@ -2602,7 +2602,7 @@ they read a stopped frame, off the race surface).
 | `debug_stop_buggy_tail_latch_erets.cfg` | `BUGGY_TAIL_LATCH_ERETS` (1 Thread) | `NoLostStop` | violation | 679 |
 | `debug_stop_buggy_latch_ends_stop.cfg` | `HELD` + `BUGGY_LATCH_ENDS_STOP` | `ParkEndsOnlyInDeath` | violation | 1817 |
 | `debug_stop_buggy_spawner_latch_returns.cfg` | `HELD` + `BUGGY_SPAWNER_LATCH_RETURNS` | `SpawnReturnsAfterBirth` | violation | 133 |
-| `debug_stop_buggy_spawn_at_el0.cfg` | `Spawned = {t2}` + `BUGGY_SPAWN_AT_EL0` | `NoEL0BornStopped` | violation | *(unmeasured: TLC owed at the C7 gate)* |
+| `debug_stop_buggy_spawn_at_el0.cfg` | `Spawned = {t2}` + `BUGGY_SPAWN_AT_EL0` | `NoEL0BornStopped` | violation | 244 |
 
 Distinct counts are TLC with `-workers 1` (re-measured 2026-09-30 by
 `specs/check-debug-stop.sh`). A multi-worker run stops a safety violation at a

@@ -28,7 +28,7 @@ STAMP="$TMP/stamp"; : > "$STAMP"
 # clean: cfg, expected distinct states ("-" = do not pin)
 CLEAN="debug_stop:12830
 debug_stop_held:17330
-debug_stop_spawn:-"
+debug_stop_spawn:24485"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="debug_stop_buggy_lost_stop:NoLostStop

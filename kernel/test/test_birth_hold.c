@@ -42,6 +42,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/exception.h"   // struct exception_context: the birth frame
+#include "../../arch/arm64/uaccess.h"     // uaccess_copy_in: the entry page made resident
 
 #include <thylacine/caps.h>
 #include <thylacine/devramfs.h>
@@ -1120,11 +1121,18 @@ struct fe_exec_args {
 };
 
 static volatile u64 g_fe_entry;
+static volatile u32 g_fe_insn;   // the entry's first instruction word, read before the first entry
 
 // Exec /hello from a kernel-entry thread. The stop is made pending after the
 // exec and before the first instruction -- the window a debugger's stop or a
 // terminal's suspend can land in while a spawned child is still in its kernel
 // thunk -- so nothing the exec does can park first.
+//
+// The entry page is read in before the first entry. The image is demand-paged,
+// so otherwise its first fetch faults, and that fault's own return runs the
+// tail and parks the image at its entry on an untouched frame, which is what a
+// correct first entry does: the test would pass with the first entry skipping
+// the tail. Resident, the first instruction runs unless the first entry parks.
 __attribute__((noreturn))
 static void fe_exec_thunk(void *arg) {
     const struct fe_exec_args *ea = (const struct fe_exec_args *)arg;
@@ -1132,6 +1140,10 @@ static void fe_exec_thunk(void *arg) {
     u64 entry = 0, sp = 0;
     if (exec_setup(p, g_fe_blob, ea->size, &entry, &sp) != 0)
         exits("fe-exec");
+    u32 insn = 0;
+    if (uaccess_copy_in(&insn, entry, sizeof(insn)) != 0)
+        exits("fe-entry-page");
+    __atomic_store_n(&g_fe_insn, insn, __ATOMIC_RELAXED);
     __atomic_store_n(&g_fe_entry, entry, __ATOMIC_RELEASE);
     if (ea->stop)
         __atomic_store_n(&p->job_stop_req, 1u, __ATOMIC_RELEASE);
@@ -1151,12 +1163,14 @@ void test_first_entry_exec_into_stop_parks(void) {
     // (a) A stop pending at the first entry: the image parks at its entry, on
     //     a fresh frame, and dies of the kill there.
     __atomic_store_n(&g_fe_entry, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_fe_insn, 0, __ATOMIC_RELAXED);
     struct fe_exec_args args = { .size = size, .stop = true };
     int pid = rfork(RFPROC, fe_exec_thunk, &args);
     struct Proc *c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
     struct fe_parked w = { .c = c, .tid = 0 };
     bool parked = c && bh_wait(fe_parked_pred, &w, BH_BUDGET_NS);
     u64 entry = __atomic_load_n(&g_fe_entry, __ATOMIC_ACQUIRE);
+    u32 insn = __atomic_load_n(&g_fe_insn, __ATOMIC_RELAXED);
     int st = -1, reaped = -1;
     bool killed = false;
     char msg[32];
@@ -1167,6 +1181,7 @@ void test_first_entry_exec_into_stop_parks(void) {
     TEST_ASSERT(parked, "the image parked at its first entry");
     TEST_ASSERT(w.birth, "its published frame is a fresh first-entry frame");
     TEST_ASSERT(entry != 0, "the exec published its entry");
+    TEST_ASSERT(insn != 0, "the entry page was resident before the first entry (its first word read)");
     TEST_EXPECT_EQ(w.elr, entry, "its stopped PC is the image's entry");
     TEST_EXPECT_EQ(reaped, pid, "the killed Proc was reaped");
     TEST_ASSERT(!killed, "the kill ended the Proc inside the budget");
