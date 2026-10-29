@@ -1370,6 +1370,11 @@ void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
 void test_devenv_readdir_type_byte(void);
 void test_devenv_stat_native_shapes(void);      // V-4b-5: /env stats; entry size is real
+void test_devenv_open_binds_opener(void);       // vote 19: a handle acts on the opener's Env
+void test_devenv_create_binds_creator(void);
+void test_devenv_unopened_id_needs_its_env(void);
+void test_devenv_unlink_answers_its_errno(void);
+void test_devenv_entry_backs_no_mapping(void);
 
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
@@ -3728,6 +3733,11 @@ struct test_case g_tests[] = {
     { "devenv.walk_read",              test_devenv_walk_read,              false, NULL },
     { "devenv.readdir_type_byte",      test_devenv_readdir_type_byte,      false, NULL },
     { "devenv.stat_native_shapes",     test_devenv_stat_native_shapes,     false, NULL },
+    { "devenv.open_binds_opener",      test_devenv_open_binds_opener,      false, NULL },
+    { "devenv.create_binds_creator",   test_devenv_create_binds_creator,   false, NULL },
+    { "devenv.unopened_id_needs_its_env", test_devenv_unopened_id_needs_its_env, false, NULL },
+    { "devenv.unlink_answers_its_errno", test_devenv_unlink_answers_its_errno, false, NULL },
+    { "devenv.entry_backs_no_mapping", test_devenv_entry_backs_no_mapping, false, NULL },
 
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
     { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },

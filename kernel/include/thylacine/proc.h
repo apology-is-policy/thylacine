@@ -543,10 +543,10 @@ struct Proc {
     // G15 (ARCH section 9.7): the per-Proc environment group -- the Plan 9 Egrp
     // surfaced as the per-Proc /env directory (devenv). Lazily allocated (NULL ==
     // empty), deep-COPIED across rfork by env_clone_into (the Plan 9 default-copy;
-    // the reserved RFENVG share-flag stays deferred), freed by proc_free
-    // (env_free). KP_ZERO inits it NULL. Shared across a Proc's threads (one
-    // p->env, env->lock serializes); never shared cross-Proc at v1.0. See
-    // <thylacine/env.h>.
+    // the reserved RFENVG share-flag stays deferred); proc_free drops this
+    // Proc's reference (env_free), and an open /env/NAME Spoor holds one too,
+    // so the Env can outlive the Proc. KP_ZERO inits it NULL. Shared across a
+    // Proc's threads (one p->env, env->lock serializes). See <thylacine/env.h>.
     struct Env        *env;
 
     // CF-3 A audit F1 (an I-32-shaped resource axis): live TRANSIENT bounce

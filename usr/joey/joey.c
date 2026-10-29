@@ -11343,8 +11343,8 @@ int main(void) {
             //
             // Leg A -- the DISCRIMINATOR. The same binary, spawned with NO
             // declaration, asserts that a Linux syscall number is NOT
-            // translated (brk 214 falls to the native dispatcher's default and
-            // answers -1, not -ENOSYS). Without this leg, leg B's success
+            // translated (getpid 172 falls to the native dispatcher's default
+            // and answers -ENOSYS, not a pid). Without this leg, leg B's success
             // would not prove the phenotype caused it.
             //
             // Leg B -- the CHAIN. A container whose manifest declares

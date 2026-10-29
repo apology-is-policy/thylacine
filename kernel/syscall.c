@@ -6758,7 +6758,8 @@ static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
     // THE FLOOR (#217 F1). Only a Dev that serves real file content may back
     // executable pages at all. This is NOT redundant with the mount check below
     // -- it is what catches the class the mount check structurally cannot:
-    // devenv stamps the CALLING Proc's env devno at walk time, so a container's
+    // devenv stamps, at walk time, the env devno of the Proc whose walk resolved
+    // the name, so a container's
     // /env files never share (dc, devno) with the /env mount source viv
     // installed, and no MNOEXEC flag can ever cover them. An environment
     // variable is not code; nor is a /proc field, a /srv endpoint or a console.
@@ -6831,6 +6832,11 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     if (!sp->dev || !sp->dev->read) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
+    }
+    // After the exec floor, as Linux checks noexec before a missing mmap.
+    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+        spoor_clunk(sp);
+        return -(s64)T_E_NODEV;
     }
 
     // #194 (I-32): the backing size is REQUIRED on this guest-facing arm -- it
@@ -7052,6 +7058,11 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     if ((prot & (u32)VMA_PROT_EXEC) && !exec_map_vouched(p, sp)) {
         spoor_clunk(sp);
         return -(s64)T_E_PERM;
+    }
+    // After the exec floor, as in the non-fixed arm.
+    if (sp->dev->no_file_mapping) {                  // Dev.no_file_mapping
+        spoor_clunk(sp);
+        return -(s64)T_E_NODEV;
     }
 
     bool writable = (prot & (u32)VMA_PROT_WRITE) != 0;
@@ -17168,9 +17179,9 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         return;
 
     default:
-        // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;
-        // v1.0 returns -1 (ENOSYS) and lets userspace decide.
-        ctx->regs[0] = (u64)(s64)-1;
+        // An unknown syscall answers ENOSYS, as on Linux (operator vote
+        // 2026-10-22). A bare -1 is -T_E_PERM, which reads as EPERM.
+        ctx->regs[0] = (u64)-(s64)T_E_NOSYS;
         return;
     }
 }

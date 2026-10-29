@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## SYS_WSTAT on a resolved Spoor (2026-10-22, G12)
 
@@ -265,7 +265,7 @@ and the thread-exit call, which abandon the frame on the exiting thread's kernel
 stack until the reaper collects it. Three others take **the frame itself** and
 so break the uniform result-write; see below.
 
-An unknown number writes `-1` and returns.
+An unknown number writes `-T_E_NOSYS` (38, Linux's `ENOSYS`) and returns.
 
 **The dispatcher is no longer contentless.** The pre-phenotype claim — no
 validation, no capability check, no bookkeeping, every gate a handler's — held
@@ -350,7 +350,7 @@ Nothing pins the translation table's native targets to real dispatch arms by
 construction — but a compile-time assertion pins the table's native/Linux
 boundary constant to the highest assigned native number, and a census of every
 native symbol the table can emit finds a dispatch arm for each. A translated
-number with no arm would land on `default` and return the bare sentinel with no
+number with no arm would land on `default` and return `ENOSYS` with no
 unserved report, which is the one failure shape the four-way naming above does
 not cover.
 
@@ -1188,8 +1188,8 @@ line held at the child-creation boundary.
 
 Every handler returns a negative on failure and the dispatcher writes it back
 unexamined — there is no central error translation. The unknown-number arm
-returns `-1`; the source notes that a signal-equivalent notification is the
-eventual behaviour and was not built.
+returns `-T_E_NOSYS` (`ENOSYS`), as Linux does, and does not terminate the
+caller.
 
 The device-error clamp is the one piece of central error handling, and it lives
 in the shared read and write bodies rather than in the dispatcher.
@@ -1308,7 +1308,7 @@ threshold so small transfers never pay the extra handle lookup.
 - **The unknown-syscall arm has no notification.** Documented as owed. It is
   also the one hole in the phenotype layer's otherwise careful four-way naming of
   refusals: a *translated* number that had no native arm would land here and
-  return the sentinel with no unserved report at all. Nothing constructs that
+  return `ENOSYS` with no unserved report at all. Nothing constructs that
   case today — every native symbol the table can emit has an arm, and a
   compile-time assertion pins the native/Linux boundary constant — but the
   guarantee is a census, not a mechanism.

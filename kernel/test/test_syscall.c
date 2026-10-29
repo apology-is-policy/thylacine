@@ -6,7 +6,7 @@
 // P3-Ed once the ELF fixture lands).
 //
 //   syscall.dispatch_unknown
-//     Unknown syscall number → ctx->regs[0] = -1; no extinction.
+//     Unknown syscall number → ctx->regs[0] = -T_E_NOSYS; no extinction.
 //
 //   syscall.dispatch_puts_smoke
 //     SYS_PUTS with valid args writes to UART, returns len. NULL buf,
@@ -59,8 +59,16 @@ void test_syscall_dispatch_unknown(void) {
     ctx.regs[8] = 9999ull;       // not a real syscall
 
     TEST_SYSCALL_DISPATCH(&ctx);
-    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
-        "unknown syscall must return -1 (ENOSYS-equivalent)");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_NOSYS,
+        "an unknown syscall answers ENOSYS, not a bare -1 (EPERM)");
+
+    // The number is the whole register: a high bit set over a real call's
+    // number must not reach that call.
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = (1ull << 32) | (u64)SYS_GETPID;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_NOSYS,
+        "SYS_GETPID with bit 32 set is an unknown number");
 }
 
 void test_syscall_dispatch_puts_smoke(void) {
@@ -324,7 +332,7 @@ void test_syscall_opath_walkonly_no_byte_io(void) {
 }
 
 // Vote 2026-10-20: SYS_READLINK (135) and SYS_LSTAT (136) reach their handlers.
-// An unknown number answers -1; each handler answers -T_E_INVAL for an empty
+// An unknown number answers -T_E_NOSYS; each handler answers -T_E_INVAL for an empty
 // path before it reads any memory.
 void test_syscall_dispatch_symlink_reads(void) {
     struct exception_context ctx;

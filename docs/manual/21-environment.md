@@ -15,9 +15,9 @@ usual way: a program built with Pouch through `getenv`, a Go program through
 `os.Getenv`, and a native program through the file that holds the variable.
 
 `env` prints the environment, and runs a command with variables added to its
-environment or removed from it. `ut` has no command that sets a variable in its
-own environment, so a variable that a command needs is given to it through
-`env`.
+environment or removed from it. The shell sets a variable in its own
+environment by redirecting a value into the variable's file under `/env`, and
+removes one with `unset`.
 
 ## In Practice
 
@@ -60,15 +60,20 @@ receives only the variables given after it. This command prints a single line,
 `PATH=/bin`. A program started with an empty environment has no `HOME`, `USER`
 or `BEACON`, and it falls back to whatever its own defaults are.
 
-### Setting a variable from ut
+### Set a variable in the shell
 
-Redirecting output into a file under `/env` does not set the variable. The
-command `echo 1 > /env/V` leaves `V` set to an empty value in the shell's
-environment and discards the `1`: `ut` opens `/env/V` in its own environment,
-emptying it, and `echo` writes the value into its own copy of the environment,
-which ends when `echo` exits. Every command the shell starts afterwards
-receives `V` with an empty value. Use `env V=1 command` to give a command a
-variable.
+```sh
+echo -n 16 > /env/FC_DEBUG
+unset FC_DEBUG
+```
+
+The redirect sets `FC_DEBUG` to `16` in the shell's own environment, so every
+command the shell starts afterwards receives it, until `unset FC_DEBUG`
+removes it. `-n` keeps `echo` from adding a newline, which would otherwise
+become the last byte of the value. `rm /env/FC_DEBUG` does not remove the
+shell's variable: `rm` runs as a process of its own and removes the variable
+from its own copy of the environment. To give one command a variable without
+changing the shell's, use `env`.
 
 ### Command reference
 
@@ -100,15 +105,34 @@ it was not found:
 | `env: cannot read path: reason` | `env` could not list its environment: `/env` for `-i`, or its `/proc/<pid>/environ` when printing. |
 | `env: 'COMMAND': reason` | The command could not be run. A missing command exits with status 127; any other cause, such as a file that is not a program, exits with 126. |
 
+```sh
+unset NAME...
+```
+
+`unset` removes each `NAME` from the shell's variables and from its own
+environment, so the commands the shell starts afterwards no longer receive it.
+A name the shell does not have is not an error. `unset` is a shell builtin.
+It sets `$status` to 0 when it succeeds. When a name cannot be removed, it goes
+on with the others, then sets `$status` to 1 and `$errstr` to the first
+reason:
+
+| Reason | Cause |
+| --- | --- |
+| `unset: 'NAME': invalid variable name` | The name is empty, contains a `/`, or is `.` or `..`. |
+| `unset: 'NAME': reason` | The environment refused the removal. |
+
 ## Technical Details
 
 ### Where the environment is kept
 
 The kernel holds each process's environment and presents it as the device
 mounted at `/env`. A variable's name is a file name in that directory, and its
-value is the file's contents, as raw bytes. Every operation on `/env` acts on
-the environment of the process that performs it. When a process starts
-another, the kernel copies the starting process's variables into the new one,
+value is the file's contents, as raw bytes. Looking up a name, listing the
+directory, creating a variable and removing one act on the environment of the
+process that does it. A variable's file, once open, stays with the environment
+it was opened in: a process given the open file by another, as a command is
+given its output by the shell, reads and writes the opener's variable. When a
+process starts another, the kernel copies the starting process's variables into the new one,
 and the copy is independent from then on. A name holds at most 63 bytes and no
 `/`, a value at most 4096 bytes, and a process at most 64 variables.
 
@@ -137,13 +161,12 @@ The kernel runs only programs in its executable format. `ut` reads the `#!`
 line of a script and runs the interpreter it names; `env` does not, so a script
 given to `env` as the command fails with status 126.
 
-### Why a redirect into /env sets nothing
+### Why a redirect into /env sets the shell's variable
 
 `ut` opens the target of a redirect itself and passes the open file to the
-command as its output. Opening `/env/V` for writing empties `V` in the
-environment of `ut`, the process that opened it. The command then writes
-through the file it was given, and the kernel applies the write to the
-environment of the writing process, which is the command's copy. The value
-therefore never reaches the shell, and the shell's `V` stays empty. Plan 9
-shares one environment between a process and the processes it starts unless a
-process asks for a copy, so the same redirect sets the variable there.
+command as its output. The open file stays with the environment of `ut`, the
+process that opened it, so the command's write reaches the shell's variable and
+not the command's own copy of the environment, which ends when the command
+exits. Plan 9 gets the same result another way: it shares one environment
+between a process and the processes it starts unless a process asks for a
+copy.

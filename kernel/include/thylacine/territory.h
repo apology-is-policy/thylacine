@@ -139,7 +139,8 @@ struct PgrpMhead;
 // claim here -- "sound for every mount we make (each Env / dev9p session mints
 // its own devno)".** dev9p and devsrv mint a devno per SESSION at attach, and
 // walked descendants inherit it via spoor_clone, so the key holds for them.
-// devenv does NOT: devenv_walk stamps the CALLING Proc's env devno (an I-1 fix
+// devenv does NOT: devenv_walk stamps the env devno of the Proc whose walk
+// resolved the name (an I-1 fix
 // -- entry ids restart at 1 per Env, so without it two Procs' unrelated
 // variables claim to be the same file and the REVENANT Image cache serves one
 // the other's bytes). A container's /env files therefore never share an

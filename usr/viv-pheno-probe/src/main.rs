@@ -157,6 +157,7 @@ const EAFNOSUPPORT: i64 = 97;
 const EISCONN: i64 = 106;
 const NR_EXIT_GROUP: u64 = 94;
 const NR_BRK: u64 = 214;
+const NR_GETPID: u64 = 172;
 const NR_MUNMAP: u64 = 215;
 const NR_MMAP: u64 = 222;
 const NR_MPROTECT: u64 = 226;
@@ -548,8 +549,8 @@ const SEEK_SET: u64 = 0;
 
 // The translated-mode answer for a number with no Thylacine counterpart, and
 // (until V-3's supervisor exists) for a forwarded one too: -ENOSYS. Natively
-// the same number falls to syscall_dispatch's `default:`, which answers -1 --
-// and that difference is exactly what leg 1 measures.
+// an unassigned number answers -ENOSYS as well (syscall_dispatch's
+// `default:`), so leg 1 measures a number the table answers with a value.
 const NEG_ENOSYS: i64 = -38;
 
 // V-2d: the T2 shells reproduce Linux's ARGUMENT errors exactly rather than
@@ -1178,11 +1179,14 @@ unsafe fn run_linux() -> ! {
     }
 
     // --- L01: we really are translated --------------------------------------
-    // `brk` is the table's one explicit ENOSYS row (the heap is Burrow-based;
-    // there is no break pointer to move). Natively 214 is unassigned and the
-    // dispatcher's default answers -1, so this single comparison separates
-    // "the phenotype is live" from "the phenotype did nothing".
-    leg!(rep, svc3(NR_BRK, 0, 0, 0) == NEG_ENOSYS, b"L01\n");
+    // `getpid` is a table row and answers this Proc's pid. Natively 172 is
+    // unassigned and the dispatcher's default answers -ENOSYS, so this single
+    // comparison separates "the phenotype is live" from "the phenotype did
+    // nothing". `brk`, the table's one explicit ENOSYS row (the heap is
+    // Burrow-based; there is no break pointer to move), cannot: an unassigned
+    // native number answers -ENOSYS too.
+    leg!(rep, svc3(NR_GETPID, 0, 0, 0) > 0, b"L01\n");
+    leg!(rep, svc3(NR_BRK, 0, 0, 0) == NEG_ENOSYS, b"L01b\n");
 
     // --- L02: an argument error is Linux's, not a decline -------------------
     // Was `munmap -> ENOSYS` while munmap was a FORWARD row. V-2d makes it T2,
@@ -4997,7 +5001,6 @@ unsafe fn run_linux() -> ! {
     const NR_KILL: u64 = 129;
     const NR_TKILL: u64 = 130;
     const NR_TGKILL: u64 = 131;
-    const NR_GETPID: u64 = 172;
     const NR_GETPPID: u64 = 173;
     const NEG_ESRCH: i64 = -3;
     const SIGABRT: u64 = 6;
@@ -5182,12 +5185,13 @@ unsafe fn run_linux() -> ! {
 /// The native-mode body: the discriminator, plus proof the native ABI is
 /// untouched by the branch's existence.
 fn run_native() -> i64 {
-    // Un-translated, `brk`'s number is simply unknown to the native dispatcher,
-    // which answers -1. Seeing -1 here and -ENOSYS in linux mode is what proves
-    // the phenotype -- and only the phenotype -- changed the answer.
-    let brk = unsafe { svc3(NR_BRK, 0, 0, 0) };
-    if brk != -1 {
-        t_putstr("viv-pheno-probe: FAIL native brk not -1\n");
+    // Un-translated, Linux getpid's number is unassigned to the native
+    // dispatcher, which answers -ENOSYS. Seeing -ENOSYS here and a pid in
+    // linux mode is what proves the phenotype -- and only the phenotype --
+    // changed the answer.
+    let pid = unsafe { svc3(NR_GETPID, 0, 0, 0) };
+    if pid != NEG_ENOSYS {
+        t_putstr("viv-pheno-probe: FAIL native getpid number not -ENOSYS\n");
         return 1;
     }
     // A native Proc still has its native ABI: this call is the proof, and it
@@ -5355,11 +5359,12 @@ unsafe fn run_linux_loc() -> ! {
         linux_exit(1);
     }
 
-    // The discriminator. brk is the table's explicit ENOSYS row (the heap is
-    // Burrow-based; there is no break pointer). Natively 214 is unassigned and
-    // the dispatcher answers -1. -ENOSYS here <=> the mount stamped this Proc
-    // PHENO_LINUX -- the whole of the claim, in one comparison.
-    leg!(rep, svc3(NR_BRK, 0, 0, 0) == NEG_ENOSYS, b"L01\n");
+    // The discriminator. getpid is a table row and answers this Proc's pid;
+    // natively 172 is unassigned and the dispatcher answers -ENOSYS. A pid
+    // here <=> the mount stamped this Proc PHENO_LINUX -- the whole of the
+    // claim, in one comparison. (brk, the table's explicit ENOSYS row, would
+    // answer -ENOSYS either way.)
+    leg!(rep, svc3(NR_GETPID, 0, 0, 0) > 0, b"L01\n");
 
     // Real bytes through translated openat + read: open our own image and read
     // its ELF magic. A translation that returned plausible values without

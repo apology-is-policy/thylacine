@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-19
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -389,9 +389,11 @@ that rule sound rather than hopeful:
    entry keyed in that session survives into the container's table.
 3. **One Dev breaks the premise, and says so.** A walk normally
    preserves `(dc, devno)` (`spoor_clone` copies it). `devenv` stamps the
-   CALLING Proc's Env devno on every walk, including the 0-element mount
-   cross, so a Spoor inside `/env` does not share a devno with the `/env`
-   mount source. `Dev.devno_per_walker` ([[sub-kernel-dev]]) makes the
+   walking Proc's Env devno on every walk that resolves a name or reaches
+   its directory, the 0-element mount cross included, so a Spoor inside
+   `/env` does not share a devno with the `/env` mount source. A
+   0-element walk from an entry resolves nothing and keeps the entry's
+   devno. `Dev.devno_per_walker` ([[sub-kernel-dev]]) makes the
    closure match such a Dev on `dc` alone. The set of devno assigners was
    enumerated, not assumed: `spoor_alloc` (0), `spoor_clone` (copy),
    `dev9p` attach, `devsrv` attach, `env_alloc`, `devenv_walk`.

@@ -49,7 +49,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -196,9 +196,9 @@ assignments, on `/bin` when there is none. With no command, `env` prints its own
 to a line, so it lists what a command it started would receive. The operand
 grammar (`-i` and `-`, `--`, assignments until the first operand without `=`)
 is `coreutils::envcmd`, host-tested ([[sub-coreutils-lib]]). A redirect into
-`/env/NAME` from `ut` cannot do what `env` does: `ut` opens the file in its own
-environment and the writing child's write lands in the child's copy (OPEN-BUGS,
-bind-at-open).
+`/env/NAME` from `ut` does the opposite of what `env` does: `ut` opens the file,
+and an open `/env` file acts on the environment that opened it, so the value
+lands in the shell's own environment.
 
 **Path cleaning and input streaming are the shared behaviour.** `realpath` no
 longer carries its own lexical normaliser; the collapse of `.`, `..` and `//`

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -223,7 +223,7 @@ unused offset. The explicit flag decouples "can be fstat'd" from "has a
 meaningful position" — a worked example of one predicate answering two
 questions and needing to be split.
 
-There are two more, both statements a Dev makes about itself because
+There are three more, all statements a Dev makes about itself because
 inferring them was unsafe. `may_back_exec` is the allowlist floor under
 `MNOEXEC` (#217). `devno_per_walker` (2026-09-21) says this Dev's walk
 stamps a `devno` that depends on WHO walks rather than on the instance
@@ -234,6 +234,13 @@ is matched on `dc` alone, the conservative direction. A NEW per-walk
 stamper that leaves the flag false makes the shed drop live mounts, which
 is why the flag is opt-in to the *unsafe* behaviour's accommodation and
 the assigners of `devno` are an enumerated set.
+`no_file_mapping` (2026-10-28) says this Dev's files back no file
+mapping: both mapping cores refuse it with `ENODEV`, after the exec floor
+(an executable mapping answers `EPERM` first, Linux's order) and before
+the Image cache.
+`devenv` sets it, because a variable has no version (the Image cache keys
+pages on `qid.vers`) and its open Spoor holds the environment it was opened
+in, which a cached mapping would keep alive past every handle.
 
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.

@@ -830,10 +830,11 @@ void proc_free(struct Proc *p) {
     // heap struct, independent of the handle/notes/VMA frees above.
     allowance_free(p);
 
-    // G15: release the per-Proc environment group (NULL-tolerant; frees every
-    // entry's value + the struct). Like the allowance, a plain heap struct
-    // independent of the frees above; owned 1:1 by this Proc (RFENVG sharing
-    // deferred), so this is the sole release.
+    // G15: drop this Proc's reference on its environment group (NULL-tolerant).
+    // Like the allowance, a plain heap struct independent of the frees above. An
+    // open /env/NAME handle holds a reference too (ARCH 9.7), so the group is
+    // freed here -- every entry's value and the struct -- only if nothing
+    // opened in it is still open; otherwise its last close frees it.
     env_free(p);
 
     // VIVARIUM V-4a-0: drop this Proc's ref on its executable's #66 Path.

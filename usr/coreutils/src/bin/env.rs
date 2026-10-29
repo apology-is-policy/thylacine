@@ -5,8 +5,9 @@
 // survives exec. So env changes ITS OWN /env and then execs COMMAND in place,
 // as POSIX env does: the command keeps env's pid and descriptors, its exit
 // status is env's, and the caller's environment is untouched. A redirect such
-// as `echo 1 > /env/NAME` from ut cannot do this: ut opens the file in its own
-// environment and echo writes into echo's copy (OPEN-BUGS, bind-at-open).
+// as `echo 1 > /env/NAME` from ut does the opposite: ut opens the file, and an
+// open /env file acts on the environment that opened it, so the value lands
+// in ut's own.
 //
 // With no COMMAND, env prints the environment a program it started would
 // receive: the kernel's NAME=VALUE rendering of /env (/proc/<pid>/environ, the

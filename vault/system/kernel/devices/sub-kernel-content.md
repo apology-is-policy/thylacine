@@ -9,6 +9,7 @@ code:
   - kernel/devenv.c
   - kernel/env.c
   - kernel/include/thylacine/env.h
+  - kernel/test/test_env.c
   - kernel/random.c
   - kernel/chacha20.c
   - kernel/include/thylacine/random.h
@@ -23,7 +24,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-10-21
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -44,7 +45,10 @@ the qid type in byte 0 ([[sub-kernel-spoor]]): every `/env` entry is
   ([[dec-2026-09-25-initrd-bin-directory]]).
 - **`/env`** — a directory of the calling process's environment variables. Read
   a name for its value, write or create to set, remove to unset, enumerate for
-  the names. The mount is global; the contents are never anyone else's.
+  the names. The mount is global; the names are always the caller's own. An
+  open variable stays with the environment that opened it, so a descriptor
+  handed to another process reads and writes the opener's variable: that is how
+  the shell's `echo v > /env/NAME` sets the shell's.
 - **`/dev/random`** — an endless stream of bytes nobody can predict, or an error
   if the kernel cannot yet promise that.
 
@@ -133,6 +137,32 @@ the tree's instance" holds — and the mount-table shed at pivot / chroot
 `/env` carries the *walker's* number, never the mount source's (the same fact
 that puts `/env` beyond any `MNOEXEC` mount). So `devenv` sets
 `Dev.devno_per_walker`, and the shed matches it on the device class alone.
+
+**An open variable belongs to the environment that opened it, not to whoever
+holds the descriptor** (operator vote 19, 2026-10-22, building the 2026-09-16
+decision). A shell redirect is the case that forced it: `ut` opens `/env/NAME`
+and hands the descriptor to `echo`, which holds a *copy* of the environment, so
+resolving the caller on every write put the value in `echo`'s copy, where it
+died, and left the shell's variable emptied by the open's truncate. Now the
+open (or the create) takes a reference on its environment into the Spoor's
+private slot, and every read, write and stat through it acts there; the
+directory itself — a lookup, a listing, a create or removal by name — still
+resolves the caller. The slot is owned **exactly while the Spoor is open**:
+only this Dev's open and create set the open flag, and a Spoor clone clears the
+flag while copying the slot, so a clone never owns what it copied and its close
+drops nothing. An environment therefore lives until its process *and* every
+variable opened in it have let go. A variable is held open by a descriptor, a
+mount entry or a Loom registration, each bounded by its holder's table, and
+never by a mapping: this Dev backs none (a map of a variable is refused with
+`ENODEV`, an executable one with the exec floor's `EPERM`), because a cached mapping
+would hold the environment past every descriptor and serve a changed value as
+its old bytes, a variable having no version. The id needs the same care in the other
+direction: ids restart in every environment and a copy keeps them, so a walked
+variable that is not yet open (an `O_PATH` descriptor passed on) carries the
+device number of the environment that resolved it, and an operation on it from
+a process with another environment fails rather than reading that process's
+variable under the same id; a 0-element walk from a variable resolves nothing
+and keeps the number it had.
 
 **The random source's content is manufactured on demand, and its lifetime runs
 backwards.** Where the other two must make their bytes persist, this one must
@@ -271,8 +301,10 @@ frees its own and adopts the winner's.
 ## Invariants enforced
 
 **[[inv-i1]]** — the environment is per-process content behind a global mount, so
-every operation resolves the *calling* process, and no permission check is
-involved: there is nothing reachable to deny. The minted device number is what
+the directory resolves the *calling* process, and no permission check is
+involved: there is nothing reachable to deny. An open variable acts on the
+environment that opened it, and another process reaches it only through a
+descriptor that process passed on, which is delegation, as for any descriptor. The minted device number is what
 keeps that isolation from being undone by an identity collision in a cache
 elsewhere.
 
@@ -341,6 +373,11 @@ round-trip every megabyte.
   device number must stay stamped at walk time — the identity it prevents
   colliding is consumed by a cache in another subsystem that has no way to
   detect the collision itself.
+- An open variable's reference on its environment is owned exactly while the
+  Spoor is open. A path that set the open flag without this Dev's open or
+  create would drop a reference it never took; one that freed an open Spoor
+  without its close hook (`spoor_unref`) would keep an environment alive
+  forever.
 - The environment's flat-block render must keep **skipping** entries it cannot
   encode rather than emitting them (below).
 - The ramfs table's pointers into the archive mean the archive can never be
@@ -414,12 +451,10 @@ link to a directory is skipped).
   being true when it began preserving each source's permissions. Since B-1d the
   load keeps only a regular file or a directory, so an entry with no type bits is
   refused and counted, and the fallback was removed.
-- **An inherited environment handle reports its parent's device number.** The
-  number is stamped onto the handle at walk time from the walking process; a
-  child inheriting an open handle re-resolves its *contents* against its own
-  environment but keeps the stamp, so the pair names the parent's file while the
-  bytes are the child's — the one case the stamp cannot see. Not reachable from
-  the cache the stamp protects, which always re-walks.
+- **A refused environment id answers EIO.** A walked variable used from a
+  process with another environment fails clean, but the open and the stat report
+  the generic I/O error, which reads as a device fault. The precise answer is a
+  stale handle (`ESTALE`), which the registry does not carry yet.
 - **The flat environment block skips what it cannot encode, and this is the right
   trade.** Rendering the environment in the conventional flat form cannot express
   a name containing an equals sign or a value containing a zero byte, because

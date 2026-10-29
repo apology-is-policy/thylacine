@@ -622,12 +622,38 @@ fn bi_abdicate(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
 // unset
 // ---------------------------------------------------------------------
 
+// A name also leaves the shell's own environment, the /env its commands
+// copy. Only the shell can do that: a removal acts on the remover's /env,
+// so an `rm /env/NAME` it spawned removes the name from rm's copy alone.
 fn bi_unset(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    let mut failure: Option<String> = None;
     for name in args {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            failure.get_or_insert_with(|| alloc::format!("unset: '{}': invalid variable name", name));
+            continue;
+        }
         env.unset(name);
+        // No environment holds a name with a NUL in it, or one too long to be a
+        // path component: nothing to remove there.
+        if name.contains('\0') || name.len() > libthyla_rs::T_WALK_OPEN_NAME_MAX {
+            continue;
+        }
+        let mut path = String::from("/env/");
+        path.push_str(name);
+        match fs::remove_file(path) {
+            Ok(()) | Err(Error::NotFound) => {}
+            Err(e) => {
+                failure.get_or_insert_with(|| alloc::format!("unset: '{}': {}", name, e));
+            }
+        }
     }
-    env.status_set(0);
-    Ok(StatementFlow::Normal)
+    match failure {
+        Some(m) => fail(env, m, 1),
+        None => {
+            env.status_set(0);
+            Ok(StatementFlow::Normal)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

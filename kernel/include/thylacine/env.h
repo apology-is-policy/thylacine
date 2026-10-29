@@ -8,9 +8,13 @@
 // A table of name->value pairs surfaced as the per-Proc /env directory (devenv,
 // dc='E'). Thylacine's native ABI passes no Unix envp at spawn, so the
 // environment is a namespace object: write /env/NAME to set, read /env/NAME to
-// get, readdir /env to list. A spawned child inherits a COPY via env_clone_into
-// (the Plan 9 default-copy-on-rfork, like territory_clone); the reserved RFENVG
-// (share semantics) stays deferred, so ref is always 1 at v1.0.
+// get, readdir /env to list. A spawned child inherits a COPY via env_clone_into,
+// like territory_clone (Plan 9's rfork SHARES the group unless RFENVG; Thylacine
+// copies, and the reserved RFENVG stays deferred). `ref` counts the owning Proc
+// plus every open /env/NAME Spoor opened in this Env (one per open, however many
+// handles, mounts or Loom entries share it): an open entry acts on the Env it
+// was opened in, whoever holds it (ARCH 9.7), so an Env can outlive its Proc
+// until the last such Spoor closes.
 //
 // The Env is lazily allocated (a Proc with no environment carries env == NULL,
 // read as empty). Every access takes env->lock -- peer threads of a Proc share
@@ -26,7 +30,7 @@
 
 #define ENV_NAME_MAX     64        // var name incl. the NUL
 #define ENV_VALUE_MAX    4096      // var value, raw bytes (kmalloc'd; DoS floor)
-#define ENV_MAX_ENTRIES  64        // per-Proc cap (DoS floor; composes I-32)
+#define ENV_MAX_ENTRIES  64        // per-Env cap (DoS floor; composes I-32)
 
 struct EnvEntry {
     u64   id;                       // monotonic; 0 == free slot (never reused)
@@ -36,8 +40,8 @@ struct EnvEntry {
 };
 
 struct Env {
-    int              ref;           // 1 at v1.0 (RFENVG sharing deferred); accessed
-                                    // via __atomic_* (the territory_ref/unref pattern)
+    int              ref;           // the Proc + each open entry handle (env_ref);
+                                    // accessed via __atomic_* (territory_ref/unref)
     spin_lock_t      lock;          // serializes every access
     u64              devno;         // Plan 9 Chan.dev for THIS Env (V-4b-5). Every
                                     // other Dev's qid namespace is global, so a
@@ -57,10 +61,19 @@ struct Proc;
 // env_clone_into deep-copies parent's env into child (fresh ref=1); a NULL
 // parent->env leaves child->env NULL (empty). Returns 0 on success, -1 on OOM
 // (child->env stays NULL -> the proc_free rollback's env_free is a clean no-op).
-// env_free drops the ref + frees on the last drop (every value + the struct);
-// NULL-tolerant; clears p->env so a second call no-ops.
+// env_free drops the Proc's ref + frees on the last drop (every value + the
+// struct); NULL-tolerant; clears p->env so a second call no-ops.
 int  env_clone_into(struct Proc *child, struct Proc *parent);
 void env_free(struct Proc *p);
+
+// --- an open handle's Env (devenv) -------------------------------------------
+// env_current is p->env (NULL == empty), borrowed: valid while p is live, which
+// the calling Proc always is. env_ref takes a ref for an open /env/NAME handle;
+// env_unref drops one and frees on the last drop. The *_in forms below act on
+// an Env directly (a handle's), NULL-tolerant like the Proc forms.
+struct Env *env_current(struct Proc *p);
+void env_ref(struct Env *e);
+void env_unref(struct Env *e);
 
 // --- per-name ops (devenv) --------------------------------------------------
 // Each resolves p->env (lazily allocating only on the create path) and takes
@@ -93,6 +106,13 @@ bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
               u32 name_cap, u32 *name_len_out);
 bool env_size(struct Proc *p, u64 id, u64 *out_len);
 u64  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
+
+void env_truncate_in(struct Env *e, u64 id);
+long env_read_in(struct Env *e, u64 id, s64 off, void *buf, long n);
+long env_write_in(struct Env *e, u64 id, s64 off, const void *buf, long n);
+bool env_iter_in(struct Env *e, u64 after_id, u64 *out_id, char *name_out,
+                 u32 name_cap, u32 *name_len_out);
+bool env_size_in(struct Env *e, u64 id, u64 *out_len);
 
 // --- the flat block (devproc, exec) ------------------------------------------
 // env_render_environ renders the whole environment as Linux's NUL-separated

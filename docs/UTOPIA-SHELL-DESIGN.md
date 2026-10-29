@@ -498,6 +498,7 @@ Must be internal (no other choice — they modify the shell's own state):
 - `exit` — exit the shell with optional code.
 - `return` — return from a function.
 - `set`, `unset`, `export` — variable management.
+  `unset NAME` also removes `NAME` from the shell's own environment (`/env`), so the commands it starts afterwards no longer receive it. Only the shell can do that: a removal acts on the remover's environment, so a spawned `rm /env/NAME` removes the name from its own copy alone (operator vote 2026-10-28).
 - `source` (also `.`) — execute a script in the current shell's scope.
 - `eval` — evaluate a string as commands.
 - `alias`, `unalias` — manage aliases.

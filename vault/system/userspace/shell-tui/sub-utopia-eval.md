@@ -28,7 +28,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -93,6 +93,14 @@ operands, four-digit output, every mask read back); the parse runs before any
 syscall, so a refused mode changes nothing. u-builtin-test probe 14 witnesses the
 default arriving, a set, a bare read leaving the mask unchanged and a refusal
 changing nothing; viv-run.exp the printed form and the created modes.
+
+**`unset NAME...` (operator vote 2026-10-28).** It removes each name from the
+shell's variables and from the shell's own `/env`. Only the shell can do the
+second: a removal acts on the remover's environment, so an `rm /env/NAME` the
+shell spawns removes the name from `rm`'s copy alone. An empty name, one with
+`/`, `.` and `..` are refused (`$status` 1, `$errstr` says which); a name `/env`
+lacks, or one no environment could hold (a NUL, longer than a path component),
+is not an error. ls-3b leg (o) witnesses both removals and both successes.
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned

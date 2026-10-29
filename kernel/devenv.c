@@ -4,25 +4,35 @@
 // environment is a directory of files -- read /env/NAME for the value, write or
 // create /env/NAME to set it, readdir /env for the names. Thylacine's native ABI
 // passes no Unix envp at spawn, so the environment is a namespace object, not a
-// syscall argument; a spawned child inherits a COPY via env_clone_into (the
-// Plan 9 default-copy-on-rfork). Go's runtime reads it at startup
-// (runtime/env_thylacine.go::goenvs) to populate os.Environ.
+// syscall argument; a spawned child inherits a COPY via env_clone_into (Plan 9's
+// rfork shares the group unless RFENVG; Thylacine copies). Go's runtime reads it
+// at startup (runtime/env_thylacine.go::goenvs) to populate os.Environ.
 //
 // dc='E'. The data + lock + monotonic-id discipline live in env.c (struct Env);
 // this file is the thin Dev vtable over the env_* primitives. The mount is
-// global (joey_mount_static_dev) but every op resolves the CALLING Proc's own
-// env (current_thread()->proc->env), so a Proc sees only its own environment
-// (I-1) -- like /proc/self. perm_enforced is false (visibility, not authority:
-// a Proc's env is its own; there is nothing to leak across the per-Proc gate).
+// global (joey_mount_static_dev); the directory -- a walk, readdir, unlink, a
+// create by name -- resolves the CALLING Proc's own env, like /proc/self, so a
+// Proc names only its own variables (I-1). An OPEN /env/NAME handle acts on the
+// Env it was opened in, whoever holds it now (ARCH 9.7, Plan 9's c->aux shape):
+// `ut`'s `echo v > /env/NAME` opens the file in ut and hands the descriptor to
+// echo, and the value has to land in ut's environment, not in echo's copy. Its
+// Spoor owns a ref on that Env in `aux` exactly while COPEN is set (only
+// devenv_open / devenv_create set it; spoor_clone clears it and shallow-copies
+// aux, which a clone therefore never owns). Reaching another Proc's Env takes a
+// handle that Proc opened and passed on: delegation, not a leak.
+// perm_enforced is false (visibility, not authority).
 //
 // A walked /env/NAME Spoor carries qid.path = the entry's MONOTONIC id; every op
 // re-resolves id->entry under env->lock, so a var removed between walk and read
 // fails clean rather than resolving to a different var (the net-3d slot-reuse
-// discipline). No per-Spoor private state -- the value lives in the Proc's Env,
-// keyed by id -- so close is the trivial dev_simple_close (no UAF surface).
+// discipline). Ids restart in every Env and a spawned copy keeps them, so the
+// id is meaningful only in the Env that resolved it: the Spoor's devno names
+// that Env, and an op on a not-yet-open entry whose devno is not the caller's
+// Env fails clean rather than reading another variable.
 
 #include <thylacine/dev.h>
 #include <thylacine/env.h>
+#include <thylacine/errno.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
@@ -38,6 +48,16 @@
 static struct Proc *env_proc(void) {
     struct Thread *t = current_thread();
     return t ? t->proc : NULL;
+}
+
+// The Env an op on `c` acts on: an open entry's own, else the caller's. A
+// not-yet-open entry's id must have been resolved in the caller's Env (its
+// devno says which Env did), or it names a different variable there.
+static struct Env *devenv_env(struct Spoor *c) {
+    if ((spoor_flag_get(c) & COPEN) && c->aux) return (struct Env *)c->aux;
+    struct Env *e = env_current(env_proc());
+    if (e && c->qid.path != ENV_QID_ROOT && c->devno != e->devno) return NULL;
+    return e;
 }
 
 static u32 cstr_len(const char *s) {
@@ -135,17 +155,9 @@ static struct Walkqid *devenv_walk(struct Spoor *c, struct Spoor *nc,
         if (!cur) { walkqid_free(wq); return NULL; }
     }
 
-    // Stamp the CALLING Proc's Env device number (V-4b-5). Every other Dev's qid
-    // namespace is global, so its Spoors can carry the static devno 0 and
-    // (devno, qid.path) still names one file tree-wide. devenv's is PER-PROC --
-    // entry ids restart at 1 in every Env -- so without this two Procs' unrelated
-    // variables both report (0, 1) and claim to be the same file. That is not
-    // only a wrong `fstat`: the REVENANT Image cache is keyed on exactly that
-    // pair, so an exec of an /env path would serve one Proc the cached text of
-    // another Proc's variable, which is an I-1 leak. `spoor_stat_native` reports
-    // whatever the Spoor carries (the #100 stamp), so the value has to land here
-    // rather than in stat_native, which cannot outlive that overwrite.
-    cur->devno = env_devno(p);
+    // A walk result is a position, not an open handle: it owns no Env, and the
+    // clone's shallow copy of a bound source's aux must not be mistaken for one.
+    cur->aux = NULL;
 
     int n = 0;
     for (int i = 0; i < nname; i++) {
@@ -154,6 +166,21 @@ static struct Walkqid *devenv_walk(struct Spoor *c, struct Spoor *nc,
         cur->qid = next;
         wq->qid[n++] = next;
     }
+
+    // Stamp the Env device number of whatever resolved the position (V-4b-5).
+    // Every other Dev's qid namespace is global, so its Spoors can carry the
+    // static devno 0 and (devno, qid.path) still names one file tree-wide.
+    // devenv's is PER-PROC -- entry ids restart at 1 in every Env -- so without
+    // this two Procs' unrelated variables both report (0, 1) and claim to be the
+    // same file. That is not only a wrong `fstat`: the REVENANT Image cache is
+    // keyed on exactly that pair, so an exec of an /env path would serve one Proc
+    // the cached text of another Proc's variable, which is an I-1 leak.
+    // `spoor_stat_native` reports whatever the Spoor carries (the #100 stamp), so
+    // the value has to land here rather than in stat_native. A walk that resolved
+    // a name, or reached the directory (the 0-element mount cross included), is
+    // the caller's; a 0-element walk from an entry (an O_PATH re-open) resolved
+    // nothing, so its id keeps naming the Env the clone's devno already says.
+    if (n > 0 || cur->qid.path == ENV_QID_ROOT) cur->devno = env_devno(p);
 
     wq->spoor = cur;
     wq->nqid  = n;
@@ -177,14 +204,12 @@ static int devenv_stat(struct Spoor *c, u8 *dp, int n) {
 // syscall (spoor_stat_native is what services it).
 //
 // OWNER IS THE CALLER, and that is the honest answer rather than a convenient
-// one: /env is per-Proc content behind a global mount, so every op -- walk,
-// read, write, and now stat -- resolves the CALLING Proc's own environment
-// (env_proc()). A Proc statting /env is statting its own, so reporting its own
-// principal as the owner with 0644/0755 says exactly what is true: you may read
-// and write your environment, and nobody else's is reachable from here. (A child
-// that inherits an /env fd across spawn therefore stats against ITS env, not the
-// parent's -- the same rebinding read and write already do.) No authority is
-// claimed: devenv.perm_enforced is false, so no gate consults this mode.
+// one: the directory resolves the CALLING Proc's own environment, and an open
+// entry is a handle its holder may read and write, whichever Env it was opened
+// in. Reporting the caller's principal as the owner with 0644/0755 says exactly
+// that. The SIZE is the bound Env's (an inherited open fd stats the variable it
+// reads). No authority is claimed: devenv.perm_enforced is false, so no gate
+// consults this mode.
 static int devenv_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
     struct Proc *p = env_proc();
@@ -204,7 +229,7 @@ static int devenv_stat_native(struct Spoor *c, struct t_stat *out) {
     }
 
     u64 len = 0;
-    if (!env_size(p, c->qid.path, &len)) return -1;   // gone since walk
+    if (!env_size_in(devenv_env(c), c->qid.path, &len)) return -1;   // gone / not this Env
     out->size     = len;
     out->blocks   = (len + 511u) / 512u;
     out->mode     = T_S_IFREG | 0644u;
@@ -214,12 +239,19 @@ static int devenv_stat_native(struct Spoor *c, struct t_stat *out) {
 
 static struct Spoor *devenv_open(struct Spoor *c, int omode) {
     if (!c) return NULL;
-    // OTRUNC (0x10) on a value file resets it -- os.WriteFile / os.Create open
-    // O_TRUNC then write the whole value. The root is a directory (no truncate).
-    if (c->qid.path != ENV_QID_ROOT && (omode & 0x10)) {
-        struct Proc *p = env_proc();
-        if (p) env_truncate(p, c->qid.path);
+    if (c->qid.path == ENV_QID_ROOT) {
+        c->aux = NULL;                                 // the directory stays the caller's
+        return dev_simple_open(c, omode);
     }
+    struct Env *e = devenv_env(c);                     // not open yet: the caller's, id-checked
+    if (!e) return NULL;
+    if (!(c->flag & COPEN)) {                          // an open entry already owns its ref
+        env_ref(e);
+        c->aux = e;
+    }
+    // OTRUNC (0x10) on a value file resets it -- os.WriteFile / os.Create open
+    // O_TRUNC then write the whole value.
+    if (omode & 0x10) env_truncate_in(e, c->qid.path);
     return dev_simple_open(c, omode);
 }
 
@@ -239,13 +271,19 @@ static struct Spoor *devenv_create(struct Spoor *c, const char *name, int omode,
 
     u64 id = env_create(p, name, cstr_len(name));
     if (id == 0) return NULL;                          // bad name / OOM / bounds
-    if (omode & 0x10) env_truncate(p, id);             // OTRUNC on a re-created name
+    struct Env *e = env_current(p);                    // the create installed it
+    env_ref(e);
+    if (omode & 0x10) env_truncate_in(e, id);          // OTRUNC on a re-created name
 
     // Transition the parent-dir Spoor `c` into the new file (Plan 9 create
-    // semantics; mirrors dev9p_create): qid -> the entry id, opened.
+    // semantics; mirrors dev9p_create): qid -> the entry id, opened, bound to
+    // the Env the entry lives in. The parent's devno was the caller's Env at
+    // its walk, or 0 if the Proc had none until this create.
     c->qid.path = id;
     c->qid.vers = 0;
     c->qid.type = QTFILE;
+    c->devno    = e->devno;
+    c->aux      = e;
     c->flag    |= COPEN;
     c->offset   = 0;
     c->mode     = omode;
@@ -253,6 +291,9 @@ static struct Spoor *devenv_create(struct Spoor *c, const char *name, int omode,
 }
 
 static int devenv_close(struct Spoor *c) {
+    if (!c) return 0;
+    if ((c->flag & COPEN) && c->aux) env_unref((struct Env *)c->aux);
+    c->aux = NULL;
     dev_simple_close(c);
     return 0;
 }
@@ -261,9 +302,7 @@ static long devenv_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n < 0) return -1;
     if (c->qid.path == ENV_QID_ROOT) return -1;        // a dir enumerates via readdir
-    struct Proc *p = env_proc();
-    if (!p) return -1;
-    return env_read(p, c->qid.path, off, buf, n);
+    return env_read_in(devenv_env(c), c->qid.path, off, buf, n);
 }
 
 static struct Block *devenv_bread(struct Spoor *c, long n, s64 off) {
@@ -275,9 +314,7 @@ static long devenv_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n < 0) return -1;
     if (c->qid.path == ENV_QID_ROOT) return -1;        // cannot write the directory
-    struct Proc *p = env_proc();
-    if (!p) return -1;
-    return env_write(p, c->qid.path, off, buf, n);
+    return env_write_in(devenv_env(c), c->qid.path, off, buf, n);
 }
 
 static long devenv_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
@@ -293,8 +330,8 @@ static long devenv_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     if (n <= 0) return 0;
     if (off < 0) return -1;
     if (c->qid.path != ENV_QID_ROOT) return -1;
-    struct Proc *p = env_proc();
-    if (!p) return 0;                                  // no env -> empty directory
+    struct Env *e = devenv_env(c);
+    if (!e) return 0;                                  // no env -> empty directory
 
     u8 *out = (u8 *)buf;
     long pos = 0;
@@ -303,7 +340,7 @@ static long devenv_readdir(struct Spoor *c, void *buf, long n, s64 off) {
         u64 id = 0;
         char nm[ENV_NAME_MAX];
         u32 nlen = 0;
-        if (!env_iter(p, cursor, &id, nm, (u32)sizeof(nm), &nlen)) break;
+        if (!env_iter_in(e, cursor, &id, nm, (u32)sizeof(nm), &nlen)) break;
         long e = emit_dirent(out, n, pos, id, QTFILE, id, nm, nlen);
         if (e == 0) {
             if (pos == 0) return -1;                   // first entry too big for buf
@@ -315,15 +352,19 @@ static long devenv_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     return pos;
 }
 
-// Unset: os.Remove("/env/NAME") -> SYS_UNLINK -> here. /env has no directories,
-// so SYS_UNLINK_REMOVEDIR is rejected.
+// Unset: os.Remove("/env/NAME") -> SYS_UNLINK -> here. A specific errno per
+// refusal (the Dev.unlink contract): /env holds no directories, so a directory
+// removal is ENOTDIR; a name the caller's Env does not hold -- absent, or one
+// no Env could hold -- is ENOENT, as for a missing file, so a remover can tell
+// "nothing there" from a failure.
 static int devenv_unlink(struct Spoor *parent, const char *name, u32 flags) {
     (void)parent;
-    if (!name) return -1;
-    if (flags & SYS_UNLINK_REMOVEDIR) return -1;
+    if (!name) return -T_E_INVAL;
     struct Proc *p = env_proc();
-    if (!p) return -1;
-    return env_unset(p, name, cstr_len(name)) ? 0 : -1;
+    if (!p) return -T_E_NOENT;
+    if (flags & SYS_UNLINK_REMOVEDIR)
+        return env_lookup(p, name, cstr_len(name)) ? -T_E_NOTDIR : -T_E_NOENT;
+    return env_unset(p, name, cstr_len(name)) ? 0 : -T_E_NOENT;
 }
 
 static void devenv_remove(struct Spoor *c) {
@@ -352,9 +393,15 @@ struct Dev devenv = {
     .perm_enforced = false,
 
     // devenv_walk stamps the CALLER's Env devno (even on the 0-element mount
-    // cross), so a Spoor inside /env does not share a devno with the /env
-    // mount source. Declared for the mount-table shed (ARCH 9.6.10).
+    // cross; a 0-element walk from an entry keeps its id's Env), so a Spoor
+    // inside /env does not share a devno with the /env mount source. Declared
+    // for the mount-table shed (ARCH 9.6.10).
     .devno_per_walker = true,
+
+    // A variable backs no file mapping (see Dev.no_file_mapping): it has no
+    // version, any holder may write it, and a cached mapping would keep its Env
+    // alive past every handle.
+    .no_file_mapping = true,
 
     .reset    = devenv_reset,
     .init     = devenv_init,

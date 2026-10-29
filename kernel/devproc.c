@@ -937,9 +937,10 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_IMPERIUM: return T_S_IFREG | 0400u;
     // V-4b-6: 0400 -- Linux's own mode for environ, and for Linux's own reason.
     // Environment variables are where secrets live by universal convention
-    // (tokens, passwords, keys), and unlike exe/cwd/ns/maps NOTHING discloses
-    // another Proc's environment today: /env resolves current_thread()->proc->env
-    // by construction, so it is self-only. This file is therefore a genuinely NEW
+    // (tokens, passwords, keys), and unlike exe/cwd/ns/maps nothing AMBIENT
+    // discloses another Proc's environment: /env resolves the caller's own, and
+    // an open /env/NAME acts on its opener's only because the opener passed the
+    // handle on. This file is therefore a genuinely NEW
     // cross-Proc disclosure, which is why it carries a real gate at the read site
     // (devproc_owner_or_hostowner) rather than inheriting the 0444 all-pids-
     // visible posture its info-file siblings share.
@@ -2958,8 +2959,9 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
 // all-pids-visible for an UNSEALED Proc (Plan 9's posture), and every one of them
 // -- this file too -- is refused for a dump-SEALED Proc (devproc_kind_is_image).
 // Environ gets an owner gate on top because it is a new cross-Proc disclosure:
-// /env resolves current_thread()->proc->env BY CONSTRUCTION, so nothing else lets
-// one Proc read another's environment, and environment variables are where
+// /env resolves the caller's own environment, and an open /env/NAME reaches its
+// opener's only as a handle the opener passed on, so nothing AMBIENT lets one
+// Proc read another's environment, and environment variables are where
 // secrets live by universal convention. So it carries the owner-or-CAP_HOSTOWNER
 // gate -- the same policy sched uses, and the same posture Linux itself takes
 // (mode 0400 plus a ptrace_may_access check) -- composed with the seal in

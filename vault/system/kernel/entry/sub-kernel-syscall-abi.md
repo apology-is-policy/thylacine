@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## SYS_FSTAT answers an errno (2026-10-20, ERRORS.md ER-2)
 
@@ -353,7 +353,7 @@ now filled: `SYS_FD_DEVCLASS` (80, H-1a) returns a Dev's class character, so
 is-a-terminal is `dc == 'c'` (the console) OR `dc == 't'` (a pts slave, H-4d) --
 `libthyla-rs::stdout_is_terminal()` is the one wrapper that folds both, since a
 program in a session tile is on a terminal exactly as one on `/dev/cons` is. Each
-hole carries a comment naming what used to be there. An unknown number returns `-1` rather than terminating the
+hole carries a comment naming what used to be there. An unknown number returns `-T_E_NOSYS` (`ENOSYS`) rather than terminating the
 caller.
 
 Return values follow two conventions and the split is per-syscall, not
@@ -651,8 +651,8 @@ error rollout (`docs/ERRORS.md`, ER-1 to ER-4) converts it call by call; the
 header documents which each call uses, individually, in its enum comment. A
 caller cannot tell from the number which convention applies.
 
-The unknown-number arm returns `-1` and lets userspace decide — the header notes
-that a signal-equivalent note is the eventual behaviour and was not built.
+The unknown-number arm returns `-T_E_NOSYS` (`ENOSYS`, as on Linux) and lets
+userspace decide.
 
 ## Performance
 
