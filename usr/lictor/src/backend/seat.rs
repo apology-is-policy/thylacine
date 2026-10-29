@@ -3,6 +3,8 @@
 use alloc::vec::Vec;
 use crate::{endpoint as ep, keymap::{self, Mods}, model::{Model, State}};
 use super::{device::Device, screen::Screen, input::{InputDev, RawInputEvent, EV_KEY}};
+#[cfg(feature = "test-mode")]
+use super::device::SeatShot;
 
 pub struct Input {
     pub device: InputDev,
@@ -22,7 +24,9 @@ pub struct Seat {
     pub generation: u64,
     quiescence: crate::quiescence::Gate,
     mods: Mods,
-    active: bool,
+    /// The generation whose trusted scanout is up. Keyed, so state an episode
+    /// left behind can never stand in for a later takeover's exclusion.
+    active: Option<u64>,
     sequence: u64,
     masked: u32,
     model: Model,
@@ -35,10 +39,13 @@ pub struct Seat {
     /// this boot (TRUSTED-PATH section 7, vote 30).
     withheld: bool,
     withheld_said: bool,
+    #[cfg(feature = "test-mode")]
+    test_refuse_restored: bool,
 }
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
 impl Seat {
+    fn active(&self) -> bool { self.active == Some(self.generation) }
     pub fn acknowledge_cancellation(&mut self, generation: u64) -> bool {
         self.phase == 1 && self.generation == generation && self.quiescence.acknowledge(generation)
     }
@@ -97,7 +104,7 @@ impl Seat {
                 for input in inputs.iter_mut() { input.events.clear(); }
                 device.reap();
                 if !device.gpu.all_work_retired() { return; }
-                if !self.active {
+                if !self.active() {
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {
                         self.fail("private scanout activation"); return;
@@ -105,15 +112,22 @@ impl Seat {
                     #[cfg(feature = "test-mode")]
                     let shot = device.test_latch_seat_shot();
                     #[cfg(feature = "test-mode")]
-                    { screen.test_stall_after_exclusion = shot == Some(false); }
+                    {
+                        screen.test_stall_after_exclusion = shot == Some(SeatShot::StallAfterExclusion);
+                        device.gpu.test_cursor_stall_next(shot == Some(SeatShot::CursorStall));
+                        self.test_refuse_restored = shot == Some(SeatShot::RefuseRestored);
+                    }
                     // A takeover that fails part-way may already have disabled
                     // outputs or bound the trusted image.
                     self.displaced = true;
-                    if screen.activate(&mut device.gpu).is_err() { self.fail("private scanout activation"); return; }
-                    self.active = true; self.sequence = 0; self.masked = 0;
+                    let activated = screen.activate(&mut device.gpu);
+                    #[cfg(feature = "test-mode")]
+                    device.gpu.test_cursor_stall_next(false);
+                    if activated.is_err() { self.fail("private scanout activation"); return; }
+                    self.active = Some(self.generation); self.sequence = 0; self.masked = 0;
                     super::diagnostic(&alloc::format!("lictor: trusted scanout active generation={}\n", self.generation));
                     #[cfg(feature = "test-mode")]
-                    if shot == Some(true) { device.gpu.test_latch_now(true); }
+                    if shot == Some(SeatShot::StallHeld) { device.gpu.test_latch_now(true); }
                 }
                 if released && self.quiescence.ready(self.generation) {
                     self.mods = Mods::default();
@@ -123,7 +137,7 @@ impl Seat {
                 }
             }
             2 => {
-                if !self.active { self.fail("exclusive without active scanout"); return; }
+                if !self.active() { self.fail("exclusive without active scanout"); return; }
                 if m.sequence != self.sequence || m.code != self.masked {
                     let model = match Model::decode(&m.data[..m.length as usize]) {
                         Ok(model) => model, Err(_) => { self.fail("frame decode"); return; }
@@ -140,10 +154,19 @@ impl Seat {
                 if !released { return; }
                 if device.restore().is_err() { self.fail("normal scanout restoration"); return; }
                 screen.deactivated();
-                self.displaced = false;
+                // The trusted scanout is down; restoration stays owed until
+                // the kernel acknowledges it.
+                self.active = None;
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
-                if ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
-                self.phase = m.phase; self.active = false;
+                #[cfg(feature = "test-mode")]
+                let refused = core::mem::take(&mut self.test_refuse_restored);
+                #[cfg(not(feature = "test-mode"))]
+                let refused = false;
+                if refused { super::diagnostic("lictor: RESTORED refused (INJECTED by test-latch-dead)\n"); }
+                // A refused RESTORED leaves restoration owed: the FAILED arm
+                // rebinds again before the seat may return.
+                if refused || ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
+                self.phase = m.phase; self.displaced = false;
             }
             _ => {
                 // The kernel already cancelled any grant and scrubbed the key
@@ -155,15 +178,16 @@ impl Seat {
                 for input in inputs.iter_mut() { input.events.clear(); }
                 let since = *self.failed_since.get_or_insert_with(|| {
                     super::diagnostic(&alloc::format!("lictor: kernel closed trusted seat (scanout {})\n",
-                        if self.active { "private" } else if self.displaced { "displaced" } else { "normal" }));
-                    if self.active {
+                        if self.active == Some(self.generation) { "private" }
+                        else if self.displaced { "displaced" } else { "normal" }));
+                    if self.active == Some(self.generation) {
                         let model = Model { state: State::Failed, ..Model::default() };
                         let _ = screen.paint(&mut device.gpu, &model, 0, None);
                     }
                     libthyla_rs::time::Instant::now()
                 });
-                if !released || (self.active && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
-                if self.displaced {
+                if !released || (self.active() && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
+                if self.displaced || self.active.is_some() {
                     if device.gpu.engine_dead() {
                         // Nothing can redraw the glass, and keys typed into a
                         // frozen trusted frame must reach no one.
@@ -177,9 +201,11 @@ impl Seat {
                     } else {
                         super::diagnostic(&alloc::format!(
                             "lictor: normal scanout restored generation={}\n", self.generation));
+                        #[cfg(feature = "test-mode")]
+                        device.gpu.test_cursor_release();
                     }
                     screen.deactivated();
-                    self.active = false;
+                    self.active = None;
                     self.displaced = false;
                 }
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;

@@ -39,6 +39,23 @@ pub struct Device {
     /// is said, the witness's proof that the retirement ran.
     #[cfg(feature = "test-mode")]
     test_latch_fired: Vec<u32>,
+    /// Seat shots left, one per trusted takeover (`test_latch_seat_shot`).
+    #[cfg(feature = "test-mode")]
+    test_seat_shots: u8,
+}
+/// How the lever breaks a trusted takeover's return, in firing order.
+#[cfg(feature = "test-mode")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SeatShot {
+    /// A controlq stall between exclusion and bind; the device retires it.
+    StallAfterExclusion,
+    /// A cursor stall inside exclusion, held until the seat restores.
+    CursorStall,
+    /// The kernel's RESTORED refused after a completed restore.
+    RefuseRestored,
+    /// A controlq stall under the trusted scanout whose retirement is
+    /// withheld: the engine dies.
+    StallHeld,
 }
 impl Device {
     pub fn new(mut gpu: Gpu, owner: u64) -> Result<Self, Error> {
@@ -48,6 +65,7 @@ impl Device {
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
             refused_retirements: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
+            #[cfg(feature = "test-mode")] test_seat_shots: 0,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
@@ -157,16 +175,19 @@ impl Device {
             _ => {}
         }
     }
-    /// The same lever, fired by a trusted takeover instead of a retirement:
-    /// `Some(false)` for the first shot (the device retires the chain),
-    /// `Some(true)` for the second (its retirement is withheld).
+    /// The same lever's seat half, one shot per trusted takeover in this
+    /// order, so one boot walks every way an episode's return can go wrong.
     #[cfg(feature = "test-mode")]
-    pub fn test_latch_seat_shot(&mut self) -> Option<bool> {
-        if self.test_latch_shots == 0 { return None; }
-        let hold = self.test_latch_shots == 1;
-        self.test_latch_shots -= 1;
-        self.test_latch_targets.clear();
-        Some(hold)
+    pub fn test_latch_seat_shot(&mut self) -> Option<SeatShot> {
+        let shot = match self.test_seat_shots {
+            4 => SeatShot::StallAfterExclusion,
+            3 => SeatShot::CursorStall,
+            2 => SeatShot::RefuseRestored,
+            1 => SeatShot::StallHeld,
+            _ => return None,
+        };
+        self.test_seat_shots -= 1;
+        Some(shot)
     }
     #[cfg(feature = "test-mode")]
     fn test_latch_mark(&mut self, resource_id: u32, w: u32, h: u32) {
@@ -539,7 +560,7 @@ impl Device {
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestArmLatch => {
-                #[cfg(feature = "test-mode")] { self.test_latch_shots = 2; ().put(&mut out); }
+                #[cfg(feature = "test-mode")] { self.test_latch_shots = 2; self.test_seat_shots = 4; ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::CompSlotState => {

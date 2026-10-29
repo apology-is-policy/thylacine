@@ -249,7 +249,12 @@ fails part-way may already have disabled outputs or bound the trusted image.
 `Device::restore` needs only the control queue's quiescence
 (`Gpu::controlq_retired`), so a cursor queue poisoned on a live engine does not
 cost the display. A restore refused by a stalled engine is retried every
-pass until the engine revives or dies.
+pass until the engine revives or dies. Restoration stays owed until the
+kernel acknowledges RESTORED: when the kernel refuses it (a grantee that
+exited before the commit), the seat fails and rebinds again before it
+returns. `Seat.active` names the generation whose trusted scanout is up, so
+state an episode left behind can never stand in for a later takeover's
+exclusion and bind.
 
 A dead engine can restore nothing, so the seat goes back without its display
 (TRUSTED-PATH section 7, operator vote 30):
@@ -362,11 +367,16 @@ adds real expiry and the five-failure lockout at the 800x720 minimum; and
 `ls-graphical-sak-recover` holds the chord past the quiesce deadline, requires
 the failure notice, the recovery with nothing conferred, a live workspace and
 then a full conferral on the recovered seat. `ls-graphical-sak-dead` fires the
-two-shot `test-latch-dead` lever at trusted takeovers (`Device::test_latch_seat_shot`).
-The first stalls the engine between disabling the outputs and binding the
+`test-latch-dead` lever's seat half, one shot per trusted takeover
+(`Device::test_latch_seat_shot`, `SeatShot`). The first stalls the engine between disabling the outputs and binding the
 trusted image, and the device retires it, so the takeover fails part-way and
 lictor must say `normal scanout restored` before the seat recovers, and typing
-must reach the shell. The second stalls it under the trusted scanout with the
+must reach the shell. The second stalls the cursor queue inside exclusion and
+holds its retirement until the seat restores, so the restore must go through
+on the control queue alone (`Gpu::test_cursor_stall_next`). The third has the
+kernel's RESTORED refused after a completed restore: lictor must rebind again
+before the seat returns, and the next takeover must exclude and bind afresh.
+The fourth stalls the engine under the trusted scanout with the
 retirement withheld, so the engine dies at 30 s. The seat must recover with
 its display lost, and a key typed afterwards must draw lictor's
 `input withheld` line, while the shell stays silent. Ordinary test descendants are refused trusted-seat

@@ -24,6 +24,12 @@ pub(super) struct Plane {
     /// completion pump retires it late, or poisons the lane at
     /// FENCE_ABANDON_MS.
     stalled: Option<Instant>,
+    /// The next cursor command misses its deadline at once, and its
+    /// retirement is held until released (the test-latch-dead lever).
+    #[cfg(feature = "test-mode")]
+    test_stall_next: bool,
+    #[cfg(feature = "test-mode")]
+    test_hold: bool,
 }
 impl Plane {
     pub(super) fn new(notify: u64) -> Self {
@@ -38,6 +44,10 @@ impl Plane {
             image: None,
             visible: false,
             stalled: None,
+            #[cfg(feature = "test-mode")]
+            test_stall_next: false,
+            #[cfg(feature = "test-mode")]
+            test_hold: false,
         }
     }
 }
@@ -130,6 +140,13 @@ impl Gpu {
         } else {
             SUBMIT_DEADLINE_MS
         };
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.cursor.test_stall_next) && deadline_ms < FENCE_ABANDON_MS {
+            self.cursor.test_hold = true;
+            self.cursor.stalled = Some(Instant::now());
+            say!("lictor: cursor chain missed its deadline (INJECTED by test-latch-dead, retirement held) -- cursor queue stalled until it retires");
+            return Err(Error::Hardware);
+        }
         loop {
             if let Some(result) = self.cursor_retire() {
                 return result.map_err(|_| Error::Hardware);
@@ -157,6 +174,10 @@ impl Gpu {
     /// Retire the outstanding chain if its used entry has arrived: None while
     /// it has not; a malformed entry poisons the lane (`Queue::complete`).
     fn cursor_retire(&mut self) -> Option<Result<(), ()>> {
+        #[cfg(feature = "test-mode")]
+        if self.cursor.test_hold {
+            return None;
+        }
         let used = self.ring_va + CURSOR_USED_OFF;
         let index = unsafe { r16(used + 2) };
         virtio_rmb();
@@ -282,6 +303,21 @@ impl Gpu {
         self.cursor_command(0, RESOURCE, x, y, hot, changed || !self.cursor.visible)?;
         self.cursor.visible = true;
         Ok(())
+    }
+
+    /// Arm (or disarm) the lever's cursor stall for the next cursor command.
+    #[cfg(feature = "test-mode")]
+    pub fn test_cursor_stall_next(&mut self, on: bool) {
+        self.cursor.test_stall_next = on;
+    }
+
+    /// Let a held cursor retirement through: the completion pump then
+    /// retires the chain late, the way a slow device does.
+    #[cfg(feature = "test-mode")]
+    pub fn test_cursor_release(&mut self) {
+        if core::mem::take(&mut self.cursor.test_hold) {
+            say!("lictor: cursor chain retirement released (test-latch-dead)");
+        }
     }
 
     pub(super) fn cursor_hide_output(&mut self, output: u32) -> Result<(), Error> {

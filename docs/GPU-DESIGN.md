@@ -2590,10 +2590,10 @@ block the serve loop, and seat input with it. Neither was taken.
     refuses it with its pins kept;
   - the 30 s park bound.
   A stall is not unreachable quiescence. It is the one non-quiescent state
-  that comes back by itself. A seat episode that meets a stall waits for it
-  too. Its restoration is refused until the engine revives, or until the
-  engine dies, at which point the episode ends without the device
-  (TRUSTED-PATH §7, vote 30).
+  that comes back by itself. A seat episode whose restoration meets a stall
+  fails at once, so its grant is cancelled. The seat's return to normal then
+  waits for the stall: it rebinds once the engine revives, or goes back
+  without its display once the engine dies (TRUSTED-PATH §7, vote 30).
 - **Restoring a scanout needs only the control queue's quiescence.** A late
   cursor chain can touch only a cursor plane, and a cursor queue that is not
   idle already keeps any later takeover out. So a poisoned cursor queue on a
