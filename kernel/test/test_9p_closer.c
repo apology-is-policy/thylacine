@@ -517,6 +517,7 @@ void test_p9_closer_dying_lock_release_flushes_shared_run(void) {
     TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one job ran");
     TEST_EXPECT_EQ(st.sent, base.sent + 1, "one Tclunk sent: the lock fid's");
     TEST_EXPECT_EQ(st.dropped, base.dropped, "and the job alone asked for none");
+    TEST_EXPECT_EQ(st.refused, base.refused, "nor had one refused");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "the shared file's close later loses nothing");
 }
 

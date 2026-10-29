@@ -5250,6 +5250,13 @@ static bool d9_streq(const char *a, const char *b) {
 
 static struct dev9p_priv g_d9_forged;
 
+// A byte loop: the kernel links no memset, and an aggregate zero of a struct
+// this size lowers to a call to one.
+static void d9_forged_zero(void) {
+    u8 *b = (u8 *)&g_d9_forged;
+    for (u64 i = 0; i < sizeof(g_d9_forged); i++) b[i] = 0;
+}
+
 // A mismatch prints what was rendered, so the failure names its cause.
 static bool d9_ns_is(const char *got, const char *want) {
     if (d9_streq(got, want)) return true;
@@ -5500,7 +5507,7 @@ void test_dev9p_origin_format_ns(void) {
 
     // A cached-open priv owns no fid, like the root, but is not one: it refuses
     // the stamp. The same priv shaped as a root takes it (the control).
-    g_d9_forged = (struct dev9p_priv){ 0 };
+    d9_forged_zero();
     g_d9_forged.magic       = DEV9P_PRIV_MAGIC;
     g_d9_forged.client      = &g_client;
     g_d9_forged.fid         = P9_NOFID;
@@ -5514,7 +5521,7 @@ void test_dev9p_origin_format_ns(void) {
     TEST_ASSERT(dev9p_spoor_origin(bare, &on, &od) && od == anon->dc,
                 "control: the same priv shaped as a root takes it");
     bare->aux = NULL;
-    g_d9_forged = (struct dev9p_priv){ 0 };
+    d9_forged_zero();
     spoor_unref(bare);
 
     spoor_unref(mp); spoor_unref(conn); spoor_unref(other); spoor_unref(anon); spoor_unref(a);

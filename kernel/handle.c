@@ -301,6 +301,8 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
 // at struct lock_owner_ent in handle.h).
 // =============================================================================
 
+static struct HandleTable *proc_handles_or_extinct(struct Proc *p);
+
 // The entry naming c's file, or NULL. Under t->lock. Dev.lock_same_file is
 // non-blocking by contract, and is asked only of an entry of c's own Dev.
 static struct lock_owner_ent *lock_owner_find_locked(struct HandleTable *t,

@@ -29,6 +29,8 @@ static bool handle_slot_may_alias(struct Handle *s){assert(locked);return s->kin
 static void handle_acquire_obj(enum kobj_kind k,void *o){assert(locked && k==KOBJ_PROCESS);atomic_fetch_add(&((struct Object*)o)->refs,1);}
 static void handle_release_obj(enum kobj_kind k,void *o){assert(!locked && k==KOBJ_PROCESS);assert(atomic_fetch_sub(&((struct Object*)o)->refs,1)>0);}
 static void cloexec_set_locked(struct HandleTable *t,int fd,bool v){assert(locked);t->flags[fd]=v;}
+static atomic_int g_lock_hook_calls;
+static void lock_owners_on_close(struct HandleTable *t,enum kobj_kind k,void *o){assert(!locked && t==&proc.table && k==KOBJ_PROCESS);assert(atomic_load(&((struct Object*)o)->refs)>0);atomic_fetch_add(&g_lock_hook_calls,1);} /* outside the lock, before the release */
 #include "target-under-test.c"
 static void install(int fd,int object){spin_lock(&proc.table.lock);assert(!proc.table.slots[fd].magic);proc.table.slots[fd]=(struct Handle){HANDLE_MAGIC,KOBJ_PROCESS,4,&objects[object]};handle_acquire_obj(KOBJ_PROCESS,&objects[object]);spin_unlock(&proc.table.lock);}
 static void remove_slot(int fd){spin_lock(&proc.table.lock);struct Handle h=proc.table.slots[fd];proc.table.slots[fd].magic=0;spin_unlock(&proc.table.lock);if(h.magic)handle_release_obj(h.kind,h.obj);}
@@ -38,7 +40,7 @@ int main(void){
  assert(!pthread_mutex_init(&proc.table.lock,0));install(1,0);install(2,1);
  assert(handle_dup_to_checked(&proc,1,2,true)==2 && proc.table.flags[2]);
  assert(atomic_load(&objects[0].refs)==2 && atomic_load(&objects[1].refs)==0);
- assert(g_handle_allocated==1 && g_handle_freed==1);
+ assert(g_handle_allocated==1 && g_handle_freed==1 && atomic_load(&g_lock_hook_calls)==1);
  assert(handle_dup_to_checked(&proc,1,2,false)==2 && !proc.table.flags[2]);
  assert(atomic_load(&objects[0].refs)==2); // same object replacement balanced
  assert(handle_dup_to_checked(&proc,1,3,true)==3 && proc.table.flags[3]);

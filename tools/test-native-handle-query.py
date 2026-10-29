@@ -28,7 +28,8 @@ checks = {
         r'\bSYS_GETPPID\s*=\s*132\b',
         r'\bSYS_UMASK\s*=\s*133\b',
         r'\bSYS_READLINK\s*=\s*135\b',
-        r'\bSYS_LSTAT\s*=\s*136\b'],
+        r'\bSYS_LSTAT\s*=\s*136\b',
+        r'\bSYS_FILE_LOCK\s*=\s*137\b'],
     'usr/lib/libt/include/thyla/syscall.h': [
         r'#define T_SYS_HANDLE_FLAGS_GET 129\b',
         r'#define T_HANDLE_CLOSE_ON_EXEC 1u\b',
@@ -50,7 +51,7 @@ checks = {
     'usr/lib/pouch/patches/0059-pouch-symlinks.patch': [
         r'\+#define SYS_thyla_readlink\s+135\b',
         r'\+#define SYS_thyla_lstat\s+136\b'],
-    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+136\b'],
+    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+137\b'],
     'kernel/vivarium.c': [
         r'VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET',
         r'\{ VIV_LINUX_KILL,\s+VIV_TIER2 \}',
@@ -60,19 +61,20 @@ checks = {
         r'VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK',
         r'VIV_LINUX_RT_SIGPENDING == SYS_LSTAT',
         r'VIV_LINUX_RT_SIGACTION == SYS_READLINK - 1',
-        r'VIV_LINUX_RT_SIGTIMEDWAIT > VIV_NATIVE_CEILING'],
+        r'VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK',
+        r'VIV_LINUX_RT_SIGQUEUEINFO > VIV_NATIVE_CEILING'],
 }
 failed = []
 for name, patterns in checks.items():
     source = (r / name).read_text()
     if a.mutant == 'ceiling' and name.endswith('vivarium.h'):
-        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)136\b', r'\g<1>135', source)
+        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)137\b', r'\g<1>136', source)
         assert n == 1
     for pattern in patterns:
         if len(re.findall(pattern, source)) != 1:
             failed.append((name, pattern))
 if a.mutant == 'ceiling':
-    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+136\b')], failed
+    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+137\b')], failed
     print('PASS ceiling mutant refused by the pin')
     raise SystemExit(0)
 assert not failed, failed
