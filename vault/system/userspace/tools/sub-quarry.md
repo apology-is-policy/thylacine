@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-10-08
-updated: 2026-10-08
+updated: 2026-10-28
 ---
 ## Purpose
 
@@ -44,8 +44,9 @@ fallen-back run.
 
 **The driver rides `/env`, not the spawn ABI.** quarry writes `GALLIUM_DRIVER`
 into its own environment, the child inherits a deep copy at spawn
-(`env_clone_into`), and the old value is put back after. No spawn-ABI
-environment argument exists (#151); this is the sanctioned inheritance route.
+(`env_clone_into`), and the old value is put back after. It predates the
+spawn record's environment tail ([[dec-2026-10-28-spawn-env]]); `Command::env`
+would now hand the child the driver without quarry touching its own `/env`.
 
 **The console is borrowed, then lent.** quarry owns the screen on fd 1 and reads
 keys on fd 0 through kaua ([[sub-kaua]]); it never touches consctl, and `ut`

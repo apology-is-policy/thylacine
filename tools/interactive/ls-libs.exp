@@ -202,9 +202,10 @@ foreach lib {libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz fontconfig} 
 # fontconfig on the device's own config and faces (the header). The muster
 # tests above have already written a cache as this user, so the leg removes
 # it first. `env FC_DEBUG=144` sets the variable in env's own /env, which the
-# exec into fc-list keeps (a `> /env/FC_DEBUG` redirect from ut sets nothing: ut
-# opens the file in its own environment and echo writes into echo's copy, which
-# dies with it). 128 prints each directory scanned, 16 each cache's validity
+# exec into fc-list keeps, and it dies with that command (a `> /env/FC_DEBUG`
+# redirect from ut would set it in ut's own environment, since an open /env file
+# acts on its opener's, and every later leg would carry it). 128 prints each
+# directory scanned, 16 each cache's validity
 # check.
 set ::lc_cmd_timeout 300
 set timeout 300

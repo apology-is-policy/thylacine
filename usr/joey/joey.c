@@ -4854,7 +4854,10 @@ static int probe_spawn_cwd(void) {
     long r_nd  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin/hello", 10, 0);
     long r_em  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 0, 0);
     long r_fl  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 4, 1);
-    long r_bit = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD | (1u << 1), "/bin", 4, 0);
+    // The lowest bit no tail claims, derived so a new tail cannot make it known.
+    const unsigned int known = T_SPAWN_EXT_FLAGS_ALL;
+    long r_bit = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD | (~known & (known + 1u)),
+                            "/bin", 4, 0);
     long refused[5] = { r_nf, r_nd, r_em, r_fl, r_bit };
     for (int i = 0; i < 5; i++)
         if (refused[i] > 0 && !scwd_kill_reap(refused[i])) unreaped++;
@@ -4896,6 +4899,217 @@ static int probe_spawn_cwd(void) {
         return -1;
     }
     t_putstr("joey: probe spawn-cwd OK (child born in /bin; relative image from the child cwd; ENOENT/ENOTDIR/EINVAL refusals)\n");
+    return 0;
+}
+
+// The spawn environment tail (ARCH 9.7; dec-2026-10-28-spawn-env), driven
+// through the REAL ABI: T_SPAWN_EXT_ENV announcing a tail after whichever
+// earlier tails are set, the handler's one copy of the records, the spawner's
+// build, the child's thunk installing it. Held spawns, so the child's
+// environment is read through /proc/<pid>/environ before it has run anything of
+// its own; each is then killed and reaped. Boot-fatal.
+union senv_record {
+    struct t_sys_spawn_args base;
+    unsigned char           b[104 + 16 + 16];
+};
+
+static void senv_put(unsigned char *dst, const void *src, unsigned int n) {
+    const unsigned char *s = (const unsigned char *)src;
+    for (unsigned int i = 0; i < n; i++) dst[i] = s[i];
+}
+
+// A held spawn of /bin/hello whose record carries the tails `ext` names, each
+// after the earlier ones in bit order. The environment tail is written at its
+// place even when its bit is clear, so a caller can leave a poison tail there
+// that the kernel must not read.
+static long senv_spawn(unsigned int ext, const char *blk, unsigned int len,
+                       unsigned int flags) {
+    static const char nm[] = "/bin/hello";
+    static const char dir[] = "/bin";
+    union senv_record rec;
+    for (unsigned int i = 0; i < sizeof(rec.b); i++) rec.b[i] = 0;
+    rec.base.name_va     = (unsigned long)nm;
+    rec.base.name_len    = sizeof(nm) - 1;
+    rec.base.ext_flags   = ext;
+    rec.base.debug_flags = T_SPAWN_DEBUG_HELD;
+    unsigned int off = 104;
+    if (ext & T_SPAWN_EXT_CWD) {
+        struct t_sys_spawn_ext_cwd c = { (unsigned long)dir, sizeof(dir) - 1, 0u };
+        senv_put(rec.b + off, &c, sizeof(c));
+        off += sizeof(c);
+    }
+    struct t_sys_spawn_ext_env e = { (unsigned long)blk, len, flags };
+    senv_put(rec.b + off, &e, sizeof(e));
+    return t_spawn_full_argv(&rec.base);
+}
+
+// /proc/<pid>/environ into buf, read to EOF; its length, or -1.
+static long senv_environ(long pid, char *buf, unsigned int cap) {
+    char path[40], nb[24];
+    unsigned int pl = 0;
+    const char *ds = itoa_dec(pid, nb, sizeof(nb));
+    const char *pfx = "/proc/", *sfx = "/environ";
+    for (unsigned int i = 0; pfx[i]; i++) path[pl++] = pfx[i];
+    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 10; i++) path[pl++] = ds[i];
+    for (unsigned int i = 0; sfx[i]; i++) path[pl++] = sfx[i];
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OREAD);
+    if (fd < 0) return -1;
+    long got = 0;
+    for (;;) {
+        long n = t_read(fd, buf + got, cap - (unsigned long)got);
+        if (n < 0) { got = -1; break; }
+        if (n == 0 || (unsigned long)(got + n) >= cap) { got += n; break; }
+        got += n;
+    }
+    (void)t_close(fd);
+    return got;
+}
+
+static int senv_eq(const char *a, long al, const char *b, long bl) {
+    if (al != bl) return 0;
+    for (long i = 0; i < al; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+// The kernel's ENV_VALUE_MAX: the value leg asks for one byte more. Should the
+// bound move, that leg fails, naming the value it got.
+#define ENV_PROBE_VALUE 4096u
+static char senv_big[ENV_PROBE_VALUE + 8];
+
+static int probe_spawn_env(void) {
+    char nb[24], mine[1024], got[1024], cwdb[64];
+    int unreaped = 0;
+
+    // joey's own variable for the probe's span, so "the child has joey's
+    // environment" and "the child has the block" cannot read alike.
+    long edir = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+    long mv = (edir >= 0) ? t_walk_create(edir, "PE_JOEY", 7, T_OWRITE, 0644) : -1;
+    int marked = mv >= 0 && t_write(mv, "here", 4) == 4;
+    if (mv >= 0) (void)t_close(mv);
+    long ml = senv_environ(t_getpid(), mine, sizeof(mine));
+
+    // (a) A lone tail: the child's environment is exactly the block.
+    static const char blk[] = "PE_A=1\0PE_B=two\0";
+    long pa = senv_spawn(T_SPAWN_EXT_ENV, blk, sizeof(blk) - 1, 0u);
+    long ga = (pa > 0) ? senv_environ(pa, got, sizeof(got)) : -1;
+    int a_ok = pa > 0 && senv_eq(got, ga, blk, sizeof(blk) - 1);
+    if (pa > 0 && !scwd_kill_reap(pa)) unreaped++;
+
+    // The control: no bit, a POISON tail behind the record (a NULL block, a
+    // length and flags no tail may carry). Read, it refuses the spawn; ignored,
+    // the child gets a copy of joey's environment.
+    long pp = senv_spawn(0u, (const char *)0, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    long gp = (pp > 0) ? senv_environ(pp, got, sizeof(got)) : -1;
+    int p_ok = pp > 0 && senv_eq(got, gp, mine, ml);
+    if (pp > 0 && !scwd_kill_reap(pp)) unreaped++;
+
+    // The same control behind the cwd tail: the poison sits at +120, where a
+    // kernel that took the cwd bit for the env bit would read it.
+    long pq = senv_spawn(T_SPAWN_EXT_CWD, (const char *)0, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    long gq = (pq > 0) ? senv_environ(pq, got, sizeof(got)) : -1;
+    int pcombo_ok = pq > 0 && senv_eq(got, gq, mine, ml);
+    if (pcombo_ok) {
+        long cl = scwd_child_cwd(pq, cwdb, sizeof(cwdb));
+        pcombo_ok = cl > 0 && scwd_eq(cwdb, "/bin");
+    }
+    if (pq > 0 && !scwd_kill_reap(pq)) unreaped++;
+
+    // (b) An empty block is an empty environment.
+    long pe = senv_spawn(T_SPAWN_EXT_ENV, (const char *)0, 0u, 0u);
+    long ge = (pe > 0) ? senv_environ(pe, got, sizeof(got)) : -1;
+    if (pe > 0 && !scwd_kill_reap(pe)) unreaped++;
+
+    // (c) A repeated name is held once, with the later value.
+    static const char dup[] = "PE_A=1\0PE_A=2\0";
+    static const char dup_want[] = "PE_A=2\0";
+    long pd = senv_spawn(T_SPAWN_EXT_ENV, dup, sizeof(dup) - 1, 0u);
+    long gd = (pd > 0) ? senv_environ(pd, got, sizeof(got)) : -1;
+    int d_ok = pd > 0 && senv_eq(got, gd, dup_want, sizeof(dup_want) - 1);
+    if (pd > 0 && !scwd_kill_reap(pd)) unreaped++;
+
+    // (d) The tail's offset follows the earlier tail: after the cwd tail (+120),
+    //     both tails honoured.
+    static const char one[] = "PE_C=3\0";
+    long pc = senv_spawn(T_SPAWN_EXT_CWD | T_SPAWN_EXT_ENV, one, sizeof(one) - 1, 0u);
+    long gc = (pc > 0) ? senv_environ(pc, got, sizeof(got)) : -1;
+    int combo_ok = pc > 0 && senv_eq(got, gc, one, sizeof(one) - 1);
+    if (combo_ok) {
+        long cl = scwd_child_cwd(pc, cwdb, sizeof(cwdb));
+        combo_ok = cl > 0 && scwd_eq(cwdb, "/bin");
+    }
+    if (pc > 0 && !scwd_kill_reap(pc)) unreaped++;
+
+    // (e) Refusals, each one variable away from leg (a): no '=', a '/' in a
+    //     name, the name "..", an unterminated block, a value one byte past ENV_PROBE_VALUE,
+    //     a length past the data bound, a bad pointer, a flag bit, and the
+    //     lowest ext bit no tail claims.
+    static const char noeq[] = "PE_A\0";
+    static const char slash[] = "PE/A=1\0";
+    static const char dotdot[] = "..=1\0";
+    static const char unterm[] = "PE_A=1";
+    senv_big[0] = 'B'; senv_big[1] = '=';
+    for (unsigned int i = 0; i < ENV_PROBE_VALUE + 1u; i++) senv_big[2 + i] = 'v';
+    senv_big[3 + ENV_PROBE_VALUE] = '\0';
+    const unsigned int known = T_SPAWN_EXT_FLAGS_ALL;
+    long r_eq  = senv_spawn(T_SPAWN_EXT_ENV, noeq, sizeof(noeq) - 1, 0u);
+    long r_sl  = senv_spawn(T_SPAWN_EXT_ENV, slash, sizeof(slash) - 1, 0u);
+    long r_dd  = senv_spawn(T_SPAWN_EXT_ENV, dotdot, sizeof(dotdot) - 1, 0u);
+    long r_un  = senv_spawn(T_SPAWN_EXT_ENV, unterm, sizeof(unterm) - 1, 0u);
+    long r_val = senv_spawn(T_SPAWN_EXT_ENV, senv_big, ENV_PROBE_VALUE + 4u, 0u);
+    long r_len = senv_spawn(T_SPAWN_EXT_ENV, blk, T_SYS_SPAWN_ENV_DATA_MAX + 1u, 0u);
+    long r_ptr = senv_spawn(T_SPAWN_EXT_ENV, (const char *)0, 8u, 0u);
+    long r_fl  = senv_spawn(T_SPAWN_EXT_ENV, blk, sizeof(blk) - 1, 1u);
+    long r_bit = senv_spawn(T_SPAWN_EXT_ENV | (~known & (known + 1u)), blk, sizeof(blk) - 1, 0u);
+    long refused[9] = { r_eq, r_sl, r_dd, r_un, r_val, r_len, r_ptr, r_fl, r_bit };
+    for (int i = 0; i < 9; i++)
+        if (refused[i] > 0 && !scwd_kill_reap(refused[i])) unreaped++;
+
+    long ma = senv_environ(t_getpid(), got, sizeof(got));
+    int mine_kept = senv_eq(got, ma, mine, ml);
+    long un = (edir >= 0 && marked) ? t_unlink(edir, "PE_JOEY", 7, 0u) : -1;
+    if (edir >= 0) (void)t_close(edir);
+
+    if (!marked || ml <= 0 || !a_ok || !p_ok || !pcombo_ok || pe <= 0 || ge != 0 || !d_ok || !combo_ok ||
+        r_eq != -22 || r_sl != -22 || r_dd != -22 || r_un != -22 || r_val != -7 || r_len != -7 ||
+        r_ptr != -14 || r_fl != -1 || r_bit != -1 || !mine_kept || un != 0 || unreaped) {
+        t_putstr("joey: spawn-env probe FAILED marked=");
+        t_putstr(marked ? "yes" : "no");
+        t_putstr(" mine=");
+        t_putstr(itoa_dec(ml, nb, sizeof(nb)));
+        t_putstr(a_ok ? " block=ok" : " block=WRONG");
+        t_putstr(p_ok ? " inherit=ok" : " inherit=WRONG");
+        t_putstr(pcombo_ok ? " poison-behind-tails=ok" : " poison-behind-tails=WRONG");
+        t_putstr(" empty=");
+        t_putstr(itoa_dec(ge, nb, sizeof(nb)));
+        t_putstr(d_ok ? " dup=ok" : " dup=WRONG");
+        t_putstr(combo_ok ? " offsets=ok" : " offsets=WRONG");
+        t_putstr(" noeq=");
+        t_putstr(itoa_dec(r_eq, nb, sizeof(nb)));
+        t_putstr(" slash=");
+        t_putstr(itoa_dec(r_sl, nb, sizeof(nb)));
+        t_putstr(" dotdot=");
+        t_putstr(itoa_dec(r_dd, nb, sizeof(nb)));
+        t_putstr(" unterm=");
+        t_putstr(itoa_dec(r_un, nb, sizeof(nb)));
+        t_putstr(" value=");
+        t_putstr(itoa_dec(r_val, nb, sizeof(nb)));
+        t_putstr(" len=");
+        t_putstr(itoa_dec(r_len, nb, sizeof(nb)));
+        t_putstr(" ptr=");
+        t_putstr(itoa_dec(r_ptr, nb, sizeof(nb)));
+        t_putstr(" flag=");
+        t_putstr(itoa_dec(r_fl, nb, sizeof(nb)));
+        t_putstr(" bit=");
+        t_putstr(itoa_dec(r_bit, nb, sizeof(nb)));
+        t_putstr(mine_kept ? " joey-env=kept" : " joey-env=CHANGED");
+        t_putstr(" unlink=");
+        t_putstr(itoa_dec(un, nb, sizeof(nb)));
+        t_putstr(" unreaped=");
+        t_putstr(itoa_dec(unreaped, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: probe spawn-env OK (block exact, inherit without the bit, alone and behind the cwd tail, empty, repeat, after the cwd tail; 9 refusals)\n");
     return 0;
 }
 
@@ -6481,8 +6695,8 @@ int main(void) {
     // === /pouch-hello-env orchestration (Clade CL-1b-0: the pouch-env crt
     // boundary line, patch 0025) ===
     // Proves a POUCH process reads its environment through getenv()/environ,
-    // populated by __pouch_env_init from the /env device (envp[0] is NULL for
-    // every pouch program). joey sets PGENV1 + PGENVNUM on its OWN /env; the
+    // populated by __pouch_env_init from the /env device (exec's envp is the
+    // same /env, projected). joey sets PGENV1 + PGENVNUM on its OWN /env; the
     // child inherits a COPY via env_clone_into (Plan 9 copy-on-rfork) and the
     // crt reads them into __environ before main. joey UNSETs them after the
     // spawn so they do not leak into the login session. Pre-pivot: /env is
@@ -7426,6 +7640,8 @@ int main(void) {
     if (probe_cl5_page_budget() != 0) return 1;
     // The spawn cwd tail, driven through the real ABI.
     if (probe_spawn_cwd() != 0) return 1;
+    // The spawn environment tail, driven through the real ABI.
+    if (probe_spawn_env() != 0) return 1;
     // Menagerie devhw: prove /hw is reachable + walkable through the REAL
     // namespace -- the load-bearing path the kernel tests cannot exercise
     // (stalk crosses the /hw mount, devhw's reuse-nc walk descends multiple

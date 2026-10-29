@@ -1091,6 +1091,10 @@ void test_birth_hold_held_spawn_death_wins(void);
 void test_spawn_cwd_child_born_in_cwd(void);
 void test_spawn_cwd_image_joins_child_cwd(void);
 void test_spawn_cwd_refusals(void);
+void test_spawn_env_block_parse(void);
+void test_spawn_env_install_refills(void);
+void test_spawn_env_child_gets_block(void);
+void test_spawn_env_refusals(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -4856,6 +4860,10 @@ struct test_case g_tests[] = {
     { "spawn_cwd.child_born_in_cwd",           test_spawn_cwd_child_born_in_cwd,           false, NULL },
     { "spawn_cwd.image_joins_child_cwd",       test_spawn_cwd_image_joins_child_cwd,       false, NULL },
     { "spawn_cwd.refusals",                    test_spawn_cwd_refusals,                    false, NULL },
+    { "spawn_env.block_parse",                 test_spawn_env_block_parse,                 false, NULL },
+    { "spawn_env.install_refills",             test_spawn_env_install_refills,             false, NULL },
+    { "spawn_env.child_gets_block",            test_spawn_env_child_gets_block,            false, NULL },
+    { "spawn_env.refusals",                    test_spawn_env_refusals,                    false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },

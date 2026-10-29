@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-10-12
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -70,8 +70,9 @@ before taking it over is killed.
 
 `Proc.debug_birth_hold` is a `u32` in the Proc's tail pad at offset 404,
 pinned by a static assert. It holds NONE, UNBORN (held, still loading) or
-PARKED (held, at the birth park). `rfork_spawn_held` passes the hold into
-`rfork_internal`, which stores UNBORN under `g_proc_table_lock` in the same
+PARKED (held, at the birth park). `rfork_spawn_held` (its flags `RFPROC`, or
+`RFPROC|RFCENVG` for a spawn that names the child's environment) passes the
+hold into `rfork_internal`, which stores UNBORN under `g_proc_table_lock` in the same
 hold that links the child into the table, the way the debug taint is stored.
 No reparent, sweep or `/proc` walk can therefore find the child linked but
 unmarked.

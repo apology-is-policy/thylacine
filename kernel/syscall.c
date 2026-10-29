@@ -23,6 +23,7 @@
 #include <thylacine/elf.h>
 #include <thylacine/errno.h>
 #include <thylacine/allowance.h>
+#include <thylacine/env.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -9900,7 +9901,9 @@ static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
 //   - perm_flags subset of SPAWN_PERM_ALL; nonzero only if console-attached.
 //   - ext_flags subset of SPAWN_EXT_FLAGS_ALL. SPAWN_EXT_CWD's tail names a
 //     directory the spawner can search (cwd_flags 0, cwd_len in
-//     [1, SYS_OPEN_PATH_MAX]).
+//     [1, SYS_OPEN_PATH_MAX]). SPAWN_EXT_ENV's tail names the child's whole
+//     environment (env_flags 0, env_len <= SYS_SPAWN_ENV_DATA_MAX, every record
+//     NAME=VALUE with a name /env accepts).
 
 // A-1a: identity bundle threaded from the spawn handler/entry into the
 // child via spawn_full_argv_args. `set` mirrors SPAWN_IDENTITY_SET; when
@@ -10050,7 +10053,20 @@ struct spawn_full_argv_args {
     // for the reason `name` is.
     bool           cwd_set;
     char           cwd[SYS_OPEN_PATH_MAX + 1];
+    // The SPAWN_EXT_ENV tail's environment, built by the spawner (env_from_block)
+    // and owned by the child once rfork succeeds: the thunk installs it before
+    // anything else. NULL: the child keeps rfork's copy of the spawner's.
+    struct Env    *env;
 };
+
+// The tail admits only environments exec can project onto a new image's stack.
+_Static_assert(SYS_SPAWN_ENV_DATA_MAX == EXEC_ENV_DATA_MAX,
+               "SYS_SPAWN_ENV_DATA_MAX must equal exec's EXEC_ENV_DATA_MAX");
+// The handler finds the env tail past the cwd tail alone; a tail on a lower bit
+// moves it, and a merge that brings one must add its size there.
+_Static_assert((SPAWN_EXT_FLAGS_ALL & (SPAWN_EXT_ENV - 1u)) == SPAWN_EXT_CWD,
+               "a tail below SPAWN_EXT_ENV: add its size to the env tail's offset "
+               "in sys_spawn_full_argv_handler");
 
 __attribute__((noreturn))
 static void sys_spawn_full_argv_thunk(void *arg) {
@@ -10086,7 +10102,12 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     struct Proc *p = t->proc;
     if (!p) extinction("sys_spawn_full_argv_thunk: no proc");
 
-    // The cwd tail first, read from `sa` before it is freed: the child's
+    // The environment tail first: env_install cannot fail, and once it has run
+    // the group is this Proc's, freed with it on every exit below. It must
+    // precede exec_setup_from_spoor, which projects /env onto the new stack.
+    if (sa->env) env_install(p, sa->env);
+
+    // The cwd tail next, read from `sa` before it is freed: the child's
     // Territory is its own clone (rfork), so the spawner's dot does not move.
     // Only an allocation can fail here, and it is handled below, with the
     // thunk's other pre-EL0 failures.
@@ -10239,6 +10260,8 @@ static void sys_spawn_full_argv_thunk(void *arg) {
 // Internal: the unified spawn-with-argv body. Mirrors sys_spawn_full_with_
 // perms_for_proc but threads argv through; perm_flags MUST be vetted by
 // the caller (gate-checks console-attachment before passing nonzero).
+// `env` (a detached Env, or NULL) passes to the child only when this returns a
+// pid; on any refusal the caller still owns it.
 static int sys_spawn_full_argv_with_perms_for_proc(
         struct Proc *p,
         const char *name, size_t name_len,
@@ -10248,7 +10271,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         u32 eff_budget,
         const struct spawn_identity *id,
         const struct spawn_allowance *want_allowance,
-        u32 pheno_flags, u32 debug_flags, const char *cwd) {
+        u32 pheno_flags, u32 debug_flags, const char *cwd, struct Env *env) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -10373,14 +10396,18 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         sa->cwd[cl] = '\0';
         sa->cwd_set = true;
     }
+    sa->env = env;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
     }
 
+    // A named environment: the child is born with none (RFCENVG), never with a
+    // copy of the spawner's, and the thunk adopts `env` as its group.
+    unsigned rf = RFPROC | (env ? (unsigned)RFCENVG : 0u);
     int pid = held
-        ? rfork_spawn_held(sys_spawn_full_argv_thunk, sa, cap_mask)
-        : rfork_with_caps(RFPROC, sys_spawn_full_argv_thunk, sa, cap_mask);
+        ? rfork_spawn_held(rf, sys_spawn_full_argv_thunk, sa, cap_mask)
+        : rfork_with_caps(rf, sys_spawn_full_argv_thunk, sa, cap_mask);
     if (pid < 0) {
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
@@ -10409,8 +10436,14 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 // `cwd` (kernel memory, `cwd_len` bytes; NULL == inherit) is the SPAWN_EXT_CWD
 // tail's path. It is resolved here, in the spawner, after the gates and before
 // any child exists, as the image is: a bad cwd answers chdir's errno
-// (sys_dir_landed_name) and leaves nothing to reap. Every other refusal is -1.
-int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+// (sys_dir_landed_name) and leaves nothing to reap.
+//
+// `env_block` (kernel memory, `env_len` bytes) is the SPAWN_EXT_ENV tail's
+// records when `env_set`; the child's environment is built from it here, after
+// the cwd, and a malformed or oversized block answers env_from_block's errno and
+// leaves nothing to reap. `env_set` false: the child keeps rfork's copy. Every
+// other refusal is -1.
+int sys_spawn_full_argv_env_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
@@ -10419,7 +10452,8 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const u32 *supp_gids, u32 supp_gid_count,
         const struct spawn_allowance *want_allowance,
         u32 req_budget, u32 pheno_flags, u32 debug_flags,
-        const char *cwd, u32 cwd_len) {
+        const char *cwd, u32 cwd_len,
+        bool env_set, const char *env_block, u32 env_len) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
     // V-1b: unknown pheno bits reject (forward-compat); the known bit needs
@@ -10490,15 +10524,52 @@ int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         landed = name_out;
     }
 
+    struct Env *env = NULL;
+    if (env_set) {
+        if (env_len > SYS_SPAWN_ENV_DATA_MAX) {
+            if (cwd_buf) kfree(cwd_buf);
+            return -(int)T_E_2BIG;
+        }
+        int eerr = 0;
+        env = env_from_block(env_block, env_len, &eerr);
+        if (!env) {
+            if (cwd_buf) kfree(cwd_buf);
+            return eerr;
+        }
+    }
+
     int pid = sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
                                                       argv_data, argv_data_len,
                                                       argc, cap_mask, perm_flags,
                                                       fds, fd_count, eff_budget,
                                                       eff_id, want_allowance,
                                                       pheno_flags, debug_flags,
-                                                      landed);
+                                                      landed, env);
+    if (pid < 0) env_discard(env);  // a refused spawn never reached the child
     if (cwd_buf) kfree(cwd_buf);
     return pid;
+}
+
+// Back-compat entry: no environment tail (the child keeps rfork's copy of the
+// spawner's). Keeps the pre-SPAWN_EXT_ENV signature for the kernel test suite.
+int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags,
+        const char *cwd, u32 cwd_len) {
+    return sys_spawn_full_argv_env_for_proc(p, name, name_len, argv_data,
+                                            argv_data_len, argc, fds, fd_count,
+                                            cap_mask, perm_flags, set_identity,
+                                            principal_id, primary_gid, supp_gids,
+                                            supp_gid_count, want_allowance,
+                                            req_budget, pheno_flags, debug_flags,
+                                            cwd, cwd_len,
+                                            /*env_set=*/false, NULL, 0u);
 }
 
 // Back-compat entry: no cwd tail (the child inherits the spawner's cwd).
@@ -10787,6 +10858,29 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             allow_kbuf.pci[i] = desc.pci[i];
     }
 
+    // SPAWN_EXT_ENV: after the tails of the lower bits that are set. Its
+    // fields are checked here, before anything is allocated; its records are
+    // copied below, once, and the entry parses only that copy.
+    struct sys_spawn_ext_env env_ext = { 0 };
+    bool env_set = (req.ext_flags & SPAWN_EXT_ENV) != 0;
+    if (env_set) {
+        u64 tail_va = req_va + sizeof(struct sys_spawn_args) +
+            ((req.ext_flags & SPAWN_EXT_CWD) ? sizeof(struct sys_spawn_ext_cwd) : 0u);
+        if (!sys_validate_user_buf(tail_va, sizeof(struct sys_spawn_ext_env)))
+            return -(s64)T_E_FAULT;
+        u8 *edst = (u8 *)&env_ext;
+        for (u64 i = 0; i < sizeof(env_ext); i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(tail_va + i, &b) != 0) return -(s64)T_E_FAULT;
+            edst[i] = b;
+        }
+        if (env_ext.env_flags != 0)                    return -1;   // the unknown-bits rule
+        if (env_ext.env_len > SYS_SPAWN_ENV_DATA_MAX)  return -(s64)T_E_2BIG;
+        if (env_ext.env_len > 0 &&
+            !sys_validate_user_buf(env_ext.env_va, env_ext.env_len))
+            return -(s64)T_E_FAULT;
+    }
+
     // SPAWN_EXT_CWD: the tail directly after the record, read only when the
     // record announces it -- a caller that does not set the bit is never read
     // past its 104 bytes. Copied into a kmalloc'd buffer (the frame already
@@ -10821,6 +10915,26 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         cwd_len = ext.cwd_len;
     }
 
+    // The environment records, copied once into kernel memory (bounded above by
+    // SYS_SPAWN_ENV_DATA_MAX, past the kstack, so kmalloc'd like argv).
+    char *env_kbuf = NULL;
+    if (env_set && env_ext.env_len > 0) {
+        env_kbuf = kmalloc(env_ext.env_len, 0);
+        if (!env_kbuf) {
+            if (cwd_kbuf) kfree(cwd_kbuf);
+            return -(s64)T_E_NOMEM;
+        }
+        for (u32 i = 0; i < env_ext.env_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(env_ext.env_va + i, &b) != 0) {
+                kfree(env_kbuf);
+                if (cwd_kbuf) kfree(cwd_kbuf);
+                return -(s64)T_E_FAULT;
+            }
+            env_kbuf[i] = (char)b;
+        }
+    }
+
     // Copy argv_data into a kmalloc'd buffer (NOT a kernel-stack array --
     // SYS_SPAWN_ARGV_DATA_MAX is 64 KiB, over the 16 KiB kstack). The body
     // re-copies into its own kmalloc'd region (owned by the child's thunk)
@@ -10830,6 +10944,7 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
     if (req.argv_data_len > 0) {
         argv_kbuf = kmalloc(req.argv_data_len, 0);
         if (!argv_kbuf) {
+            if (env_kbuf) kfree(env_kbuf);
             if (cwd_kbuf) kfree(cwd_kbuf);
             return -1;
         }
@@ -10837,13 +10952,14 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             u8 b = 0;
             if (uaccess_load_u8(req.argv_data_va + i, &b) != 0) {
                 kfree(argv_kbuf);
+                if (env_kbuf) kfree(env_kbuf);
                 if (cwd_kbuf) kfree(cwd_kbuf);
                 return -1;
             }
             argv_kbuf[i] = (char)b;
         }
     }
-    s64 rc = (s64)sys_spawn_full_argv_cwd_for_proc(
+    s64 rc = (s64)sys_spawn_full_argv_env_for_proc(
         p, name, (size_t)req.name_len,
         argv_kbuf, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
@@ -10854,8 +10970,10 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         req.page_budget,                  // CL-5: 0 == inherit
         req.pheno_flags,                  // V-1b: 0 == inherit
         req.debug_flags,                  // 5f: 0 == not held
-        cwd_kbuf, cwd_len);               // SPAWN_EXT_CWD: NULL == inherit
+        cwd_kbuf, cwd_len,                // SPAWN_EXT_CWD: NULL == inherit
+        env_set, env_kbuf, env_ext.env_len); // SPAWN_EXT_ENV: false == inherit
     if (argv_kbuf) kfree(argv_kbuf);
+    if (env_kbuf) kfree(env_kbuf);
     if (cwd_kbuf) kfree(cwd_kbuf);
     return rc;
 }

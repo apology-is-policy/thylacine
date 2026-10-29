@@ -342,8 +342,8 @@ pub const T_CACHE_WC: u64       = 1; // Normal Non-Cacheable (write-combining)
 pub const T_CACHE_UNCACHED: u64 = 2; // Normal Non-Cacheable (host non-coherent)
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
-// SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
-// served at L-3b; RFPROC alone needs copy-on-write (L-4) and is refused.
+// SYS_RFORK flags (kernel/include/thylacine/proc.h). SYS_RFORK serves RFPROC
+// (a copy-on-write fork, L-5) and RFPROC|RFMEM and refuses every other word.
 pub const T_RFPROC: u64               = 0x0001;
 pub const T_RFMEM: u64                = 0x0002;
 // Overcommit memory model (#321): reserve cheaply, commit on first touch,
@@ -474,6 +474,8 @@ pub const T_S_IFLNK: u32              = 0o120000;
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 pub const T_SYS_SPAWN_ARGV_MAX: usize        = 512;
 pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 65536;
+// Mirror SYS_SPAWN_ENV_DATA_MAX: the T_SPAWN_EXT_ENV tail's records, in bytes.
+pub const T_SYS_SPAWN_ENV_DATA_MAX: usize    = 32768;
 
 // Maximum binary name length (mirror SYS_SPAWN_NAME_MAX).
 pub const T_SPAWN_NAME_MAX: usize    = 256;
@@ -553,6 +555,14 @@ pub const T_SPAWN_DEBUG_HELD: u32 = 1 << 0;
 // tail is a TSpawnExtCwd naming the cwd the child is born with, resolved by the
 // spawner as chdir resolves one (STALK-DESIGN 4.3).
 pub const T_SPAWN_EXT_CWD: u32 = 1 << 0;
+// T_SPAWN_EXT_ENV: a TSpawnExtEnv names the child's whole environment as
+// NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the tails of the lower
+// bits that are set.
+pub const T_SPAWN_EXT_ENV: u32 = 1 << 2;
+// Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
+// refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
+// mask to the kernel's.
+pub const T_SPAWN_EXT_FLAGS_ALL: u32 = T_SPAWN_EXT_CWD | T_SPAWN_EXT_ENV;
 
 /// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
 /// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
@@ -565,6 +575,18 @@ pub struct TSpawnExtCwd {
 const _: () = assert!(core::mem::size_of::<TSpawnExtCwd>() == 16);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_len) == 8);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_flags) == 12);
+
+/// The T_SPAWN_EXT_ENV tail (mirror `struct sys_spawn_ext_env`;
+/// tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtEnv {
+    pub env_va:    u64, // 0 — the records; may be 0 when env_len is 0
+    pub env_len:   u32, // 8 — 0..T_SYS_SPAWN_ENV_DATA_MAX incl. the NULs
+    pub env_flags: u32, // 12 — must be 0
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtEnv>() == 16);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_len) == 8);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_flags) == 12);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;

@@ -6,11 +6,13 @@
 
 // Per-Proc environment group (ARCH section 9.7 / G15) -- the Plan 9 Egrp idiom.
 // A table of name->value pairs surfaced as the per-Proc /env directory (devenv,
-// dc='E'). Thylacine's native ABI passes no Unix envp at spawn, so the
-// environment is a namespace object: write /env/NAME to set, read /env/NAME to
-// get, readdir /env to list. A spawned child inherits a COPY via env_clone_into,
-// like territory_clone (Plan 9's rfork SHARES the group unless RFENVG; Thylacine
-// copies, and the reserved RFENVG stays deferred). `ref` counts the owning Proc
+// dc='E'). /env is the environment's one home -- write /env/NAME to set, read
+// /env/NAME to get, readdir /env to list -- and exec projects it onto a new
+// image's stack as its envp (exec_stage_env). A spawned child
+// inherits a COPY via env_clone_into, like territory_clone (Plan 9's rfork SHARES
+// the group unless RFENVG; Thylacine copies, and the reserved RFENVG stays
+// deferred), unless its spawner names a different environment in the
+// SPAWN_EXT_ENV tail (env_from_block, env_install). `ref` counts the owning Proc
 // plus every open /env/NAME Spoor opened in this Env (one per open, however many
 // handles, mounts or Loom entries share it): an open entry acts on the Env it
 // was opened in, whoever holds it (ARCH 9.7), so an Env can outlive its Proc
@@ -137,5 +139,32 @@ bool env_size_in(struct Env *e, u64 id, u64 *out_len);
 // in a value) are skipped rather than mangled. Both are argued at the definition.
 // Returns bytes copied (0 at EOF / no Env), or -1 on a bad argument.
 long env_render_environ(struct Proc *p, s64 off, void *buf, long n);
+
+// --- the spawn environment tail (SPAWN_EXT_ENV; ARCH 9.7) --------------------
+// env_from_block builds a DETACHED Env -- published to no Proc, so owned
+// exclusively by the caller -- from `len` bytes of NUL-terminated "NAME=VALUE"
+// records in kernel memory: the argv packing, and the block exec projects. A
+// later record for a name replaces an earlier one; len 0 is an empty Env. The
+// spawner calls it before rfork, so a refusal makes no child: NULL with *err =
+// -T_E_INVAL (an unterminated block, a record with no '=', a name /env would
+// refuse), -T_E_2BIG (a value past ENV_VALUE_MAX, a name past ENV_MAX_ENTRIES)
+// or -T_E_NOMEM. The caller bounds len (EXEC_ENV_DATA_MAX).
+//
+// env_install hands `fresh` to p, consuming it. A tail spawn's child is forked
+// with no group (RFCENVG) and adopts `fresh` as its own. A Proc that already
+// has one has it emptied and refilled in place under its lock, never freed or
+// swapped: a cross-Proc devproc reader may hold it. Call it only before p's first EL0
+// instruction (the spawn thunk), when no peer thread of p can mutate the group
+// and no /env handle is bound to it (only p's own opens bind p's group, and p
+// has not run), so the refill reaches no one who saw the copy.
+//
+// env_discard frees a detached Env that was never installed (NULL-tolerant).
+struct Env *env_from_block(const char *block, u32 len, int *err);
+void env_install(struct Proc *p, struct Env *fresh);
+void env_discard(struct Env *e);
+
+// Envs allocated and not yet freed, every kind counted (a Proc's group, an
+// open handle's, a detached one).
+u64 env_live_count(void);
 
 #endif /* THYLACINE_ENV_H */

@@ -74,8 +74,9 @@ pub fn set_current_dir(path: &str) -> Result<()> {
 }
 
 // The kernel's ENV_VALUE_MAX (kernel/include/thylacine/env.h): a /env value
-// is at most 4096 raw bytes, so a stack buffer of that size always holds one.
-const ENV_VALUE_BUF: usize = 4096;
+// is at most 4096 raw bytes, so one read into a buffer of that size takes all
+// of it under one hold of the group's lock.
+pub(crate) const ENV_VALUE_BUF: usize = 4096;
 
 /// Read environment variable `name` from the per-Proc `/env` device. Loosely
 /// mirrors `std::env::var`, with `None` covering absent, unreadable, and
@@ -90,15 +91,10 @@ pub fn var(name: &str) -> Option<String> {
     path.push_str("/env/");
     path.push_str(name);
     let mut f = crate::fs::File::open(&path).ok()?;
+    // One read: a second could meet a writer's replacement and return half of
+    // each value.
     let mut buf = [0u8; ENV_VALUE_BUF];
-    let mut len = 0usize;
-    while len < ENV_VALUE_BUF {
-        match f.read(&mut buf[len..]) {
-            Ok(0) => break,
-            Ok(n) => len += n,
-            Err(_) => return None,
-        }
-    }
+    let len = f.read(&mut buf).ok()?;
     let s = core::str::from_utf8(&buf[..len]).ok()?;
     Some(String::from(s))
 }

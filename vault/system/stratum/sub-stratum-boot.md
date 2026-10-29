@@ -133,6 +133,29 @@ killed through its ctl and reaped. Boot-fatal. Probe83's chdir legs ask the
 errno too: `f/..` -20, `nope/..` -2, and `f` named whole -20 (the resolver's own
 directory check, not the walk's).
 
+**The spawn environment tail, through the real ABI (2026-10-28,
+[[dec-2026-10-28-spawn-env]]).** `probe_spawn_env` runs after the cwd
+probe. It first sets `PE_JOEY=here` in joey's own `/env`, so the
+spawner's environment and the block cannot read alike, and unsets it after.
+Each record (`union senv_record`) always writes the environment tail at its
+offset, so a leg can clear the bit and leave a poisoned tail in place. It spawns
+`/bin/hello` held and reads each child's `/proc/<pid>/environ` before the child
+runs:
+- the block arrives exactly;
+- with the bit clear, the poisoned tail is never read and the child carries
+  joey's environment -- at +104, and behind a cwd tail (+120), the cwd still
+  landing;
+- an empty block gives an empty environment;
+- a repeated name arrives once, with the later value;
+- the tail is read at +120 after a cwd tail, and the cwd still lands.
+Refused, with no child: a record with no `=` (-22), a `/` in a name (-22), the
+name `..` (-22), an unterminated block (-22), a value past 4096 bytes (-7), a length past 32768
+(-7), a NULL pointer with a length (-14), a nonzero `env_flags` (-1) and the
+next unknown `ext_flags` bit (-1). joey's own environment is checked unchanged.
+Boot-fatal. Both probes derive the next unknown bit from libt's
+`T_SPAWN_EXT_FLAGS_ALL`, which the mirror check holds to the kernel's, so a new
+tail cannot turn an "unknown bit" leg into a garbage-tail read.
+
 **The readiness wire, read directly (#98 NP-3b, 2026-09-28).** Before its
 net-6b polls, joey reads the udp connection's `ready` file with `t_pread`, and
 pty-probe (the PTY-2e rung) does the same to `/dev/pts/<n>ready` before the

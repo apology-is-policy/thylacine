@@ -368,6 +368,14 @@ report a symlink as a plain file even where the mode string shows `l`.
   utility; while the initrd was flat, the same name met the `/env` device and
   the utility could not be reached before the pivot
   ([[dec-2026-09-25-initrd-bin-directory]]).
+  Two legs pin `Command::env` end to end (2026-10-28,
+  [[dec-2026-10-28-spawn-env]]): `ls --beacon=always /bin/version` writes a
+  rich Beacon frame only when `BEACON=rich` reaches it. Before the run's own
+  `BEACON` is written, the frame is absent with no tail, present with
+  `env("BEACON", "rich")`, and the smoke's own `BEACON` is still unset after.
+  After it is written, the frame is present when inherited and under
+  `env_remove` of another name (so a removal that emptied the environment
+  fails), and absent under `env_remove("BEACON")` and under `env_clear()`.
 
 - **`cp -P` and `-a` refuse a symlink source.** Copying a link as a link needs
   a call that creates one, and native code has only the Loom op; until an

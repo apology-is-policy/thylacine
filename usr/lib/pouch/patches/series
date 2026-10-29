@@ -196,3 +196,7 @@
 0062-pouch-link-eperm.patch
 # 0063 (B-3g, G12, operator votes 17 and 18 of 2026-10-22): utimensat sets times over SYS_WSTAT's four time bits (x6 carries the values; __syscall7); every time but the touch is the owner's, so its refusal is EPERM, as chmod's is in fchmod and fchmodat.
 0063-pouch-utimensat.patch
+# 0064 (env-c, vote 28; corona's, after B-3's 0051-0063): posix_spawn sends envp
+# as the SPAWN_EXT_ENV tail, the child's whole environment; the tail's refusals
+# return their errno.
+0064-pouch-spawn-env.patch

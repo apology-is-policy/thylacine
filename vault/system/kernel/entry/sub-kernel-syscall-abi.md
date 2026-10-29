@@ -195,6 +195,31 @@ the word (libt, libthyla-rs, the pouch patch) and declare the tail (libt
 `T_SPAWN_EXT_CWD` + `struct t_sys_spawn_ext_cwd`; libthyla-rs `TSpawnExtCwd` and
 `Command::current_dir`); the fork needs no change until it sends one. What the
 tail does is [[sub-kernel-syscall-dispatch]]'s (STALK-DESIGN 4.3).
+Bit 1 is `SPAWN_EXT_THREADS` (the thread budget) on the trees that carry the
+thread model; this tree has no such tail and refuses the bit (-1).
+`SPAWN_EXT_ENV` (bit 2, 2026-10-28, [[dec-2026-10-28-spawn-env]]) announces a
+`struct sys_spawn_ext_env` after the cwd tail when bit 0 is set too,
+else at +104: `env_va` (u64; may be 0 when the length is), `env_len` (u32,
+0..`SYS_SPAWN_ENV_DATA_MAX`, 32768 bytes, past it `T_E_2BIG`) and `env_flags`
+(u32, must be 0), 16 bytes. The block is the argv packing, NUL-terminated
+`NAME=VALUE` records, and it is the child's whole environment: nothing of the
+spawner's carries over, and a length of 0 is an empty one. The bound is
+`EXEC_ENV_DATA_MAX`, asserted equal in `kernel/syscall.c`, because exec projects
+the group onto the child's stack and refuses a larger one; a tail that admitted
+more would make a child exec could not start. Mirrors: libt `T_SPAWN_EXT_ENV`,
+`T_SYS_SPAWN_ENV_DATA_MAX` + `struct t_sys_spawn_ext_env`; libthyla-rs
+`T_SPAWN_EXT_ENV`, `T_SYS_SPAWN_ENV_DATA_MAX` + `TSpawnExtEnv`, sent by
+`Command::env`, `env_remove` and `env_clear` ([[sub-libthyla-rs]]);
+`tools/check-spawn-args-mirrors.py` holds both to the kernel's layout. Both
+libraries also mirror `SPAWN_EXT_FLAGS_ALL` (`T_SPAWN_EXT_FLAGS_ALL`), and the
+same check holds their `T_SPAWN_EXT_*` members to the kernel's names and bits
+and each mask to exactly those members, proving each rule on a mutation (a
+member dropped, a mask missing one, a kernel member no mirror has). Pouch's
+`posix_spawn` sends it on every call (patch 0064, [[sub-pouch-process]]). The
+Go fork does not send it yet: the fork is shared by every tree, and a kernel
+without bit 2 refuses the bit, so it waits until every tree carries the
+kernel half. What the tail does is [[sub-kernel-syscall-dispatch]]'s and
+[[sub-kernel-content]]'s (ARCH 9.7).
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
@@ -764,6 +789,10 @@ be one 4 KiB staging buffer per round trip.
 ## Provenance
 
 [[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
+
+2026-10-28 (vote 28): `SPAWN_EXT_ENV` (bit 2) + `sys_spawn_ext_env` +
+`SYS_SPAWN_ENV_DATA_MAX`, and `T_E_2BIG`'s emitter list in `errno.h` names the
+tail. No number changed; the record stays 104 bytes.
 
 2026-09-16: `SYS_BURROW_DETACH`'s documented `-1` list (syscall.h and the
 libthyla-rs `t_burrow_detach` mirror) now states the window refusal it always

@@ -36,6 +36,7 @@ TERRITORY_H = 'kernel/include/thylacine/territory.h'
 WORDS = [
     # (word, header, member-name pattern, width in bits)
     ('proc_flags',            PROC_H,      r'PROC_FLAG_\w+',       32),
+    ('rfork flags',           PROC_H,      r'RF[A-Z]+',            32),
     ('spawn perms',           SYSCALL_H,   r'SPAWN_PERM_\w+',      32),
     ('spawn identity flags',  SYSCALL_H,   r'SPAWN_IDENTITY_\w+',  32),
     ('spawn allowance flags', SYSCALL_H,   r'SPAWN_ALLOWANCE_\w+', 32),

@@ -9,9 +9,11 @@
 #
 # One boot on the GL device, one timedemo through the BARE ramfs name --
 # the launcher's production path: its /srv/warp ctl probe (the two-step
-# attach, wprobe2-proven) reads "virgl 1", writes /env/GALLIUM_DRIVER=
-# virpipe, and execs the pool binary, which the SDL shim then adopts
-# (glsrc + present-to). BOTH present arms are exercised in one run:
+# attach, wprobe2-proven) reads "virgl 1", setenvs GALLIUM_DRIVER=virpipe
+# and spawns the pool binary with environ (pouch's execve is still the
+# ENOSYS sentinel), which the SDL shim then adopts (glsrc + present-to).
+# GL_RENDERER naming virgl is the proof the driver reached the game.
+# BOTH present arms are exercised in one run:
 #
 #   launch  -window -width DW -height DH  -> two visible leaves (console +
 #           game), the game letterboxed in its half-pane -> Composed-GL
@@ -124,7 +126,7 @@ lc_login michael correct-horse-battery-staple-v1
 set s0 [pswp]
 
 # The BARE name: ut resolves the ramfs launcher; the launcher's seam probe
-# + /env write + exec are part of what this gate proves.
+# + setenv + spawn with environ are part of what this gate proves.
 # -noglcompression (#216): the guest Mesa advertises
 # GL_EXT_texture_compression_s3tc while the virgl screen rejects the DXT
 # formats on an S3TC-less host (V3D), so every compressed upload fails

@@ -352,11 +352,21 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // tail is a struct t_sys_spawn_ext_cwd naming the cwd the child is born with,
 // resolved by the spawner as chdir resolves one (STALK-DESIGN 4.3).
 #define T_SPAWN_EXT_CWD                (1u << 0)
+// T_SPAWN_EXT_ENV: a struct t_sys_spawn_ext_env names the child's whole
+// environment as NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the
+// tails of the lower bits that are set.
+#define T_SPAWN_EXT_ENV                (1u << 2)
+// Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
+// refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
+// mask to the kernel's.
+#define T_SPAWN_EXT_FLAGS_ALL          (T_SPAWN_EXT_CWD | T_SPAWN_EXT_ENV)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 #define T_SYS_SPAWN_ARGV_MAX        512u
 #define T_SYS_SPAWN_ARGV_DATA_MAX   65536u
+// Mirror SYS_SPAWN_ENV_DATA_MAX: the T_SPAWN_EXT_ENV tail's records, in bytes.
+#define T_SYS_SPAWN_ENV_DATA_MAX    32768u
 
 // SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
 // in kernel/include/thylacine/syscall.h. The 80-byte ABI shape is pinned
@@ -466,6 +476,22 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_len) == 8,
                "t_sys_spawn_ext_cwd.cwd_len at ABI offset 8");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_flags) == 12,
                "t_sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
+
+// The T_SPAWN_EXT_ENV tail (mirror struct sys_spawn_ext_env;
+// tools/check-spawn-args-mirrors.py compares the two).
+struct t_sys_spawn_ext_env {
+    unsigned long  env_va;           // 0  — the records; may be 0 when env_len is 0
+    unsigned int   env_len;          // 8  — 0..T_SYS_SPAWN_ENV_DATA_MAX incl. the NULs
+    unsigned int   env_flags;        // 12 — must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_env) == 16,
+               "t_sys_spawn_ext_env must be 16 bytes (the kernel's tail)");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_va) == 0,
+               "t_sys_spawn_ext_env.env_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_len) == 8,
+               "t_sys_spawn_ext_env.env_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_flags) == 12,
+               "t_sys_spawn_ext_env.env_flags at ABI offset 12");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

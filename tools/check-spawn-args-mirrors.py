@@ -20,6 +20,7 @@ compares every mirror with it field by field:
   libthyla-rs  usr/lib/libthyla-rs/src/lib.rs          struct TSpawnArgs
   pouch        usr/lib/pouch/patches/0026-pouch-process.patch
                                                        struct pouch_spawn_args
+               (its env tail, struct pouch_spawn_ext_env, is in 0064)
   go fork      $GOFORK/src/syscall/exec_thylacine.go   type spawnArgs
 
 The in-tree mirrors must match names, offsets and sizes: two same-size fields
@@ -75,7 +76,24 @@ GO_TAIL = re.compile(r"^\s*type\s+(spawnExt\w*)\s+struct\b", re.M)
 EXT_TAILS = [
     ("sys_spawn_ext_cwd", [("libt", "t_sys_spawn_ext_cwd", "c"),
                            ("libthyla-rs", "TSpawnExtCwd", "rust")]),
+    ("sys_spawn_ext_env", [("libt", "t_sys_spawn_ext_env", "c"),
+                           ("libthyla-rs", "TSpawnExtEnv", "rust"),
+                           ("pouch-env", "pouch_spawn_ext_env", "patch")]),
 ]
+# Tail mirrors that live outside the MIRRORS files: pouch's env tail comes in its
+# own patch, after the one that mirrors the record.
+TAIL_SOURCES = {"pouch-env": "usr/lib/pouch/patches/0064-pouch-spawn-env.patch"}
+# The files above are read as patches, not as the series' result, so a later
+# patch that edits a pouch mirror would go unseen; every other patch in the
+# series must leave them alone.
+POUCH_SERIES = "usr/lib/pouch/patches"
+POUCH_MIRROR_PATCHES = {"0026-pouch-process.patch", "0064-pouch-spawn-env.patch"}
+POUCH_MIRROR_NAME = re.compile(
+    r"^[+-](?![+-]{2}).*(\bstruct\s+pouch_spawn_(?:args|ext_env|env_rec)\b|\bPOUCH_SPAWN_EXT_\w+)", re.M)
+# posix_spawn returns a refused tail's -T_E value as this libc's errno, which
+# holds only while the kernel's values are the Linux ones (docs/ERRORS.md).
+KERNEL_ERRNO = "kernel/include/thylacine/errno.h"
+POUCH_ERRNOS = {"T_E_2BIG": 7, "T_E_NOMEM": 12, "T_E_FAULT": 14, "T_E_INVAL": 22}
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
 C_SIZES = {
@@ -346,6 +364,64 @@ def u64_class_errs(text, struct=None):
     return errs
 
 
+# The ext_flags word: each mirror defines the kernel's SPAWN_EXT_* members at the
+# same bits, and its FLAGS_ALL mask names exactly those members -- a probe that
+# derives "the next unknown bit" from a mask missing a member sends a bit the
+# kernel reads a tail for.
+EXT_FLAG_FORMS = {
+    "kernel": (r"^#define\s+SPAWN_EXT_(\w+)\s+\(1u\s*<<\s*(\d+)\)",
+               r"^#define\s+SPAWN_EXT_FLAGS_ALL\s+\(([^)]*)\)", "SPAWN_EXT_"),
+    "libt": (r"^#define\s+T_SPAWN_EXT_(\w+)\s+\(1u\s*<<\s*(\d+)\)",
+             r"^#define\s+T_SPAWN_EXT_FLAGS_ALL\s+\(([^)]*)\)", "T_SPAWN_EXT_"),
+    "libthyla-rs": (r"^pub const T_SPAWN_EXT_(\w+): u32 = 1 << (\d+);",
+                    r"^pub const T_SPAWN_EXT_FLAGS_ALL: u32 = ([^;]*);", "T_SPAWN_EXT_"),
+}
+
+
+def ext_flags(text, label):
+    """(members {name: bit}, the FLAGS_ALL mask's member names) for one source."""
+    member, mask, prefix = EXT_FLAG_FORMS[label]
+    members = {m.group(1): int(m.group(2)) for m in re.finditer(member, text, re.M)}
+    m = re.search(mask, text, re.M)
+    if not members or not m:
+        raise CheckError(f"{label}: no ext_flags members or no FLAGS_ALL mask")
+    names = {n.strip()[len(prefix):] for n in m.group(1).split("|")
+             if n.strip().startswith(prefix)}
+    return members, names
+
+
+# Pouch names only the bits it sends, so each must be the kernel's member of
+# that name at the kernel's bit; it keeps no mask.
+EXT_FLAG_SUBSETS = {
+    "pouch-env": r"^\+#define\s+POUCH_SPAWN_EXT_(\w+)\s+\(1u\s*<<\s*(\d+)\)",
+}
+
+
+def ext_flag_errs(texts):
+    kmembers, knames = ext_flags(texts["kernel"], "kernel")
+    errs = []
+    if knames != set(kmembers):
+        errs.append(f"kernel: ext flag mask names {sorted(knames)}, members are "
+                    f"{sorted(kmembers)}")
+    for label in ("libt", "libthyla-rs"):
+        members, names = ext_flags(texts[label], label)
+        if members != kmembers:
+            errs.append(f"{label}: ext flag members {members} != kernel {kmembers}")
+        if names != set(kmembers):
+            errs.append(f"{label}: ext flag mask names {sorted(names)}, kernel "
+                        f"members are {sorted(kmembers)}")
+    for label, form in EXT_FLAG_SUBSETS.items():
+        members = {m.group(1): int(m.group(2))
+                   for m in re.finditer(form, texts[label], re.M)}
+        if not members:
+            errs.append(f"{label}: defines no ext flag member")
+        for name, bit in members.items():
+            if kmembers.get(name) != bit:
+                errs.append(f"{label}: ext flag member {name} is bit {bit}, kernel "
+                            f"has {kmembers.get(name)}")
+    return errs
+
+
 def check(texts, go_text):
     """Every mismatch, as messages; raises CheckError on an unreadable source."""
     kernel = kernel_layout(texts["kernel"])
@@ -362,6 +438,15 @@ def check(texts, go_text):
         errs += [f"go fork: declares a record tail type {t} that EXT_TAILS does "
                  f"not hold to the kernel -- list it beside its kernel tail"
                  for t in GO_TAIL.findall(go_text) if t not in listed]
+    errs += ext_flag_errs(texts)
+    for m in POUCH_MIRROR_NAME.finditer(texts["pouch-series"]):
+        errs.append(f"pouch series: a patch outside {sorted(POUCH_MIRROR_PATCHES)} edits "
+                    f"a spawn mirror: {m.group(0).strip()[:80]}")
+    for name, want in POUCH_ERRNOS.items():
+        m = re.search(r"^#define\s+%s\s+(\d+)\b" % name, texts["kernel-errno"], re.M)
+        if not m or int(m.group(1)) != want:
+            errs.append(f"kernel errno: {name} is {m.group(1) if m else 'undefined'}, but "
+                        f"pouch's posix_spawn returns it as the Linux errno {want}")
     for kstruct, mirrors in EXT_TAILS:
         ktail = kernel_layout(texts["kernel"], kstruct)
         errs += u64_class_errs(texts["kernel"], kstruct)
@@ -476,11 +561,57 @@ def self_test(texts, go_text):
                                 lambda l: l + "\n    u32 unasserted_field;")
         if not fails(t, go_text):
             missed.append(f"a {kstruct} field with no offsetof assert")
+        # An address field loses its suffix; a tail with none gains an 8-byte
+        # field without one. Either way the u64 rule must report it.
         t = dict(texts)
-        t["kernel"] = re.sub(r"\bcwd_va\b", "cwd_addr", texts["kernel"]) \
-            if kstruct == "sys_spawn_ext_cwd" else texts["kernel"]
+        tail_va = [f[0] for f in tf if f[0].endswith("_va")]
+        if tail_va:
+            t["kernel"] = re.sub(r"\b%s\b" % tail_va[0], tail_va[0][:-3] + "_addr",
+                                 texts["kernel"])
+        else:
+            # Asserted and sized, so the layout holds and only the u64 rule
+            # has anything to say about it.
+            _, size = layout(tf)
+            off = (size + 7) & ~7
+            k = edit_line(texts["kernel"], "kernel", tf[-1][3],
+                          lambda l: l + "\n    u64 addr;")
+            k = re.sub(r"(_Static_assert\(\s*sizeof\(\s*struct\s+%s\s*\)\s*==\s*)\d+"
+                       % kstruct, lambda m: m.group(1) + str(off + 8), k, count=1)
+            t["kernel"] = k + (f"\n_Static_assert(__builtin_offsetof(struct {kstruct}, "
+                               f"addr) == {off}, \"\");\n")
         if t["kernel"] == texts["kernel"] or not reported(t, go_text, "not named *_va"):
-            missed.append(f"a {kstruct} address field without its _va suffix")
+            missed.append(f"a {kstruct} 8-byte field without the _va suffix")
+    # The ext_flags word: a mirror missing a member, a mask missing one, and a
+    # kernel member no mirror has yet must each be reported as such.
+    t = dict(texts)
+    t["libt"] = re.sub(r"^#define\s+T_SPAWN_EXT_ENV\s.*$", "", texts["libt"], count=1, flags=re.M)
+    if t["libt"] == texts["libt"] or not reported(t, go_text, "ext flag"):
+        missed.append("a libt ext flag member dropped")
+    t = dict(texts)
+    t["libthyla-rs"] = re.sub(r"(T_SPAWN_EXT_FLAGS_ALL: u32 = [^;]*?)\s*\|\s*T_SPAWN_EXT_ENV",
+                              r"\1", texts["libthyla-rs"], count=1)
+    if t["libthyla-rs"] == texts["libthyla-rs"] or not reported(t, go_text, "ext flag mask"):
+        missed.append("a libthyla-rs ext flag mask missing a member")
+    t = dict(texts)
+    t["kernel"] = re.sub(r"^(#define\s+SPAWN_EXT_FLAGS_ALL\s+\([^)]*)\)",
+                         r"\1 | SPAWN_EXT_NEXT)\n#define SPAWN_EXT_NEXT (1u << 9)",
+                         texts["kernel"], count=1, flags=re.M)
+    if t["kernel"] == texts["kernel"] or not reported(t, go_text, "ext flag members"):
+        missed.append("a kernel ext flag member no mirror defines")
+    t = dict(texts)
+    t["pouch-env"] = re.sub(r"^(\+#define\s+POUCH_SPAWN_EXT_ENV\s+\(1u\s*<<\s*)\d+",
+                            r"\g<1>3", texts["pouch-env"], count=1, flags=re.M)
+    if t["pouch-env"] == texts["pouch-env"] or not reported(t, go_text, "ext flag member ENV"):
+        missed.append("a pouch ext flag member at the wrong bit")
+    t = dict(texts)
+    t["pouch-series"] = texts["pouch-series"] + "\n-#define POUCH_SPAWN_EXT_ENV (1u << 2)\n+#define POUCH_SPAWN_EXT_ENV (1u << 3)\n"
+    if not reported(t, go_text, "edits a spawn mirror"):
+        missed.append("a later pouch patch that edits a spawn mirror")
+    t = dict(texts)
+    t["kernel-errno"] = re.sub(r"^(#define\s+T_E_2BIG\s+)7\b", r"\g<1>8", texts["kernel-errno"],
+                               count=1, flags=re.M)
+    if t["kernel-errno"] == texts["kernel-errno"] or not reported(t, go_text, "T_E_2BIG is 8"):
+        missed.append("a kernel T_E value pouch returns as a Linux errno, renumbered")
     first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
                     if n.endswith("_va"))
     t = dict(texts)
@@ -494,6 +625,14 @@ def main():
     texts = {KERNEL[0]: (ROOT / KERNEL[1]).read_text()}
     for label, rel, _, _ in MIRRORS:
         texts[label] = (ROOT / rel).read_text()
+    for label, rel in TAIL_SOURCES.items():
+        texts[label] = (ROOT / rel).read_text()
+    series_dir = ROOT / POUCH_SERIES
+    names = [ln.strip() for ln in (series_dir / "series").read_text().splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    texts["pouch-series"] = "\n".join((series_dir / n).read_text() for n in names
+                                       if n not in POUCH_MIRROR_PATCHES)
+    texts["kernel-errno"] = (ROOT / KERNEL_ERRNO).read_text()
     gofork = pathlib.Path(os.environ.get(
         "GOFORK", str(pathlib.Path.home() / "projects" / "go-thylacine")))
     go_path = gofork / GO_REL
@@ -527,7 +666,9 @@ def main():
     print(f"spawn-args mirror check: kernel {size} B / {len(lay)} fields, every "
           f"u64 classified; "
           f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}; "
-          f"tails: {tails}")
+          f"tails: {tails}; ext flag members + mask ok (libt, libthyla-rs), "
+          f"bits ok ({', '.join(EXT_FLAG_SUBSETS)}); no other pouch patch edits a "
+          f"mirror; kernel T_E values pouch returns ok")
     return 0
 
 

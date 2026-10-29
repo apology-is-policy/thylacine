@@ -176,7 +176,7 @@ void test_birth_hold_publication_mark(void) {
     g_bh_mark.grand_saw = BH_UNSEEN;
     g_bh_mark.grand_pid = 0;
 
-    int hpid = rfork_spawn_held(bh_mark_held_thunk, NULL, CAP_NONE);
+    int hpid = rfork_spawn_held(RFPROC, bh_mark_held_thunk, NULL, CAP_NONE);
     int hst = -1;
     int hreaped = (hpid > 0) ? wait_pid_for(hpid, 0, &hst) : -1;
     int ppid = rfork_with_caps(RFPROC, bh_mark_plain_thunk, NULL, CAP_NONE);
@@ -270,7 +270,7 @@ void test_birth_hold_parked_wakes_birth_wait(void) {
     g_bh_wake.waiter_slept = 0;
     g_bh_wake.saw_return   = 0;
 
-    int pid = rfork_spawn_held(bh_wake_thunk, NULL, CAP_NONE);
+    int pid = rfork_spawn_held(RFPROC, bh_wake_thunk, NULL, CAP_NONE);
     int reaped = -1;
     if (pid > 0) {
         __atomic_store_n(&g_bh_wake.awaiting, 1u, __ATOMIC_RELEASE);
@@ -336,7 +336,7 @@ static void bh_orphan_launcher_thunk(void *arg) {
     struct bh_orphan *o = (struct bh_orphan *)arg;
     struct Proc *self = current_thread()->proc;
     o->launcher = self;
-    int gpid = rfork_spawn_held(bh_orphan_grand_thunk, o, CAP_NONE);
+    int gpid = rfork_spawn_held(RFPROC, bh_orphan_grand_thunk, o, CAP_NONE);
     __atomic_store_n(&o->gpid, gpid, __ATOMIC_RELEASE);
     if (gpid > 0 && o->release_first) {
         irq_state_t s = proc_table_lock_acquire();
@@ -489,7 +489,7 @@ static void bh_latch_launcher_thunk(void *arg) {
     struct Proc *self = current_thread()->proc;
     l->launcher        = self;
     l->launcher_thread = current_thread();
-    int gpid = rfork_spawn_held(bh_latch_grand_thunk, l, CAP_NONE);
+    int gpid = rfork_spawn_held(RFPROC, bh_latch_grand_thunk, l, CAP_NONE);
     __atomic_store_n(&l->gpid, gpid, __ATOMIC_RELEASE);
     if (gpid > 0) {
         __atomic_store_n(&l->awaiting, 1u, __ATOMIC_RELEASE);
