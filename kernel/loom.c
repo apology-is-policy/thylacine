@@ -541,13 +541,17 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
     // Geometry already bounds cq to 8192. Allocate at least a buddy page even
     // for tiny rings: the charge follows real physical allocation, not a slab.
-    _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
+    // The protocol index is charged by its buddy footprint, never assumed to be
+    // a page: its embedded poll hooks grow with struct poll_waiter.
+    _Static_assert(sizeof(struct loom_service_engine) > SLUB_MAX_OBJECT_SIZE,
+                   "protocol index uses buddy kmalloc");
     size_t request_bytes = (size_t)loom_request_records(cq) * sizeof(struct loom_service_request);
     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
-        + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;
+        + 1u + (u32)burrow_backing_pages(request_bytes)
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_engine));
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
@@ -564,7 +568,7 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     struct loom_service_request *requests = (!nodes || requests_fault) ? NULL :
         kmalloc(request_bytes, KP_ZERO);
     struct loom_service_engine *engine = (!requests || engine_fault) ? NULL :
-        kmalloc(PAGE_SIZE, KP_ZERO);
+        kmalloc(sizeof(struct loom_service_engine), KP_ZERO);
     struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || !engine || layout_fault) ? NULL :
         loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {

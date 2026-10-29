@@ -7,7 +7,6 @@
 #include <thylacine/extinction.h>
 #include "../arch/arm64/timer.h"
 
-_Static_assert(sizeof(struct loom_service_engine)<=4096,"frontend fits charged engine page");
 static int frontend_dispatch(struct Loom *l,struct Proc *p,const struct loom_sqe *s) {
     int rc=loom_private_sqe_shape(s,l->receipt_size!=0);if(rc)return rc;
     if(s->opcode==LOOM_OP_SERVICE_CONNECT) {

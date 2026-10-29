@@ -278,10 +278,11 @@ static const char *loom_slot_owner_fixture(void) {
              "private owner owns zeroed node storage");
     SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
              (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)) +
-             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 3u,
+             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 2u +
+             (u32)burrow_backing_pages(sizeof(struct loom_service_engine)),
              "slot pool target node request and index pages included in metadata charge");
     SO_CHECK(l->service_engine && loom_engine_empty(l->service_engine),
-             "private owner owns a zeroed protocol index page");
+             "private owner owns zeroed protocol index storage");
     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
              (u32)burrow_backing_pages(l->ring_size) + 1u,
              "all base storage charged before owner publication");
