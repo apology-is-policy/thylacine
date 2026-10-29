@@ -1062,10 +1062,12 @@ int proc_setsid(struct Proc *p) {
         proc_table_lock_release(s);
         return -T_E_ACCES;              // POSIX EPERM: already a group leader
     }
-    pts_interaction_invalidate_locked(p, false);
+    struct pts_wakes wakes = { .n = 0 };
+    pts_interaction_invalidate_locked(p, false, &wakes);
     p->sid  = (u32)p->pid;
     p->pgid = (u32)p->pid;
     proc_table_lock_release(s);
+    pts_interaction_wake(&wakes);
     return p->pid;
 }
 
@@ -1109,9 +1111,11 @@ int proc_setpgid(struct Proc *self, int pid, int pgid) {
             return -T_E_ACCES;          // POSIX EPERM: no such group in session
         }
     }
-    pts_interaction_invalidate_locked(target, false);
+    struct pts_wakes wakes = { .n = 0 };
+    pts_interaction_invalidate_locked(target, false, &wakes);
     target->pgid = want;
     proc_table_lock_release(s);
+    pts_interaction_wake(&wakes);
     return 0;
 }
 
@@ -4248,11 +4252,11 @@ static void proc_birth_hold_orphan_rule_locked(struct Proc *p);
 // msg:    captured by reference; caller-owned (typically a string
 //         literal). NULL becomes "ok".
 static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
-                                      const char *msg) {
+                                      const char *msg, struct pts_wakes *wakes) {
     // The departure record, under the lock every image join reads it under, and
     // before any reap can unlink p out of the joins' traversal.
     addrspace_record_holder(p->as, p);
-    pts_interaction_invalidate_locked(p, true);
+    pts_interaction_invalidate_locked(p, true, wakes);
 
     // A-4a (I-25): if p is a legate ROOT, tear down its scope as it dies. Placed
     // at this chokepoint (not in exits() alone) so the sweep fires on EVERY death
@@ -4887,9 +4891,11 @@ static void exits_term(int code, int sig, const char *msg) {
     thread_commit_exiting_locked(t);
     proc_threads_unlock(p, ts);
 
-    proc_become_zombie_locked(p, code, sig, msg);
+    struct pts_wakes wakes = { .n = 0 };
+    proc_become_zombie_locked(p, code, sig, msg, &wakes);
 
     proc_table_lock_release(s);
+    pts_interaction_wake(&wakes);
 
     // F3 audit close: the clear-child-tid handoff runs AFTER the EXITING
     // commit (and the ZOMBIE transition) so any joiner woken by the
@@ -5035,8 +5041,10 @@ void thread_exit_self(void) {
         // The status read at the decision above (#91: a group claim carries the
         // REAL exit byte, so a phenotype exit_group(N) reaches the parent's wait
         // as WEXITSTATUS == N; gcpark-b: and the claim's signal).
-        proc_become_zombie_locked(p, zcode, zsig, zmsg);
+        struct pts_wakes wakes = { .n = 0 };
+        proc_become_zombie_locked(p, zcode, zsig, zmsg, &wakes);
         proc_table_lock_release(g);
+        pts_interaction_wake(&wakes);
     }
 
     exit_tail_test_hook();
@@ -5396,6 +5404,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     proc_exec_wait_alone(p);
 
     struct AddrSpace *old;
+    struct pts_wakes wakes = { .n = 0 };
     {
         irq_state_t s = proc_table_lock_acquire();
         // The single-thread precondition is re-checked HERE, inside the same
@@ -5423,7 +5432,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
             proc_table_lock_release(s);
             extinction("proc_exec_replace: a peer thread appeared");
         }
-        pts_interaction_invalidate_locked(p, true);
+        pts_interaction_invalidate_locked(p, true, &wakes);
         // Latch every private ring shut before the image it was admitted against
         // stops being this Proc's. Infallible and leaf-only: the descriptors are
         // removed, and their waiters woken, by handle_close_on_exec outside this
@@ -5452,6 +5461,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
 
         proc_table_lock_release(s);
     }
+    pts_interaction_wake(&wakes);
 
     // Design D (VIVARIUM 13.10.4): the ONE store of the new image's phenotype,
     // here in the infallible commit region and nowhere earlier. Before the
@@ -7192,9 +7202,11 @@ struct Proc *proc_pts_live_locked(u64 stripes) {
 
 s64 proc_pts_interaction(struct Proc *p, u64 op, struct pts_interaction_call *call) {
     if (!p || !call) return -T_E_INVAL;
+    struct pts_wakes wakes = { .n = 0 };
     irq_state_t irq = proc_table_lock_acquire();
     s64 result = proc_pts_live_locked(proc_stripes(p)) == p
-        ? pts_interaction_locked(p, op, call) : -T_E_NOENT;
+        ? pts_interaction_locked(p, op, call, &wakes) : -T_E_NOENT;
     proc_table_lock_release(irq);
+    pts_interaction_wake(&wakes);
     return result;
 }

@@ -170,6 +170,7 @@ void test_pts_tty_set_get_fg_matrix(void);
 void test_pts_tty_signal_routing(void);
 void test_pts_tty_tstp_stop_cont_seam(void);
 void test_pts_teardown_hup_cont(void);
+void test_pts_interaction_wakes_after_the_table_lock(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_page_peak_high_water(void);

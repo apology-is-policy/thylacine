@@ -215,10 +215,21 @@ struct pts_interaction_call {
 #define PTS_INTERACTION_POLL_WATCH 35u
 // The sole lock-taking process wrapper. No allocation/uaccess while held.
 s64 proc_pts_interaction(struct Proc *p, u64 op, struct pts_interaction_call *call);
+// The bindings a change under g_proc_table_lock must wake, as pool slot
+// indices (small enough for the exit and exec frames). Any number of pollers may
+// be on a binding's list, so no walk runs under that lock (specs/poll_owed.tla):
+// the caller runs pts_interaction_wake after its release. Each listed binding
+// holds a wake reference until then.
+struct pts_wakes {
+    u8  slot[PTS_MAX];
+    u32 n;
+};
 // The following two helpers REQUIRE the process lifecycle lock.
 struct Proc *proc_pts_live_locked(u64 stripes);
-s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *call);
-void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role);
+s64 pts_interaction_locked(struct Proc *p, u64 op, struct pts_interaction_call *call,
+                           struct pts_wakes *w);
+void pts_interaction_invalidate_locked(struct Proc *p, bool retire_role, struct pts_wakes *w);
+void pts_interaction_wake(struct pts_wakes *w);
 // Allocate only after reserving one of the two bounded watcher slots.
 struct Spoor *pts_interaction_watch(struct Proc *p, u64 binding_id, s64 *error);
 

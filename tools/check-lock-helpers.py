@@ -10,15 +10,26 @@ defer depth raised, so its later walks wait forever: lost wakeups. The
 corona join (2026-10-29) merged fourteen such raw sites into kernel/9p_client.c
 and four into kernel/proc.c without a textual conflict.
 
-  kernel/9p_client.c   every spin_* call    only in client_lock / client_unlock
-  kernel/dev9p_poll.c  g_dev9p_poll_lock    only in dpl_lock / dpl_unlock
-  kernel/proc.c        g_proc_table_lock    only in proc_table_lock_acquire /
-                                            proc_table_lock_release
+  A. kernel/proc.c, kernel/dev9p_poll.c: outside the helpers
+     (proc_table_lock_acquire/_release, dpl_lock/dpl_unlock) the lock's name
+     appears only in its definition, its spin_lock_init, or a `.value` read.
+     Any other mention -- a spin_* call of any variant or shape, or its address
+     taken into a pointer -- fails.
+  B. kernel/9p_client.c: outside client_lock/client_unlock no spin_* call but
+     spin_lock_init, and no `&x->lock` but spin_lock_init's or a `.value` read.
+  C. Every other production file under kernel/ and arch/ (not kernel/test/,
+     whose fixtures inspect a client under a balanced raw pair): no `&x->lock`
+     of a name it declares as `struct p9_client *`.
+  D. Each helper holds a raw call of its own lock, so a renamed helper fails
+     instead of leaving A and B vacuous.
 
-spin_lock_init is exempt. Each helper must itself hold a raw call, so a renamed
-helper fails here instead of leaving the rule vacuous.
+Comments and string literals are blanked before matching, offsets kept, and
+calls are matched across lines.
 
---self-test plants a raw release in each file, and renames each helper.
+--self-test plants each shape the gate must catch (single-line and multi-line
+raw releases, an alias pointer, a _raw variant, a raw client lock in another
+file, a raw call just past a helper's closing brace, a renamed helper) and the controls it must pass (the same text in a
+comment and in a string).
 """
 
 import pathlib
@@ -27,57 +38,157 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# (file, pattern of a raw call this rule owns, the helpers that may make it)
-RULES = [
-    ("kernel/9p_client.c",
-     re.compile(r"\bspin_(?:lock|unlock|trylock|lock_irqsave|unlock_irqrestore)\s*\("),
-     {"client_lock", "client_unlock"}),
-    ("kernel/dev9p_poll.c",
-     re.compile(r"\bspin_(?:lock|unlock|trylock|lock_irqsave|unlock_irqrestore)\s*\(\s*&g_dev9p_poll_lock\b"),
-     {"dpl_lock", "dpl_unlock"}),
-    ("kernel/proc.c",
-     re.compile(r"\bspin_(?:lock|unlock|trylock|lock_irqsave|unlock_irqrestore)\s*\(\s*&g_proc_table_lock\b"),
+NAMED = [  # rule A: (file, lock, helpers)
+    ("kernel/proc.c", "g_proc_table_lock",
      {"proc_table_lock_acquire", "proc_table_lock_release"}),
+    ("kernel/dev9p_poll.c", "g_dev9p_poll_lock", {"dpl_lock", "dpl_unlock"}),
 ]
+CLIENT = ("kernel/9p_client.c", {"client_lock", "client_unlock"})  # rule B
 
+SPIN_CALL = re.compile(r"\bspin_(?!lock_init\b)\w+\s*\(")
+FIELD_ADDR = re.compile(r"&\s*\w+\s*->\s*lock\b(?!\s*\.\s*value)")
+# The argument of a spin_lock_init that ends right before a match.
+INIT_ARG = re.compile(r"\bspin_lock_init\s*\(\s*$")
+CLIENT_DECL = re.compile(r"\bstruct\s+p9_client\s*\*\s*(?:const\s+)?(\w+)")
 # A function definition's first line: column 0, a name, an open paren, and no
-# trailing semicolon. Good enough for this tree's style, and the helper-presence
-# check below fails loudly if it ever stops finding the helpers.
+# trailing semicolon. Rule D fails loudly if it ever stops finding the helpers.
 FUNC = re.compile(r"^[A-Za-z_][\w \t\*]*?\b(\w+)\s*\([^;]*$")
 
 
-def problems(path, text, pattern, helpers):
-    out = []
-    current = None
-    seen = {h: 0 for h in helpers}
-    for n, line in enumerate(text.split("\n"), 1):
-        m = FUNC.match(line)
-        if m and not line.startswith(("#", "//")):
-            current = m.group(1)
-        code = line.split("//", 1)[0]
-        if not pattern.search(code):
-            continue
-        if current in helpers:
-            seen[current] += 1
+def blank(text):
+    """Comments and string/char literals to spaces; newlines and offsets kept."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i)); i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(re.sub(r"[^\n]", " ", text[i:j])); i = j
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append(c + " " * (j - i - 2) + (text[j - 1] if j - i >= 2 else ""))
+            i = j
         else:
-            out.append(f"{path}:{n}: raw lock call outside {sorted(helpers)} "
-                       f"(in {current}): {line.strip()}")
+            out.append(c); i += 1
+    return "".join(out)
+
+
+def owners(code):
+    """For each line, the function whose body it is in (by the FUNC heuristic)."""
+    cur, res = None, []
+    for line in code.split("\n"):
+        m = FUNC.match(line)
+        if m and not line.startswith("#"):
+            cur = m.group(1)
+        res.append(cur)
+        if line.startswith("}"):
+            cur = None    # a body's closing brace: what follows is no helper's
+    return res
+
+
+def line_of(code, off):
+    return code.count("\n", 0, off)
+
+
+def rule_named(path, text, lock, helpers):
+    code = blank(text)
+    own = owners(code)
+    lines = text.split("\n")
+    out, seen = [], {h: 0 for h in helpers}
+    exempt = re.compile(
+        rf"(\bstatic\s+spin_lock_t\s+{lock}\b|\bspin_lock_init\s*\(\s*&\s*{lock}\b|\b{lock}\s*\.\s*value\b)")
+    ok_spans = [m.span() for m in exempt.finditer(code)]
+    for m in re.finditer(rf"\b{lock}\b", code):
+        if any(a <= m.start() < b for a, b in ok_spans):
+            continue
+        ln = line_of(code, m.start())
+        f = own[ln]
+        if f in helpers:
+            seen[f] += 1
+            continue
+        out.append(f"{path}:{ln + 1}: {lock} named outside {sorted(helpers)} "
+                   f"(in {f}): {lines[ln].strip()}")
     for h, k in sorted(seen.items()):
         if k == 0:
-            out.append(f"{path}: helper {h} holds no raw call -- renamed or moved? "
+            out.append(f"{path}: helper {h} holds no raw call of {lock} -- renamed or moved? "
                        "the rule would be vacuous")
     return out
 
 
+def rule_client(path, text, helpers):
+    code = blank(text)
+    own = owners(code)
+    lines = text.split("\n")
+    out, seen = [], {h: 0 for h in helpers}
+    for pat, what in ((SPIN_CALL, "spin_* call"), (FIELD_ADDR, "&x->lock")):
+        for m in pat.finditer(code):
+            if what == "&x->lock" and INIT_ARG.search(code, 0, m.start()):
+                continue
+            ln = line_of(code, m.start())
+            f = own[ln]
+            if f in helpers:
+                if what == "spin_* call":
+                    seen[f] += 1
+                continue
+            out.append(f"{path}:{ln + 1}: {what} outside {sorted(helpers)} "
+                       f"(in {f}): {lines[ln].strip()}")
+    for h, k in sorted(seen.items()):
+        if k == 0:
+            out.append(f"{path}: helper {h} holds no spin_* call -- renamed or moved? "
+                       "the rule would be vacuous")
+    return out
+
+
+def rule_client_elsewhere(path, text):
+    code = blank(text)
+    lines = text.split("\n")
+    out = []
+    for name in sorted(set(CLIENT_DECL.findall(code))):
+        for m in re.finditer(rf"&\s*{name}\s*->\s*lock\b(?!\s*\.\s*value)", code):
+            if INIT_ARG.search(code, 0, m.start()):
+                continue
+            ln = line_of(code, m.start())
+            out.append(f"{path}:{ln + 1}: a struct p9_client's lock taken outside "
+                       f"kernel/9p_client.c's helpers: {lines[ln].strip()}")
+    return out
+
+
+def elsewhere_paths():
+    paths = []
+    for top in ("kernel", "arch"):
+        for p in sorted((ROOT / top).rglob("*.c")):
+            rel = p.relative_to(ROOT).as_posix()
+            if rel.startswith("kernel/test/") or rel == CLIENT[0]:
+                continue
+            paths.append(rel)
+    return paths
+
+
 def check(sources):
     out = []
-    for path, pattern, helpers in RULES:
-        out += problems(path, sources[path], pattern, helpers)
+    for path, lock, helpers in NAMED:
+        out += rule_named(path, sources[path], lock, helpers)
+    out += rule_client(CLIENT[0], sources[CLIENT[0]], CLIENT[1])
+    for path, text in sorted(sources.items()):
+        if path in (CLIENT[0],) or path.startswith("kernel/test/"):
+            continue
+        out += rule_client_elsewhere(path, text)
     return out
 
 
 def load():
-    return {path: (ROOT / path).read_text() for path, _, _ in RULES}
+    srcs = {path: (ROOT / path).read_text() for path, _, _ in NAMED}
+    srcs[CLIENT[0]] = (ROOT / CLIENT[0]).read_text()
+    for rel in elsewhere_paths():
+        srcs.setdefault(rel, (ROOT / rel).read_text(errors="replace"))
+    return srcs
 
 
 def self_test():
@@ -85,32 +196,81 @@ def self_test():
     fails = []
     if check(real):
         fails.append("the tree itself fails; fix it before trusting the self-test")
-    for path, pattern, helpers in RULES:
-        lock = {"kernel/9p_client.c": "c->lock",
-                "kernel/dev9p_poll.c": "g_dev9p_poll_lock",
-                "kernel/proc.c": "g_proc_table_lock"}[path]
+
+    def must_flag(label, path, extra, needle):
         planted = dict(real)
-        planted[path] = real[path] + (
-            "\nint planted_raw_release(void) {\n"
-            f"    spin_unlock(&{lock});\n"
-            "    return 0;\n}\n")
-        if not any("planted_raw_release" in p for p in check(planted)):
-            fails.append(f"{path}: a raw release in another function was not flagged")
-        commented = dict(real)
-        commented[path] = real[path] + (
-            "\nint planted_comment(void) {\n"
-            f"    return 0;  // spin_unlock(&{lock}); is only prose here\n}}\n")
-        if check(commented):
-            fails.append(f"{path}: a raw call inside a comment was flagged")
+        planted[path] = real.get(path, "") + extra
+        if not any(needle in p for p in check(planted)):
+            fails.append(f"{label}: not flagged")
+
+    def must_pass(label, path, extra):
+        planted = dict(real)
+        planted[path] = real.get(path, "") + extra
+        got = check(planted)
+        if got:
+            fails.append(f"{label}: flagged: {got[0]}")
+
+    for path, lock, helpers in NAMED:
+        must_flag(f"{path} single-line raw release", path,
+                  f"\nint planted_a(void) {{\n    spin_unlock(&{lock});\n    return 0;\n}}\n", "planted_a")
+        must_flag(f"{path} multi-line raw release", path,
+                  f"\nint planted_b(void) {{\n    spin_unlock_irqrestore(\n        &{lock}, 0);\n    return 0;\n}}\n",
+                  "planted_b")
+        must_flag(f"{path} alias pointer", path,
+                  f"\nint planted_c(void) {{\n    spin_lock_t *l = &{lock};\n    spin_unlock(l);\n    return 0;\n}}\n",
+                  "planted_c")
+        must_flag(f"{path} _raw variant", path,
+                  f"\nint planted_d(void) {{\n    spin_unlock_raw(&{lock});\n    return 0;\n}}\n", "planted_d")
+        must_pass(f"{path} comment control", path,
+                  f"\nint planted_e(void) {{\n    return 0;  // spin_unlock(&{lock}); prose\n}}\n"
+                  f"/* spin_lock(&{lock}); */\n")
+        must_pass(f"{path} string control", path,
+                  f"\nconst char *planted_f(void) {{\n    return \"spin_unlock(&{lock})\";\n}}\n")
         for h in sorted(helpers):
             renamed = dict(real)
             renamed[path] = re.sub(rf"\b{h}\b", h + "_renamed", real[path])
             if not any(f"helper {h} holds no raw call" in p for p in check(renamed)):
                 fails.append(f"{path}: renaming {h} was not flagged")
+            # A raw call just past the helper's closing brace is not the helper's.
+            m = re.search(rf"(?m)^[A-Za-z_][\w \t\*]*\b{h}\s*\([^;]*$", real[path])
+            end = real[path].find("\n}\n", m.end()) + 3 if m else -1
+            if end > 2:
+                after = dict(real)
+                after[path] = (real[path][:end] + f"#define PLANTED_AFTER_{h} spin_unlock(&{lock})\n"
+                               + real[path][end:])
+                if not any(f"PLANTED_AFTER_{h}" in p for p in check(after)):
+                    fails.append(f"{path}: a raw call past {h}'s closing brace was not flagged")
+            else:
+                fails.append(f"{path}: could not find {h}'s body to plant after it")
+
+    cpath, chelpers = CLIENT
+    must_flag("9p_client multi-line raw release", cpath,
+              "\nint planted_g(struct p9_client *c) {\n    spin_unlock(\n        &c->lock);\n    return 0;\n}\n",
+              "planted_g")
+    must_flag("9p_client _raw variant", cpath,
+              "\nint planted_h(struct p9_client *c) {\n    spin_unlock_raw(&c->lock);\n    return 0;\n}\n",
+              "planted_h")
+    must_flag("9p_client alias pointer", cpath,
+              "\nint planted_i(struct p9_client *c) {\n    spin_lock_t *l = &c->lock;\n    (void)l;\n    return 0;\n}\n",
+              "planted_i")
+    must_pass("9p_client comment control", cpath,
+              "\nint planted_j(void) {\n    return 0;  // spin_unlock(&c->lock);\n}\n")
+    for h in sorted(chelpers):
+        renamed = dict(real)
+        renamed[cpath] = re.sub(rf"\b{h}\b", h + "_renamed", real[cpath])
+        if not any(f"helper {h} holds no spin_* call" in p for p in check(renamed)):
+            fails.append(f"{cpath}: renaming {h} was not flagged")
+    must_flag("raw client lock in another file", "kernel/dev9p.c",
+              "\nstatic void planted_k(struct p9_client *cl) {\n    spin_lock(&cl->lock);\n}\n",
+              "struct p9_client's lock")
+    must_pass("another file's own lock control", "kernel/dev9p.c",
+              "\nstruct planted_l { spin_lock_t lock; };\n"
+              "static void planted_l(struct planted_l *o) {\n    spin_lock(&o->lock);\n}\n")
+
     for f in fails:
         print("check-lock-helpers self-test FAILED:", f, file=sys.stderr)
     if not fails:
-        print("check-lock-helpers self-test OK: every planted fault flagged, the control clean")
+        print("check-lock-helpers self-test OK: every planted shape flagged, every control clean")
     return 1 if fails else 0
 
 

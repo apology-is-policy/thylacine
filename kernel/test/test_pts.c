@@ -1382,3 +1382,94 @@ cleanup:
     TEST_ASSERT(!failure, failure);
 #undef PTI_EDGE_CHECK
 }
+
+// A binding's pollers are unbounded, so a walk of them owes the poll chunk's
+// rule (specs/poll_owed.tla): never under g_proc_table_lock, and IRQs on
+// between batches. More than one batch of hooks makes the walk cross a batch
+// boundary, where g_poll_wake_batch_hook samples the lock and the IRQ mask.
+// Driven through both table-lock holders that wake: an ACK
+// (proc_pts_interaction) and a setsid (the invalidate under the hold).
+static u32  g_tpti_batches;
+static bool g_tpti_under_table;
+static bool g_tpti_masked;
+
+static void tpti_batch(struct poll_waiter_list *l) {
+    (void)l;
+    g_tpti_batches++;
+    if (proc_table_held_for_test()) g_tpti_under_table = true;
+    if (irqs_masked())              g_tpti_masked = true;
+}
+
+#define TPTI_HOOKS (POLL_WAKE_BATCH + 1u)
+
+void test_pts_interaction_wakes_after_the_table_lock(void) {
+    static struct Rendez      rendez[TPTI_HOOKS];
+    static struct poll_waiter hook[TPTI_HOOKS];
+    struct Proc *host = proc_alloc(), *observer = proc_alloc(), *subject = proc_alloc();
+    struct Proc *member = proc_alloc();
+    TEST_ASSERT(host && observer && subject && member, "TPTI fixture processes");
+    proc_test_link(host); proc_test_link(observer); proc_test_link(subject);
+    subject->principal_id = host->principal_id = member->principal_id = 1001;
+    proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
+    struct SrvConn *cn = pts_make_conn(host);
+    TEST_ASSERT(cn, "TPTI fixture transport");
+    s64 id = pts_mint(host, cn, 930);
+    TEST_ASSERT(id > 0, "TPTI fixture terminal");
+    TEST_EXPECT_EQ(pts_bind_slave(host, cn, 931, (u64)id), 0, "TPTI fixture slave");
+    TEST_EXPECT_EQ(pts_tty_acquire(subject, cn, 931), 0, "TPTI acquire");
+    member->sid = subject->sid; member->pgid = subject->pgid;
+    proc_test_link(member);
+    struct pts_interaction_call c = { .pts_id = (u64)id, .observer_stripes = proc_stripes(observer) };
+    s64 bid = proc_pts_interaction(host, PTY_INTERACTION_BIND, &c);
+    TEST_ASSERT(bid > 0, "TPTI bind");
+    c.binding_id = (u64)bid;
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "TPTI state");
+    c.request = (struct t_pty_interaction_check){ .version = 1, .size = 24,
+        .expected_epoch = c.state.foreground_epoch, .subject_stripes = proc_stripes(member) };
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "TPTI nominate the member");
+    s64 error;
+    struct Spoor *watch = pts_interaction_watch(observer, (u64)bid, &error);
+    TEST_ASSERT(watch && error == 0, "TPTI observer watch");
+    for (u32 i = 0; i < TPTI_HOOKS; i++) {
+        rendez_init(&rendez[i]);
+        poll_waiter_init(&hook[i], &rendez[i]);
+        (void)pti_test_poll(observer, watch, &hook[i]);
+    }
+
+    // An ACK that changes the binding (the APP acknowledgement) wakes it.
+    g_tpti_batches = 0; g_tpti_under_table = g_tpti_masked = false;
+    g_poll_wake_batch_hook = tpti_batch;
+    c.request.subject_stripes = 0;
+    s64 ack = proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c);
+    g_poll_wake_batch_hook = NULL;
+    u32  ack_batches = g_tpti_batches;
+    bool ack_under = g_tpti_under_table, ack_masked = g_tpti_masked;
+
+    // setsid of the nominated member invalidates the binding under the hold.
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_STATE, &c), 0, "TPTI state again");
+    c.request.expected_epoch = c.state.foreground_epoch;
+    c.request.subject_stripes = proc_stripes(member);
+    TEST_EXPECT_EQ(proc_pts_interaction(observer, PTY_INTERACTION_ACK, &c), 0, "TPTI renominate the member");
+    g_tpti_batches = 0; g_tpti_under_table = g_tpti_masked = false;
+    g_poll_wake_batch_hook = tpti_batch;
+    int sid = proc_setsid(member);
+    g_poll_wake_batch_hook = NULL;
+    u32  sid_batches = g_tpti_batches;
+    bool sid_under = g_tpti_under_table, sid_masked = g_tpti_masked;
+
+    for (u32 i = 0; i < TPTI_HOOKS; i++) poll_waiter_list_unregister(&hook[i]);
+    TEST_EXPECT_EQ(proc_pts_interaction(host, PTY_INTERACTION_UNBIND, &c), 0, "TPTI unbind");
+    spoor_clunk(watch);
+    TEST_EXPECT_EQ(pts_free(host, (u64)id), 0, "TPTI free terminal");
+    pts_drop_conn(cn);
+    pts_drop_linked(member); pts_drop_linked(subject); pts_drop_linked(observer); pts_drop_linked(host);
+
+    TEST_EXPECT_EQ(ack, 0, "TPTI the APP acknowledgement");
+    TEST_ASSERT(ack_batches >= 1u, "TPTI the ACK's walk crossed a batch boundary (the sampler ran)");
+    TEST_ASSERT(!ack_under, "TPTI no batch of the ACK's walk ran under g_proc_table_lock");
+    TEST_ASSERT(!ack_masked, "TPTI the ACK's walk ran with IRQs on between batches");
+    TEST_ASSERT(sid > 0, "TPTI setsid");
+    TEST_ASSERT(sid_batches >= 1u, "TPTI the setsid's walk crossed a batch boundary (the sampler ran)");
+    TEST_ASSERT(!sid_under, "TPTI no batch of the setsid's walk ran under g_proc_table_lock");
+    TEST_ASSERT(!sid_masked, "TPTI the setsid's walk ran with IRQs on between batches");
+}

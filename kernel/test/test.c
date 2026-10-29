@@ -587,6 +587,7 @@ struct test_case g_tests[] = {
     { "pts.tty_signal_routing",        test_pts_tty_signal_routing,        false, NULL },
     { "pts.tty_tstp_stop_cont_seam",   test_pts_tty_tstp_stop_cont_seam,   false, NULL },
     { "pts.teardown_hup_cont",         test_pts_teardown_hup_cont,         false, NULL },
+    { "pts.interaction_wakes_after_the_table_lock", test_pts_interaction_wakes_after_the_table_lock, false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.rfork_refused_while_terminating",
