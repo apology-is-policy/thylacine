@@ -14,7 +14,8 @@ probe stages run, and an expect waiting for it would discard probe lines the
 later stages need. The transcript has every byte the guest wrote.
 
 Each bring-up leg asks: aimed, injected, the step's retry, its verification;
-the conventions line then names no CPU class. The health-step leg follows.
+the conventions line names no CPU class, a failure even where the chain
+broke first. The health-step leg follows.
 Its order is only the causal one. tapestryd aims the shot (B) before
 the step whose reply carries it, lictor says the injection (C) before that
 reply, and tapestryd reads the failure (D) after it. lictor's revival (E)
@@ -81,9 +82,11 @@ def verdict(text):
                              (f"{what}: no verdict, retried", retry), (f"{what}: verified", ok)):
             pos = at(needle, pos) if pos >= 0 else -1
             chain.append((name, pos))
+    # A CPU class is a failure on its own, whether or not the chain before it held.
+    settled = CONVENTIONS.search(text, max(at(ARMED), 0))
+    if settled and "CPU" in settled.group(1):
+        fails.append(f"a blit class fell to the CPU after the stall ({settled.group(1)})")
     conv = CONVENTIONS.search(text, pos + 1) if pos >= 0 else None
-    if conv and "CPU" in conv.group(1):
-        fails.append(f"a blit class fell to the CPU after the stall ({conv.group(1)})")
     pos = conv.start() if conv else -1
     chain.append(("the conventions measured after both", pos))
     a = pos
