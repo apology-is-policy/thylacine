@@ -200,3 +200,7 @@
 # as the SPAWN_EXT_ENV tail, the child's whole environment; the tail's refusals
 # return their errno.
 0064-pouch-spawn-env.patch
+# 0065 (B-3h4, votes 34-35): fcntl F_SETLK/F_SETLKW/F_GETLK (the Proc owns)
+# and F_OFD_* (the open file owns), and flock (the open file, the whole file),
+# over SYS_FILE_LOCK 137.
+0065-pouch-file-locks.patch

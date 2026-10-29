@@ -34,12 +34,14 @@ checks = {
         r'#define T_SYS_HANDLE_FLAGS_GET 129\b',
         r'#define T_HANDLE_CLOSE_ON_EXEC 1u\b',
         r'#define T_SYS_GETPPID 132\b',
-        r'#define T_SYS_UMASK 133\b'],
+        r'#define T_SYS_UMASK 133\b',
+        r'#define T_SYS_FILE_LOCK 137\b'],
     'usr/lib/libthyla-rs/src/lib.rs': [
         r'pub const T_SYS_HANDLE_FLAGS_GET: u64 = 129;',
         r'pub const T_HANDLE_CLOSE_ON_EXEC: u64 = 1;',
         r'pub const T_SYS_GETPPID: u64 = 132;',
-        r'pub const T_SYS_UMASK: u64 = 133;'],
+        r'pub const T_SYS_UMASK: u64 = 133;',
+        r'pub const T_SYS_FILE_LOCK: u64 = 137;'],
     'usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch': [
         r'\+#define __NR_thyla_handle_flags_get 129\b',
         r'\+#define SYS_thyla_handle_flags_get 129\b'],
@@ -51,6 +53,8 @@ checks = {
     'usr/lib/pouch/patches/0059-pouch-symlinks.patch': [
         r'\+#define SYS_thyla_readlink\s+135\b',
         r'\+#define SYS_thyla_lstat\s+136\b'],
+    'usr/lib/pouch/patches/0065-pouch-file-locks.patch': [
+        r'\+#define SYS_thyla_file_lock\s+137\b'],
     'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+137\b'],
     'kernel/vivarium.c': [
         r'VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET',

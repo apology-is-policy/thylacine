@@ -4069,3 +4069,39 @@ pub unsafe fn t_umask(mask: u64) -> i64 {
     asm!("svc #0", inout("x0") x0, in("x8") T_SYS_UMASK, options(nostack));
     x0 as i64
 }
+pub const T_SYS_FILE_LOCK: u64 = 137;
+/// `t_file_lock`'s op word (kernel SYS_FILE_LOCK_*): a type, then the flags.
+pub const T_FILE_LOCK_RD: u64 = 0;
+pub const T_FILE_LOCK_WR: u64 = 1;
+pub const T_FILE_LOCK_UN: u64 = 2;
+pub const T_FILE_LOCK_TYPE_MASK: u64 = 0xf;
+pub const T_FILE_LOCK_WAIT: u64 = 0x10;
+pub const T_FILE_LOCK_TEST: u64 = 0x20;
+pub const T_FILE_LOCK_PROC: u64 = 0x40;
+pub const T_FILE_LOCK_FLAGS_ALL: u64 = T_FILE_LOCK_WAIT | T_FILE_LOCK_TEST | T_FILE_LOCK_PROC;
+/// A TEST's answer: type `T_FILE_LOCK_UN` when the lock would be granted,
+/// else the first conflicting lock (len 0 = to the end of the file).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TFileLock {
+    pub type_: u8,
+    pub _pad0: [u8; 7],
+    pub start: u64,
+    pub len: u64,
+    pub pid: i32,
+    pub _pad1: u32,
+}
+const _: () = assert!(core::mem::size_of::<TFileLock>() == 32);
+const _: () = assert!(core::mem::offset_of!(TFileLock, start) == 8);
+const _: () = assert!(core::mem::offset_of!(TFileLock, len) == 16);
+const _: () = assert!(core::mem::offset_of!(TFileLock, pid) == 24);
+/// A byte-range lock the file's server holds (ARCH 9.6.11). With
+/// `T_FILE_LOCK_PROC` the Proc owns it (POSIX F_SETLK), otherwise the open
+/// file does (OFD, flock). Returns 0 or a raw native negative errno.
+pub unsafe fn t_file_lock(fd: i64, op: u64, start: u64, len: u64,
+                          out: *mut TFileLock) -> i64 {
+    let mut x0 = fd as u64;
+    asm!("svc #0", inout("x0") x0, in("x1") op, in("x2") start, in("x3") len,
+         in("x4") out, in("x8") T_SYS_FILE_LOCK, options(nostack));
+    x0 as i64
+}

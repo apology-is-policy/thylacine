@@ -3,7 +3,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #define POUCH_SOCK_TAG 0x40000000
 #define SYS_thyla_handle_flags_get 129
@@ -16,6 +20,12 @@
 #endif
 #ifndef O_NOATIME
 #define O_NOATIME 01000000
+#endif
+/* Linux's OFD lock commands; a host without them takes Linux's values. */
+#ifndef F_OFD_GETLK
+#define F_OFD_GETLK 36
+#define F_OFD_SETLK 37
+#define F_OFD_SETLKW 38
 #endif
 static long results[4];
 static int nresults, calls, live_socket=1, failures, checks;
@@ -46,7 +56,30 @@ __attribute__((unused)) static int cancellable_close(int fd) { cancellable_close
 #define dup tested_dup
 #define pipe2 tested_pipe2
 #include "descriptor-under-test.h"
+/* The lock call: x3 (len) and x4 (the TEST answer) beside mock's record. A
+ * TEST that succeeds writes test_answer where x4 points. */
+static long la3, la4;
+static int cp_calls, test_writes;
+static struct pouch_file_lock test_answer;
+static long mock5(long n,long a,long b,long c,long d,long e,int cp) {
+ la3=d;la4=e;cp_calls+=cp;
+ long r=mock(n,a,b,c);
+ if (r==0 && (b & POUCH_FILE_LOCK_TEST) && e) { memcpy((void *)e,&test_answer,sizeof test_answer); test_writes++; }
+ return r;
+}
+#define __syscall5(n,a,b,c,d,e) mock5(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),0)
+#define __syscall_cp(n,a,b,c,d,e) mock5(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),1)
+/* SEEK_CUR reads the cursor; SEEK_END reads the size and must not seek. */
+static off_t cur_pos=100, file_size=1000;
+static int lseek_calls, fstat_calls, lseek_fail, fstat_fail;
+static off_t mock_lseek(int fd,off_t off,int wh) { (void)fd; lseek_calls++; assert(off==0 && wh==SEEK_CUR); if (lseek_fail) { errno=EBADF; return -1; } return cur_pos; }
+static int mock_fstat(int fd,struct stat *st) { (void)fd; fstat_calls++; if (fstat_fail) { errno=EBADF; return -1; } memset(st,0,sizeof *st); st->st_size=file_size; return 0; }
+#define __lseek mock_lseek
+#define __fstat mock_fstat
 #include "fcntl-under-test.c"
+#define flock tested_flock
+#include "flock-under-test.c"
+#undef flock
 #include "dup-under-test.c"
 #include "dup2-under-test.c"
 #include "dup3-under-test.c"
@@ -61,7 +94,78 @@ __attribute__((unused)) static int cancellable_close(int fd) { cancellable_close
 #define RESET(ret) do { results[0]=(ret);nresults=1;calls=0;errno=EDOM;pipe_calls=pipe_fail=close_calls=cancellable_closes=0; } while(0)
 #define RESET2(r1,r2) do { results[0]=(r1);results[1]=(r2);nresults=2;calls=0;errno=EDOM;pipe_calls=pipe_fail=close_calls=cancellable_closes=0; } while(0)
 #define OM(m) ((long)(m)<<8)
+#define LRESET(ret) do { RESET(ret);la3=la4=-7;cp_calls=test_writes=lseek_calls=fstat_calls=lseek_fail=fstat_fail=0; } while(0)
+#define FL(t,w,s,l,pid) (fl=(struct flock){.l_type=(t),.l_whence=(w),.l_start=(s),.l_len=(l),.l_pid=(pid)},&fl)
+#define ANSWER(t,s,l) (test_answer=(struct pouch_file_lock){.type=(t),.start=(s),.len=(l),.pid=-1})
 int main(void) {
+ struct flock fl;
+ /* The ABI the kernel's syscall.h states, parsed by the driver. */
+ CASE("abi-number",SYS_thyla_file_lock==K_SYS_FILE_LOCK);
+ CASE("abi-op",POUCH_FILE_LOCK_RD==K_RD && POUCH_FILE_LOCK_WR==K_WR && POUCH_FILE_LOCK_UN==K_UN && POUCH_FILE_LOCK_TYPE_MASK==K_TYPE_MASK && POUCH_FILE_LOCK_WAIT==K_WAIT && POUCH_FILE_LOCK_TEST==K_TEST && POUCH_FILE_LOCK_PROC==K_PROC && POUCH_FILE_LOCK_FLAGS_ALL==K_FLAGS_ALL);
+ CASE("abi-answer",sizeof(struct pouch_file_lock)==K_SIZE && offsetof(struct pouch_file_lock,type)==K_OFF_type && offsetof(struct pouch_file_lock,start)==K_OFF_start && offsetof(struct pouch_file_lock,len)==K_OFF_len && offsetof(struct pouch_file_lock,pid)==K_OFF_pid);
+ /* F_SETLK / F_SETLKW: the Proc owns; SETLKW waits, as a cancellation point. */
+ LRESET(0);CASE("setlk-proc",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,10,5,0))==0 && calls==1 && number==137 && a1==(1|0x40) && a2==10 && la3==5 && la4==0 && cp_calls==0 && all_x0(8));
+ LRESET(0);CASE("setlkw-waits",tested_fcntl(8,F_SETLKW,FL(F_RDLCK,SEEK_SET,0,1,0))==0 && calls==1 && a1==(0|0x40|0x10) && cp_calls==1 && all_x0(8));
+ LRESET(0);CASE("setlkw-unlock-no-wait",tested_fcntl(8,F_SETLKW,FL(F_UNLCK,SEEK_SET,0,0,0))==0 && a1==(2|0x40) && cp_calls==1 && all_x0(8));
+ LRESET(0);CASE("setlk-pid-ignored",tested_fcntl(8,F_SETLK,FL(F_UNLCK,SEEK_SET,0,0,99))==0 && calls==1 && a1==(2|0x40));
+ /* F_OFD_*: the open file owns, and l_pid must be 0. */
+ LRESET(0);CASE("ofd-setlk",tested_fcntl(8,F_OFD_SETLK,FL(F_WRLCK,SEEK_SET,3,4,0))==0 && calls==1 && a1==1 && a2==3 && la3==4 && cp_calls==0 && all_x0(8));
+ LRESET(0);CASE("ofd-setlkw",tested_fcntl(8,F_OFD_SETLKW,FL(F_RDLCK,SEEK_SET,0,0,0))==0 && a1==0x10 && cp_calls==1);
+ LRESET(0);CASE("ofd-pid",tested_fcntl(8,F_OFD_SETLK,FL(F_RDLCK,SEEK_SET,0,0,7))==-1 && errno==EINVAL && calls==1 && number==129 && all_x0(8));
+ LRESET(0);CASE("ofd-pid-mode-first",tested_fcntl(8,F_OFD_SETLK,FL(F_WRLCK,SEEK_SET,0,0,7))==-1 && errno==EBADF && calls==1 && number==129);
+ LRESET(OM(1));CASE("ofd-pid-wronly-rd",tested_fcntl(8,F_OFD_SETLK,FL(F_RDLCK,SEEK_SET,0,0,7))==-1 && errno==EBADF && calls==1);
+ LRESET(OM(2));CASE("ofd-pid-rdwr",tested_fcntl(8,F_OFD_SETLK,FL(F_WRLCK,SEEK_SET,0,0,7))==-1 && errno==EINVAL && calls==1);
+ LRESET(-EBADF);CASE("ofd-pid-closed",tested_fcntl(8,F_OFD_SETLK,FL(F_RDLCK,SEEK_SET,0,0,7))==-1 && errno==EBADF && calls==1);
+ LRESET(OM(1));CASE("ofd-getlk-pid",tested_fcntl(8,F_OFD_GETLK,FL(F_RDLCK,SEEK_SET,0,0,7))==-1 && errno==EINVAL && calls==1 && test_writes==0);
+ /* The range: Linux's rules, each refusal asking about a closed fd first. */
+ LRESET(0);CASE("len-zero-to-eof",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,10,0,0))==0 && a2==10 && la3==0);
+ LRESET(0);CASE("neg-len",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,10,-4,0))==0 && a2==6 && la3==4);
+ LRESET(0);CASE("neg-len-to-zero",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,3,-3,0))==0 && a2==0 && la3==3);
+ LRESET(0);CASE("neg-len-below-zero",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,2,-3,0))==-1 && errno==EINVAL && calls==1 && number==129);
+ LRESET(0);CASE("neg-start",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,-1,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
+ LRESET(0);cur_pos=100;CASE("whence-cur",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,-10,5,0))==0 && a2==90 && la3==5 && lseek_calls==1 && fstat_calls==0);
+ LRESET(0);lseek_fail=1;CASE("whence-cur-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,0,1,0))==-1 && errno==EBADF && calls==0);
+ LRESET(0);file_size=1000;CASE("whence-end",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,-1,1,0))==0 && a2==999 && la3==1 && fstat_calls==1 && lseek_calls==0);
+ LRESET(0);fstat_fail=1;CASE("whence-end-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EBADF && calls==0);
+ LRESET(0);CASE("whence-bad",tested_fcntl(8,F_SETLK,FL(F_WRLCK,9,0,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
+ LRESET(0);CASE("start-overflow",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,LLONG_MAX,1,0))==-1 && errno==EOVERFLOW && calls==1 && number==129);
+ LRESET(0);CASE("len-overflow",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,10,LLONG_MAX,0))==-1 && errno==EOVERFLOW && calls==1);
+ LRESET(0);CASE("len-max-fits",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,1,LLONG_MAX,0))==0 && a2==1 && la3==LLONG_MAX);
+ LRESET(0);CASE("type-after-range",tested_fcntl(8,F_SETLK,FL(99,SEEK_SET,10,LLONG_MAX,0))==-1 && errno==EOVERFLOW);
+ LRESET(0);CASE("bad-type",tested_fcntl(8,F_SETLK,FL(99,SEEK_SET,0,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
+ LRESET(-EBADF);CASE("refuse-closed",tested_fcntl(8,F_SETLK,FL(99,SEEK_SET,0,1,0))==-1 && errno==EBADF && calls==1);
+ /* F_GETLK: a TEST; the answer is translated, and a free range changes only l_type. */
+ LRESET(0);CASE("getlk-unlck",tested_fcntl(8,F_GETLK,FL(F_UNLCK,SEEK_CUR,0,1,0))==-1 && errno==EINVAL && calls==1 && number==129 && lseek_calls==0);
+ LRESET(0);ANSWER(2,10,5);CASE("getlk-free",tested_fcntl(8,F_GETLK,FL(F_WRLCK,SEEK_CUR,-90,5,4))==0 && fl.l_type==F_UNLCK && fl.l_whence==SEEK_CUR && fl.l_start==-90 && fl.l_len==5 && fl.l_pid==4 && a1==(1|0x20|0x40) && a2==10 && la3==5 && test_writes==1);
+ LRESET(0);ANSWER(1,4,8);CASE("getlk-conflict",tested_fcntl(8,F_GETLK,FL(F_RDLCK,SEEK_SET,6,1,0))==0 && fl.l_type==F_WRLCK && fl.l_whence==SEEK_SET && fl.l_start==4 && fl.l_len==8 && fl.l_pid==-1 && a1==(0|0x20|0x40));
+ LRESET(0);ANSWER(0,4,0);CASE("getlk-conflict-to-eof",tested_fcntl(8,F_GETLK,FL(F_WRLCK,SEEK_SET,6,1,0))==0 && fl.l_type==F_RDLCK && fl.l_start==4 && fl.l_len==0);
+ LRESET(0);ANSWER(1,10,~0ULL-9);CASE("getlk-conflict-past-llmax",tested_fcntl(8,F_GETLK,FL(F_WRLCK,SEEK_SET,6,0,0))==0 && fl.l_start==10 && fl.l_len==0);
+ LRESET(0);ANSWER(1,10,(unsigned long long)LLONG_MAX-9);CASE("getlk-conflict-ends-at-llmax",tested_fcntl(8,F_GETLK,FL(F_WRLCK,SEEK_SET,6,0,0))==0 && fl.l_len==0);
+ LRESET(0);ANSWER(1,10,(unsigned long long)LLONG_MAX-10);CASE("getlk-conflict-ends-below-llmax",tested_fcntl(8,F_GETLK,FL(F_WRLCK,SEEK_SET,6,0,0))==0 && fl.l_len==LLONG_MAX-10);
+ LRESET(0);ANSWER(0,0,0);CASE("getlk-ofd",tested_fcntl(8,F_OFD_GETLK,FL(F_RDLCK,SEEK_SET,0,0,0))==0 && a1==(0|0x20) && cp_calls==0);
+ LRESET(0);ANSWER(7,0,0);CASE("getlk-bad-answer",tested_fcntl(8,F_GETLK,FL(F_RDLCK,SEEK_SET,0,0,0))==-1 && errno==EIO && fl.l_type==F_RDLCK);
+ LRESET(0);ANSWER(1,(unsigned long long)LLONG_MAX+1,1);CASE("getlk-answer-unrepresentable",tested_fcntl(8,F_GETLK,FL(F_RDLCK,SEEK_SET,0,0,0))==-1 && errno==EOVERFLOW && fl.l_type==F_RDLCK);
+ LRESET(-EBADF);CASE("getlk-closed",tested_fcntl(8,F_GETLK,FL(F_RDLCK,SEEK_SET,0,0,0))==-1 && errno==EBADF && test_writes==0);
+ /* The kernel's answers pass through; an old kernel's bare -1 is ENOSYS. */
+ LRESET(-EAGAIN);CASE("setlk-conflict",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,0,0,0))==-1 && errno==EAGAIN);
+ LRESET(-ENOLCK);CASE("setlk-enolck",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,0,0,0))==-1 && errno==ENOLCK);
+ LRESET(-EINTR);CASE("setlkw-eintr",tested_fcntl(8,F_SETLKW,FL(F_WRLCK,SEEK_SET,0,0,0))==-1 && errno==EINTR && cp_calls==1);
+ LRESET(-1);CASE("setlk-old-kernel",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,0,0,0))==-1 && errno==ENOSYS);
+ LRESET(0);CASE("setlk-socket",tested_fcntl(POUCH_SOCK_TAG,F_SETLK,FL(F_WRLCK,SEEK_SET,0,0,0))==-1 && errno==ENOSYS && calls==0);
+ LRESET(0);CASE("setlk-negative",tested_fcntl(-1,F_SETLK,FL(F_WRLCK,SEEK_SET,0,0,0))==-1 && errno==EBADF && calls==0);
+ /* flock: the open file owns the whole file; it waits unless LOCK_NB. */
+ LRESET(0);CASE("flock-ex",tested_flock(8,LOCK_EX)==0 && calls==1 && number==137 && a1==(1|0x10) && a2==0 && la3==0 && la4==0 && cp_calls==0 && all_x0(8));
+ LRESET(0);CASE("flock-ex-nb",tested_flock(8,LOCK_EX|LOCK_NB)==0 && a1==1);
+ LRESET(0);CASE("flock-sh",tested_flock(8,LOCK_SH)==0 && a1==0x10);
+ LRESET(0);CASE("flock-un",tested_flock(8,LOCK_UN)==0 && a1==2);
+ LRESET(0);CASE("flock-un-nb",tested_flock(8,LOCK_UN|LOCK_NB)==0 && a1==2);
+ LRESET(0);CASE("flock-bad-op",tested_flock(8,0)==-1 && errno==EINVAL && calls==1 && number==129);
+ LRESET(0);CASE("flock-sh-ex",tested_flock(8,LOCK_SH|LOCK_EX)==-1 && errno==EINVAL && calls==1);
+ LRESET(-EBADF);CASE("flock-bad-op-closed",tested_flock(8,0)==-1 && errno==EBADF);
+ LRESET(-EAGAIN);CASE("flock-would-block",tested_flock(8,LOCK_EX|LOCK_NB)==-1 && errno==EWOULDBLOCK);
+ LRESET(-EBADF);CASE("flock-ex-rdonly",tested_flock(8,LOCK_EX)==-1 && errno==EBADF);
+ LRESET(0);CASE("flock-socket",tested_flock(POUCH_SOCK_TAG,LOCK_EX)==-1 && errno==ENOSYS && calls==0);
+ LRESET(0);CASE("flock-negative",tested_flock(-1,LOCK_EX)==-1 && errno==EBADF && calls==0);
  RESET(1);CASE("get-no-vararg",tested_fcntl(8,F_GETFD)==FD_CLOEXEC && calls==1 && number==129 && a0==8 && all_x0(8));
  RESET(0);CASE("set-translates",tested_fcntl(8,F_SETFD,FD_CLOEXEC)==0 && calls==1 && number==130 && a1==1 && all_x0(8));
  RESET(0);CASE("clear",tested_fcntl(8,F_SETFD,0)==0 && a1==0 && all_x0(8));

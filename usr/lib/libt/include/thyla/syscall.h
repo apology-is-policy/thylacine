@@ -2573,4 +2573,44 @@ static inline long t_umask(unsigned long mask) {
     return x0;
 }
 
+// t_file_lock -- a byte-range lock the file's server holds (SYS_FILE_LOCK,
+// ARCH 9.6.11). op = a type | WAIT | TEST | PROC: PROC makes the Proc the
+// owner (POSIX F_SETLK), otherwise the open file is (OFD, flock). len 0 runs
+// to the end of the file. A TEST writes *out: type UN when the lock would be
+// granted, else the first conflicting lock, pid always -1.
+#define T_SYS_FILE_LOCK 137
+#define T_FILE_LOCK_RD        0u
+#define T_FILE_LOCK_WR        1u
+#define T_FILE_LOCK_UN        2u
+#define T_FILE_LOCK_TYPE_MASK 0xfu
+#define T_FILE_LOCK_WAIT      0x10u
+#define T_FILE_LOCK_TEST      0x20u
+#define T_FILE_LOCK_PROC      0x40u
+#define T_FILE_LOCK_FLAGS_ALL (T_FILE_LOCK_WAIT | T_FILE_LOCK_TEST | T_FILE_LOCK_PROC)
+struct t_file_lock {
+    unsigned char      type;
+    unsigned char      _pad0[7];
+    unsigned long long start;
+    unsigned long long len;
+    int                pid;
+    unsigned int       _pad1;
+};
+_Static_assert(sizeof(struct t_file_lock) == 32, "t_file_lock is the 32-byte ABI record");
+_Static_assert(__builtin_offsetof(struct t_file_lock, start) == 8 &&
+               __builtin_offsetof(struct t_file_lock, len) == 16 &&
+               __builtin_offsetof(struct t_file_lock, pid) == 24,
+               "t_file_lock field offsets");
+static inline long t_file_lock(long fd, unsigned long op, unsigned long start,
+                               unsigned long len, struct t_file_lock *out) {
+    register long x0 __asm__("x0") = fd;
+    register unsigned long x1 __asm__("x1") = op;
+    register unsigned long x2 __asm__("x2") = start;
+    register unsigned long x3 __asm__("x3") = len;
+    register struct t_file_lock *x4 __asm__("x4") = out;
+    register long x8 __asm__("x8") = T_SYS_FILE_LOCK;
+    __asm__ volatile("svc #0" : "+r"(x0)
+                     : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
 #endif // THYLA_SYSCALL_H

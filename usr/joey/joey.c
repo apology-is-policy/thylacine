@@ -12310,6 +12310,25 @@ int main(void) {
                      "private, unmapped, its transition table read)\n");
         }
 
+        // B-3h4: the file-lock prover (0065, operator votes 34 and 35). Spawn
+        // /bin/pouch-hello-locks -- it and the children it spawns contend for
+        // one file over Stratum's lock table: one Proc's locks against
+        // another's, a close of any descriptor dropping the Proc's F_SETLK
+        // locks, OFD locks per open file, flock against fcntl, an F_SETLKW
+        // that waits for a release, SQLite's lock sequence with its
+        // downgrade, and the refusals' errnos. Boot-fatal.
+        {
+            const char lk_name[]   = "/bin/pouch-hello-locks";
+            const char lk_expect[] = POUCH_CENSUS_LOCKS;
+            if (pouch_smoke_one(lk_name, sizeof(lk_name) - 1,
+                                lk_expect, sizeof(lk_expect) - 1) != 0) {
+                t_putstr("joey: B-3h4 PROBE pouch-hello-locks FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: B-3h4 PROBE OK (file locks: the Proc and the open "
+                     "file as owners, flock, F_SETLKW, the SQLite sequence)\n");
+        }
+
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;
