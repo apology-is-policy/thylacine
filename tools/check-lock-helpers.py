@@ -12,14 +12,21 @@ and four into kernel/proc.c without a textual conflict.
 
   A. kernel/proc.c, kernel/dev9p_poll.c: outside the helpers
      (proc_table_lock_acquire/_release, dpl_lock/dpl_unlock) the lock's name
-     appears only in its definition, its spin_lock_init, or a `.value` read.
-     Any other mention -- a spin_* call of any variant or shape, or its address
-     taken into a pointer -- fails.
+     appears only in its definition, an `__atomic_load_n(&L.value, ...)` read,
+     and -- for a lock defined without an initializer -- ONE spin_lock_init.
+     Any other mention fails: a spin_* call of any variant or shape, its address
+     taken into a pointer, a store to `.value`, a spin_lock_init of a statically
+     initialised lock (each of those writes the lock word, i.e. releases it).
   B. kernel/9p_client.c: outside client_lock/client_unlock no spin_* call but
-     spin_lock_init, and no `&x->lock` but spin_lock_init's or a `.value` read.
-  C. Every other production file under kernel/ and arch/ (not kernel/test/,
-     whose fixtures inspect a client under a balanced raw pair): no `&x->lock`
-     of a name it declares as `struct p9_client *`.
+     spin_lock_init, and no mention of `NAME->lock` -- in any spelling,
+     parenthesised or not -- for a NAME the file declares `struct p9_client *`,
+     but spin_lock_init's argument or an `__atomic_load_n(&NAME->lock.value`.
+  C. Every other production file under kernel/ and arch/, headers included
+     (not kernel/test/, whose fixtures inspect a client under a balanced raw
+     pair): the same `NAME->lock` rule, for the names that file declares
+     `struct p9_client *` AND, reached through `->` or `.`, every member a
+     header declares `struct p9_client *` (`priv->client->lock`). The names are
+     derived from the declarations, so a new one is covered without an edit.
   D. Each helper holds a raw call of its own lock, so a renamed helper fails
      instead of leaving A and B vacuous.
 
@@ -27,9 +34,11 @@ Comments and string literals are blanked before matching, offsets kept, and
 calls are matched across lines.
 
 --self-test plants each shape the gate must catch (single-line and multi-line
-raw releases, an alias pointer, a _raw variant, a raw client lock in another
-file, a raw call just past a helper's closing brace, a renamed helper) and the controls it must pass (the same text in a
-comment and in a string).
+raw releases, an alias pointer, a _raw variant, a store to `.value`, a re-init,
+a raw client lock in another file, through a header member, parenthesised, in a
+header inline, a raw call just past a helper's closing brace, a renamed helper)
+and the controls it must pass (the same text in a comment and in a string, a
+`.value` read, another struct's own lock).
 """
 
 import pathlib
@@ -46,10 +55,15 @@ NAMED = [  # rule A: (file, lock, helpers)
 CLIENT = ("kernel/9p_client.c", {"client_lock", "client_unlock"})  # rule B
 
 SPIN_CALL = re.compile(r"\bspin_(?!lock_init\b)\w+\s*\(")
-FIELD_ADDR = re.compile(r"&\s*\w+\s*->\s*lock\b(?!\s*\.\s*value)")
-# The argument of a spin_lock_init that ends right before a match.
-INIT_ARG = re.compile(r"\bspin_lock_init\s*\(\s*$")
+# What may sit right before a client's `NAME->lock` that the gate allows:
+# spin_lock_init's argument, or an __atomic_load_n of its `.value` (a read).
+INIT_ARG = re.compile(r"\bspin_lock_init\s*\(\s*&?\s*\(?\s*$")
+LOAD_ARG = re.compile(r"\b__atomic_load_n\s*\(\s*&\s*\(?\s*$")
+VALUE_AFTER = re.compile(r"\s*\.\s*value\b")
 CLIENT_DECL = re.compile(r"\bstruct\s+p9_client\s*\*\s*(?:const\s+)?(\w+)")
+# A member (or extern) a header declares: reachable from any file.
+CLIENT_MEMBER = re.compile(
+    r"\bstruct\s+p9_client\s*\*\s*(?:const\s+)?(\w+)\s*(?:\[[^\]]*\])?\s*;")
 # A function definition's first line: column 0, a name, an open paren, and no
 # trailing semicolon. Rule D fails loudly if it ever stops finding the helpers.
 FUNC = re.compile(r"^[A-Za-z_][\w \t\*]*?\b(\w+)\s*\([^;]*$")
@@ -102,9 +116,13 @@ def rule_named(path, text, lock, helpers):
     own = owners(code)
     lines = text.split("\n")
     out, seen = [], {h: 0 for h in helpers}
-    exempt = re.compile(
-        rf"(\bstatic\s+spin_lock_t\s+{lock}\b|\bspin_lock_init\s*\(\s*&\s*{lock}\b|\b{lock}\s*\.\s*value\b)")
-    ok_spans = [m.span() for m in exempt.finditer(code)]
+    defn = re.search(rf"\bstatic\s+spin_lock_t\s+{lock}\b(\s*=)?", code)
+    ok_spans = [defn.span()] if defn else []
+    ok_spans += [m.span() for m in re.finditer(
+        rf"\b__atomic_load_n\s*\(\s*&\s*{lock}\s*\.\s*value\b", code)]
+    inits = list(re.finditer(rf"\bspin_lock_init\s*\(\s*&\s*{lock}\b", code))
+    if defn and not defn.group(1) and len(inits) == 1:
+        ok_spans.append(inits[0].span())   # its one boot init; any other writes the word
     for m in re.finditer(rf"\b{lock}\b", code):
         if any(a <= m.start() < b for a, b in ok_spans):
             continue
@@ -122,23 +140,40 @@ def rule_named(path, text, lock, helpers):
     return out
 
 
+def client_lock_uses(code, names, members=()):
+    """Each `NAME->lock` of a client-typed NAME (a member only after -> or .,
+    or any expression cast to one), minus spin_lock_init's argument and an
+    __atomic_load_n of its .value."""
+    pats = [rf"\b{n}\s*->\s*lock\b" for n in sorted(names)]
+    pats += [rf"(?:->|\.)\s*{n}\s*->\s*lock\b" for n in sorted(members)]
+    pats.append(r"\(\s*(?:const\s+)?struct\s+p9_client\s*\*\s*\)\s*\(?\s*\w+\s*\)\s*->\s*lock\b")
+    for pat in pats:
+        for m in re.finditer(pat, code):
+            before = code[max(0, m.start() - 120):m.start()]
+            if INIT_ARG.search(before):
+                continue
+            if LOAD_ARG.search(before) and VALUE_AFTER.match(code, m.end()):
+                continue
+            yield m
+
+
 def rule_client(path, text, helpers):
     code = blank(text)
     own = owners(code)
     lines = text.split("\n")
     out, seen = [], {h: 0 for h in helpers}
-    for pat, what in ((SPIN_CALL, "spin_* call"), (FIELD_ADDR, "&x->lock")):
-        for m in pat.finditer(code):
-            if what == "&x->lock" and INIT_ARG.search(code, 0, m.start()):
-                continue
-            ln = line_of(code, m.start())
-            f = own[ln]
-            if f in helpers:
-                if what == "spin_* call":
-                    seen[f] += 1
-                continue
-            out.append(f"{path}:{ln + 1}: {what} outside {sorted(helpers)} "
-                       f"(in {f}): {lines[ln].strip()}")
+    names = set(CLIENT_DECL.findall(code))
+    hits = [(m, "spin_* call") for m in SPIN_CALL.finditer(code)]
+    hits += [(m, "a client's ->lock") for m in client_lock_uses(code, names)]
+    for m, what in hits:
+        ln = line_of(code, m.start())
+        f = own[ln]
+        if f in helpers:
+            if what == "spin_* call":
+                seen[f] += 1
+            continue
+        out.append(f"{path}:{ln + 1}: {what} outside {sorted(helpers)} "
+                   f"(in {f}): {lines[ln].strip()}")
     for h, k in sorted(seen.items()):
         if k == 0:
             out.append(f"{path}: helper {h} holds no spin_* call -- renamed or moved? "
@@ -146,24 +181,29 @@ def rule_client(path, text, helpers):
     return out
 
 
-def rule_client_elsewhere(path, text):
+def rule_client_elsewhere(path, text, members):
     code = blank(text)
     lines = text.split("\n")
     out = []
-    for name in sorted(set(CLIENT_DECL.findall(code))):
-        for m in re.finditer(rf"&\s*{name}\s*->\s*lock\b(?!\s*\.\s*value)", code):
-            if INIT_ARG.search(code, 0, m.start()):
-                continue
-            ln = line_of(code, m.start())
-            out.append(f"{path}:{ln + 1}: a struct p9_client's lock taken outside "
-                       f"kernel/9p_client.c's helpers: {lines[ln].strip()}")
+    for m in client_lock_uses(code, set(CLIENT_DECL.findall(code)), members):
+        ln = line_of(code, m.start())
+        out.append(f"{path}:{ln + 1}: a struct p9_client's lock taken outside "
+                   f"kernel/9p_client.c's helpers: {lines[ln].strip()}")
     return out
+
+
+def header_members(sources):
+    members = set()
+    for path, text in sources.items():
+        if path.endswith(".h"):
+            members |= set(CLIENT_MEMBER.findall(blank(text)))
+    return members
 
 
 def elsewhere_paths():
     paths = []
     for top in ("kernel", "arch"):
-        for p in sorted((ROOT / top).rglob("*.c")):
+        for p in sorted([*(ROOT / top).rglob("*.c"), *(ROOT / top).rglob("*.h")]):
             rel = p.relative_to(ROOT).as_posix()
             if rel.startswith("kernel/test/") or rel == CLIENT[0]:
                 continue
@@ -176,10 +216,11 @@ def check(sources):
     for path, lock, helpers in NAMED:
         out += rule_named(path, sources[path], lock, helpers)
     out += rule_client(CLIENT[0], sources[CLIENT[0]], CLIENT[1])
+    members = header_members(sources)
     for path, text in sorted(sources.items()):
         if path in (CLIENT[0],) or path.startswith("kernel/test/"):
             continue
-        out += rule_client_elsewhere(path, text)
+        out += rule_client_elsewhere(path, text, members)
     return out
 
 
@@ -196,6 +237,10 @@ def self_test():
     fails = []
     if check(real):
         fails.append("the tree itself fails; fix it before trusting the self-test")
+    # A planted header joins the sources whatever load() reads, so the header
+    # plant below proves the rule, not that the gate ever reads a header.
+    if "kernel/include/thylacine/9p_client.h" not in real:
+        fails.append("load() reads no kernel header: a header inline would go unchecked")
 
     def must_flag(label, path, extra, needle):
         planted = dict(real)
@@ -267,6 +312,34 @@ def self_test():
               "\nstruct planted_l { spin_lock_t lock; };\n"
               "static void planted_l(struct planted_l *o) {\n    spin_lock(&o->lock);\n}\n")
 
+    for path, lock, helpers in NAMED:
+        must_flag(f"{path} store to .value", path,
+                  f"\nint planted_s(void) {{\n    __atomic_store_n(&{lock}.value, 0u, __ATOMIC_RELEASE);\n"
+                  f"    return 0;\n}}\n", "planted_s")
+        must_flag(f"{path} re-init", path,
+                  f"\nvoid planted_t(void) {{\n    spin_lock_init(&{lock});\n}}\n", "planted_t")
+        must_pass(f"{path} .value read control", path,
+                  f"\nint planted_u(void) {{\n    return __atomic_load_n(&{lock}.value, __ATOMIC_RELAXED) != 0;\n}}\n")
+    must_flag("9p_client parenthesised alias", cpath,
+              "\nint planted_n(struct p9_client *c) {\n    spin_lock_t *l = &(c->lock);\n    (void)l;\n    return 0;\n}\n",
+              "planted_n")
+    must_flag("9p_client store to .value", cpath,
+              "\nint planted_v(struct p9_client *c) {\n    __atomic_store_n(&c->lock.value, 0u, __ATOMIC_RELEASE);\n"
+              "    return 0;\n}\n", "planted_v")
+    must_pass("9p_client .value read control", cpath,
+              "\nint planted_w(struct p9_client *c) {\n    return __atomic_load_n(&c->lock.value, __ATOMIC_RELAXED) != 0;\n}\n")
+    must_flag("client lock through a header member", "kernel/dev9p.c",
+              "\nstatic void planted_m(struct dev9p_priv *priv) {\n    spin_lock(&priv->client->lock);\n}\n",
+              "struct p9_client's lock")
+    must_flag("client lock through a member of a struct value", "kernel/dev9p.c",
+              "\nstatic void planted_x(struct dev9p_priv p) {\n    spin_lock(&(p.client->lock));\n}\n",
+              "struct p9_client's lock")
+    must_flag("client lock through a cast", "kernel/dev9p.c",
+              "\nstatic void planted_y(void *x) {\n    spin_lock(&((struct p9_client *)x)->lock);\n}\n",
+              "struct p9_client's lock")
+    must_flag("client lock in a header inline", "kernel/include/thylacine/9p_client.h",
+              "\nstatic inline void planted_o(struct p9_client *c) {\n    spin_lock(&c->lock);\n}\n",
+              "struct p9_client's lock")
     for f in fails:
         print("check-lock-helpers self-test FAILED:", f, file=sys.stderr)
     if not fails:

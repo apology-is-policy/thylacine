@@ -36,6 +36,7 @@
 #include <thylacine/thread.h>  // THREAD_SLEEPING -- the F2 park observation
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
+#include "../../mm/slub.h"   // kmalloc/kfree: the metadata charge asked of the allocator
 
 static struct Proc *test_proc_make(void) {
     return proc_alloc();
@@ -193,6 +194,28 @@ void test_loom_private_node_owner(void) {
 }
 
 #include "loom_pool_table_fixture.h"
+
+// The private Loom charges each kmalloc'd metadata table burrow_backing_pages(size),
+// which is exact only while it agrees with the order kmalloc's large path really
+// takes. Two ceil-log2s written apart: asked here of the real allocator, at every
+// size loom_create_private charges, plus a page count that is not a power of two.
+void test_loom_metadata_charge_matches_kmalloc_order(void) {
+    static const struct { size_t size; const char *what; } table[] = {
+        { PAGE_SIZE, "LMCO one-page table: charge != kmalloc's pages" },
+        { sizeof(struct Loom), "LMCO struct Loom: charge != kmalloc's pages" },
+        { sizeof(struct loom_service_pool_table), "LMCO pool table: charge != kmalloc's pages" },
+        { sizeof(struct loom_service_target_table), "LMCO target table: charge != kmalloc's pages" },
+        { sizeof(struct loom_service_engine), "LMCO protocol index: charge != kmalloc's pages" },
+        { 3u * PAGE_SIZE, "LMCO three-page request records: charge != kmalloc's pages" },
+    };
+    for (u32 i = 0; i < sizeof table / sizeof table[0]; i++) {
+        void *p = kmalloc(table[i].size, 0);
+        TEST_ASSERT(p, "LMCO kmalloc of a metadata-sized block");
+        u64 got = 1ull << pa_to_page(kva_to_pa(p))->order;
+        kfree(p);
+        TEST_ASSERT(got == (u64)burrow_backing_pages(table[i].size), table[i].what);
+    }
+}
 
 void test_loom_service_pool_table(void) {
     const char *error = loom_pool_table_fixture();

@@ -634,6 +634,7 @@ void test_loom_private_native_stage_close(void);
 void test_loom_private_native_isolation(void);
 void test_loom_private_node_owner(void);
 void test_loom_service_pool_table(void);
+void test_loom_metadata_charge_matches_kmalloc_order(void);
 void test_loom_private_slot_owner(void);
 void test_loom_private_buffers(void);
 void test_loom_private_pool_pins(void);

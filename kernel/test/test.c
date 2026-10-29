@@ -1209,6 +1209,7 @@ struct test_case g_tests[] = {
     { "loom.private_fixed",              test_loom_private_fixed,              false, NULL },
     { "loom.private_slot_owner",         test_loom_private_slot_owner,         false, NULL },
     { "loom.service_pool_table",         test_loom_service_pool_table,         false, NULL },
+    { "loom.metadata_charge_matches_kmalloc_order", test_loom_metadata_charge_matches_kmalloc_order, false, NULL },
     { "loom.private_node_owner",         test_loom_private_node_owner,         false, NULL },
     { "loom.service_requests",           test_loom_service_requests,           false, NULL },
     { "loom.private_requests",           test_loom_private_requests,           false, NULL },
