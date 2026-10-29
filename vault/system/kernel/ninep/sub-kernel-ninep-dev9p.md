@@ -15,8 +15,45 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-22
+updated: 2026-10-29
 ---
+## Byte-range locks and lock-to-unlock consistency (B-3h2, 2026-10-29)
+
+dev9p serves the five lock slots of [[sub-kernel-dev]] for
+[[sub-kernel-filelock]] (ARCH 9.6.11):
+- `dev9p_lock(c, type, start, len, test)` acts as the open file `c`. It sends
+  Tlock on `c`'s fid, and Tgetlock for a test. BLOCKED on a take is
+  `-T_E_AGAIN` (the wait loop is generic). ERROR, GRACE or an undefined status
+  is `-T_E_NOLCK`. A Tgetlock type 9P2000.L does not define is `-T_E_IO`. The
+  test answer's `pid` is -1.
+- A grant drops the qid's Larder attributes and pages. The invalidates log
+  the qid, so a fill in flight from before the grant is dropped rather than
+  installed after it.
+- An unlock first lands `c`'s write-behind run (`dev9p_lock_sync`). A flush
+  that fails still releases, and the error latches for the next write or
+  fsync.
+- `dev9p_lock_owner(c)` mints a second owner on `c`'s file: a zero-name
+  Twalk clone of `c`'s fid into a fresh fid (Stratum admits the clone of an
+  open fid). The clone is unopened, never published, and flagged
+  `fid_locks`, so `dev9p_close` never parks it in the directory-fid cache.
+  It inherits `c`'s learned generation.
+- `dev9p_lock_ident(c)` learns once, with one Tgetattr for
+  `P9_GETATTR_GEN`, the inode generation of the file `c`'s fid names. It
+  stores `lock_gen` and `lock_ident` (GEN, or NONE when the server reports
+  no generation). A dead file's fid answers ESTALE and learns nothing.
+  `dev9p_lock_same_file(a, b)` requires the same client and qid.path, and
+  the same generation when both have learned one. Stratum does not keep a
+  file a fid names, and reuses inode numbers.
+- `dev9p_lock_sync(c, RELEASE)` flushes `c`'s run when the thread may wait.
+  A thread that may not (a death is pending) queues `dev9p_lock_flush_job`,
+  which holds `c`, on the session closer as a job alone (`P9_NOFID`, see
+  [[sub-kernel-ninep-attach]]). It is queued ahead of the owner's deferred
+  Tclunk, and the closer serves a session's entries in order. Without it, a
+  killed holder whose open file another Proc shares would release its lock
+  before its staged bytes landed.
+- A fidless cached open answers `-T_E_NOLCK` and learns no identity until
+  Boosty B-3h3.
+
 ## Create admission by session end (2026-10-19, B-3e M7)
 
 `dev9p_create_admits(c, principal)` answers whether `principal` may create

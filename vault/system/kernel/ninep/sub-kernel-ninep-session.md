@@ -12,8 +12,16 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-29
 ---
+## Tlock and Tgetlock (B-3h, 2026-10-29)
+
+`p9_session_send_lock` and `p9_session_send_getlock` build the two requests
+on a bound fid. They are read-shaped for the fid table: neither changes what
+the fid names. The dispatch arms parse Rlock's status into
+`p9_dispatch_result.lock_status`, and Rgetlock into `.getlock` (plain
+scalars, safe past the call).
+
 ## Purpose
 
 The per-session tag pool + fid table + outstanding-request bookkeeping — the

@@ -19,6 +19,25 @@ design:
 created: 2026-08-03
 updated: 2026-10-29
 ---
+## SYS_FILE_LOCK 137 (B-3h2, 2026-10-29)
+
+`file_lock(fd, op, start, len, out)` = 137 (operator votes 34-35,
+`dec-2026-10-29-b3h-file-locks`, ARCH 9.6.11; the full contract is in
+[[sub-kernel-filelock]]).
+- `op` is a type (`SYS_FILE_LOCK_RD` 0, `_WR` 1, `_UN` 2) plus the flags
+  `_WAIT`, `_TEST` and `_PROC`. Any other bit, type 3, `_TEST|_UN`,
+  `_TEST|_WAIT`, or a range past 2^64 is `-T_E_INVAL`.
+- `_TEST` writes a `struct t_file_lock` (32 bytes,
+  `_Static_assert`ed: type, start, len, pid = -1) to `out`.
+- The errnos are EBADF, ENOLCK (`T_E_NOLCK` 37), ESTALE (`T_E_STALE` 116),
+  EAGAIN, EINTR and EFAULT.
+
+`tools/check-flag-words.py` holds the op flags (the type values excluded)
+under its no-collision rule. `tools/test-native-handle-query.py` pins
+`SYS_FILE_LOCK = 137`. Linux rt_sigtimedwait shares the number
+([[sub-kernel-vivarium]]). The libthyla-rs and libt mirrors land with their
+wrappers in B-3h4.
+
 ## SYS_FSTAT answers an errno (2026-10-20, ERRORS.md ER-2)
 
 `SYS_FSTAT` (50; handle, stat_va) answers 0 or a -errno, where it answered a

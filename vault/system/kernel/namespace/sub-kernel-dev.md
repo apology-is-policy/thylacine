@@ -14,6 +14,24 @@ design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
 updated: 2026-10-29
 ---
+## The lock slots (B-3h2, 2026-10-29)
+
+Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
+- `lock(c, type, start, len, test)` acts as the open file `c` and never
+  waits. A conflict is `-T_E_AGAIN`.
+- `lock_owner(c, &err)` mints an unpublished Spoor naming the same file
+  through its own fid: the Proc owner.
+- `lock_same_file(a, b)` is non-blocking. It is asked only of two Spoors of
+  the same Dev.
+- `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes before a
+  release.
+- `lock_ident(c)` learns once which file `c` names, and can answer ESTALE.
+
+The first four are NULL-permitted together: a Dev without `lock` answers
+ENOLCK, as NFS without lockd does. `lock_ident` is NULL-permitted alone. A
+Dev without it matches files by `lock_same_file` alone. Only dev9p implements
+them.
+
 ## Purpose
 
 `struct Dev` is the Plan 9 device vtable, kept verbatim in shape: the

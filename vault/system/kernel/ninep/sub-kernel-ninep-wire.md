@@ -12,8 +12,24 @@ hazards: []
 abis: []
 design: [docs/9P-EXTENSIONS.md]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-29
 ---
+## Tlock and Tgetlock (B-3h, 2026-10-29)
+
+The codec gains P9_TLOCK (52) through P9_RGETLOCK (55), 9P2000.L as diod's
+protocol.md defines them. The fixed fields:
+- Tlock: fid, type, flags (BLOCK 1, RECLAIM 2), start, length, proc_id, and
+  then the `client_id` string.
+- Rlock: one status byte (SUCCESS 0, BLOCKED 1, ERROR 2, GRACE 3).
+- Tgetlock: fid, type, start, length, proc_id, client_id.
+- Rgetlock: the same fields, describing the conflicting lock.
+
+The parsers refuse a short body and a client id that overruns it.
+`P9_GETATTR_GEN` (0x1000) names the generation bit of the getattr mask,
+which Stratum fills from the inode's `si_gen`. Tests:
+`9p_wire.tlock_round_trip` and `9p_wire.tgetlock_round_trip`, with their
+refusal cases.
+
 ## Purpose
 
 The pure byte-level marshal/unmarshal layer for the 9P2000.L dialect plus the

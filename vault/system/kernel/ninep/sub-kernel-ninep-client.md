@@ -19,8 +19,18 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-19
+updated: 2026-10-29
 ---
+## Tlock and Tgetlock (B-3h, 2026-10-29)
+
+`p9_client_lock(c, fid, type, flags, start, length, &status)` and
+`p9_client_getlock(c, fid, type, start, length, &out)` follow
+`p9_client_fsync`'s shape. A conflict is a status (`P9_LOCK_BLOCKED`), not an
+error: the server never waits. The client sends `proc_id` 0 and a fixed
+client id. Stratum keys its owner on the fid and ignores both. An Rlerror
+maps through `map_error`, which folds a server EBADF to `-P9_E_IO`. The
+callers are [[sub-kernel-ninep-dev9p]]'s lock slots.
+
 ## The session's create ends (2026-10-19, B-3e M7)
 
 `struct p9_client` gains `client_end` and `server_end`, two principals

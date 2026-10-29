@@ -10,8 +10,22 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-22
+updated: 2026-10-29
 ---
+## Native ceiling 137 (B-3h2, 2026-10-29)
+
+`SYS_FILE_LOCK` lands at 137 (votes 34-35), which is Linux rt_sigtimedwait's
+number. Its row is VIV_ENOSYS, and `viv_linux_dispatch` returns before the
+native switch for every row that is not TRANSLATED, so a Linux Proc never
+reaches the native lock call. test_vivarium pins the verdict (ENOSYS) after
+the rt_sigpending pin. `vivarium.c` now argues the number on its own
+(`VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK`). The lowest row still argued
+by the ceiling is rt_sigqueueinfo (138, VIV_ENOSYS), and
+`VIV_NATIVE_CEILING` is 137. A native program mis-declared as Linux loses
+its locks to ENOSYS, which takes nothing. A change of the row to TRANSLATED
+must re-argue this. `tools/test-native-handle-query.py` pins the ceiling and
+both asserts; its ceiling mutant (137 to 136) is refused.
+
 ## utimensat (88), the time setter (G12, 2026-10-22)
 
 The row is VIV_TIER2 over SYS_WSTAT's time bits ([[dec-2026-10-22-wstat-times]];

@@ -12,8 +12,22 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-19
+updated: 2026-10-29
 ---
+## A closer entry may be a job alone (B-3h2, 2026-10-29)
+
+`p9_attached_defer_close(a, P9_NOFID, job)` queues a job with no fid. The
+closer runs it in queue order and sends no Tclunk, and the entry counts in
+`jobs` but in none of `sent`, `refused` or `dropped`
+(FID-LIFECYCLE-DESIGN.md 9). dev9p's lock release uses it: a thread with a
+death pending cannot flush the open file's staged run itself, so it queues
+the flush as a job alone ahead of the lock owner's deferred Tclunk
+([[sub-kernel-ninep-dev9p]]). Because the queue is per-session FIFO, with
+tail append, head pop and one closer per session, the run lands before the
+lock is released. Test: `p9_closer.dying_lock_release_flushes_shared_run`.
+It asserts one write, the Tclunk after it, the shared fid left open,
+`jobs` +1, `sent` +1, and `dropped` and `refused` unchanged.
+
 ## The create ends are the conn's (2026-10-19, B-3e M7)
 
 `srvconn_attach_dev9p_root` stamps the session's create ends

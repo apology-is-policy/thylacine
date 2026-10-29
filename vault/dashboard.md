@@ -125,11 +125,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-29 [[chg-2026-10-29-b3-spawn-env]] — b3 backports the spawn environment tail (env-a + env-c); the child is born with no environment
+- 2026-10-29 [[chg-2026-10-29-b3h2-file-locks]] — B-3h2: SYS_FILE_LOCK 137 with its two owners, the Proc owner table, and dev9p's lock path
 - 2026-10-29 [[chg-2026-10-29-env-bind-at-open]] — An open /env file binds its opener's environment; unknown syscalls answer ENOSYS; ut's unset reaches /env
 - 2026-10-28 [[chg-2026-10-28-spawn-env]] — The spawn environment tail: a spawner names its child's whole environment (env-a kernel + native, env-c pouch)
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
 - 2026-10-20 [[chg-2026-10-20-b3f-meson-tests]] — FreeType and HarfBuzz through meson, their upstream tests on the device; a test's meson depends are built and staged (B-3f)
 - 2026-10-20 [[chg-2026-10-20-b3fprime-symlinks]] — Native lstat and readlink, and Pouch's symlink truth: lstat, readlink, realpath, O_NOFOLLOW, O_PATH, O_DIRECTORY, lchmod (B-3f')
 - 2026-10-20 [[chg-2026-10-20-fstat-ebadf]] — SYS_FSTAT answers its errnos: a closed descriptor reads EBADF from fstat and isatty (0061)
-- 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
 <!-- generated:end -->

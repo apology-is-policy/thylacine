@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**203 declared surfaces · 199 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 25 cited path(s) that do not resolve.**
+**204 declared surfaces · 200 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 26 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -53,6 +53,7 @@ changed on main? — is the next increment, tracked as task #169.
 | **HAUL: the npxf secure channel -- a second implementation of a hand-r… | `lib/bin` | no such file in the tree |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | B-3g G12-b: Pouch's utimensat sets times over SYS_WSTAT's time bits; c… | `arch/aarch64/syscall_arch.h` | no such file in the tree |
+| B-3h file locks: `SYS_FILE_LOCK` (137) naming its owner (the open file… | `specs/locks.tla` | no such file in the tree |
 | Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |
 | Initial bringup | `init/init.c` | no such file in the tree |
 | Monotonic-clock vDSO page (#343) | `kernel/user` | **possibly a documented NEGATIVE — read the claim** |

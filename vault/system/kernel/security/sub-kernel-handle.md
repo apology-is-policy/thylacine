@@ -13,8 +13,49 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-15
+updated: 2026-10-29
 ---
+## The Proc lock owners (B-3h2, 2026-10-29)
+
+The handle table now also holds the Proc owner of `SYS_FILE_LOCK_PROC` locks
+([[sub-kernel-filelock]], ARCH 9.6.11, votes 34-35). POSIX gives a process's
+locks to its descriptor table. Linux drops them at any close of the file by
+that table, threads share them, a fork does not inherit them, and exec keeps
+them. Here the per-Proc HandleTable plays that table. `lockowners[]`
+(`struct lock_owner_ent`, 16 bytes, at most `PROC_LOCK_OWNER_MAX` 128) keeps
+one entry per locked file: a minted Spoor naming that file through its own
+fid, a `users` count, `granted` and `dead`. `t->lock` covers the entries, as
+it covers the slots and `cloexec`. The table lives here, not in proc.c,
+because the handle table already has the right lifetime and sharing.
+
+- `handle_lock_owner_get(p, c, mint, &owner)` first has `c` learn its file's
+  identity (`Dev.lock_ident`, which can answer ESTALE). It then adopts the
+  entry naming `c`'s file, or mints one outside the lock and inserts it. A
+  peer's mint of the same file wins, and a full table answers ENOLCK. The
+  caller holds a reference and a `users` count across its RPC.
+- `handle_lock_owner_put(p, owner, granted)` drops them. An entry whose users
+  reach 0 is removed if it never held a lock (a refused take spends no slot)
+  or if it was retired.
+- `handle_lock_owner_retire` marks an entry `dead`. Its fid answered ESTALE:
+  Stratum kills an unlinked file's fids and hands the lowest freed inode
+  number to the next create, so the entry's number may now name another
+  file. A dead entry is never found again.
+- `lock_owners_on_close` runs after a descriptor leaves the table and before
+  its object is released, from `handle_close`'s report path,
+  `handle_replace` and `handle_dup_to`. If an entry names the closed file
+  (by number, then confirmed by the closed Spoor's identity; a dead file's
+  descriptor shows no entry), it lands every staged write of that file the
+  table can reach (`lock_sync_table`). It then sends the whole-file unlock
+  through the entry, waits for it, and removes the entry unless a lock call
+  is using it.
+- The teardown syncs every entry's file, releases the slots, then clunks the
+  entries. A last close that cannot wait hands its run to a closer, and the
+  owner's clunk must not overtake it.
+- An rfork child's table starts with no entries.
+
+The HandleTable's size assert counts the entries (`nlockowners` replaced the
+old `_pad_lock`), and the table stays at or under 32 KiB.
+
 ## Native descriptor mutation (October11)
 
 `handle_dup_to_checked` returns EBADF/EINVAL/EACCES while preserving the old

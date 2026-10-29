@@ -42,6 +42,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
 | [[sub-kernel-exec]] | kernel/exec.c, kernel/include/thylacine/exec.h | inv-i36, inv-i12, inv-i32, inv-i33, inv-i44 | On any change: that the Spoor ref ledger balances on every path — the Image |
 | [[sub-kernel-fault]] | arch/arm64/fault.c, arch/arm64/fault.h | inv-i12, inv-i32, inv-i7, inv-i36, inv-i44 | On any change here: that the file arm's four-step protocol keeps its pin across |
+| [[sub-kernel-filelock]] | kernel/filelock.c, kernel/include/thylacine/filelock.h, kernel/test/test_filelock.c | inv-i32, inv-i38 | Mutants run in the B-3h2 lease (each must turn its named leg red): |
 | [[sub-kernel-gic]] | arch/arm64/gic.c, arch/arm64/gic.h, kernel/test/test_gic.c | inv-i15, inv-i18 | - The two generations are **different code for the same behaviour**, and a run |
 | [[sub-kernel-gic-msi]] | arch/arm64/gic_msi.c, arch/arm64/gic_msi.h, arch/arm64/gic_its.c, arch/arm64/gic_its.h | inv-i5, inv-i15, inv-i18 | `pci.msi_allocator` passes on GICv2/HVF: masked initial allocation, denial of raw |
 | [[sub-kernel-halls]] | arch/arm64/halls.c, arch/arm64/halls.h, arch/arm64/halls_symtab.h, arch/arm64/halls_symtab.stub.c, kernel/extinction.c, kernel/include/thylacine/extinction.h |  | On any change, re-establish: |
