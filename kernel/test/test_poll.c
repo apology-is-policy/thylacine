@@ -1972,7 +1972,6 @@ static void tpw_count_batch(struct poll_waiter_list *l) {
     if (l != &g_tpw_list || poll_waiter_list_empty(l)) g_tpw_ok = false;
 }
 
-void test_poll_wake_reaches_every_hook_in_batches(void);
 void test_poll_wake_reaches_every_hook_in_batches(void) {
     tpw_setup(TPW_N);
     g_poll_wake_batch_hook = tpw_count_batch;
@@ -2008,7 +2007,6 @@ static void tpw_churn_once(struct poll_waiter_list *l) {
     poll_waiter_list_register(l, &g_tpw[TPW_M - 1]);
 }
 
-void test_poll_wake_batches_owe_only_older_hooks(void);
 void test_poll_wake_batches_owe_only_older_hooks(void) {
     tpw_setup(TPW_M);
     g_poll_wake_batch_hook = tpw_churn_once;
@@ -2039,7 +2037,6 @@ static void tpw_nested_walk(struct poll_waiter_list *l) {
     if (reached != TPW_M) g_tpw_ok = false;
 }
 
-void test_poll_wake_steps_over_another_walks_bookmark(void);
 void test_poll_wake_steps_over_another_walks_bookmark(void) {
     tpw_setup(TPW_M);
     g_tpw_depth = 0;
@@ -2062,7 +2059,6 @@ static void tpw_drain_all(struct poll_waiter_list *l) {
     if (poll_waiter_list_count_for_test(l) != 0) g_tpw_ok = false;
 }
 
-void test_poll_wake_bookmark_alone_reads_empty(void);
 void test_poll_wake_bookmark_alone_reads_empty(void) {
     tpw_setup(TPW_M);
     g_poll_wake_batch_hook = tpw_drain_all;
@@ -2088,7 +2084,6 @@ static void consumer_poll_twice_entry(void) {
     test_kthread_park_terminal(&g_poll_exited);
 }
 
-void test_poll_one_hook_per_list_per_call(void);
 void test_poll_one_hook_per_list_per_call(void) {
     struct Proc *p = make_test_proc();
     struct Spoor *rd = NULL, *wr = NULL;
@@ -2188,7 +2183,6 @@ static void consumer_poll_both_ends_entry(void) {
     test_kthread_park_terminal(&g_poll_exited);
 }
 
-void test_poll_dedupe_keeps_the_earlier_hook(void);
 void test_poll_dedupe_keeps_the_earlier_hook(void) {
     struct Proc *p = make_test_proc();
     struct Spoor *rd = NULL, *wr = NULL;
@@ -2243,7 +2237,6 @@ void test_poll_dedupe_keeps_the_earlier_hook(void) {
 // Walks owed under the table lock (vote 13; specs/poll_owed.tla).
 // =============================================================================
 
-bool proc_table_held_for_test(void);
 
 static struct poll_owed g_tpo;
 static bool g_tpo_irqs_were_on;
@@ -2258,7 +2251,6 @@ static void tpo_check_batch(struct poll_waiter_list *l) {
     if (poll_waiter_list_marks_for_test(l) != 1u) g_tpw_ok = false;
 }
 
-void test_poll_owed_walk_runs_at_the_table_release(void);
 void test_poll_owed_walk_runs_at_the_table_release(void) {
     tpw_setup(TPW_N);
     poll_owed_init(&g_tpo, &g_tpw_list);
@@ -2300,7 +2292,6 @@ void test_poll_owed_walk_runs_at_the_table_release(void) {
     tpw_teardown();
 }
 
-void test_poll_owed_records_chain_once_and_cancel(void);
 void test_poll_owed_records_chain_once_and_cancel(void) {
     poll_waiter_list_init(&g_tpw_list);
     struct poll_owed_chain c = { NULL }, c2 = { NULL };
@@ -2335,7 +2326,6 @@ void test_poll_owed_records_chain_once_and_cancel(void) {
     TEST_ASSERT(poll_owed_begin(&c, &mark) == NULL, "nothing owed: begin returns NULL");
 }
 
-void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void);
 void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void) {
     tpw_setup(TPW_M);
     struct poll_owed_chain c = { NULL };
@@ -2357,7 +2347,6 @@ void test_poll_owed_walk_owes_only_hooks_behind_the_bookmark(void) {
     tpw_teardown();
 }
 
-void test_poll_notes_post_under_the_table_lock_owes_its_walk(void);
 void test_poll_notes_post_under_the_table_lock_owes_its_walk(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL && p->notes != NULL, "proc_alloc with a notes queue");
@@ -2404,7 +2393,6 @@ static void tpo_child_owes_then_exits(void *arg) {
     exits("ok");
 }
 
-void test_poll_reap_cancels_the_walks_owed_to_a_proc(void);
 void test_poll_reap_cancels_the_walks_owed_to_a_proc(void) {
     g_tpo_stray.head = NULL;
     g_tpo_child_ran = 0;
@@ -2418,7 +2406,6 @@ void test_poll_reap_cancels_the_walks_owed_to_a_proc(void) {
 
 // The console episode's wake (P-d): its four list walks are owed when the
 // transition runs under the table lock, as every production transition does.
-void test_poll_cons_episode_walks_owed_under_the_table_lock(void);
 void test_poll_cons_episode_walks_owed_under_the_table_lock(void) {
     struct Rendez r;
     struct poll_waiter pw;
@@ -2464,7 +2451,6 @@ static u32 tpd_reached(u32 n) {
     return reached;
 }
 
-void test_poll_deferred_walk_runs_at_the_outermost_release(void);
 void test_poll_deferred_walk_runs_at_the_outermost_release(void) {
     tpw_setup(TPW_N);
     poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
@@ -2525,7 +2511,6 @@ static void tdl_check_batch(struct poll_waiter_list *l) {
     if (current_thread()->preempt_count != 0u) g_tdl_counted = true;
 }
 
-void test_poll_dev9p_poll_lock_defers_its_walks(void);
 void test_poll_dev9p_poll_lock_defers_its_walks(void) {
     tpw_setup(TPW_N);
     poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
@@ -2568,7 +2553,6 @@ static void tpd_put(void *owner) {
 
 static const struct poll_defer_ops g_tpd_ops = { .tryget = tpd_tryget, .put = tpd_put };
 
-void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void);
 void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void) {
     tpw_setup(TPW_M);
     poll_deferred_init(&g_tpd, &g_tpw_list, &g_tpd_ops, &g_tpd_ref);
@@ -2591,7 +2575,6 @@ void test_poll_deferred_ref_owner_holds_a_ref_across_the_walk(void) {
 
 // An owner already in its free has no poller: the owe that cannot take a
 // reference walks at once instead of chaining a record nothing pins.
-void test_poll_deferred_walks_a_dying_owner_at_once(void);
 void test_poll_deferred_walks_a_dying_owner_at_once(void) {
     tpw_setup(TPW_M);
     poll_deferred_init(&g_tpd, &g_tpw_list, &g_tpd_ops, &g_tpd_ref);
@@ -2628,7 +2611,6 @@ static void tpd_child_owes_then_drains(void *arg) {
     exits("ok");
 }
 
-void test_poll_deferred_await_waits_out_an_owed_walk(void);
 void test_poll_deferred_await_waits_out_an_owed_walk(void) {
     tpw_setup(TPW_M);
     poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);
@@ -2652,7 +2634,6 @@ void test_poll_deferred_await_waits_out_an_owed_walk(void) {
 
 // A srvconn send under a client's lock (the client holds c->lock across its
 // transport's send) owes the poll_list walk and holds the conn across it.
-void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void);
 void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void) {
     struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0,
                                         PRINCIPAL_INVALID, SRVCONN_MSIZE);
@@ -2683,7 +2664,6 @@ void test_poll_srvconn_send_under_a_client_lock_owes_its_walk(void) {
 // p9_client_close: the transport's close tears the conn down and drops its
 // reference under c->lock. The walks the teardown owes keep the conn alive,
 // and the drain's last put frees it, after the lock.
-void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void);
 void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void) {
     struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0,
                                         PRINCIPAL_INVALID, SRVCONN_MSIZE);
@@ -2718,7 +2698,6 @@ void test_poll_srvconn_close_under_a_client_lock_outlives_its_walks(void) {
 
 // The pipe a 9P transport writes and hangs up under c->lock: the ring's walk
 // is owed, and the ring outlives both ends' closes until it is walked.
-void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void);
 void test_poll_pipe_hangup_under_a_client_lock_owes_its_walk(void) {
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
@@ -2773,7 +2752,6 @@ static void tpd_drainer_entry(void) {
     test_kthread_park_terminal(&g_tpd_drainer_done);
 }
 
-void test_poll_await_yields_to_a_drainer_on_its_cpu(void);
 void test_poll_await_yields_to_a_drainer_on_its_cpu(void) {
     tpw_setup(TPW_N);
     poll_deferred_init(&g_tpd, &g_tpw_list, NULL, NULL);

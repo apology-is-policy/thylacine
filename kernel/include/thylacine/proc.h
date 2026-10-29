@@ -3177,6 +3177,7 @@ u64 proc_exec_walk_a_seq_for_test(void);
 void proc_exit_close_test_set_window_hook(void (*fn)(void));
 void proc_exit_tail_test_set_hook(void (*fn)(void));
 u64 proc_id_counter_swap_for_test(u64 v);
+bool proc_table_held_for_test(void);
 struct Proc *proc_test_console_owner(void);
 void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 void proc_test_link(struct Proc *p);

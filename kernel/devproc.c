@@ -2926,22 +2926,20 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     return 1;
 }
 
-// Test hooks (the *_for_test convention: absent from the header, extern-declared
-// by the harness, no production caller): step's operand parse, and one arming
-// pass of the step verb, since the write itself blocks until the target
-// re-stops.
-bool devproc_parse_step_tid_for_test(const char *s, long n, int *tid_out);
+#ifdef KERNEL_TESTS
+// Test hooks: step's operand parse, and one arming pass of the step verb, since
+// the write itself blocks until the target re-stops.
 bool devproc_parse_step_tid_for_test(const char *s, long n, int *tid_out) {
     return parse_ctl_step_tid(s, n, tid_out);
 }
 
-int devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoor *ctl);
 int devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoor *ctl) {
     struct devproc_step_ctx s = { .target_pid = pid, .tid = tid, .caller = caller,
                                   .ctl = ctl, .result = 0 };
     proc_for_each(devproc_step_walk_cb, &s);
     return s.result;
 }
+#endif
 
 // Scan a target (by pid) for full debug-stop. state: -1 gone/not-found, 0
 // not-yet-stopped, 1 fully stopped, 2 slot released (debug_owner != ctl). "Fully

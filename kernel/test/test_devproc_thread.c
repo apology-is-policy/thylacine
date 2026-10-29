@@ -31,6 +31,7 @@
 
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/devproc.h>
 #include <thylacine/errno.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -39,15 +40,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-bool devproc_parse_step_tid_for_test(const char *s, long n, int *tid_out);
-int  devproc_step_arm_for_test(int pid, int tid, struct Proc *caller, struct Spoor *ctl);
-
-void test_devproc_thread_files_name_their_thread(void);
-void test_devproc_thread_step_names_its_thread(void);
-void test_devproc_thread_dir_gated(void);
-void test_devproc_readdir_lists_every_dir(void);
 
 // =============================================================================
 // Helpers.

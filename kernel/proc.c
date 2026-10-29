@@ -4107,7 +4107,6 @@ void proc_wake_or_owe(struct poll_owed *o) {
 }
 
 #ifdef KERNEL_TESTS
-bool proc_table_held_for_test(void);
 bool proc_table_held_for_test(void) {
     struct Thread *t = current_thread();
     return t && __atomic_load_n(&g_proc_table_holder, __ATOMIC_RELAXED) == t;
