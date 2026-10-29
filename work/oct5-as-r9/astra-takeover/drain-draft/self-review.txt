@@ -1,0 +1,41 @@
+Astra single-agent self-review; no independent audit.
+
+The engine now separates CONNECT PREPARED/ACTIVE from ordinary operation work.
+Completed CONNECT timeouts no longer govern the scope. Retained CONNECT terminal
+posting uses a separate visit, preserving one bounded action/completion quantum.
+Every actual READY/close visit owns an independent entry pin and explicit Loom
+root through operation free, physical accounting return and final driver wake.
+Protocol collection and global request detach wait for operation owners, native
+wait-registration pins, users, driving and fixed-backing settlement.
+
+Local retirement follows actual RPC abort and the end of active request/FID/buffer
+borrows. A terminal owner with committed PENDING MORE may survive local retirement;
+ordinary delivery or whole-close disposal must still visit it. Whole close drains
+owners before requiring zero entry pins, including already-locally-retired scopes.
+Retained poll registrations park final collection and unregister before entry put.
+Ll protects list/index/ledger metadata; no native poll/teardown, allocator/ref final
+drop or wake is called under Ll. Exclusive driving prevents unlocked cursor races;
+readiness interest refuses such cursor reads while driving/users are present.
+Engine negative action refusals fail closed as invariants; legitimate shortages
+return zero, and user failures already settle/latch their scope.
+
+DRAIN-R1 stale readiness deadline reproduced from the actual earlier action source;
+fresh IO preflight checks current absolute time and cancellation before copying.
+DRAIN-R3 CLUNK guard tests check real wait-arm behavior, not only a zero return.
+An initial mutant survived the weaker witness; retained failed evidence documents
+that test defect. Missing-close-pin fault hits the earlier exact engine invariant,
+so the runner requires that named invariant/exit86 instead of a generic failure.
+
+Fixture uses actual engine routing/get/put/wait/close/collection and actual owner,
+client submit/abort, session/codec, program/admission and physical operation-drop
+code. New tests retain the real headers and ARM64 compile full changed modules.
+Initial engine publication is synthetic/prebound, successful responses are parsed
+fixture values, native progress/teardown/poll registration, allocator, Loom refs,
+notifications and protocol storage destruction are controlled boundaries. The
+actual protocol destructor is compiled for ARM64 but not executed in this fixture.
+Earlier regressions retain their explicitly simulated boundaries. Existing TLA
+models are unchanged regression evidence, not models of this new C integration.
+No native scheduling/SMP/full-source gate or installed dispatch claim follows.
+
+Immutable shared frontend and actual pool RETURN/wake integration remain ahead.
+Canonical kernel stays97d495; private activation/128MiB protection unchanged.

@@ -1,0 +1,2 @@
+kernel/loom.c:3381:    l->sq_head++;
+kernel/loom.c:3382:    __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);

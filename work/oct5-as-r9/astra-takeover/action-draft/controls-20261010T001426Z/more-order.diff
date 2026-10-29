@@ -1,0 +1,11 @@
+--- control.c
++++ more-order.c
+@@ -1659,7 +1659,7 @@
+         spin_unlock(&l->lock);
+         return rc?action_abort(p,rc):1;
+     case LREADY_DELIVER:
+-        rc=loom_provided_deliver(o);return rc?rc:1;
++        rc=loom_retirement_post_terminal(o);return rc?rc:1;
+     case LREADY_REARM:
+         spin_lock(&l->lock);rc=loom_rpc_rearm_read_locked(o,timer_now_ns());spin_unlock(&l->lock);
+         return rc?action_abort(p,rc):1;

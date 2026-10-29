@@ -1,0 +1,13 @@
+diff --git a/kernel/test/test_loom_bridge_probe.c b/kernel/test/test_loom_bridge_probe.c
+index b341e4312..c9eb3792b 100644
+--- a/kernel/test/test_loom_bridge_probe.c
++++ b/kernel/test/test_loom_bridge_probe.c
+@@ -55,7 +55,7 @@ static void bridge_probe_exec_thunk(void *arg) {
+ void test_loom_bridge_probe(void) {
+     const void *cpio_blob = NULL;
+     size_t size = 0;
+-    if (devramfs_lookup("bin/loom-bridge-probe", &cpio_blob, &size) != 0) {
++    if (devramfs_lookup("bin/loom-bridge-probe-absent", &cpio_blob, &size) != 0) { // MUTANT M12
+         // Only a kernel booted without userspace may skip; a ramfs that has init
+         // but not the probe is stale, and skipping would pass it.
+         const void *init_blob = NULL;

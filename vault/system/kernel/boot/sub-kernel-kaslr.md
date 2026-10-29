@@ -14,7 +14,7 @@ abis: []
 design:
   - "docs/ARCHITECTURE.md section 5.3"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -62,17 +62,20 @@ simple.
 **Relocations.** The relocation section is walked and every relative entry gets
 the slide added to its addend. Target addresses are stored as link-time VAs, so
 each is converted to a physical address using the runtime-derived delta — the
-writes happen with the MMU still off. Under the current build the section is
-empty, because every reference the compiler emits is PC-relative; the walker
-terminates immediately. It exists for the code that will eventually take the
-address of something in static data.
+writes happen with the MMU still off. The section is not empty: measured
+2026-10-27, the kernel ELF carries 4997 `R_AARCH64_RELATIVE` entries (pointers
+in static data), and the linker leaves each slot 0 in the image, so until the
+walk runs every such pointer reads 0, and after it a high VA that is unmapped
+until the MMU is on. Code that runs before the MMU, the fault path included,
+must read no such pointer.
 
 **The canary.** The cookie is seeded from the same mixed entropy, mid-function,
 which forces this function to opt out of stack-protection: its prologue would
 save the pre-init magic and its epilogue would compare against the post-init
 cookie. Functions called before the seeding see the old value at both ends;
-functions called after see the new one at both ends. The single function that
-straddles the change is the one exempted.
+functions called after see the new one at both ends, the relocation walk among
+them (it runs after the seeding). The single function that straddles the change
+is the one exempted.
 
 ## Data structures
 
@@ -112,7 +115,10 @@ unsupported relocation type halts at a breakpoint instruction rather than
 proceeding — the reasoning being that a relocation the walker cannot apply leaves
 a wrong address in the image, which becomes a fault somewhere unrelated much
 later; stopping at the point of detection is the only way that ever gets
-diagnosed. The comment is candid that this is a build misconfiguration surfacing
+diagnosed. Since 2026-10-27 that stop prints: the boot CPU's vectors are
+installed at their load PA before the first C call ([[sub-kernel-boot-entry]]),
+so the breakpoint reaches the exception path and extincts with the MMU off.
+Before that, it vectored through a reset-UNKNOWN base and hung silently. The comment is candid that this is a build misconfiguration surfacing
 at runtime because there is nowhere better to catch it.
 
 ## Performance
@@ -145,16 +151,22 @@ Irrelevant. One counter read, one hash, a walk over an empty section.
 
 ## Caveats
 
-**The relocation infrastructure is exercised by nothing.** The section is empty
-in every current build, so the walker's loop body — the part that computes a
-target address and writes to it — has never run. It is correct by reading, and
-its first live use will be whatever change introduces the first absolute
-reference. The header says as much.
+**The relocation walk runs on every boot (corrected 2026-10-27).** This note
+said the section was empty and the walker's loop body had never run; the image
+had gained absolute references since, and a 2026-10-27 measurement counted 4997
+entries. Every boot that reaches the banner exercises the walk. The test it lacks
+is a direct one: nothing compares a relocated slot with its expected value.
 
 **Widening the slide is not free in the way it looks.** The alignment is coupled
 to the fixed page-grain kernel mapping, and the coupling is recorded in three
 places (this header, the linker assertions, and the table builder) that must move
 together. The header's comment enumerates them.
+
+**A fault-test provoker sits in `kaslr_init` (2026-10-27).** Under
+`THYLACINE_FAULT_TEST_vbar_pre_reloc` it calls `fault_test_unaligned_load` right
+after the DTB parser is initialized, before the seeding and the relocation walk:
+an Alignment fault with the MMU off and the image unrelocated, which only the
+boot CPU's PA vectors turn into an `EXTINCTION:` line ([[sub-kernel-boot-sequence]]).
 
 ## Provenance
 

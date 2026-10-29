@@ -1,0 +1,13 @@
+{
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/loom_service_admission.c": "1660d2cc6666adf2cc1fb2bab139b257a8a1bf61691aec085bb2694a39be0e7d",
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/loom_service_operation.c": "f0e18a1a7b73f98581af12950756d0894176d51eaa011408803d017f0c3811d5",
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/loom_service_rpc.c": "f90c53bc0bc2a42c365eac7c1810a46f8b1e0e49344ba7f17174b6f8b2e60163",
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_rpc.h": "71791b4b5f13312b4c1875b571b840c4e759f06d3b83196aba51957d3c88e757",
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_operation.h": "eb226d5000d6d038b4f2163fa1ec4fa2831e8ea4477c993c12d2958c81a9d5d5",
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+  "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+  "work/oct5-as-r9/astra-takeover/admission-draft/fixture.c": "58a64cba0c1cfd34b488571869fa06dc419d931a35cc79aec027a36ee937c280",
+  "work/oct5-as-r9/astra-takeover/admission-draft/run-controls.py": "d24ed2b6f6d5191a0d07755a9d28594df155b3fd9ded7ea70254067b0be787bc",
+  "work/oct5-as-r9/astra-takeover/admission-draft/check-operation.py": "441e424e60a545d6025f87ca600580f78ce00b22e2ec0fcfbc96c7bb0a1c4254",
+  "work/oct5-as-r9/astra-takeover/admission-draft/check-arm64.py": "e554442b291cebf068fd8563488a0085d058bd70a88fba2b63f08ef978a05ca1"
+}

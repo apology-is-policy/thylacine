@@ -1,0 +1,26 @@
+Astra single-agent review of uninstalled paired CQ readers.
+Only one creator consumer; Rust requires &mut self and is not Clone/Send/Sync.
+C caller contract forbids copying an active reader, concurrent reap or out alias
+with mapping/reader. This internal C struct is not the eventual opaque public API.
+The unsafe Rust constructor and C constructor require a live owner-held mapping
+and kernel release-tail/acquire-head publication. Checked size/alignment, power-
+of-two geometry (1..8192), uintptr bounds and pairwise disjoint CQ/header/receipt
+ranges precede pointer construction. SQ geometry validation belongs to outer setup.
+A local cursor detects unexpected second-head writers and refuses overfull tail
+without copying/acknowledging. Acquire tail precedes both CQE and receipt copies;
+one release head follows both. Neither copies a payload nor returns a lease.
+No callback or pointer/slice into shared CQ escapes; record remains a value after
+slot reuse. u32 counter wrap uses wrapping distance with bounded occupancy.
+
+Host tests cover empty/wrap/copied-record survival, corruption refusal, nine bad
+geometries, and100000 concurrent paired publications across wrap and reuse.
+Rust opt0/opt2 and LLVM22 C ASan+UBSan pass; six geometry/receipt-index/double-ack
+mutants compile then fail assertions. Stress is not a memory-model proof and
+these helpers are not integrated into safe/native owned clients. ABI mirror
+size/offset assertions match inspected native16-byte CQE and32-byte receipt;
+native ABI integration and mapping ownership still need qualification.
+Next: bind these readers to an owned private Ring mapping; consume owned eager
+buffers, compose lease ledger and read-only PayloadLease, and retain failed
+returns/client drop in bounded existing-slot retirement ownership. Avoid exposing
+legacy Ring::reap/raw submit or any storage mutation after transfer. Do not claim
+safe-client borrow tests, syscalls, future cancellation or retirement are done.

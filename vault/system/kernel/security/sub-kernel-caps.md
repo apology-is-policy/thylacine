@@ -14,10 +14,28 @@ guarded-by: [inv-i2, inv-i25]
 validated-by: [prose, spec-imperium, gate-smp]
 locks: []
 abis: []
-design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
+design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
 updated: 2026-10-27
 ---
+## Registry creation is a role, not an Imperium capability
+
+The D7 factory uses explicit spawn permission bit 11 / Proc flag bit 14.
+Neither POST_SERVICE nor TCB_DIAL nor SET_IDENTITY implies it; console
+attachment is insufficient too. Only a holder may explicitly delegate it.
+Bootstrap gives it to Joey, Joey gives it to login, and ordinary children do
+not inherit it. This keeps authority to mint fresh quota domains separate
+from authority to post within an existing session. See [[sub-kernel-devsrv]].
+
+
+## Administrative authority specification
+
+`docs/USER-AUTHORITY-DESIGN.md` is approved for implementation,
+tracked by [[arc-user-authority]]. It does not describe implemented Admin scopes,
+mandates or transaction verbs. Existing code remains the as-built contract.
+The operator approved the detailed contract after reviewing `44d158c3`.
+Runtime implementation and exact numeric ABI reservations are still pending.
+
 ## Graphical grant commit
 
 A graphical grant is inserted with `seat_held` atomically under the grant
@@ -135,7 +153,7 @@ written by the very commit that moved the seal out of it (seal round 3, F1).
 is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains
 reserved for audio); it is absent from CAP_ALL, present in CAP_ELEVATION_ONLY
 and CAP_GRANTABLE_CLEARANCE. `sys_cap_grant_imperium_core` accepts only the
-propagating flag and this subset. `proc_become_legate` rejects nested
+propagating flag and this subset. `proc_become_legate_locked` rejects nested
 propagating redemption. During `rfork_internal`, only the parent's scoped
 `legate_caps` can survive the elevation strip, intersected with actual parent
 caps and the requested child mask. Ordinary clearance still does not flow.
@@ -189,7 +207,7 @@ fork even by asking to.
 
 The parent's caps are read under an **acquire** load, because the child's
 ceiling is bounded by what the parent observably holds *now* and
-`proc_become_legate` is a cross-thread writer.
+`proc_become_legate_locked` is a cross-thread writer.
 
 **The grant is two-phase, and the two phases are gated on different
 parties.** The `cap` device (`dc='k'`) exposes two write-only files:
@@ -222,7 +240,7 @@ a stale discriminator behind.
 |---|---|---|
 | console-attached required | **yes** | no — auth was corvus-side |
 | requested vs granted mask | must be **equal** | must be a **subset** |
-| effect | OR into `caps` | `proc_become_legate` |
+| effect | OR into `caps` | `proc_become_legate_locked` |
 
 Equality for hostowner keeps the protocol explicit: a `/use` asking for a
 different cap is a bug or an attack, not a negotiation. Subset for clearance
@@ -230,7 +248,7 @@ is *self-restriction* — the Proc voluntarily narrows below its ceiling,
 which is I-2's shape. In both cases a failed gate does **not** consume the
 grant, so the legitimate holder can still redeem.
 
-**The legate is a scope, not an identity change.** `proc_become_legate` ORs
+**The legate is a scope, not an identity change.** `proc_become_legate_locked` ORs
 the caps atomically, leaves `principal_id` untouched, allocates a monotonic
 `scope_id`, and marks the Proc `LEGATE_ROOT`. The root flag is never
 inherited (no `proc_flags` are), so an `rfork` child is a scope *member*,
@@ -413,6 +431,16 @@ so the invariant holds trivially today.
 - The reserved-bit block lists `CAP_SIGNAL_ANY` as a future bit, then notes
   it was realized as `CAP_KILL`. Next free bit is `1<<12`.
 
+## Image sharing excludes kernel descriptor pins (AS-2a)
+
+`proc_image_join_locked` and `proc_image_stamp_locked` use address-space process
+owner count, not the total count that includes asynchronous cleanup pins. The
+pin retains storage/accounting but cannot write the user's image or confer
+process authority. Actual live sharers still block elevation, and the existing
+zombie subtraction and table publication proof are unchanged. Native tests
+exercise sole-plus-pin, real shared Proc, then sole-plus-pin again. No new
+capability or authority inheritance rule is introduced by this prerequisite.
+
 ## Provenance
 
 [[chg-2026-08-02-authority-sweep]].
@@ -440,3 +468,55 @@ drift the Caveats once carried), and `proc.c` gained `rfork_forked_with_caps` �
 the Linux `clone`'s rfork, `caps_mask = CAP_ALL`. After two borrowed flags a
 reader had every reason to skip the third; this one was the dossier's own. Folded
 at [[chg-2026-09-05-caps-fork-inherit]].
+
+## Terminal host seal consumer
+
+Terminal interaction BIND checks both NOTRACE and NODUMP and refuses DEBUG_TAINTED
+under the process lifecycle lock. It adds no new capability bit and changes no
+capability inheritance rule. Userspace must spawn the terminal host sealed before
+its first user instruction; the kernel's current seal check is not a historical
+proof of when that seal was first stamped. See [[sub-kernel-pts]].
+
+## AS-2b admission (October 4)
+
+Async admission captures a live creator's atomic caps together with its durable
+principal/groups, by value. Ordinary owner-first DAC consumes the same structure;
+no worker, special principal or synthetic Proc supplies authority. New operations
+must resample; a saved ring cannot cache grants permanently. Existing live peer
+checks and capability revocation semantics remain in place.
+
+## Private ring sharing and fork exclusion
+
+Private command-ring memory cannot acquire a second process writer: AS guard
+admission and process-owner acquisition share one lock, and COW omits tagged
+ring VMAs. This supplements identity checks, which cannot distinguish writers
+sharing one SQ page. Kernel lifetime pins do not count as authority-sharing
+owners. These helpers do not activate the private Loom ABI.
+
+## Private worker budget identity
+
+The internal ticket helper resolves a live creator/image before charging its
+ordinary shared thread budget. Existing resource exemption controls the cap,
+never whether the worker is counted; even exempt counters refuse overflow.
+The ticket carries only stripes, not cached credentials or authority. It cannot
+authorize a service request and adds no capability or inheritance rule. Private
+ring runtime remains gated; [[sub-kernel-proc]] owns the lifetime contract.
+
+## 2026-10-07: flagged by co-tenancy, nothing owed (AS-R9)
+
+`kernel/proc.c` moved +6 lines since this dossier's date and `quaestor stale`
+flagged it, as it flags every owner of that file -- churn is measured per FILE,
+not per surface ([[chg-2026-08-15-stale-by-cotenancy]], which recorded the same
+disposition for this surface once before).
+
+The entire delta is ONE hunk: `handle_private_exec_latch(p)` plus its five-line
+comment inside `proc_exec_replace`. Checked by bounded token count against this
+dossier's own material rather than by eye:
+
+    proc_exec_replace        0 mentions in this dossier
+    handle_private_exec_latch / private_exec   0
+    close_on_exec                              0
+
+The hunk installs no capability check, reads none, and changes nothing about the fork-grantable ceiling, the cap device or the legate. A latched ring confers no authority, which is also what [[sub-kernel-proc]]'s private-worker entry records for the ticket. The fact is owed by [[sub-kernel-proc]], which owns
+`proc_exec_replace`, and it is recorded there. Dated current rather than left
+flagged, so the next session does not redo this check.

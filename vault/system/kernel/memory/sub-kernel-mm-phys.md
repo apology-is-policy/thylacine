@@ -6,11 +6,21 @@ title: "The page allocator — phys bootstrap, buddy, per-CPU magazines"
 code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h"]
 audit: hard
 guarded-by: [inv-i32]
-validated-by: [gate-smp, spec-capacity]
-locks: [lock-buddy-zone]
+validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
+locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
 updated: 2026-10-27
 ---
+
+## Shared-memory accounting review
+
+The user-pool charge applies to alloc_user_pages/PG_USER backing. The current
+DMA weave/GPU BO constructor dma_create_body uses raw alloc_pages, so those
+buffers are not included by that tag path. The proposed durable-account and
+reserve-classification replacement is in docs/SHARED-MEMORY-ACCOUNTING.md;
+it is an approved design, not installed enforcement. Existing pool semantics and
+the separate shared-map floor remain in force.
+
 ## Purpose
 
 Every physical 4 KiB frame that is not the kernel image, the
@@ -65,8 +75,8 @@ table lists it as a trigger surface in its own right.
   — after which runtime kstack-guard flips only toggle present L3
   leaves, never a break-before-make, eliminating the #806 IRQ-during-
   BBM race for the buddy zone by construction.
-- Diagnostics: total/free/reserved pages, the #808 table-page cost,
-  `phys_zone_bounds`.
+- Diagnostics: total/free/reserved pages, the #808 table-page cost, and
+  the tests' `phys_zone_bounds`.
 
 ## Mechanism
 
@@ -90,26 +100,29 @@ a corrupted `page->order` would walk past the free-list array).
 
 **Magazines** (#807, [[chg-2026-05-31-807-magazines]]): 16-entry
 per-CPU stacks at orders 0 and 4 KiB/2 MiB, half-fill hysteresis
-(refill/drain to 8). The fast path is IRQ-masked
-(`spin_lock_irqsave(NULL)` — bare mask, no lock): the mask pins the
-CPU identity across `my_cpu()` → pop/push and makes the set
+(refill/drain to 8). The fast path is IRQ-masked, then takes the
+set's own lock ([[lock-magazine-set]], since 2026-10-21): the mask
+pins the CPU identity across `my_cpu()` → pop/push and makes the set
 non-reentrant (IRQ-context allocs can't re-enter; preemption is
-IRQ-driven so no mid-op migration). Pre-#807 `NCPUS` was 1 — every
+IRQ-driven so no mid-op migration); the lock excludes a peer CPU
+draining the set, which the mask cannot. Pre-#807 `NCPUS` was 1 — every
 CPU shared one set and raced the non-atomic `count` RMW, the SMP
 double-alloc. The count-corruption `ASSERT_OR_DIE` is the loud
 regression guard. `my_cpu()` is `MPIDR_EL1.Aff0` clamped to range —
 the kernel-wide dense-Aff0 assumption ([[fnd-807-f1]],
-[[seam-sparse-mpidr]]: a clustered SoC folds two CPUs onto one slot
-and reopens the shared-set race; the Lazarus canonical map is the
-fix, uniformly with sched/gic/fault/halls).
+[[seam-sparse-mpidr]]: a clustered SoC folds two CPUs onto one slot;
+the set's lock keeps that correct but contended, and sched/gic/fault/
+halls have no such lock, so the Lazarus canonical map is still the
+fix, uniformly).
 
 Refill and drain call `buddy_alloc`/`buddy_free` **once per page** —
 the buddy lock is taken 8 times per boundary crossing, not once per
 batch. The bulk-op under one hold is the named lift
 ([[seam-buddy-bulk-op]]).
 
-`magazines_drain_all` is **quiescent-only** — it walks peer CPUs'
-sets with no coordination; test-harness and shutdown use only.
+`magazines_drain_all` (tests build only) drains every CPU's set, each under its own lock,
+so it is safe while peers allocate. It does not give a stable global
+count: a peer may refill its set the moment the drain lets go.
 
 ## Data structures
 
@@ -338,9 +351,11 @@ skipped).
   by the F3 cap's reach argument; raising the cap requires extending
   `l1_directmap` FIRST, and at any `mem_base != 1 GiB` bringup the
   cap must become absolute ([[seam-mm-directmap-cap-absolute]]).
-- The magazine fast path's soundness is the MASK, not a lock — any
-  path that touches `g_percpu` without it (or from a peer CPU, as
-  `magazines_drain_all` does) must prove quiescence.
+- The magazine fast path's soundness is the mask PLUS the set's lock:
+  the mask pins the CPU and excludes same-CPU IRQ re-entry, the lock
+  excludes a peer. Any path that touches `g_percpu` holds that set's
+  lock; a peer-CPU touch under the mask alone is the October 21 defect
+  (below).
 - `mag_alloc`/`mag_free` init page fields OUTSIDE the critical
   section — correct only while the page is private to the caller;
   a future shared-magazine design loses that.
@@ -373,7 +388,8 @@ teardown test hit it, and the only reason a working mechanism did not get
 theory.
 
 `magazines_drain_all()` before each sample makes the figure a true total
-again. Measured with the drain in place: the private teardown returns one
+again, provided no peer refills a set between the drain and the sample (the
+drain is safe at any time, but it is not a measurement; see October 21). Measured with the drain in place: the private teardown returns one
 page, the shared teardown returns zero.
 
 **The earlier draft of the same test was worse — it passed.** It asserted
@@ -434,3 +450,57 @@ order-0 instrument trap) →
 `alloc_user_pages`, `PG_USER`, the return at `free_pages`) →
 thread-model C6, 2026-10-27 (`capacity_charge` / `capacity_uncharge`: user
 threads' kernel memory joins the pool).
+
+## October 21: each CPU's magazine set gets its own lock (Corona)
+
+Until now the fast path's only exclusion was the IRQ mask, and
+`magazines_drain_all` was documented quiescent-only. The in-kernel suite
+did not honour that: 21 test call sites drain after `smp_init`, with
+kthreads runnable on peer CPUs. A host model of the real bodies under
+ThreadSanitizer (2026-10-07, `work/oct5-as-r9/mag-double`) produced 7575
+silent double allocations with the #807 count guard never firing, because
+the count stays in range while a drain and a push or pop interleave.
+
+The operator chose a per-CPU lock (vote, 2026-10-21) over an IPI-per-CPU
+drain and over a test-only stop-the-world. `struct percpu_data` carries a
+spinlock. `mag_alloc` and `mag_free` mask IRQs, pick the local set with
+`my_cpu()`, then take its lock. `magazines_drain_all` takes each set's
+lock in turn, irqsave. Lock order: magazine lock, then zone lock; no
+path holds two magazine locks ([[lock-magazine-set]]). This is the
+heritage design: illumos kmem's per-CPU cache takes `cc_lock` on every
+alloc and free, and Linux's per-CPU page lists gained a per-CPU spinlock
+in 2022 for remote draining. ARCH 6.3 now says the hot path takes no
+SHARED lock, instead of "lock-freedom".
+
+The witness is `tools/test-magazines.py`: the actual bodies and structs,
+extracted, under TSan, with three CPUs churning their own sets and a
+fourth draining. Clean: no race report, no page handed to two owners,
+every page back in the zone exactly once. Three mutants each drop one
+side's lock (the drain's, the alloc's, the free's) and must draw a race
+report, and the same model on the pre-lock `magazines.c` (pinned at
+b057de8eb) must fail; `--mutants` runs all five legs ([[gate-magazines-tsan]]).
+Its guest twin, `phys.drain_meets_live_owners`, drains while three kthreads
+churn their own sets, each stamping every page it holds and checking the
+stamps before freeing them; a drain that freed a page its owner was popping
+would let a second owner overwrite the stamp. Each owner is placed on one
+of the drainer's peers with `ready_on` and woken by IPI: in-kernel tests
+send no idle-peer IPIs, and `sched()` steals only onto an empty tree, so a
+`ready()`d owner runs on the drainer's own CPU. Its first run did exactly
+that and never met its premise, a drain while an owner reports another
+CPU, which the test asserts before the stamps. It drains once more after
+joining the owners, because the next test's gauge reads the buddy without
+draining.
+
+On each of the three sabotaged trees (the pre-lock bodies, the drain
+unlocked, the alloc unlocked) the twin dies before any stamp is checked: a
+page freed into the buddy twice is still linked after its first pop clears
+its links, so a later refill's pop in `buddy_alloc`, under an owner's
+`mag_alloc`, writes through NULL. On the locked tree it passes in every gate
+leg (2026-10-22, at 7062e8926: CONTROL, CONTROL-Q and UBSan 1901/1901; SMP
+five configurations of ten boots each). The kill is evidence only beside that
+pass, since the criterion admitting a fault was widened after the first run
+that showed one.
+
+The drain is now safe, not a measurement: the Loom private fixture's
+unpinned-reap release witness stays removed, because it needs a stable
+global count, which a production counter would give and a drain cannot.

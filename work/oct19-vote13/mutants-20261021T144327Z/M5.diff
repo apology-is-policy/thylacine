@@ -1,0 +1,13 @@
+diff --git a/kernel/vivarium.c b/kernel/vivarium.c
+index 0a3608576..f2c0ed928 100644
+--- a/kernel/vivarium.c
++++ b/kernel/vivarium.c
+@@ -437,7 +437,7 @@ static const struct viv_reject g_viv_rejects[] = {
+     //   restart_syscall — the kernel-internal restart continuation, meaningless
+     //                   without SA_RESTART.
+     { VIV_LINUX_SIGALTSTACK,     VIV_ENOSYS },
+-    { VIV_LINUX_RT_SIGSUSPEND,   VIV_ENOSYS },
++    { VIV_LINUX_RT_SIGSUSPEND,   VIV_FORWARD },
+     { VIV_LINUX_RT_SIGPENDING,   VIV_ENOSYS },
+     { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_ENOSYS },
+     { VIV_LINUX_RT_SIGQUEUEINFO, VIV_ENOSYS },

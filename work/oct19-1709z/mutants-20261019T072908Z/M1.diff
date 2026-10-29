@@ -1,0 +1,13 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 30f29ec60..1352170d8 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -11909,7 +11909,7 @@ static struct Spoor *viv_sock_pin_ctl(struct Proc *p, struct viv_socktab *tab,
+     if (hook) hook(p, fd_raw);
+ #endif
+     struct Spoor *s = sys_lookup_rw_handle(p, (hidx_t)fd_raw, want);
+-    if (s && viv_socktab_ctl_is(tab, (s32)(s64)fd_raw, e->epoch, s)) return s;
++    if (s) return s;
+     if (s) spoor_clunk(s);
+     struct viv_sock now;
+     if (viv_socktab_get(tab, (s32)(s64)fd_raw, &now) && now.epoch == e->epoch &&

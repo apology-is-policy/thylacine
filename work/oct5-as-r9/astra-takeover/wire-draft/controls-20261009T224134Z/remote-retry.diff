@@ -1,0 +1,9 @@
+--- kernel/loom_service_wire.c
++++ remote-retry.c
+@@ -67,5 +67,5 @@
+ }
+ bool loom_private_wire_retry(const struct loom_service_wire *w,int error,
+                              const struct loom_service_reply *reply) {
+-    return w && reply && w->local_again && !error && reply->result==-T_E_AGAIN;
++    return w && reply && !error && reply->result==-T_E_AGAIN;
+ }

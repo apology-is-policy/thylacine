@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:00:11
+@@ -3588,7 +3588,7 @@
+     struct Thread *t = current_thread();             if (!t) return -1;
+     struct Proc *p = t->proc;                        if (!p) return -1;
+     s32 pid = 0;
+-    if (!sys_s32_arg(a0, &pid)) return -T_E_INVAL;
++    pid = (s32)a0; // width: MUTANT M2 truncates
+     return (s64)proc_getpgid(p, pid);
+ }
+ 

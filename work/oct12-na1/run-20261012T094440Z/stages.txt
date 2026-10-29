@@ -1,0 +1,35 @@
+2026-10-12T09:44:40Z  HEAD 3f816c8a497eea835d337572e596acbf5700a595
+2026-10-12T09:44:41Z  expected tests (derived from test.c): 1869
+2026-10-12T09:44:42Z  build-config test: ALL PASS
+2026-10-12T09:44:42Z  disk pre: 11960 MiB free (floor 8192)
+2026-10-12T09:45:56Z  disk post-control-d-build: 12074 MiB free (floor 8192)
+2026-10-12T09:46:56Z  control-d: test.sh exit 0
+2026-10-12T09:46:56Z  CONTROL-D GREEN: 1869/1869, the default bridge body and four witnesses PASS
+2026-10-12T09:48:05Z  disk post-control-q-build: 12024 MiB free (floor 8192)
+2026-10-12T09:49:01Z  control-q: test.sh exit 0
+2026-10-12T09:49:01Z  CONTROL-Q GREEN: 1869/1869, the qualification bridge body PASSes; default kernel untouched
+2026-10-12T09:49:01Z  disk pre-m3: 11905 MiB free (floor 8192)
+2026-10-12T09:50:12Z  disk post-m3-build: 12018 MiB free (floor 8192)
+2026-10-12T09:50:26Z  m3: test.sh exit 1
+2026-10-12T09:50:26Z  M3 DISCRIMINATED: exactly the two frontend witnesses FAIL at their named assertions
+2026-10-12T09:50:26Z  disk pre-m4: 12008 MiB free (floor 8192)
+2026-10-12T09:51:42Z  disk post-m4-build: 12005 MiB free (floor 8192)
+2026-10-12T09:51:57Z  m4: test.sh exit 1
+2026-10-12T09:51:57Z  M4 DISCRIMINATED: exactly loom.setup_close_race FAILs at its named assertion
+2026-10-12T09:51:57Z  disk pre-m5: 11998 MiB free (floor 8192)
+2026-10-12T09:53:09Z  disk post-m5-build: 11985 MiB free (floor 8192)
+2026-10-12T09:53:23Z  m5: test.sh exit 1
+2026-10-12T09:53:23Z  M5 DISCRIMINATED: exactly the two rollback witnesses FAIL at their named assertions
+2026-10-12T09:53:23Z  disk pre-m6: 11980 MiB free (floor 8192)
+2026-10-12T09:54:39Z  disk post-m6-build: 11974 MiB free (floor 8192)
+2026-10-12T09:54:47Z  m6: test.sh exit 1
+2026-10-12T09:54:47Z  M6 DISCRIMINATED: the qual boot extincts with exactly 'private register lost its reservation rollback' inside loom.private_bridge
+2026-10-12T09:54:47Z  disk pre-m7: 11975 MiB free (floor 8192)
+2026-10-12T09:55:59Z  disk post-m7-build: 11960 MiB free (floor 8192)
+2026-10-12T09:56:14Z  m7: test.sh exit 1
+2026-10-12T09:56:14Z  M7 DISCRIMINATED: exactly loom.private_bridge FAILs at its weft-share assertion
+2026-10-12T09:58:25Z  rebuild-d byte-identical to CONTROL-D
+2026-10-12T09:58:25Z  rebuild-q byte-identical to CONTROL-Q
+2026-10-12T09:58:25Z  GUARD: 243 production sources; both sq_head writes inside loom_sq_release (loom.c:3380-3387)
+2026-10-12T09:58:28Z  SHAPE: 4 files x {default, lever} compile with KERNEL_TESTS off; no test hook symbol survives
+2026-10-12T09:58:28Z  exit 0

@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:04:09
+@@ -12552,7 +12552,7 @@
+     s64 lrc = sys_resolve_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                          2u /* ORDWR */, &lsp, &lr);
+     if (lrc < 0) {
+-        handle_unreserve(p, dh);
++        (void)dh; // MUTANT M11: the reservation leaks
+         return lrc;
+     }
+     // netd held that open until a call arrived: the connection is ours now, and

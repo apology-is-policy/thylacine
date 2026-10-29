@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Actual process-budget source, pthread lifetime lock double, named mutants."""
+from pathlib import Path
+import argparse,importlib.util,os,shlex,subprocess,tempfile
+ROOT=Path(__file__).resolve().parent.parent
+spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
+MUTANTS=[
+ ('image','p->as == c->as &&','true &&','wrong image refused'),
+ ('zombie','p->state == PROC_STATE_ALIVE &&','true &&','zombie refused'),
+ ('terminating','__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&','true &&','terminating refused'),
+ ('cap','proc_thread_room_locked(p)) {','(proc_thread_room_locked(p) || true)) {','the Proc\'s own budget refuses'),
+ ('budget','__atomic_load_n(&p->thread_budget, __ATOMIC_RELAXED)','8u','the Proc\'s own budget refuses'),
+ ('threadlock','irq_state_t s = proc_threads_lock(p);\n    if (c->release) {','irq_state_t s = 0;\n    if (c->release) {','budget under the thread lock'),
+ ('occupied','if (!ticket->stripes) {','if (true) {','occupied ticket refused'),
+ ('consume','ticket->stripes = 0;','/* lost consumption */','refund survives exec'),
+ ('identity','if (p->stripes != c->stripes) return 0;','if (false) return 0;','missing creator refused'),
+ ('overflow','p->loom_sqpoll_count < 0x7fffffff','p->loom_sqpoll_count <= 0x7fffffff','exempt overflow refused'),
+]
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
+ s=(ROOT/'kernel/proc.c').read_text();body=s[s.index('struct sqpoll_ticket_ctx {'):s.index('bool proc_child_cap_ok(')]
+ i=s.index('static bool proc_thread_room_locked(');room=s[i:s.index('\n}\n',i)+3]
+ s=(ROOT/'kernel/include/thylacine/proc.h').read_text();decl=s[s.index('struct ProcSqpollTicket {'):s.index('#ifdef KERNEL_TESTS\n// proc_child_cap_ok')]
+ cc,cc_extra=sanitizer_cc.select(a.logs)
+ fixture=(ROOT/'tools/host-tests/sqpoll-ticket.c').read_text().replace('/* ACTUAL_DECL */',decl).replace('/* ACTUAL_ROOM */',room).replace('/* ACTUAL_BODY */',body)
+ with tempfile.TemporaryDirectory(prefix='sqpoll-ticket-') as tmp:
+  for name,old,new,expected in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
+   s=fixture
+   if old:assert s.count(old)==1,(name,s.count(old));s=s.replace(old,new)
+   f=Path(tmp)/(name+'.c');f.write_text(s);exe=f.with_suffix('')
+   cmd=[cc,'-std=c11','-Wall','-Wextra','-Werror','-O1','-pthread',*sanitizer_cc.SANITIZE,str(f),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
+   sanitizer_cc.build(cmd,a.logs/(name+'-build.log'))
+   r=subprocess.run([str(exe)],text=True,capture_output=True,timeout=30);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
+   # Overflow mutant is stopped by UBSan before the boolean postcondition.
+   message='signed integer overflow' if name=='overflow' else expected
+   sanitizer_cc.check(name,r,message if expected else None,any_failure=True,by_sanitizer=name=='overflow')
+   print('PASS '+name+(': '+message if expected else ''),flush=True)
+if __name__=='__main__':main()

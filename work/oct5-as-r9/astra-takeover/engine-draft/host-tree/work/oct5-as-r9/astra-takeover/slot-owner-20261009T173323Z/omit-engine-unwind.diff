@@ -1,0 +1,11 @@
+--- control
++++ omit-engine-unwind
+@@ -166,7 +166,7 @@
+     struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || !engine || layout_fault) ? NULL :
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+-        kfree(engine);
++
+         kfree(requests);
+         kfree(nodes);
+         kfree(targets);

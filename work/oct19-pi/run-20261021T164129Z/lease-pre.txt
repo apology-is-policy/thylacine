@@ -1,0 +1,7 @@
+mac   HELD by main for 22s, 2.0h left
+        why: B-3g fontconfig device run
+        queue 1: aux (1.7h waiting)
+        queue 2: astra (1.4h waiting)
+pi    HELD by you for 20s, 3.0h left
+        why: corona: the A72/KVM SMP axis for corona 293cdbabe (vote 13 + the Loom close): pi-smp.sh run, N=10 per config in corona's private pi tree. Length uncertain; released when the boots end.
+disk: 10.8 GiB available at /Users/northkillpd/projects/thylacine-corona

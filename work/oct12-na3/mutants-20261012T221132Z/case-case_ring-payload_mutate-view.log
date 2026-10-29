@@ -1,0 +1,9 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+error[E0594]: cannot assign to data in a `&` reference
+    --> src/tests/ring.rs:2663:74
+     |
+2663 | let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;
+     |                                                                          ^^^^^^^^^^^^^^ cannot assign
+
+For more information about this error, try `rustc --explain E0594`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

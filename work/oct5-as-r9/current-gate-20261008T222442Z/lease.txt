@@ -1,0 +1,4 @@
+mac   HELD by you for 3m, 1.9h left
+        why: Astra private slot owner allocation and retirement qualification
+pi    FREE
+disk: 11.1 GiB available at /Users/northkillpd/projects/thylacine-astra

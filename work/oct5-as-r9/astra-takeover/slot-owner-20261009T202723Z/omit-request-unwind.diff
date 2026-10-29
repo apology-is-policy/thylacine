@@ -1,0 +1,11 @@
+--- control
++++ omit-request-unwind
+@@ -168,7 +168,7 @@
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+         kfree(engine);
+-        kfree(requests);
++
+         kfree(nodes);
+         kfree(targets);
+         kfree(pools);

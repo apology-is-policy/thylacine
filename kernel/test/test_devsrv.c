@@ -40,10 +40,15 @@
 
 #include "test.h"
 
+#include <limits.h>
+
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
+#include <thylacine/srvconn.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/poll.h>
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/spoor.h>
@@ -51,28 +56,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
-
-// Test-support registry wipe (non-static; defined in kernel/devsrv.c;
-// deliberately not in devsrv.h — no production caller).
-extern void srv_registry_reset(void);
-extern bool srv_test_accept_pin(struct SrvService *svc, int mode);
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
-extern int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
-                              struct Spoor *mountpoint, u32 flags);
-extern int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint);
-
-void test_devsrv_registered(void);
-void test_devsrv_open_root_dir(void);
-void test_devsrv_stat_native_root(void);
-void test_devsrv_post_gate(void);
-void test_devsrv_post_basic(void);
-void test_devsrv_tombstone(void);
-void test_devsrv_registry_full(void);
-void test_devsrv_post_rollback(void);
-void test_devsrv_registry_lifecycle(void);
-void test_devsrv_svc_ref_holds_registry(void);
-void test_devsrv_post_listener(void);
-void test_devsrv_service_keys_distinct(void);
 
 static struct Proc *make_test_proc(void) {
     return proc_alloc();
@@ -370,11 +353,27 @@ void test_devsrv_post_rollback(void) {
     while (handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, NULL) >= 0) filled++;
     TEST_ASSERT(filled > 0, "handle table filled");
 
-    TEST_EXPECT_EQ(post_svc_9p(p, "corvus", 6), -1,
+    TEST_EXPECT_EQ(post_svc_9p(p, "corvus", 6), -T_E_MFILE,
         "post fails when the handle table is full");
     TEST_EXPECT_EQ(srv_registry_count(), 0,
         "failed post left no stale registry entry (srv_abort rolled back)");
 
+    // The same failure on a mortal registry must undo the listener's
+    // provisional retain as well as its reserved name.
+    u64 destroyed0 = srv_registry_total_destroyed();
+    struct SrvRegistry *reg = srv_registry_create();
+    TEST_ASSERT(reg != NULL, "rollback mortal registry");
+    struct Spoor *root = devsrv_attach_registry(reg);
+    TEST_ASSERT(root != NULL, "rollback registry root");
+    TEST_EXPECT_EQ(devsrv_post_listener(p, root, "rollback", 8,
+                                       SRV_MODE_BYTE, false, false, false), -T_E_MFILE,
+        "mortal post fails at handle allocation");
+    TEST_EXPECT_EQ(srv_lookup_in(reg, "rollback", 8), NULL,
+        "failed post returns mortal slot to FREE");
+    spoor_clunk(root);
+    srv_registry_unref(reg);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)1,
+        "failed listener allocation leaks no registry ref");
     drop_test_proc(p);
 }
 
@@ -383,7 +382,10 @@ void test_devsrv_post_rollback(void) {
 // attached root + each clone-walk-zero of it), each dropped at devsrv_close
 // (the Spoor's last clunk). The last registry ref drains + frees. Proves no
 // phantom unref (the normalize-aux discipline in devsrv_walk) and no leak.
+static void test_session_registry(void);
+
 void test_devsrv_registry_lifecycle(void) {
+    test_session_registry();
     u64 created0   = srv_registry_total_created();
     u64 destroyed0 = srv_registry_total_destroyed();
     u64 sp_alloc0  = spoor_total_allocated();
@@ -428,6 +430,46 @@ void test_devsrv_registry_lifecycle(void) {
     TEST_EXPECT_EQ(spoor_total_allocated() - sp_alloc0,
                    spoor_total_freed() - sp_freed0,
         "no Spoor leaked across the registry lifecycle");
+
+    // A listener pins its containing registry independently of the namespace.
+    // Then model poll's precise retain/register/close/sweep/put schedule: a
+    // peer closes the table slot while its waiter is still registered.
+    struct Proc *p = make_marked_test_proc();
+    TEST_ASSERT(p != NULL, "mortal listener poster");
+    reg = srv_registry_create();
+    TEST_ASSERT(reg != NULL, "listener registry");
+    root = devsrv_attach_registry(reg);
+    TEST_ASSERT(root != NULL, "listener registry root");
+    int h = devsrv_post_listener(p, root, "pinned", 6,
+                                SRV_MODE_BYTE, false, false, false);
+    TEST_ASSERT(h >= 0, "post listener in mortal registry");
+    spoor_clunk(root);
+    srv_registry_unref(reg);
+    TEST_ASSERT(srv_registry_total_destroyed() - destroyed0 == 1,
+        "listener survives removal of every namespace/creator ref");
+
+    struct Handle held;
+    TEST_ASSERT(handle_get(p, h, &held) == 0, "retain listener snapshot");
+    struct Rendez rendez = {0};
+    struct poll_waiter waiter;
+    poll_waiter_init(&waiter, &rendez);
+    TEST_EXPECT_EQ(srv_handle_poll(held.obj, POLLIN, &waiter), 0,
+        "empty listener registers without readiness");
+    TEST_ASSERT(waiter.list != NULL, "listener waiter registered");
+    TEST_EXPECT_EQ(handle_close(p, h), 0, "peer closes table slot");
+    TEST_ASSERT(srv_registry_total_destroyed() - destroyed0 == 1,
+        "retained poll snapshot keeps registry and waiter list alive");
+    TEST_EXPECT_EQ(srv_handle_poll(held.obj, POLLIN, NULL), 0,
+        "close does not unpost or tombstone the service");
+    poll_waiter_list_unregister(&waiter);
+    TEST_EXPECT_EQ(waiter.list, NULL, "sweep removes the embedded-list hook");
+    srv_proc_exit_notify(p); // membership drops, poll snapshot still pins reg
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)1,
+        "death cannot free a retained poll snapshot");
+    handle_put(&held);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)2,
+        "last snapshot frees mortal registry after poll sweep");
+    drop_test_proc(p);
 }
 
 // devsrv.svc_ref_holds_registry — a /srv/<name> service-ref Spoor + a 2nd
@@ -540,7 +582,6 @@ void test_devsrv_post_listener(void) {
 }
 
 
-void test_devsrv_cap_post_bounds(void);
 void test_devsrv_cap_post_bounds(void) {
     srv_registry_reset();
     struct Proc *p = make_test_proc(), *q = make_test_proc();
@@ -607,7 +648,6 @@ static void test_accept_worker(void) {
     test_kthread_park_terminal(&g_accept_exited);
 }
 
-void test_devsrv_accept_lifetime(void);
 void test_devsrv_accept_lifetime(void) {
     srv_registry_reset();
     struct Proc *p = make_marked_test_proc(), *q = make_marked_test_proc();
@@ -719,5 +759,182 @@ void test_devsrv_service_keys_distinct(void) {
 
     spoor_clunk(root);
     drop_test_proc(p);
+    srv_registry_reset();
+}
+
+// The constructor answers a descriptor or a refusal as s64. Anything that is
+// not a descriptor reads as -1, so it fails the caller's >= 0 check rather
+// than narrowing into a plausible index; the range is checked before the
+// narrowing, which never sees a value hidx_t cannot hold.
+static hidx_t registry_new_fd(struct Proc *p, u64 source_fd, const struct srv_route *routes,
+                              u64 count, u64 flags) {
+    s64 rc = sys_srv_registry_new_for_proc(p, source_fd, routes, count, flags);
+    return rc >= 0 && rc <= INT_MAX ? (hidx_t)rc : -1;
+}
+
+static struct Spoor *session_leaf(struct Spoor *root, const char *name) {
+    struct Spoor *c = spoor_clone(root);
+    if (!c) return NULL;
+    struct Walkqid *w = devsrv.walk(root, c, &name, 1);
+    if (!w) { spoor_clunk(c); return NULL; }
+    walkqid_free(w);
+    return c;
+}
+
+static void test_session_registry(void) {
+    srv_registry_reset();
+    struct Proc *p = make_marked_test_proc();
+    struct Proc *q = make_marked_test_proc();
+    TEST_ASSERT(p && q, "session factory procs");
+    struct Spoor *boot = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(boot, "boot source");
+    boot->flag |= CWALKONLY;
+    int fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, boot);
+    TEST_ASSERT(fd >= 0, "source fd");
+    struct srv_route r = {.name_len = 8, .name = "resident"};
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &r, 1, 0), -T_E_ACCES,
+        "posting authority alone cannot mint quota domains");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(p, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "poster cannot delegate factory");
+    proc_mark_session_registry(p);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(p, SPAWN_PERM_SESSION_REGISTRY), 0,
+        "factory holder can explicitly delegate");
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, ~0ULL, &r, 1, 0), -T_E_BADF, "bad fd");
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &r, 1, 1), -T_E_INVAL, "reserved flags");
+    r.reserved = 1;
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &r, 1, 0), -T_E_INVAL, "reserved route bytes");
+    r.reserved = 0;
+    struct srv_route bad = r;
+    bad.name[31] = 'x';
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &bad, 1, 0), -T_E_INVAL, "nonzero unused bytes");
+    bad = (struct srv_route){.name_len = 1, .name = "."};
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &bad, 1, 0), -T_E_INVAL, "dot route refused");
+    bad = (struct srv_route){.name_len = 2, .name = ".."};
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &bad, 1, 0), -T_E_INVAL, "parent route refused");
+    bad = (struct srv_route){.name_len = 3, .name = "a/b"};
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, &bad, 1, 0), -T_E_INVAL, "separator route refused");
+    struct srv_route duplicate[2] = {r, r};
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, duplicate, 2, 0), -T_E_INVAL, "duplicate routes");
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, NULL, 17, 0), -T_E_INVAL, "manifest bounded before dereference");
+    // Sixteen simultaneously retained roots, then repeated construction well
+    // beyond that bound. Retired domains must actually return their tickets.
+    int roots[SRV_MAX_DOMAINS];
+    for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) {
+        roots[i] = registry_new_fd(p, fd, NULL, 0, 0);
+        TEST_ASSERT(roots[i] >= 0, "empty manifest root");
+    }
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, fd, NULL, 0, 0), -T_E_NOSPC, "retained root bound");
+    for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) handle_close(p, roots[i]);
+    for (u32 i = 0; i < 40; i++) {
+        int fresh = registry_new_fd(p, fd, &r, 1, 0);
+        TEST_ASSERT(fresh >= 0, "retired domains do not accumulate");
+        handle_close(p, fresh);
+    }
+    int a = registry_new_fd(p, fd, &r, 1, 0);
+    int b = registry_new_fd(p, fd, &r, 1, 0);
+    TEST_ASSERT(a >= 0 && b >= 0, "two private views");
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(p, a, &r, 1, 0), -T_E_ACCES,
+        "private root cannot create nested quota domains");
+    struct Handle ah, bh;
+    TEST_ASSERT(handle_get(p, a, &ah) == 0 && handle_get(p, b, &bh) == 0, "hold roots");
+    struct Spoor *ar = ah.obj, *br = bh.obj;
+    TEST_ASSERT(ar->devno != br->devno, "mount identities independent");
+    TEST_ASSERT(p->territory == NULL, "fixture begins without territory");
+    p->territory = territory_alloc();
+    TEST_ASSERT(p->territory, "session mount territory");
+    int point_fd = install_source(p, QTDIR, 0x7171);
+    struct Handle point_h;
+    TEST_ASSERT(point_fd >= 0 && handle_get(p, point_fd, &point_h) == 0, "mountpoint fixture");
+    struct Spoor *point = point_h.obj;
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd, point, MREPL), 0, "initial boot /srv mount");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, a, point, MREPL), 0, "session replaces boot group");
+    struct Spoor *member = mount_member_at(p->territory, point, 0, NULL);
+    TEST_ASSERT(member && member->devno == ar->devno, "only private registry visible");
+    spoor_clunk(member);
+    TEST_EXPECT_EQ(mount_member_at(p->territory, point, 1, NULL), NULL, "no boot union tail");
+    TEST_EXPECT_EQ(sys_unmount_for_proc(p, point), 0, "remove private registry");
+    TEST_EXPECT_EQ(mount_member_at(p->territory, point, 0, NULL), NULL, "unmount cannot reveal boot alias");
+    handle_put(&point_h);
+
+    TEST_ASSERT(devsrv_post_listener(p, ar, "local", 5, SRV_MODE_BYTE, false, false, false) >= 0,
+        "post first session");
+    TEST_ASSERT(devsrv_post_listener(p, br, "local", 5, SRV_MODE_BYTE, false, false, false) >= 0,
+        "same name second session does not collide");
+    TEST_EXPECT_EQ(devsrv_post_listener(p, ar, "resident", 8, SRV_MODE_BYTE, false, false, false), -1,
+        "offline route cannot be shadowed by trusted poster");
+    struct Spoor *leaf = session_leaf(ar, "resident");
+    TEST_ASSERT(leaf, "offline route reserves stable leaf");
+    TEST_EXPECT_EQ(devsrv_open_connect(p, leaf, 0), NULL, "offline route fails connect");
+    int listener = devsrv_post_listener(q, boot, "resident", 8, SRV_MODE_BYTE, false, false, false);
+    TEST_ASSERT(listener >= 0, "resident starts after view creation");
+    TEST_EXPECT_EQ(devsrv_open_connect(p, leaf, 0), NULL, "route does not bypass D8");
+    p->caps |= CAP_TCB_DIAL;
+    struct Spoor *conn = devsrv_open_connect(p, leaf, 0);
+    TEST_ASSERT(conn, "trusted dial through route");
+    struct SrvConn *cn = devsrv_conn_of(conn);
+    TEST_ASSERT(cn && cn->domain, "routed connection charged to requesting session");
+    u32 local, total, all, domains;
+    srv_domain_counts(cn->domain, &local, &total, &all, &domains);
+    TEST_EXPECT_EQ(local, 1u, "one routed ticket");
+    srv_proc_exit_notify(q);
+    TEST_EXPECT_EQ(devsrv_open_connect(p, leaf, 0), NULL, "route goes offline on provider death");
+    TEST_EXPECT_EQ(devsrv_post_listener(q, boot, "late", 4, SRV_MODE_BYTE, false, false, false), -T_E_ACCES,
+        "closed poster cannot republish after death notification");
+    struct Proc *restart = make_marked_test_proc();
+    TEST_ASSERT(restart, "restart provider");
+    TEST_ASSERT(devsrv_post_listener(restart, boot, "resident", 8, SRV_MODE_BYTE, false, false, false) >= 0,
+        "trusted provider restarts");
+    struct Spoor *again = devsrv_open_connect(p, leaf, 0);
+    TEST_ASSERT(again, "old route sees trusted restart");
+    spoor_clunk(again);
+    spoor_clunk(leaf);
+    handle_put(&ah); handle_put(&bh);
+    drop_test_proc(restart); drop_test_proc(q); drop_test_proc(p);
+    srv_domain_counts(cn->domain, &local, &total, &all, &domains);
+    TEST_EXPECT_EQ(domains, 1u, "retained connection keeps domain but not registry");
+    spoor_clunk(conn);
+    srv_domain_counts(NULL, NULL, NULL, NULL, &domains);
+    TEST_EXPECT_EQ(domains, 0u, "last retained endpoint returns domain slot");
+    struct Proc *full = make_marked_test_proc();
+    TEST_ASSERT(full, "full fd fixture");
+    proc_mark_session_registry(full);
+    struct Spoor *source = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(source, "full fd source");
+    source->flag |= CWALKONLY;
+    int source_fd = handle_alloc(full, KOBJ_SPOOR, RIGHT_READ, source);
+    TEST_ASSERT(source_fd >= 0, "full fd source installed");
+    int wrong = handle_alloc(full, KOBJ_PROCESS, RIGHT_READ, NULL);
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(full, wrong, NULL, 0, 0), -T_E_INVAL, "wrong handle kind");
+    while (handle_alloc(full, KOBJ_PROCESS, RIGHT_READ, NULL) >= 0) {}
+    TEST_EXPECT_EQ(sys_srv_registry_new_for_proc(full, source_fd, &r, 1, 0), -T_E_MFILE, "root install rollback");
+    srv_domain_counts(NULL, NULL, NULL, NULL, &domains);
+    TEST_EXPECT_EQ(domains, 0u, "failed fd install returns domain ticket");
+    drop_test_proc(full);
+    // A route is policy for a resident, not an alias for any boot post.
+    struct Proc *factory = make_marked_test_proc();
+    struct Proc *cap_only = make_test_proc();
+    TEST_ASSERT(factory && cap_only, "cap-posted route fixtures");
+    proc_mark_session_registry(factory);
+    cap_only->caps |= CAP_POST_SERVICE;
+    source = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(source, "cap route boot source");
+    source->flag |= CWALKONLY;
+    source_fd = handle_alloc(factory, KOBJ_SPOOR, RIGHT_READ, source);
+    struct srv_route cap_route = {.name_len = 8, .name = "userboot"};
+    int view_fd = registry_new_fd(factory, source_fd, &cap_route, 1, 0);
+    TEST_ASSERT(view_fd >= 0, "view with capability-posted source name");
+    struct Handle view_h;
+    TEST_ASSERT(handle_get(factory, view_fd, &view_h) == 0, "retain route view");
+    leaf = session_leaf(view_h.obj, "userboot");
+    TEST_ASSERT(leaf, "reserved capability route leaf");
+    TEST_ASSERT(devsrv_post_listener(cap_only, source, "userboot", 8,
+        SRV_MODE_BYTE, false, false, false) >= 0, "capability can post separate boot fixture");
+    factory->caps |= CAP_TCB_DIAL;
+    TEST_EXPECT_EQ(devsrv_open_connect(factory, leaf, 0), NULL,
+        "resident route refuses cap-posted source even for trusted dialer");
+    spoor_clunk(leaf); handle_put(&view_h);
+    drop_test_proc(cap_only); drop_test_proc(factory);
+    srv_domain_counts(NULL, NULL, NULL, NULL, &domains);
+    TEST_EXPECT_EQ(domains, 0u, "refused route retains no domain charge");
     srv_registry_reset();
 }

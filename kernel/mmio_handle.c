@@ -41,6 +41,7 @@ static u64               g_mmio_created;
 static u64               g_mmio_live;
 static bool              g_mmio_initialized;
 
+#ifdef KERNEL_TESTS
 u64 kobj_mmio_total_created(void) {
     return __atomic_load_n(&g_mmio_created, __ATOMIC_RELAXED);
 }
@@ -48,6 +49,7 @@ u64 kobj_mmio_total_created(void) {
 u64 kobj_mmio_live_count(void) {
     return __atomic_load_n(&g_mmio_live, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Init.
@@ -263,10 +265,6 @@ void kobj_mmio_unref(struct KObj_MMIO *k) {
     }
 }
 
-void kobj_mmio_destroy(struct KObj_MMIO *k) {
-    kobj_mmio_unref(k);
-}
-
 // =============================================================================
 // R10 F154 (P1) close: kernel-MMIO reservation.
 // =============================================================================
@@ -319,7 +317,6 @@ static void reserve_kernel_range(u64 pa, size_t size, const char *what) {
     uart_puts(" size="); uart_puthex64((u64)size); uart_puts("\n");
 }
 #ifdef KERNEL_TESTS
-bool kobj_mmio_test_reservation_union(void);
 bool kobj_mmio_test_reservation_union(void) {
     struct mmio_claim claims[KOBJ_MMIO_MAX];
     for (size_t i = 0; i < sizeof(claims); i++) ((volatile u8 *)claims)[i] = 0;
@@ -474,16 +471,7 @@ void kobj_mmio_reserve_kernel_ranges(void) {
     // configuration drift, ECAM enumeration interference).
 }
 
-int kobj_mmio_kernel_reserved_count(void) {
-    int n = 0;
-    irq_state_t s = spin_lock_irqsave(&g_mmio_lock);
-    for (int i = 0; i < KOBJ_MMIO_MAX; i++) {
-        if (g_mmio_claims[i].owner == KOBJ_MMIO_KERNEL_RESERVED) n++;
-    }
-    spin_unlock_irqrestore(&g_mmio_lock, s);
-    return n;
-}
-
+#ifdef KERNEL_TESTS
 bool kobj_mmio_pa_claimed(u64 pa, size_t size) {
     if (size == 0) return false;
     if (size > (u64)-1 - pa) return false;  // overflow ⇒ caller mis-use
@@ -492,3 +480,4 @@ bool kobj_mmio_pa_claimed(u64 pa, size_t size) {
     spin_unlock_irqrestore(&g_mmio_lock, s);
     return claimed;
 }
+#endif // KERNEL_TESTS

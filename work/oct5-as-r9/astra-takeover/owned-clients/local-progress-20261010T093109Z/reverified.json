@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:31:33.480722+00:00",
+  "source_count": 10,
+  "command_count": 21,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "06fa46773190f8284ab1542ef720edc3acae47aab249faef056bc4450184ef8d",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "addf5da5ddf2b583bae6b03f45c6b5732f776b872e0b203c7d4fbe90dc5c02ee",
+    "no-clone-client-build": "1b6b9c3f3c501fc3ae31ab003fcccfb31bba6a1c0c3d805b1aabecd15638ece1",
+    "no-send-executor-build": "18e86ebdb69e6c4f79882123c92daaf119de8218cb4bf42883359f3b9568716a",
+    "valid-client-build": "89fcfd409909d243b835cac3ae190aff9adfa23917cef606d90b582bdcf80960",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-owner-signal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-owner-signal-run": "df9429f3e0ea8f28b6c8dcd0ccae1781b94ed4df739be5557d3f9319fcdba8b4",
+    "missing-cq-signal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-cq-signal-run": "ec3238bd759e4cadbfd5bd5565427b959bd97c87a901a30904ddffcea8fd2f75",
+    "zero-budget-loses-event-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "zero-budget-loses-event-run": "09427f28ab566e8d09158d7abbe33b4c2947b49b4782d742bf0e569922576677",
+    "lost-partial-sweep-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-partial-sweep-run": "28fce9198d5c43825c7ab812350061d8c1bad8d2c9ca1f3e1478b13a7effe81a",
+    "busy-self-reschedule-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "busy-self-reschedule-run": "36f17da98f514a678c3a952e86b96b807830f0df92f3f78640d7d1299fb7a489",
+    "missing-admission-signal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-admission-signal-run": "b348534b9bd34f28e601755919b974d32ed77028080293bf7da7fb5e1cf82011"
+  }
+}

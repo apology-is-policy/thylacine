@@ -1,0 +1,10 @@
+--- kernel/loom_service_requests.c
++++ deliver-unbounded.c
+@@ -157,7 +157,6 @@
+     if (!r) return -T_E_NOENT;
+     if (r->phase != LREQ_TERMINAL || r->borrows) return -T_E_BUSY;
+     if (t->detached) return -T_E_CANCELED;
+-    if (!loom_request_deliver_room(t)) return -T_E_AGAIN;
+     r->phase = LREQ_DELIVERED;
+     ++t->delivered;
+     return 0;

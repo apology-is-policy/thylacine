@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 23.5"
   - "docs/TRUSTED-PATH.md"
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -47,11 +47,12 @@ crash dump by `uart_tx_drain_sync`, and probed empty by `uart_tx_fifo_empty`.
 
 The RX path is `uart_rx_init` (bring-up), `uart_irq_handler` (the GIC dispatch
 target for the shared PL011 SPI), `uart_rx_pump` (the reader-side backpressure
-resume), and `uart_rx_path_enabled` (the #943 regression predicate — RX is live
+resume), and `uart_rx_path_enabled` (tests build only; the #943 regression predicate — RX is live
 iff `UARTEN` and `RXE` are both set).
 
-The base is set by `uart_set_base` (from `boot_main` after the DTB parse),
-`uart_remap_to_vmalloc` (once the MMU maps MMIO), and read by `uart_get_base`.
+The base starts at the QEMU virt fallback (`0x09000000`), is set by
+`uart_remap_to_vmalloc` (from `boot_main` after the DTB parse, once the MMU
+maps MMIO), and read by `uart_get_base`.
 
 ## Mechanism
 
@@ -247,3 +248,13 @@ room inside the window.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+**Console gate append (2026-10-14).** `uart_putc` is the gated wrapper over
+`uart_putc_wire`: after a peer's extinction claims the console, this CPU's
+bytes are dropped so the banner reaches the wire whole (sub-kernel-halls).
+`uart_tx_try_putc` (the ring drain) stays ungated: it runs under the ring lock
+the winner holds.
+
+`uart_putc` passes enter's token to exit: with IRQs on the byte holds its
+thread's preempt count, and with IRQs masked it touches no thread state
+(sub-kernel-halls, round 3).

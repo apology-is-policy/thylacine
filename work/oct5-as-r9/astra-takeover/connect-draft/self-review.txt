@@ -1,0 +1,51 @@
+Astra self-review, 2026-10-09. Not an independent audit.
+
+Scope: internal single-handshake CONNECT owner; no syscall/ring dispatch or
+private activation. Reviewed against ASYNC-SERVICE-LIFECYCLE sections 4-7,
+ASYNC-SERVICE-ABI errors/state/CQE semantics, actual requests/slots/nodes,
+protocol-owner cleanup, native prepare/publish/wake/release, and p9 progress.
+
+Ownership: reserve terminal record first, giving one exact scope pin, then
+add a separate protocol/scope pin before native allocation. Allocation failure
+unwinds both; duplicate scope is refused while any request reserves it.
+Prepared protocol keeps creator/image and independent Loom ownership through
+allocation and unwind. Exclusive publish-through-wake prevents release during
+accept wake. Check-admit, native publish, request admission and ADMITTED are
+one Ll interval. Registry lock order has no path back into this Loom. Native
+publish failure drops a nonfinal temporary ref only; allocation/final drops and
+waiter wake stay outside Ll. Request check and commit share predicates.
+
+Driver: entry lifetime is an explicit caller obligation, not a fake refcount.
+Ll excludes a second driver and makes abort and READY mutually ordered. The
+driver pins request parsing; p9 progress is outside Ll. Cancellation recheck
+wins over freshly parsed success; previously committed success stays immutable.
+Handshake deadline ends on committed success. Acknowledged abort only latches
+and tears down transport; actual exclusive cursor abort and zero live teardown
+users are required before RETIRED. Full CQ retains request and protocol storage.
+CONNECT owner alone reaps the delivered request, then its own scope pin, before
+free/refund/Loom-last drop. Child pins block explicit metadata reap. Native
+server reference can retain endpoint storage/credits after local retirement.
+
+Finding corrected: initial CONNECT implementation lacked the diagnostic phase
+required alongside protocol EIO. It now captures attempted handshake phase
+before the lower layer marks FAILED. Added host mutation and real native
+Rlerror coverage. EIO mapping is intentional per ASYNC-SERVICE-ABI, not loss of
+a promised peer errno. Timeout and explicit cancellation retain their reasons.
+
+Native fixture tests both normal/bulk real service/creator capture, actual
+version+attach exchange, no bytes before admitted publication, allocation and
+expired-publication rollback, duplicate scope, success-before-abort,
+abort-before-success, timeout, real protocol error with phase, closing owner,
+full CQ, separate endpoint lifetime and exact scope reap. The shared fixture
+links its isolated Proc into the actual process tree and always attempts local
+cleanup on failure. Host tests compile actual CONNECT/request/slot/node/CQ C;
+protocol/native doubles check lock/ref ordering and deterministic nested race
+schedules. Neither is an independent concurrency audit. Full Mac matrix still
+must qualify the final source. No Pi/A72/KVM or optional graphics claim.
+
+Integration still owed: charged per-ring lookup/entry pins, owner list, fair
+progress visits/wake predicates, close/detach retirement queue, query/reap
+handlers, remaining per-FID operations and provided-buffer leases, AS-3/4,
+then MM0-MM4. Generic terminal cleanup MUST NOT reap the CONNECT record before
+this protocol owner. Future general RPC/fid/user borrows invalidate the current
+handshake-only retirement proof and must extend it, not silently escape.

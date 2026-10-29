@@ -1,0 +1,67 @@
+
+running 10 tests
+test task_dispatch_and_wake_have_no_internal_allocation ... ok
+test task_capacity_precedes_factory_and_ids_are_owner_specific ... ok
+test task_completion_and_root_drop_release_owned_futures ... FAILED
+test task_completed_and_cancelled_wakers_cannot_wake_reused_slot ... FAILED
+test task_fixed_completion_wakes_and_result_stays_owned ... FAILED
+test task_self_wake_survives_poll_and_is_bounded ... FAILED
+test task_pending_stays_quiet_until_woken ... FAILED
+test task_fixed_future_cancel_retains_storage_until_terminal ... FAILED
+test task_zero_budget_and_many_wakes_coalesce ... FAILED
+test task_unwind_detaches_owner_and_keeps_other_tasks ... ok
+
+failures:
+
+---- task_completion_and_root_drop_release_owned_futures stdout ----
+
+thread 'task_completion_and_root_drop_release_owned_futures' (22526988) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:338:228:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- task_completed_and_cancelled_wakers_cannot_wake_reused_slot stdout ----
+
+thread 'task_completed_and_cancelled_wakers_cannot_wake_reused_slot' (22526987) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:332:161:
+assertion failed: t.cancel(old)
+
+---- task_fixed_completion_wakes_and_result_stays_owned stdout ----
+
+thread 'task_fixed_completion_wakes_and_result_stays_owned' (22526990) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:350:382:
+assertion failed: t.ready()
+
+---- task_self_wake_survives_poll_and_is_bounded stdout ----
+
+thread 'task_self_wake_survives_poll_and_is_bounded' (22526993) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:329:251:
+assertion failed: t.ready()
+
+---- task_pending_stays_quiet_until_woken stdout ----
+
+thread 'task_pending_stays_quiet_until_woken' (22526992) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:326:252:
+assertion failed: t.ready()
+
+---- task_fixed_future_cancel_retains_storage_until_terminal stdout ----
+
+thread 'task_fixed_future_cancel_retains_storage_until_terminal' (22526991) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:347:238:
+assertion failed: t.cancel(task)
+
+---- task_zero_budget_and_many_wakes_coalesce stdout ----
+
+thread 'task_zero_budget_and_many_wakes_coalesce' (22526995) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-drop-pending-task/test_local_tasks.rs:335:228:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    task_completed_and_cancelled_wakers_cannot_wake_reused_slot
+    task_completion_and_root_drop_release_owned_futures
+    task_fixed_completion_wakes_and_result_stays_owned
+    task_fixed_future_cancel_retains_storage_until_terminal
+    task_pending_stays_quiet_until_woken
+    task_self_wake_survives_poll_and_is_bounded
+    task_zero_budget_and_many_wakes_coalesce
+
+test result: FAILED. 3 passed; 7 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.00s
+

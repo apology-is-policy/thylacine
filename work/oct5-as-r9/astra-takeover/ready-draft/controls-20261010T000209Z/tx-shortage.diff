@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -34,7 +34,7 @@
+     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+     bool room=(u32)(l->cq_tail-head)<l->cq_entries;
+-    bool wire=!reason && !p->locally_retired && !p->progress.io.tx &&
++    bool wire=!reason && !p->locally_retired && true &&
+               p9_session_has_free_tag(&p->client.session);
+     u32 seen=0;struct loom_service_operation *previous=NULL;
+     for(struct loom_service_operation *o=p->op_head;o;o=o->next) {

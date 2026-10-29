@@ -38,6 +38,7 @@ cpus=4
 mem_mib="${THYLACINE_MEM_MIB:-2048}"
 gdb_flags=()
 share_flags=()
+no_share=0
 snapshot=""
 extra_qemu_args=()
 
@@ -59,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --no-share)
-            share_flags=()
+            no_share=1
             shift
             ;;
         --snapshot)
@@ -392,7 +393,7 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     # (NO backend), so QEMU only maintains a console surface for a BOUND scanout
     # -- keep gpu-mmio0 (exactly the default -nographic device set) or gpu0's
     # scanout gets no surface and aurora waits forever for its first present.
-    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "vnc-unix" || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
        || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
         gpu_flags=(
             -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
@@ -424,12 +425,10 @@ fi
 if [[ "${THYLACINE_FULL_GRAB:-1}" != "0" ]]; then
     cocoa_display="$cocoa_display,full-grab=on"
 fi
-# show-cursor=on draws the HOST pointer over the window. A STOPGAP, not the
-# fix: tapestryd sets up the virtio-gpu cursor queue but never issues
-# UPDATE_CURSOR, so the guest draws no pointer of its own and one is
-# invisible on VNC or any other display. Drop this once the guest does.
-# THYLACINE_SHOW_CURSOR=0 opts out.
-if [[ "${THYLACINE_SHOW_CURSOR:-1}" != "0" ]]; then
+# Halcyon supplies its own pointer through Lictor's cursor plane. Showing
+# another host arrow would mask guest-pointer failures and duplicate it.
+# The explicit override is useful only for diagnosing an older guest image.
+if [[ "${THYLACINE_SHOW_CURSOR:-0}" != "0" ]]; then
     cocoa_display="$cocoa_display,show-cursor=on"
 fi
 
@@ -470,7 +469,7 @@ fi
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
-if [[ ${#share_flags[@]} -eq 0 ]] && [[ "${THYLACINE_NO_SHARE:-0}" != "1" ]]; then
+if [[ "$no_share" != 1 && "${THYLACINE_NO_SHARE:-0}" != "1" ]]; then
     mkdir -p "$REPO_ROOT/share"
     share_flags=(
         -virtfs "local,path=$REPO_ROOT/share,mount_tag=host0,security_model=none,id=host0"
@@ -575,6 +574,13 @@ case "${THYLACINE_DISPLAY:-none}" in
     # mode 1a; cocoa is the operator-facing one.
     gpu-headless) display_flags=(-nographic) ;;
     cocoa) display_flags=(-display "$cocoa_display") ;;
+    vnc-unix)
+        if [[ -z "${THYLACINE_VNC_SOCKET:-}" ]]; then
+            echo "run-vm.sh: vnc-unix requires THYLACINE_VNC_SOCKET" >&2
+            exit 2
+        fi
+        display_flags=(-display "vnc=unix:$THYLACINE_VNC_SOCKET")
+        ;;
     vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
     # Headless GL for the Warp arc: needs a Linux host with an openable DRM
     # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
@@ -599,7 +605,7 @@ case "${THYLACINE_DISPLAY:-none}" in
     # (no screendump, no VNC): it is the lane for measuring the guest's own
     # present costs, and only that.
     dbus-gl) display_flags=(-display dbus,p2p=on,gl=on) ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|egl-headless|dbus-gl)" >&2
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|vnc-unix|egl-headless|dbus-gl)" >&2
            exit 2 ;;
 esac
 
@@ -742,10 +748,6 @@ fi
 if [[ -n "$scale_decl" ]]; then
     append_tokens+=("thylacine.scale=${scale_decl}")
 fi
-append_flags=()
-if (( ${#append_tokens[@]} > 0 )); then
-    append_flags=(-append "${append_tokens[*]}")
-fi
 
 # Nocturne N-1 (docs/NOCTURNE.md section 4.3): the virtio-sound function
 # (virtio device id 25 -> the warden's `virtio-pci:25` bind -> nocturned).
@@ -800,13 +802,104 @@ if [[ -n "${THYLACINE_QEMU_EXTRA:-}" ]]; then
     extra_qemu_args+=("${_env_extra[@]}")
 fi
 
+# What this boot attached, declared to the kernel as bootargs words, one per
+# instance (vote 17). QEMU's virt machine always has 32 virtio-mmio slots and an
+# empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device the
+# same way, so only the launcher knows what it asked for: a kernel test FAILS
+# when what it needs was declared and is absent, or is present undeclared, and
+# skips (counted) when it was not declared. Derived from every -device and
+# -virtfs argument QEMU is given, extras included, so it cannot drift from them:
+# thylacine.virtio-<kind> per virtio-mmio device and thylacine.virtio-pci-<kind>
+# per virtio PCI function, where the kind names the virtio DeviceID, not the
+# model (keyboard, mouse, tablet, multitouch and input-host are input; gpu-gl
+# and gpu-rutabaga are gpu), and -virtfs is the virtio-9p PCI function it makes.
+# QEMU also makes devices from -drive (unless if=none or if=pflash), -hd[a-d],
+# -cdrom, -nic and -net, and takes a -device as JSON or with driver= after
+# another key; the extras may use none of these, since the walk could not
+# declare what they attach.
+_prev=
+for _arg in ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
+    _implicit=
+    case "${_prev#-}" in
+        -drive|drive)
+            case ",$_arg," in *,if=none,*|*,if=pflash,*) ;; *) _implicit=1 ;; esac ;;
+        -hd[a-d]|hd[a-d]|-cdrom|cdrom) _implicit=1 ;;
+        -nic|nic|-net|net) [[ "$_arg" == none ]] || _implicit=1 ;;
+        -device|device)
+            _spec=${_arg%%,*}
+            [[ "$_arg" != \{* && ( "$_spec" != *=* || "$_spec" == driver=* ) ]] || _implicit=1 ;;
+    esac
+    if [[ -n "$_implicit" ]]; then
+        echo "run-vm.sh: '$_prev $_arg' attaches a device the launcher cannot declare;" \
+             "attach it with -device (a -drive if=none or -netdev backend beside it)" >&2
+        exit 2
+    fi
+    _prev=$_arg
+done
+# THYLACINE_NO_RNG=1 attaches neither: on a CPU without RNDR (HVF, -cpu
+# cortex-a72) the kernel then has no strong entropy and refuses userspace
+# (vote 18; tools/test-fault.sh no_entropy). Like THYLACINE_NO_GPU, it moves
+# every PCI function after rng_pci0 up a slot (audio, the mouse, the share,
+# any extra). That puts the sound function on the NIC's INTx line (slot 5),
+# which matters only where INTx is used (THYLACINE_ITS=off): there, add
+# THYLACINE_NO_AUDIO=1.
+rng_flags=()
+if [[ "${THYLACINE_NO_RNG:-0}" != "1" ]]; then
+    rng_flags=(-device virtio-rng-device,id=rng0 -device virtio-rng-pci,id=rng_pci0)
+fi
+_prev=
+for _arg in ${pool_flags[@]+"${pool_flags[@]}"} ${disk_flags[@]+"${disk_flags[@]}"} \
+            ${net_flags[@]+"${net_flags[@]}"} ${input_flags[@]+"${input_flags[@]}"} \
+            ${gpu_flags[@]+"${gpu_flags[@]}"} ${rng_flags[@]+"${rng_flags[@]}"} ${audio_flags[@]+"${audio_flags[@]}"} \
+            ${mouse_flags[@]+"${mouse_flags[@]}"} ${display_flags[@]+"${display_flags[@]}"} \
+            ${share_flags[@]+"${share_flags[@]}"} ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}; do
+    if [[ "$_prev" == -device || "$_prev" == --device ]]; then
+        _spec=${_arg%%,*}
+        _spec=${_spec#driver=}
+        _spec=${_spec%-non-transitional}
+        _spec=${_spec%-transitional}
+        case "$_spec" in
+            virtio-*-device) _bus=; _kind=${_spec#virtio-}; _kind=${_kind%-device} ;;
+            virtio-*-pci)    _bus=pci-; _kind=${_spec#virtio-}; _kind=${_kind%-pci} ;;
+            *)               _kind= ;;
+        esac
+        case "$_kind" in
+            keyboard|mouse|tablet|multitouch|input-host) _kind=input ;;
+            gpu-gl|gpu-rutabaga) _kind=gpu ;;
+        esac
+        [[ -z "$_kind" ]] || append_tokens+=("thylacine.virtio-$_bus$_kind")
+    elif [[ "$_prev" == -virtfs || "$_prev" == --virtfs ]]; then
+        append_tokens+=("thylacine.virtio-pci-9p")
+    fi
+    _prev=$_arg
+done
+if [[ "$cpus" =~ ^[0-9]+$ ]] && (( cpus >= 2 )); then
+    append_tokens+=("thylacine.smp")
+fi
+# An MSI controller, when the launcher can know the machine has one: GICv2
+# always carries a v2m frame, and GICv3 under TCG an ITS unless its=off. Under
+# KVM or hvf a GICv3 ITS depends on what the host supports, which the launcher
+# cannot see even with its=on, so nothing is declared and the MSI tests do not
+# require it.
+case "$gicv:${THYLACINE_ITS:-auto}:$accel" in
+    2:*|3:on:tcg|3:auto:tcg) append_tokens+=("thylacine.msi") ;;
+esac
+append_flags=()
+if (( ${#append_tokens[@]} > 0 )); then
+    append_flags=(-append "${append_tokens[*]}")
+fi
+
 # Canonical QEMU flags per TOOLING.md §3.
 #
 # disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU
 # assigns virtio-mmio slots in reverse-creation order, so the first
 # -device lands at slot 31. virtio-blk-probe scans 0..31 either way;
 # the ordering keeps slot 31 conventionally the "primary device."
+# The guest MMIO drivers require VirtIO 1.0 (transport version 2).
+# QEMU builds can default to legacy transport; pin the device contract on
+# every host instead of relying on a distributor-specific default.
 exec qemu-system-aarch64 \
+    -global virtio-mmio.force-legacy=false \
     -machine "virt,gic-version=$gicv,accel=$accel$its_machine_opt" \
     -cpu "$cpu" \
     -smp "$cpus" \
@@ -819,8 +912,7 @@ exec qemu-system-aarch64 \
     ${net_flags[@]+"${net_flags[@]}"} \
     ${input_flags[@]+"${input_flags[@]}"} \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
-    -device virtio-rng-device,id=rng0 \
-    -device virtio-rng-pci,id=rng_pci0 \
+    ${rng_flags[@]+"${rng_flags[@]}"} \
     ${audio_flags[@]+"${audio_flags[@]}"} \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \

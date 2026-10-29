@@ -1,0 +1,779 @@
+[
+ {
+  "driver": "run-composed-ring.py",
+  "name": "wrong-receipt",
+  "file": "paired_cq.c",
+  "a": "r->receipts[slot]",
+  "b": "r->receipts[(slot+1)&(r->entries-1)]",
+  "tests": [
+   "test_composed_ring.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-composed-ring.py",
+  "name": "wrong-pool",
+  "file": "request_book.c",
+  "a": "!same(r->receipt.pool,e->spec.pool)",
+  "b": "(0 && !same(r->receipt.pool,e->spec.pool))",
+  "tests": [
+   "test_composed_ring.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-composed-ring.py",
+  "name": "untracked-lease",
+  "file": "ring_payload.c",
+  "a": "++p->live;++c->live;",
+  "b": "++p->live;",
+  "tests": [
+   "test_composed_ring.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-deadlines-c.py",
+  "name": "repeat-abort",
+  "file": "ring_payload.c",
+  "a": "f->phase!=FIX_ACTIVE||f->abort_requested",
+  "b": "f->phase!=FIX_ACTIVE",
+  "tests": [
+   "test_deadlines.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-deadlines-c.py",
+  "name": "early-expiry",
+  "file": "ring_payload.c",
+  "a": "now>=f->deadline",
+  "b": "now+1>=f->deadline",
+  "tests": [
+   "test_deadlines.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-deadlines-c.py",
+  "name": "no-cursor",
+  "file": "ring_payload.c",
+  "a": "c->deadline_cursor=(i+1)%64",
+  "b": "c->deadline_cursor=i",
+  "tests": [
+   "test_deadlines.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-deadlines-c.py",
+  "name": "ignore-budget",
+  "file": "ring_payload.c",
+  "a": "visits=budget<64?budget:64",
+  "b": "visits=(budget?64:0)",
+  "tests": [
+   "test_deadlines.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-deadlines-c.py",
+  "name": "cancel-releases-storage",
+  "file": "ring_payload.c",
+  "a": "f->abort_requested=1;",
+  "b": "f->abort_requested=1;f->phase=FIX_FREE;",
+  "tests": [
+   "test_deadlines.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-deadlines-c.py",
+  "name": "cancelled-deadline-remains",
+  "file": "ring_payload.c",
+  "a": "f->has_deadline&&!f->abort_requested&&(!found",
+  "b": "f->has_deadline&&(!found",
+  "tests": [
+   "test_deadlines.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "early-fixed-view",
+  "file": "ring_payload.c",
+  "a": "f->write||f->phase!=FIX_TERMINAL",
+  "b": "f->write",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "abandon-refund",
+  "file": "ring_payload.c",
+  "a": "f->abandoned=1;",
+  "b": "f->abandoned=1;f->phase=FIX_FREE;",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "missing-abort",
+  "file": "ring_payload.c",
+  "a": "c->b.abort_scope(c->b.context,f->scope);",
+  "b": "(void)f->scope;",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "fixed-pool-overlap",
+  "file": "ring_payload.c",
+  "a": "if(fixed_overlap(c->fixed[i].range,ranges[j]))",
+  "b": "if(0 && fixed_overlap(c->fixed[i].range,ranges[j]))",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "pool-fixed-overlap",
+  "file": "ring_payload.c",
+  "a": "if(fixed_overlap(p->members[k].range,range))",
+  "b": "if(0 && fixed_overlap(p->members[k].range,range))",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "early-retired-refund",
+  "file": "ring_payload.c",
+  "a": "if(done&&f->abandoned)",
+  "b": "if(f->abandoned)",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "oversized-fixed-result",
+  "file": "ring_payload.c",
+  "a": "if(result>0&&(uint64_t)result>f->range.length)",
+  "b": "if(0 && result>0&&(uint64_t)result>f->range.length)",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-io-c.py",
+  "name": "late-write",
+  "file": "ring_payload.c",
+  "a": "!f->write||f->phase!=FIX_PREPARED",
+  "b": "!f->write",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-requests-c.py",
+  "name": "unpublished-leak",
+  "file": "fixed_requests.c",
+  "a": "if(t_request_cancel_unpublished(d->book,r->cookie))abort();",
+  "b": "",
+  "tests": [
+   "test_fixed_requests.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-requests-c.py",
+  "name": "lost-abandoned-terminal",
+  "file": "fixed_requests.c",
+  "a": "if(delivery.abandoned){",
+  "b": "if(0 && delivery.abandoned){",
+  "tests": [
+   "test_fixed_requests.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-requests-c.py",
+  "name": "retirement-without-proof",
+  "file": "fixed_requests.c",
+  "a": "if(t_ring_progress(d->owner)){",
+  "b": "if(1){",
+  "tests": [
+   "test_fixed_requests.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-requests-c.py",
+  "name": "retired-metadata-leak",
+  "file": "fixed_requests.c",
+  "a": "t_request_clear_retired(d->book);",
+  "b": "",
+  "tests": [
+   "test_fixed_requests.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-requests-c.py",
+  "name": "missing-storage-terminal",
+  "file": "fixed_requests.c",
+  "a": "rc=t_ring_fixed_finish(d->owner,delivery.cookie,delivery.record.cqe.result);",
+  "b": "rc=0;",
+  "tests": [
+   "test_fixed_requests.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-fixed-requests-c.py",
+  "name": "corrupt-keeps-open",
+  "file": "fixed_requests.c",
+  "a": "t_ring_close(d->owner);",
+  "b": "",
+  "tests": [
+   "test_fixed_requests.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ledger.py",
+  "name": "owner",
+  "file": "lease_ledger.c",
+  "a": "t->owner!=b->owner || ",
+  "b": "",
+  "tests": [
+   "test_lease_ledger.c"
+  ]
+ },
+ {
+  "driver": "run-ledger.py",
+  "name": "stale",
+  "file": "lease_ledger.c",
+  "a": "if(r.lease<=m->last)return T_LEASE_STALE;",
+  "b": "",
+  "tests": [
+   "test_lease_ledger.c"
+  ]
+ },
+ {
+  "driver": "run-ledger.py",
+  "name": "failed-return",
+  "file": "lease_ledger.c",
+  "a": "if(rc==0)",
+  "b": "if(rc<=0)",
+  "tests": [
+   "test_lease_ledger.c"
+  ]
+ },
+ {
+  "driver": "run-ledger.py",
+  "name": "busy",
+  "file": "lease_ledger.c",
+  "a": "if(m->state!=AVAILABLE)return T_LEASE_BUSY;",
+  "b": "",
+  "tests": [
+   "test_lease_ledger.c"
+  ]
+ },
+ {
+  "driver": "run-ledger.py",
+  "name": "final-release",
+  "file": "lease_ledger.c",
+  "a": "return 0; /* EOF/final/error",
+  "b": "b->outstanding=0;return 0; /* EOF/final/error",
+  "tests": [
+   "test_lease_ledger.c"
+  ]
+ },
+ {
+  "driver": "run-ledger.py",
+  "name": "overlap",
+  "file": "lease_ledger.c",
+  "a": "if(p.buffer_index==r.buffer_index &&",
+  "b": "if(0 && p.buffer_index==r.buffer_index &&",
+  "tests": [
+   "test_lease_ledger.c"
+  ]
+ },
+ {
+  "driver": "run-owned-mapping.py",
+  "name": "sq-overlap",
+  "file": "owned_mapping.c",
+  "a": "j<i",
+  "b": "j<i && i==99",
+  "tests": [
+   "test_owned_mapping.c"
+  ]
+ },
+ {
+  "driver": "run-owned-mapping.py",
+  "name": "receipt-stride",
+  "file": "owned_mapping.c",
+  "a": "p.receipt[2]!=32",
+  "b": "(0 && p.receipt[2]!=32)",
+  "tests": [
+   "test_owned_mapping.c"
+  ]
+ },
+ {
+  "driver": "run-owned-mapping.py",
+  "name": "failed-close",
+  "file": "owned_mapping.c",
+  "a": "b.close(b.context);b.destroy(b.context);",
+  "b": "b.destroy(b.context);",
+  "tests": [
+   "test_owned_mapping.c"
+  ]
+ },
+ {
+  "driver": "run-owned-mapping.py",
+  "name": "after-close",
+  "file": "owned_mapping.c",
+  "a": "if(m->closed)return T_MAP_CLOSED;",
+  "b": "if(0 && m->closed)return T_MAP_CLOSED;",
+  "tests": [
+   "test_owned_mapping.c"
+  ]
+ },
+ {
+  "driver": "run-owned-mapping.py",
+  "name": "fresh-header",
+  "file": "owned_mapping.c",
+  "a": "if(words[0]||",
+  "b": "if((0 && words[0])||",
+  "tests": [
+   "test_owned_mapping.c"
+  ]
+ },
+ {
+  "driver": "run-paired.py",
+  "name": "receipt-index",
+  "file": "paired_cq.c",
+  "a": "r->receipts[slot]",
+  "b": "r->receipts[slot ^ 1]",
+  "tests": [
+   "test_paired_cq.c"
+  ]
+ },
+ {
+  "driver": "run-paired.py",
+  "name": "double-ack",
+  "file": "paired_cq.c",
+  "a": "++r->next",
+  "b": "r->next+=2",
+  "tests": [
+   "test_paired_cq.c"
+  ]
+ },
+ {
+  "driver": "run-paired.py",
+  "name": "overlap",
+  "file": "paired_cq.c",
+  "a": "if(starts[i]<starts[j]+sizes[j]",
+  "b": "if(0 && starts[i]<starts[j]+sizes[j]",
+  "tests": [
+   "test_paired_cq.c"
+  ]
+ },
+ {
+  "driver": "run-payload-c.py",
+  "name": "live-retire",
+  "file": "payload_owner.c",
+  "a": "c->closing&&!c->live&&",
+  "b": "c->closing&&",
+  "tests": [
+   "test_payload_owner.c"
+  ]
+ },
+ {
+  "driver": "run-payload-c.py",
+  "name": "lost-return",
+  "file": "payload_owner.c",
+  "a": "l->pending=rc!=0;",
+  "b": "l->pending=0;(void)rc;",
+  "tests": [
+   "test_payload_owner.c"
+  ]
+ },
+ {
+  "driver": "run-payload-c.py",
+  "name": "wrong-range",
+  "file": "payload_owner.c",
+  "a": "c->ranges[l->token.receipt.member]",
+  "b": "c->ranges[0]",
+  "tests": [
+   "test_payload_owner.c"
+  ]
+ },
+ {
+  "driver": "run-payload-c.py",
+  "name": "failed-success",
+  "file": "payload_owner.c",
+  "a": "if(!rc){l->active=0;",
+  "b": "if(rc<=0){l->active=0;",
+  "tests": [
+   "test_payload_owner.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "live-retire",
+  "file": "ring_payload.c",
+  "a": "c->closing&&!c->live&&",
+  "b": "c->closing&&",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "pool-closes-ring",
+  "file": "ring_payload.c",
+  "a": "c->b.retire_pool(c->b.context,p->identity);",
+  "b": "retire(c);",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "global-cap",
+  "file": "ring_payload.c",
+  "a": "if(n>64-c->members)return T_LEASE_BUSY;",
+  "b": "",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "cross-pool-overlap",
+  "file": "ring_payload.c",
+  "a": "if(a.buffer_index==b.buffer_index",
+  "b": "if(0 && a.buffer_index==b.buffer_index",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "failed-destroy",
+  "file": "ring_payload.c",
+  "a": "if(c->b.destroy_pool(c->b.context,p->identity)==0)",
+  "b": "if(c->b.destroy_pool(c->b.context,p->identity)<=0)",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "stale-pool",
+  "file": "ring_payload.c",
+  "a": "if(identity.incarnation<=c->last[slot])return T_LEASE_STALE;",
+  "b": "",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "missing-precharge",
+  "file": "ring_payload.c",
+  "a": "c->members+=n;struct t_loom_service_ref identity={0};",
+  "b": "struct t_loom_service_ref identity={0};",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "uncertain-no-close",
+  "file": "ring_payload.c",
+  "a": "c->quarantine=p;close_owner(c);",
+  "b": "c->quarantine=p;",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "rollback-no-refund",
+  "file": "ring_payload.c",
+  "a": "c->members-=n;free(p);return result;",
+  "b": "free(p);return result;",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-registration-c.py",
+  "name": "accept-nonzero-output",
+  "file": "ring_payload.c",
+  "a": "result<0&&!identity.slot&&!identity.reserved&&!identity.incarnation",
+  "b": "result<0",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-request-book.py",
+  "name": "reused-cookie",
+  "file": "request_book.c",
+  "a": "*out=n;return 0;",
+  "b": "*out=1;return 0;",
+  "tests": [
+   "test_request_book.c"
+  ]
+ },
+ {
+  "driver": "run-request-book.py",
+  "name": "more-final",
+  "file": "request_book.c",
+  "a": "unsigned terminal=!(flags&1u);",
+  "b": "unsigned terminal=1;",
+  "tests": [
+   "test_request_book.c"
+  ]
+ },
+ {
+  "driver": "run-request-book.py",
+  "name": "duplicate-terminal",
+  "file": "request_book.c",
+  "a": "e->phase=TERMINAL;e->terminal",
+  "b": "e->phase=ACTIVE;e->terminal",
+  "tests": [
+   "test_request_book.c"
+  ]
+ },
+ {
+  "driver": "run-request-book.py",
+  "name": "wrong-pool",
+  "file": "request_book.c",
+  "a": "!same(r->receipt.pool,e->spec.pool)",
+  "b": "(0 && !same(r->receipt.pool,e->spec.pool))",
+  "tests": [
+   "test_request_book.c"
+  ]
+ },
+ {
+  "driver": "run-request-book.py",
+  "name": "oversized-fixed",
+  "file": "request_book.c",
+  "a": "result>0&&(uint32_t)result>e->spec.limit",
+  "b": "result>0&&0",
+  "tests": [
+   "test_request_book.c"
+  ]
+ },
+ {
+  "driver": "run-request-book.py",
+  "name": "repeated-abort",
+  "file": "request_book.c",
+  "a": "!e->abandoned&&e->phase==ACTIVE",
+  "b": "e->phase==ACTIVE",
+  "tests": [
+   "test_request_book.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-executor-c.py",
+  "name": "early-reclaim",
+  "file": "retirement_executor.c",
+  "a": "c->retiring&&t_fixed_progress(c->driver)",
+  "b": "c->retiring",
+  "tests": [
+   "test_retirement_executor.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-executor-c.py",
+  "name": "missing-retire",
+  "file": "retirement_executor.c",
+  "a": "cell->retiring=1;t_fixed_begin_retire(cell->driver);",
+  "b": "cell->retiring=1;",
+  "tests": [
+   "test_retirement_executor.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-executor-c.py",
+  "name": "frozen-cursor",
+  "file": "retirement_executor.c",
+  "a": "e->cursor=(i+1)%e->capacity;",
+  "b": "e->cursor=i;",
+  "tests": [
+   "test_retirement_executor.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-executor-c.py",
+  "name": "excess-budget",
+  "file": "retirement_executor.c",
+  "a": "visited=budget<e->capacity?budget:e->capacity",
+  "b": "visited=(budget<e->capacity?budget:e->capacity)+1",
+  "tests": [
+   "test_retirement_executor.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-executor-c.py",
+  "name": "no-shutdown-close",
+  "file": "retirement_executor.c",
+  "a": "t_fixed_close(e->cells[i].driver);",
+  "b": "t_fixed_begin_retire(e->cells[i].driver);",
+  "tests": [
+   "test_retirement_executor.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-executor-c.py",
+  "name": "premature-admission",
+  "file": "retirement_executor.c",
+  "a": "if(slot==e->capacity)return T_RETIREMENT_FULL;",
+  "b": "if(slot==e->capacity)slot=0;",
+  "tests": [
+   "test_retirement_executor.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-timers-c.py",
+  "name": "skip-retiring",
+  "file": "retirement_executor.c",
+  "a": "if(d)requested+=",
+  "b": "if(d&&!e->cells[i].retiring)requested+=",
+  "tests": [
+   "test_retirement_timers.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-timers-c.py",
+  "name": "skip-attached",
+  "file": "retirement_executor.c",
+  "a": "if(d)requested+=",
+  "b": "if(d&&e->cells[i].retiring)requested+=",
+  "tests": [
+   "test_retirement_timers.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-timers-c.py",
+  "name": "ignore-inner-budget",
+  "file": "retirement_executor.c",
+  "a": "t_fixed_expire(d,now,fixed_budget)",
+  "b": "t_fixed_expire(d,now,fixed_budget+64)",
+  "tests": [
+   "test_retirement_timers.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-timers-c.py",
+  "name": "ignore-outer-budget",
+  "file": "retirement_executor.c",
+  "a": "visits=ring_budget<e->capacity?ring_budget:e->capacity",
+  "b": "visits=(ring_budget<e->capacity?ring_budget:e->capacity)+1",
+  "tests": [
+   "test_retirement_timers.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-timers-c.py",
+  "name": "shared-cursor",
+  "file": "retirement_executor.c",
+  "a": "e->deadline_cursor",
+  "b": "e->cursor",
+  "tests": [
+   "test_retirement_timers.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-retirement-timers-c.py",
+  "name": "wrong-earliest",
+  "file": "retirement_executor.c",
+  "a": "when<*out",
+  "b": "when>*out",
+  "tests": [
+   "test_retirement_timers.c",
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ring-payload-c.py",
+  "name": "live-retire",
+  "file": "ring_payload.c",
+  "a": "c->closing&&!c->live&&",
+  "b": "c->closing&&",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ring-payload-c.py",
+  "name": "pool-closes-ring",
+  "file": "ring_payload.c",
+  "a": "c->b.retire_pool(c->b.context,p->identity);",
+  "b": "retire(c);",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ring-payload-c.py",
+  "name": "global-cap",
+  "file": "ring_payload.c",
+  "a": "if(n>64-c->members)return T_LEASE_BUSY;",
+  "b": "",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ring-payload-c.py",
+  "name": "cross-pool-overlap",
+  "file": "ring_payload.c",
+  "a": "if(a.buffer_index==b.buffer_index",
+  "b": "if(0 && a.buffer_index==b.buffer_index",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ring-payload-c.py",
+  "name": "failed-destroy",
+  "file": "ring_payload.c",
+  "a": "if(c->b.destroy_pool(c->b.context,p->identity)==0)",
+  "b": "if(c->b.destroy_pool(c->b.context,p->identity)<=0)",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ },
+ {
+  "driver": "run-ring-payload-c.py",
+  "name": "stale-pool",
+  "file": "ring_payload.c",
+  "a": "if(identity.incarnation<=c->last[slot])return T_LEASE_STALE;",
+  "b": "",
+  "tests": [
+   "test_ring_payload.c"
+  ]
+ }
+]

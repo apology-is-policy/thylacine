@@ -1,0 +1,106 @@
+diff --git a/kernel/loom_service_connect.c b/kernel/loom_service_connect.c
+index f968059d5..c072ceac6 100644
+--- a/kernel/loom_service_connect.c
++++ b/kernel/loom_service_connect.c
+@@ -83,10 +83,18 @@ static int connect_rollback_consume(struct loom_service_protocol *p) {
+         !r || r->phase != LREQ_PREPARED || r->borrows) {
+         spin_unlock(&l->lock); return -T_E_BUSY;
+     }
+-    connect_rollback_locked(l,p->scope,p->request);
++    struct loom_service_ref scope=p->scope;
++    struct loom_request_ref request=p->request;
+     p->connect_bound = false;
+     spin_unlock(&l->lock);
+-    return loom_private_protocol_release_unused(p);
++    // Retain the PREPARED obligation and scope pins while real cursor/storage
++    // destruction runs unlocked. A closing worker must still see this owner.
++    // The public wrapper retains l across the consuming final protocol drop.
++    if (loom_private_protocol_release_unused(p)) extinction("CONNECT lost unused protocol ownership");
++    spin_lock(&l->lock);
++    connect_rollback_locked(l,scope,request);
++    spin_unlock(&l->lock);
++    return 0;
+ }
+ int loom_private_connect_rollback(struct loom_service_protocol *p) {
+     if (!p || !p->owner) return -T_E_INVAL;
+diff --git a/kernel/loom_service_protocol.c b/kernel/loom_service_protocol.c
+index 3d153d1fa..90c420aec 100644
+--- a/kernel/loom_service_protocol.c
++++ b/kernel/loom_service_protocol.c
+@@ -63,6 +63,9 @@ int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
+     if (!p || !p->owner) return -T_E_INVAL;
+     if (p->admission.published || p->connect_bound || p->indexed || p->users || p->driving)
+         return -T_E_BUSY;
++#ifdef KERNEL_TESTS
++    loom_private_close_boundary_for_test(p->owner,4);
++#endif
+     protocol_destroy(p);
+     return 0;
+ }
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index d140355fa..798785ba4 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -2367,6 +2367,27 @@ static void loom_close_boundary_hook(struct Loom *l,u32 stage) {
+     if(l!=close_boundary.l || stage!=close_boundary.stage)return;
+     loom_private_close_hook_for_test(NULL); // one exact owner boundary
+     close_boundary.seen=true;
++    if(stage==4) {
++        // The handle is already closed. Force the actual parked worker to
++        // revisit while unused protocol destruction is suspended outside Ll.
++        u64 before=0,after=0;
++        loom_private_close_observe_for_test(l,&before);
++        loom_private_close_changed(l);
++        u64 end=timer_now_ns()+5000000000ull;
++        u32 phase=LCLOSE_NEW;
++        do {
++            phase=loom_private_close_observe_for_test(l,&after);
++            if(after>before && (phase==LCLOSE_PARKED || phase==LCLOSE_DONE))break;
++            sched();
++        } while(timer_now_ns()<end);
++        spin_lock(&l->lock);
++        bool retained=!l->service_requests.detached && l->service_requests.occupied &&
++            l->service_slots->slots[close_boundary.scope.slot].pins==2;
++        spin_unlock(&l->lock);
++        if(after<=before || phase!=LCLOSE_PARKED || !retained)
++            close_boundary.error="rollback retains close barrier through physical protocol destruction";
++        return;
++    }
+     if(handle_close(close_boundary.creator,close_boundary.fd)) {
+         close_boundary.error="boundary actual handle close";return;
+     }
+@@ -2531,7 +2552,17 @@ static const char *loom_close_cases(struct Loom **owner, struct Proc *creator,
+         spin_lock(&l->lock);attached=!l->service_requests.detached;spin_unlock(&l->lock);
+         CL(attached,"physical borrower or constructor preserves consumer");
+         if (kind==5) CL(!loom_private_fixed_release(l,&fixed),"last fixed return resumes real close worker");
+-        if (kind==6) {CL(!loom_private_connect_rollback(prepared[1]),"unindexed rollback resumes real close worker");prepared[1]=NULL;}
++        if (kind==6) {
++            close_boundary.l=l;close_boundary.stage=4;close_boundary.scope=scope[1];
++            close_boundary.seen=false;close_boundary.error=NULL;
++            loom_private_close_hook_for_test(loom_close_boundary_hook);
++            int rc=loom_private_connect_rollback(prepared[1]);
++            loom_private_close_hook_for_test(NULL);
++            if(!rc)prepared[1]=NULL;
++            CL(!rc,"unindexed rollback resumes real close worker");
++            CL(close_boundary.seen && !close_boundary.error,
++               close_boundary.error?close_boundary.error:"rollback destruction boundary reached");
++        }
+     }
+     CL(loom_close_wait_state(l,LCLOSE_DONE),"real close worker completes without peer or CQ progress");
+     CL(loom_engine_empty(l->service_engine) && !l->service_requests.occupied &&
+diff --git a/work/oct5-as-r9/connect-control.py b/work/oct5-as-r9/connect-control.py
+index 1c0bcdb2e..6cd85ac6e 100644
+--- a/work/oct5-as-r9/connect-control.py
++++ b/work/oct5-as-r9/connect-control.py
+@@ -37,8 +37,9 @@ static int loom_private_protocol_prepare(struct Loom *l,struct loom_service_ref
+  active->owner=l;active->admission.conn=&cn;*out=active;return 0;
+ }
+ static int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
+- CHECK(!held && !p->connect_bound && !p->admission.published && !p->owner->service_requests.occupied &&
+-       !p->owner->service_slots->slots[p->scope.slot].pins,"rollback ledger before native release");
++ CHECK(!held && !p->connect_bound && !p->admission.published && p->owner->service_requests.occupied==1 &&
++       p->owner->service_requests.records[p->request.index].phase==LREQ_PREPARED &&
++       p->owner->service_slots->slots[p->scope.slot].pins==2,"rollback pins through native release");
+  releases++;free(p);active=NULL;return 0;
+ }
+ static int loom_private_protocol_release_retired(struct loom_service_protocol *p) {

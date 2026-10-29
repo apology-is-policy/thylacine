@@ -1,0 +1,23 @@
+test-loom-client: work/oct12-na2b/run-20261012T185928Z
+  sanitized: test_lease_ledger PASS
+  sanitized: test_paired_cq PASS
+  sanitized: test_owned_mapping PASS
+  sanitized: test_request_book PASS
+  sanitized: test_ring_payload PASS
+  sanitized: test_composed_ring PASS
+  sanitized: test_fixed_requests PASS
+  sanitized: test_deadlines PASS
+  sanitized: test_retirement_executor PASS
+  sanitized: test_retirement_timers PASS
+  sanitized: test_fatal PASS
+tools/test-loom-client.sh: line 111: 77310 Abort trap: 6              "$OUT/sanitized/ubsan_control" > "$OUT/sanitized/ubsan_control.log" 2>&1
+  sanitized: control -- a signed overflow fails the run
+  optimized: test_lease_ledger PASS
+  optimized: test_paired_cq PASS
+  optimized: test_owned_mapping PASS
+  optimized: test_request_book PASS
+tools/test-loom-client.sh: line 83: 77397 Abort trap: 6              "$dir/$t" > "$dir/$t.log" 2>&1
+loom-client fatal: t_lease_init:26
+C seven fixed ownership scenarios PASS
+test-loom-client: optimized test_ring_payload FAILED
+exit=1

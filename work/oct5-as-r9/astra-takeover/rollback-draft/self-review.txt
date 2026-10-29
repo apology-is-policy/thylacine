@@ -1,0 +1,42 @@
+CLOSE-R1: unpublished rollback versus ring close (Astra self-review)
+
+Defect: connect_rollback_consume removed the PREPARED request and both scope
+pins before protocol_release_unused destroyed the real cursor/storage. A close
+worker in that gap saw no unindexed obligation and could detach/declare DONE.
+References prevented final use-after-free, but completion was premature.
+
+Reproduced using actual CONNECT/engine/request/slot/node C with a forced close
+visit inside the checked destruction boundary: old source exits11 at the exact
+barrier assertion, repaired source exits0 under LLVM22 ASan/UBSan. Original and
+fresh-current reproductions, source hashes, commands and logs are retained.
+
+Repair: copy exact scope/request identities, relinquish connect_bound under Ll,
+destroy the exclusively owned unpublished protocol outside Ll, then roll back
+both ledger pins under Ll. Public wrapper holds a temporary Loom root across
+the consuming protocol drop and subsequent close notification. No p access
+occurs after destruction. PREPARED prevents a replacement prepare or consumer
+detach; exact scope pins prevent metadata reuse. Release refusal is an invariant
+failure after validated exclusive ownership, never a successful partial unwind.
+Preparation-error cleanup already physically unwinds before ledger rollback.
+Published retirement separately proves cursor abort/no users before retiring
+its record and remains unchanged. No new ABI, general RPC borrow or activation.
+
+Native test adds a test-only stage4 boundary at unused protocol destruction.
+With the handle already closed, it kicks the actual parked retirer, waits for
+a new visit, and requires PARKED plus retained consumer and both exact scope
+pins. This tests actual kernel scheduling/protocol destruction boundaries; it
+is not an exhaustive scheduling proof. After rollback, the existing fixture
+requires DONE and exact image refund with accepted peer endpoints retained.
+
+Verification: canonical CONNECT11 controls/12 mutants; close engine18 controls/
+7 mutants; current before/after boundary regression. Native rollback-native-
+20261009T1854Z:1851/1851, D7 overlap,20 distinct cycles,banner, matching source
+and six inputs plus retained rebuilt ELF/bin. All host tests use LLVM22 ASan/
+UBSan and checked boundary doubles. Harness migration initially looked for an
+old header under the new evidence directory; corrected the explicit historical
+fixture path and retained the failure. No kernel failure was hidden by that fix.
+
+Astra intentionally stopped own5ab15c4d5 full matrix (SIGTERM,rc143);16 partial
+serial/harness logs preserved before any next run. It does not qualify5ab.
+The repaired source still needs its full Mac matrix. No independent audit,
+Main landing, private activation, clipboard activation or128MiB change.

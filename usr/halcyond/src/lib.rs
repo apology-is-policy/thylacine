@@ -14,7 +14,14 @@
 
 extern crate alloc;
 
+pub mod apprecord;
+pub mod application;
 pub mod chrome;
+pub mod clipboard;
+pub mod clipbroker;
+pub mod controllers;
+pub mod interaction;
+pub mod hostbindings;
 pub mod downq;
 pub mod grid;
 pub mod help;
@@ -24,6 +31,7 @@ pub mod inlinecache;
 pub mod input;
 pub mod layout;
 pub mod menu;
+pub mod modeview;
 pub mod picker;
 pub mod dialog;
 pub mod outline;
@@ -32,6 +40,8 @@ pub mod paneroute;
 pub mod raster;
 pub mod select;
 pub mod session_init;
+pub mod servicewire;
+pub mod servicepool;
 pub mod status;
 pub mod tile;
 pub mod tiles;

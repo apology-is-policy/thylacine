@@ -74,6 +74,8 @@ pub enum Control {
     SyncBegin,
     /// The program closed its synchronized frame.
     SyncEnd,
+    /// Kernel binding locator from the sealed host; never emitted by VT parsing.
+    TerminalBinding(u64),
 }
 
 /// One ordered seam record, kaua-term -> halcyond (HALCYON 14.3). Cells are the

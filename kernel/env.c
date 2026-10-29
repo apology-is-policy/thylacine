@@ -11,6 +11,7 @@
 // never needs a large contiguous allocation.
 
 #include <thylacine/env.h>
+#include <thylacine/errno.h>    // env_from_block's refusals
 #include <thylacine/extinction.h>  // extinction (the double-free guard)
 #include <thylacine/page.h>     // KP_ZERO
 #include <thylacine/proc.h>
@@ -397,6 +398,116 @@ long env_render_environ(struct Proc *p, s64 off, void *buf, long n) {
     }
     spin_unlock(&e->lock);
     return copied;
+}
+
+// =============================================================================
+// The spawn environment tail (SPAWN_EXT_ENV; ARCH 9.7, dec-2026-10-28-spawn-env).
+// =============================================================================
+
+// Parse ONLY the caller's kernel copy -- the handler copied the user block once,
+// so a peer thread rewriting it cannot change a record between its check and its
+// use. The detached Env is the caller's alone, so the *_locked helpers run
+// without the lock: no other thread can reach it.
+//
+// The name rule is name_valid, the one devenv's create applies, so the tail
+// admits exactly the names /env can serve. A name holds no '=' by construction:
+// the first '=' ends it, and a value may hold more (Linux reads "A=b=c" the same
+// way). A record repeated by name replaces the earlier value in the earlier slot
+// -- the result of writing /env/NAME twice -- so a duplicate is never a second
+// entry and never counts against ENV_MAX_ENTRIES.
+struct Env *env_from_block(const char *block, u32 len, int *err) {
+    int dummy;
+    if (!err) err = &dummy;
+    *err = 0;
+    if (len > 0 && !block) { *err = -(int)T_E_INVAL; return NULL; }
+    if (len > 0 && block[len - 1] != '\0') { *err = -(int)T_E_INVAL; return NULL; }
+    struct Env *e = env_alloc();
+    if (!e) { *err = -(int)T_E_NOMEM; return NULL; }
+
+    u32 start = 0;
+    for (u32 i = 0; i < len; i++) {
+        if (block[i] != '\0') continue;
+        const char *rec = block + start;
+        u32 rlen = i - start;
+        start = i + 1;
+
+        u32 nlen = 0;
+        while (nlen < rlen && rec[nlen] != '=') nlen++;
+        if (nlen == rlen || !name_valid(rec, nlen)) { *err = -(int)T_E_INVAL; break; }
+        u32 vlen = rlen - nlen - 1;
+        if (vlen > ENV_VALUE_MAX) { *err = -(int)T_E_2BIG; break; }
+
+        int slot = find_by_name_locked(e, rec, nlen);
+        bool fresh_slot = slot < 0;
+        if (fresh_slot) {
+            slot = find_free_locked(e);
+            if (slot < 0) { *err = -(int)T_E_2BIG; break; }
+        }
+        char *v = NULL;
+        if (vlen > 0) {
+            v = (char *)kmalloc(vlen, 0);
+            if (!v) { *err = -(int)T_E_NOMEM; break; }
+            for (u32 k = 0; k < vlen; k++) v[k] = rec[nlen + 1 + k];
+        }
+        struct EnvEntry *en = &e->entries[slot];
+        if (fresh_slot) {
+            en->id = e->next_id++;
+            for (u32 k = 0; k < nlen; k++) en->name[k] = rec[k];
+            en->name[nlen] = '\0';
+            e->count++;
+        } else if (en->value) {
+            kfree(en->value);
+        }
+        en->value = v;
+        en->len   = vlen;
+    }
+    if (*err != 0) {
+        env_destroy(e);
+        return NULL;
+    }
+    return e;
+}
+
+void env_install(struct Proc *p, struct Env *fresh) {
+    if (!p || !fresh) return;
+    struct Env *old = NULL;
+    if (__atomic_compare_exchange_n(&p->env, &old, fresh, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;                     // p had no group: fresh becomes it
+    }
+
+    // Refill p's group in place. Its new entries take ids from its own counter,
+    // after every id it ever issued, so no id is reused within the group (the
+    // monotonic-id guarantee). fresh's slots fill lowest-first in increasing id
+    // order and it never frees one, so moving slot for slot keeps the records'
+    // order, which env_iter and the exec projection both follow.
+    spin_lock(&old->lock);
+    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+        struct EnvEntry *d = &old->entries[i];
+        if (d->value) kfree(d->value);
+        d->value   = NULL;
+        d->len     = 0;
+        d->id      = 0;
+        d->name[0] = '\0';
+    }
+    old->count = 0;
+    for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+        struct EnvEntry *s = &fresh->entries[i];
+        if (s->id == 0) continue;
+        struct EnvEntry *d = &old->entries[i];
+        d->id    = old->next_id++;
+        d->value = s->value;        // moved: fresh no longer owns it
+        d->len   = s->len;
+        for (u32 k = 0; k < ENV_NAME_MAX; k++) d->name[k] = s->name[k];
+        old->count++;
+        s->value = NULL;
+    }
+    spin_unlock(&old->lock);
+    env_destroy(fresh);             // every value moved; frees the struct
+}
+
+void env_discard(struct Env *e) {
+    env_destroy(e);
 }
 
 // =============================================================================

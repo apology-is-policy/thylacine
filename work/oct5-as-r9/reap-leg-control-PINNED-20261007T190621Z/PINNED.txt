@@ -1,0 +1,33 @@
+PINNED AGAINST ROLLING PRUNING -- do not move this back under boot-inputs/.
+
+WHY IT IS HERE AND NOT IN boot-inputs/: preserve_boot_inputs prunes that
+directory newest-first to KEEP_INPUT_GENS generations (default 2,
+lease-runbook.sh:226-239). This set would therefore survive one further run and
+be deleted by the next. It is moved out of $PRESERVE_DIR entirely, which is the
+only way the pruner cannot reach it -- a bound you have to remember to raise is
+not a pin. Requested by astra, yip 0161 t61.
+
+WHAT IT IS: the nine-input boot set of the FIRST run of the unpinned-reap leg,
+reap-leg-20261007T190621Z, built on the pinned external Stratum
+(stratum-astra @61dde3727921e70e2c72fbd3c9e2044a192f4a54, clean) from
+corona/async-memory @c7d120bcc.
+
+WHAT IT IS THE RECEIPT OF, both halves, because half of that run was wrong:
+  CONTROL -- VALID AND STILL THE EVIDENCE. tests: 1836/1836 PASS,
+    [test] loom.private_owner_lifecycle ... PASS by name, test.sh exit 0, no
+    '^EXTINCTION:' in the boot log. Control kernel 9fae5eb3a0873190, and the
+    recovery rebuild came back byte-identical to it. This is the end-to-end
+    evidence that a private ring on a reaped Proc retires on the ring's own
+    image reference, through the real retirer, with no fixture pin.
+  MUTANT -- NOT this leg's sensitivity evidence. The balanced addrspace.c
+    mutation died inside addrspace.proc_alloc_in_shares, ~90 suite lines before
+    the leg, so the boot never ran it. Kept because a failed experiment's
+    inputs are exactly what a later reader needs to check the claim that it
+    failed for that reason.
+
+NOTE ON SUPERSESSION: the fixture gained arrival/cleanup markers after this run
+(astra t61), so a FRESH control is owed and this set's control is no longer
+reproducible byte-for-byte from the current tree. That does not reduce what it
+witnesses; it fixes what it witnesses TO this commit. The boot logs for both
+halves live beside the run at work/oct5-as-r9/reap-leg-20261007T190621Z/ (git
+ignores *.log, so they are on disk only).

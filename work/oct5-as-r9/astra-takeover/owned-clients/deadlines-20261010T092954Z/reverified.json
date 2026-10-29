@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:31:09.174575+00:00",
+  "source_count": 10,
+  "command_count": 21,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "dc54105e6914926f30a4b9dfff2fff11dc0d2757715e776d284ea835b5a56690",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "927d1761e23cf8fbc5c1d1accc0424f831d2ab23f0b29f6798788b7aea157f4c",
+    "no-clone-client-build": "86265cfd1c8f6979f7c594f5808a9bc7bd2ab92f2694c0df0179068346fc3061",
+    "no-send-executor-build": "0865aa2ad90b858351f574fc63a783734d0799c3193d18975e20fd5a99901065",
+    "valid-client-build": "1ec9db11a2ccd5d804a67fd69aac0700a865306928bfef7d584a39d9537befa0",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ignore-deadline-build": "cd382211e751aa3ef720dcf58e4a565d681ab065e3bcaee9952dd1c3891bea65",
+    "ignore-deadline-run": "44b3dc7fe3544651fffa5c85d7ceb429f328f2089ca20385909fe1353e04601c",
+    "late-deadline-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "late-deadline-run": "e45c8f777e7f7db0e0049a963de9146c356c4abaa0a45f75c3189be28f63edb1",
+    "repeat-cancel-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "repeat-cancel-run": "1c6ef66a0cc7c131c15d42938d4216b662ef8f6d2fb4499da5f4462002c4e60e",
+    "drop-double-abort-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "drop-double-abort-run": "d5989fd3cfcdafe13d9298a8408bbc945894cf5839fbb712542fa52577ca26a4",
+    "unbounded-scan-build": "2b82317bd51f2cf9ae90c3510b6bc201933b6ab1912ffed2031ac92a53c170c6",
+    "unbounded-scan-run": "d1929cbbfcb707a94812e91448298e2d07315668e92102be63a2382ce2bbad35",
+    "mutable-active-deadline-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mutable-active-deadline-run": "c9bb3e7493aaa9f8e445cd5456794f6a3da7fe493f1e0a742c0159cc26f4c46c"
+  }
+}

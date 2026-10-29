@@ -41,8 +41,8 @@ Files:
  	 * persisting for the entire process lifetime. */
  	__init_libc(envp, argv[0]);
  
-+	/* pouch: the kernel passes no envp (envp[0]==NULL); the environment
-+	 * lives in the /env device. Populate __environ from it before any ctor
++	/* pouch: the environment lives in the /env device, which exec also
++	 * projects as envp. Populate __environ from /env before any ctor
 +	 * or the app runs, so getenv()/environ see the inherited variables. */
 +	__pouch_env_init();
 +
@@ -53,17 +53,17 @@ Files:
 +++ b/src/env/_pouch_env.c	2026-07-23 19:21:42
 @@ -0,0 +1,103 @@
 +/* pouch boundary-line: populate `__environ` from the Thylacine /env device
-+ * (Clade CL-1b-0). The kernel writes envp[0] = NULL for every program ("no
-+ * envp at v1.0"), so `environ` is empty in a pouch process; the environment
-+ * lives in the per-Proc /env Dev (the Plan 9 Egrp idiom -- a variable is the
-+ * file /env/NAME, inherited by children via the kernel clone env_clone_into).
++ * (Clade CL-1b-0). The environment lives in the per-Proc /env Dev (the Plan 9
++ * Egrp idiom -- a variable is the file /env/NAME), which exec also projects
++ * onto the stack as envp; this reads the Dev itself. A child's /env is its
++ * spawner's rfork copy, or the envp posix_spawn sent (SPAWN_EXT_ENV).
 + * This reads /env once at startup into a malloc'd "NAME=value" vector and
 + * points __environ at it, so getenv() + environ iteration both work.
 + *
 + * Called from __libc_start_main right after __init_libc (so malloc + the TLS
 + * are up) and before the ctors run (so a constructor's getenv sees a
-+ * populated environ). Fail-soft: any error leaves __environ as the empty
-+ * envp the kernel supplied -- a missing /env degrades to today's behaviour,
++ * populated environ). Fail-soft: any error leaves __environ as the envp
++ * exec projected from the same /env -- a missing /env degrades to that,
 + * never a crash. /env stays the source of truth; a later setenv only mutates
 + * this in-process copy (writing back to /env is a v1.x nicety).
 + */

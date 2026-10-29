@@ -17,11 +17,10 @@
 //                              comparison table. A trailing leg list selects,
 //                              orders and sizes the legs (`hw-gl@640x480`).
 //
-// Driver selection rides the /env device: GALLIUM_DRIVER is written into
-// quarry's OWN environment (a create+write of /env/GALLIUM_DRIVER), the child
-// inherits a deep copy at spawn (env_clone_into), and the previous value is
-// restored after. No spawn-ABI env argument exists (#151); this is the
-// sanctioned inheritance route.
+// Driver selection rides the spawn's environment: each launch sets
+// GALLIUM_DRIVER (and, for an unpaced leg, SDL_THYLACINE_NOPACE) on the
+// Command, so the child's /env is quarry's plus those, and quarry's own /env
+// is never written.
 //
 // CONSOLE DISCIPLINE (KAUA.md; the prowl/nora contract): quarry owns the
 // SCREEN on fd 1 and reads keys on fd 0; it never touches consctl. ut sets raw
@@ -41,7 +40,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libthyla_rs::alloc::ThylaAlloc;
-use libthyla_rs::fs::{self, File};
+use libthyla_rs::fs;
 use libthyla_rs::io::Read;
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
@@ -83,10 +82,7 @@ const BENCH_DEADLINE_MS: u64 = 600_000;
 const QCONSOLE_LOG: &str = "/quake/id1/qconsole.log";
 
 const ENV_DRIVER: &str = "GALLIUM_DRIVER";
-const ENV_DRIVER_PATH: &str = "/env/GALLIUM_DRIVER";
-
 const ENV_NOPACE: &str = "SDL_THYLACINE_NOPACE";
-const ENV_NOPACE_PATH: &str = "/env/SDL_THYLACINE_NOPACE";
 
 // ---------------------------------------------------------------------------
 // The renderer matrix.
@@ -211,41 +207,6 @@ fn read_warp_ctl() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Driver env plumbing (/env inheritance at spawn).
-// ---------------------------------------------------------------------------
-
-/// Pin GALLIUM_DRIVER in OUR env (children inherit a copy) and hand back the
-/// previous value for restore. Remove-then-create sidesteps any question of
-/// devenv write-at-offset semantics: each set is a fresh value file.
-fn env_set(name: &str, path: &str, val: &str) -> Option<String> {
-    let old = env::var(name);
-    let _ = fs::remove_file(path);
-    if let Ok(mut f) = File::create(path) {
-        use libthyla_rs::io::Write;
-        let _ = f.write_all(val.as_bytes());
-    }
-    old
-}
-
-fn env_restore(path: &str, old: Option<String>) {
-    let _ = fs::remove_file(path);
-    if let Some(v) = old {
-        if let Ok(mut f) = File::create(path) {
-            use libthyla_rs::io::Write;
-            let _ = f.write_all(v.as_bytes());
-        }
-    }
-}
-
-fn driver_set(val: &str) -> Option<String> {
-    env_set(ENV_DRIVER, ENV_DRIVER_PATH, val)
-}
-
-fn driver_restore(old: Option<String>) {
-    env_restore(ENV_DRIVER_PATH, old)
-}
-
-// ---------------------------------------------------------------------------
 // Launching.
 // ---------------------------------------------------------------------------
 
@@ -342,8 +303,10 @@ fn parse_leg(spec: &str) -> Result<Leg, String> {
 
 /// Play interactively: inherited console, wait, return the exit status.
 fn play(r: &Renderer, extra: &[String]) -> Result<i32, String> {
-    let old = r.driver.map(driver_set);
     let mut cmd = Command::new(r.bin);
+    if let Some(d) = r.driver {
+        cmd.env(ENV_DRIVER, d);
+    }
     for a in PLAY_ARGS {
         cmd.arg(*a);
     }
@@ -355,9 +318,6 @@ fn play(r: &Renderer, extra: &[String]) -> Result<i32, String> {
         let st = child.wait().map_err(|e| format!("wait: {:?}", e))?;
         Ok(st.code().unwrap_or(-1))
     })();
-    if let Some(o) = old {
-        driver_restore(o);
-    }
     res
 }
 
@@ -386,16 +346,17 @@ fn bench_one(leg: &Leg, demo: &str) -> Result<Bench, String> {
     // Start from a clean log so we read THIS leg's lines, not the last one's.
     let _ = fs::remove_file(QCONSOLE_LOG);
 
-    let old = r.driver.map(driver_set);
-    // Unpaced unless the leg asked otherwise: see Leg::paced. Set around the
-    // spawn exactly like the driver, so the child inherits it at
-    // env_clone_into and quarry's own environment is left as it was found.
-    let old_pace = if leg.paced {
-        None
-    } else {
-        Some(env_set(ENV_NOPACE, ENV_NOPACE_PATH, "1"))
-    };
     let mut cmd = Command::new(r.bin);
+    if let Some(d) = r.driver {
+        cmd.env(ENV_DRIVER, d);
+    }
+    // Unpaced unless the leg asked otherwise (Leg::paced). A paced leg also
+    // drops an inherited NOPACE, or its pace-witness line would be false.
+    if leg.paced {
+        cmd.env_remove(ENV_NOPACE);
+    } else {
+        cmd.env(ENV_NOPACE, "1");
+    }
     for a in BENCH_ARGS {
         cmd.arg(*a);
     }
@@ -425,14 +386,7 @@ fn bench_one(leg: &Leg, demo: &str) -> Result<Bench, String> {
     // the drain called read() on fds a timed-out poll had NOT reported
     // ready, so it blocked in the callee and the deadline below, written on
     // the outer loop, was never evaluated again.
-    let spawned = cmd.spawn().map_err(|e| format!("spawn: {:?}", e));
-    if let Some(o) = old {
-        driver_restore(o);
-    }
-    if let Some(o) = old_pace {
-        env_restore(ENV_NOPACE_PATH, o);
-    }
-    let mut child = spawned?;
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {:?}", e))?;
     t_putstr(&format!(
         "quarry: {} pace-witness {}\n",
         tag,

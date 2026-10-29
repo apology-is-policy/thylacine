@@ -210,6 +210,33 @@ expect_token "unrecognised verdict"           unknown   "$TMP/harn-empty.log"
 # 'arc-gates' here is what proves the arm beats that fallback rather than
 # merely existing above it.
 expect_token "arc-gate failure beats the PASS line" arc-gates "$TMP/harn-arcgates.log"
+# The one -aqE arm has no generated fixture below: its line is test.sh's own
+# echo with the accelerator filled in, so a reworded echo reddens here.
+sed -n 's/.*echo "\(==> FAIL: accel=\)\$boot_accel\( delivers EL0 watchpoints[^"]*\)".*/\1hvf\2/p' \
+    "$REPO_ROOT/tools/test.sh" | head -1 \
+    | { printf '==> harness: qemu_alive_at_teardown=1\n==> PASS: boot banner observed.\n'; cat; } > "$TMP/harn-hwwatch.log"
+expect_token "hwwatch beats the PASS line (test.sh's echo)" hwwatch "$TMP/harn-hwwatch.log"
+
+# Every post-banner gate runs after test.sh printed its PASS line, so EVERY
+# -aqF arm must beat that line. The fixtures are generated from the classifier's
+# own arms, never copied: each arm's literal after the banner yields its token.
+echo "== every -aqF arm beats the PASS line (generated from the classifier) =="
+arms_beaten=0
+while IFS=$'\t' read -r lit token; do
+    [[ -n "$lit" ]] || continue
+    printf '==> harness: qemu_alive_at_teardown=1\n==> PASS: boot banner observed.\n%s (fixture)\n' "$lit" \
+        > "$TMP/harn-arm-$arms_beaten.log"
+    expect_token "arm '$lit'" "$token" "$TMP/harn-arm-$arms_beaten.log"
+    arms_beaten=$((arms_beaten+1))
+done < <(sed -n '/^harness_result_token()/,/^}/p' "$REPO_ROOT/tools/smp-multiboot.sh" \
+         | sed -n "s/.*grep -aqF '\([^']*\)'.*then echo \([a-z0-9-]*\).*/\1\t\2/p")
+checked=$((checked+1))
+if (( arms_beaten > 0 && arms_beaten == $(sed -n '/^harness_result_token()/,/^}/p' "$REPO_ROOT/tools/smp-multiboot.sh" | grep -c 'grep -aqF') )); then
+    printf '  ok   %-46s (%d arms)\n' "every -aqF arm generated a fixture" "$arms_beaten"
+else
+    printf '  FAIL %-46s (%d arms)\n' "the arm fixtures were not all generated" "$arms_beaten"
+    fails=$((fails+1))
+fi
 
 # --------------------------------------------------------------------------
 # #234: every classifier arm keys on a literal that tools/test.sh PRODUCES,

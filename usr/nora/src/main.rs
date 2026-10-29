@@ -36,6 +36,7 @@ use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::{slurp_capped, Write};
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::{Command, Stdio};
+use libthyla_rs::time::Instant;
 use libthyla_rs::{t_fsync, t_putstr};
 
 use kaua::event::Event;
@@ -172,10 +173,19 @@ pub extern "C" fn rs_main() -> i64 {
     // workspace, and an orphaned Ambush holds its debuggee (and the ptrace
     // stop). Compose #68 close-at-exit.
     if let Some(mut l) = lsp {
-        l.shutdown();
+        // The goodbye can take seconds (gopls answers behind its first
+        // workspace load): say so rather than sit on the last frame.
+        if !l.is_dead() {
+            ed.set_status(format!("ending {} ...", l.name()));
+            let _ = redraw(&mut term, &mut ed);
+        }
+        let t0 = Instant::now();
+        let end = l.shutdown();
+        // Beside `nora: EXIT`, for the serial log: nora-demo.exp keys on it.
+        t_putstr(&format!("nora: lsp end={} ms={}\n", end.as_str(), t0.elapsed().as_millis()));
     }
     if let Some(mut d) = dap {
-        d.shutdown();
+        d.shutdown(&mut ed);
     }
     // Explicit restore (Drop also runs it; both are idempotent).
     let _ = term.leave();
@@ -252,6 +262,9 @@ fn run(
         };
         let mut dirty = false;
         let mut saved = false;
+        // Nothing ready means the poll waited out its timeout, which is only
+        // ever an ending debug session's deadline.
+        let timed_out = ready.is_empty();
         for r in ready {
             match r.tag {
                 TAG_STDIN => {
@@ -312,6 +325,9 @@ fn run(
                 _ => {}
             }
         }
+        if let Some(d) = dap.as_mut() {
+            dirty |= d.on_deadline(timed_out, ed);
+        }
         if ed.quit {
             t_putstr("nora: EXIT path=quit code=0\n");
             return 0;
@@ -359,10 +375,16 @@ fn run(
             dirty = true;
         }
         // A session that died / exited takes its debuggee with it: drop the
-        // handle so its fds leave the poll set for good.
-        if let Some(d) = dap.as_ref() {
+        // handle so its fds leave the poll set for good. A `:debug` that was
+        // waiting for it starts now.
+        if let Some(d) = dap.as_mut() {
             if d.is_dead() {
+                let next = d.take_relaunch();
                 *dap = None;
+                if let Some(prog) = next {
+                    *dap = Dap::start(&prog, ed);
+                    dirty = true;
+                }
             }
         }
         if dirty {
@@ -438,23 +460,27 @@ fn poll_all(
     if let Some(d) = dap {
         fds.extend(d.poll_fds());
     }
-    mux.poll(&fds, PollTimeout::Block).ok()
+    // An ending debug session must wake the loop at its deadline even if
+    // nothing arrives.
+    let timeout = match dap.and_then(|d| d.deadline_ms()) {
+        Some(ms) => PollTimeout::Millis(ms),
+        None => PollTimeout::Block,
+    };
+    mux.poll(&fds, timeout).ok()
 }
 
 /// Act on a debugger command. `:debug` (re)starts a session; the rest need a
 /// live one, reporting rather than acting when there is none.
 fn drive_dap(dap: &mut Option<Dap>, req: DapRequest, ed: &mut Editor) {
     match req {
-        DapRequest::Launch(prog) => {
-            // Replace any existing session so a second `:debug` cannot orphan
-            // the first Ambush + its debuggee.
-            if let Some(mut old) = dap.take() {
-                old.shutdown();
-            }
+        DapRequest::Launch(prog) => match dap.as_mut() {
+            // A live session ends first; the loop starts `prog` once it is
+            // reaped.
+            Some(d) if !d.is_dead() => d.relaunch(prog, ed),
             // `Dap::start` sets the status either way (launching / not
             // installed); nothing to add here.
-            *dap = Dap::start(&prog, ed);
-        }
+            _ => *dap = Dap::start(&prog, ed),
+        },
         other => match dap.as_mut() {
             Some(d) => d.command(other, ed),
             None => ed.set_status(String::from("no debug session (:debug <program> first)")),

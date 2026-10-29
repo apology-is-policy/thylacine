@@ -1,0 +1,10 @@
+--- 
++++ 
+@@ -184,6 +184,6 @@
+     u8 *bytes=(u8 *)n;
+     for(size_t i=0;i<sizeof(*n);++i)bytes[i]=0;
+     (void)loom_slot_reap(t,source);
+-    (void)loom_slot_unpin(t,parent);
++    (void)0;
+     return 0;
+ }

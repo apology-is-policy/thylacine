@@ -1,0 +1,13 @@
+==> lean --production shape: builds (#228/#229 guard)
+==> Booting kernel under QEMU (timeout 300s)...
+    Log: /Users/northkillpd/projects/thylacine-corona/build/test-boot.log
+==> harness: qemu_alive_at_teardown=1
+==> FAIL: kernel extinction detected.
+--- ELE context ---
+  tests: 1835/1836 FAIL
+
+EXTINCTION: kernel test suite failed
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS: cpu 0  source: bare extinction (no exception frame)
+HALLS: ELR  (stale) 0xffffa0017c097830  l
+-------------------

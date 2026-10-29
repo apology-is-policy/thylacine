@@ -1,0 +1,10 @@
+Index review mapping to the approved lifecycle model:
+loom_service.tla abstracts installing/publication as one Connect transition.
+New entry pins refine localRefs; collection refines Retire and requires request
+DELIVERED. The C index adds a real split between ownership insertion and native
+publication/wake, not represented by that atomic abstract action. A separate
+bounded index model is needed to check that split before this checkpoint,
+including abort-before-publication, installing pin, external entry vs collect,
+stale incarnation and terminal retention. Do not claim the existing5828-state
+model alone establishes those C intervals. Native wire/fairness remains its
+separate fixture and full matrix.

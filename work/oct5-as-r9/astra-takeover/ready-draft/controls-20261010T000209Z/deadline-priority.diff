@@ -1,0 +1,12 @@
+--- 
++++ 
+@@ -68,8 +68,7 @@
+             if(!clunk_wait)action=LREADY_SUBMIT;
+         }
+         // Always finish scanning for the earliest deadline, even after a pick.
+-        if(action!=LREADY_NONE && (pick->action==LREADY_NONE ||
+-           (action==LREADY_QUIESCE && pick->action!=LREADY_QUIESCE)))
++        if(action!=LREADY_NONE && pick->action==LREADY_NONE)
+             *pick=(struct loom_ready_selection){action,o,why};
+     }
+     if(seen!=p->op_count || previous!=p->op_tail)extinction("READY list count mismatch");

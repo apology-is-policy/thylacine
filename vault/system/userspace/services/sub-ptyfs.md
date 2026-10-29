@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-08
+updated: 2026-10-22
 ---
 ## Purpose
 
@@ -186,6 +186,14 @@ caller as `ENOENT`: a shell then runs without job control on a cooked
 pts, and a kaua program polls the always-readable data fd (it says so on
 the diagnostic UART). A shell run from the shell adds two fids, a kaua
 program run by another one.
+
+The earlier four-per-pair count filled the old 80-entry table at 13 terminals
+plus two roots. More independent endpoint opens still consume finite entries;
+the headroom is not a per-process allocation guarantee. The park queues keep
+their own per-connection ceiling, 80 parked reads and 80 parked writes
+(`MAX_PENDING`), apart from the fid table, so the table grows without growing
+them. A raw protocol peer meets that bound; the kernel client's own is its
+shared tag pool (below).
 
 ## Concurrency
 
@@ -379,7 +387,7 @@ The global FRAME coalescing that a compositor needs has no analogue here
   op failed `EIO`. Since ARCH 21.11 the tag table grows, an op that finds the
   op share (`P9_OPS_MAX`, 32767) full waits for a tag instead of failing, and
   parked ops are threads waiting, so filling the share takes that many of
-  them. `MAX_FIDS` caps only one `Conn`'s contribution, not the shared pool.
+  them. `MAX_PENDING` caps only one `Conn`'s contribution, not the shared pool.
 
 ## Provenance
 
@@ -408,6 +416,16 @@ output ONLCR, line overflow), the ctl battery (render, atomic reject,
 winsize-changed-only, mixed apply, TCSAFLUSH, the walk grammar), and the
 teardown tail (drain-then-EOF, the hup edge fires once, a slave close is
 not an edge, free-on-last-unref).
+
+The capacity leg exercises the actual Conn binding table with all sixteen
+ordinary terminal shapes and sixteen root/transient entries. It checks the pair
+bound, one excess fid refusal, clunk/reuse and complete pair reclamation over two
+waves. Its local pairs have no kernel IDs, so it cannot unregister live terminals
+or signal real process groups. Three actual-handler parking legs also prove
+80 accepted data reads, readiness reads or writes, refusal of operation 81,
+and teardown reclamation. The October 4 graphical capacity scenario retains
+14 authenticated controller processes across all 16 live terminal pairs; this
+is not a thirty-two-controller qualification.
 
 The 9P layer and the kernel registration are proven separately by the
 in-guest `/dev/pts` boot probe and the `pty-probe` openpty E2E, which

@@ -1,0 +1,35 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/client.o: \
+  /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/9p_client.c \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/9p_client.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/9p_session.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/9p_wire.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/types.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdint.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stddef.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/__stddef_header_macro.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/__stddef_ptrdiff_t.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/__stddef_size_t.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/__stddef_wchar_t.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/__stddef_null.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/__stddef_offsetof.h \
+  /opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdbool.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/9p_transport.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/larder.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/spinlock.h \
+  /Users/northkillpd/projects/thylacine-corona/arch/arm64/atomic_lse.h \
+  /Users/northkillpd/projects/thylacine-corona/arch/arm64/alternatives.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/extinction.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/syscall.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/errno.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/poll.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/rendez.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/cons.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/notes.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/page.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/addrspace.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/caps.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/thread.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/context.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/../arch/arm64/uart.h \
+  /Users/northkillpd/projects/thylacine-corona/kernel/../mm/slub.h

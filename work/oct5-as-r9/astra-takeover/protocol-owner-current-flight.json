@@ -1,0 +1,12 @@
+{
+  "source": "fa7e6c5bcdf0d8bdffecdbca7720f95e3cd1d20f",
+  "pid": 5293,
+  "started": "2026-10-09T07:51:47.321728+00:00",
+  "launch_log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/protocol-owner-current-launch.log",
+  "status": "completed",
+  "expect_tests": 1848,
+  "floor_mib": 8192,
+  "run": "work/oct5-as-r9/current-gate-20261009T075147Z",
+  "verified_at": "2026-10-09T16:51:45.120083+00:00",
+  "result": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/current-gate-20261009T075147Z-result.json"
+}

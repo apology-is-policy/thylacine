@@ -1,0 +1,11 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T06:45:33.638499+00:00",
+  "sources": 11,
+  "commands": 38,
+  "protected_hashes": 10,
+  "external": "61dde3727921e70e2c72fbd3c9e2044a192f4a54 clean",
+  "source_and_snapshot_hashes_verified": true,
+  "raw_logs_verified": true,
+  "limits": "Owned mapping geometry/lifecycle with simulated backend/producer; no native setup/syscall adapter or SQ publisher yet"
+}

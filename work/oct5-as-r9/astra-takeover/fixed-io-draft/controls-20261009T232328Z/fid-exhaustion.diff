@@ -1,0 +1,11 @@
+--- control.c
++++ fid-exhaustion.c
+@@ -673,7 +673,7 @@
+     } else if(kind==P9_TLOPEN)o->program.wire.mode=(u32)s->offset;
+     else if(kind==P9_TWALK) {
+         o->program.wire.new_fid=p9_client_alloc_fid(&o->protocol->client);
+-        if(o->program.wire.new_fid==P9_NOFID){rc=-T_E_NOSPC;goto fail;}
++        if(false){rc=-T_E_NOSPC;goto fail;}
+     }
+     rc=loom_private_program_start(&o->program,&o->program.identity,kind);
+     if(rc)goto fail;

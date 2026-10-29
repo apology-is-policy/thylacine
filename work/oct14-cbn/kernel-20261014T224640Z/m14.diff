@@ -1,0 +1,14 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:07:37
+@@ -11951,7 +11951,10 @@
+ 
+     // Keyed on ctl: a peer thread that closed this number while the call slept
+     // and put its own file there is refused, not swapped out and released.
+-    if (handle_replace(p, (hidx_t)fd_raw, ctl, KOBJ_SPOOR, dr, dsp) < 0) {
++    struct Handle cur_m;   // MUTANT M14: the swap keyed on whatever the number names now
++    const void *cur = handle_get(p, (hidx_t)fd_raw, &cur_m) == 0 ? cur_m.obj : NULL;
++    if (cur) handle_put(&cur_m);
++    if (handle_replace(p, (hidx_t)fd_raw, cur, KOBJ_SPOOR, dr, dsp) < 0) {
+         spoor_clunk(dsp);
+         return -(s64)T_E_IO;
+     }

@@ -1,0 +1,11 @@
+--- control.c
++++ backing-pin.c
+@@ -118,7 +118,7 @@
+         else {
+             // Existing CQ capacity bounds traversal. Actual request admission
+             // still owes its own shared terminal reservation before dispatch.
+-            burrow_ref((struct Burrow *)e.backing);
++            if(false)burrow_ref((struct Burrow *)e.backing);
+             loom_ref(l);
+             *f = (struct loom_private_fixed){l->service_fixed,l,e};
+             l->service_fixed = f;

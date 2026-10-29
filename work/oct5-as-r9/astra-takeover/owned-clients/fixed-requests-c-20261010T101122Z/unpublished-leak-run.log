@@ -1,0 +1,1 @@
+Assertion failed: (!t_fixed_occupied(d)), function main, file test_fixed_requests.c, line 12.

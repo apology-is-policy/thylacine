@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/handle.c	2026-10-15 00:46:40
++++ kernel/handle.c	2026-10-15 00:52:00
+@@ -437,7 +437,7 @@
+                                     bool cloexec) {
+     if (from < 0) from = 0;
+     for (int i = (int)from; i < PROC_HANDLE_MAX; i++) {
+-        if (t->slots[i].magic == 0) {
++        if (t->slots[i].magic == 0 || t->slots[i].magic == HANDLE_RESERVED) { // MUTANT M2: an alloc takes a reservation
+             handle_fill_locked(t, (hidx_t)i, kind, rights, obj, cloexec);
+             return (hidx_t)i;
+         }

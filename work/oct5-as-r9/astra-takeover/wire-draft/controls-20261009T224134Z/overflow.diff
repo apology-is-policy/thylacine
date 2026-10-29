@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ overflow.c
+@@ -18,7 +18,7 @@
+         if(w->iounit && w->iounit<limit)limit=w->iounit;
+         if(limit>INT32_MAX)limit=INT32_MAX;
+         if(count>limit)count=limit;
+-        if(w->offset>UINT64_MAX-count)return -T_E_INVAL;
++        
+     }
+     int rc;
+     u32 new_fid=w->fid;

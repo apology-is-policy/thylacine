@@ -1,0 +1,4 @@
+                 U __stack_chk_fail
+                 U __stack_chk_guard
+                 U extinction
+                 U p9_session_has_free_tag

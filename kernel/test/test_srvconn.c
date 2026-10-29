@@ -48,18 +48,10 @@
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/9p_session.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
-
-void test_srvconn_create_destroy(void);
-void test_srvconn_roundtrip(void);
-void test_srvconn_ring_capacity(void);
-void test_srvconn_recv_blocks_then_wakes(void);
-void test_srvconn_recv_deadline_timeout(void);
-void test_srvconn_teardown_eofs(void);
-void test_srvconn_teardown_wakes_blocked(void);
-void test_srvconn_server_send_blocks_then_drain_wakes(void);
-void test_srvconn_ctl_counters(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -115,6 +107,78 @@ void test_srvconn_create_destroy(void) {
     srvconn_unref(cn);
     TEST_EXPECT_EQ(srvconn_total_freed(), freed0 + 1,
         "the last unref frees the connection");
+
+    // Boot runs this fixture before resident service users. Constructors and
+    // torn-but-retained transports must consume the SAME bounded capacity.
+    // Alternating classes proves admission is shared rather than per class.
+    TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
+        "capacity fixture starts without retained connections");
+    struct SrvConn *held[SRV_MAX_CONNS];
+    u32 nheld = 0, used = 0;
+    while (used < SRV_CREDITS_GLOBAL) {
+        bool bulk = (nheld & 1u) && SRV_CREDITS_GLOBAL - used >= 4;
+        held[nheld] = srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID,
+                                    bulk ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE);
+        TEST_ASSERT(held[nheld] != NULL, "admit mixed classes up to credit limit");
+        used += bulk ? 4 : 1; nheld++;
+    }
+    struct srv_admission_snapshot snapshot;
+    srv_domain_snapshot(NULL, &snapshot);
+    TEST_EXPECT_EQ(snapshot.global_credits, 256u, "mixed classes consume exact credits");
+    TEST_EXPECT_EQ(snapshot.global_count, nheld, "connection counts remain distinct");
+    u64 at_limit = srvconn_total_created();
+    TEST_ASSERT(srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE) == NULL,
+                "reject constructor beyond global capacity");
+    srvconn_ref(held[0]);
+    srvconn_teardown(held[0]);
+    srvconn_teardown(held[0]);
+    srvconn_unref(held[0]);
+    TEST_ASSERT(srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_BULK_MSIZE) == NULL,
+                "teardown and nonfinal unref do not return capacity");
+    TEST_EXPECT_EQ(srvconn_total_created(), at_limit,
+                   "refused constructors do not count as created");
+    srvconn_unref(held[0]);
+    TEST_ASSERT(srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_BULK_MSIZE) == NULL,
+                "one credit cannot admit bulk");
+    held[0] = srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
+    TEST_ASSERT(held[0] != NULL, "final unref returns one capacity slot");
+    TEST_ASSERT(srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE) == NULL,
+                "final unref returns exactly one slot");
+    for (u32 i = 0; i < nheld; i++) srvconn_unref(held[i]);
+    TEST_EXPECT_EQ(srvconn_total_created(), srvconn_total_freed(),
+                   "capacity fixture releases every object");
+    // The production structures/allocator also exercise the composed budget.
+    struct SrvDomain *domains[SRV_MAX_DOMAINS];
+    int err = 0;
+    for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) {
+        domains[i] = srv_domain_create(&err);
+        TEST_ASSERT(domains[i] && err == 0, "admit domain up to bound");
+    }
+    TEST_ASSERT(srv_domain_create(&err) == NULL && err == -T_E_NOSPC, "domain limit");
+    for (u32 i = 0; i < SRV_CREDITS_SESSIONS; i++) {
+        held[i] = srvconn_create_in(domains[i / SRV_CREDITS_DOMAIN], &err,
+                                    1, 1, PRINCIPAL_INVALID, false, 2, PRINCIPAL_INVALID, SRVCONN_MSIZE);
+        TEST_ASSERT(held[i], "session partition capacity");
+        if (i == SRV_CREDITS_DOMAIN - 1)
+            TEST_ASSERT(srvconn_create_in(domains[0], &err, 1, 1, PRINCIPAL_INVALID, false, 2, PRINCIPAL_INVALID,
+                        SRVCONN_MSIZE) == NULL && err == -T_E_NOSPC, "per-domain cap");
+    }
+    TEST_ASSERT(srvconn_create_in(domains[3], &err, 1, 1, PRINCIPAL_INVALID, false, 2, PRINCIPAL_INVALID,
+                SRVCONN_MSIZE) == NULL && err == -T_E_NOSPC, "combined session cap");
+    for (u32 i = SRV_CREDITS_SESSIONS; i < SRV_MAX_CONNS; i++) {
+        held[i] = srvconn_create(1, 1, PRINCIPAL_INVALID, false, 2, PRINCIPAL_INVALID, SRVCONN_MSIZE);
+        TEST_ASSERT(held[i], "boot retains 64 credits at guest saturation");
+    }
+    srv_domain_unref(domains[0]);
+    TEST_ASSERT(srv_domain_create(&err) == NULL, "connections retain retired domain ticket");
+    for (u32 i = 0; i < SRV_CREDITS_DOMAIN; i++) srvconn_unref(held[i]);
+    domains[0] = srv_domain_create(&err);
+    TEST_ASSERT(domains[0], "last connection returns domain ticket");
+    for (u32 i = SRV_CREDITS_DOMAIN; i < SRV_MAX_CONNS; i++) srvconn_unref(held[i]);
+    for (u32 i = 0; i < SRV_MAX_DOMAINS; i++) srv_domain_unref(domains[i]);
+    u32 n = 99;
+    srv_domain_counts(NULL, NULL, NULL, NULL, &n);
+    TEST_EXPECT_EQ(n, 0u, "all domain tickets returned");
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,9 +1169,77 @@ void test_srvconn_ctl_counters(void) {
     TEST_ASSERT(!p2.found, "freed conn unlinked from the registry");
 }
 
+// AS-1 exercises the real adapter and channel role guards. Static session
+// storage keeps this fixture off the small kernel stack; tests are serialized.
+static struct p9_session g_progress_session;
+static u8 g_progress_out[256], g_progress_recv[256], g_progress_peer[256];
+static void test_srvconn_private_progress(void) {
+    struct SrvConn *cn = srvconn_create(123, 11, PRINCIPAL_INVALID, false, 456, PRINCIPAL_INVALID, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "private progress connection");
+    struct p9_srvconn_transport adapter;
+    TEST_ASSERT(p9_srvconn_transport_init(&adapter, cn) == 0, "progress adapter");
+    struct p9_transport transport;
+    struct p9_transport_progress progress;
+    struct p9_handshake_progress handshake;
+    TEST_ASSERT(p9_transport_init(&transport, p9_srvconn_transport_ops(&adapter),
+        g_progress_recv, sizeof(g_progress_recv)) == 0, "progress transport");
+    TEST_ASSERT(p9_transport_progress_init(&progress, &transport,
+        p9_srvconn_progress_ops(cn), 256) == 0, "private nonblocking mode");
+    TEST_ASSERT(p9_session_init(&g_progress_session, 17, 256) == 0, "progress session");
+    TEST_ASSERT(p9_handshake_progress_init(&handshake, &g_progress_session,
+        &progress, g_progress_out, sizeof(g_progress_out), 1007, 100) == 0,
+        "queue native handshake");
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0, "send version");
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, false, g_progress_peer, 256),
+        21L, "server gets one complete version");
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0,
+        "empty alive peer yields without blocking");
+    int len = p9_build_tversion(g_progress_peer, sizeof(g_progress_peer),
+        P9_NOTAG, 128, (const u8 *)"9P2000.L", 8);
+    TEST_ASSERT(len == 21, "version response fixture");
+    g_progress_peer[4] = P9_RVERSION;
+    for (int i = 0; i < len; i++) {
+        TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, true, &g_progress_peer[i], 1),
+            1L, "one response byte");
+        if (i == 0) {
+            spin_lock(&cn->s2c.lock); cn->s2c.reading = true; spin_unlock(&cn->s2c.lock);
+            TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0,
+                "private reader never bypasses a busy role");
+            TEST_EXPECT_EQ(progress.rx_have, 0u, "busy role retained byte");
+            spin_lock(&cn->s2c.lock); cn->s2c.reading = false; spin_unlock(&cn->s2c.lock);
+        }
+        TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0,
+            "partial version remains resumable");
+    }
+    TEST_EXPECT_EQ(handshake.phase, P9_HS_ATTACH_SEND, "version validated");
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), 0, "send attach");
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, false, g_progress_peer, 256),
+        23L, "server gets native attach");
+    TEST_EXPECT_EQ(g_progress_peer[19], (u8)(1007 & 255), "captured principal low byte");
+    u8 reply[20] = {20, 0, 0, 0, P9_RATTACH, 0, 0, 0x80};
+    reply[5] = g_progress_peer[5]; reply[6] = g_progress_peer[6];
+    for (unsigned i = 0; i < sizeof(reply); i++) {
+        TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, true, &reply[i], 1), 1L,
+            "attach response byte");
+        TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1),
+            i + 1 == sizeof(reply) ? 1 : 0, "READY only on complete attach");
+    }
+    TEST_EXPECT_EQ(progress.frame_limit, 128u, "negotiation bounds future frames");
+    srvconn_ref(cn); // retained peer endpoint outlives local retirement
+    p9_handshake_progress_abort(&handshake);
+    TEST_EXPECT_EQ(p9_handshake_progress_step(&handshake, 1), -T_E_CANCELED,
+        "abort cannot be revived by a ready root");
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, true, true, reply, 1), -(long)T_E_PIPE,
+        "abort tears down the actual channel");
+    TEST_EXPECT_EQ(p9_transport_close(&transport), 0, "release adapter after abort");
+    p9_session_destroy(&g_progress_session);
+    srvconn_unref(cn); // original local owner
+    TEST_EXPECT_EQ(cn->ref, 1, "retained peer reference remains charged");
+    srvconn_unref(cn);
+}
+
 // Discriminates poll-ready from write-all-ready: only three bytes remain, yet
 // a 16-byte nonblocking write must return three without parking the seat loop.
-void test_srvconn_nonblocking_backpressure(void);
 void test_srvconn_nonblocking_backpressure(void) {
     struct SrvConn *cn = srvconn_create(123, 11, PRINCIPAL_INVALID, false, 456, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "nonblocking connection");
@@ -1136,4 +1268,5 @@ void test_srvconn_nonblocking_backpressure(void) {
     TEST_EXPECT_EQ(sp->dev->read(sp, &byte, 1, 0), 0L, "drained EOF");
     TEST_EXPECT_EQ(sp->dev->write(sp, &byte, 1, 0), -(long)T_E_PIPE, "dead peer write");
     spoor_clunk(sp);
+    test_srvconn_private_progress();
 }

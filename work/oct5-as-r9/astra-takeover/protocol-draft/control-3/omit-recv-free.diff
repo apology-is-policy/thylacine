@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -50,7 +50,7 @@
+     p9_client_destroy(&p->client);
+     devsrv_connect_release(&p->admission);
+     if (p->bulk_send_storage) kfree(p->bulk_send_storage);
+-    if (p->recv_storage) kfree(p->recv_storage);
++    /* omit receive free */
+     kfree(p);
+     protocol_refund(l, pages);
+     loom_unref(l); // last access to l or its image

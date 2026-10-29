@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-10-26
 ---
 ## Purpose
 
@@ -31,7 +31,14 @@ inconsistencies" (TOOLING.md §3).
   host share, and a QMP control socket.
 - Prints `==> qemu: accel=<a> cpu=<c> gic=v<n> smp=<n>` — the line
   downstream harnesses read back rather than re-deriving.
-- Every device group is disable-able by env (`THYLACINE_NO_{NET,INPUT,GPU,QMP,SHARE}`).
+- Every device group is disable-able by env (`THYLACINE_NO_{NET,INPUT,GPU,RNG,QMP,SHARE}`).
+  `THYLACINE_NO_RNG=1` (2026-10-26) drops both RNGs: on a CPU without RNDR
+  the kernel then has no strong entropy and refuses userspace (vote 18),
+  which is the boot `tools/test-fault.sh no_entropy` makes. Like
+  `THYLACINE_NO_GPU`, it moves every PCI function after `rng_pci0` up a slot,
+  which puts the IRQ-claiming sound function on the NIC's INTx line (slot 5);
+  that matters only where INTx is used (`THYLACINE_ITS=off`), and
+  `THYLACINE_NO_AUDIO=1` avoids it there.
 
 ## Mechanism
 
@@ -106,7 +113,8 @@ the launcher still works on a non-Apple box. The kernel autodetects v2-vs-v3
 from the DTB, so neither choice is baked into the guest. Under HVF the guest
 sees Apple cores, which have LSE+PAC+BTI but **not** FEAT_RNG/RNDR — which
 is precisely why the kernel CSPRNG seeds from virtio-rng (Lazarus W3): one
-software path on every target.
+software path on every target. An HVF boot without it refuses userspace
+(vote 18, [[sub-kernel-boot-sequence]]).
 
 **The `nowatchpoint` token, and why its ABSENCE is the safe default.** QEMU
 TCG programs `DBGWVR`/`DBGWCR` but never raises EC 0x34; a guest thread that
@@ -166,6 +174,39 @@ so the documented way to turn the feature off would have been inert on arrival.
 0, and `gpu-mmio0` (probe-only, driverless in a resident boot) would squat
 it — the VNC client must land on `gpu0`'s head. `cocoa` keeps the canonical
 device set because its View menu switches consoles interactively.
+
+**The launcher declares what it attached, one word per instance (vote 17,
+2026-10-22).** QEMU's virt machine always has thirty-two virtio-mmio slots and
+an empty one reads DeviceID 0, and a PCI scan or a DTB read can miss a device
+the same way, so the guest cannot tell a device that was never attached from
+one it failed to see -- only the launcher knows. Just before `exec`, the script
+walks every `-device` and `-virtfs` argument it is about to pass (the extra
+arguments, the two rng devices and the host share included; the long `--`
+forms and a leading `driver=` too) and appends one bootargs word per device.
+It refuses, before QEMU starts, extra arguments that would attach a device any
+other way -- `-drive` without `if=none` or `if=pflash`, `-hd[a-d]`, `-cdrom`,
+`-nic` and `-net` other than `none`, a JSON `-device`, or one whose driver
+follows another key -- since it could not declare what they attach. The
+words: `thylacine.virtio-<kind>` for a virtio-mmio device and
+`thylacine.virtio-pci-<kind>` for a virtio PCI function, the kind naming the
+virtio DeviceID rather than the model (keyboard, mouse, tablet, multitouch and
+input-host are `input`; gpu-gl and gpu-rutabaga are `gpu`; a `-transitional`
+suffix is dropped), and `thylacine.virtio-pci-9p` for the `-virtfs` share.
+Then `thylacine.smp` for more than one CPU, and `thylacine.msi` when the
+launcher knows the machine has an MSI controller: GICv2 always carries a v2m
+frame, and GICv3 under TCG an ITS unless `its=off`; under KVM or hvf a GICv3
+ITS depends on the host, which the launcher cannot see even with `its=on`, so
+nothing is declared. `--no-share` now drops the share: it used to empty an
+array the default then refilled, so every boot that passed it, `tools/test.sh`'s
+included, carried the 9P function anyway. The words are derived from the arguments, not
+written beside them, so dropping a device -- `THYLACINE_NO_NET=1`, a missing
+`disk.img`, the vnc display's dropped MMIO GPU -- drops its word with it. The
+kernel tests FAIL on what is declared and absent, and on what is present and
+undeclared, and count a skip on what is undeclared and absent
+([[sub-substrate-kernel-suite]]); `tools/test.sh` mirrors the same rules from
+its own environment ([[sub-substrate-gates]]). Every other token is appended
+before the walk, so a userspace reader with a short buffer (aurora and
+debug-probe read 256 bytes) still finds its own word where it was.
 
 ## Data structures
 
@@ -238,11 +279,15 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   for Accessibility permission for QEMU, and `THYLACINE_FULL_GRAB=0` opts out.
   Chosen by the operator over moving the chord plane off Super. Verified
   present in QEMU 10.0.2.
-- **`show-cursor=on` is a STOPGAP** (same date, `THYLACINE_SHOW_CURSOR=0` opts
-  out): it draws the HOST pointer over the window because the guest draws
-  none -- tapestryd sets up the virtio-gpu cursor queue and never issues
-  `UPDATE_CURSOR`. On VNC or any non-cocoa display there is still no pointer.
-  Remove it when the guest draws its own.
+- Halcyon supplies its native pointer through Lictor. Cocoa's forced host
+  pointer is off by default; `THYLACINE_SHOW_CURSOR=1` remains an explicit
+  diagnostic override for older images. `THYLACINE_DISPLAY=vnc-unix` with
+  `THYLACINE_VNC_SOCKET` provides a private capture socket, selecting gpu0 as
+  the displayed device. `vnc_capture.py --cursor-at X Y` captures the actual
+  AlphaCursor plane and records its hotspot/visible pixels beside the image.
+  Its position must come from the guest's `cursor` ctl line: QEMU VNC supplies
+  pixels but does not publish cursor position. Raw screendumps alone do not
+  prove a cursor plane was displayed.
 
 - `--snapshot` is parsed but unimplemented: it prints "not yet implemented"
   and continues. TOOLING.md §6 describes the snapshot workflow as a
@@ -273,3 +318,13 @@ INTx fallback. The boot command reports the actual ITS selection.
 network/GPU/sound functions at slots 9/13/17 or 17/9/13. All three share INTA's
 wire while the two permutations exercise BDF-derived authority independent of
 device ordering. Production defaults are unchanged.
+
+## Explicit modern MMIO transport
+
+run-vm.sh pins `-global virtio-mmio.force-legacy=false` on every host. The guest
+MMIO drivers require transport version 2; QEMU's distributor defaults need not
+match that requirement. On Linux/KVM an unchanged production image with a real
+pool failed backend initialization at version 1 (STM_EBACKEND); the modern
+property made the same image boot. The native readiness scenario then passed.
+This selects the supported emulated device contract and changes no guest driver
+or bare-metal hardware discovery. HI1-R2 in the interaction status owns evidence.

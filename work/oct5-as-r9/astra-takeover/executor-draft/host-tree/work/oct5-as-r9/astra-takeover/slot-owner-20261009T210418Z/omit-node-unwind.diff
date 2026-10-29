@@ -1,0 +1,11 @@
+--- control
++++ omit-node-unwind
+@@ -189,7 +189,7 @@
+     if (!l) {
+         kfree(engine);
+         kfree(requests);
+-        kfree(nodes);
++
+         kfree(targets);
+         kfree(pools);
+         kfree(slots);

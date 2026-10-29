@@ -328,6 +328,7 @@ _Static_assert(((EXEC_INIT_STRUCTURED(0, 0) + 15ull) & ~15ull)
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
 
+#ifdef KERNEL_TESTS
 // exec_setup_with_argv — extended entry that threads argv through to the
 // initial-stack layout (P6-pouch-stratumd-boot sub-chunk 16b-alpha). Same
 // contract as exec_setup but the System V frame carries argc + argv[]
@@ -354,6 +355,7 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
 int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
                          const char *argv_data, u32 argv_data_len, u32 argc,
                          u64 *entry_out, u64 *sp_out);
+#endif // KERNEL_TESTS
 
 // REVENANT R-4: bounds for the file-backed exec path (exec_setup_from_spoor).
 //
@@ -470,6 +472,7 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 #define EXEC_ARGV_MAX       512u
 #define EXEC_ARGV_DATA_MAX  65536u
 
+#ifdef KERNEL_TESTS
 // exec_interp_argv -- the DISTRO D-4 argv block for the interpreter route:
 //
 //     [interp, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
@@ -489,6 +492,7 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
                        const char *path, u32 path_len,
                        const char *argv_data, u32 argv_data_len, u32 argc,
                        u32 *out_len, u32 *out_argc);
+#endif // KERNEL_TESTS
 
 // exec_resolve_from_namespace (#58 / REVENANT R-4) -- resolve `name` in `p`'s
 // namespace and PIN the resulting executable Spoor (the ref transfers to the
@@ -502,14 +506,6 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
 // answer to "what is executable from this namespace" and not two.
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out);
-
-// _ex variant (VIVARIUM section 13): also reports, via *pheno_out (OPTIONAL),
-// whether the resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
-// phenotype declaration channel. Only the SYS_SPAWN_FULL_ARGV path (the sole
-// fresh-phenotype declarer) passes non-NULL; the plain wrapper above passes NULL.
-struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
-                                             size_t name_len, size_t *size_out,
-                                             bool *pheno_out);
 
 // exec_stage_env -- project `p`'s /env into the packed "NAME=VALUE\0" block
 // exec_load_into takes (#140). The one place a Proc's environment becomes an
@@ -563,6 +559,10 @@ extern void userland_enter_held(u64 entry_pc, u64 user_sp);
 #ifdef KERNEL_TESTS
 void exec_icache_last_for_test(u64 *addr_out, size_t *len_out);
 u64  exec_icache_calls_for_test(void);
+// While on, exec's AT_RANDOM draw is refused as an unseeded pool refuses it.
+// The arming test releases it before any assert, so a failure cannot leave
+// every later exec refused.
+void exec_random_refuse_for_test(bool on);
 #endif
 
 #endif // THYLACINE_EXEC_H

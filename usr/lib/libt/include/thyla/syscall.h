@@ -152,6 +152,67 @@ enum {
 #define T_PTY_REG_SLAVE  1
 #define T_PTY_REG_FREE   2
 
+// HI-1 terminal ownership ABI; kernel observation and admission operations.
+// SYS_PTY_REGISTER subops 16..21: docs/HALCYON-INTERACTION-PTY-ABI.md.
+// Existing server-only subops 0..2 keep their contract. Records are little-endian
+// on the native AArch64 ABI. No padding, pointer fields or userspace bearer grant.
+#define T_PTY_INTERACTION_BIND 16u
+#define T_PTY_INTERACTION_UNBIND 17u
+#define T_PTY_INTERACTION_WATCH 18u
+#define T_PTY_INTERACTION_STATE 19u
+#define T_PTY_INTERACTION_ACK 20u
+#define T_PTY_INTERACTION_CHECK 21u
+#define T_PTY_INTERACTION_VERSION 1u
+#define T_PTY_INTERACTION_STATE_BYTES 80u
+#define T_PTY_INTERACTION_CHECK_BYTES 24u
+#define T_PTY_INTERACTION_LIVE 1u
+#define T_PTY_INTERACTION_ACKNOWLEDGED 2u
+#define T_PTY_INTERACTION_ID_MAX 0x7fffffffffffffffULL
+
+struct t_pty_interaction_state {
+    unsigned int version;
+    unsigned int flags;
+    unsigned long long binding_id;
+    unsigned long long pts_id;
+    unsigned long long foreground_epoch;
+    unsigned long long acknowledged_epoch;
+    unsigned long long revision;
+    unsigned int controlling_sid;
+    unsigned int foreground_pgid;
+    unsigned long long subject_stripes;
+    unsigned long long binder_stripes;
+    unsigned int binder_pid;
+    unsigned int reserved;
+};
+_Static_assert(sizeof(struct t_pty_interaction_state) == 80, "t_pty_interaction_state: size");
+_Static_assert(_Alignof(struct t_pty_interaction_state) == 8, "t_pty_interaction_state: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, version) == 0, "t_pty_interaction_state: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, flags) == 4, "t_pty_interaction_state: flags");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binding_id) == 8, "t_pty_interaction_state: binding_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, pts_id) == 16, "t_pty_interaction_state: pts_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_epoch) == 24, "t_pty_interaction_state: foreground_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, acknowledged_epoch) == 32, "t_pty_interaction_state: acknowledged_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, revision) == 40, "t_pty_interaction_state: revision");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, controlling_sid) == 48, "t_pty_interaction_state: controlling_sid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_pgid) == 52, "t_pty_interaction_state: foreground_pgid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, subject_stripes) == 56, "t_pty_interaction_state: subject_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_stripes) == 64, "t_pty_interaction_state: binder_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_pid) == 72, "t_pty_interaction_state: binder_pid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, reserved) == 76, "t_pty_interaction_state: reserved");
+
+struct t_pty_interaction_check {
+    unsigned int version;
+    unsigned int size;
+    unsigned long long expected_epoch;
+    unsigned long long subject_stripes;
+};
+_Static_assert(sizeof(struct t_pty_interaction_check) == 24, "t_pty_interaction_check: size");
+_Static_assert(_Alignof(struct t_pty_interaction_check) == 8, "t_pty_interaction_check: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, version) == 0, "t_pty_interaction_check: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, size) == 4, "t_pty_interaction_check: size");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, expected_epoch) == 8, "t_pty_interaction_check: expected_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, subject_stripes) == 16, "t_pty_interaction_check: subject_stripes");
+
 // SYS_TTY_SIGNAL classes (PTY-1d). TSTP (live since PTY-1f) is the
 // job-control suspend: a caught susp delivers the tty:susp note only; an
 // uncaught one on a non-orphaned foreground group takes the default STOP
@@ -321,6 +382,7 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // 3.2). Ungated: SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) are already
 // self-reachable, so this only moves the seal earlier than the child could.
 #define T_SPAWN_PERM_SEAL              (1u << 9)
+#define T_SPAWN_PERM_SESSION_REGISTRY  (1u << 11)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
@@ -349,11 +411,21 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // T_SPAWN_EXT_THREADS: a struct t_sys_spawn_ext_threads sets the child's thread
 // budget (ARCH 7.3.5), after the cwd tail when both are set.
 #define T_SPAWN_EXT_THREADS            (1u << 1)
+// T_SPAWN_EXT_ENV: a struct t_sys_spawn_ext_env names the child's whole
+// environment as NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd
+// and thread tails whose bits are set.
+#define T_SPAWN_EXT_ENV                (1u << 2)
+// Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
+// refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
+// mask to the kernel's.
+#define T_SPAWN_EXT_FLAGS_ALL          (T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 #define T_SYS_SPAWN_ARGV_MAX        512u
 #define T_SYS_SPAWN_ARGV_DATA_MAX   65536u
+// Mirror SYS_SPAWN_ENV_DATA_MAX: the T_SPAWN_EXT_ENV tail's records, in bytes.
+#define T_SYS_SPAWN_ENV_DATA_MAX    32768u
 
 // SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
 // in kernel/include/thylacine/syscall.h. The 80-byte ABI shape is pinned
@@ -476,6 +548,22 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_threads, thread_budget)
                "t_sys_spawn_ext_threads.thread_budget at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_threads, threads_flags) == 4,
                "t_sys_spawn_ext_threads.threads_flags at ABI offset 4");
+
+// The T_SPAWN_EXT_ENV tail (mirror struct sys_spawn_ext_env;
+// tools/check-spawn-args-mirrors.py compares the two).
+struct t_sys_spawn_ext_env {
+    unsigned long  env_va;           // 0  — the records; may be 0 when env_len is 0
+    unsigned int   env_len;          // 8  — 0..T_SYS_SPAWN_ENV_DATA_MAX incl. the NULs
+    unsigned int   env_flags;        // 12 — must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_env) == 16,
+               "t_sys_spawn_ext_env must be 16 bytes (the kernel's tail)");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_va) == 0,
+               "t_sys_spawn_ext_env.env_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_len) == 8,
+               "t_sys_spawn_ext_env.env_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_env, env_flags) == 12,
+               "t_sys_spawn_ext_env.env_flags at ABI offset 12");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller
@@ -2485,6 +2573,71 @@ static inline long t_pivot_root(long new_root_fd) {
         : "r"(x8)
         : "memory", "cc"
     );
+    return x0;
+}
+
+#define T_SYS_SRV_REGISTRY_NEW 134
+struct t_srv_route { unsigned int name_len, reserved; unsigned char name[32]; };
+_Static_assert(sizeof(struct t_srv_route) == 40, "D7 route ABI");
+static inline long t_srv_registry_new(long source, const struct t_srv_route *routes,
+                                      unsigned long count, unsigned long flags) {
+    register long x0 __asm__("x0") = source;
+    register long x1 __asm__("x1") = (long)routes;
+    register long x2 __asm__("x2") = (long)count;
+    register long x3 __asm__("x3") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_SRV_REGISTRY_NEW;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+// Anonymous memory in the burrow window. ATTACH (eager RW) answers vaddr, -1 (a
+// bad length, no free gap, a failed map) or -ENOMEM (the page cap, the pool);
+// DETACH answers 0 or -errno; RESERVE (lazy, minted at prot) answers vaddr or
+// -errno; PROTECT answers 0 or -errno.
+// Prot bits mirror the kernel's BURROW_PROT_*; X is never a target.
+#define T_SYS_BURROW_ATTACH  37
+#define T_SYS_BURROW_DETACH  38
+#define T_SYS_BURROW_RESERVE 124
+#define T_SYS_BURROW_PROTECT 125
+#define T_BURROW_PROT_NONE   0u
+#define T_BURROW_PROT_READ   1u
+#define T_BURROW_PROT_WRITE  2u
+#define T_BURROW_PROTECT_SEAL 1u
+
+static inline long t_burrow_attach(unsigned long length) {
+    register long x0 __asm__("x0") = (long)length;
+    register long x8 __asm__("x8") = T_SYS_BURROW_ATTACH;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+static inline long t_burrow_detach(unsigned long va, unsigned long length) {
+    register long x0 __asm__("x0") = (long)va;
+    register long x1 __asm__("x1") = (long)length;
+    register long x8 __asm__("x8") = T_SYS_BURROW_DETACH;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+static inline long t_burrow_reserve(unsigned long length, unsigned long prot,
+                                    unsigned long align_log2) {
+    register long x0 __asm__("x0") = (long)length;
+    register long x1 __asm__("x1") = (long)prot;
+    register long x2 __asm__("x2") = (long)align_log2;
+    register long x8 __asm__("x8") = T_SYS_BURROW_RESERVE;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+static inline long t_burrow_protect(unsigned long va, unsigned long length,
+                                    unsigned long prot, unsigned long flags) {
+    register long x0 __asm__("x0") = (long)va;
+    register long x1 __asm__("x1") = (long)length;
+    register long x2 __asm__("x2") = (long)prot;
+    register long x3 __asm__("x3") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_BURROW_PROTECT;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+                      : "memory", "cc");
     return x0;
 }
 

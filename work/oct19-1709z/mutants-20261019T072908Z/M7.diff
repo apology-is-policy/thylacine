@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 30f29ec60..d45cf8d8c 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -12017,10 +12017,6 @@ static s64 viv_sock_connect_dial_on(struct Proc *p, struct viv_socktab *tab,
+         // A peer thread finishing this same connect (a read on the CONNECTING
+         // fd, say) swapped first: the connection is made and the number names
+         // it, so the surplus data fid goes and the call succeeds.
+-        struct viv_sock now;
+-        if (viv_socktab_get(tab, (s32)(s64)fd_raw, &now) && now.epoch == e->epoch &&
+-            now.state == VIV_SOCK_CONNECTED)
+-            return 0;
+         return -(s64)T_E_IO;
+     }
+     // The row's ctl reference; the fd's went with the swap, and the caller's

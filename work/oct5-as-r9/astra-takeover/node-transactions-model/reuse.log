@@ -1,0 +1,211 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 92 and seed 4362237931222640494 with 2 workers on 8 cores with 683MB heap and 64MB offheap memory [pid: 11593] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/loom_service.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-10874673424449812147/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-10874673424449812147/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-10874673424449812147/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-10874673424449812147/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module loom_service
+Linting of module loom_service
+Starting... (2026-10-09 07:39:00)
+Implied-temporal checking--satisfiability problem has 1 branches.
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 07:39:00.
+Error: Invariant NoStaleSlot is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ phase = "empty"
+/\ lateSuccess = FALSE
+/\ cancelled = {}
+/\ terminal = {}
+/\ delivered = {}
+/\ accepted = {}
+/\ doubleTerminal = FALSE
+/\ cq = {}
+/\ localRefs = {}
+/\ pins = {}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {}
+/\ ringClosed = FALSE
+/\ gen = 0
+/\ peerRefs = {}
+/\ charged = {}
+/\ success = {}
+/\ retired = {}
+
+State 2: <Connect line 29, col 12 to line 38, col 80 of module loom_service>
+/\ phase = "connecting"
+/\ lateSuccess = FALSE
+/\ cancelled = {}
+/\ terminal = {}
+/\ delivered = {}
+/\ accepted = {1}
+/\ doubleTerminal = FALSE
+/\ cq = {}
+/\ localRefs = {1}
+/\ pins = {1}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {1}
+/\ ringClosed = FALSE
+/\ gen = 1
+/\ peerRefs = {1}
+/\ charged = {1}
+/\ success = {}
+/\ retired = {}
+
+State 3: <Abort line 58, col 10 to line 62, col 66 of module loom_service>
+/\ phase = "aborting"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {}
+/\ delivered = {}
+/\ accepted = {1}
+/\ doubleTerminal = FALSE
+/\ cq = {}
+/\ localRefs = {1}
+/\ pins = {1}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {1}
+/\ ringClosed = FALSE
+/\ gen = 1
+/\ peerRefs = {1}
+/\ charged = {1}
+/\ success = {}
+/\ retired = {}
+
+State 4: <Finish(1) line 63, col 14 to line 69, col 71 of module loom_service>
+/\ phase = "aborting"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {1}
+/\ delivered = {}
+/\ accepted = {1}
+/\ doubleTerminal = FALSE
+/\ cq = {}
+/\ localRefs = {1}
+/\ pins = {}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {}
+/\ ringClosed = FALSE
+/\ gen = 1
+/\ peerRefs = {1}
+/\ charged = {1}
+/\ success = {}
+/\ retired = {}
+
+State 5: <Deliver(1) line 70, col 15 to line 75, col 80 of module loom_service>
+/\ phase = "aborting"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {1}
+/\ delivered = {1}
+/\ accepted = {1}
+/\ doubleTerminal = FALSE
+/\ cq = {1}
+/\ localRefs = {1}
+/\ pins = {}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {}
+/\ ringClosed = FALSE
+/\ gen = 1
+/\ peerRefs = {1}
+/\ charged = {1}
+/\ success = {}
+/\ retired = {}
+
+State 6: <Retire line 92, col 11 to line 99, col 53 of module loom_service>
+/\ phase = "retired"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {1}
+/\ delivered = {1}
+/\ accepted = {1}
+/\ doubleTerminal = FALSE
+/\ cq = {1}
+/\ localRefs = {}
+/\ pins = {}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {}
+/\ ringClosed = FALSE
+/\ gen = 1
+/\ peerRefs = {1}
+/\ charged = {1}
+/\ success = {}
+/\ retired = {1}
+
+State 7: <Reap line 100, col 9 to line 103, col 75 of module loom_service>
+/\ phase = "empty"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {1}
+/\ delivered = {1}
+/\ accepted = {1}
+/\ doubleTerminal = FALSE
+/\ cq = {1}
+/\ localRefs = {}
+/\ pins = {}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {}
+/\ ringClosed = FALSE
+/\ gen = 1
+/\ peerRefs = {1}
+/\ charged = {1}
+/\ success = {}
+/\ retired = {1}
+
+State 8: <Connect line 29, col 12 to line 38, col 80 of module loom_service>
+/\ phase = "connecting"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {1}
+/\ delivered = {1}
+/\ accepted = {1, 3}
+/\ doubleTerminal = FALSE
+/\ cq = {1}
+/\ localRefs = {2}
+/\ pins = {3}
+/\ staleUse = FALSE
+/\ observed = {}
+/\ borrows = {3}
+/\ ringClosed = FALSE
+/\ gen = 2
+/\ peerRefs = {1, 2}
+/\ charged = {1, 2}
+/\ success = {}
+/\ retired = {1}
+
+State 9: <Stale line 120, col 10 to line 124, col 65 of module loom_service>
+/\ phase = "connecting"
+/\ lateSuccess = FALSE
+/\ cancelled = {1}
+/\ terminal = {1}
+/\ delivered = {1}
+/\ accepted = {1, 3}
+/\ doubleTerminal = FALSE
+/\ cq = {1}
+/\ localRefs = {2}
+/\ pins = {3}
+/\ staleUse = TRUE
+/\ observed = {}
+/\ borrows = {3}
+/\ ringClosed = FALSE
+/\ gen = 2
+/\ peerRefs = {1, 2}
+/\ charged = {1, 2}
+/\ success = {}
+/\ retired = {1}
+
+364 states generated, 188 distinct states found, 56 states left on queue.
+The depth of the complete state graph search is 9.
+Finished in 00s at (2026-10-09 07:39:00)

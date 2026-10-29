@@ -17,12 +17,6 @@
 
 #include <thylacine/types.h>
 
-void test_fault_decode_kernel_data_translation_l2(void);
-void test_fault_decode_kernel_data_permission_write(void);
-void test_fault_decode_user_data_translation(void);
-void test_fault_decode_user_instruction_fetch(void);
-void test_fault_decode_access_flag(void);
-
 // Helper: construct an ESR_EL1 value from EC + ISS bits.
 static inline u64 mk_esr(u32 ec, u32 iss) {
     return ((u64)ec << 26) | ((u64)iss & 0x1FFFFFFu);

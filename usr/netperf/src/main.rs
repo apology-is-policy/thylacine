@@ -477,7 +477,7 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
     let mut hint = core::cmp::min(cap, M2_BUF as u64);
     while sent < total {
         let chunk = core::cmp::min(hint, total - sent) as usize;
-        flow.tx_buf()[..chunk].fill(0xa5); // fill the shared ring in place.
+        flow.tx_buf().map_err(|_| "payload busy")?[..chunk].fill(0xa5); // fill the shared ring in place.
         let op_t = Instant::now();
         let tok = flow.push(chunk).map_err(|_| "push")?;
         let moved = flow.wait(tok).map_err(|_| "wait")?.bytes();

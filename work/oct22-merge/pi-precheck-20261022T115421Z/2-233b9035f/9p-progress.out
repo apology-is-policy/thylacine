@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/cora/corona-harness-233b9035fc3e594c424ba81040846008102af234/tools/test-9p-progress.py", line 50, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/home/cora/corona-harness-233b9035fc3e594c424ba81040846008102af234/tools/test-9p-progress.py", line 45, in main
+    else:assert r.returncode==0,(r.stdout,r.stderr)
+                ^^^^^^^^^^^^^^^
+AssertionError: ('', 'transport init\n')

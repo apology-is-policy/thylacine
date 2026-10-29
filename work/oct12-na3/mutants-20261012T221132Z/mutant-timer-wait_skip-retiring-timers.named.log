@@ -1,0 +1,31 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::timer_due_after_arm_retries_then_cancels ... ok
+test tests::ring::timer_future_cancel_waits_for_actual_terminal ... ok
+test tests::ring::timer_outer_deadline_keeps_separate_policy ... ok
+test tests::ring::timer_polling_driver_uses_same_queue_and_no_allocation ... ok
+test tests::ring::timer_publication_during_arm_prevents_stale_sleep ... ok
+test tests::ring::timer_queue_minimum_and_independent_fair_cursor ... ok
+test tests::ring::timer_retiring_driver_still_owns_deadline ... FAILED
+test tests::ring::timer_wait_uses_earliest_and_expiry_preserves_storage ... ok
+test tests::ring::timer_zero_expiry_budgets_preserve_due_work ... ok
+
+failures:
+
+---- tests::ring::timer_retiring_driver_still_owns_deadline stdout ----
+
+thread 'tests::ring::timer_retiring_driver_still_owns_deadline' (31866751) panicked at src/tests/ring.rs:2015:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::timer_retiring_driver_still_owns_deadline
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ omit-parent-pin.c
+@@ -47,7 +47,7 @@
+     if (t->closing) return -T_E_CANCELED;
+     if (kind == LOOM_SERVICE_FID) {
+         if (!node_parent_ready(t, nodes, parent)) return -T_E_NOENT;
+-        int rc = loom_slot_pin(t, parent, LOOM_SERVICE_SCOPE);
++        int rc = 0;
+         if (rc) return rc;
+     }
+     struct loom_service_ref ref;

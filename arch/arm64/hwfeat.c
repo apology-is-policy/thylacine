@@ -29,6 +29,7 @@
 
 #include <thylacine/dtb.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 struct hw_features g_hw_features;
 
@@ -43,6 +44,7 @@ static struct hw_cpu_ident g_cpu_ident[DTB_MAX_CPUS];
 // I-cache when it turns its MMU on (mmu.c, #214), before it records here.
 static bool g_icache_aliasing;
 
+VISIBLE_IF_KERNEL_TESTS
 bool hw_ctr_icache_aliases(u64 ctr) {
     return ((ctr >> 14) & 0x3u) != 0x3u;
 }

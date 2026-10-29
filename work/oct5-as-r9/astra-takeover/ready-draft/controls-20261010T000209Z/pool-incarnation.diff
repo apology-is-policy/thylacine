@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -13,7 +13,7 @@
+     for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i) {
+         struct loom_pool_cell *c=&b->cells[i];
+         if(c->phase==LMEMBER_AVAILABLE && c->pool.slot==o->pool.slot &&
+-           c->pool.incarnation==o->pool.incarnation && !c->pool.reserved)return true;
++           true && !c->pool.reserved)return true;
+     }
+     return false;
+ }

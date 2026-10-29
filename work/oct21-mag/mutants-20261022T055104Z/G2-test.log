@@ -1,0 +1,20 @@
+==> lean --production shape: builds (#228/#229 guard)
+==> Booting kernel under QEMU (timeout 300s)...
+    Log: /Users/northkillpd/projects/thylacine-corona/build/test-boot.log
+==> harness: qemu_alive_at_teardown=1
+==> FAIL: kernel extinction detected.
+--- ELE context ---
+    [test] phys.leak_10k ... PASS
+    [test] phys.drain_meets_live_owners ... 
+EXTINCTION: unclassified kernel fault (ESR) 0x0000000096000040
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS: cpu 3  source EL1 (kernel fault)
+HALLS: ELR  0xffffa003f98a9934  link 0xffffa000000a9934  buddy_alloc+0xb4
+HALLS: ESR  0x0000000096000040  FAR  0x0000000000000008  SPSR 0x00000000200003c5
+HALLS: SP   0xffff000041fefe20
+HALLS: LR   0xffffa003f98a98b0  link 0xffffa000000a98b0  buddy_alloc+0x30
+HALLS: FP   0xffff000041fefe20
+HALLS:  x0  = 0x0000000000000003  x1  = 0x0000000000000000
+HALLS:  x2  = 0x0000000000000000  x3  = 0x0000c3e000000000
+HALLS:  x4  = 0x0000c3e000000000  x5  = 0x00000000187c0000
+-------------------

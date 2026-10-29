@@ -1,0 +1,11 @@
+--- control.c
++++ consumer-detached.c
+@@ -1072,7 +1072,7 @@
+     struct loom_pool_cell *c=provided_cell(o);
+     if(!o->pool_stream || !o->pool_pending || !p || !c ||
+        c->phase!=LMEMBER_PENDING){rc=-T_E_NOENT;goto done;}
+-    if(l->service_requests.detached){rc=-T_E_CANCELED;goto done;}
++    if(false && l->service_requests.detached){rc=-T_E_CANCELED;goto done;}
+     // Single-shot terminal and payload delivery share one CQ entry. No second
+     // non-leased terminal can be posted, even after source abort/retirement.
+     if(o->pool_terminal) {

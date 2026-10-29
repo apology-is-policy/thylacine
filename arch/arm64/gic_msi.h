@@ -13,7 +13,9 @@ struct gic_msi_route {
 typedef void (*gic_msi_fault_handler_t)(u32 controller_node);
 void gic_msi_init(gic_irq_handler_t handler, gic_msi_fault_handler_t fault_handler);
 bool gic_msi_reserved(u32 intid);
+#ifdef KERNEL_TESTS
 u32 gic_msi_live_count(void); // includes quarantined and in-progress leases
+#endif // KERNEL_TESTS
 // Returns a masked route; requester identity is kernel-derived from the BDF.
 // Unsupported controller/layout or resource exhaustion fails explicitly.
 bool gic_msi_alloc(u16 requester_id, u32 event_id, struct gic_msi_route *out);
@@ -22,6 +24,8 @@ bool gic_msi_alloc(u16 requester_id, u32 event_id, struct gic_msi_route *out);
 // no further message can reach this routing identity. A missing proof or failed
 // controller drain quarantines the vector; it is never reassigned on a timer.
 bool gic_msi_retire(const struct gic_msi_route *route, bool source_quiesced);
+#ifdef KERNEL_TESTS
 // Kernel tests may inject a pending notification into their held route.
 bool gic_msi_set_pending(const struct gic_msi_route *route);
+#endif // KERNEL_TESTS
 #endif

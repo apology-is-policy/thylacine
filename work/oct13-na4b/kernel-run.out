@@ -1,0 +1,30 @@
+=== preconditions ===
+2026-10-13T06:06:12Z  HEAD 3bb975619501621ce82e81e902c60289e8564b93
+2026-10-13T06:06:12Z  expected tests (derived from test.c): 1871
+2026-10-13T06:06:12Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-13T06:06:12Z  disk pre: 7812 MiB free (floor 7000)
+=== CONTROL ===
+2026-10-13T06:07:01Z  disk post-control-build: 7813 MiB free (floor 7000)
+2026-10-13T06:07:53Z  control: test.sh exit 0
+2026-10-13T06:07:53Z  CONTROL GREEN: 1871/1871, loom.service_fid_reap, loom.private_native_operations and loom.private_native_isolation PASS, bin eb67f04ffe06e875
+=== M1: the dispatcher sends a used FID to node_reap_unused ===
+2026-10-13T06:07:53Z  disk pre-m1: 7691 MiB free (floor 7000)
+2026-10-13T06:08:42Z  disk post-m1-build: 7809 MiB free (floor 7000)
+2026-10-13T06:08:56Z  m1: test.sh exit 1
+2026-10-13T06:08:56Z  M1 DISCRIMINATED: 1869/1871, exactly loom.private_native_operations and loom.private_native_isolation FAIL at 'native clunked FID reaps once while its ring lives'; loom.service_fid_reap PASS; extinction set = the suite's own
+=== M3: the REAP lookup refuses a RETIRING FID ===
+2026-10-13T06:08:56Z  disk pre-m3: 7804 MiB free (floor 7000)
+2026-10-13T06:09:44Z  disk post-m3-build: 7803 MiB free (floor 7000)
+2026-10-13T06:09:58Z  m3: test.sh exit 1
+2026-10-13T06:09:59Z  M3 DISCRIMINATED: 1869/1871, exactly loom.private_native_operations and loom.private_native_isolation FAIL at 'native clunked FID reaps once while its ring lives'; loom.service_fid_reap PASS; extinction set = the suite's own
+=== M2: an unclunked FID of a retired scope is refused ===
+2026-10-13T06:09:59Z  disk pre-m2: 7799 MiB free (floor 7000)
+2026-10-13T06:10:47Z  disk post-m2-build: 7798 MiB free (floor 7000)
+2026-10-13T06:11:05Z  m2: test.sh exit 1
+2026-10-13T06:11:05Z  M2 DISCRIMINATED: 1868/1871, exactly loom.service_fid_reap, loom.private_native_operations and loom.private_native_isolation FAIL at their named assertions; extinction set = the suite's own
+=== rebuild the committed tree, then SHAPE ===
+2026-10-13T06:11:52Z  rebuild byte-identical to the control kernel
+2026-10-13T06:11:52Z  disk pre-shape: 7803 MiB free (floor 7000)
+2026-10-13T06:13:09Z  SHAPE: tools/check-production.sh --all exit 0
+-- done: work/oct13-na4b/kernel-20261013T060612Z
+2026-10-13T06:13:09Z  exit 0

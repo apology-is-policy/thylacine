@@ -75,20 +75,6 @@ struct Burrow;
 // bring-up point + a future allocation hook. Call after burrow_init.
 void image_cache_init(void);
 
-// B-1a' audit F8: the pool's reclaim step (mm/phys.h capacity_set_reclaim;
-// registered by image_cache_init). Strips IDLE images -- cached, mapped by no
-// one, holding resident pages -- of their pages, least recently used first,
-// until `want` pages are freed or no idle image holds a page -- each pick
-// strips only what is still wanted (B-1a' audit F14), so a refused allocation
-// costs the cache its own size and an image stripped in part yields the rest
-// on the next pick. The entry stays cached, and empty once every page has
-// gone; the next mapper pages it in again (the Plan 9 imagereclaim shape: the
-// Image outlives its pages). Returns the pages freed. Runs in the
-// allocating context under whatever that holds (as->lock for a fault or an
-// attach); takes g_image_lock -> v->lock -> the buddy, never the cache's own
-// allocation path, and allocates nothing.
-u32 image_cache_reclaim(u32 want);
-
 // image_lookup_or_create — the exec text-segment entry point (R-4 consumer).
 // Resolve the file-backed text Burrow for the segment [file_offset,
 // file_offset+length) of the file behind `spoor`:

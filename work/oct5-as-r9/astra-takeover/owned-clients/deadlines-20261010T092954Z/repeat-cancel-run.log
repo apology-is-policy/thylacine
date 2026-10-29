@@ -1,0 +1,43 @@
+
+running 10 tests
+test deadline_active_deadline_cannot_be_extended ... ok
+test deadline_closed_driver_does_not_issue_more_aborts ... ok
+test deadline_expiry_has_no_internal_allocation ... ok
+test deadline_prepared_has_no_timer_or_scope_abort ... ok
+test deadline_publication_notifies_local_progress ... ok
+test deadline_expiry_requests_once_without_refund ... FAILED
+test deadline_cancel_does_not_overwrite_later_success ... FAILED
+test deadline_reused_cell_does_not_inherit_old_timer ... ok
+test deadline_terminal_before_expiry_wins ... ok
+test deadline_all64_cells_expire_in_bounded_rotating_visits ... FAILED
+
+failures:
+
+---- deadline_expiry_requests_once_without_refund stdout ----
+
+thread 'deadline_expiry_requests_once_without_refund' (22495727) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-repeat-cancel/test_deadlines.rs:250:283:
+assertion `left == right` failed
+  left: Some(5)
+ right: None
+
+---- deadline_cancel_does_not_overwrite_later_success stdout ----
+
+thread 'deadline_cancel_does_not_overwrite_later_success' (22495724) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-repeat-cancel/test_deadlines.rs:256:193:
+assertion failed: !r.request_cancel().unwrap()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- deadline_all64_cells_expire_in_bounded_rotating_visits stdout ----
+
+thread 'deadline_all64_cells_expire_in_bounded_rotating_visits' (22495723) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-repeat-cancel/test_deadlines.rs:267:104:
+assertion `left == right` failed
+  left: Some(5)
+ right: None
+
+
+failures:
+    deadline_all64_cells_expire_in_bounded_rotating_visits
+    deadline_cancel_does_not_overwrite_later_success
+    deadline_expiry_requests_once_without_refund
+
+test result: FAILED. 7 passed; 3 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

@@ -1,0 +1,56 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 10 tests
+test tests::ring::deadlines::deadline_active_deadline_cannot_be_extended ... ok
+test tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits ... FAILED
+test tests::ring::deadlines::deadline_cancel_does_not_overwrite_later_success ... ok
+test tests::ring::deadlines::deadline_closed_driver_does_not_issue_more_aborts ... ok
+test tests::ring::deadlines::deadline_expiry_has_no_internal_allocation ... FAILED
+test tests::ring::deadlines::deadline_expiry_requests_once_without_refund ... FAILED
+test tests::ring::deadlines::deadline_prepared_has_no_timer_or_scope_abort ... ok
+test tests::ring::deadlines::deadline_publication_notifies_local_progress ... FAILED
+test tests::ring::deadlines::deadline_reused_cell_does_not_inherit_old_timer ... ok
+test tests::ring::deadlines::deadline_terminal_before_expiry_wins ... ok
+
+failures:
+
+---- tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits stdout ----
+
+thread 'tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits' (30923865) panicked at src/tests/ring/deadlines.rs:132:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::deadlines::deadline_expiry_has_no_internal_allocation stdout ----
+
+thread 'tests::ring::deadlines::deadline_expiry_has_no_internal_allocation' (30923868) panicked at src/tests/ring/deadlines.rs:171:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::deadlines::deadline_expiry_requests_once_without_refund stdout ----
+
+thread 'tests::ring::deadlines::deadline_expiry_requests_once_without_refund' (30923869) panicked at src/tests/ring/deadlines.rs:22:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::deadlines::deadline_publication_notifies_local_progress stdout ----
+
+thread 'tests::ring::deadlines::deadline_publication_notifies_local_progress' (30923871) panicked at src/tests/ring/deadlines.rs:187:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits
+    tests::ring::deadlines::deadline_expiry_has_no_internal_allocation
+    tests::ring::deadlines::deadline_expiry_requests_once_without_refund
+    tests::ring::deadlines::deadline_publication_notifies_local_progress
+
+test result: FAILED. 6 passed; 4 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

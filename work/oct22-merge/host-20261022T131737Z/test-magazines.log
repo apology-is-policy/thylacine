@@ -1,0 +1,5 @@
+PASS clean: no race; summary iters=4000 alias=0 double_free=0 guard=0 zone=512/512 dup=0
+PASS drain-unlocked: 14 race report(s); summary iters=4000 alias=1255 double_free=38 guard=0 zone=484/512 dup=0
+PASS alloc-unlocked: 10 race report(s); summary iters=4000 alias=559 double_free=160 guard=0 zone=423/512 dup=0
+PASS free-unlocked: 7 race report(s); summary iters=4000 alias=1 double_free=3 guard=0 zone=484/512 dup=0
+PASS pre-lock-b057de8eb: 14 race report(s); summary iters=4000 alias=351 double_free=16 guard=0 zone=466/512 dup=0

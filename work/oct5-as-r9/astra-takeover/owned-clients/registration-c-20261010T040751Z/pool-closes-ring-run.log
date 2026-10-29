@@ -1,0 +1,1 @@
+Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, file test_ring_payload.c, line 36.

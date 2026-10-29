@@ -1,0 +1,23 @@
+PASS clean: actual transport byte-boundary fixture
+PASS send-offset: send bytes exactly once
+PASS recv-offset: one frame exact bytes
+PASS again-terminal-send: EAGAIN retains send
+PASS again-terminal-recv: EAGAIN preserves receive cursor
+PASS abort-repeat: abort must be exactly once
+PASS rx-bound: reject frame outside negotiated bound
+PASS coalesced: receive resumes suffix
+PASS close-before-abort: legacy close cannot bypass abort
+PASS send-limit: send respects negotiated limit
+PASS deadline: absolute deadline at every handshake byte
+PASS principal: captured principal on wire
+Traceback (most recent call last):
+  File "/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/tools/test-9p-progress.py", line 50, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/tools/test-9p-progress.py", line 41, in main
+    with (logs/(name+'-build.log')).open('wb') as out:subprocess.run(cmd,stdout=out,stderr=subprocess.STDOUT,check=True)
+                                                      ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['gcc', '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-I', '/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/kernel/include', '-I', '/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/tools/host-tests/host-env', '/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/kernel/9p_transport.c', '/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/kernel/9p_wire.c', '/tmp/9p-progress-802g9eq9/version-dialect.c', '/home/cora/corona-harness-5eebcc75986a434651360e1c8d9fe64360c950bc/tools/host-tests/9p-progress.c', '-o', '/tmp/9p-progress-802g9eq9/version:dialect', '-Wno-misleading-indentation']' returned non-zero exit status 1.

@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ symlink.c
+@@ -53,7 +53,7 @@
+         } else if(p->operation==P9_TLOPEN) {
+             // Relative private FIDs have no namespace symlink resolver. A
+             // link's permissive mode cannot authorize opening its target.
+-            if(r->attr.qid.type&P9_QTSYMLINK)
++            if(false)
+                 return program_end(p,-T_E_LOOP,LPROGRAM_TERMINAL);
+             if(p->wire.mode>2)return program_end(p,-T_E_INVAL,LPROGRAM_TERMINAL);
+             want=perm_want_for_omode(p->wire.mode);

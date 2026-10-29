@@ -1,0 +1,31 @@
+
+running 4 tests
+test geometry_refuses_overlap_alignment_and_overflow ... ok
+test refuses_corrupt_distance_or_second_head_writer ... ok
+test copies_receipt_before_slot_reuse_and_wrap ... FAILED
+test concurrent_pair_publication_and_reuse ... FAILED
+
+failures:
+
+---- copies_receipt_before_slot_reuse_and_wrap stdout ----
+
+thread 'copies_receipt_before_slot_reuse_and_wrap' (22116136) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired-20261010T033551Z/rust-mutant-receipt-index/test_paired_cq.rs:22:93:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- concurrent_pair_publication_and_reuse stdout ----
+
+thread 'concurrent_pair_publication_and_reuse' (22116135) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired-20261010T033551Z/rust-mutant-receipt-index/test_paired_cq.rs:39:244:
+assertion `left == right` failed
+  left: 4
+ right: 1
+
+
+failures:
+    concurrent_pair_publication_and_reuse
+    copies_receipt_before_slot_reuse_and_wrap
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -26,6 +26,7 @@
 #include <thylacine/smp.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/exception.h" // struct exception_context -- a first entry's EL0 frame
 #include "../arch/arm64/mmu.h"
@@ -56,7 +57,7 @@ static u64                g_thread_free_oncpu_waits;
 // cpu_switch_context) so a timer-tick preempt is GUARANTEED to land there.
 // context.switch_irq_safe sets this, runs a round trip, resets it -> a
 // deterministic fail-pre/pass-post guard for the #101 IRQ-mask discipline.
-volatile u64              g_thread_switch_test_window_ns;
+VISIBLE_IF_KERNEL_TESTS volatile u64              g_thread_switch_test_window_ns;
 
 #ifdef KERNEL_TESTS
 // Tests only: a reaped thread of the Proc with this pid records the pool's
@@ -66,8 +67,6 @@ volatile int              g_thread_reap_watch_pid;
 volatile u32              g_thread_reap_pool_found;
 volatile u32              g_thread_reap_pool_at_unlink;
 #endif
-
-u64 thread_free_oncpu_waits(void);
 u64 thread_free_oncpu_waits(void) {
     return __atomic_load_n(&g_thread_free_oncpu_waits, __ATOMIC_RELAXED);
 }
@@ -265,6 +264,7 @@ static void kstack_free(void *base) {
         kstack_release(base);
 }
 
+#ifdef KERNEL_TESTS
 u32 thread_kstack_cache_count(void) {
     irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
     u32 n = g_kstack_cache_n;
@@ -278,6 +278,7 @@ u32 thread_kstack_cache_drain(void) {
         kstack_release(base);
     return n;
 }
+#endif // KERNEL_TESTS
 
 // Bytes of kernel stack this thread has ever used. 0 for a thread with no
 // kstack of its own (the bootstrap/idle threads run on a per-CPU BSS stack and
@@ -703,6 +704,7 @@ struct Thread *thread_create_user(struct Proc *proc,
 
 // LINEAGE L-3b. Contract + rationale in thread.h; this is deliberately the
 // whole of the decision, so a test can reach it without a Proc.
+VISIBLE_IF_KERNEL_TESTS
 void fork_frame_init(struct exception_context *dst,
                      const struct exception_context *src,
                      u64 child_sp) {
@@ -1044,5 +1046,7 @@ void thread_switch(struct Thread *next) {
     spin_unlock_irqrestore(NULL, sw_irq);
 }
 
+#ifdef KERNEL_TESTS
 u64 thread_total_created(void)   { return __atomic_load_n(&g_thread_created, __ATOMIC_RELAXED); }
 u64 thread_total_destroyed(void) { return __atomic_load_n(&g_thread_destroyed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS

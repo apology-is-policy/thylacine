@@ -1,0 +1,11 @@
+--- control.c
++++ write-limit.c
+@@ -1170,7 +1170,7 @@
+     o->program.wire.fid=wire;
+     // Same Ll and exact source borrow as access admission: detach the immutable
+     // wire limit from the mutable node table before handing the owner to READY.
+-    if(kind==P9_TREAD || kind==P9_TWRITE)
++    if(kind==P9_TREAD)
+         o->program.wire.iounit=l->service_nodes->nodes[source.slot].fid_iounit;
+     if(loom_rpc_enqueue_locked(o,now))extinction("admission changed inside Ll");
+     return 0;

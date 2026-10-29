@@ -4,7 +4,15 @@ type: sub
 title: "libhalcyon -- the Daylight tokens, the save format, and the restore planner"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libhalcyon/src/interaction_events.rs
+  - usr/lib/libhalcyon/src/seat_control.rs
+  - usr/lib/libhalcyon/src/interaction_control.rs
   - usr/lib/libhalcyon/src/lib.rs
+  - usr/lib/libhalcyon/src/cursor.rs
+  - usr/lib/libhalcyon/src/interaction_wire.rs
+  - usr/lib/libhalcyon/src/interaction_body.rs
+  - usr/lib/libhalcyon/src/interaction_frame.rs
+  - usr/lib/libhalcyon/include/halcyon_interaction.h
   - usr/lib/libhalcyon/src/theme.rs
   - usr/lib/libhalcyon/src/layout.rs
   - usr/lib/libhalcyon/src/skeleton.rs
@@ -27,8 +35,39 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-29
+updated: 2026-10-03
 ---
+## Ordered ownership codec and journal
+
+`interaction_events` defines the strict 80-byte HIO1 notification/decision record,
+a 64-record journal and contiguous-sequence receiver. Sequence gaps, malformed
+records or journal overflow poison the history. Initial normal seat generation
+zero is valid; it is not absence of seat membership. Inline journal storage is
+bounded to 8 KiB. See HALCYON-INTERACTION-ORDERED for the field table and limits.
+
+## Seat control core (October 2)
+
+`seat_control` supplies strict HSR1/HSC1 codecs and an allocation-free bounded
+Coordinator. Kernel-derived Peer identity is separate from decoded records.
+Eight slots retain live cancellation obligations across notification, EOF and
+failed episodes. Exact peer/lane/generation/revision checks, fresh rejoin,
+request/identity exhaustion and an initially unknown seat all fail closed.
+Thirteen actual-core schedules pass; six coordinator mutations and two Lictor
+gate mutations fail at their intended assertions. This does not activate HIN1.
+
+## Renderer admission codec (October 1)
+
+`interaction_control` pins internal HIA1 requests (80 bytes) and replies
+(40 bytes), with exact lengths, reserved-zero and operation-specific validation.
+It is distinct from application HIN1. Replies echo operation/request ID and
+focus/seat/foreground epochs; consumers must match a single pending operation.
+They are never transferable authority. Clipboard activation remains separate.
+
+
+## Shared capacity
+
+The existing pane limit now lives in `layout::MAX_PANES` (32), shared by Tapestry and the HIN1 controller bound. `MAX_CONTROLLERS` derives from it with a u16 representability assertion; wire values and capacity are unchanged.
+
 ## Purpose
 
 The Halcyon environment library (HALCYON.md 13): the shared pieces of the
@@ -65,6 +104,29 @@ everything else is pure `no_std` + `alloc` -- the TOML subset is the crate's
 OWN module, not a dependency.
 
 ## Contract
+
+The HIN1 contract pins a 24-byte little-endian header, ten exact request and
+response bodies, existing 9P errno mappings, bounds and canonical text rules.
+`interaction_body` borrows decoded data, rejects trailing or reserved bytes and
+checks nonzero identities and transfer bounds. Chunk bytes remain raw until the
+whole clipboard value can be validated; a UTF-8 sequence may cross chunks.
+The C mirror uses byte offsets rather than native structs. Twenty frozen vectors
+are consumed by Rust and an independent C encoder in `tools/test-interaction-wire.py`.
+
+`interaction_frame::Receiver` withholds a record until its contiguous writes
+complete. It validates the fixed header and declared extent before reserving
+body storage, accounts actual capacity, and poisons on every failure until reset.
+Its allowance includes its own reservation; a service must subtract reservations
+of every other fid before calling it. The receiver does not implement aggregate
+accounting, replay, controller authorization or clipboard storage. Accepting a
+header or typed body never admits an operation. Those service obligations remain
+in `docs/HALCYON-INTERACTION-ABI.md` and the approved interaction design.
+
+Tests cover every split and truncation, malformed fields, wrong response identity,
+poison/reset, exact extents and budget contraction. All 148 library tests and the
+C fixtures passed on Linux/aarch64 on September 24; no clipboard runtime is yet
+implemented or claimed. This checkpoint has single-agent self-review under the
+operator's direction, not an independent adversarial audit.
 
 `theme::DAYLIGHT` is the `Theme` (colours + syntax), `theme::METRICS` the
 `Metrics`, `theme::hairline(&Theme)` the derived rule colour, and
@@ -753,3 +815,25 @@ Operator's Manual chunk, which writes `~/` for the same reason.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Standard pointer geometry
+
+`cursor` defines the five standard shapes, scaled hotspots, clipped placement,
+premultiplied rasterization and composition onto a cursor-free software scene.
+Lictor uses the same pixels in its private VirtIO cursor plane. The software
+helper is not a qualification claim for a future framebuffer backend: its
+caller must supply the complete scene and correct damage. The CPU mirror of a
+GPU-only surface is not such a scene (`docs/HALCYON-INTERACTION.md` section 14).
+
+## Borrowed HIN1 response encoding (October 3)
+
+interaction_body::Response::encoded returns EncodedResponse with a 64-byte
+inline prefix and borrowed payload. copy_range copies directly into caller
+storage at any bounded position; overflow/beyond-end offsets produce EOF. The
+existing encode convenience function uses this same representation and one final
+Vec allocation, removing its separate temporary body allocation. All prior typed
+bounds and wire values remain unchanged. An explicit Read fixture checks every
+offset/count combination and unchanged output tails; Hello uses the full64-byte
+prefix. The payload pointer remains the caller's admitted snapshot. This supplies
+no lifetime/authority itself; [[sub-halcyond-application]] revalidates the transfer
+before borrowing it. All169 libhalcyon host tests pass.

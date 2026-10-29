@@ -1,0 +1,33 @@
+
+running 6 tests
+test composed_drop_progress_no_internal_allocation ... ok
+test composed_terminal_survives_client_retire_before_poll ... ok
+test composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict ... ok
+test composed_receive_wake_can_drop_another_client_and_poll ... ok
+test composed_payload_result_blocks_cell_until_last_view_ends ... FAILED
+test composed_client_drop_wake_can_access_peer_and_retire_both ... FAILED
+
+failures:
+
+---- composed_payload_result_blocks_cell_until_last_view_ends stdout ----
+
+thread 'composed_payload_result_blocks_cell_until_last_view_ends' (22458402) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/future-retirement-20261010T090037Z/mutant-early-reclaim/test_future_retirement.rs:215:350:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- composed_client_drop_wake_can_access_peer_and_retire_both stdout ----
+
+thread 'composed_client_drop_wake_can_access_peer_and_retire_both' (22458400) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/future-retirement-20261010T090037Z/mutant-early-reclaim/test_future_retirement.rs:209:547:
+assertion `left == right` failed
+  left: 2
+ right: 0
+
+
+failures:
+    composed_client_drop_wake_can_access_peer_and_retire_both
+    composed_payload_result_blocks_cell_until_last_view_ends
+
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s
+

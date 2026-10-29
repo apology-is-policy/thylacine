@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T235045Z/scope-is-not-ring.c:1141:18: error: unused variable 'l' [-Werror,-Wunused-variable]
+ 1141 |     struct Loom *l=o->owner;struct loom_service_protocol *p=o->protocol;
+      |                  ^
+1 error generated.

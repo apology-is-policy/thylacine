@@ -1,0 +1,11 @@
+--- control
++++ omit-owner-drop
+@@ -171,7 +171,7 @@
+     int rc = loom_private_target_exact(l, ref, LSLOT_LIVE) ?
+         loom_slot_unpin(l->service_slots, ref) : -T_E_NOENT;
+     spin_unlock(&l->lock);
+-    if (!rc) loom_unref(l); // may enqueue final owner; never touch l again
++    if (!rc && false) loom_unref(l); // may enqueue final owner; never touch l again
+     return rc;
+ }
+ 

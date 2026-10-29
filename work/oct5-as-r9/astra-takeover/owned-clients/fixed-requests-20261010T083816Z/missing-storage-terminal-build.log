@@ -1,0 +1,10 @@
+warning: unnecessary `unsafe` block
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T083816Z/mutant-missing-storage-terminal/fixed_requests.rs:44:17
+   |
+44 |   if let Err(e)=unsafe{{let _=delivery.cookie;Ok::<(),StorageError>(())}}{c.fail();return Err(Error::Storage(e));}
+   |                 ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+

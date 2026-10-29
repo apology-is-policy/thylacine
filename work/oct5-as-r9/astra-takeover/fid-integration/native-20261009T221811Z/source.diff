@@ -1,0 +1,238 @@
+diff --git a/kernel/CMakeLists.txt b/kernel/CMakeLists.txt
+index df1200637..e31fbfb7c 100644
+--- a/kernel/CMakeLists.txt
++++ b/kernel/CMakeLists.txt
+@@ -67,6 +67,7 @@ set(KERNEL_SRCS
+     loom_service_pool.c
+     loom_service_pool_table.c
+     loom_service_slots.c
++    loom_service_fids.c
+     loom_service_nodes.c
+     loom_service_requests.c
+     loom_service_operation.c
+diff --git a/kernel/include/thylacine/loom_service_nodes.h b/kernel/include/thylacine/loom_service_nodes.h
+index bcef6c088..e1a4f2925 100644
+--- a/kernel/include/thylacine/loom_service_nodes.h
++++ b/kernel/include/thylacine/loom_service_nodes.h
+@@ -10,12 +10,16 @@ struct loom_service_node {
+     u32 status_flags; // completed-driver diagnostics only; protected by Ll
+     u32 failure_phase;
+     u32 diagnostic_reserved;
++    // Internal protocol mapping. The engine supplies actual handshake/WALK/DAC
++    // proof; these fields alone confer no authority to send an RPC.
++    u64 fid_claim; // exact ring request identity; owns one destination slot pin
++    u32 wire_fid, fid_access, fid_flags, fid_borrows;
+ };
+ struct loom_service_node_table {
+     struct loom_service_node nodes[LOOM_SERVICE_SLOT_COUNT];
+ };
+-_Static_assert(sizeof(struct loom_service_node) == 40, "scope/fid reservation ledger");
+-_Static_assert(sizeof(struct loom_service_node_table) == 2560, "scope/fid table ledger");
++_Static_assert(sizeof(struct loom_service_node) == 64, "scope/fid reservation ledger");
++_Static_assert(sizeof(struct loom_service_node_table) == 4096, "scope/fid table ledger");
+ // Zero once with its owner. Live calls hold the SAME ring lock as the shared
+ // slot ledger and retain the ring. The zero-reference retire worker instead has
+ // exclusive ownership. No allocation, usercopy, callbacks or drops.
+diff --git a/kernel/loom.c b/kernel/loom.c
+index 31f30d3bd..ae41e22a9 100644
+--- a/kernel/loom.c
++++ b/kernel/loom.c
+@@ -22,6 +22,7 @@
+ #include <thylacine/loom_service_pool_table.h>
+ #include <thylacine/loom_service_targets.h>
+ #include <thylacine/loom_service_nodes.h>
++#include <thylacine/loom_service_fids.h>
+ #include <thylacine/9p_client.h>
+ #include <thylacine/9p_session.h>
+ #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
+@@ -672,12 +673,23 @@ static void loom_private_nodes_destroy(struct Loom *l) {
+             if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
+             struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
+             struct loom_service_node *n=&l->service_nodes->nodes[i];
++            if (kinds[pass]==LOOM_SERVICE_FID && s->phase!=LSLOT_PROVISIONAL &&
++                n->state!=LOOM_SERVICE_RESERVED) {
++                // The engine has actually aborted the parent client before
++                // zero-reference destruction. No physical operation can still
++                // own a ring reference here. Refuse any leaked claim/borrow.
++                if (loom_fid_retire_aborted(l->service_slots,l->service_nodes,ref) ||
++                    loom_fid_reap(l->service_slots,l->service_nodes,ref))
++                    extinction("private Loom retained live derived fid");
++                continue;
++            }
+             if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
+                 // Protocol/index/request cleanup precedes final zero-ref free.
+                 // Unused children were removed above; no caller can still own
+                 // a provisional child here. READY/ABORTING never use this path.
+                 if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
+-                    n->parent.reserved || n->parent.incarnation || n->reserved)
++                    n->parent.reserved || n->parent.incarnation || n->reserved ||
++                    n->fid_claim || n->fid_borrows)
+                     extinction("private Loom retained pinned retired scope");
+                 *n=(struct loom_service_node){0};
+                 if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))
+diff --git a/kernel/loom_service_connect.c b/kernel/loom_service_connect.c
+index a4be3a5f8..0a7427e4c 100644
+--- a/kernel/loom_service_connect.c
++++ b/kernel/loom_service_connect.c
+@@ -12,6 +12,7 @@
+ #include <thylacine/loom_service_connect.h>
+ #include <thylacine/loom.h>
+ #include <thylacine/srvconn.h>
++#include <thylacine/loom_service_fids.h>
+ #include <thylacine/errno.h>
+ #include <thylacine/extinction.h>
+ 
+@@ -216,6 +217,11 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
+                                        l->service_nodes,p->request,(s32)p->scope.slot))
+                 extinction("CONNECT lost success obligation");
+             n->state=LOOM_SERVICE_READY;
++            // Handshake and terminal commit share Ll with abort. Publish only
++            // the actual attached root, never a user-supplied protocol fid.
++            if (loom_fid_bind_root(l->service_slots,l->service_nodes,p->scope,
++                                   p->client.session.root_fid))
++                extinction("CONNECT lost root fid publication");
+             rc=1;
+         } else {
+             n->state=phase <= P9_HS_VERSION_RECV ? LOOM_SERVICE_VERSION : LOOM_SERVICE_ATTACH;
+@@ -287,7 +293,7 @@ int loom_private_connect_reap(struct Loom *l, struct loom_service_ref scope) {
+     spin_lock(&l->lock);
+     struct loom_service_node *n=connect_scope(l,scope);
+     int rc=!n ? -T_E_NOENT : n->state != LOOM_SERVICE_RETIRED ||
+-        l->service_slots->slots[scope.slot].pins ? -T_E_BUSY : 0;
++        l->service_slots->slots[scope.slot].pins || n->fid_claim || n->fid_borrows ? -T_E_BUSY : 0;
+     if (!rc) {
+         *n=(struct loom_service_node){0};
+         if (loom_slot_retire(l->service_slots,scope) || loom_slot_reap(l->service_slots,scope))
+diff --git a/kernel/loom_service_nodes.c b/kernel/loom_service_nodes.c
+index 141ad4574..0fe84bf7d 100644
+--- a/kernel/loom_service_nodes.c
++++ b/kernel/loom_service_nodes.c
+@@ -112,6 +112,8 @@ bool loom_service_nodes_empty(const struct loom_service_node_table *nodes) {
+         if (nodes->nodes[i].state != LOOM_SERVICE_EMPTY ||
+             !node_zero_ref(nodes->nodes[i].parent) || nodes->nodes[i].reserved ||
+             nodes->nodes[i].reason || nodes->nodes[i].status_flags ||
+-            nodes->nodes[i].failure_phase || nodes->nodes[i].diagnostic_reserved) return false;
++            nodes->nodes[i].failure_phase || nodes->nodes[i].diagnostic_reserved ||
++            nodes->nodes[i].fid_claim || nodes->nodes[i].wire_fid ||
++            nodes->nodes[i].fid_access || nodes->nodes[i].fid_flags || nodes->nodes[i].fid_borrows) return false;
+     return true;
+ }
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index b3a5d07b7..75d072e16 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -1,3 +1,4 @@
++#include <thylacine/loom_service_fids.h>
+ #include <thylacine/loom_service_operation.h>
+ #include <thylacine/loom_service_control.h>
+ #include <thylacine/loom_service_connect.h>
+@@ -2862,7 +2863,8 @@ done:
+ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creator,
+     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
+     const char *error=NULL;
+-    struct loom_service_ref scope={0};
++    struct loom_service_ref scope={0},child={0};
++    bool root_borrow=false;
+     struct loom_service_protocol *prepared=NULL,*held=NULL;
+     struct loom_service_operation *op=NULL,*other=NULL;
+     struct SrvConn *server=NULL;
+@@ -2882,6 +2884,9 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
+         (void)loom_engine_visit(l,1+i);
+     OS(l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_READY,
+        "operation storage actual READY protocol");
++    OS(l->service_nodes->nodes[scope.slot].fid_flags==LFID_BOUND &&
++       l->service_nodes->nodes[scope.slot].wire_fid==held->client.session.root_fid,
++       "actual attach publishes exact root fid mapping");
+     OS(!loom_engine_put(l,scope,held),"operation storage observer release");held=NULL;
+     u32 baseline=creator->as->page_count;
+     loom_private_operation_fault_arm_for_test();
+@@ -2914,16 +2919,37 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
+        "operation storage exact page refund and pin return");
+     OS(!loom_private_operation_prepare(l,scope,906,0,0,&op) && op->request.identity!=old.identity,
+        "operation storage burns identity before slot reuse");
++    reserve.kind=LOOM_SERVICE_FID;reserve.scope=scope;
++    OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child),
++       "root retains unused child through close");
++    u32 wire=UINT32_MAX;
++    spin_lock(&l->lock);
++    int borrowed=loom_fid_borrow(l->service_slots,l->service_nodes,scope,scope,0,&wire);
++    root_borrow=borrowed==0;
++    spin_unlock(&l->lock);
++    OS(root_borrow && wire==op->protocol->client.session.root_fid,
++       "root source borrow retains actual attached mapping");
+     loom_handle_closed(l);
+     OS(loom_close_wait_state(l,LCLOSE_PARKED),"operation storage close parks on physical owner");
+     OS(creator->as->page_count==baseline+1 && l->service_requests.records[op->request.index].owners==1 &&
+        l->service_engine->entries[scope.slot].pins==1,
+        "operation storage close retains actual storage and owner");
++    spin_lock(&l->lock);
++    int put=loom_fid_put(l->service_slots,l->service_nodes,scope);
++    if(!put)root_borrow=false;
++    spin_unlock(&l->lock);
++    OS(!put,"root borrow returns after actual close abort");
+     OS(!loom_private_operation_release_unused(op),"operation storage cleanup after close");op=NULL;
+     OS(loom_close_wait_state(l,LCLOSE_DONE) && loom_engine_empty(l->service_engine) &&
+        !l->service_requests.occupied && !l->service_fixed_count,
+        "operation storage final owner release unblocks real close worker");
+ done:
++    if(root_borrow) {
++        spin_lock(&l->lock);
++        (void)loom_fid_put(l->service_slots,l->service_nodes,scope);
++        spin_unlock(&l->lock);
++        loom_private_close_changed(l);
++    }
+     spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+     if(other)(void)loom_private_operation_release_unused(other);
+     if(op)(void)loom_private_operation_release_unused(op);
+diff --git a/work/oct5-as-r9/connect-control.py b/work/oct5-as-r9/connect-control.py
+index 379b3b291..26b84f316 100644
+--- a/work/oct5-as-r9/connect-control.py
++++ b/work/oct5-as-r9/connect-control.py
+@@ -8,11 +8,11 @@ import datetime,difflib,hashlib,importlib.util,json,os,re,subprocess
+ ROOT=Path(__file__).resolve().parents[2]
+ spec=importlib.util.spec_from_file_location('post',Path(__file__).with_name('request-post-control.py'))
+ post=importlib.util.module_from_spec(spec);spec.loader.exec_module(post)
+-PRE=post.PRE.replace('struct Loom {u32 magic;', 'struct Loom {struct loom_slot_table *service_slots;struct loom_service_node_table *service_nodes;u32 magic;')+r'''
++PRE='#include <thylacine/loom_service_fids.h>\n'+post.PRE.replace('struct Loom {u32 magic;', 'struct Loom {struct loom_slot_table *service_slots;struct loom_service_node_table *service_nodes;u32 magic;')+r'''
+ enum {P9_HS_VERSION_SEND,P9_HS_VERSION_RECV,P9_HS_ATTACH_SEND,P9_HS_ATTACH_RECV,P9_HS_READY};
+ struct SrvConn {bool dead;};
+ struct SrvConnectAdmission {struct SrvConn *conn;bool published;};
+-struct p9_client {int dummy;};
++struct p9_client {struct {u32 root_fid;} session;};
+ struct loom_service_protocol {
+  struct Loom *owner;struct SrvConnectAdmission admission;struct p9_client client;
+  struct {struct {u32 phase;} handshake;struct {bool bytes_sent;} io;} progress;
+@@ -121,6 +121,7 @@ int main(int argc,char **argv) {
+  if(mode==0) {
+   CHECK(!rc && records[0].phase==LREQ_ACTIVE && nodes.nodes[scope.slot].state==LOOM_SERVICE_ATTACH,"IO progress is not READY");
+   CHECK(loom_private_connect_step(p,4)==1 && records[0].result==result && nodes.nodes[scope.slot].state==LOOM_SERVICE_READY,"handshake READY commits success");
++  CHECK(nodes.nodes[scope.slot].fid_flags==LFID_BOUND && nodes.nodes[scope.slot].wire_fid==p->client.session.root_fid,"actual handshake binds root mapping");
+   CHECK(loom_private_connect_step(p,101)==1 && !p->abort_reason && steps==2,"deadline ends on success");
+   CHECK(!loom_private_connect_abort(p,-T_E_CANCELED),"abort after success");
+   rc=loom_private_connect_step(p,5);
+@@ -141,6 +142,7 @@ int main(int argc,char **argv) {
+ }
+ '''
+ MUTANTS=[
++ ('omit-root-bind','loom_fid_bind_root(l->service_slots,l->service_nodes,p->scope,\n                                   p->client.session.root_fid)','0',0,'actual handshake binds root mapping'),
+  ('omit-failure-phase','p->failure_phase=attempted_phase;','(void)attempted_phase;',5,'protocol failure records attempted phase'),
+  ('omit-duplicate','if (r->phase != LREQ_FREE && connect_same(r->scope,scope))','if (r->phase != LREQ_FREE && connect_same(r->scope,scope) && false)',0,'terminal reserved before allocation'),
+  ('omit-own-pin','rc = loom_slot_pin(l->service_slots,scope,LOOM_SERVICE_SCOPE);','rc = 0;',0,'two exact scope pins before allocation'),
+@@ -159,7 +161,7 @@ def main():
+  assert re.search(r'^mac +HELD by you',subprocess.check_output(['work/oct5-as-r9/astra-yip.sh','resources'],text=True),re.M)
+  st=os.statvfs('.');assert st.f_bavail*st.f_frsize>=8*1024**3
+  out=Path('work/oct5-as-r9/astra-takeover')/('connect-control-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));out.mkdir()
+- paths=['kernel/loom_service_connect.c','kernel/loom_service_requests.c','kernel/loom_service_slots.c','kernel/loom_service_nodes.c','kernel/loom.c',str(Path(__file__).relative_to(ROOT))]
++ paths=['kernel/loom_service_connect.c','kernel/loom_service_requests.c','kernel/loom_service_slots.c','kernel/loom_service_nodes.c','kernel/loom.c',str(Path(__file__).relative_to(ROOT)),'kernel/loom_service_fids.c','kernel/include/thylacine/loom_service_fids.h','kernel/include/thylacine/loom_service_nodes.h']
+  hashes={p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}
+  body=re.sub(r'^#include[^\n]*\n','',Path(paths[0]).read_text(),flags=re.M)
+  cq=post.extract.fun(Path('kernel/loom.c').read_text(),'loom_private_post_terminal')
+@@ -170,7 +172,7 @@ def main():
+    assert s.count(old)==(2 if tag == 'omit-close-recheck' else 1),(tag,s.count(old));s=s.replace(old,new)
+   src=out/(tag+'.c');src.write_text(PRE+s+cq+MAIN);exe=out/tag
+   (out/(tag+'.diff')).write_text(''.join(difflib.unified_diff(body.splitlines(True),s.splitlines(True))))
+-  cmd=['/opt/homebrew/opt/llvm@22/bin/clang','-std=c11','-O1','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-isysroot',sdk,'-I',str(ROOT/'kernel/include'),str(src),*paths[1:4],'-o',str(exe)]
++  cmd=['/opt/homebrew/opt/llvm@22/bin/clang','-std=c11','-O1','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-isysroot',sdk,'-I',str(ROOT/'kernel/include'),str(src),*paths[1:4],'kernel/loom_service_fids.c','-o',str(exe)]
+   (out/(tag+'-command.json')).write_text(json.dumps(cmd)+'\n')
+   with (out/(tag+'-build.log')).open('wb') as log:subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
+   for case in range(11) if mode is None else [mode]:

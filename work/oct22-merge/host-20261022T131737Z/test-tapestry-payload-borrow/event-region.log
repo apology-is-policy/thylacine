@@ -1,0 +1,17 @@
+
+running 1 test
+test ring::tests::completion_borrows_only_its_region_after_identity_check ... FAILED
+
+failures:
+
+failures:
+    ring::tests::completion_borrows_only_its_region_after_identity_check
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+
+thread 'ring::tests::completion_borrows_only_its_region_after_identity_check' (68310130) panicked at /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tapestry-borrow-kiazk_rk/event-region/ring.rs:478:13:
+assertion `left == right` failed
+  left: 0..152
+ right: 128..152
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

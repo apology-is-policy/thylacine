@@ -1,0 +1,34 @@
+Astra single-agent self-review, 2026-10-10; not an independent audit.
+Scope: uninstalled C/Rust owned_mapping and host fixtures/runner.
+Owned backend is consumed on every construction path. Geometry is checked before
+any header/payload pointer read: original base/length, exact ABI sizes, all five
+64-aligned disjoint regions, checked receipt arithmetic and CQ bounds. Fresh
+header checks reject existing submissions/completions/overflow or unknown flags;
+only worker wakeup is allowed. Cached masks come from validated setup, not later
+shared mirrors. Paired reader retains its acquire/copy/release protocol.
+Construction errors close and destroy the original owner once; C allocation
+failure is included. Explicit close is idempotent; reap after close refuses
+before reading CQ memory. Rust Drop retains the mapping through reader lifetime.
+No raw descriptor/address getter; moved backend, owner cloning and private field
+escape are rejected by compiler. C opaque interface still requires honest caller
+ownership/nonaliasing and valid callbacks; unsafe Rust Mapping implementors must
+retain stable mapping and independent kernel pins. These are trusted contracts,
+not proof of actual native syscalls or kernel detach/charge semantics.
+
+Clean final run owned-mapping-20261010T064503Z: Rust5 cases at opt0/opt2; C6
+scenarios under LLVM22 ASan+UBSan and optimized NDEBUG core;3 compile failures
+plus valid control;10 runtime mutants.23 malformed geometry variants,10 region
+pairs,11 dirty header words, min/max geometry, paired copying, close/drop,
+post-setup corruption and C allocation rejection.11 sources/38commands/raw logs
+and snapshots verified before documentation. Astra10 protected/pending hashes
+and external clean61dde37 checked.
+
+MAPPING-HARNESS-R1: initial064425Z clean profiles passed; missing receipt-stride
+mutant correctly failed with custom case3 panic. Runner expected literal
+assertion rather than Rust FAILED summary, so full suite was incomplete. Raw
+logs preserved; corrected diagnostic only, then added compile contracts and ran
+full suite successfully. No initial full-suite pass claimed.
+
+Remaining: original-owned native setup mapping/descriptor backend, SQ publisher,
+registration/control syscalls and composed controller/fixed-I/O/future/executor.
+Do not expose private flags or activate unfinished clients from this host result.

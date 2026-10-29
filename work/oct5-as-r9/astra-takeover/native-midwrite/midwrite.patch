@@ -1,0 +1,146 @@
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -3106,38 +3106,74 @@
+     struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+     bytes[64]=0xa5;bytes[68]=0x5a;
+-    bool writing=fault==7,timeout=fault==8;
++    bool partial=fault==9,writing=fault==7 || partial,timeout=fault==8;
++    u32 prefix_at=0;u64 produced=0;
++    if(partial) {
++        // Controlled transport-pressure injection, not a valid peer transcript:
++        // leave five bytes free so the actual private progress adapter must
++        // emit a strict prefix of TWRITE and park before sending its remainder.
++        u8 fill[64];for(u32 i=0;i<sizeof(fill);++i)fill[i]=0xd3;
++        if(!loom_native_peer_empty(server))return "midwrite requires empty output channel";
++        u32 left=server->c2s.cap-5u;
++        while(left) {
++            u32 n=left<sizeof(fill)?left:sizeof(fill);
++            if(srvconn_client_send(server,fill,n)!=(long)n)return "midwrite pressure injection";
++            left-=n;
++        }
++        spin_lock(&server->c2s.lock);
++        prefix_at=server->c2s.head;produced=server->c2s.produced;
++        spin_unlock(&server->c2s.lock);
++    }
+     u64 deadline=timeout?timer_now_ns()+500000000ull:0;
+     if(!loom_native_submit(l,creator,(struct loom_sqe){.opcode=writing?LOOM_OP_WRITE:LOOM_OP_READ,
+        .handle_idx=child.slot,.len=5,.user_data=900,
+        ._resv1={64,child.incarnation,0,deadline}}))return "fault IO submission";
+-    u8 request[64];u32 used=0,size=0;u8 type=0;u16 tag=0;
+-    u64 end=timer_now_ns()+2000000000ull;
+-    do {
+-        long n=srvconn_server_recv(server,request+used,sizeof(request)-used);
+-        if(n<0)return "fault peer lost request";
+-        used+=(u32)n;
+-        if(used>=P9_HDR_LEN) {
+-            if(p9_peek_header(request,used,&size,&type,&tag)<0 || size>sizeof(request))
+-                return "fault request framing";
+-            if(used==size)break;
+-        }
+-        sched();
+-    }while(timer_now_ns()<end);
+-    if(used!=(writing?28u:23u) || type!=(writing?P9_TWRITE:P9_TREAD) || size!=used)
+-        return "fault waits for emitted IO";
+-    if(writing && (request[23]!=0xa5 || request[27]!=0x5a))return "fault WRITE payload bytes";
+-    u8 reply[256];int count=canonical_responder(NULL,request,used,reply,sizeof(reply));
+-    if(count!=(writing?11:16))return "fault canonical reply shape";
+-    // 1: no response, 2: partial header, 3: partial body, 4: impossible
+-    // frame length, 5: unexpected reply type, 6: cancellation with full CQ,
+-    // 7: emitted WRITE without acknowledgement, 8: READ deadline expiry.
+-    int send=0;
+-    if(fault==2)send=3;
+-    if(fault==3)send=13;
+-    if(fault==4){(void)p9_pack_u32(reply,sizeof(reply),6);send=7;}
+-    if(fault==5){reply[4]=P9_RWRITE;send=count;}
+-    if(send && srvconn_server_send(server,reply,send)!=send)return "fault response injection";
++    u64 end=timer_now_ns()+2000000000ull;int send=0;
++    if(partial) {
++        bool emitted=false;
++        do {
++            spin_lock(&server->c2s.lock);
++            emitted=server->c2s.count==server->c2s.cap;
++            bool exact=server->c2s.produced==produced+5u;
++            static const u8 prefix[5]={28,0,0,0,P9_TWRITE};
++            if(emitted)for(u32 i=0;i<5;++i)
++                if(server->c2s.buf[(prefix_at+i)%server->c2s.cap]!=prefix[i])exact=false;
++            spin_unlock(&server->c2s.lock);
++            if(emitted) {
++                if(!exact)return "midwrite actual emitted prefix mismatch";
++                break;
++            }
++            sched();
++        }while(timer_now_ns()<end);
++        if(!emitted)return "midwrite did not reach partial send boundary";
++    } else {
++        u8 request[64];u32 used=0,size=0;u8 type=0;u16 tag=0;
++        end=timer_now_ns()+2000000000ull;
++        do {
++            long n=srvconn_server_recv(server,request+used,sizeof(request)-used);
++            if(n<0)return "fault peer lost request";
++            used+=(u32)n;
++            if(used>=P9_HDR_LEN) {
++                if(p9_peek_header(request,used,&size,&type,&tag)<0 || size>sizeof(request))
++                    return "fault request framing";
++                if(used==size)break;
++            }
++            sched();
++        }while(timer_now_ns()<end);
++        if(used!=(writing?28u:23u) || type!=(writing?P9_TWRITE:P9_TREAD) || size!=used)
++            return "fault waits for emitted IO";
++        if(writing && (request[23]!=0xa5 || request[27]!=0x5a))return "fault WRITE payload bytes";
++        u8 reply[256];int count=canonical_responder(NULL,request,used,reply,sizeof(reply));
++        if(count!=(writing?11:16))return "fault canonical reply shape";
++        // 1: no response, 2: partial header, 3: partial body, 4: impossible
++        // frame length, 5: unexpected reply type, 6: cancellation with full CQ,
++        // 7: emitted WRITE without acknowledgement, 8: READ deadline expiry.
++        if(fault==2)send=3;
++        if(fault==3)send=13;
++        if(fault==4){(void)p9_pack_u32(reply,sizeof(reply),6);send=7;}
++        if(fault==5){reply[4]=P9_RWRITE;send=count;}
++        if(send && srvconn_server_send(server,reply,send)!=send)return "fault response injection";
++    }
+     bool malformed=fault==4 || fault==5;
+     if(!malformed && !timeout) {
+         // For fragments, observe actual transport consumption before abort.
+@@ -3310,7 +3346,7 @@
+     struct loom_service_ref scope={0},child={0};
+     struct loom_native_peer peer;
+     for(u32 i=0;i<sizeof(peer);++i)((u8 *)&peer)[i]=0;
+-    peer.creator=creator;peer.stop=fault>=9?fault-8:0;
++    peer.creator=creator;peer.stop=(fault>=9 && fault<=14)?fault-8:0;
+     struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
+ #define NO(c,m) do{if(!(c)){error=m;goto done;}}while(0)
+     NO(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
+@@ -3346,7 +3382,7 @@
+     if(fault==13 || fault==14) {error=loom_native_stage_cancel(l,server,&peer,scope,102,&held,close_kind);goto done;}
+     NO(loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
+     NO(l->service_nodes->nodes[child.slot].fid_iounit==4096,"native negotiated iounit retained");
+-    if(fault) {error=loom_native_fault(l,creator,server,scope,child,bytes,fault);goto done;}
++    if(fault) {error=loom_native_fault(l,creator,server,scope,child,bytes,fault==15?9:fault);goto done;}
+     if(independent) {
+         struct loom_service_reserve another={.size=sizeof(another),.version=1,.kind=LOOM_SERVICE_SCOPE};
+         NO(!loom_private_node_prepare(l,creator,&another,&stalled) && !loom_private_node_publish(l,stalled),
+@@ -3670,6 +3706,11 @@
+            "zero-reference retirer wakes joins and refunds the live private worker");
+         goto done;
+     }
++    if (kind==102 || kind==103) {
++        bool bulk=kind==103;
++        error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,15);
++        goto done;
++    }
+     if (kind==100 || kind==101) {
+         bool bulk=kind==101;
+         error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,40);
+@@ -3865,6 +3906,10 @@
+         const char *error=loom_protocol_fixture(kind);
+         TEST_ASSERT(!error,error);
+     }
++    for(u32 kind=102;kind<=103;++kind) {
++        const char *error=loom_protocol_fixture(kind);
++        TEST_ASSERT(!error,error);
++    }
+ }
+ 
+ void test_loom_private_native_reconnects(void);

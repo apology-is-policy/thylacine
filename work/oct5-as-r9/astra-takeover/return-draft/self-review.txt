@@ -1,0 +1,39 @@
+Astra single-agent self-review; no independent audit.
+
+RETURN is an internal creator-authorized control over one immutable kernel ABI
+record, not an activated syscall. Exact retained image and creator identity precede
+all shape and payload access. Header/reserved/index checks precede table indexing;
+missing receipt negotiation refuses the operation. Under Ll, the shared slot must
+be LIVE, have the same incarnation and be a POOL, then the existing pure ledger
+requires its exact LEASED member/nonce. PENDING, BUSY, stale and duplicate returns
+cannot release a member. Zero incarnation is a malformed reference (EINVAL).
+
+Ll serializes the LEASED-to-AVAILABLE transition with next-member selection.
+Only a successful return changes the existing close/engine wake epoch, outside Ll.
+The caller's retained Loom spans that wake; no allocation, remote/native progress,
+SQ/CQ capacity or source protocol lifetime is required. A parked multishot wakes
+on RETURN but still obeys CQ backpressure before its next fresh-nonce claim.
+Payload ownership is rooted in the ring pool after source protocol destruction.
+Whole-ring final destruction cannot race a retained caller reference; the control
+needs no new allocation or retained pointer and changes no public activation.
+
+The host fixture executes this actual control with the engine/ownership stack.
+It covers PENDING rejection, malformed records, both authority dimensions, feature
+negotiation, full CQ, registered empty-pool wake, fresh lease identity, stale/double
+return and pool-slot reuse after source retirement. Initial failed test tried to
+register a replacement pool after whole-ring close, correctly refused by the
+unchanged pool ledger. Corrected test drives scope-only abort/collection before
+pool-slot reuse; it never resets the monotone close latch on a live ring. All raw
+runs are preserved. Changed authority/wake guards have exact assertion mutants.
+
+Native poll/wake/teardown, allocator/backing pins/Loom refs and final protocol
+storage remain controlled boundaries from drain-draft; parsed successful replies
+are synthetic. Prior host regression coverage does not turn this into native
+RETURN scheduling, syscall activation, shared-SQE or SMP qualification. Actual
+ARM64 control module and layout compile with real headers; canonical sources and
+all previously qualified draft inputs remain unchanged. Existing model evidence
+from drain-draft remains bounded and was not duplicated for this small wrapper.
+
+Next immutable shared-SQE submission/creator frontend and CQ wake, then coherent
+current-overlay installation and actual-source/native gates. AS3/4 and MM0-MM4
+remain ordered after async. No Main/private activation or128MiB protection change.

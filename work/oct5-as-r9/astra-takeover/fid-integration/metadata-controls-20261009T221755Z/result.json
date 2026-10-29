@@ -1,0 +1,132 @@
+{
+  "scope": "Actual final metadata cleanup, sequential host slot/node ledgers; test simulates retirement, not protocol proof. Eleven clean cases plus seven targeted mutants; derived bind is simulated, not a wire proof.",
+  "loom_sha256": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+  "results": [
+    {
+      "variant": "control",
+      "case": 0,
+      "rc": 0,
+      "expected": "PASS child before retired parent cleanup",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 1,
+      "rc": 0,
+      "expected": "PASS child before retired parent cleanup",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 2,
+      "rc": 86,
+      "expected": "private Loom retained active or invalid node",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 3,
+      "rc": 86,
+      "expected": "private Loom retained active or invalid node",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 4,
+      "rc": 86,
+      "expected": "private Loom retained pinned retired scope",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 5,
+      "rc": 86,
+      "expected": "private Loom retained pinned retired scope",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 6,
+      "rc": 86,
+      "expected": "private Loom retained pinned retired scope",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 7,
+      "rc": 86,
+      "expected": "private Loom retained pinned retired scope",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 8,
+      "rc": 0,
+      "expected": "PASS child before retired parent cleanup",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 9,
+      "rc": 86,
+      "expected": "private Loom retained live derived fid",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "control",
+      "case": 10,
+      "rc": 86,
+      "expected": "private Loom retained live derived fid",
+      "sha256": "7b301a1055fa85fb24649dcb2dbbbeec8b73734225acf07440a96cc276af4968"
+    },
+    {
+      "variant": "parent-first",
+      "case": 0,
+      "rc": 86,
+      "expected": "private Loom retained pinned retired scope",
+      "sha256": "31b4e966d4ad0b3fedf4b3d59f02ea22caa872b3741febbb0165916e733e52ba"
+    },
+    {
+      "variant": "ignore-retired",
+      "case": 0,
+      "rc": 86,
+      "expected": "private Loom retained active or invalid node",
+      "sha256": "81f8e58e64561ef42a0982f129b97b6c585874a232937f6ca77819dc2295b69a"
+    },
+    {
+      "variant": "omit-parent-clear",
+      "case": 0,
+      "rc": 86,
+      "expected": "private Loom retained unowned node",
+      "sha256": "55615d08e505f1654f998690fac6c897d730422504448522a7aeb51ecec9f047"
+    },
+    {
+      "variant": "permit-ready",
+      "case": 2,
+      "rc": 0,
+      "expected": "PASS child before retired parent cleanup",
+      "sha256": "f7b70bff0fd7ba4d46479b446b049f0e510da2dd5caf44b923dcc94396e91850"
+    },
+    {
+      "variant": "ignore-parent",
+      "case": 5,
+      "rc": 0,
+      "expected": "PASS child before retired parent cleanup",
+      "sha256": "b4d57df1e82a1ca06188774171ff5644df64e2f7d7a007364f71618551641418"
+    },
+    {
+      "variant": "ignore-reserved",
+      "case": 6,
+      "rc": 0,
+      "expected": "PASS child before retired parent cleanup",
+      "sha256": "562554428b1749f2898ddc2f7cdc8735e224130a4e48d68d6bdda9e818f55481"
+    },
+    {
+      "variant": "omit-derived-reap",
+      "case": 8,
+      "rc": 86,
+      "expected": "private Loom retained pinned retired scope",
+      "sha256": "94215845114e46e57f2b2e03b9ca97d4f076a7fd6548b4f598ced2b75147e242"
+    }
+  ]
+}

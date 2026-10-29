@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -153,7 +153,7 @@
+     if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);
+     // CONNECT deadline ends once its success is committed; READY is not a
+     // permanent lease with the old handshake deadline attached to it.
+-    if (r->phase == LREQ_ACTIVE && p->connect_deadline && p->connect_deadline <= now)
++    if (p->connect_deadline && p->connect_deadline <= now)
+         connect_latch(p,n,-T_E_TIMEDOUT);
+     if (!p->abort_reason && n->state == LOOM_SERVICE_READY) {
+         spin_unlock(&l->lock); return 1;

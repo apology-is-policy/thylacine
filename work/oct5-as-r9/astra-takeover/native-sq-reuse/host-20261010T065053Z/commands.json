@@ -1,0 +1,38 @@
+[
+  {
+    "name": "sanitized-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "PASS"
+  },
+  {
+    "name": "optimized-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "optimized-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "PASS"
+  },
+  {
+    "name": "early-release-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "early-release-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "ksqe.user_data==0x111"
+  }
+]

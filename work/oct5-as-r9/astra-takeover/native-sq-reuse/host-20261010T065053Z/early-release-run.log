@@ -1,0 +1,1 @@
+Assertion failed: (ksqe.user_data==0x111), function exercise, file early-release.c, line 63.

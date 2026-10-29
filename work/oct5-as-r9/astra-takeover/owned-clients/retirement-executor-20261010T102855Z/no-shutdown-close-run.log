@@ -1,0 +1,27 @@
+
+running 8 tests
+test executor_drop_and_progress_do_not_allocate ... ok
+test executor_failed_factory_does_not_leak_cell ... ok
+test executor_capacity_precedes_factory_and_survives_abandon ... ok
+test executor_held_terminal_result_blocks_reuse_and_preserves_bytes ... ok
+test executor_live_request_blocks_reuse_despite_retirement_proof ... ok
+test executor_never_reclaims_attached_client ... ok
+test executor_rotation_is_bounded_and_does_not_starve_later_cells ... ok
+test executor_shutdown_closes_once_keeps_live_read_storage ... FAILED
+
+failures:
+
+---- executor_shutdown_closes_once_keeps_live_read_storage stdout ----
+
+thread 'executor_shutdown_closes_once_keeps_live_read_storage' (22576234) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T102855Z/mutant-no-shutdown-close/test_retirement_executor.rs:180:274:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    executor_shutdown_closes_once_keeps_live_read_storage
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

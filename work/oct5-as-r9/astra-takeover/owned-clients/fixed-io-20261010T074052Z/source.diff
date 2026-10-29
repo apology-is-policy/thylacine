@@ -1,0 +1,226 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
+index 0657e1ccc..07122941c 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
+@@ -12,6 +12,8 @@ use super::{lease_ledger::{LeaseLedger,LeaseToken,LeaseError},service_abi::{Slot
+ /// reference remains. Ring retirement stops admission globally. `retired` proves
+ /// all local writers stopped. `close` is bounded/idempotent, preserves leased
+ /// bytes and independent kernel pins/payer charges beyond backend destruction.
++/// Backing is initialized and writable. Provided and fixed users must obey this
++/// owner's exclusive reservations; fixed terminal CQ ends all local access.
+ /// No callback may reenter, panic, block on peers or expose mutable backing.
+ pub(crate) unsafe trait RingBackend {
+  /// Zero creates exactly the returned pool. Negative + all-zero output proves
+@@ -25,6 +27,8 @@ pub(crate) unsafe trait RingBackend {
+  fn return_buffer(&self,receipt:BufferReceipt)->i64;
+  fn retire_pool(&self,pool:SlotRef);
+  fn destroy_pool(&self,pool:SlotRef)->i64;
++ /// Scope-wide cancellation; bounded, idempotent, no storage reuse implied.
++ fn abort_scope(&self,scope:SlotRef);
+  fn begin_retire(&self);
+  fn retired(&self)->bool;
+  fn close(&self);
+@@ -33,7 +37,12 @@ struct PoolState {
+  identity:SlotRef,ledger:LeaseLedger,ranges:Box<[PoolMember]>,
+  pending:Box<[Option<LeaseToken>]>,live:usize,closing:bool,
+ }
+-struct State {quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
++#[derive(Clone,Copy,PartialEq,Eq)]
++enum FixedPhase{Prepared,Active,Terminal(i32)}
++#[derive(Clone,Copy)]
++struct FixedState{cookie:u64,scope:SlotRef,range:PoolMember,write:bool,phase:FixedPhase,abandoned:bool}
++fn overlap(a:PoolMember,b:PoolMember)->bool{a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length}
++struct State {fixed:[Option<FixedState>;64],quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
+ struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>}
+ impl<B:RingBackend> Core<B>{
+  fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();}}
+@@ -52,6 +61,8 @@ impl<B:RingBackend> Core<B>{
+ impl<B:RingBackend> Drop for Core<B>{fn drop(&mut self){self.close();}}
+ pub(crate) struct RingOwner<B:RingBackend>{core:Rc<Core<B>>}
+ pub(crate) struct RingClient<B:RingBackend>{core:Rc<Core<B>>}
++/// Exclusive fixed-I/O range; no view while submitted. Shares the whole-ring owner.
++pub(crate) struct FixedIo<B:RingBackend>{core:Rc<Core<B>>,index:usize,cookie:u64}
+ pub(crate) struct Pool<B:RingBackend>{core:Rc<Core<B>>,identity:SlotRef}
+ pub(crate) struct Payload<B:RingBackend>{core:Rc<Core<B>>,token:Option<LeaseToken>}
+ #[derive(Debug,PartialEq,Eq)]
+@@ -60,7 +71,7 @@ impl<B:RingBackend> RingOwner<B>{
+  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
+   let count=backend.buffer_count();let valid=count>0&&count<=64&&(0..count).all(|i|{let n=backend.buffer_len(i);n>0&&n<=isize::MAX as usize});
+   if !valid{backend.begin_retire();backend.close();return Err(Error::Geometry);}
+-  let core=Rc::new(Core{backend,state:RefCell::new(State{quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
++  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
+   Ok((Self{core:core.clone()},RingClient{core}))
+  }
+  /// At most64 RETURN and64 pool-destroy attempts; no allocation on this path.
+@@ -76,14 +87,40 @@ impl<B:RingBackend> RingOwner<B>{
+     if self.core.backend.destroy_pool(identity)==0{let mut s=self.core.state.borrow_mut();let p=s.pools[slot].take().unwrap();s.members-=p.ranges.len();}
+    }
+   }
+-  self.core.closing.get()&&self.core.state.borrow().live==0&&self.core.backend.retired()
++  let retired=self.core.backend.retired();
++  if retired{for slot in &mut self.core.state.borrow_mut().fixed{if slot.as_ref().is_some_and(|f|f.abandoned){*slot=None;}}}
++  self.core.closing.get()&&self.core.state.borrow().live==0&&self.core.state.borrow().fixed.iter().all(Option::is_none)&&retired
+  }
++ /// # Safety
++ /// Only the authenticated terminal CQ for this exact ring/request after the
++ /// final local fixed-buffer access has ended. ENTER failure/ABORT is not proof.
++ pub(crate) unsafe fn finish_fixed(&mut self,cookie:u64,result:i32)->Result<(),Error>{
++  let mut s=self.core.state.borrow_mut();let slot=s.fixed.iter_mut().find(|f|f.as_ref().is_some_and(|f|f.cookie==cookie)).ok_or(Error::Stale)?;
++  let f=slot.as_mut().unwrap();if f.phase!=FixedPhase::Active{return Err(Error::Busy);}
++  if result>0&&result as u64>f.range.length{return Err(Error::Geometry);}
++  if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}Ok(())
++ }
++ pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
+  pub(crate) fn members(&self)->usize{self.core.state.borrow().members}
+  pub(crate) fn live(&self)->usize{self.core.state.borrow().live}
+  pub(crate) fn pending(&self)->usize{self.core.state.borrow().pools.iter().flatten().map(|p|p.pending.iter().filter(|x|x.is_some()).count()).sum()}
+ }
+ impl<B:RingBackend> Drop for RingOwner<B>{fn drop(&mut self){self.core.close();}}
+ impl<B:RingBackend> RingClient<B>{
++ /// One preallocated fixed reservation per existing registered buffer (<=64).
++ /// Cookie is allocated by this ring's RequestBook before any SQ publication.
++ /// Adapter excludes all native accesses except this request; backing is writable
++ /// and initialized, and fixed ranges cannot overlap provided-pool reservations.
++ pub(crate) fn reserve_fixed(&self,cookie:u64,scope:SlotRef,range:PoolMember,write:bool)->Result<FixedIo<B>,Error>{
++  if self.core.closing.get(){return Err(Error::Closing);}
++  let i=range.buffer_index as usize;
++  if cookie==0||scope.slot>=64||scope.reserved!=0||scope.incarnation==0||range.reserved!=0||range.length==0||range.length>i32::MAX as u64||i>=self.core.backend.buffer_count()||range.offset.checked_add(range.length).is_none_or(|end|end>self.core.backend.buffer_len(i)as u64){return Err(Error::Geometry);}
++  let mut s=self.core.state.borrow_mut();
++  if s.fixed[i].is_some()||s.fixed.iter().flatten().any(|f|f.cookie==cookie){return Err(Error::Busy);}
++  for p in s.pools.iter().flatten(){if p.ranges.iter().any(|r|overlap(*r,range)){return Err(Error::Geometry);}}
++  s.fixed[i]=Some(FixedState{cookie,scope,range,write,phase:FixedPhase::Prepared,abandoned:false});
++  Ok(FixedIo{core:self.core.clone(),index:i,cookie})
++ }
+  fn prepare(&self,ranges:&[PoolMember])->Result<Box<PoolState>,Error>{
+   if self.core.closing.get(){return Err(Error::Closing);}
+   let s=self.core.state.borrow();
+@@ -95,6 +132,7 @@ impl<B:RingBackend> RingClient<B>{
+   for p in s.pools.iter().flatten(){for a in p.ranges.iter(){for b in ranges{
+    if a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length{return Err(Error::Geometry);}
+   }}}
++  for f in s.fixed.iter().flatten(){for r in ranges{if overlap(f.range,*r){return Err(Error::Geometry);}}}
+   // Every heap allocation precedes native admission. OOM cannot orphan a pool.
+   Ok(Box::new(PoolState{identity:SlotRef{slot:0,reserved:0,incarnation:0},ledger,ranges:ranges.into(),pending:(0..ranges.len()).map(|_|None).collect::<alloc::vec::Vec<_>>().into_boxed_slice(),live:0,closing:false}))
+  }
+@@ -155,3 +193,33 @@ impl<B:RingBackend> Payload<B>{
+  pub(crate) fn try_return(mut self)->Result<(),(i64,Self)>{let token=self.token.take().unwrap();let slot=token.receipt().pool.slot as usize;match self.core.give_back(token){Ok(())=>{self.core.finish_live(slot);Ok(())},Err((rc,token))=>{self.token=Some(token);Err((rc,self))}}}
+ }
+ impl<B:RingBackend> Drop for Payload<B>{fn drop(&mut self){if let Some(token)=self.token.take(){self.core.abandon(token);}}}
++
++impl<B:RingBackend> FixedIo<B>{
++ fn snapshot(&self)->FixedState{let f=self.core.state.borrow().fixed[self.index].expect("live fixed owner");assert_eq!(f.cookie,self.cookie);f}
++ /// Copy input before submission; never expose a mutable backing alias.
++ pub(crate) fn write_from(&mut self,bytes:&[u8])->Result<(),Error>{
++  let f=self.snapshot();if self.core.closing.get(){return Err(Error::Closing);}
++  if !f.write||f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}
++  if bytes.len()!=f.range.length as usize{return Err(Error::Geometry);}
++  unsafe{core::ptr::copy_nonoverlapping(bytes.as_ptr(),self.core.backend.buffer(self.index).as_ptr().add(f.range.offset as usize),bytes.len());}Ok(())
++ }
++ /// # Safety
++ /// Integrator activates the matching request record and releases the SQ tail
++ /// with no fallible work after this transition. No raw/second buffer user.
++ pub(crate) unsafe fn publish(&mut self)->Result<(),Error>{
++  if self.core.closing.get(){return Err(Error::Closing);}
++  let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();
++  if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.phase=FixedPhase::Active;Ok(())
++ }
++ /// Only successful terminal READ bytes, bounded by the actual completion.
++ pub(crate) fn bytes(&self)->Result<&[u8],Error>{let f=self.snapshot();
++  if f.write{return Err(Error::Busy);}let FixedPhase::Terminal(n)=f.phase else{return Err(Error::Busy)};
++  if n<0{return Err(Error::Backend(n as i64));}
++  Ok(unsafe{core::slice::from_raw_parts(self.core.backend.buffer(self.index).as_ptr().add(f.range.offset as usize),n as usize)})
++ }
++}
++impl<B:RingBackend> Drop for FixedIo<B>{fn drop(&mut self){
++ let abort={let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();assert_eq!(f.cookie,self.cookie);
++  if f.phase==FixedPhase::Active{f.abandoned=true;Some(f.scope)}else{s.fixed[self.index]=None;None}};
++ if let Some(scope)=abort{if !self.core.closed.get(){self.core.backend.abort_scope(scope);}}
++}}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs b/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs
+index 935873789..640c7c73e 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs
+@@ -6,8 +6,8 @@ mod paired_cq;mod request_book;
+ use ring_payload::*;
+ use service_abi::*;
+ use std::{cell::{Cell,UnsafeCell},ptr::NonNull,rc::Rc};
+-struct Probe{register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
+-impl Probe{fn new()->Rc<Self>{Rc::new(Self{register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
++struct Probe{aborts:Cell<usize>,last_abort:Cell<SlotRef>,register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
++impl Probe{fn new()->Rc<Self>{Rc::new(Self{aborts:Cell::new(0),last_abort:Cell::new(id(0,0)),register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
+ struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
+ impl Backing{fn new(p:Rc<Probe>)->Self{let mut bytes=[0;1024];for i in 0..128{bytes[i*8..i*8+8].fill(i as u8);}Self{bytes:Box::new(UnsafeCell::new(bytes)),p}}}
+ unsafe impl RingBackend for Backing{
+@@ -20,6 +20,7 @@ unsafe impl RingBackend for Backing{
+  fn return_buffer(&self,_:BufferReceipt)->i64{self.p.returns.set(self.p.returns.get()+1);self.p.rc.get()}
+  fn retire_pool(&self,r:SlotRef){let n=&self.p.pool_retires[r.slot as usize];n.set(n.get()+1);}
+  fn destroy_pool(&self,r:SlotRef)->i64{let rc=self.p.destroy_rc.get();if rc==0{let n=&self.p.destroyed[r.slot as usize];n.set(n.get()+1);}rc}
++ fn abort_scope(&self,scope:SlotRef){self.p.aborts.set(self.p.aborts.get()+1);self.p.last_abort.set(scope);}
+  fn begin_retire(&self){self.p.retires.set(self.p.retires.get()+1);}fn retired(&self)->bool{self.p.retired.get()}fn close(&self){self.p.closes.set(self.p.closes.get()+1);}
+ }
+ impl Drop for Backing{fn drop(&mut self){assert_eq!(self.p.closes.get(),1);self.p.freed.set(self.p.freed.get()+1);}}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs b/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs
+index 6bd37f682..65fb58bdc 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs
+@@ -5,8 +5,8 @@ mod ring_payload;
+ use ring_payload::*;
+ use service_abi::*;
+ use std::{cell::{Cell,UnsafeCell},ptr::NonNull,rc::Rc};
+-struct Probe{register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
+-impl Probe{fn new()->Rc<Self>{Rc::new(Self{register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
++struct Probe{aborts:Cell<usize>,last_abort:Cell<SlotRef>,register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
++impl Probe{fn new()->Rc<Self>{Rc::new(Self{aborts:Cell::new(0),last_abort:Cell::new(id(0,0)),register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
+ struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
+ impl Backing{fn new(p:Rc<Probe>)->Self{let mut bytes=[0;1024];for i in 0..128{bytes[i*8..i*8+8].fill(i as u8);}Self{bytes:Box::new(UnsafeCell::new(bytes)),p}}}
+ unsafe impl RingBackend for Backing{
+@@ -19,6 +19,7 @@ unsafe impl RingBackend for Backing{
+  fn return_buffer(&self,_:BufferReceipt)->i64{self.p.returns.set(self.p.returns.get()+1);self.p.rc.get()}
+  fn retire_pool(&self,r:SlotRef){let n=&self.p.pool_retires[r.slot as usize];n.set(n.get()+1);}
+  fn destroy_pool(&self,r:SlotRef)->i64{let rc=self.p.destroy_rc.get();if rc==0{let n=&self.p.destroyed[r.slot as usize];n.set(n.get()+1);}rc}
++ fn abort_scope(&self,scope:SlotRef){self.p.aborts.set(self.p.aborts.get()+1);self.p.last_abort.set(scope);}
+  fn begin_retire(&self){self.p.retires.set(self.p.retires.get()+1);}fn retired(&self)->bool{self.p.retired.get()}fn close(&self){self.p.closes.set(self.p.closes.get()+1);}
+ }
+ impl Drop for Backing{fn drop(&mut self){assert_eq!(self.p.closes.get(),1);self.p.freed.set(self.p.freed.get()+1);}}
+@@ -75,3 +76,41 @@ fn register(c:&RingClient<Backing>,ranges:&[PoolMember])->Result<Pool<Backing>,E
+ #[test]fn ledger_cannot_accept_unbound_or_rebind_after_return(){
+  use lease_ledger::*;let mut l=LeaseLedger::prepare(&[range(0)],&[1024]).unwrap();assert!(matches!(l.accept_read(8,4,receipt(0,1,0,1)),Err(LeaseError::State)));assert!(l.bind(id(64,1)).is_err());l.bind(id(0,1)).unwrap();let t=l.accept_read(8,4,receipt(0,1,0,1)).unwrap().unwrap();l.begin_return(&t).unwrap();l.finish_return(&t,0).unwrap();assert_eq!(l.outstanding(),0);assert_eq!(l.bind(id(1,2)),Err(LeaseError::State));
+ }
++
++#[test]fn fixed_read_owns_range_through_terminal_and_view(){
++ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(101,id(4,9),range(8),false).unwrap();assert!(f.bytes().is_err());
++ assert!(unsafe{r.finish_fixed(101,8)}.is_err());unsafe{f.publish().unwrap();}assert!(f.bytes().is_err());
++ assert!(unsafe{r.finish_fixed(101,9)}.is_err());assert_eq!(r.fixed_count(),1);unsafe{r.finish_fixed(101,3).unwrap();}
++ assert_eq!(f.bytes().unwrap(),&[1;3]);assert!(c.reserve_fixed(102,id(4,9),range(8),false).is_err());
++ drop(c);drop(r);assert_eq!(p.closes.get(),1);assert_eq!(p.freed.get(),0);assert_eq!(f.bytes().unwrap(),&[1;3]);drop(f);assert_eq!(p.freed.get(),1);
++}
++#[test]fn fixed_abandon_is_scope_cancel_not_refund(){
++ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(201,id(3,7),range(8),false).unwrap();unsafe{f.publish().unwrap();}drop(f);
++ assert_eq!(p.aborts.get(),1);assert_eq!(p.last_abort.get(),id(3,7));assert_eq!(r.fixed_count(),1);assert!(!r.progress());assert_eq!(r.fixed_count(),1);
++ assert!(c.reserve_fixed(202,id(3,7),range(8),false).is_err());assert!(unsafe{r.finish_fixed(999,-2)}.is_err());assert_eq!(r.fixed_count(),1);
++ unsafe{r.finish_fixed(201,-2).unwrap();}assert_eq!(r.fixed_count(),0);let f=c.reserve_fixed(202,id(3,7),range(8),false).unwrap();drop(f);assert_eq!(p.aborts.get(),1);
++}
++#[test]fn fixed_and_provided_exclude_overlaps_both_directions(){
++ let(_p,mut r,c)=fixture();let pool=attach(&c,1,8);assert!(c.reserve_fixed(301,id(0,1),range(8),false).is_err());
++ let f=c.reserve_fixed(301,id(0,1),range(0),false).unwrap();assert!(unsafe{c.attach_pool(id(2,1),&[range(0)])}.is_err());
++ assert!(c.register_pool(&[range(0)]).is_err());drop(pool);r.progress();drop(f);assert_eq!(r.fixed_count(),0);let _pool=attach(&c,2,0);
++}
++#[test]fn fixed_write_freezes_after_publish_and_error_preserves_owner(){
++ let(_p,mut r,c)=fixture();let mut f=c.reserve_fixed(401,id(0,1),range(16),true).unwrap();assert!(f.write_from(&[3;7]).is_err());f.write_from(&[3;8]).unwrap();
++ unsafe{f.publish().unwrap();}assert!(f.write_from(&[4;8]).is_err());assert!(f.bytes().is_err());assert!(unsafe{f.publish()}.is_err());
++ // A failed ENTER does not have a rollback API; reservation remains active.
++ assert_eq!(r.fixed_count(),1);unsafe{r.finish_fixed(401,-2).unwrap();}assert!(unsafe{r.finish_fixed(401,0)}.is_err());assert_eq!(r.fixed_count(),1);drop(f);assert_eq!(r.fixed_count(),0);
++ let pool=attach(&c,1,16);let a=accept(&pool,1);assert_eq!(a.bytes(),&[3;8]);drop(a);
++}
++#[test]fn fixed_retirement_reclaims_abandoned_only_after_proof(){
++ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(501,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();}drop(f);drop(c);assert!(!r.progress());assert_eq!(r.fixed_count(),1);
++ p.retired.set(true);assert!(r.progress());assert_eq!(r.fixed_count(),0);drop(r);assert_eq!(p.freed.get(),1);
++}
++#[test]fn fixed_bad_geometry_and_precise_error(){
++ let(_p,mut r,c)=fixture();for x in [PoolMember{length:0,..range(0)},PoolMember{reserved:1,..range(0)},PoolMember{offset:u64::MAX,..range(0)},PoolMember{length:2048,..range(0)},PoolMember{buffer_index:1,..range(0)}]{assert!(c.reserve_fixed(601,id(0,1),x,false).is_err());}
++ assert!(c.reserve_fixed(0,id(0,1),range(0),false).is_err());let mut f=c.reserve_fixed(601,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(601,-14).unwrap();}assert_eq!(f.bytes(),Err(Error::Backend(-14)));drop(f);assert_eq!(r.fixed_count(),0);
++}
++#[test]fn fixed_unpublished_and_closed_drop_do_not_abort(){
++ let(p,r,c)=fixture();let f=c.reserve_fixed(701,id(0,1),range(0),false).unwrap();drop(f);assert_eq!(p.aborts.get(),0);
++ let mut f=c.reserve_fixed(702,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();}drop(r);assert_eq!(p.closes.get(),1);drop(f);assert_eq!(p.aborts.get(),0);drop(c);assert_eq!(p.freed.get(),1);
++}

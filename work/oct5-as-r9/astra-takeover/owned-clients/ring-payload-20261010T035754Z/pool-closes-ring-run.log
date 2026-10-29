@@ -1,0 +1,44 @@
+
+running 7 tests
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... FAILED
+test overlap_and_global64_members_are_rejected ... FAILED
+test last_generation_cannot_wrap_or_reuse ... FAILED
+test pool_destroy_error_retains_exclusion_and_incarnation ... FAILED
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+
+failures:
+
+---- one_pool_drop_preserves_other_pool_and_ring stdout ----
+
+thread 'one_pool_drop_preserves_other_pool_and_ring' (22139109) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ring-payload-20261010T035754Z/mutant-pool-closes-ring/test_ring_payload.rs:26:232:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- overlap_and_global64_members_are_rejected stdout ----
+
+thread 'overlap_and_global64_members_are_rejected' (22139110) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ring-payload-20261010T035754Z/mutant-pool-closes-ring/test_ring_payload.rs:24:121:
+called `Result::unwrap()` on an `Err` value: Closing
+
+---- last_generation_cannot_wrap_or_reuse stdout ----
+
+thread 'last_generation_cannot_wrap_or_reuse' (22139108) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ring-payload-20261010T035754Z/mutant-pool-closes-ring/test_ring_payload.rs:31:163:
+assertion failed: matches!(unsafe{c.attach_pool(id(63,1),&[range(0)])},Err(Error::Stale))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- pool_destroy_error_retains_exclusion_and_incarnation stdout ----
+
+thread 'pool_destroy_error_retains_exclusion_and_incarnation' (22139112) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ring-payload-20261010T035754Z/mutant-pool-closes-ring/test_ring_payload.rs:28:181:
+assertion failed: matches!(unsafe{c.attach_pool(id(4,1),&[range(0)])},Err(Error::Geometry))
+
+
+failures:
+    last_generation_cannot_wrap_or_reuse
+    one_pool_drop_preserves_other_pool_and_ring
+    overlap_and_global64_members_are_rejected
+    pool_destroy_error_retains_exclusion_and_incarnation
+
+test result: FAILED. 3 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

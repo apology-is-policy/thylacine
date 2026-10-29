@@ -1,0 +1,11 @@
+--- control
++++ omit-unwind-refund
+@@ -173,7 +173,7 @@
+         kfree(pools);
+         kfree(slots);
+         spin_lock(&as->lock);
+-        addrspace_uncharge_pages(as, metadata + backing);
++
+         spin_unlock(&as->lock);
+         addrspace_private_end(as);
+         return NULL;

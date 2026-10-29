@@ -1,0 +1,11 @@
+--- control.c
++++ msize-bound.c
+@@ -415,7 +415,7 @@
+         u32 overhead=w->kind==P9_TWRITE?P9_HDR_LEN+16u:P9_HDR_LEN+4u;
+         u32 limit=bound>overhead?bound-overhead:0;
+         if(count && !limit)return -T_E_INVAL;
+-        if(w->iounit && w->iounit<limit)limit=w->iounit;
++        if(w->iounit)limit=w->iounit;
+         if(limit>INT32_MAX)limit=INT32_MAX;
+         if(count>limit)count=limit;
+         if(w->offset>UINT64_MAX-count)return -T_E_INVAL;

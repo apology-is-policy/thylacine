@@ -1,0 +1,2 @@
+unsupported walk arity: invalid capture mutated output/payload or succeeded (0)
+Assertion failed: (0), function bad, file walk-arity.c, line 64.

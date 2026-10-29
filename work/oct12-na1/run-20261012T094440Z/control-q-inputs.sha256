@@ -1,0 +1,4 @@
+b84cf8c74c2804a23f6cb8b5e9b2ca8ff0c32b9e5137d53fb8fa06a5ea8a22bb  build/kernel-private-async-qual/thylacine.bin
+3072262ffcf3e2b6f8e33514ede867f28c065bd969643b1dcc81b9fbd4240acd  build/kernel-private-async-qual/thylacine.elf
+9b5f8b811c05344a7f0287374e1b57c0b0f2955f2ccaef0818b77ef885f8cdfa  build/ramfs.cpio
+08d8c861a8fc808026a465ff32b70b16ad2a48aee476e0235cc569c57c3ebd97  build/disk.img

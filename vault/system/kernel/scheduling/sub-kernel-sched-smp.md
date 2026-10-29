@@ -118,7 +118,7 @@ unreachable rather than merely unused.
 cpu0's idle runs on `g_bootcpu_idle_stack` — a `struct secondary_stack`
 identical to a secondary's, with a leading guard page mapped no-access —
 because cpu0's `_boot_stack` belongs to `kthread`, which is suspended
-mid-`wait_pid` once init blocks.
+mid-`wait_pid_for` once init blocks.
 
 **`idle_in_wfi` accuracy (F7).** The flag means "this CPU's current
 thread is its idle", and it is maintained in two places: the idle loop
@@ -185,7 +185,9 @@ peer kicks one peer to come steal.
 **Secondary bring-up** (`kernel/smp.c`). PSCI `CPU_ON` at the computed PA
 of the `secondary_entry` trampoline; the trampoline flips `g_cpu_online`,
 applies PAC keys, programs the MMU, and long-branches to `per_cpu_main`
-at the high VA. `per_cpu_main` sets VBAR, enables FP and EL0 counter
+at the high VA, the trampoline having installed VBAR there first (#214).
+`per_cpu_main` verifies VBAR (`exception_vectors_verify` extincts unless it holds
+the high-VA table; since 2026-10-27 it re-sets nothing), enables FP and EL0 counter
 access, brings up per-PE debug and hardware identity, creates and parks
 this CPU's idle in TPIDR_EL1, runs `sched_init`, brings up the per-CPU
 GIC and attaches the IPI, then flips `g_cpu_alive` — the flag the boot

@@ -1,0 +1,11 @@
+=== preconditions ===
+2026-10-21T20:51:49Z  occurs self-check: a true count passes, a false one fails
+2026-10-21T20:51:49Z  verdict self-check: PASS, a FAIL's message and an absent test read as such
+2026-10-21T20:51:49Z  probes_hash self-check: equal files agree, a changed byte differs, a missing program refuses
+2026-10-21T20:51:49Z  HEAD 01c819efcb023701612a6399d91ea57f665932d9, clean
+2026-10-21T20:51:49Z  expected tests (derived from test.c): 1901; named: 12
+2026-10-21T20:51:49Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla' (self-check: a wrong set refuses); no untracked build input
+2026-10-21T20:51:49Z  go fork /Users/northkillpd/projects/go-thylacine-pin-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+2026-10-21T20:51:49Z  disk pre: 7606 MiB free (floor 8192)
+REFUSING at pre: under the floor
+2026-10-21T20:51:49Z  exit 3

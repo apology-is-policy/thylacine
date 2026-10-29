@@ -1,0 +1,115 @@
+warning: unused variable: `ring_budget`
+   --> src/local_wait.rs:156:5
+    |
+156 |     ring_budget: usize,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ring_budget`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `fixed_budget`
+   --> src/local_wait.rs:157:5
+    |
+157 |     fixed_budget: usize,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_fixed_budget`
+
+warning: method `expire` is never used
+  --> src/retirement_executor.rs:38:8
+   |
+25 | pub(crate) trait Retirable {
+   |                  --------- method in this trait
+...
+38 |     fn expire(&mut self, now: u64, budget: usize) -> usize;
+   |        ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `deadline_cursor` is never read
+   --> src/retirement_executor.rs:114:5
+    |
+111 | struct State<D: Retirable> {
+    |        ----- field in this struct
+...
+114 |     deadline_cursor: usize,
+    |     ^^^^^^^^^^^^^^^
+
+warning: method `expire` is never used
+   --> src/retirement_executor.rs:260:19
+    |
+129 | impl<D: Retirable> RetireQueue<D> {
+    | --------------------------------- method in this implementation
+...
+260 |     pub(crate) fn expire(&mut self, now: u64, ring_budget: usize, fixed_budget: usize) -> usize {
+    |                   ^^^^^^
+
+warning: `loom-client` (lib test) generated 5 warnings (run `cargo fix --lib -p loom-client --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::timer_due_after_arm_retries_then_cancels ... FAILED
+test tests::ring::timer_future_cancel_waits_for_actual_terminal ... ok
+test tests::ring::timer_outer_deadline_keeps_separate_policy ... ok
+test tests::ring::timer_polling_driver_uses_same_queue_and_no_allocation ... FAILED
+test tests::ring::timer_publication_during_arm_prevents_stale_sleep ... ok
+test tests::ring::timer_queue_minimum_and_independent_fair_cursor ... FAILED
+test tests::ring::timer_retiring_driver_still_owns_deadline ... FAILED
+test tests::ring::timer_wait_uses_earliest_and_expiry_preserves_storage ... FAILED
+test tests::ring::timer_zero_expiry_budgets_preserve_due_work ... FAILED
+
+failures:
+
+---- tests::ring::timer_due_after_arm_retries_then_cancels stdout ----
+
+thread 'tests::ring::timer_due_after_arm_retries_then_cancels' (31865091) panicked at src/tests/ring.rs:1978:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::timer_polling_driver_uses_same_queue_and_no_allocation stdout ----
+
+thread 'tests::ring::timer_polling_driver_uses_same_queue_and_no_allocation' (31865094) panicked at src/tests/ring.rs:2061:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::timer_queue_minimum_and_independent_fair_cursor stdout ----
+
+thread 'tests::ring::timer_queue_minimum_and_independent_fair_cursor' (31865096) panicked at src/tests/ring.rs:1929:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::timer_retiring_driver_still_owns_deadline stdout ----
+
+thread 'tests::ring::timer_retiring_driver_still_owns_deadline' (31865097) panicked at src/tests/ring.rs:2015:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::timer_wait_uses_earliest_and_expiry_preserves_storage stdout ----
+
+thread 'tests::ring::timer_wait_uses_earliest_and_expiry_preserves_storage' (31865098) panicked at src/tests/ring.rs:1895:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::timer_zero_expiry_budgets_preserve_due_work stdout ----
+
+thread 'tests::ring::timer_zero_expiry_budgets_preserve_due_work' (31865099) panicked at src/tests/ring.rs:1957:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    tests::ring::timer_due_after_arm_retries_then_cancels
+    tests::ring::timer_polling_driver_uses_same_queue_and_no_allocation
+    tests::ring::timer_queue_minimum_and_independent_fair_cursor
+    tests::ring::timer_retiring_driver_still_owns_deadline
+    tests::ring::timer_wait_uses_earliest_and_expiry_preserves_storage
+    tests::ring::timer_zero_expiry_budgets_preserve_due_work
+
+test result: FAILED. 3 passed; 6 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,7 @@
+PASS settled       final        rc=0   want=0    the final drop refunds metadata + ring
+PASS settled       nonfinal     rc=0   want=0    a nonfinal drop refunds metadata only, tail settles the ring
+PASS settled       exact-payer  rc=0   want=0    a record paid by another image is not refunded here
+PASS unconditional final        rc=0   want=0    BLIND SPOT: an unconditional refund passes the all-final fixture
+PASS unconditional nonfinal     rc=11  want=11   DISCRIMINATION: the nonfinal leg catches it
+nonfinal: page_count 0, want 3
+

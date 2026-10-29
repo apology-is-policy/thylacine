@@ -53,34 +53,7 @@
 #include "../../arch/arm64/timer.h"   // PTY-1f: the sleeper thunk's deadlines
 #include <thylacine/page.h>           // PTY-4e #19: the torpor sleeper's page
 #include <thylacine/torpor.h>         // PTY-4e #19: the preserved-wait probe
-
-void test_proc_rfork_basic_smoke(void);
-void test_proc_rfork_exits_status(void);
-void test_proc_rfork_stress_1000(void);
-void test_proc_cascading_rfork_wait_smoke(void);
-void test_proc_cascading_rfork_stress(void);
-void test_proc_orphan_reparent_smoke(void);
-void test_proc_orphan_diag_uses_cons_path(void);
-void test_proc_orphan_reparent_to_init(void);
-void test_proc_console_attached_smoke(void);
-void test_proc_stripes_smoke(void);
-void test_proc_legate_scope_teardown(void);
-void test_proc_legate_teardown_except_and_zero(void);
-void test_proc_legate_teardown_from_zombie_chokepoint(void);
-
-// Test-harness hooks (kept out of proc.h; no production caller). The legate
-// teardown walk + the synthetic-Proc table splice let the test verify the walk
-// flags every scope member -- the actual death fires at the EL0 die-check,
-// which kernel test threads (EL1) never reach, so the flag is the observable.
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
-extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern void proc_test_set_init(struct Proc *p);
-extern void proc_exec_drop_image_state_for_test(struct Proc *p,
-                                                struct Thread *t,
-                                                u32 pheno);          // #247 + Design D
+#include <thylacine/devctl.h>
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -1047,6 +1020,49 @@ static void stripes_child_entry(void *arg) {
     exits("ok");
 }
 
+// Real process table / incarnation lookup; synthetic Procs are unscheduled.
+// Changing the image pointer below isolates the refund predicate, not a claim
+// of the future private-ring exec integration. Restore it before proc_free.
+static const char *sqpoll_ticket_fixture(void) {
+    struct Proc *p = proc_alloc(), *q = proc_alloc();
+    if (!p || !q) {
+        if (p) { p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+        if (q) { q->state = PROC_STATE_ZOMBIE; proc_free(q); }
+        return "ticket fixture allocation";
+    }
+    struct ProcSqpollTicket t = {0}, u = {0};
+    struct AddrSpace *original = p->as;
+    const char *error = NULL;
+#define TICKET_CHECK(cond, msg) do { if (!(cond)) { error = msg; goto done; } } while (0)
+    p->principal_id = 1000;
+    p->thread_budget = 2;
+    p->live_threads = 1;
+    proc_test_link(p); proc_test_link(q);
+    TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, q->as, &t), "ticket wrong image");
+    TICKET_CHECK(proc_sqpoll_ticket_charge(p->stripes, original, &t), "ticket admission");
+    TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, original, &u), "ticket cap");
+    p->live_threads = 0;
+    TICKET_CHECK(!proc_sqpoll_ticket_charge(p->stripes, original, &t), "ticket occupied");
+    TICKET_CHECK(proc_sqpoll_ticket_charge(p->stripes, original, &u), "ticket second");
+    proc_test_unlink(p); p->as = q->as; proc_test_link(p);
+    proc_sqpoll_ticket_release(&t);
+    TICKET_CHECK(p->loom_sqpoll_count == 1 && !t.stripes, "ticket refund across image change");
+    proc_sqpoll_ticket_release(&t);
+    TICKET_CHECK(p->loom_sqpoll_count == 1, "ticket duplicate refund");
+    proc_test_unlink(p); p->as = original; proc_test_link(p);
+    // The second ticket survives actual descriptor destruction. No pointer to
+    // that descriptor is retained by the ticket or dereferenced by release.
+    proc_test_unlink(p); p->state = PROC_STATE_ZOMBIE; proc_free(p); p = NULL;
+    proc_sqpoll_ticket_release(&u);
+    TICKET_CHECK(!u.stripes && !q->loom_sqpoll_count, "ticket release after reap");
+done:
+    proc_sqpoll_ticket_release(&t); proc_sqpoll_ticket_release(&u);
+    if (p) { proc_test_unlink(p); p->as = original; p->live_threads = 0; p->state = PROC_STATE_ZOMBIE; proc_free(p); }
+    proc_test_unlink(q); q->state = PROC_STATE_ZOMBIE; proc_free(q);
+#undef TICKET_CHECK
+    return error;
+}
+
 // proc.stripes_smoke
 //   Verifies the P5-corvus-srv per-Proc identity tag:
 //     * proc_stripes(NULL) is 0 — the fail-closed sentinel.
@@ -1056,6 +1072,8 @@ static void stripes_child_entry(void *arg) {
 //     * an rfork'd child's tag is non-zero and differs from its
 //       parent's — the tag is minted, never inherited.
 void test_proc_stripes_smoke(void) {
+    const char *ticket_error = sqpoll_ticket_fixture();
+    TEST_ASSERT(ticket_error == NULL, ticket_error);
     // Fail-closed: a NULL Proc reads as stripes 0.
     TEST_EXPECT_EQ(proc_stripes(NULL), (u64)0,
         "proc_stripes(NULL) must be 0 (fail-closed sentinel)");
@@ -1774,7 +1792,6 @@ static u32 js_note_count(struct Proc *p, const char *name) {
 // BOTH clear. A resume that cleared the other owner's flag is exactly the
 // BUGGY_DOUBLE_STOP counterexample (a tty:cont running a debugger-stopped
 // thread); this is its deterministic regression.
-void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_owner_algebra(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1862,7 +1879,6 @@ static void js_sleeper_thunk(void *arg) {
     exits("ok");
 }
 
-void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_park_report_cont_live(void) {
     __atomic_store_n(&g_js_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_js_sleeper_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
@@ -1921,7 +1937,6 @@ void test_proc_job_stop_park_report_cont_live(void) {
 // unpinned. Deterministic regression: after a full stop/report/cont/report
 // round, a SECOND TSTP fan must stop the group again (fresh park, fresh
 // latch, fresh report), and a second cont must release it to a clean exit.
-void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_recycle(void) {
     __atomic_store_n(&g_js_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_js_sleeper_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
@@ -2010,7 +2025,6 @@ static void tsp_sleeper_thunk(void *arg) {
     exits("ok");
 }
 
-void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_preserves_torpor_wait(void) {
     __atomic_store_n(&g_tsp_done, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_tsp_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
@@ -2102,7 +2116,6 @@ static void js_anchor_thunk(void *arg) {
 // notes_proc_has_live_handler both load ->sigtab with a bare acquire and no lock
 // exec holds, and notes_post targets ANOTHER Proc on every call, so freeing here
 // is a use-after-free. That is what this pins.
-void test_proc_exec_reset_dispositions(void);
 void test_proc_exec_reset_dispositions(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -2192,7 +2205,6 @@ void test_proc_exec_reset_dispositions(void) {
     proc_free(p);
 }
 
-void test_proc_job_stop_orphan_rule(void);
 void test_proc_job_stop_orphan_rule(void) {
     // Each leg records, releases its fixture, then asserts: a failing assert
     // returns, and a fixture left linked holds every later drain of kproc's
@@ -2338,8 +2350,6 @@ void test_proc_job_stop_orphan_rule(void) {
         "its running member got no hup");
 }
 
-void test_proc_dying_takes_no_stop(void);
-
 static bool dts_is_stopped(const char *s) {
     const char *w = "STOPPED";
     while (*s && *s == *w) { s++; w++; }
@@ -2353,7 +2363,6 @@ static bool dts_is_stopped(const char *s) {
 // it with a live Proc one variable (group_exit_msg) apart, so a deliver that
 // refused every Proc would fail too.
 void test_proc_dying_takes_no_stop(void) {
-    extern const char *devctl_procs_state_name_for_test(const struct Proc *p);
     struct Proc *live  = proc_alloc();
     struct Proc *dying = proc_alloc();
     TEST_ASSERT(live != NULL && dying != NULL, "proc_alloc live/dying");
@@ -2401,9 +2410,6 @@ void test_proc_dying_takes_no_stop(void) {
     TEST_ASSERT(live_col, "/ctl/procs shows the job-stopped live Proc STOPPED");
     TEST_ASSERT(!dying_col, "/ctl/procs does not show a dying Proc STOPPED");
 }
-
-void test_proc_exec_drops_image_note_state(void);
-void test_proc_kill_forces_final_close(void);
 
 // #247: a successful exec must drop every note-side thing that names the OLD
 // image -- including the in-handler LATCH, which the reset missed.

@@ -129,6 +129,7 @@ void cons_tx_arm(void);
 // caller emits unserialized and reports the miss). Only extinction() calls it.
 bool cons_tx_claim_for_dump(void);
 
+#ifdef KERNEL_TESTS
 // The pure bounded try-spin, exported to run on a CALLER-SUPPLIED lock so a test
 // can exercise the bound and the return-holding contract WITHOUT touching the
 // live ring (a test that claimed the live ring would silence the console for
@@ -138,12 +139,7 @@ bool cons_tx_claim_core(spin_lock_t *l);
 // FALSE on a clean boot, and it must STAY false -- guarded by
 // `cons.ring_unclaimed_on_clean_boot`. A spurious claim is a dead console.
 bool cons_tx_claimed_for_dump(void);
-
-// #75-audit F3: bounded synchronous flush for a HEALTHY caller (blocking-lock,
-// waits the FIFO out). boot_mark_complete calls it before the direct-path
-// "Thylacine boot OK" banner so residual EL0 ring output cannot tear that
-// tooling-ABI line (TOOLING.md section 10).
-void cons_tx_flush(void);
+#endif // KERNEL_TESTS
 
 // The two kernel-side emit mechanisms below arrived on different branches and
 // serve DISJOINT contexts; read them as a pair.
@@ -227,6 +223,7 @@ bool cons_diag_line_emit(struct cons_diag_line *l);                  // one push
 bool cons_kernel_writer_begin(void);
 void cons_kernel_writer_end(void);
 
+#ifdef KERNEL_TESTS
 // #75 test hooks (test-only). The RING needs no dedicated test -- every byte of
 // console output on every boot goes through it, so a ring bug means no boot at
 // all. The ROLE does: it is what makes a write call-atomic, and its absence is
@@ -260,6 +257,7 @@ u32  cons_test_tx_room_waits(void);
 bool cons_test_tx_armed(void);
 u32  cons_test_tx_ring_capacity(void);
 u64  cons_test_tx_room_wait_ns(void);
+#endif // KERNEL_TESTS
 
 // #174/#129 backpressure PRE-check: true iff the RX ring has room for the
 // worst-case push one more admitted byte could cause. The PL011 RX drain
@@ -370,6 +368,7 @@ bool cons_episode_begin(void);
 bool cons_episode_end(void);
 bool cons_episode_abandon(void);
 
+#ifdef KERNEL_TESTS
 // IM-1 test hooks. cons_test_sak_dispatch drives console_mgr's SAK arm
 // EXACTLY (proc_console_sak -> cons_episode_begin). cons_test_reader_busy /
 // _episode_parked / _line_len are non-blocking observables: the reader slot,
@@ -382,7 +381,6 @@ void cons_test_sak_dispatch(void);
 bool cons_test_reader_busy(void);
 u32  cons_test_episode_parked(void);
 u32  cons_test_line_len(void);
-#ifdef KERNEL_TESTS
 void cons_test_set_window_hook(void (*fn)(void));
 #endif
 
@@ -423,18 +421,22 @@ long cons_render_winsize(void *buf, long n);
 #define CONS_BEACON_CELLS  1u
 #define CONS_BEACON_RICH   2u
 
+#ifdef KERNEL_TESTS
 // Snapshot the current tier (one g_cons.lock hold internally).
 u32 cons_beacon_tier(void);
+#endif // KERNEL_TESTS
 
 // The standalone `beacon <tier>\n` line the ungated /dev/beacon leaf serves
 // (H-1 audit F1: the session shell cannot seek its inherited consctl fd nor
 // mint a fresh one -- the winsize-leaf precedent). Max 13 bytes.
 long cons_render_beacon(void *buf, long n);
 
+#ifdef KERNEL_TESTS
 // Diagnostic: count of CHANGED winsize applies (each corresponds to one
 // tty:winch post attempt). The iff-changed regression reads it -- an unchanged
 // rewrite must NOT advance it.
 u32 cons_winch_events(void);
+#endif // KERNEL_TESTS
 
 // #55: the is-a-cons qid contract (the ptsname PTS_FLAG precedent, pouch
 // 0021's client ABI). cons fds were STATLESS (fstat -1 -> pouch folded them
@@ -509,6 +511,7 @@ void console_mgr_main(void);
 // harness cannot inject UART RX -- IDENTITY-DESIGN.md section 9.8 test note).
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // Reset the console input ring + flags + reader-busy to the empty state.
 void cons_test_reset(void);
 
@@ -587,6 +590,7 @@ void cons_test_force_full(bool on);
 u32  cons_test_drain_count(void);
 u32  cons_test_drain_overflow(void);
 bool cons_test_drain_pollwake_pending(void);
+#endif // KERNEL_TESTS
 
 // #130-R2 F2: the harness backstop. Each bit names a piece of console state a
 // test arms for a window and must release; a failing assert inside the window
@@ -607,6 +611,8 @@ bool cons_test_drain_pollwake_pending(void);
 // the login prompt); armed, a real BREAK would open one behind a synthetic,
 // by then freed, authority.
 #define CONS_TEST_OWNED_EPISODE       (1u << 6)
+#ifdef KERNEL_TESTS
 u32  cons_test_release_owned_state(void);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_CONS_H

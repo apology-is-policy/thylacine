@@ -7,7 +7,7 @@ guards: [sub-kernel-territory]
 validated-by: [spec-territory, gate-smp]
 strength: spec
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-27
 ---
 ## Statement
 
@@ -19,9 +19,12 @@ cycle.
 
 ## Enforcement
 
-Two checks in `kernel/territory.c`, same algorithm, different graphs:
+Two checks in `kernel/territory.c`, same algorithm, different graphs. The
+production kernel has only the second: no production code binds, so the bind
+graph and its check are compiled only with the in-kernel tests (since
+2026-10-27).
 
-- `would_create_cycle` on the bind graph — fixed-point reachability
+- `would_create_cycle` on the bind graph (tests build) — fixed-point reachability
   from `src` over existing `dst -> src` edges; if `dst` becomes
   reachable, the new edge would close `src -> ... -> dst -> src`.
   `bind` returns `-1`; the degenerate self-bind returns `-4`.

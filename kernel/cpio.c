@@ -137,6 +137,7 @@ int cpio_newc_iter(const u8 *blob, size_t blob_size,
 // cpio_newc_count: convenience using cpio_newc_iter.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 static int count_cb(const struct cpio_entry *e, void *arg) {
     (void)e;
     int *n = (int *)arg;
@@ -150,3 +151,4 @@ int cpio_newc_count(const u8 *blob, size_t blob_size) {
     if (rv < 0) return -1;
     return n;
 }
+#endif // KERNEL_TESTS

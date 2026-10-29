@@ -1,0 +1,42 @@
+; ModuleID = '/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/layout.c'
+source_filename = "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/layout.c"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
+target triple = "aarch64-unknown-none-elf"
+
+@rpc_operation_bytes = dso_local local_unnamed_addr constant i64 640, align 8, !dbg !0
+@rpc_protocol_bytes = dso_local local_unnamed_addr constant i64 42288, align 8, !dbg !5
+
+!llvm.dbg.cu = !{!2}
+!llvm.module.flags = !{!14, !15, !16, !17, !18, !19, !20, !21, !22, !23}
+!llvm.ident = !{!24}
+!llvm.errno.tbaa = !{!25}
+
+!0 = !DIGlobalVariableExpression(var: !1, expr: !DIExpression())
+!1 = distinct !DIGlobalVariable(name: "rpc_operation_bytes", scope: !2, file: !7, line: 2, type: !8, isLocal: false, isDefinition: true)
+!2 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: "Homebrew clang version 22.1.4", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, globals: !4, splitDebugInlining: false, nameTableKind: None)
+!3 = !DIFile(filename: "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/layout.c", directory: "/Users/northkillpd/projects/thylacine-corona", checksumkind: CSK_MD5, checksum: "2aaf734af9537c83b4f077c5bd089748")
+!4 = !{!0, !5}
+!5 = !DIGlobalVariableExpression(var: !6, expr: !DIExpression())
+!6 = distinct !DIGlobalVariable(name: "rpc_protocol_bytes", scope: !2, file: !7, line: 3, type: !8, isLocal: false, isDefinition: true)
+!7 = !DIFile(filename: "work/oct5-as-r9/astra-takeover/rpc-draft/layout.c", directory: "/Users/northkillpd/projects/thylacine-corona", checksumkind: CSK_MD5, checksum: "2aaf734af9537c83b4f077c5bd089748")
+!8 = !DIDerivedType(tag: DW_TAG_const_type, baseType: !9)
+!9 = !DIDerivedType(tag: DW_TAG_typedef, name: "u64", file: !10, line: 21, baseType: !11)
+!10 = !DIFile(filename: "kernel/include/thylacine/types.h", directory: "/Users/northkillpd/projects/thylacine-corona", checksumkind: CSK_MD5, checksum: "57aaf05fe3db90aa604c277cacb04727")
+!11 = !DIDerivedType(tag: DW_TAG_typedef, name: "uint64_t", file: !12, line: 102, baseType: !13)
+!12 = !DIFile(filename: "/opt/homebrew/Cellar/llvm/22.1.4/lib/clang/22/include/stdint.h", directory: "", checksumkind: CSK_MD5, checksum: "a47a6a6c7fcbc62776237de6abac9549")
+!13 = !DIBasicType(name: "unsigned long", size: 64, encoding: DW_ATE_unsigned)
+!14 = !{i32 7, !"Dwarf Version", i32 5}
+!15 = !{i32 2, !"Debug Info Version", i32 3}
+!16 = !{i32 1, !"wchar_size", i32 4}
+!17 = !{i32 8, !"branch-target-enforcement", i32 2}
+!18 = !{i32 8, !"sign-return-address", i32 2}
+!19 = !{i32 8, !"PIC Level", i32 1}
+!20 = !{i32 7, !"PIE Level", i32 1}
+!21 = !{i32 1, !"Code Model", i32 1}
+!22 = !{i32 7, !"direct-access-external-data", i32 1}
+!23 = !{i32 7, !"frame-pointer", i32 4}
+!24 = !{!"Homebrew clang version 22.1.4"}
+!25 = !{!26, !26, i64 0}
+!26 = !{!"int", !27, i64 0}
+!27 = !{!"omnipotent char", !28, i64 0}
+!28 = !{!"Simple C/C++ TBAA"}

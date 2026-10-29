@@ -1,0 +1,11 @@
+--- control.c
++++ accepted_error.c
+@@ -2410,7 +2410,7 @@
+     --e->pins;
+     spin_unlock(&l->lock);
+     engine_changed(l);
+-    return 0;
++    return rc;
+ }
+ static int engine_pin_locked(struct Loom *l, struct loom_service_ref ref,
+                               struct loom_service_protocol **out, bool installing) {

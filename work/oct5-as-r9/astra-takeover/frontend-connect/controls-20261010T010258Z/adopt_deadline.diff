@@ -1,0 +1,11 @@
+--- control.c
++++ adopt_deadline.c
+@@ -2833,7 +2833,7 @@
+         struct loom_service_protocol *protocol;
+         rc=loom_private_connect_prepare(l,scope,target,s->user_data,s->_resv1[3],timer_now_ns(),&protocol);
+         if(rc)return rc;
+-        rc=loom_engine_adopt(protocol,timer_now_ns());
++        rc=loom_engine_adopt(protocol,1);
+         // Successful adoption owns even its failed native publication terminal.
+         if(rc && loom_private_connect_rollback(protocol))extinction("frontend lost CONNECT rollback");
+         return rc;

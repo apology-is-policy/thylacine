@@ -142,8 +142,10 @@ void p9_srvconn_transport_destroy(struct p9_srvconn_transport *st);
 // Adapter MUST outlive the transport that uses these ops.
 struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st);
 
+#ifdef KERNEL_TESTS
 // Query: is the adapter live (magic valid + inner SrvConn present)?
 bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st);
+#endif // KERNEL_TESTS
 
 // The SrvConn wrapped by a client's transport, or NULL when the client's
 // backend is not this adapter (loopback / spoor / mq clients carry no
@@ -156,5 +158,14 @@ bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st);
 // (the pts binding refs), not for dereference.
 struct p9_client;
 struct SrvConn *p9_srvconn_transport_conn(const struct p9_client *c);
+
+// AS-1 exclusive native-service adapter. The future private-service admission
+// path must own a fresh SrvConn with NO other client/embedded handshake. It must
+// retain its reference through local retirement; this vtable takes/drops none.
+// It is NOT an adapter for an arbitrary shared native connection. Unlike the
+// legacy byte-mode attachment above it never waits or performs namespace work.
+// Abort tears down both directions but leaves credit/storage charged until the
+// real last reference. The progress core bounds every copy to negotiated msize.
+struct p9_transport_try_ops p9_srvconn_progress_ops(struct SrvConn *cn);
 
 #endif  // THYLACINE_9P_SRVCONN_TRANSPORT_H

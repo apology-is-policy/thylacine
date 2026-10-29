@@ -32,9 +32,11 @@ u64 phys_reserved_pages(void);  // total - free, computed at init
 // (mmu_pagemap_directmap, driven from phys_init). Boot-banner diagnostic.
 u64 phys_directmap_table_pages(void);
 
+#ifdef KERNEL_TESTS
 // Buddy zone bounds [base, end) after the direct-map 8 GiB-reach cap.
 // NULL args are skipped. Used by the #808 page-map sweep test.
 void phys_zone_bounds(paddr_t *base, paddr_t *end);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // B-1a' (ARCH 6.5 "Capacity, and the I-32 default"): the user pool.
@@ -113,6 +115,7 @@ void capacity_uncharge(u32 npages);
 typedef u32 (*capacity_reclaim_fn)(u32 npages);
 void capacity_set_reclaim(capacity_reclaim_fn fn);
 
+#ifdef KERNEL_TESTS
 // Tests only: hold `npages` of the pool without allocating (an exempt charge,
 // never refused), and give them back.
 void capacity_pool_park_for_test(u32 npages);
@@ -120,11 +123,11 @@ void capacity_pool_unpark_for_test(u32 npages);
 // The runner releases whatever a test left parked, after every test, and
 // reddens a test that passed while leaking it; answers the pages released.
 u32 capacity_pool_unpark_all_for_test(void);
+#endif // KERNEL_TESTS
 
 // Public allocation API per ARCHITECTURE.md §6.3.
 struct page *alloc_pages(unsigned order, unsigned flags);
 void free_pages(struct page *p, unsigned order);
-struct page *alloc_pages_node(int node, unsigned order, unsigned flags);
 
 void *kpage_alloc(unsigned flags);   // single 4 KiB page; returns PA-as-void*
 void  kpage_free(void *p);

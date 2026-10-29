@@ -1,0 +1,4 @@
+mac   HELD by you for 4m, 1.9h left
+        why: Astra CLOSE-R1 rollback retirement repair and native verification
+pi    FREE
+disk: 11.0 GiB available at /Users/northkillpd/projects/thylacine-astra

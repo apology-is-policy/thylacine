@@ -1,0 +1,11 @@
+--- control.c
++++ receipt-copy.c
+@@ -1088,7 +1088,7 @@
+     struct loom_service_buffer_receipt *receipts=(void *)(l->ring_kva+l->receipt_off);
+     cq[idx]=(struct loom_cqe){.user_data=c->user_data,.result=(s32)c->result,
+         .flags=LOOM_CQE_SERVICE_BUFFER|(c->more?LOOM_CQE_MORE:0)};
+-    receipts[idx]=o->receipt;
++    receipts[idx]=(struct loom_service_buffer_receipt){0};
+     if(loom_pool_deliver(&l->service_pools->bank,p,&o->receipt))extinction("provided delivery changed inside Ll");
+     if(o->pool_terminal && loom_request_deliver(&l->service_requests,o->request))extinction("provided terminal delivery lost");
+     o->pool_pending=false;o->pool_more_delivered=!o->pool_terminal;

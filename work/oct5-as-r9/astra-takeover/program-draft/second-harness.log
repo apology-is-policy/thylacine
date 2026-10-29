@@ -1,0 +1,11 @@
+PASS control PASS wire adapter: 156 checks
+PASS staged program: 18711 total checks
+PASS stat-before-open open starts with stat
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/run-controls.py", line 48, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/run-controls.py", line 42, in main
+    build=subprocess.run(cmd,capture_output=True);(out/(name+'-build.log')).write_bytes(build.stdout+build.stderr);assert not build.returncode,(name,build.stderr.decode())
+                                                                                                                          ^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('identity-copy', "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/controls-20261009T225026Z/identity-copy.c:16:15: error: unused variable 'src' [-Werror,-Wunused-variable]\n   16 |     const u8 *src=(const u8 *)id;u8 *dst=(u8 *)&p->identity;\n      |               ^~~\n1 error generated.\n")

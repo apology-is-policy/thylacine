@@ -3,7 +3,7 @@ id: sub-kernel-ninep-transport
 type: sub
 title: "9P transport core + backends"
 parent: moc-kernel-ninep
-code: [kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h]
+code: [kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h, kernel/include/thylacine/9p_srvconn_transport.h, tools/test-9p-progress.py, tools/host-tests/9p-progress.c]
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -317,6 +317,17 @@ mid-way against a live server).
   backend ([[seam-841-mi-harness]] tracks the still-owed cross-Proc SMP
   variant).
 
+## October 4 broad qualification
+
+The fresh AS-1/TLS matrix on8542dbb4b completed50/50 clean boots: ten each
+at default CPU1/4/8 and kernel-UBSan CPU4/8. Every row records zero corruption,
+external-kill, inject-miss, timing and other classifications. The wrapper exited0,
+restored all four protected drafts, released Mac, and the separate log/pin
+check verified every individual boot, five summaries, original source hashes
+and empty index. Evidence: work/oct4-async-service/as-r3/matrix-fixed/verified.json
+and smp.log. This qualifies the transport helpers and TLS correction, not private
+Loom runtime, clipboard activation or a fresh graphical/Pi/min-display run.
+
 ## Provenance
 
 (generated from incoming `touched` edges — shaped by P5-transport,
@@ -342,3 +353,49 @@ mq consumers). The death hangup has one witness per backend that has one:
 `9p_client.death_hangs_up_once` (loopback),
 `9p_srvconn_transport.death_tears_down_the_conn` (srvconn) and
 `pipe.client_death_hangs_up_the_tx_pipe` (spoor over a real pipe).
+mq consumers).
+
+
+## Private nonblocking progress (AS-1)
+
+`p9_transport_progress` adds resumable frame cursors to this same transport
+layer. It accepts only a fresh OPEN transport and transitions it to PROGRESS;
+legacy I/O and close refuse that mode. A dedicated try-vtable has partial byte
+counts, EAGAIN, EOF and terminal errors; it cannot hide a blocking callback.
+One step invokes at most one callback, copying no more than negotiated msize.
+TX storage is borrowed unchanged through completion/abort. RX reads exactly one
+header/body, preserving partial offsets across EAGAIN and leaving coalesced
+successor frames in the pipe. Oversize/EOF/error aborts the entire private stream.
+
+`p9_handshake_progress` composes those cursors with the existing session engine.
+It uses native empty uname/aname and a captured principal, shares version/tag/fid
+validation, and reaches READY only on complete Rattach. Deadline is absolute.
+Abort is local and idempotent; it sends no Tflush/Tclunk, never drops storage or
+pretends retained server endpoint references disappeared. SrvConn's adapter uses
+srvconn_io_nonblock and srvconn_teardown. Caller supplies exclusive ownership,
+serialization and pinned lifetimes; public private-scope admission is not enabled.
+
+`tools/test-9p-progress.py` links actual sources and exercises every partial byte
+boundary, malformed/coalesced frames, cancellation, deadlines, captured identity
+and errno limits. It detects 13 intended source mutations, each matching one
+site (EAGAIN's send and receive arms are separate mutants). --sanitize accepts
+CC/CFLAGS for a working host sanitizer toolchain. The session's tag table
+allocates through host `kmalloc`/`kfree` doubles, and `mm/slub.h` reaches
+`atomic_lse.h` through the host-env double ([[sub-substrate-gates]]). The fixture's
+backend supplies the mandatory `recv_ready` and `recv_now` as sentinels that fail
+when called, since the byte-boundary engine reads only through its try ops. The
+`version:` mutants compile a mutated copy of `9p_session.c` from a temporary
+directory, so its quoted includes resolve through `-iquote kernel`. The real-channel guest witness
+is the expanded srvconn.nonblocking_backpressure test. These are bounded fixture
+claims, blind to future Loom table admission/retirement and full concurrent use.
+See docs/ASYNC-SERVICE-STATUS.md for measured qualification and remaining work.
+
+## Request-driver integration and zero deadline
+
+The private p9_client driver now owns resumable framing through version/attach
+and subsequent RPCs, alternating TX/RX visits. Its client lock serializes progress
+with abort; no shared legacy session is terminally cancelled through this path.
+Handshake deadline0 means none (AS-R6 correction); a nonzero absolute deadline
+still expires regardless of partial peer progress. Host framing12mutants and
+zero-deadline control pass; native request fixture covers the same handshake.
+No private Loom activation or global transport policy change follows.

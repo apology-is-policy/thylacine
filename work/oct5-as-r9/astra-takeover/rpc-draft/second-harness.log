@@ -1,0 +1,9 @@
+PASS control PASS RPC owner: 49 checks
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/run-controls.py", line 67, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/run-controls.py", line 62, in main
+    assert (run.returncode==1 and run.stderr==f'FAIL {want}\n'.encode()) if want else (run.returncode==0 and not run.stderr),(name,run.returncode,run.stdout,run.stderr)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('request-identity', 0, b'PASS RPC owner: 49 checks\n', b'')

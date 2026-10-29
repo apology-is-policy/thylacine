@@ -218,6 +218,7 @@ struct srvconn_chan {
 // p9_srvconn_transport (srvconn_attach_dev9p_root) — the SrvConn itself
 // is pure transport + identity (stalk-3b-β retired the old embedded
 // per-SrvConn p9_client).
+struct SrvDomain;
 struct SrvConn {
     u64                 magic;             // SRV_CONN_MAGIC; 0 once freed
     int                 ref;               // refcount; create → 1 (atomic)
@@ -243,6 +244,7 @@ struct SrvConn {
     // recv cap, so the negotiated session msize can never exceed what
     // the rings carry. Immutable for the conn's lifetime.
     u32                 msize;
+    u32 credit_charge; // immutable admission ticket; not negotiated msize
 
     // Kernel-client-side blocking-recv deadline. Absolute ns on the
     // timer_now_ns timebase; 0 = no deadline (blocks indefinitely,
@@ -266,6 +268,7 @@ struct SrvConn {
     // BEFORE teardown/free (the ctl walker holds the registry lock across
     // its whole walk, so it can never observe a freed conn).
     struct SrvConn     *ctl_next;
+    struct SrvDomain   *domain; // owned admission ticket; NULL = boot
 
     // Pollers registered on this connection's server endpoint (P5-poll-b).
     // The hook list is connection-wide because the server endpoint Spoor
@@ -367,13 +370,33 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // (c2s / s2c) + poll list. The connection is born LIVE with refcount 1 —
 // the caller owns that reference and drops it via srvconn_unref.
 //
-// Returns NULL on allocation failure or a bad msize. A 9P-mode session
+// Reserves class-weighted credits before allocating. The reservation lasts
+// through transport teardown until final unref frees the rings and object;
+// every allocation-failure path returns it. Constructors in flight count too.
+// Returns NULL on exhausted capacity, allocation failure or a bad msize. A 9P-mode session
 // over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
+struct SrvDomain *srv_domain_create(int *err);
+void srv_domain_unref(struct SrvDomain *d);
+// One coherent admission snapshot; NULL domain selects the boot counts.
+struct srv_admission_snapshot {
+    u32 local_count, session_count, global_count, domains;
+    u32 local_credits, session_credits, global_credits;
+};
+void srv_domain_snapshot(struct SrvDomain *d, struct srv_admission_snapshot *out);
+#ifdef KERNEL_TESTS
+void srv_domain_counts(struct SrvDomain *d, u32 *local, u32 *sessions,
+                       u32 *global, u32 *domains);
+#endif // KERNEL_TESTS
+struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+    u64 peer_stripes, int peer_pid, u32 peer_principal, bool peer_console,
+    u64 server_stripes, u32 server_principal, u32 msize);
+#ifdef KERNEL_TESTS
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
                                u32 peer_principal, bool peer_console,
                                u64 server_stripes, u32 server_principal,
                                u32 msize);
+#endif // KERNEL_TESTS
 
 // srvconn_msize — the conn's 9P msize class (set at mint from the
 // service's ring class). Fail-closes to SRVCONN_MSIZE on a NULL /
@@ -490,11 +513,13 @@ u64 srvconn_server_stripes(const struct SrvConn *cn);
 // write ops route to (a3b).
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // srvconn_client_send — kernel client writes `n` bytes toward corvus
 // (the c2s ring). Returns bytes accepted (0..n; in correct single-
 // frame-in-flight operation always n), or -1 if the connection is torn
 // down or args are bad. Non-blocking.
 long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n);
+#endif // KERNEL_TESTS
 
 // srvconn_client_send_frame — ALL-OR-NOTHING send of one whole 9P frame
 // (#841). The pipelined kernel 9P client (ARCH §21.10) may have several frames
@@ -549,7 +574,9 @@ long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 // short progress when space/data is limited, read EOF=0 and write EOF=EPIPE.
 long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
                         void *buf, long n);
+#ifdef KERNEL_TESTS
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
+#endif // KERNEL_TESTS
 
 // srvconn_server_send_blocking — the BLOCKING server-side write (#348).
 //
@@ -611,15 +638,20 @@ short srvconn_poll(struct SrvConn *cn, bool client, short events,
 // Diagnostics.
 // =============================================================================
 
+#ifdef KERNEL_TESTS
 // Cumulative counters. (created - freed) == live SrvConn count.
 u64 srvconn_total_created(void);
 u64 srvconn_total_freed(void);
+#endif // KERNEL_TESTS
 
 // #210: one live connection's counter snapshot for /ctl/9p-sessions.
 // Ring conservation: produced == consumed + buffered per direction; a
 // violation (or produced > consumed with the attached client parked) is
 // the reply-undrained arm of the loss discriminator.
 struct srvconn_ctl_row {
+    bool session_domain;
+    u32 domain_used, sessions_used, global_used, domains_retained;
+    u32 domain_credits, session_credits, global_credits;
     int  peer_pid;
     u32  peer_principal;   // the conn's two ends: who may read its counters
     u32  server_principal;

@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ room-unbounded.c
+@@ -163,7 +163,7 @@
+     return 0;
+ }
+ bool loom_request_deliver_room(const struct loom_request_table *t) {
+-    return t && t->delivered < t->admit + LOOM_SERVICE_SLOT_COUNT;
++    return t != 0;
+ }
+ int loom_requests_detach(struct loom_request_table *t, const struct loom_slot_table *s) {
+     if (!t || !t->records || !s) return -T_E_INVAL;

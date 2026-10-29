@@ -28,9 +28,12 @@ Generated from note fields — do not edit between the markers
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-poll-dedupe-direction-test]] | closed | sub-kernel-poll | fnd-pollwalk-r1-f2 | aux follow-up after the poll chunk |
 | [[seam-poll-hooks-per-list]] | closed | sub-kernel-poll | fnd-b0poll-r7-f1 | v1.x |
+| [[seam-poll-srv-registry-retain]] | closed | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-pouch-guard-pages]] | closed | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
+| [[seam-pouch-spawn-envp]] | closed | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
+| [[seam-srv-registry-lifecycle]] | closed | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-wb-close-flush-slot]] | closed | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
@@ -83,7 +86,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-nuname-trust-stamp]] | open | sub-kernel-syscall-dispatch, sub-kernel-ninep-attach | chg-2026-09-06-9p-identity-absorb | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
-| [[seam-poll-srv-registry-retain]] | open | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |
 | [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-pouch-errno-channel]] | open | sub-pouch-seam, sub-pouch-fs, sub-pouch-net | chg-2026-05-22-p6-syscall-seam | POUCH-DESIGN.md 5.1 |
@@ -95,7 +97,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-pouch-sigmask-per-thread]] | open | sub-pouch-signal | chg-2026-05-24-p6-signals-b | signals-13b F-SELF-1 |
 | [[seam-pouch-sigtstp-ignore]] | open | sub-pouch-signal, sub-pouch-tty | chg-2026-07-18-pty3 | PTY-3 |
 | [[seam-pouch-sock-single-user]] | open | sub-pouch-net | chg-2026-05-23-p6-sockets | sockets-12 F4 |
-| [[seam-pouch-spawn-envp]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-proc-name-torn-read]] | open | sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc | chg-2026-08-02-introspection-sweep | task #17 |
 | [[seam-proxy-coord-eof]] | open | sub-stratum-session | chg-2026-08-02-stratum-sweep |  |
@@ -106,7 +107,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-slub-debug-mode]] | open | sub-kernel-mm-slub | chg-2026-05-04-p1e-slub | named at P1-E; still unbuilt |
 | [[seam-sparse-mpidr]] | open | sub-kernel-sched-smp | chg-2026-06-05-863-smp-soundness-core | the DTB MPIDR -> dense-logical-index map |
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
-| [[seam-srv-registry-lifecycle]] | open | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
+| [[seam-stratum-final-eviction-failure]] | open | sub-stratum-session | chg-2026-10-01-session-service-registries |  |
 | [[seam-stratum-notify-peercred]] | open | sub-stratum-session, sub-stratum-server | chg-2026-08-02-stratum-sweep |  |
 | [[seam-tapestry-battery-unowned]] | open | sub-tapestryd | chg-2026-09-02-h4b1-claim | H-4b-1 placement-claim doc pass, 2026-09-02 |
 | [[seam-tickless-bare-metal]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | owed at Lazarus / RPi |

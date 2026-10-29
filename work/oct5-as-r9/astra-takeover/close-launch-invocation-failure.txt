@@ -1,0 +1,1 @@
+Initial direct subprocess invocation failed before launch: runner script has no execute bit. No runner/process/generation created. Use its declared sh interpreter as earlier launches; do not change tracked permissions.

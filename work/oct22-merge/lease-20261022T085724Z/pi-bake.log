@@ -1,0 +1,6 @@
+2026-10-22T08:58:20Z  occurs self-check: a true count passes, a false one fails
+2026-10-22T08:58:20Z  HEAD d645dd0eb4e795d1859ad83b23f2db0c64115576, clean; expected tests (derived from test.c): 2085; last registered: stalk.open_create_containment_and_denials
+2026-10-22T08:58:21Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla'; no untracked build input
+2026-10-22T08:58:21Z  go fork /Users/northkillpd/projects/go-thylacine-pin-3471e2a at 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean
+2026-10-22T08:58:38Z  exit 0
+work/oct22-merge/pi-smp.sh: line 55: 37169 Terminated: 15          tools/build.sh kernel --config ci --sanitize=ubsan > "$OUT/ubsan-build.log" 2>&1

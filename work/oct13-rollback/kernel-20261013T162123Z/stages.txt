@@ -1,0 +1,37 @@
+2026-10-13T16:21:23Z  HEAD 8809cdd5cadd01f46da8bece7d416557077337aa
+2026-10-13T16:21:23Z  predictions derived: each kernel message reached from its registered test or its fixture
+2026-10-13T16:21:23Z  expected tests (derived from test.c): 1875
+2026-10-13T16:21:23Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-13T16:21:23Z  anchor census: 5 mutants, each anchor once in its file
+2026-10-13T16:21:23Z  disk pre: 13111 MiB free (floor 8192)
+2026-10-13T16:22:42Z  disk post-control-build: 13052 MiB free (floor 8192)
+2026-10-13T16:23:34Z  control: test.sh exit 0
+2026-10-13T16:23:34Z  CONTROL GREEN: 1875/1875, the eight named tests PASS, probe status 70, probe 6cfd78064b7921b3, bin 318bc467c9fed99e
+2026-10-13T16:24:32Z  disk post-control-q-build: 13009 MiB free (floor 8192)
+2026-10-13T16:25:22Z  control-q: test.sh exit 0
+2026-10-13T16:25:22Z  CONTROL-Q GREEN: 1875/1875, the eight named tests PASS, probe status 71 (qualification path), probe 6cfd78064b7921b3, bin 540dbdeba80d397c
+2026-10-13T16:25:22Z  disk pre-m1: 12747 MiB free (floor 8192)
+2026-10-13T16:26:11Z  disk post-m1-build: 12879 MiB free (floor 8192)
+2026-10-13T16:26:24Z  m1: test.sh exit 1
+2026-10-13T16:26:25Z  M1 DISCRIMINATED: exactly loom.setup_rollback_identity at 'the rollback spares a file that reused the ring's number'; extinction set = the suite's own
+2026-10-13T16:26:25Z  disk pre-m1q: 12876 MiB free (floor 8192)
+2026-10-13T16:27:13Z  disk post-m1q-build: 12828 MiB free (floor 8192)
+2026-10-13T16:27:27Z  m1q: test.sh exit 1
+2026-10-13T16:27:27Z  M1Q DISCRIMINATED: in the qualification image, exactly loom.setup_rollback_identity at 'the rollback spares a file that reused the ring's number' and loom.private_setup_rollback_identity at 'the private rollback spares a file that reused the ring's number'; extinction set = the suite's own
+2026-10-13T16:27:27Z  disk pre-m2: 12816 MiB free (floor 8192)
+2026-10-13T16:28:16Z  disk post-m2-build: 12791 MiB free (floor 8192)
+2026-10-13T16:28:30Z  m2: test.sh exit 1
+2026-10-13T16:28:30Z  M2 DISCRIMINATED: exactly loom.setup_rollback_identity at 'the rollback spares a region mapped at the ring's VA'; extinction set = the suite's own
+2026-10-13T16:28:30Z  disk pre-m2q: 12768 MiB free (floor 8192)
+2026-10-13T16:29:19Z  disk post-m2q-build: 12749 MiB free (floor 8192)
+2026-10-13T16:29:33Z  m2q: test.sh exit 1
+2026-10-13T16:29:33Z  M2Q DISCRIMINATED: in the qualification image, exactly loom.setup_rollback_identity at 'the rollback spares a region mapped at the ring's VA' and loom.private_setup_rollback_identity at 'the private rollback spares a region mapped at the ring's VA'; extinction set = the suite's own
+2026-10-13T16:29:33Z  disk pre-m3: 12730 MiB free (floor 8192)
+2026-10-13T16:30:22Z  disk post-m3-build: 12710 MiB free (floor 8192)
+2026-10-13T16:30:36Z  m3: test.sh exit 1
+2026-10-13T16:30:36Z  M3 DISCRIMINATED: exactly loom.setup_resource_refusals at 'and its pages were refunded' and loom.setup_rollback_identity at 'a refused setup's ring stays charged while a mapping of it survives'; extinction set = the suite's own
+2026-10-13T16:31:25Z  rebuild byte-identical to the control kernel
+2026-10-13T16:32:14Z  rebuild-q byte-identical to CONTROL-Q
+2026-10-13T16:32:14Z  disk pre-shape: 12635 MiB free (floor 8192)
+2026-10-13T16:33:35Z  SHAPE: tools/check-production.sh --all exit 0
+2026-10-13T16:33:35Z  exit 0

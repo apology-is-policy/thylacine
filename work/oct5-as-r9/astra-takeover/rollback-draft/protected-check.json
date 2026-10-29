@@ -1,0 +1,15 @@
+{
+  "utc": "2026-10-09T18:54:42.081156+00:00",
+  "sha256": {
+    "usr/halcyond/src/layout.rs": "a5f73b2859b26d975978401abbc262aedbe7dec7eceba89e4230c2dc669c5f8c",
+    "docs/HALCYON-INTERACTION-STATUS.md": "944dd1c25ce97a1a36018dfd9b215aefc5a79de5ff5407518f30c3092eb784eb",
+    "docs/JOURNAL.md": "9a4616c0e801aa2c6737af02209794e92f0643236edfec08b0febd8131073f4e",
+    "vault/system/userspace/shell-tui/sub-halcyond.md": "a42cc070a9b33cbe9f0c8bc6343905f2ca0d827ab96a83480cfec5901a5296cd",
+    "docs/HALCYON-TEXT-CELL-SELF-REVIEW.md": "0cc79661eb684034438482aff67b517dd11a431e8f3af92069bf166dfcd629b1",
+    "vault/record/changes/chg-2026-10-06-halcyon-text-cell.md": "1047a9943b683431ce96a40909259bfeb0d6f69cc1026bae6fd8d4557c08f13a",
+    ".claude/settings.json": "f8e66f25123dcd715f2a117612ce882b8ccc9a649eded899c24ea1e47bb89420",
+    "docs/USER-AUTHORITY-DESIGN.md": "9eab72e0c62112b0d600366d8a6333a663d8957e179c79dbee774c6ccddfe93e",
+    "kernel/test/test.c": "3a680af6147fb0e74270b0475e10cfe118f895f807e6165b6f6de211aa3d43b4",
+    "kernel/test/test_devproc.c": "44a555c087ac8ff9a6f8da8f30699ba0e1f514bd906945647775a783d489c4f6"
+  }
+}

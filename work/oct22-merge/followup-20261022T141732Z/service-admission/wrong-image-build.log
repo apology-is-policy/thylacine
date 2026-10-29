@@ -1,0 +1,3 @@
+argv: clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/wrong-image.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/wrong-image -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: f5c6edf91af4037a4188c8b7930ed061dac59f19398a48ffe573a3d5db21a259  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/wrong-image.c

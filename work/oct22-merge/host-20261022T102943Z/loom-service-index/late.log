@@ -1,0 +1,96 @@
+TLC2 Version 2026.10.15.145915 (rev: 932d35e)
+Running breadth-first search Model-Checking with fp 68 and seed -2576131815872688242 with 1 worker on 8 cores with 455MB heap and 64MB offheap memory [pid: 95244] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/loom_service_index.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-1100624188366522448/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-1100624188366522448/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-1100624188366522448/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-1100624188366522448/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module loom_service_index
+Linting of module loom_service_index
+Starting... (2026-10-22 12:40:29)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-22 12:40:29.
+Error: Invariant NoLatePublication is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ late |-> FALSE,
+  phase |-> "empty",
+  gen |-> 0,
+  pins |-> 0,
+  allocated |-> FALSE,
+  aborted |-> FALSE,
+  published |-> FALSE,
+  terminal |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  stale |-> FALSE ]
+
+State 2: <Prepare line 10, col 12 to line 13, col 53 of module loom_service_index>
+s = [ late |-> FALSE,
+  phase |-> "prepared",
+  gen |-> 1,
+  pins |-> 0,
+  allocated |-> TRUE,
+  aborted |-> FALSE,
+  published |-> FALSE,
+  terminal |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  stale |-> FALSE ]
+
+State 3: <Install line 14, col 12 to line 16, col 66 of module loom_service_index>
+s = [ late |-> FALSE,
+  phase |-> "installing",
+  gen |-> 1,
+  pins |-> 1,
+  allocated |-> TRUE,
+  aborted |-> FALSE,
+  published |-> FALSE,
+  terminal |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> TRUE,
+  exposed |-> FALSE,
+  stale |-> FALSE ]
+
+State 4: <Abort line 17, col 10 to line 18, col 40 of module loom_service_index>
+s = [ late |-> FALSE,
+  phase |-> "installing",
+  gen |-> 1,
+  pins |-> 1,
+  allocated |-> TRUE,
+  aborted |-> TRUE,
+  published |-> FALSE,
+  terminal |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> TRUE,
+  exposed |-> FALSE,
+  stale |-> FALSE ]
+
+State 5: <Publish line 19, col 12 to line 21, col 67 of module loom_service_index>
+s = [ late |-> TRUE,
+  phase |-> "installing",
+  gen |-> 1,
+  pins |-> 1,
+  allocated |-> TRUE,
+  aborted |-> TRUE,
+  published |-> TRUE,
+  terminal |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> TRUE,
+  exposed |-> FALSE,
+  stale |-> FALSE ]
+
+7 states generated, 6 distinct states found, 1 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 00s at (2026-10-22 12:40:29)

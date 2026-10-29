@@ -1,0 +1,4 @@
+mac   HELD by you for 1s, 2.0h left
+        why: Astra owner-index full Mac gate
+pi    FREE
+disk: 13.3 GiB available at /Users/northkillpd/projects/thylacine-astra

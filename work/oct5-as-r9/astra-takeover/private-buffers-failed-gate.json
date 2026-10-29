@@ -1,0 +1,81 @@
+{
+  "run": "work/oct5-as-r9/current-gate-20261009T001138Z",
+  "source": "3dcff4cb91a2c61092e9e1c983a6f219cadda101",
+  "runner_rc": "143",
+  "records": [
+    {
+      "file": "default-smp1-6-harness.log",
+      "sha256": "e32a86179b2194ca4ba16316fc78908fde263c785e106a429119f62d4cb3de89",
+      "expected_fixture_failure": false,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-3-harness.log",
+      "sha256": "44d530254fd73c271bd88ebffa4b80ba4dc96a1cc204d6a10f015f1ab124657e",
+      "expected_fixture_failure": false,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-5.log",
+      "sha256": "bace525d87847fdf10eeac18a57538e85d1217f20dd9f253564a84c303eb3e60",
+      "expected_fixture_failure": true,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-4.log",
+      "sha256": "0c3075a9bd10d71030944cd21002ca3c05b59f4d4518ac64425adc5fc32be995",
+      "expected_fixture_failure": true,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-6.log",
+      "sha256": "75b3e5a5dfee5771730e3b03c8969b3020d1420f8117bd83112fb917b78107c7",
+      "expected_fixture_failure": true,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-3.log",
+      "sha256": "8ab83a04457fe5ccc529b3bf1763ab33cbb858a3bfdd9e0f90af4041c2c9831a",
+      "expected_fixture_failure": true,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-2.log",
+      "sha256": "a1004bbe065588bae10cbb1643f55058e447857f899da3f4957052d5793e6ecf",
+      "expected_fixture_failure": true,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-1.log",
+      "sha256": "feec92e8472dd0eebddea9957ee8336a55297d5e862c71a4717aec7af818b3f0",
+      "expected_fixture_failure": true,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-5-harness.log",
+      "sha256": "9f8663a33cd93de7071fabd9a944d7f065b3b5c58fbeba6ce78f54998e36a593",
+      "expected_fixture_failure": false,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-2-harness.log",
+      "sha256": "7193038d40019e3184db6df8236c006c1e2a4905db8cb524c73c3531639ac58d",
+      "expected_fixture_failure": false,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-4-harness.log",
+      "sha256": "388e12920386d763ec732d10a79a68c7e8ad5190bab9825bd9c27a0c34964a8c",
+      "expected_fixture_failure": false,
+      "suite_failure": true
+    },
+    {
+      "file": "default-smp1-1-harness.log",
+      "sha256": "340dd32c5ce725591fab14cf1483300542af184ecca5964d5ad6522adbe68e42",
+      "expected_fixture_failure": false,
+      "suite_failure": true
+    }
+  ],
+  "finding": "Native fixture places shared backing at0x60000000, below EXEC_USER_BURROW_BASE; sys_burrow_detach_for_proc refuses outside its window. Existing legacy fixture uses0x140000000 and documents this constraint. Also restore required destination image lock around burrow_share_into in new idle fixture. Production implementation unchanged.",
+  "qualification": false
+}

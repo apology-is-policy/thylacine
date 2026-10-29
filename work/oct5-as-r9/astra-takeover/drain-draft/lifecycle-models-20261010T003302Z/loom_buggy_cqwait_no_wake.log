@@ -1,0 +1,145 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 7 and seed -5447973356723214628 with 1 worker on 8 cores with 455MB heap and 64MB offheap memory [pid: 61136] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/loom.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-8222717729899813524/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-8222717729899813524/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-8222717729899813524/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module loom
+Linting of module loom
+Starting... (2026-10-10 02:33:03)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-10 02:33:03.
+Error: Invariant NoMissedCqWake is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ phase = (o1 :> "empty" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_none"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 2: <UserProduce(o1,"arg_ok") line 317, col 5 to line 322, col 103 of module loom>
+/\ phase = (o1 :> "posted" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_none"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 3: <UserRegister("obj_ok") line 347, col 5 to line 351, col 114 of module loom>
+/\ phase = (o1 :> "posted" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 4: <Consume(o1) line 362, col 5 to line 370, col 92 of module loom>
+/\ phase = (o1 :> "snap" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 5: <Dispatch(o1) line 380, col 5 to line 387, col 90 of module loom>
+/\ phase = (o1 :> "inflight" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 6: <ReplyArrives(o1) line 395, col 5 to line 398, col 112 of module loom>
+/\ phase = (o1 :> "completed" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 7: <CqWaitRegister line 503, col 5 to line 509, col 46 of module loom>
+/\ phase = (o1 :> "completed" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "registered"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 8: <CqWaitCommitOrSleep line 554, col 5 to line 559, col 56 of module loom>
+/\ phase = (o1 :> "completed" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "sleeping"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 9: <PostCqe(o1) line 411, col 5 to line 428, col 70 of module loom>
+/\ phase = (o1 :> "cqd" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 1 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {o1}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "sleeping"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+1926 states generated, 668 distinct states found, 226 states left on queue.
+The depth of the complete state graph search is 9.
+Finished in 00s at (2026-10-10 02:33:03)

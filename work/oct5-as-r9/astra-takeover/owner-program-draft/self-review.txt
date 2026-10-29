@@ -1,0 +1,64 @@
+Astra single-agent self-review, October10. Not an independent audit.
+
+Reviewed the constructor and RPC transitions against canonical requests, FIDs,
+client submission, wire capture and staged DAC. This draft replaces the old
+rpc-draft operation/RPC copies only in the uninstalled working set. It imports
+program-draft and wire-draft by exact headers/sources, preserving their evidence.
+No installer was run; canonical kernel remains97d495fcb.
+
+One program.wire now owns the only expectation/component/payload fields. The
+actual builder and retained callback container use it; no independent stale
+copy can accept a different frame or write to another payload. The constructor
+copies its freshly captured creator/image identity.access byte-for-byte into
+program.identity while NEW. program_start may use that same retained address;
+no CONNECT cache or executor Proc authority is sampled. This C constructor was
+host-tested with explicit snapshot/allocator/engine/layout doubles; an actual
+Proc snapshot in a native newly admitted operation is still outstanding.
+
+OP-R1: joining a staged program to generic RPC transitions requires consumption
+of each submit/callback edge once and positive terminal checks against the staged
+outcome. Otherwise a GETATTR success could finish before the open effect or a
+second advance could consume an old reply as the next stage. submitted/advanced
+flags reset at begin. Requeue requires NEXT and a fresh absolute deadline;
+positive finish requires advanced TERMINAL/DONE and nonnegative program result.
+Queued cancellation may still settle without a callback. Program ABORT, like
+malformed capture, requires the protocol abort latch before a negative finish.
+These guards are defensive: actual FID publication/result encoding remain the
+future driver's responsibility in one Ll interval with final cancellation checks.
+
+submit runs outside Ll under sole protocol driving. It arms before synchronous
+client callbacks and never frees or publishes a terminal. A negative validation
+refusal with no callback receives one local capture; accepted negative callbacks
+are not repeated. advance is after client return, requires completion and no TX
+sender, consumes once, and never takes Ll. All request/list transitions hold Ll;
+continuous borrow and physical-owner flag remain through terminal/CQ/disposal.
+Unused release now also rejects linked/queued/submitted owners.
+
+Verification:160 checks and17 deliberate mutants, plus constructor clean faults
+and14 mutants, ASan/UBSan. Two operations submit to one actual session and complete
+in reverse order with separate retained buffers and exact request/list ownership.
+Actual submit function is extracted unchanged; session/codec/transport/perm and
+request/node/slot/reply C are linked. Full actual RPC/protocol/program headers are
+used, but minimal host Loom, sequential checked locks, wake/death stand-ins and
+direct reply dispatch remain explicit boundaries. TX quiescence is manually
+supplied in its isolated sender test; this is not real abort/close qualification.
+ARM64 real-header objects compile without libc symbols: operation776B fits its
+charged4096page; protocol42288B remains in its prior65536buddy allocation.
+Raw input/generated source/binary/object hashes rechecked; protected Astra10hashes
+and exact clean external Stratum61dde37 unchanged.
+
+Harness failures preserved: copied unused le64 helper refused by -Werror; one
+mutant needed parentheses to compile with logical-op warnings. ARM64 metadata
+collector initially could not relativize compiler headers; paths now retain
+absolute external header names. Constructor's draft-local mm/slub.h needs the
+repository-root include in the ARM64 command; initial missing-include log kept.
+None is reported as a product failure or passing test. Earlier successful140check
+run remains separate from final160check interleaving evidence.
+
+Outstanding: full-incarnation FID/destination admission, canonical fixed/provided
+payload ownership, monotone wire FID allocation, staged mapping/open commits,
+fair READY readiness/deadlines, real progress/abort callbacks and physical owner
+retirement before the old zero-entry-pin close gate. No queue installation until
+these dependencies are coherent. Native normal/bulk close/exec and source-matched
+full gates remain required, followed by AS3/4 and MM0-MM4. No activation, Main
+landing or128MiB protection removal. Prior full gates remain source-bound.

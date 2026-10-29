@@ -1,0 +1,242 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "clang-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-link",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ndebug-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ndebug-link",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ndebug-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "clone-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0599"
+  },
+  {
+    "name": "send-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0277"
+  },
+  {
+    "name": "valid-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "valid-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-reused-cookie-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-reused-cookie-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "rust-more-final-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-more-final-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "rust-duplicate-terminal-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-duplicate-terminal-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "rust-wrong-pool-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-wrong-pool-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "rust-oversized-fixed-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-oversized-fixed-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "rust-repeated-abort-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-repeated-abort-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "c-reused-cookie-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "c-reused-cookie-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "Assertion failed"
+  },
+  {
+    "name": "c-more-final-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "c-more-final-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "Assertion failed"
+  },
+  {
+    "name": "c-duplicate-terminal-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "c-duplicate-terminal-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "Assertion failed"
+  },
+  {
+    "name": "c-wrong-pool-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "c-wrong-pool-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "Assertion failed"
+  },
+  {
+    "name": "c-oversized-fixed-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "c-oversized-fixed-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "Assertion failed"
+  },
+  {
+    "name": "c-repeated-abort-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "c-repeated-abort-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "Assertion failed"
+  }
+]

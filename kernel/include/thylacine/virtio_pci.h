@@ -148,7 +148,9 @@ u32 virtio_pci_cfg_read32(const struct virtio_pci_dev *d, u32 off);
 // width; a misaligned or out-of-range write is a silent no-op. The kernel
 // drives these only from the pci-1b claim path (BAR sizing + assignment +
 // command-register enable); config space is never mapped to userspace.
+#ifdef KERNEL_TESTS
 void virtio_pci_cfg_write8 (const struct virtio_pci_dev *d, u32 off, u8  val);
+#endif // KERNEL_TESTS
 void virtio_pci_cfg_write16(const struct virtio_pci_dev *d, u32 off, u16 val);
 void virtio_pci_cfg_write32(const struct virtio_pci_dev *d, u32 off, u32 val);
 

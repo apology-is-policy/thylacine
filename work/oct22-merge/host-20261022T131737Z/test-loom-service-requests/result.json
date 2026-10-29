@@ -1,0 +1,178 @@
+{
+  "inputs": {
+    "kernel/loom_service_requests.c": "cca88b76bc77038914f3d1c58cf8f6b4d17cef4d9b0b482e14c8afac7151ead3",
+    "kernel/include/thylacine/loom_service_requests.h": "f2620f7957bbda42ee8fa86ecd1f1545d7a62597fefe29fecd2bef3eaa441b58",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_requests_fixture.h": "b1b1b5d4eef77e4a9674dd55a0cb7e669247b87af4d2e935477515692e6d8bce",
+    "tools/host-tests/loom-service-requests.c": "6c25e0ece514f53e4c8add7d4f17ea5e3e0d9223bf03594da8ad3f7f71018d49",
+    "tools/test-loom-service-requests.py": "3f1b696dbd7b7fecaad3477c68aad8584065aafe77bb54fd8c0b05eee7f1a471",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/loom_service_nodes.c": "a4885e505fbe072b6c7994615dd172b2c444b82507f40fb8149c692f0b10dc27",
+    "kernel/include/thylacine/loom_service_nodes.h": "9ae5536a56f5db164d312772652eb36c25a67ad955f79d9490b76259a7b0aa1a"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "cca88b76bc77038914f3d1c58cf8f6b4d17cef4d9b0b482e14c8afac7151ead3",
+      "binary_sha256": "09449ead827c8d6295568bd997eef32353adf6303695fd48391bb5cf2dbb5f47"
+    },
+    {
+      "case": "reject-success",
+      "expected": "rejected admission validates identity and negative result",
+      "rc": 1,
+      "generated_sha256": "665b53af8e825505b72a003510829e630bccff75cebd5be2134e1eb0d61650bd",
+      "binary_sha256": "c40e15012f5c23dedf35d92522e48985d01ed394e1eb30f7da070895262ef5d0"
+    },
+    {
+      "case": "reject-borrow",
+      "expected": "rejected admission waits for local borrow",
+      "rc": 1,
+      "generated_sha256": "46299c2e43a6af7ee75a53e5c5cdae0e7ec81e8da1ca3644e010cfb8d8d9aaca",
+      "binary_sha256": "737e48a33140fa5b2e7ffda7160056c3dc20f8b95e4bfd500d797107b5251ea0"
+    },
+    {
+      "case": "reject-pin",
+      "expected": "rejected admission retains exact scope pin",
+      "rc": 1,
+      "generated_sha256": "f5a09988046108620082c4221dc7398d62b21025f4538780d30e439d51d3a3f4",
+      "binary_sha256": "62c634e5d6d7c8b4982fb625258ca474c060f80d3147dfc108015822a9c0012a"
+    },
+    {
+      "case": "reject-rewrite",
+      "expected": "rejected terminal is immutable",
+      "rc": 1,
+      "generated_sha256": "a59b15ef9853e87fef2fc0ed7a975c33c72f5513ac86b4dfaeb8b09692ddbf9d",
+      "binary_sha256": "c4672c32781b25150198151bff2893e2fb74b2b20a245a0644cb647aa6eb5170"
+    },
+    {
+      "case": "expired",
+      "expected": "expired request reserves nothing",
+      "rc": 1,
+      "generated_sha256": "9ded0110cc44bebed4d26ef5937eb5ab9c83755bc06855d25f8dd9c80630b155",
+      "binary_sha256": "f595a59676c4d0fc0f1ea9ee16107a519b6a92b33ba9721569489e7d23d4891d"
+    },
+    {
+      "case": "admit-expired",
+      "expected": "admission rechecks absolute deadline",
+      "rc": 1,
+      "generated_sha256": "a5789b47d2ee5d256e4caf5ea9893786a2879b175b3b22728e78bcd940c32bd5",
+      "binary_sha256": "4eb1e861e04f553a39fb3f7e5ad65dba5e22011909ac0aadee61c3ab955c330c"
+    },
+    {
+      "case": "omit-pin",
+      "expected": "prepare reserves terminal and parent",
+      "rc": 1,
+      "generated_sha256": "7ddba0394f4e92d49f6ad5c34c0c61bf809961cb208977c2457b7bc8d6aaf94c",
+      "binary_sha256": "a2ffc4222cb0b32532ddbd0b6d61254a88b57e430cfe244b14fb81e62265501a"
+    },
+    {
+      "case": "omit-unpin",
+      "expected": "rollback releases capacity and pin",
+      "rc": 1,
+      "generated_sha256": "602658b5880de63df46641545e7b270656832dc75f2bb6c1172bc766524e2349",
+      "binary_sha256": "6d92df3ee94b42f0736f62aa4c446f928b639d62bedc122025a24a57396da27b"
+    },
+    {
+      "case": "reuse-identity",
+      "expected": "rollback burns request identity",
+      "rc": 1,
+      "generated_sha256": "a57a577ff840f425f2fbfea2d96cc666c560998dceab301c1c8b7b4336cf34b0",
+      "binary_sha256": "7fedce08ca5660066ff5fb0c5a8a65680db2a0813ca2026e93e62ef2f2704ee8"
+    },
+    {
+      "case": "stale",
+      "expected": "stale request cannot mutate replacement",
+      "rc": 1,
+      "generated_sha256": "7b85b031159a019f5dfa3b364ac363ef92eab4ceff8ca65a09c10220a339cc4a",
+      "binary_sha256": "5d5c8c76788ecbe86c16788f210f52a77dd991aa39d7e11268003a2b8e6d02e3"
+    },
+    {
+      "case": "early-terminal",
+      "expected": "live borrow blocks terminal and free",
+      "rc": 1,
+      "generated_sha256": "f8509f91de46313855aec5cadbbad969de98ed209f94ac1770e062edbdb4945c",
+      "binary_sha256": "24c8afabf8a8a0446599a2371bcd3b3290ecd48e995816c9da28841fdabc9446"
+    },
+    {
+      "case": "double-terminal",
+      "expected": "duplicate terminal refused",
+      "rc": 1,
+      "generated_sha256": "bc0623164b3f89cef998800286474d4342391a93e9386e0e77092091570ef1cc",
+      "binary_sha256": "569d794d009dfd50dafc862781b2fe47247c73d08a903af7ab2bb0ba47068666"
+    },
+    {
+      "case": "late-success",
+      "expected": "abort forbids fresh success",
+      "rc": 1,
+      "generated_sha256": "82759e1ceb5ba5a13c7b5e3028e95236dc962ed09dca7671ee0b87469f4fa47e",
+      "binary_sha256": "7f3ac86ece8ed6463f3a47616c7e378f0406a46c23bca4ab65c079fdebc3c5a2"
+    },
+    {
+      "case": "early-reap",
+      "expected": "undelivered terminal cannot be discarded or freed",
+      "rc": 1,
+      "generated_sha256": "0e4af348e3ef589b07e45e6da89b642edaa681e8e26bae4ae2ca11806553fff2",
+      "binary_sha256": "b0d4db7470ee408e0ce695d218f1c7beeefdd6792d1fad9226a96c25dbe444a3"
+    },
+    {
+      "case": "live-discard",
+      "expected": "undelivered terminal cannot be discarded or freed",
+      "rc": 1,
+      "generated_sha256": "d01a3f0d1c0ec83dd524d0850787060f98b0d6cb7f644974ab75d35e3a810c3c",
+      "binary_sha256": "1355953bda5cfa1d3e15a9281ca5b417733c4a1a87ab72fae699be3fb426c8cc"
+    },
+    {
+      "case": "wrap",
+      "expected": "request identity wrap refused",
+      "rc": 1,
+      "generated_sha256": "a37d8671ccab8b0c0904496d717a92192a9f08e1f6cb2fb90cb8d3e1cd81a6db",
+      "binary_sha256": "3229affd1ae27966e479757a62205e7ec32a28b3857a51486e37591d7a696fad"
+    },
+    {
+      "case": "detach-borrow",
+      "expected": "live borrows prevent consumer detach",
+      "rc": 1,
+      "generated_sha256": "913372cc3a53c73861d265cb6695157459d5698989063622c0001db22342fc01",
+      "binary_sha256": "9addaa3b8cee16f73859dd90b4f322e0bf913ea7e142acb900d85258e520d0b9"
+    },
+    {
+      "case": "admit-delivered",
+      "expected": "a delivered record no longer counts against admission",
+      "rc": 1,
+      "generated_sha256": "02d0a7f20b94862e3768af2a00765ab6bba1dba1fc7cc29871649263d4e9a251",
+      "binary_sha256": "d223a836f41b5e82596c611bbbc002475a579ffd1db906bd85fbf5e5c8c8e42a"
+    },
+    {
+      "case": "deliver-unbounded",
+      "expected": "delivery waits at the delivered bound",
+      "rc": 1,
+      "generated_sha256": "82497adce56507512185c5628c6d85b3cd2b15afadb8f347994296b0a7d4d9f9",
+      "binary_sha256": "4aaf70be0255d9f5b508222c8b3354778f0b9cd4a68459d55ed711d24c4b1446"
+    },
+    {
+      "case": "room-unbounded",
+      "expected": "a delivered record no longer counts against admission",
+      "rc": 1,
+      "generated_sha256": "75b7a0840e3d9ffaf28c024b611bf318ef26d9b1c8169838bc85835626fd6ca0",
+      "binary_sha256": "59c587e959eb2cd06f531b484533d4ea157f3d2a62dd89c48aad2599d7bc7837"
+    },
+    {
+      "case": "reap-keeps-delivered",
+      "expected": "detached consumer discards quiescent terminal",
+      "rc": 1,
+      "generated_sha256": "fa03a9c7cf440a26b228440dccb24fa1ea9643e98a401e0b8774c6f2ae40960b",
+      "binary_sha256": "d1346b09515c335dbb4b6637ac25bae9720889353bbd9fc9407da68ac6a841c9"
+    },
+    {
+      "case": "discard-uncounted",
+      "expected": "detached consumer discards quiescent terminal",
+      "rc": 1,
+      "generated_sha256": "e1a44d41ea0e3607b713cd594d8718edb870ab2f850d408cda981357122b44f3",
+      "binary_sha256": "d2fe10e2382c16d30389dda387c2694b3bc26dbb2f6fe6df7cabca13184e92a2"
+    }
+  ]
+}

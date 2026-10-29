@@ -1,0 +1,1349 @@
+---
+id: sub-substrate-kernel-suite
+type: sub
+parent: moc-substrate
+title: "The in-kernel suite — what the boot log says, and what a reader may conclude from it"
+code:
+  - kernel/test/test.c
+  - kernel/test/test.h
+audit: none
+guarded-by: []
+validated-by: [prose, gate-smp]
+updated: 2026-10-26
+---
+
+## Purpose
+
+`sub-substrate-gates` owns the gate's half of this story: which boot counts as a
+pass, how a multi-boot run classifies a non-pass. This dossier owns the other
+half -- what the kernel itself EMITS while the suite runs, in what order, and
+therefore which readings of a captured serial log are sound.
+
+Every gate in the fleet consumes that text, and so does every ad-hoc parser an
+agent writes mid-investigation. It had no owning dossier, and the cost of the
+gap is on the record: a parser written against a reasonable belief about the
+format read 1749 of 1836 verdicts and reported a test that had FAILED as absent,
+while 87 PASSING verdicts in the same green boot had been invisible to the same
+pattern all along.
+
+## Contract
+
+What a reader of the boot log is entitled to assume:
+
+- The number of tests is derivable from the source without booting: it is the
+  number of registration rows before the table's sentinel.
+- Every test that runs produces exactly one verdict -- `PASS`, `FAIL: ` with a
+  message, or `SKIP` -- AFTER the line that announces its name. A `SKIP` follows
+  a `[skip]` line saying what the configuration lacked.
+- A verdict belongs to the most recently announced name, not to the line it sits
+  on.
+- The suite prints a summary tally with its own verdict word, whether it passed
+  or failed. A pass reads `tests: P/T PASS`, then ` (N soft-warn)` and
+  ` (K skipped)` when either is nonzero, in that order. P counts passes only, so
+  on a pass P + K = T.
+- Every kernel-printed line ends CRLF.
+
+What a reader is NOT entitled to assume: that a name and its verdict share a
+line; that a failing suite is cut short before its tally; that the absence of
+a `[skip]` line means anything in a boot that did not pass; that the first
+`  tests:` match in the log carries numbers.
+
+## Mechanism
+
+**The registration table is the denominator.** `g_tests[]` is the single
+registration site, declared in `test.h` and defined in `test.c`. The runner
+walks it until it meets a row whose function pointer is NULL -- the table ends
+in an explicit sentinel -- so the test count is the number of rows before that
+sentinel. Derive it; do not carry it in prose. A census that counts
+registration rows and compares them with the suite's own total has two
+independent routes to one number, which is the only form in which a count is
+evidence.
+
+**But counting those rows out of the log needs the conjunction of two markers,
+not either one.** Measured on a green boot whose registration count is known:
+the `[test] ` marker alone appears 1837 times, because the runner prints a
+NON-TEST summary line (the yield-waits report) behind the same marker. The
+` ... ` separator alone also appears 1837 times, because a userspace probe line
+happens to contain it. Lines carrying BOTH are exactly the registration count.
+Two decoys, from unrelated sources, each inflating a census by exactly one --
+and off-by-one is the error least likely to be noticed, because the number still
+looks right.
+
+**A verdict is a STATE in the log, not a line in it.** The runner prints the
+indented `[test] ` marker, the name, and ` ... ` BEFORE calling the test
+function. The verdict is printed only after that function returns. Everything
+the test emits in between lands between a name and its verdict, and three
+sources routinely do:
+
+- `test_fail` records the failure on the current test and then calls
+  `sched_dump_runnable` immediately, on the failure path only -- the instrument
+  that cracked a scheduler-quiescence bug, and worth its cost. So a FAILING test
+  prints its name, then an all-CPU runnable dump, then `FAIL: <msg>`: three
+  lines or more, never one.
+- The runner itself interposes a note before the verdict when a test leaves a
+  counted condition behind, such as the proc-wait timeout report.
+- `test_soft_warn` prints a `[SOFT-WARN]` line, with its own newline, from
+  inside the test, and does not fail it.
+
+So a reader must track the pending name from the `[test]` marker and resolve it
+on the first following verdict.
+
+**The tally is printed by the boot, not by the harness.** `boot_main` emits the
+summary; the harness only counts. The prefix `  tests:` appears TWICE in a
+passing boot -- first as a bare header before the run, with no numbers after it
+-- so a reader that takes the first match gets the header. The tally itself
+carries its verdict word: `<passed>/<total> PASS`, with a parenthesised
+soft-warn count appended when any fired, or `<passed>/<total> FAIL`. A
+production build compiles no suite and prints `  tests: DISABLED` with a reason:
+the same prefix, no numbers, no verdict word.
+
+## Data structures
+
+`struct test_case` (in `test.h`) is one row: the name as it appears in the log,
+the test function, and then the row's own VERDICT -- a failed flag and a failure
+message. Those last two are OUTPUT slots written by the harness, not
+configuration: the `false, NULL` that ends every registration row is their
+initial value, which is why a new test is registered by extending the array and
+needs no constructor and no options. The runner holds a pointer to the row it is
+currently running, and that is how `test_fail`, called from arbitrary depth
+inside a test, attributes a failure without being passed anything.
+
+(This dossier's first draft called those two fields "dispatch fields the runner
+uses to decide how to invoke it". That was wrong, and it was caught by reading
+the header rather than inferring from the registration rows' shape -- a comment,
+or a dossier, can be true about the wrong thing.)
+
+## Concurrency
+
+The suite runs on one thread, in table order, in the boot's own context -- there
+is no parallel test execution to reason about. Concurrency enters only as
+SUBJECT: tests that start threads, and the runnable dump that `test_fail` prints
+across all CPUs. Two consequences for a reader. Output from a test's own threads
+can interleave with the harness's lines, which is a further reason a verdict
+cannot be assumed to sit on its name's line. And the kernel's own CRLF applies
+to every line regardless of which CPU printed it.
+
+## Invariants enforced
+
+None of the section-28 invariants is enforced here; the harness is an observer,
+not a mechanism. The property it does carry is weaker but load-bearing for every
+gate: **one announced name yields exactly one verdict, and the pair is ordered**
+-- name first, verdict after. A parser may rely on that order and on nothing
+else about adjacency.
+
+## Error paths
+
+`test_fail` is the only failure channel: it marks the row, stores the message,
+and dumps the runnable set. A test that returns without calling it has passed,
+and that is the harness's single most consequential behaviour -- see Caveats.
+
+A failing suite is NOT cut short. The runner completes the whole table, the
+summary prints the full tally with `FAIL`, and only then is `extinction` raised
+with the suite's name. So a red boot carries a usable tally, and the kernel's
+own failure count can be cross-checked against a reader's parse of the
+individual verdicts -- two routes, one number, on the red leg as much as the
+green.
+
+## Performance
+
+The failure-path dump costs nothing on a passing run and so cannot detune
+timing-sensitive tests. The suite's cost is otherwise the sum of its tests; it
+runs inside the boot, so it is on the critical path of every gate boot, which is
+why a gate that only needs a verdict reads the log rather than re-running.
+
+## Prosecution
+
+The adversarial questions this surface deserves, each of which has been answered
+wrongly here at least once:
+
+- Does the pattern match a name and a verdict on one line? Then it is wrong
+  about failures AND about a measured 87 of 1836 passing verdicts.
+- Is the pattern `$`-anchored? Then it matches nothing, silently, because every
+  line is CRLF.
+- Does the reader report a parsed total, and does that total equal the
+  registration count? A short parse is a refusal, never a verdict.
+- Does an unresolved pending name exist at end of log? That is a reading
+  failure, not an absent test.
+- Does the reader cross-check the kernel's own tally? It is free, independent,
+  and present on red legs too.
+- Does the gate read the ` (K skipped)` count, or the `[skip]` lines, and treat
+  a skip as NOT coverage? `tools/test.sh` does: it refuses a skip of any shape
+  but the two gated ones, and a skip its own configuration does not explain
+  ([[sub-substrate-gates]]).
+
+## Seams
+
+The log text is the seam, and it is consumed by `tools/test.sh` (the boot
+verdict), by the multi-boot classifier, and by any investigation-time parser.
+Only the boot banner and the `EXTINCTION:` prefix are binding tooling ABI; the
+`[test]`, `[skip]`, `[SOFT-WARN]` and tally lines are prose, so a consumer
+should key on their SHAPE -- including the verdict word -- rather than on a
+prefix alone, and a change to any of them should be looked for in consumers
+before it is made.
+
+## Caveats
+
+**A skip is counted and gated; it is never a pass (2026-10-22).** Until then a
+test that printed `[skip]` and returned was counted as a pass, so a renamed or
+unstaged binary, or a device the boot did not attach, turned a real test into a
+green no-op the tally could not show. Now a test can skip only through a
+helper that first proves the configuration permits the absence, and there is
+deliberately no bare skip call:
+- `test_image_lookup` finds a file in the ramfs that ships whenever a
+  companion does. A miss FAILS when the image carries the companion -- the
+  ramfs is stale -- and skips only when it carries neither.
+  `test_probe_lookup` is its form for probe binaries, keyed on `bin/joey`; an
+  image without userspace fails the suite anyway
+  (`devramfs.live_bin_holds_the_programs`), so that skip never appears in a
+  passing boot. The dlopen prover is keyed on `lib/libc.so`: an image built
+  without the LLVM fork has neither. A binary too large for its buffer fails
+  in every image.
+- `test_requires(present, token, nth, exact, absent)` names what a test needs
+  from the machine by the bootargs word the launcher adds once per instance it
+  attached ([[sub-substrate-machine]]): `thylacine.virtio-<kind>` per
+  virtio-mmio device, `thylacine.virtio-pci-<kind>` per virtio PCI function,
+  `thylacine.smp` for a second CPU, `thylacine.msi` for an MSI controller the
+  launcher knows of. Absent and declared FAILS; absent and undeclared is a
+  counted skip (vote 17); present and undeclared FAILS when `exact`, since the
+  launcher attached what it did not declare -- so every green boot checks the
+  declaration channel too. `msi` passes `exact` false: under KVM or hvf with
+  GICv3 the launcher cannot know. `test_virtio_device` is its form for a
+  virtio-mmio device. The probe each such test spawns runs only once the
+  device is found, so its own missed scan is a FAIL too ([[sub-virtio-probes]]).
+- `test_strong_entropy` asks whether a strong source seeded the CSPRNG
+  ([[sub-kernel-content]]), and is a check, not a gate. Since vote 18
+  (2026-10-26) the boot refuses userspace on an unseeded pool before the
+  suite runs ([[sub-kernel-boot-sequence]]), so an unseeded pool here FAILS:
+  a seeding bug on a CPU with RNDR, a refusal that moved on one without.
+  Until then it skipped through `test_requires` on `thylacine.virtio-rng`
+  on a CPU without RNDR.
+
+The first census counted only the tests that printed `[skip]`. Audit round 1
+cited twenty-five sites that returned silently instead, a census of every
+early return in `kernel/test` found eight more, and round 2 found the
+unconditional assertions beside them -- a test that FAILED for the same absence
+a sibling skipped, and loops that passed over an empty set. Every test that
+needs something a configuration can lack goes through a gate now: the
+virtio-mmio rng (four tests), the PCI rng function (thirteen) or any virtio PCI
+function (nine), a second PCI input function, the MSI route or controller
+(four), a second CPU (eight -- the `default-smp1` rows' green no-ops), a seeded
+CSPRNG (seven, through `test_strong_entropy`, a check that FAILS rather than
+skips since vote 18), and the dlopen prover through
+`test_image_lookup`. The census behind that sentence reads every function in
+`kernel/test` that calls a configuration primitive -- the virtio and PCI
+lookups and counts, the CPU counts, the DTB's MSI map and compat properties,
+the GIC version, the bootargs, the ramfs lookup, the CSPRNG; a dependency
+reached only through a syscall handler or a spawned probe is outside it. The
+guards that could never fire (a virtio-mmio slot count, twice; an all-empty
+slot page, four times) are assertions. A skip line is composed whole and
+printed by one `uart_puts`, so this CPU cannot split it; `uart_puts` takes no
+console lock, and the tally line is several calls, so another CPU printing at
+that instant can still tear either -- which `tools/test.sh`'s reconcile turns
+into a red, never a pass. The instance suffix is a terminated string even when
+it is empty, so a first-instance line carries no stack bytes;
+`harness.skip_line_composes_clean` composes it into a garbage-filled buffer for
+the first three instances. Three tests that branch on
+the CPU count or the DTB's MSI map are not skips: their other arm asserts
+something real (the self-CPU path; that a host without an MSI map invents no
+route), and a declared machine lacking either FAILS a sibling gate.
+
+The initrd guards that returned silently (`devramfs_entry_count() < 1`, a
+`welcome` file that would not open) are assertions now: the suite already
+fails a boot without an initrd (`devramfs.initialized_with_files`), so they
+were dead, and their comments said otherwise.
+
+**This dossier covers the harness, not the tests.** `test.c` and `test.h` are
+the harness. The individual test files are a separate and much larger surface --
+137 files, of which 26 are claimed by the dossiers of the subsystems they
+exercise and the rest are unclaimed. That gap is pre-existing and tracked with
+the standing dossier backlog; nothing here closes it, and this dossier must not
+be read as covering it.
+
+## Provenance
+
+Authored 2026-10-07 from the source, after the private-owner red legs exposed
+that no dossier described the format every gate parses. The specific readings
+recorded here -- the eager name print, the failure-path dump between name and
+verdict, the 87 split passing verdicts, the CRLF, the tally surviving a failing
+suite -- were measured against two real captured boot logs, a green one and a
+mutant one, not inferred from the source alone. The skip trap predates this
+dossier and is carried from the open-defect record rather than discovered here.
+
+
+## October 8 private service ledger fixture
+
+`loom.service_slots` is registered as its own ordinary suite entry and runs the
+same real-module fixture as tools/test-loom-service-slots.py. Its verdict checks
+bounded identity/borrow state, not private-engine activation or caller locking.
+The registration increases the source-derived denominator by one. The older
+50-boot 1836-test record remains historical; subsequent records must derive the
+count from their exact source and observe this entry's verdict separately.
+
+
+The subsequent private-owner integration adds `loom.private_slot_owner`, testing
+actual page allocation, charge/refusal rollback, close with a retained borrow and
+retirement refund. The denominator increases by another one; derive it from the
+qualified source. This entry does not enable public service registration.
+
+
+The October8 pool-owner checkpoint registers `loom.service_pool_table` as its own
+ordinary test. Its shared host/guest fixture checks joint slot/member reservation,
+rollback and publication, stale identity rejection, busy reap preserving both
+ledgers, exact payload return and close during copyout. `loom.private_slot_owner`
+adds pool-allocation refusal and exact aggregate metadata charging. These fixtures
+exclude caller authority/protocol integration; a passing row does not activate
+private services. The next source-specific full matrix remains pending.
+
+
+October9 adds `loom.private_buffers`: an ordinary native row checking actual
+registered-buffer pins, creator/image authority, partial-resolution rollback,
+ring-backing refusal, provisional/live-pool replacement refusal, settled drops
+after unmap, foreign-payer handling and private retirement. It does not enable
+private service dispatch or certify unimplemented protocol/worker lifetimes.
+The new source-specific full Mac matrix is pending.
+
+
+October 9: b010ace93 passed all 50 Mac HVF boots, 1840/1840 each, including
+the corrected loom.private_buffers row, pool/slot/owner rows, both D7 legs and
+boot banner. Run current-gate-20261009T001717Z has 100 hash-verified raw logs
+and ten pinned inputs. Default SMP1/4/8 and UBSan SMP4/8 each passed ten boots.
+The earlier 3dcff4cb9 fixture-address failure remains recorded as failed; it is
+not retroactively qualified. Pi/A72/KVM, guest final allocator reclamation and
+absent optional graphics probes remain unqualified. Private dispatch stays off.
+
+
+October 9 adds loom.private_pool_pins as an ordinary native row. It exercises
+canonical registered aliases, independent backing pins, provisional overlap,
+rollback identity burning, stale/busy refusal, unmap/reap/refund and close before
+publication through the internal owner front-end. The denominator is now 1841;
+one source-and-diff recorded SMP1 boot passed. Full matrix qualification of the
+new source is pending; public service dispatch remains disabled.
+
+
+October 9 adds loom.private_fixed, checking both physical-alias exclusion
+directions, provisional pools, duplicate/capacity refusal, table replacement,
+unmap, double release and a final fixed borrower retaining the closed owner.
+The new denominator is 1842; its source-and-diff recorded SMP1 boot passed.
+Protocol/worker integration and the new source's full matrix remain pending.
+
+
+## October 9: native target owner witness
+
+`loom.private_targets` raises this source's registered suite to 1843. It checks
+actual native registry capture through a navigation handle, provisional rollback,
+identity burn/stale refusal, busy reap, close-before-publish, fd/poster closure,
+and final borrower retention/registry destruction without a peer responder.
+The existing slot-owner row adds target-allocation failure/unwind and its fifth
+metadata page. Default SMP1 diagnostic private-targets-diagnostic-20261009T025959Z
+passed 1843/1843 plus D7 overlap, twenty distinct cycles and banner. Full Mac
+matrix remains pending for the new source; prior d3563f828 50/50 had 1842 rows.
+Host controls use checked doubles; no protocol, Pi or guest allocator proof is
+inferred. See ASYNC-SERVICE-STATUS for hashes, harness corrections and scope.
+
+
+## October 9: native target full Mac qualification
+
+Exact source 4ac2790caa82653cf3a5bcf0f77aa5367c59535b passed all 50 Mac HVF
+boots in current-gate-20261009T030505Z: default SMP1/4/8 and UBSan SMP4/8,
+ten each. Every boot passed 1843/1843, including native target ownership,
+private fixed/pool/buffer/owner fixtures, D7 overlap, twenty distinct d7user00..19
+cycles and banner. Both gate and runner exit zero. Verification retained and
+hashed 100 raw serial/harness logs and all ten captured inputs; inputs PINNED.
+Minimum recorded admission free space 8786 MiB exceeds the 8192 MiB floor.
+Stratum remained exact clean 61dde37; Astra's Mac lease was released. Evidence:
+astra-takeover/current-gate-20261009T030505Z-result.json and run verify.py.
+
+This is Mac qualification of internal target ownership, not complete private
+async support. Continue scope/fid/request/CQ admission, usercopy/authority and
+bounded protocol/worker retirement before MM0-MM4. Pi/A72/KVM, final guest
+allocator reclamation and absent optional graphics probes remain unqualified.
+Self-review only. No Main landing, private async/clipboard activation or removal
+of the 128 MiB protection. Preserve all pinned artifact generations; current
+free disk is about 8.5 GiB, so recheck admission before further heavy work.
+
+
+## October 9: scope/fid reservation module witness
+
+`loom.service_nodes` raises the suite to 1844 and invokes the same actual metadata
+modules/fixture as the host sanitizer runner. It tests shared quota, provisional
+child parent pins, rollback, exact identities, borrow refusal, abort versus
+publication and cleanup after close. Parent protocol states are explicitly
+simulated; this is no CONNECT, authority, allocator or concurrency witness.
+The table is not yet owned by a runtime Loom. Diagnostic nodes-diagnostic-
+20261009T035230Z passed 1844/1844 and D7 overlap/twenty cycles/banner. Full Mac
+matrix is pending for this source; previous target-source50/50 had1843 rows.
+
+
+## October 9: scope/fid metadata Mac gate verified
+
+Exact source c5abd02647e9744eb200afe65e4530b19b5cd5af passed all 50 Mac HVF
+boots in current-gate-20261009T035529Z: default SMP1/4/8 and UBSan SMP4/8,
+ten each. Every boot passed 1844/1844, including loom.service_nodes and the
+existing target/fixed/pool/buffer/owner fixtures, D7 overlap, twenty distinct
+d7user00..19 cycles and banner. Gate and runner exited zero; raw verification
+retained and hashed 100 serial/harness logs and all ten captured inputs. Inputs
+are PINNED. Minimum recorded admission free space was 8282 MiB, above 8192.
+Astra's Mac lease was released. Result: astra-takeover/
+current-gate-20261009T035529Z-result.json and the run's verify.py.
+
+This verifies metadata with explicitly simulated parent protocol states. Charged
+node owner storage, actual scope/fid protocol resources, request/CQ admission,
+usercopy/authority and worker retirement remain next, before MM0-MM4. Pi/A72/KVM,
+final guest allocator reclamation and absent optional graphics probes remain
+unqualified. Self-review only; no Main landing, private async/clipboard activation
+or removal of the 128 MiB protection. Preserve pinned artifact generations.
+
+
+## October 9: charged node owner and unused-node retirement
+
+Private Loom now owns the 1536-byte SCOPE/FID metadata table in a separately
+allocated, zeroed 4096-byte buddy page. Charge is reserved before allocation;
+constructor failures free node/target/pool/slot storage before refunding and
+dropping the exact image pin. The node allocation fault is consumed even by
+early geometry refusal. Loom is 2904 bytes (native DWARF 0xb58), still one buddy
+page: metadata is now six pages including slot, pool, target and node storage.
+No syscall ABI or private activation changes.
+
+At zero owner references, the retire worker has exclusive access. It cleans
+unused FIDs before unused SCOPEs, using exact rollback for provisional nodes
+and unused reap for live nodes; child cleanup releases its parent pin first.
+Only RESERVED nodes with no own borrows qualify. READY/ADMITTED/ABORTING/RETIRED,
+invalid identities and orphan payloads fail closed: actual protocol retirement
+is still the engine's obligation. Node storage is freed before the final image
+refund/private_end, outside locks. There is no peer I/O, wait or usercopy here.
+
+Self-review checked whole-page charging against allocation size, all unwind
+edges, last-owner exclusivity, child-before-parent ordering, stale/borrow/state
+guards and final image lifetime. The native owner fixture checks node allocation
+refusal, zeroed storage, complete charge, automatic provisional/live unused-scope
+cleanup and restoration of image charge/refcount. Host control explicitly
+simulates parent states for child cleanup; this is not a protocol witness.
+
+Evidence: slot-owner-20261009T044245Z passes 19 controls and 18 exact ASan/UBSan
+mutants, including reversed cleanup order, omitted cleanup, charge/free/unwind
+and orphan guards. Initial slot-owner-20261009T043850Z passed 19 controls and
+16 mutants before the two extra sensitivity checks. final-reclaim-20261009T043907Z
+passes both owner-drop orders and eight omission mutants at the host allocator
+boundary. Native link succeeded; node-owner-diagnostic-20261009T044103Z passed
+1844/1844, D7 overlap, twenty distinct cycles and banner, source cfa1c5c63 plus
+its captured diff with six stable input hashes and retained ELF/bin. Existing
+lifecycle model node-owner-model-20261009T0442Z passes clean 5828 states and
+seven named counterexamples. Full Mac coverage for these owner changes is
+pending; prior 50/50 belongs to c5abd0264. No independent audit is claimed.
+
+Next: actual scope/fid protocol resources and retirement, request/CQ admission,
+usercopy/authority and bounded worker progress, then MM0-MM4. Private async and
+clipboard stay disabled; keep the 128 MiB protection and do not land Main.
+Pi/A72/KVM, final guest allocator reclamation and optional graphics remain open.
+
+Disk admission headroom was restored by reclaiming five idle, ignored, untracked
+native Cargo debug caches under the operator resource grant, from Main and old
+Aux checkouts. No source, release outputs, run evidence or pinned generation was
+removed. native-debug-cache-reclaim-20261009T0443Z.json inventories exact paths
+and files; measured free space rose from 8164 to 8737 MiB. Full gate admission
+will independently enforce the unchanged 8192 MiB floor.
+
+
+## October 9: charged node owner full Mac gate verified
+
+Exact source 262ff29d3fe306dd700481f36d1fa4dd40aaede0 passed 50/50 Mac HVF
+boots in current-gate-20261009T044430Z: default SMP1/4/8 and UBSan SMP4/8, ten
+each. Every boot passed 1844/1844, including charged private owner/unused-node
+cleanup and existing node/target/fixed/pool/buffer fixtures, D7 overlap, twenty
+distinct login cycles and banner. Both exits were zero; verified 100 raw logs
+and all ten input hashes, and marked inputs PINNED. Minimum recorded admission
+free space was 8208 MiB, above the unchanged 8192 floor. Mac lease released.
+Result: astra-takeover/current-gate-20261009T044430Z-result.json.
+
+This is internal owner/metadata coverage, not complete private async support.
+Actual scope/fid protocol resources and retirement, request/CQ admission,
+usercopy/authority and bounded worker progress remain next before MM0-MM4.
+Pi/A72/KVM, final guest allocator reclamation and absent optional graphics probes
+remain unqualified. Self-review only. Keep private async/clipboard disabled,
+128 MiB protection and all pinned evidence; no Main landing. Current free disk
+is only about 8 GiB: restore headroom before the next build/gate without lowering
+admission or removing canonical evidence.
+
+## October 9: node owner transaction fixture
+
+The suite now contains 1845 entries. `loom.private_node_owner` creates an actual
+private Loom and exercises creator/image and ABI validation, failed-copyout
+rollback, stale continuation rejection, parent abort before child publication,
+and close before root publication. Parent READY/ABORTING states are test
+injection, not a service handshake. The fixture retains its caller reference
+until cleanup, then waits for the actual private retirer before dropping the
+creator. A diagnostic boot passed 1845/1845 plus D7 overlap and twenty cycles
+at node-transactions-diagnostic-20261009T053938Z. This single boot does not
+qualify the current source's SMP/UBSan matrix.
+
+## October 9 06:28 UTC: scope/FID transactions full Mac gate verified
+
+Exact source `d4825ae1e106924d67d3eb405180da7f8d5882d6` passed
+`current-gate-20261009T054208Z`: 50/50 boots, default SMP1/4/8 and kernel
+UBSan SMP4/8, ten each. All boots passed1845/1845 including the new
+`loom.private_node_owner` fixture, D7 overlap, twenty distinct d7user00..19
+login/logout cycles and the boot banner. Both gate.rc and runner.rc are0.
+The verifier retained and hashed100 raw serial/harness logs and checked all ten
+captured input hashes against the clean source/end-source and Stratum61dde37
+provenance. Lowest recorded admission headroom16194MiB;8192MiB floor intact.
+The runner released Astra's Mac lease. Result:
+`astra-takeover/current-gate-20261009T054208Z-result.json`; verifier beside run.
+Astra's pending files and four protected drafts, plus clean Stratum pin, were
+rechecked unchanged after the run. This is self-verification, not an independent
+audit. Optional graphics probes remain absent from this exact ramfs; Pi/A72/KVM
+and final guest allocator reclamation remain unqualified.
+
+This qualifies the internal reservation owner checkpoint only. Next: charged,
+bounded request records and terminal-completion obligations before native
+backlog publication, then actual scope/protocol binding, caller authority,
+bounded progress and local retirement. Private service registration/CONNECT and
+clipboard remain disabled, Main untouched,128MiB protection retained. MM0-MM4
+still follow completion of async integration and its client/consumer gates.
+
+## October 9: request ledger and actual terminal CQ fixture
+
+The suite has1847 entries. `loom.service_requests` exercises the real bounded
+request ledger with synthetic scope transitions. `loom.private_requests` owns an
+actual private ring, checks request-allocation fault unwind, commits a synthetic
+request result, fills the actual CQ and proves AGAIN retains the terminal. It
+then latches close, corrupts user-writable CQ mirrors, advances the consumer and
+verifies that private geometry posts the prior result exactly once with a
+cleared receipt. Real owner retirement returns the charge. This is not a native
+service handshake or proof of runtime callback retirement. The diagnostic
+request-owner-diagnostic-20261009T064808Z passed1847/1847 and D7; full matrix
+qualification is pending for this newer source.
+
+
+## October 9: charged private protocol preparation fixture
+
+loom.private_protocol uses actual native target admission and preallocated client
+storage, with a process-tree-linked creator, both32/128KiB classes, three
+allocation refusal points, image budget refusal, no backlog/byte effects,
+published-owner cleanup refusal and final Loom/image retention. It exercises
+unpublished construction only, not CONNECT handshake or active retirement.
+Native protocol-owner-diagnostic-20261009T074413Z passes1848/1848 and D7; initial
+074015Z unlinked-creator fixture failure is retained with its repair. Request
+source45d26893b separately passes full50/50 at1847/1847; newer protocol source
+full matrix pending. See sub-kernel-loom and ASYNC-SERVICE-STATUS for self-review.
+
+## October 9: private CONNECT native fixture
+
+loom.private_connect uses real registered targets, creator snapshot, native
+admission and preallocated 9P version/attach progress for normal and bulk
+connections. It checks allocation/expired publication rollback, duplicate
+destination refusal, cancellation ordering, handshake deadlines, Rlerror phase
+diagnostics, close, full CQ retention, local storage refund with a server-held
+endpoint, and exact scope reap. connect-diagnostic-20261009T170730Z passes
+1849/1849 plus D7 overlap/twenty cycles/banner with stable source and inputs.
+Full Mac matrix pending on this source. Checked host boundary doubles separately
+pass11 controls/12 named mutations; they do not constitute SMP race stress or
+an independent audit. The engine is internal, handshake-only, and requires its
+caller to retain entry storage. Private ring dispatch/activation stays disabled.
+
+
+## October 10: private executor and operation-storage evidence boundaries
+
+The1853 suite's loom.private_executor is qualified on exact f719ee4a3 by
+current-gate-20261009T211533Z:50/50 Mac default SMP1/4/8 and UBSan4/8, D7
+overlap/twenty distinct cycles in every boot. Evidence checkpoint79dfd1267
+retains100 raw logs and ten input hashes. Earlier counts remain historical.
+
+New loom.private_operation_storage raises the suite to1854 and uses real normal
+and bulk READY peers to check request physical-owner retention, exact one-page
+charge/refund, real allocator/quota refusal, terminal-capacity exhaustion,
+identity burn and close PARKED until the owner is physically destroyed.
+operation-storage-native-20261009T215931Z passes1854/1854 plus D7 overlap/twenty
+cycles/banner with eleven source/six input hashes. Implementation e7ff5d1c7 is
+covered only by this bounded CPU1 native run and recorded host/ARM64 checks;
+prior full Mac qualification does not extend to it. General RPC/FID/buffer
+dispatch and public activation remain unimplemented. Self-review only.
+
+October10 Astra: suite remains1854 registrations. private_operation_storage
+now additionally verifies actual normal/bulk root FID mapping after attach and
+root metadata borrow/unused-child retention across close until physical
+operation cleanup. CPU1 native fid-integration/native-20261009T221811Z passes
+1854/D7/20cycles with exact source/artifact evidence. It does not test submitted
+WALK/LOPEN/READ/WRITE/CLUNK RPCs or confer prior full-Mac qualification.
+
+October10 coherent async integration adds loom.private_frontend:1855 registered
+tests. New normal/bulk cases invoke the actual creator frontend and real protocol
+constructor/engine adoption, verify copied correlation through native handshake,
+root mapping, malformed-SQE CQ refusal and zero-submit CQ wake, then retain the
+existing charged storage/close exercise. CPU1 async-integration/native-
+20261010T010700Z passes1855/D7overlap/20cycles with41source/6artifact hashes stable.
+Native general-operation/provided/MORE traffic and full Mac matrix remain next;
+no private ABI/clipboard activation or128MiB protection change. Single-agent review.
+
+
+### October 10: native general operations and provided payloads
+
+The suite registers1856 tests after adding loom.private_native_operations. It
+exercises normal/bulk native CONNECT, WALK/open DAC, fixed READ/WRITE/CLUNK,
+provided leases, empty/full-CQ backpressure, independent RETURN, MORE and EOF.
+The controlled peer reads actual wire requests; explicit engine visits drive
+progress. This is not general-operation worker or real filesystem qualification.
+Raw native-operations/provided-20261010T0210Z passes1856/1856,D7overlap/20cycles,
+with41source/6artifact hashes stable. The earlier pinned-image50/50 matrix remains
+qualified only at98dd4b618 (1855tests). Failed fixture build and wrong CQ flag
+expectation are preserved. Single-agent self-review; no activation or128MiB change.
+
+
+### Astra actual worker operation smoke verified, October 10
+
+The native general/provided probe now runs entirely through the actual private
+worker: no explicit engine visits drive it. CQ consumption uses acquire loads
+and zero-submit creator kicks; physical terminal cleanup is observed under Ll.
+Wake epoch and native channel occupancy observations take their owning locks.
+Whole-close joins the worker before peer/mapping cleanup.
+
+Five source-matched one-boot rows pass: default SMP1/4/8 and UBSan SMP4/8, each
+1856/1856,D7overlap and20login cycles. Run native-worker/smoke-20261010T021745Z
+under work/oct5-as-r9/astra-takeover. Reverified10rawlogs,41installed source hashes,
+six inputs per run with cloned kernels,Stratum clean61dde37 and Astra10preserved
+files. Minimum9056MiB. These smoke rows do not replace the50boot qualification
+of98dd4b618. The controlled peer still leaves hostile/stalled schedules and safe
+client APIs pending. Self-review is single-agent; no activation/128MiB change.
+
+Earlier smoke021509Z stopped at8255MiB before boot completion, preserving raw
+interruption evidence. Diagnostic signal handling now joins its child and saves
+interrupted results. Clearing only799MiB of rebuildable Go cache restored space;
+no source, saved binary or evidence was removed. Mac released after successful
+smoke. Continue AS-3 native faults and owned C/Rust clients, then AS-4/MM0-MM4.
+
+
+### Astra native READ faults verified, October 10
+
+`loom.private_native_faults` adds six worker-driven READ schedules in both normal
+and bulk classes after real CONNECT/WALK/LOPEN: silent peer, partial header/body,
+impossible frame length, wrong reply type and full-CQ cancellation. The retained
+peer endpoint and observation pin survive until local retirement. Negative CQE
+identity, fixed-owner release, unregister and unchanged failed-read payload are
+checked. Full CQ retains the cancellation terminal until creator acknowledgement.
+
+Five single-boot rows pass1857/1857,D7overlap/20cycles: default1/4/8,UBSan4/8.
+Run astra-takeover/native-faults/smoke-20261010T023045Z, sourcecc644dc6a plus
+recorded diff62dc1a57. Ten raw logs,41sources,six inputs/row,kernel clones and
+Astra10protected/pending hashes reverified; Stratum clean61dde37; minimum9221MiB.
+This is bounded smoke evidence, not50boot or completed AS3 qualification.
+Single-agent review records that fragment consumption before cancellation is
+scheduler-dependent; next change will observe actual transport drain. Prepared
+followup-write-deadline.patch is UNINSTALLED and also adds emitted WRITE abort
+and READ deadline cases. No production kernel change or activation/128MiB change.
+Mac released. Continue broader AS3 faults and owned clients, thenAS4/MM0-MM4.
+
+
+### Astra emitted WRITE and deadline faults verified, October 10
+
+Expanded native fault fixture to eight schedules per normal/bulk class. Canceled
+WRITE is observed after its bytes reach the peer without acknowledgement; its
+negative terminal and retained BYTES_SENT diagnostic do not promise remote
+rollback. Silent READ expires by absolute500ms deadline and locally retires.
+Partial header/body cancellation now waits for actual s2c channel drain under
+the channel lock, establishing consumption before abort instead of yield counts.
+
+Five smoke rows pass1857/1857,D7overlap/20cycles at bdba6bc5e plus diff504cd6018,
+run native-faults-followup/smoke-20261010T023726Z. Reverified10rawlogs,41sources,
+six inputs/row,kernel clones,Stratum clean61dde37 and Astra10preserved hashes.
+Minimum9252MiB; Mac released. No50boot or completeAS3 claim. Single-agent review;
+no production change, private activation or128MiB removal. Next reviewed but
+UNINSTALLED native-reconnect/reconnect.patch adds1000 canceled-before-accept
+attempts alternating classes with complete per-attempt ownership/accounting checks.
+Broader AS3 stage/close/exec/exit/independent-media and owned clients,AS4/MM0-MM4 remain.
+
+
+### Astra1000 failed native reconnects verified, October 10
+
+One private worker/ring now survives1000failed CONNECTs before server acceptance,
+alternating500normal/500bulk. Each exact canceled terminal precedes scope reap,
+local parser/request/page refund and stale-identity refusal. A torn backlog peer
+retains count+1 and credits+1or4; late acceptance then last-unref restores native
+count/credits exactly. Retirement does not pretend peer-held storage is free.
+
+Initial smoke024406Z failed1857/1858 because the fixture wrongly expected native
+endpoint/backlog refund before late accept. RECONNECT-FIXTURE-R1 is preserved
+with raw source/binary/logs; corrected assertions follow approved design section5.
+No production code changed. Corrected smoke024610Z passes five rows1858/1858,
+D7overlap/20cycles, default1/4/8+UBSan4/8. Source4fe965d62+diff408aed6b;
+10rawlogs/41sources/sixinputs per row/kernel clones/Astra10hashes/clean61dde37
+reverified, minimum9209MiB. Self-review is single-agent; no50boot or AS3 completion.
+
+Next reviewed UNINSTALLED native-reconnect-retained/retained.patch adds a second
+1000attempts with no server acceptance:32torn endpoints hold80credits and968
+backlog refusals must not grow retained storage. Verify after checkpoint. Broader
+AS3/owned clients,AS4/MM0-MM4 remain; no activation/Main/128MiB change. Mac released.
+
+
+### Astra retained-backlog stress verified, October 10
+
+The actual private worker now completes two 1000-attempt reconnect loops per
+boot. The second accepts no peer during retries: 16 normal and 16 bulk torn
+endpoints retain exactly 80 credits, while 968 backlog refusals leave retained
+storage bounded. Each local scope retires/reaps; final late acceptance and last
+unref restore the original native endpoint/credit counts. No production change.
+
+Run native-reconnect-retained/smoke-20261010T025237Z passed five one-boot rows
+(default 1/4/8, UBSan 4/8), 1858/1858 tests, D7 overlap and 20 login cycles each.
+Source 8f31d58b9 plus diff ec849c4ad3; 10 raw logs, 41 source hashes, six inputs
+per row, cloned kernels, clean external Stratum 61dde37 and Astra's ten protected
+hashes reverified before documentation changes. Minimum free space 9165 MiB.
+This is bounded smoke evidence, not a new 50-boot qualification or AS3 completion.
+
+Single-agent self-review recorded. Next native-stages/stages.patch is reviewed,
+UNINSTALLED and unverified: cancellation after each of six complete setup
+requests, in both connection classes. Broader close/exec/exit, independent media,
+owned clients, AS4 and MM0-MM4 remain. No Main/private activation/128 MiB change.
+
+
+### Astra native setup-stage cancellation verified, October 10
+
+Actual worker cancellation now passes at six complete emitted requests: VERSION,
+ATTACH, pre-WALK GETATTR, WALK, pre-LOPEN GETATTR and LOPEN, in normal/bulk
+classes. The peer sends no reply for the selected request; local retirement,
+exact negative terminal (no successful descriptor), physical request/fixed-owner
+release and unregister complete while retained peer/observation references remain.
+
+Five one-boot rows default1/4/8 and UBSan4/8 passed1859/1859 plus D7overlap and
+20login cycles each in native-stages/smoke-20261010T025901Z. Source51b95e440 plus
+diff2e6e907363;10rawlogs,41installedsources,sixinputs per row and cloned kernels
+reverified before docs changed. Clean61dde37 and Astra's10hashes preserved;
+minimum9169MiB. Single-agent self-review; no production change or full50boot claim.
+
+Next UNINSTALLED native-stage-close/stage-close.patch repeats those six requests
+with final handle close, forced private exec cleanup and exit handle-table cleanup
+(36schedules), with actual worker overlap, held references and no CQ/peer progress.
+It also adds a common explicit final image-page/private-ring refund assertion.
+These are production cleanup boundary witnesses; whole userspace exec/exit races,
+independent media/owned clients, remaining AS3,AS4/MM0-MM4 still remain.
+No Main/private activation or128MiB protection removal.
+
+
+### Astra native close-boundary schedules verified, October 10
+
+Six emitted setup requests x normal/bulk x final handle close, forced private
+exec close (CLOEXEC false), and exit handle-table destruction:36 schedules now
+pass with actual worker overlap. Retained observation pins force PARKED after
+local transport retirement; returning them permits DONE, worker join and empty
+physical request/fixed storage without CQ consumption or peer replies. The
+common protocol fixture now explicitly verifies original image page_count and
+zero private_rings after final retirement, before process destruction.
+
+native-stage-close/smoke-20261010T030607Z passed five one-boot default1/4/8 and
+UBSan4/8 rows,1860/1860tests,D7overlap/20cycles each. Sourcefc76769b1 plus
+diffc9e5b59d77;10rawlogs/41sources/sixinputs per row/cloned kernels reverified,
+clean external61dde37 and Astra10hashes preserved. Minimum9151MiB. This tests
+production cleanup boundaries, not whole userspace exec/exit syscall races.
+Single-agent review; no production changes, full50boot or AS3completion claim.
+
+Next reviewed UNINSTALLED native-isolation/isolation.patch checks one byte stream
+while a second scope stalls, then cancels only the latter and continues original
+WRITE/provided/MORE/EOF/CLUNK with torn peer retained. Controlled native isolation
+is not real media throughput. Owned clients, other AS3 integration,AS4/MM0-MM4
+remain. No Main/private activation or128MiB protection removal.
+
+
+### Astra same-worker scope isolation verified, October 10
+
+One scope completes byte-checked READ while a second stalls at an observed
+VERSION request. Canceling/reaping only the second preserves the first READY
+transport and its WRITE/provided READ/MORE/EOF/CLUNK progress while the torn peer
+remains held. Both classes pass on the same actual worker/ring. CQ4 uses existing
+geometry for two CONNECT owners plus IO; full-CQ checks fill its actual capacity.
+
+First run031230Z failed at link before any VM: a large fixture initializer emitted
+unavailable memset (ISOLATION-FIXTURE-R1). Failed source/manifest/build log retained;
+explicit existing byte-zero pattern fixes fixture only. Corrected run
+native-isolation/smoke-20261010T031341Z passed five rows1861/1861,D7overlap/20cycles,
+default1/4/8+UBSan4/8. Source5734fe538+difff3da283cc8;10rawlogs/41sources/sixinputs
+per row/cloned kernels reverified before docs changed. Clean61dde37 and Astra10
+hashes preserved;minimum9079MiB. Single-agent review, controlled native byte stream,
+not real media throughput, whole userspace exec/exit or full50boot qualification.
+
+Next reviewed UNINSTALLED native-midwrite/midwrite.patch injects c2s pressure
+leaving5bytes, observes actual TWRITE prefix, then aborts without draining peer.
+Private progress uses partial srvconn_io_nonblock, not legacy atomic frame send.
+This is explicit transport pressure injection, not a valid peer transcript.
+Owned C/Rust implementation source inspection is in owned-clients/; no safe-client
+implementation/tests claimed. Remaining AS3/clients,AS4/MM0-MM4; no activation,
+Main landing or128MiB protection removal.
+
+
+### Astra partial-WRITE and client receipt ledger checkpoint, October 10
+
+The actual private worker now emits exactly five TWRITE prefix bytes into an
+explicitly pressure-filled channel, then aborts locally without peer drain.
+Both classes verify exact negative terminal/BYTES_SENT, fixed-owner release and
+unregister while peer/observation references remain. This is transport pressure
+injection, not a valid peer transcript. Nine IO fault schedules per class.
+
+native-midwrite/smoke-20261010T032012Z passed five one-boot rows1861/1861,
+D7overlap/20cycles, default1/4/8+UBSan4/8. Source00f4d736d+diff106e399f2e;
+10rawlogs,41sources,sixinputs/row,kernel clones and Astra10hashes reverified,
+clean external61dde37; minimum9148MiB. Bounded smoke, not50boot or AS3completion.
+
+Uninstalled C/Rust receipt-ledger foundations validate bounded geometry, exact
+receipts and ring-local identity, stale/double/out-of-order returns and failed
+RETURN retention. Earlier leases survive final/EOF. Self-review LEDGER-REVIEW-R1
+added a distinct library owner identity to prevent matching tuples across rings
+from returning foreign leases. Host ledger-20261010T032905Z passed Rust six cases
+at opt0/opt2 and LLVM22 C ASan+UBSan; all12mutants compiled then failed assertions.
+Eight source hashes and32command/rawlog records reverified. Initial Apple ASan
+run032712Z stalled before main; HOST-ASAN-R1 sample shows reentrant ASan startup
+spinlock. Failure evidence preserved; that C run is not a pass.
+
+These are metadata foundations only, without owned backing, payload borrows,
+paired CQ reap, futures, retirement or native safe-client qualification. Continue
+owned C/Rust lifetimes then remaining AS3/AS4/MM0-MM4. Single-agent self-review;
+no independent audit, Main landing, private activation or128MiB protection change.
+
+
+### Astra paired completion-reader foundations, October 10
+
+Uninstalled C/Rust paired readers now acquire CQ tail, copy the CQE and matching
+receipt, then release head exactly once. Geometry validates aligned disjoint
+header/CQE/receipt regions and bounded power-of-two entries; corrupt occupancy
+or a second head writer refuses without acknowledgement. Returned records own
+copies and survive slot reuse; this does not return or expose a payload.
+
+owned-clients/paired-20261010T033551Z passed Rust four scenarios at opt0/opt2,
+LLVM22 C ASan+UBSan, and100000 concurrent records per run across counter wrap.
+All six receipt-index/double-ack/overlap mutants compiled then failed assertions.
+Nine source hashes and20command/rawlogs reverified. Single-agent review records
+unsafe mapping/producer contracts and C no-alias/exclusive-reader obligations;
+concurrent stress is not a memory-model proof. Astra's10pending/protected hashes
+and exact clean external61dde37 preserved. Mac released; disk remains above8GiB.
+
+These helpers remain uninstalled and require owned mapping/backing, read-only
+PayloadLease, future cancellation and bounded failed-return/client retirement.
+No native safe-client qualification or complete AS3 claim. Continue those client
+lifetimes before remaining AS3/AS4/MM0-MM4; no Main, activation or128MiB change.
+
+
+### Astra owned payload lifetime cores, October 10
+
+Uninstalled Rust/C cores consume backing and retain it independently of CQ and
+client lifetimes. Read-only leases keep storage alive; explicit RETURN errors
+preserve exact ownership/errno. Drop/abandon uses one pre-reserved pending cell
+per member, with at most64retry attempts per progress call. Earlier A bytes survive
+B return and final/EOF. Removing the retirement record requires client closing,
+zero live leases and confirmed local retirement; controller destruction closes
+once while existing leases retain backing. Native pins remain a backend contract.
+
+Rust payload-20261010T034518Z passed six scenarios at opt0/opt2, four compile-fail
+checks (borrowed return, mutable view, moved storage, legacy reap), valid-return
+control and four runtime mutants. Initial034434Z negative fixture failed: wildcard
+let _ did not access moved storage (PAYLOAD-FIXTURE-R1); evidence preserved, actual
+field access now rejects E0382. C payload-c-20261010T034735Z passed six scenarios
+under LLVM22 ASan+UBSan and optimized NDEBUG core objects plus four runtime mutants.
+Five/seven source hashes and19/17raw command records respectively reverified.
+
+Single-agent review derived lengths from owned backend rather than caller claims
+(PAYLOAD-REVIEW-R1), and moved C state mutations outside assertions before release
+controls (R2). Astra10hashes and clean external61dde37 preserved; disk9153MiB.
+These are one-pool components with simulated backends, not native complete clients:
+one shared full-ring controller, global64-member/cross-pool exclusion, syscall/
+paired-CQ integration, fixed I/O ownership, futures and bounded executor retirement
+still remain. Do not give each native pool independent whole-ring close authority.
+Remaining AS3/AS4/MM0-MM4 pending; no Main, activation or128MiB protection change.
+
+
+### Astra shared full-ring payload owners, October 10
+
+Uninstalled C/Rust ring_payload cores replace independent one-pool retirement for
+intended integration. One backend retains all backing and whole-ring authority;
+pool drop closes only that pool. Other pools and live payloads keep their bytes.
+All pools share64member admission and cross-pool overlap exclusions. Failed/busy
+pool destroy retains slots/ranges/capacity; only zero permits reuse with a newer
+full incarnation. Pending/lease cells total at most64, allocated at admission;
+progress makes at most64RETURN and64destroy attempts without allocating.
+
+Rust ring-payload-20261010T035754Z passes seven scenarios at opt0/opt2, four
+compile-fail contracts plus positive control, and six runtime mutants. C
+ring-payload-c-20261010T035801Z passes seven scenarios under LLVM22 ASan+UBSan
+and optimized NDEBUG core plus six runtime mutants. Five/seven source hashes
+and23/21raw command records respectively reverified. Earlier six-case runs
+035413Z/035628Z retained and verified before adding explicit-return/EOF coverage.
+Astra10hashes and clean external61dde37 preserved; disk9131MiB, Mac released.
+
+Single-agent review records that separate pools need not mean independent scopes.
+Native adapter still must pre-reserve local metadata before kernel registration,
+retain failed commit cleanup, authenticate paired CQ/request identities, and bind
+owned mapping/storage, fixed I/O, futures and executor retirement. Current unsafe
+attach accepts only adapter-proven native pool identities; simulated backend tests
+do not qualify that missing boundary. Remaining AS3/AS4/MM0-MM4 pending; no Main,
+private activation,128MiB change or independent audit claim.
+
+
+### Astra pool registration transactions, October 10
+
+Uninstalled C/Rust shared-ring cores now prepare all ownership metadata and
+precharge the global64-member bound before registration. Successful publication
+binds the actual full pool identity without allocation. Confirmed negative+zero
+output rollback refunds admission and preserves errno; uncertain, malformed,
+stale or colliding results retain a quarantined reservation and close the whole
+owner while existing leases keep their bytes. No destroy uses an untrusted ID.
+Ledger bind is one-time even after all leases return. Native adapter must prove
+that negative+zero output means no surviving registration/pins; this is currently
+a trusted simulated-backend contract, not verified public syscall behavior.
+
+registration-20261010T040736Z:13Rust cases opt0/opt2,4compile-fail+positivecontrol,
+10runtime mutants. registration-c-20261010T040751Z:14C cases LLVM22ASan+UBSan and
+optimized NDEBUG core,10runtime mutants. Five/seven source hashes and31/29raw
+command records reverified; no late allocation on observed registration paths,
+C allocation failure before native admission verified. REGISTRATION-REVIEW-R1
+rejects guessed cleanup of malformed/colliding IDs; single-agent self-review in
+owned-clients/registration-self-review.txt. Astra10hashes and clean61dde37 intact.
+Native mapping/backing/syscall adapter, paired CQ/request correlation, fixed I/O,
+futures and executor retirement remain; AS3/AS4/MM0-MM4 still pending. No Main,
+private activation,128MiB change, independent audit or native-client pass claim.
+
+
+### Astra request/CQ correlation, October 10
+
+Uninstalled C/Rust request tables preallocate at existing CQ capacity (<=8192).
+Library-wide monotone cookies reject cross-ring/stale completions; exact pool,
+flags, receipt and length checks precede state changes. Prepared rollback ends at
+SQ publication; ENTER errors never authorize storage reuse. MORE remains active,
+terminal records stay charged until consumption, and payload receipts travel only
+with delivery, independently of terminal metadata. Abandon requests scope-wide
+abort once per request and retains ownership until terminal/retirement; actual
+executor and storage owners remain to be integrated.
+
+request-book-20261010T062909Z passed seven cases per language, Rustopt0/opt2,
+Clone/Send compile failures with positive control, C LLVM22ASan+UBSan and optimized
+NDEBUG core, and12runtime mutants. Ten source hashes/40raw commands reverified.
+REQUEST-BUILD-R1 initial041455Z C build refused misleading indentation; preserved
+failure, corrected loop formatting, no initial C runtime pass. Single-agent review
+in owned-clients/request-self-review.txt records CQ-only terminal retention and
+remaining native ownership boundary. Astra10hashes and cleanexternal61dde37 intact;
+disk10041MiB before run,Mac released. No complete safe-client/AS3 claim, private
+activation,Main,128MiB change or independent audit. AS4/MM0-MM4 still pending.
+
+
+### Astra composed CQ/request/payload checks, October 10
+
+Actual C/Rust paired reader, request book and shared pool lease cores now run
+together in two host scenarios per language. CQ acknowledgment/reuse and final
+consumption preserve held A while B returns; wrapper/CQ destruction leaves A's
+owned backing intact. Abandoned MORE with failed return remains pending; malformed
+pool identity is rejected after paired copy and explicit owner close retains A.
+Producer, backing and retirement confirmation are simulated; no actual native
+syscall, scope ABORT, fixed-I/O or future/executor qualification is implied.
+
+composed-ring-20261010T063524Z passed Rustopt0/2, C LLVM22ASan+UBSan/NDEBUG and six
+runtime mutants. Nineteen source hashes/30raw commands reverified. Initial063431Z
+clean cases passed but mutant runner demanded FAILED summary when deliberately
+missing live-count accounting caused an underflow/abort; COMPOSED-HARNESS-R1 raw
+logs retained and exact expected diagnostic corrected. No full initial-suite pass.
+Single-agent composed-self-review.txt records boundaries. Astra10hashes and clean
+external61dde37 preserved; Mac released. Native owned mapping/backing/control and
+composed controller/fixed-I/O/futures/executor remain, then AS3/AS4/MM0-MM4 gates.
+No Main, private activation,128MiB protection change or independent audit claim.
+
+
+### Astra owned mapping boundary, October 10
+
+Uninstalled C/Rust owners now consume the mapping backend and validate the full
+88-byte setup geometry before pointer access: header/SQ index/SQE/CQE/receipt
+regions, exact counts/sizes, alignment, overlap, overflow and original mapping
+identity. Fresh header checks precede exclusive paired-reader construction.
+Failures close/destroy the original owner once; successful close is idempotent
+and prevents further CQ access. No raw mapping/descriptor or clone API escapes.
+Actual native setup/control/SQ publication and kernel pin retirement remain
+trusted backend obligations, not a completed native adapter or AS3 qualification.
+
+owned-mapping-20261010T064503Z passes Rust5 cases opt0/2,C6 scenarios LLVM22
+ASan+UBSan/NDEBUG,3 ownership compile failures plus control,10 runtime mutants.
+Eleven source hashes/snapshots and38raw command logs reverified before docs.
+MAPPING-HARNESS-R1 initial064425Z clean profiles passed but custom case3 panic
+missed runner's expected literal diagnostic; preserved evidence, fixed expected
+Rust FAILED summary, full retry passed. Single-agent mapping-self-review.txt
+records pointer/lifetime/cleanup review and remaining unsafe backend boundary.
+Astra10hashes and cleanexternal61dde37 preserved; Mac released. Native adapter,
+SQ publisher, composed controller/fixed-I/O/futures/executor remain before AS3,
+AS4 and MM0-MM4. No Main, private activation or128MiB protection change.
+
+
+### Operator-directed parking of SQ reuse correction, October 10
+
+SQ-REUSE-R1 found shared sq_head publication before SQ-index/SQE copying; a
+producer can reuse storage before the kernel snapshot. Proposed correction and
+regression are preserved, unapplied, in astra-takeover/native-sq-reuse/sq-reuse.patch
+with exact base, full patched source and PARKED.md. Operator reported a classifier
+block and requested parking for Corona. No rejection reason was visible to this
+turn; no bypass or assumption of future clearance is authorized. Only the four
+agent-authored kernel changes were restored after complete patch preservation.
+
+Already-launched native065006Z completed: five one-boot default1/4/8,UBSan4/8 rows,
+1862tests each, D7overlap/20logins, min9944MiB. Raw source/diff/input/kernel/log
+hashes reverified before restoring source. Host065053Z exact copy/release block
+passed sanitizer/optimized profiles; old-order mutant failed cookie assertion.
+Tests qualify only the parked patched source. Current build kernels include that
+patch and MUST NOT be treated as matching the restored checkout. No full50boot,
+complete AS3 or independent audit claim. Astra10hashes/cleanexternal61dde37 intact.
+
+Continue independent fixed-I/O ownership, cancellation bookkeeping and bounded
+executor retirement with simulated backends. Native SQ submission/integration
+and complete async qualification depend on resolving the parked item. Async-first
+then MM0-MM4 order and all activation/128MiB/Main gates remain. Heartbeat prompt
+updated with exception; its existing PAUSED status preserved.
+
+
+### Astra independent fixed-I/O ownership, October 10
+
+Uninstalled Rust/C fixed operations now share the existing ring backing owner.
+Checked reservations exclude provided pools in both directions, permit WRITE
+copy-in only before publication, and expose READ bytes only after a validated
+terminal result. Active drop requests scope cancellation while retaining storage;
+failed ENTER has no rollback path. Confirmed terminal or whole-owner retirement
+reclaims abandoned reservations. Live terminal views retain backing past wrapper
+close. One preallocated reservation per registered buffer (<=64) is a conservative
+library limit; actual request accounting still requires RequestBook integration.
+
+Rust fixed-io074052Z:20cases opt0/2,6compile-fail+control,8mutants. C fixed-io-c074317Z:
+21scenarios LLVM22ASan+UBSan/NDEBUG,8mutants. Composition074349Z:two scenarios per
+language, bothprofiles,6mutants. Five/seven/nineteen source hashes and29/25/30raw
+commands/snapshots reverified; single-agent fixed-self-review.txt records lifetime,
+callback, aliasing, cancellation and release checks. All backends, terminal and
+retirement proofs are simulated; typed futures/native request integration and
+bounded executor retirement remain. WRITE cancellation never implies remote rollback.
+Astra10hashes/cleanexternal61dde37 preserved. SQ reuse remains parked and unapplied;
+no native gates rerun, Main landing, private activation or128MiB change. Heartbeat
+remains paused as found. AS3/AS4/MM0-MM4 remain incomplete.
+
+
+### Astra typed fixed request controllers, October 10
+
+Uninstalled C/Rust controllers couple preallocated request metadata and fixed
+storage through exact library cookies. Preparation failures release both
+reservations; active abandonment requests scope abort once and retains ownership
+until authenticated terminal or whole-owner retirement. READ results own backing
+past driver close; WRITE results preserve actual errors. Malformed/foreign records
+close only the affected driver. No allocation in receive/completion/drop/progress.
+TYPED-REVIEW-R1 fixes prepared/active polling after driver drop to report Closing
+while retaining storage, rather than waiting indefinitely without a driver.
+
+Rust083816Z:10cases opt0/2,4compile-fail+control,6mutants,8hashes/23commands.
+C083803Z:11scenarios LLVM22ASan+UBSan/NDEBUG,6mutants,13hashes/25commands.
+Raw logs/source snapshots and current diff reverified before documentation;
+initial nine-case Rust083141Z retained. Single-agent typed-self-review.txt records
+ownership/error/retirement boundaries. Protected10/cleanexternal61dde37 and parked
+kernel base preserved. These are typed polling handles, not Future/waker/executor
+or native SQ integration. Continue bounded executor retirement/futures independently;
+SQ correction remains parked/unapplied. Heartbeat resumed ACTIVE under operator's
+latest autonomous-continuation instruction. AS3/AS4/MM0-MM4 remain incomplete;
+no Main, private activation or128MiB protection change.
+
+
+### Astra bounded library retirement owners, October 10
+
+Uninstalled C/Rust executors reserve a bounded retirement cell before the driver
+factory runs. Dropping a managed client transfers it to its existing cell without
+allocation; confirmed local retirement and ended storage users are required before
+reuse. A rotating progress round visits at most min(budget,capacity) cells, keeping
+busy entries charged while allowing later ones to finish. Root shutdown closes
+descriptors once, rejects new operations and preserves existing payload backing.
+The1..64cell bound is conservative library configuration, not a new kernel quota.
+
+Eight scenarios/language pass: Rust084435Z opt0/2,2compile-fail+control,6mutants;
+C084418Z LLVM22ASan+UBSan/NDEBUG,6mutants. Nine/fifteen source hashes and21/27raw
+command records reverified. Initial084249Z Rust clean profiles passed; final
+mutant failed correctly with unreachable-factory panic, but diagnostic expected
+assertion. RETIREMENT-HARNESS-R1 evidence retained, expected diagnostic corrected,
+complete retry passes. Single-agent retirement-self-review.txt records ownership,
+allocation, shutdown and fair bounded progression. Protected10/cleanexternal61dde37
+and parked kernel base unchanged. Event-loop wakeups/typed Future integration and
+native backend remain pending; this is not a full async executor/AS3 pass. SQ stays
+parked/unapplied. Heartbeat ACTIVE; AS4/MM0-MM4 and all activation guards remain.
+
+
+### Astra Rust fixed Futures and bounded wake registrations, October 10
+
+Uninstalled Read/Write Futures own typed requests and reserve one of64wake cells.
+Preparation errors roll back registration; Future drop unregisters without
+releasing active storage. Terminal delivery wakes a bounded snapshot; polling
+rechecks readiness and READ results retain backing. Waker clone precedes readiness
+check, replacement precedes old-Waker drop, and clone/drop/wake callbacks execute
+outside internal borrows. Root close wakes unfinished tasks while preserving
+owned storage. No internal allocation on observed Arc-waker poll/receive paths;
+arbitrary caller Waker implementations can allocate and are outside that claim.
+
+fixed-futures085203Z:12cases opt0/2,2compile-fail+control,6mutants;9hashes/21raw
+commands verified. Eleven-case085056Z pass retained before full64cell regression.
+FUTURE-REVIEW-R1 records reentrant clone/drop/wake checks and lost-wakeup mutants.
+Single-agent futures-self-review.txt; protected10/cleanexternal61dde37 and parked
+kernel base unchanged. Integration with the bounded retirement owner is next:
+notifications must escape every enclosing manager borrow before invocation.
+Native event/sleep/deadline integration remains pending; no complete async executor,
+AS3 or C callback qualification is claimed. SQ stays parked; heartbeat ACTIVE,
+AS4/MM0-MM4 and all Main/private-activation/128MiB guards remain.
+
+
+### Astra Future/retirement ownership composition, October 10
+
+One generic Rust retirement queue now supports polling and Future drivers with
+preallocated cells. Completion, client drop and executor shutdown return deferred
+wake batches, dispatched after all enclosing borrows end. Progress detaches ready
+entries before driver destruction. Callback tests poll tasks and drop/access peer
+clients safely. Normal client retirement preserves an already-terminal WRITE
+success; held READ results still block cell reuse until their users finish.
+
+Composition090037Z:6cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands.
+Polling retirement regression090048Z:8cases,2compile-fail+control,6mutants,
+10hashes/21commands. Future regression090111Z:12cases,2compile-fail+control,
+6mutants,9hashes/21commands. Raw source/diff/logs reverified. Initial090001Z clean
+profiles passed; borrow mutant aborted during destructor cleanup after exact
+RefCell panic, so expected FAILED footer was absent. FUTURE-RETIRE-HARNESS-R1
+preserves failure and corrects expected diagnostic; complete retry passes.
+
+Single-agent future-retirement-self-review.txt records composition and remaining
+local-progress duty. Local event/sleep/deadline integration is next, including
+notification when the last held result drops; callers currently drive progress
+explicitly. C unchanged. Protected10/cleanexternal61dde37 and parked kernel base
+preserved. No native SQ or full AS3 qualification; heartbeat ACTIVE, AS4/MM0-MM4
+and Main/private-activation/128MiB guards remain.
+
+
+### Astra creator-local retirement progress, October 10
+
+The uninstalled Rust owner now signals a coalesced creator-thread pulse when a
+request/result or payload releases ownership, a pool/client retires, or a fixed
+terminal completion arrives. The bounded retirement queue consumes each pulse
+as one rotating sweep; zero and partial budgets preserve pending work. Busy
+entries become quiet until another event, avoiding an idle retry loop. A held
+READ result can release the last local owner and enable retirement without a
+new CQ. Existing retirement proof and storage-lifetime requirements still apply.
+
+Local-progress091022Z:7cases opt0/2,2compile-fail+control,6mutants. Composition
+regression091254Z:6cases; polling retirement091311Z:8cases, each opt0/2 with
+2compile-fail+control and6mutants. Each run has10source hashes/21commands;
+source/snapshot/HEAD/diff and raw diagnostics verified before documentation.
+Single-agent local-progress-self-review.txt records event coalescing, bounded
+sweeps, lifetime and callback checks. No new test/harness failure. C unchanged.
+
+Next is local event-loop/sleep/deadline integration with simulated events.
+This pulse performs no OS wake and is creator-thread only. Callers still invoke
+progress_notified and check needs_progress before sleep; backend readiness and
+retirement changes need explicit notification. No native or full AS3 gate is
+claimed. Protected10/cleanexternal61dde37 and parked kernel base preserved.
+SQ stays parked/unapplied; AS4/MM0-MM4, Main/private activation and128MiB guards
+remain. Heartbeat ACTIVE under continuing operator authorization.
+
+
+### Astra simulated local wait/deadline coordination, October 10
+
+The uninstalled Rust coordinator performs one bounded retirement turn and at
+most one wait. It registers interest before rechecking external readiness/time,
+then checks local ownership pulses last. An armed guard cleans up every return
+path; pending partial work prevents sleep. Spurious wakes retain the original
+absolute deadline and schedule progress. Timeout reports expiry without treating
+it as terminal completion or allowing storage reuse.
+
+local-wait091938Z:9cases opt0/2,2compile-fail+control,6mutants;11source hashes and
+21rawcommands/snapshots/HEAD/diff reverified before documentation. Owner drops
+during arm/readiness, event between recheck/wait, absolute deadlines, bounded
+budgets, error cleanup and retained active ownership are covered. No new failure.
+Single-agent local-wait-self-review.txt explains the limits: simulated event
+source only, no native atomic wait or actual sleeping-thread qualification.
+The future adapter must retain events until serviced and include runnable/CQ
+work. Existing ownership cores and C code are unchanged.
+
+Next independent bounded per-request deadline/cancellation bookkeeping and
+runnable-task composition. Protected10/cleanexternal61dde37 and parked kernel
+base preserved. SQ remains parked/unapplied, native/fullAS3 qualification gated;
+AS4/MM0-MM4, Main/private activation and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra fixed-request deadline/cancellation bookkeeping, October 10
+
+The uninstalled Rust fixed-owner cells now carry optional absolute deadlines and
+an abort-requested bit. Only prepublication configuration is allowed; active work
+cannot extend its deadline. A bounded rotating expiry scan and explicit request
+cancellation issue scope-wide abort at most once per owner. Drop after cancellation
+does not repeat that request. Completion metadata and storage remain retained;
+authentic later WRITE success is preserved. Publication signals local progress.
+
+Deadline092954Z:10cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands.
+Backing093013Z:20cases,6compile-fail+control,8mutants,5hashes/29commands. Typed
+093026Z:10cases,4compile-fail+control,6mutants,8hashes/23commands. All source,
+snapshot,HEAD/diff and raw diagnostics verified before documentation. C unchanged.
+
+DEADLINE-PULSE-TEST-R1: local-progress093034Z clean profiles passed, but the new
+publication pulse masked the missing-admission-signal mutant in combined tests.
+Added an isolated admission-before-publication assertion; retry093109Z passes
+8cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands. Failed evidence
+preserved. Single-agent deadline-self-review.txt records limits and test-gap fix.
+
+Next forward these APIs through Futures/retirement queue and compose with the
+simulated wait coordinator, then runnable tasks. Timers still require explicit
+FixedDriver expiry scans. Protected10/cleanexternal61dde37 and parked kernel base
+preserved. Native SQ stays parked; fullAS3/AS4/MM0-MM4, Main/private activation
+and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra Future/retirement timer and wait composition, October 10
+
+Uninstalled Rust Futures forward deadline/cancel to their owned typed requests.
+The retirement queue scans timers with an independent bounded rotating cursor,
+including retiring drivers. The wait adapter uses the earliest remaining request
+or outer deadline. Due requests left by a partial scan, or becoming due during
+arming, return Retry for another bounded turn; outer timeout remains separate.
+Cancellation alone never wakes a Future as completed or releases its storage.
+Publication during arming prevents waiting on an obsolete deadline.
+
+Timer-wait093908Z:9cases opt0/2,2compile-fail+control,6mutants,11hashes/21commands.
+Composition regression093920Z:6cases,10hashes/21commands; local-wait093929Z:
+9cases,11hashes/21commands, each with the same profiles/compile controls/mutants.
+All raw source/snapshot/HEAD/diff/diagnostics verified before documentation.
+Single-agent timer-wait-self-review.txt records work bounds and timer policy.
+No new failure; C unchanged. Native atomic wait remains an unimplemented adapter
+contract, and no actual sleeping-thread or complete async qualification is claimed.
+
+Next bounded runnable-task ownership/dispatch and readiness composition with the
+simulated wait coordinator. Protected10/cleanexternal61dde37 and parked kernel
+base preserved. SQ stays parked/unapplied; fullAS3/AS4/MM0-MM4, Main/private
+activation and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra bounded local task ownership and dispatch, October 10
+
+The uninstalled Rust dispatcher owns1..64task cells, checks capacity before its
+factory, and uses exact monotonic IDs for cancellation. Each admission gets its
+own atomic Waker flag; stale Wakers cannot wake a reused cell. Readiness is
+cleared before poll, preserving self-wake, and rotating dispatch visits each
+cell at most once per bounded turn. Completion/cancellation/unwind drops the
+owned Future; cancelling fixed Futures retains active storage until real proof.
+
+local-tasks094912Z:10cases opt0/2,2compile-fail+control,6mutants;12source hashes,
+21rawcommands,snapshots,HEAD/diff reverified before documentation. Self-wake,
+quiet tasks, stale handles/Wakers, unwind, capacity and actual fixed-Future
+ownership covered. Single-agent local-tasks-self-review.txt records limitations.
+No new failure; existing components/C unchanged. External Wakers may retain old
+flag allocations beyond live-task capacity; no native memory-accounting claim.
+
+Next compose task readiness with the simulated timer/wait coordinator's final
+pre-wait predicate. Wakers only set atomic flags; no OS wake or native atomic
+park is implemented. Protected10/cleanexternal61dde37 and parked kernel base
+preserved. SQ stays parked/unapplied; fullAS3/AS4/MM0-MM4, Main/private activation
+and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra local task/timer/retirement wait composition, October 10
+
+The uninstalled Rust task loop polls one bounded task quantum, then services
+bounded timers and retirement even while a task keeps itself runnable. Task
+readiness is checked before arming and after all event-source readiness/time
+callbacks. Zero/partial task budgets and wakes during those callbacks prevent
+sleep. Outer expiry prevents starting another task poll. Existing non-task wait
+interfaces retain their behavior through an empty runnable predicate.
+
+Task-loop095847Z:9cases opt0/2,2compile-fail+control,6mutants,13hashes/21commands.
+Local-wait095859Z and timer-wait095916Z regressions each9cases,11hashes/21commands,
+with the same profiles/controls/mutants. Source/snapshot/HEAD/diff/raw diagnostics
+verified before documentation. Actual fixed Futures exercise terminal delivery,
+held READ-result retirement and cancellation retention. Single-agent review in
+task-loop-self-review.txt; no failures. C/kernel/SQ unchanged.
+
+These are simulated creator-thread callback schedules. Concurrent wake after
+the last predicate still needs a native combined wake/atomic-park adapter; none
+is implemented or qualified. Next review independent AS3 lifecycle coverage,
+remaining non-native shutdown/drain and C/Rust parity gaps. Protected10,
+cleanexternal61dde37 and parked kernel base preserved. SQ stays parked/unapplied;
+fullAS3/AS4/MM0-MM4, Main/private activation and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra C deadline/cancellation parity, October 10
+
+Uninstalled C fixed-request owners now support prepared-only absolute deadlines,
+explicit scope-wide cancellation and bounded rotating expiry using existing64cells.
+An enabled bit distinguishes zero from no deadline. Explicit cancel, expiry and
+active-handle drop share one abort-requested bit; none releases active backing or
+request metadata. Authentic later WRITE success remains success, and completed
+READ views retain storage. Closed owners suppress backend abort; normal retirement
+continues due-work polling. These are simulated creator-thread components only.
+
+Host deadlines-c-20261010T101109Z:8cases, LLVM22ASan+UBSan and optimized NDEBUG
+core,6mutants. Typed regression101122Z:11cases/6mutants; backing101136Z:21cases/
+8mutants; retirement101143Z:8cases/6mutants, same two profiles. Source manifests,
+snapshots,HEAD/diff and all raw outcomes reverified before docs:13/13/7/15sources,
+25/25/25/27commands. No failed run. Single-agent self-review in
+owned-clients/c-deadline-self-review.txt; not an independent audit.
+
+Next forward C timers through the bounded retirement owner and review independent
+shutdown/drain coverage. No native wake/timer or completeAS3 qualification. Rust
+source unchanged; earlier Rust evidence remains scoped to its recorded snapshots.
+Protected10, exact clean external61dde37 and parked patch/restored kernel verified.
+SQ remains parked/unapplied; AS4/MM0-MM4/Main/private activation/128MiB guards remain.
+
+
+### Astra C retirement timer forwarding, October 10
+
+Uninstalled C retirement owner now polls deadlines across attached and retiring
+clients. Earliest deadline scans at most capacity*64cells. Expiry visits at most
+min(ring_budget,capacity)*min(fixed_budget,64), with a timer cursor independent
+of reclamation progress. Zero budgets issue no aborts; expiry never reclaims an
+entry or substitutes for terminal/local-retirement proof. C remains caller-polled.
+
+Host retirement-timers-c-20261010T101819Z:6scenarios, LLVM22ASan+UBSan and
+optimized NDEBUG-core,6mutants. Existing retirement regression101844Z:8scenarios,
+same profiles/6mutants. Each15source hashes/27rawcommands, snapshots and HEAD/diff
+reverified before docs. Tests cover both client states, separate cursors, zero/
+partial budgets, all64driver fairness, held READ, pending request across root
+shutdown, reused slots and no observed allocation during timer/progress rounds.
+No failures; single-agent self-review in owned-clients/c-retirement-timer-self-review.txt.
+
+Next audit remaining independent shutdown/drain coverage against approved AS3,
+mapping existing evidence before introducing mechanisms. Current C root destruction
+closes each driver and retains surviving request/result storage; it is not a native
+process-exit proof. Native SQ/atomic wait and completeAS3 remain gated. Protected10,
+clean exact external61dde37 and parked patch/restored kernel verified. No Main,
+private activation,128MiB change, AS4/MM0-MM4 advance or independent audit claim.
+
+
+### Astra independent shutdown coverage audit, October 10
+
+Audit mapped approved shutdown/drop/drain contracts to existing ownership tests;
+no new blocking shutdown API is needed for the simulated slice. Two new composed
+checks cover task-owner shutdown retaining retirement charge until proof and
+retirement-root shutdown waking a real task while another held READ survives.
+Runtime implementation unchanged. Read owned-clients/shutdown-coverage.txt and
+shutdown-coverage-audit.json for contracts, exact evidence and remaining boundaries.
+
+Combined shutdown-audit-20261010T102835Z passes all94tests opt0/2,2compile-fail+
+control,3shutdown mutants. Changed-source gaps prompted focused refreshes:
+retirement102855Z8cases,deadline102904Z10cases,progress102913Z8cases, each opt0/2,
+2compile-fail+control,6mutants. 13/10/10/10source hashes and15/21/21/21rawcommands
+verified before docs;14historical manifests/logs audited without relabeling their
+source coverage. No failures. Existing current C suites were not rerun.
+
+No further concrete gap identified in the permitted independent simulated
+fixed-I/O/cancellation/retirement slice. Next dependency is native integration,
+which remains gated by parked SQ. Preserve evidence and quietly monitor call0161/
+dependency changes; do not rerun unchanged suites or invent mechanisms to stay busy.
+CompleteAS3,AS4,MM0-MM4 remain incomplete; heartbeat ACTIVE. Protected10, clean
+external61dde37 and parked patch/restored kernel preserved. Single-agent self-review,
+no independent audit, Main landing, private activation or128MiB protection change.
+
+### Corona, October 12: SQ-1, NA-1 and the first lever-pinned EL0 probe
+
+Counted from test.c's table rows (one row per registered test, the same derived
+count the guest runners require). SQ-1 and NA-1 brought the suite to 1869
+registrations, and NA-2a makes it 1870.
+
+The new test is `loom.bridge_probe`. It spawns `/bin/loom-bridge-probe` from the
+ramfs and requires the exit status that the kernel's own qualification lever
+implies: 70 without it, 71 with it ([[sub-kernel-loom-bridge]]). So the same
+registration passes on both images for different reasons, and a PASS line alone
+does not say which kernel booted.
+
+It was the first probe-spawning test to fail rather than skip when its binary
+is absent from a ramfs that carries `bin/joey`; since 2026-10-22 every one does,
+through `test_probe_lookup`. The guest runner also requires:
+- the probe's own verdict line, the status line
+  `loom-bridge-probe status=N expected=N`, and the ring line
+  `loom-bridge-probe rings made=N retired=N expected=N`, each exactly once;
+- that the baked binary matches the built one.
+
+**Append (2026-10-14).** New tests: `extinction.tx_gate_admits_only_the_owner_once_claimed`,
+`extinction.tx_wait_waits_out_a_peer_byte`, `vivarium.t1_keeps_guest_registers`.
+
+**Append (2026-10-22).** New test: `dtb.bootargs_whole_words` ([[sub-kernel-dtb]]).

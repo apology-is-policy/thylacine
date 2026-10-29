@@ -1,0 +1,30 @@
+[
+  {
+    "compiler": "/usr/bin/clang",
+    "cmd": [
+      "/usr/bin/clang",
+      "-fsanitize=address,undefined",
+      "-isysroot",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "work/oct5-as-r9/astra-takeover/close-draft/queue-control-1/runtime-reproducer.c",
+      "-o",
+      "work/oct5-as-r9/astra-takeover/close-draft/queue-control-1/runtime-apple.exe"
+    ],
+    "rc": "timeout-before-MAIN",
+    "output": ""
+  },
+  {
+    "compiler": "/opt/homebrew/opt/llvm@22/bin/clang",
+    "cmd": [
+      "/opt/homebrew/opt/llvm@22/bin/clang",
+      "-fsanitize=address,undefined",
+      "-isysroot",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "work/oct5-as-r9/astra-takeover/close-draft/queue-control-1/runtime-reproducer.c",
+      "-o",
+      "work/oct5-as-r9/astra-takeover/close-draft/queue-control-1/runtime-llvm22.exe"
+    ],
+    "rc": 0,
+    "output": "MAIN\n"
+  }
+]

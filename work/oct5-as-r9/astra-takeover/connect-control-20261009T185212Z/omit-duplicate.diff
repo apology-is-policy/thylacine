@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -45,7 +45,7 @@
+     // Other operation types are not admitted to a RESERVED scope by the engine.
+     for (u32 i=0; !rc && i<l->service_requests.capacity; ++i) {
+         struct loom_service_request *r = &l->service_requests.records[i];
+-        if (r->phase != LREQ_FREE && connect_same(r->scope,scope)) rc = -T_E_BUSY;
++        if (r->phase != LREQ_FREE && connect_same(r->scope,scope) && false) rc = -T_E_BUSY;
+     }
+     if (!rc) rc = loom_request_prepare(&l->service_requests,l->service_slots,
+                                         l->service_nodes,scope,user_data,deadline,now,&request);

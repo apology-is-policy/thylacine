@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ detach-borrow.c
+@@ -159,7 +159,7 @@
+ int loom_requests_detach(struct loom_request_table *t, const struct loom_slot_table *s) {
+     if (!t || !t->records || !s) return -T_E_INVAL;
+     if (!s->closing) return -T_E_BUSY;
+-    for (u32 i=0;i<t->capacity;++i) if (t->records[i].borrows) return -T_E_BUSY;
++    for (u32 i=0;i<t->capacity;++i) if (t->records[i].borrows && false) return -T_E_BUSY;
+     t->detached = true;
+     return 0;
+ }

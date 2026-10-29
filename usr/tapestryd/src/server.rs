@@ -93,6 +93,9 @@
 // event overflowing the bounded queue WEDGES the surface (force-retire +
 // CLOSE), never blocks and never drops a control event for a live client.
 
+#[path = "interaction.rs"]
+mod interaction;
+
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -883,6 +886,8 @@ pub const TEV_LAYOUT: u16 = 10;
 pub const TEV_PTR_LEAVE: u16 = 11;
 /// HALCYON-INSTRUMENT 9.3 (I-7): a picker/help chord to the rail owner.
 pub const TEV_CHORD: u16 = 12;
+/// TAPESTRY-STORAGE v1: code 1 suspend / 2 resume, value+rune = u64 token.
+pub const TEV_STORAGE: u16 = 13;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -957,6 +962,9 @@ impl FrameIntent {
 }
 
 struct Surface {
+    // Pixel residency is independent of this surface/hosting incarnation.
+    storage: tapestryd::storage::Storage,
+    cursor: libhalcyon::cursor::Shape,
     gen: u32,        // the slot-reuse guard (net-3d); fids capture it at bind
     owner_conn: u64, // F2: the minting conn's id
     /// The minting conn's peer PROCESS (the kernel's per-Proc `stripes`
@@ -1730,6 +1738,11 @@ pub struct Comp {
     probe_count: u32,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
+    seat_coordinator: Option<crate::seat_coordinator::Owner>,
+    interaction_seat: Option<u64>,
+    interactions: [Option<interaction::Binding>; pane::MAX_PANES],
+    ordered: [Option<interaction::Feed>; MAX_CONNS],
+    next_ordered: u64,
     screen: Option<Screen>,
     scanout: Scanout,
     /// Warp-4: the resource id the DEVICE currently scans out (0 = none/
@@ -1859,6 +1872,9 @@ pub struct Comp {
     /// seeded with the stage-0 defaults, remapped by the gated `chord`
     /// ctl verb. Also holds the inter-pane `gaps` inset.
     chords: Chords,
+    /// Last hardware-acknowledged normal pointer, invalidated at seat resume.
+    cursor_sent: Option<(u8, u16, u32, u32)>,
+    cursor_failed: bool,
     /// The pointer's last display position (G-7c; tablet-absolute, scaled
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
@@ -2477,6 +2493,11 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
+    pub fn start_seat_coordinator(&mut self) -> Result<(), libdriver::Error> {
+        self.seat_coordinator = Some(crate::seat_coordinator::start().map_err(|_|libdriver::Error::Hardware)?);
+        Ok(())
+    }
+
     pub fn new(gpu: Gpu, declared: Option<u16>, bundle: libhalcyon::instrument::Bundle) -> Comp {
         let theme = bundle.theme;
         let (derived, src) = match declared {
@@ -2546,6 +2567,11 @@ impl Comp {
             probe_tick: u64::MAX,
             probe_count: 0,
             layout: Layout::new(),
+            seat_coordinator: None,
+            interaction_seat: None,
+            interactions: core::array::from_fn(|_| None),
+            ordered: core::array::from_fn(|_| None),
+            next_ordered: 1,
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
@@ -2575,6 +2601,8 @@ impl Comp {
             menu_reason: "retire",
             chord_down: [0; KEYCODE_SPAN / 64],
             chords: Chords::new(),
+            cursor_sent: None,
+            cursor_failed: false,
             ptr_x: 0,
             abs_last: None,
             ptr_over: None,
@@ -2643,9 +2671,10 @@ impl Comp {
         }
     }
 
-    pub fn next_conn_id(&mut self) -> u64 {
-        self.conn_seq = self.conn_seq.wrapping_add(1);
-        self.conn_seq
+    pub fn next_conn_id(&mut self) -> Option<u64> {
+        // Connection identities outlive individual fids and must never repeat.
+        self.conn_seq = self.conn_seq.checked_add(1)?;
+        Some(self.conn_seq)
     }
 
     fn surf(&self, n: usize) -> Option<&Surface> {
@@ -2673,8 +2702,11 @@ impl Comp {
     /// Mint a surface slot for `conn_id` (F9 caps enforced by the caller).
     fn mint(&mut self, conn_id: u64, peer: u64, principal: u32) -> Option<usize> {
         let n = self.surfaces.iter().position(|s| s.is_none())?;
-        self.gen_seq = self.gen_seq.wrapping_add(1);
+        // Surface incarnations used by pending admission must never repeat.
+        self.gen_seq = self.gen_seq.checked_add(1)?;
         self.surfaces[n] = Some(Surface {
+            storage: tapestryd::storage::Storage::new(),
+            cursor: libhalcyon::cursor::Shape::Arrow,
             gen: self.gen_seq,
             owner_conn: conn_id,
             owner_peer: peer,
@@ -3019,6 +3051,125 @@ impl Comp {
                 }
             }
         }
+    }
+
+    /// Storage visibility is placement, not focus or missed FRAME ticks.
+    fn storage_visible(&self, n: usize) -> bool {
+        self.surface_target(n).is_some() && self.surf(n).is_some_and(|s| !s.backgrounded)
+    }
+    fn storage_unbound(&self, n: usize) -> bool {
+        self.surf(n).is_some_and(|s| s.gl_src.is_none() && (self.bound_res == 0 ||
+            (!s.res_ids.contains(&self.bound_res) && !s.old_weave.as_ref()
+                .is_some_and(|(_, ids)| ids.contains(&self.bound_res)))))
+    }
+    fn storage_sync(&mut self) {
+        let mut wedged = Vec::new();
+        for n in 0..MAX_SURFACES {
+            if !self.surf(n).is_some_and(|s| s.storage.enabled()) { continue; }
+            let visible = self.storage_visible(n);
+            let unbound = self.storage_unbound(n);
+            let offer = self.surf_mut(n).unwrap().storage.reconcile(visible, unbound);
+            if let Some(o) = offer {
+                let ev = Tevent { kind: TEV_STORAGE, code: o.kind as u16,
+                    value: o.token as u32, rune: (o.token >> 32) as u32,
+                    mods: 0, flags: 0, tick: self.tick };
+                if !self.push_event(n, ev) { wedged.push(n); }
+            }
+        }
+        for n in wedged { self.retire(n); }
+    }
+    /// Caller already proved no bound scanout and invalidated pixel admission.
+    /// Existing Lictor pins survive ambiguous backend retire completion; neither
+    /// this handle close nor the client's later clunk bypasses those references.
+    fn storage_retire_pixels(&mut self, n: usize) {
+        let s = self.surf_mut(n).unwrap();
+        let current = s.weave.take();
+        let ids = core::mem::replace(&mut s.res_ids, [0; WEAVE_SLOTS as usize]);
+        let old = s.old_weave.take();
+        s.shown_slot = None;
+        s.held = None;
+        s.slot_stride = 0;
+        s.comp_attached = false;
+        s.res_stale = [true; WEAVE_SLOTS as usize];
+        s.ack_deferred = false;
+        s.slots_presented = 0;
+        s.patchwork = false;
+        if let Some(w) = current { self.release_gen(&w, &ids); }
+        if let Some((w, ids)) = old { self.release_gen(&w, &ids); }
+    }
+    fn storage_ctl(&mut self, n: usize, command: &str) -> Result<(), u32> {
+        if command == "1" {
+            let s = self.surf_mut(n).ok_or(p9::E_NOENT)?;
+            if s.storage.enabled() { return Ok(()); }
+            if s.weave.is_none() || s.chrome_bind.is_some() || s.is_menu || s.is_status || s.is_rail
+                || s.gl_src.is_some() { return Err(p9::E_INVAL); }
+            s.storage.enable();
+            self.storage_sync();
+            return Ok(());
+        }
+        let mut words = command.split_ascii_whitespace();
+        let verb = words.next().ok_or(p9::E_INVAL)?;
+        let raw = words.next().ok_or(p9::E_INVAL)?;
+        if !raw.bytes().all(|b| b.is_ascii_digit()) || words.next().is_some() { return Err(p9::E_INVAL); }
+        let token: u64 = raw.parse().map_err(|_| p9::E_INVAL)?;
+        self.storage_sync(); // current placement, including a visibility reversal
+        match verb {
+            "suspend" => {
+                let safe = !self.storage_visible(n) && self.storage_unbound(n);
+                self.surf_mut(n).ok_or(p9::E_NOENT)?.storage.suspend(token, safe).map_err(|_| E_AGAIN)?;
+                self.storage_retire_pixels(n);
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: storage suspended surface {} token {}", n, token);
+            }
+            "resume" => {
+                if !self.storage_visible(n) { return Err(E_AGAIN); }
+                let target = self.surface_target(n).ok_or(E_AGAIN)?;
+                self.surf_mut(n).ok_or(p9::E_NOENT)?.storage.resume(token).map_err(|_| E_AGAIN)?;
+                let allocated = self.alloc_weave(n, target.w, target.h);
+                let (weave, stride, ids, attached) = match allocated {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = self.surf_mut(n).unwrap().storage.abort(token);
+                        return Err(e);
+                    }
+                };
+                let s = self.surf_mut(n).unwrap();
+                s.weave = Some(weave); s.slot_stride = stride; s.res_ids = ids;
+                s.comp_attached = attached; s.w = target.w; s.h = target.h;
+                s.state = SurfState::Woven; s.res_stale = [true; WEAVE_SLOTS as usize];
+                s.shown_slot = None; s.held = None; s.offered = None;
+                s.slots_presented = 0; s.patchwork = false; s.presents = 0;
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: storage resumed surface {} token {} generation {} {}x{}",
+                    n, token, s.storage.generation(), s.w, s.h);
+                self.reconcile();
+            }
+            "abort" => {
+                if !self.storage_unbound(n) { return Err(E_AGAIN); }
+                self.surf_mut(n).ok_or(p9::E_NOENT)?.storage.abort(token).map_err(|_| E_AGAIN)?;
+                self.storage_retire_pixels(n);
+                // Repaint the compositor floor, never retain a failed image.
+                self.geom_sig = self.geom_sig.wrapping_add(1);
+                self.reconcile();
+            }
+            _ => return Err(p9::E_INVAL),
+        }
+        Ok(())
+    }
+    fn storage_presented(&mut self, n: usize) {
+        let pending = match self.surf_mut(n) {
+            Some(s) => {
+                s.storage.presented();
+                s.offered.filter(|(_, w, h)| *w != s.w || *h != s.h)
+            }
+            None => return,
+        };
+        // A configure can arrive during a resume's first repaint, with no
+        // displaced weave to trigger the ordinary deferred-resize re-offer.
+        if let Some((_, w, h)) = pending {
+            if !self.emit_configure_to(n, w, h) { self.retire(n); return; }
+        }
+        self.reconcile();
     }
 
     fn release_gen(&mut self, w: &Weave, res_ids: &[u32; WEAVE_SLOTS as usize]) {
@@ -5275,7 +5426,7 @@ impl Comp {
 
     fn resize_ack_inner(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
         let s = self.surf(n).ok_or(p9::E_BADF)?;
-        if s.weave.is_none() {
+        if s.weave.is_none() && (!s.storage.enabled() || s.storage.resident()) {
             return Err(p9::E_INVAL); // no generation to reweave
         }
         let (os, ow, oh) = s.offered.ok_or(p9::E_INVAL)?;
@@ -5292,6 +5443,11 @@ impl Comp {
         if w != ow || h != oh {
             return Err(p9::E_INVAL); // the ack must echo the offer
         }
+        if s.storage.enabled() && !s.storage.resident() {
+            let s = self.surf_mut(n).unwrap();
+            s.w = w; s.h = h; s.offered = None;
+            return Ok(()); // semantic geometry only, no hidden allocation
+        }
         if w == s.w && h == s.h {
             // A same-size offer (the redraw request) acked: legal no-op.
             self.surf_mut(n).unwrap().offered = None;
@@ -5304,10 +5460,13 @@ impl Comp {
             return Err(E_AGAIN);
         }
 
+        let next_storage = s.storage.resized().map_err(|_| E_AGAIN)?;
         // Reweave: mint the new generation FIRST (a failure leaves the
         // current one untouched and the offer standing for a retry).
         let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
         let s = self.surf_mut(n).unwrap();
+        s.storage = next_storage;
+        if s.storage.enabled() { s.shown_slot = None; }
         let old = s.weave.take().unwrap();
         let old_res = s.res_ids;
         s.old_weave = Some((old, old_res));
@@ -7576,7 +7735,8 @@ impl Comp {
             // must agree: a lone foreground leaf beside a zero-rect
             // backgrounded one is borderless (recompute counts foreground
             // leaves), and this conjunct is the guard that it stayed so.
-            let full = self.surf(n).is_some_and(|s| s.w == dw && s.h == dh)
+            let full = self.surf(n).is_some_and(|s| s.w == dw && s.h == dh
+                && (!s.storage.enabled() || s.storage.phase() == tapestryd::storage::Phase::Resident))
                 && active_vis[0].2
                     == (Rect {
                         x: 0,
@@ -7806,6 +7966,7 @@ impl Comp {
             }
         }
         self.focus_sync();
+        self.storage_sync();
     }
 
     /// Emit the TEV_FOCUS lost/gained pair when the focused surface
@@ -7821,6 +7982,7 @@ impl Comp {
         }
         let prev = self.last_focus;
         self.last_focus = cur; // set first: a wedge-retire below re-enters
+        if let Some(n) = prev { self.interaction_focus_lost(n); }
         let t = self.tick;
         let focus_ev = |value: u32| Tevent {
             kind: TEV_FOCUS,
@@ -8750,7 +8912,19 @@ impl Comp {
     /// the intermediate passes (a crash with N tiles is one transition to
     /// `Direct(console)`, not N-1 composed passes of dead tiles beside it);
     /// the last retire already sees a declared conn hosting nothing.
+    fn retire_seat_declaration(&mut self, conn_id: u64) {
+        if let Some(owner) = &self.seat_coordinator {
+            if owner.state().and_then(|s| s.table.lock().declaration_gone(conn_id)
+                .map_err(|_| libthyla_rs::err::Error::Io)).is_err() {
+                // Console writes may park during the trusted episode.
+                unsafe { libthyla_rs::t_exit_group(1); }
+            }
+        }
+    }
     fn retire_conn(&mut self, conn_id: u64) {
+        // Before any surface/GPU teardown that might park during SAK.
+        self.retire_seat_declaration(conn_id);
+        self.ordered_remove(conn_id);
         let seat = self.session_declared(conn_id);
         self.teardown_conn = Some(conn_id);
         for n in 0..MAX_SURFACES {
@@ -9036,6 +9210,14 @@ impl Comp {
                 return true;
             }
         }
+        if ev.kind == TEV_STORAGE {
+            // Latest state replaces an unread offer; ctl validates delivered
+            // old tokens too. No queue growth under repeated visibility flips.
+            if let Some(old) = s.events.iter_mut().find(|e| e.kind == TEV_STORAGE) {
+                *old = ev;
+                return true;
+            }
+        }
         if ev.kind == TEV_CONFIGURE {
             // Unacked CONFIGUREs coalesce -- only the latest serial matters
             // (section 18.3): replace a queued unread one WHOLESALE.
@@ -9175,6 +9357,7 @@ impl Comp {
         // per frame -- the motion between ticks coalesces to its last
         // position; the release and Escape apply the final one themselves.
         self.drag_apply();
+        self.cursor_sync();
         // Warp-C C-3: a GPU-composition latch asked for a structural repaint
         // (chrome + the redraw CONFIGURE fan). Run it HERE, at the tick,
         // never inline in the present dispatch that found the latch: the
@@ -9187,6 +9370,7 @@ impl Comp {
             self.reconcile();
         }
         self.comp_replay_deferred_imports();
+        self.storage_sync();
         // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
         // FRAME -- that is exactly what makes the console renderer's FRAME-driven
         // loop go dormant while the session owns the display.
@@ -9194,7 +9378,7 @@ impl Comp {
             .layout
             .visible_hosted()
             .iter()
-            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded && s.storage.resident()))
             .map(|v| v.1)
             .collect();
         vis.extend(self.visible_chrome().iter().map(|v| v.0));
@@ -9268,6 +9452,9 @@ impl Comp {
     /// follow their original live surface/generation; authorization Enter/Escape
     /// never enter this path. Layout and surviving focus remain unchanged.
     pub fn seat_resumed(&mut self) {
+        // Lictor hid the normal plane before trusted activation. Even an
+        // unchanged pointer must be republished for this normal seat epoch.
+        self.cursor_sent = None;
         for code in 0..KEYCODE_SPAN {
             if self.key_owner[code] != 0 { self.key_event(code as u16, 0, 0, 0); }
         }
@@ -9575,6 +9762,49 @@ impl Comp {
                 Some((m.n, sx, sy))
             }
             None => self.ptr_target(px, py),
+        }
+    }
+
+    /// Resolve the shape afresh from live surface ownership each frame: slot
+    /// reuse, layout changes, menu dismissal and scale changes cannot leave a
+    /// stale client's shape latched on another surface. No saved backdrop.
+    fn cursor_sync(&mut self) {
+        use libhalcyon::cursor::Shape;
+        if self.cursor_failed || self.gpu.width == 0 || self.gpu.height == 0 {
+            return;
+        }
+        self.ptr_x = self.ptr_x.min(self.gpu.width - 1);
+        self.ptr_y = self.ptr_y.min(self.gpu.height - 1);
+        let track = if self.menu.is_none() {
+            self.drag
+                .map(|d| (d.cid, d.idx))
+                .or_else(|| self.track_under(self.ptr_x, self.ptr_y))
+        } else {
+            None
+        };
+        let shape = track
+            .and_then(|(id, _)| self.layout.slot_of_id(id))
+            .and_then(|slot| self.layout.get(slot))
+            .and_then(|p| match p.kind {
+                pane::Kind::Container { mode: Mode::SplitH, .. } => Some(Shape::ResizeHorizontal),
+                pane::Kind::Container { mode: Mode::SplitV, .. } => Some(Shape::ResizeVertical),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                self.ptr_route(self.ptr_x, self.ptr_y)
+                    .and_then(|(n, _, _)| self.surf(n))
+                    .map_or(Shape::Arrow, |s| s.cursor)
+            });
+        let state = (shape as u8, self.scale, self.ptr_x, self.ptr_y);
+        if self.cursor_sent == Some(state) {
+            return;
+        }
+        match self.gpu.cursor(state.0, state.1, state.2, state.3, true) {
+            Ok(()) => self.cursor_sent = Some(state),
+            Err(_) => {
+                self.cursor_failed = true;
+                say!("tapestryd: pointer backend failed; cursor updates stopped");
+            }
         }
     }
 
@@ -10232,7 +10462,12 @@ struct Fid {
     path: u64,
     gen: u32, // the surface generation captured at bind (0 for static qids)
     opened: bool,
+    pixel_gen: u64, // capture at open; checked only by opted-in pixel files
+    interaction: Option<interaction::Transaction>,
 }
+// Includes the exact request/decision cache; fixed across all eight connections.
+const _: () = assert!(core::mem::size_of::<Fid>() <= 160);
+const _: () = assert!(MAX_CONNS * MAX_FIDS * 160 == 640 * 1024);
 
 enum Disp {
     Reply(usize),
@@ -15419,6 +15654,8 @@ pub struct Conn {
     out_buf: Vec<u8>,
     defer: bool,
     pending_reads: Vec<PendingRead>,
+    ordered_fid: Option<u32>,
+    ordered_read: Option<(u32, u16)>,
     pending_fences: Vec<PendingFence>,
     pending_ring_fences: Vec<PendingRingFence>,
     /// Per-fid generation pins for the regenerating text files (ctl,
@@ -15432,6 +15669,13 @@ pub struct Conn {
     /// Entries die at clunk and at session reset (Tversion) and conn
     /// death; a fresh offset-0 read replaces the pin.
     text_snaps: Vec<(u32, u64, Vec<u8>)>,
+    // One HSR transaction per connection, not per 512-fid table. The highest
+    // request survives clunk so fid reuse cannot replay an old reservation.
+    #[cfg(feature = "test-mode")]
+    seat_park_next: bool,
+    seat_fid: Option<u32>,
+    seat_transaction: Option<(libhalcyon::seat_control::Request,
+        core::result::Result<libhalcyon::seat_control::Reply, u32>)>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -15516,9 +15760,15 @@ impl Conn {
             out_buf: Vec::new(),
             defer: false,
             pending_reads: Vec::new(),
+            ordered_fid: None,
+            ordered_read: None,
             pending_fences: Vec::new(),
             pending_ring_fences: Vec::new(),
             text_snaps: Vec::new(),
+            #[cfg(feature = "test-mode")]
+            seat_park_next: false,
+            seat_fid: None,
+            seat_transaction: None,
         }
     }
 
@@ -15537,6 +15787,8 @@ impl Conn {
                 path,
                 gen,
                 opened: false,
+                interaction: None,
+                pixel_gen: 0,
             });
             return true;
         }
@@ -15547,6 +15799,8 @@ impl Conn {
                     path,
                     gen,
                     opened: false,
+                    interaction: None,
+                pixel_gen: 0,
                 });
                 true
             }
@@ -15566,6 +15820,11 @@ impl Conn {
     }
 
     fn fid_clunk(&mut self, comp: &mut Comp, fid: u32) {
+        if self.ordered_fid == Some(fid) {
+            self.ordered_fid = None; self.ordered_read = None;
+            comp.ordered_remove(self.conn_id);
+        }
+        if self.seat_fid == Some(fid) { self.seat_fid = None; }
         let mut gone: Option<Fid> = None;
         if let Some(i) = self.fid_find(fid) {
             gone = self.fids[i].take();
@@ -15607,11 +15866,14 @@ impl Conn {
         comp.retire_conn(self.conn_id);
         comp.warp_retire_conn(self.conn_id);
         self.fids = [NO_FID; MAX_FIDS];
+        self.seat_fid = None;
         // A new session gets a new one-shot budget (fid-lift audit F5): the
         // reset empties the table, so a table that fills AGAIN deserves its
         // own witness -- a spent latch here silenced the second fill.
         self.fid_full_said = false;
         self.pending_reads.clear();
+        self.ordered_fid = None;
+        self.ordered_read = None;
         self.pending_fences.clear();
         self.pending_ring_fences.clear();
         self.text_snaps.clear();
@@ -15624,6 +15886,8 @@ impl Conn {
         comp.retire_conn(self.conn_id);
         comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
+        self.ordered_fid = None;
+        self.ordered_read = None;
         self.pending_fences.clear();
         self.pending_ring_fences.clear();
         self.text_snaps.clear();
@@ -16144,6 +16408,8 @@ impl Conn {
                 path,
                 gen,
                 opened: true,
+                interaction: None,
+                pixel_gen: 0,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16168,6 +16434,8 @@ impl Conn {
                 path,
                 gen: 0,
                 opened: true,
+                interaction: None,
+                pixel_gen: 0,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16188,6 +16456,8 @@ impl Conn {
                 path,
                 gen: 0,
                 opened: true,
+                interaction: None,
+                pixel_gen: 0,
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
@@ -16223,6 +16493,10 @@ impl Conn {
         if is_pane(f.path) && comp.layout.slot_of_id(pane_id(f.path)).is_none() {
             return self.err(tag, p9::E_NOENT);
         }
+        let pixel_gen = if is_surf(f.path) {
+            comp.surf(surf_n(f.path)).map_or(0, |s| s.storage.generation())
+        } else { 0 };
+        self.fids[i].as_mut().unwrap().pixel_gen = pixel_gen;
         self.fids[i].as_mut().unwrap().opened = true;
         let q = self.qid_of(f.path);
         p9::build_rlopen(&mut self.out_buf, tag, &q, 0)
@@ -16244,6 +16518,30 @@ impl Conn {
         let cap = ((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4)).min(a.count as usize);
 
         if f.path == P_CTL {
+            if self.ordered_fid == Some(a.fid) {
+                if a.offset != 0 || cap < libhalcyon::interaction_events::RECORD_BYTES || self.ordered_read.is_some() {
+                    return self.err(tag,p9::E_INVAL);
+                }
+                return match comp.ordered_pop(self.conn_id) {
+                    Ok(Some(record)) => p9::build_rread(&mut self.out_buf,tag,&record.encode()),
+                    Ok(None) => {self.ordered_read=Some((a.fid,tag)); self.defer=true; Ok(0)},
+                    Err(e) => self.err(tag,e),
+                };
+            }
+            if self.seat_fid == Some(a.fid) {
+                let (_, result) = self.seat_transaction.ok_or(())?;
+                let reply = match result { Ok(r) => r.encode(), Err(e) => return self.err(tag,e) };
+                let off = usize::try_from(a.offset).unwrap_or(usize::MAX).min(reply.len());
+                let end = off.saturating_add(cap).min(reply.len());
+                return p9::build_rread(&mut self.out_buf,tag,&reply[off..end]);
+            }
+
+            if let Some(transaction)=f.interaction {
+                let reply = match transaction.result { Ok(b) => b, Err(e) => return self.err(tag,e) };
+                let off=(a.offset as usize).min(reply.len());
+                let end=off.saturating_add(cap).min(reply.len());
+                return p9::build_rread(&mut self.out_buf,tag,&reply[off..end]);
+            }
             // `display W H` first: the line a client parses to size a
             // fullscreen create (placement stays hidden -- D5 -- but the
             // DISPLAY geometry is global, not placement).
@@ -16263,6 +16561,14 @@ impl Conn {
                     comp.menu_text()
                 ),
             );
+            match comp.cursor_sent {
+                Some((shape, scale, x, y)) => {
+                    let name = libhalcyon::cursor::Shape::from_code(shape).unwrap().name();
+                    let _ = core::fmt::write(&mut s, format_args!("cursor {} {} {} {} {}\n",
+                        name, scale, x, y, if comp.cursor_failed { "failed" } else { "ready" }));
+                }
+                None => s.push_str(if comp.cursor_failed { "cursor failed\n" } else { "cursor pending\n" }),
+            }
             // Warp-C C-3: which composed-pixel path presents are taking,
             // and whether the GPU one latched off. Both paths must stay
             // live wherever the seam exists (4.5.9), so a silent slide to
@@ -17137,7 +17443,7 @@ impl Conn {
             }
             FK_WEAVE => {
                 let surf = comp.surf(n).unwrap();
-                if surf.state == SurfState::Minted {
+                if surf.state == SurfState::Minted || surf.weave.is_none() || !surf.storage.admits(f.pixel_gen) {
                     return self.err(tag, p9::E_INVAL);
                 }
                 let mut s = String::new();
@@ -17413,6 +17719,40 @@ impl Conn {
         }
     }
 
+    fn seat_reservation(&mut self, comp: &Comp, fid: u32, bytes: &[u8]) -> core::result::Result<(), u32> {
+        use libhalcyon::seat_control::{Op, Peer, Reply, Request};
+        let q = Request::decode(bytes).ok_or(p9::E_INVAL)?;
+        if !matches!(q.op,Op::Reserve|Op::Withdraw) { return Err(p9::E_INVAL); }
+        if self.seat_fid.is_some_and(|old| old != fid) { return Err(p9::E_BUSY); }
+        if let Some((old,result)) = self.seat_transaction {
+            if old == q { return if self.seat_fid == Some(fid) { result.map(|_|()) } else { Err(p9::E_INVAL) }; }
+            if q.request <= old.request { return Err(p9::E_INVAL); }
+        }
+        let result = (|| {
+            let mut info = TSrvPeerInfo::default();
+            if !comp.session_declared(self.conn_id) || self.peer_stripes == 0
+                || unsafe { t_srv_peer(self.handle,&mut info) } != 0
+                || info.alive != 1 || info.stripes != self.peer_stripes { return Err(p9::E_PERM); }
+            let shared = comp.seat_coordinator.as_ref().ok_or(p9::E_BUSY)?
+                .state().map_err(|_|E_IO)?;
+            let mut table = shared.table.lock();
+            let peer = Peer {stripes:info.stripes,declaration:self.conn_id};
+            let state = match q.op {
+                Op::Reserve => table.reserve(peer).map_err(crate::seat_coordinator::errno)?,
+                Op::Withdraw => {
+                    let mut state = table.reservation(peer,q.registration).map_err(crate::seat_coordinator::errno)?;
+                    table.withdraw(peer,q.registration).map_err(crate::seat_coordinator::errno)?;
+                    state.enabled=false;
+                    state
+                }
+                _ => return Err(p9::E_INVAL),
+            };
+            Ok(Reply {op:q.op,request:q.request,state})
+        })();
+        self.seat_fid=Some(fid); self.seat_transaction=Some((q,result));
+        result.map(|_|())
+    }
+
     fn h_write(&mut self, comp: &mut Comp, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
@@ -17428,6 +17768,41 @@ impl Conn {
         }
 
         if f.path == P_CTL {
+            if a.data.starts_with(b"HIO1") {
+                if a.offset != 0 || a.data != libhalcyon::interaction_events::SELECT || f.interaction.is_some()
+                    || self.seat_fid == Some(a.fid) || self.ordered_fid.is_some()
+                    || !self.peer_is_declared_session(comp) {
+                    return self.err(tag,p9::E_PERM);
+                }
+                return match comp.ordered_install(self.conn_id) {
+                    Ok(()) => {self.ordered_fid=Some(a.fid); p9::build_rwrite(&mut self.out_buf,tag,a.count)},
+                    Err(e) => self.err(tag,e),
+                };
+            }
+            if self.ordered_fid == Some(a.fid) {
+                if a.offset != 0 {return self.err(tag,p9::E_INVAL);}
+                return match self.ordered_control(comp,i,a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf,tag,a.count),
+                    Err(e) => self.err(tag,e),
+                };
+            }
+            if a.data.starts_with(b"HSR1") {
+                if a.offset != 0 || f.interaction.is_some() {return self.err(tag,p9::E_INVAL);}
+                return match self.seat_reservation(comp,a.fid,a.data) {
+                    Ok(())=>p9::build_rwrite(&mut self.out_buf,tag,a.count),
+                    Err(e)=>self.err(tag,e),
+                };
+            }
+            if self.seat_fid == Some(a.fid) {return self.err(tag,p9::E_BUSY);}
+
+            if a.data.starts_with(b"HIA1") {
+                if a.offset!=0 {return self.err(tag,p9::E_INVAL);}
+                return match self.interaction_control(comp,i,a.data) {
+                    Ok(())=>p9::build_rwrite(&mut self.out_buf,tag,a.count),
+                    Err(e)=>self.err(tag,e),
+                };
+            }
+            if f.interaction.is_some() { return self.err(tag, p9::E_BUSY); }
             return match self.global_ctl(comp, a.data) {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
@@ -17686,6 +18061,35 @@ impl Conn {
                 Err(e) => self.err(tag, e),
             },
             FK_PRESENT => {
+                if !comp.surf(n).is_some_and(|s| s.weave.is_some() && s.storage.admits(f.pixel_gen)) {
+                    return self.err(tag, p9::E_BADF);
+                }
+                let repainting = comp.surf(n).is_some_and(|s| s.storage.enabled()
+                    && s.storage.phase() == tapestryd::storage::Phase::Repainting);
+                #[cfg(feature = "test-mode")]
+                if core::mem::take(&mut self.seat_park_next) {
+                    // Deterministic qualification only: hold this owned present
+                    // until the independent coordinator observes QUIESCING,
+                    // then issue a real ordinary GPU RPC. No completion or
+                    // acknowledgement is synthesized by this fixture.
+                    let end = libthyla_rs::time::monotonic_ns() + 4_000_000_000;
+                    loop {
+                        let phase = comp.seat_coordinator.as_ref()
+                            .and_then(|o| o.state().ok())
+                            .and_then(|s| {
+                                let reply = self.seat_transaction.as_ref()?.1.as_ref().ok()?;
+                                s.table.lock().reservation(libhalcyon::seat_control::Peer {
+                                    stripes: self.peer_stripes, declaration: self.conn_id,
+                                }, reply.state.registration).ok().map(|s| s.phase)
+                            });
+                        if phase == Some(1) { break; }
+                        if libthyla_rs::time::monotonic_ns() >= end {
+                            return self.err(tag, E_IO);
+                        }
+                        unsafe { libthyla_rs::t_poll(core::ptr::null_mut(), 0, 10); }
+                    }
+                    if comp.gpu.query_display_info().is_err() { return self.err(tag, E_IO); }
+                }
                 // Warp-C C-4: the whole dispatch is timed and charged to
                 // the arm it took (`present` records the arm).
                 let t0 = Instant::now();
@@ -17693,6 +18097,10 @@ impl Conn {
                 let r = self.present(comp, n, a.data);
                 let arm = comp.cost_arm;
                 comp.cost_add(arm, t0);
+                if repainting {
+                    if r.is_ok() { comp.storage_presented(n); }
+                    else if let Some(s) = comp.surf_mut(n) { s.shown_slot = None; }
+                }
                 match r {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
@@ -18198,6 +18606,15 @@ impl Conn {
         .map(|_| ())
     }
 
+    /// Revalidate the declared session against current kernel peer metadata.
+    fn peer_is_declared_session(&self, comp:&Comp)->bool {
+        let mut info=TSrvPeerInfo::default();
+        comp.session_declared(self.conn_id) && self.peer_stripes!=0
+            && unsafe {t_srv_peer(self.handle,&mut info)}==0
+            && info.alive==1 && info.stripes==self.peer_stripes
+            && info.principal_id==self.peer_principal
+    }
+
     /// cfg-3 (AURORA-CONFIG.md section 3.3): does this conn's LIVE peer
     /// hold the console-RENDERER role? t_srv_peer resolves the identity
     /// fresh under the proc-table lock, so a moved/died role revokes on
@@ -18286,6 +18703,13 @@ impl Conn {
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        #[cfg(feature = "test-mode")]
+        if s == "test-seat-park-next-present" {
+            if !comp.session_conns.iter().any(|&(id, _)| id == self.conn_id)
+                || self.seat_transaction.is_none() { return Err(p9::E_PERM); }
+            self.seat_park_next = true;
+            return Ok(());
+        }
         if let Some(rest) = s.strip_prefix("session ") {
             // The display handoff is a DECLARATION, made by the session
             // compositor on its own conn: a Session principal only (the
@@ -18412,6 +18836,7 @@ impl Conn {
                 }
                 "off" => {
                     let seat = comp.session_declared(self.conn_id);
+                    comp.retire_seat_declaration(self.conn_id);
                     comp.session_conns.retain(|&(c, _)| c != self.conn_id);
                     // The mirror of the declare above, and TY-6 F7: a seat
                     // that gives the display back must give the display's
@@ -18813,6 +19238,16 @@ impl Conn {
     fn surface_ctl(&mut self, comp: &mut Comp, n: usize, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        if let Some(name) = s.strip_prefix("cursor ") {
+            let shape = libhalcyon::cursor::Shape::parse(name).ok_or(p9::E_INVAL)?;
+            // h_write resolved the live generation and owning connection.
+            // The preference takes effect only while this surface is hovered.
+            comp.surf_mut(n).ok_or(p9::E_NOENT)?.cursor = shape;
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("storage ") {
+            return comp.storage_ctl(n, rest);
+        }
         if let Some(rest) = s.strip_prefix("create ") {
             let mut it = rest.split_ascii_whitespace();
             let w: u32 = it
@@ -19023,6 +19458,7 @@ impl Conn {
                 comp.gl_retarget(n);
                 return Ok(());
             }
+            if comp.surf(n).is_some_and(|s| s.storage.enabled()) { return Err(p9::E_INVAL); }
             let v: u32 = rest.parse().map_err(|_| p9::E_INVAL)?;
             if !comp
                 .warp_ctxs
@@ -19125,6 +19561,11 @@ impl Conn {
             }
         }
 
+        let covers_full = rects_cover_full(&rects, w, h);
+        let st = &comp.surf(n).ok_or(p9::E_BADF)?.storage;
+        if !st.accepts_present(st.generation(), covers_full, hold) {
+            return Err(p9::E_INVAL);
+        }
         // #164: past every validation gate = a well-formed present, on
         // any routing arm below. Malformed spam never reaches this line,
         // so it cannot hold the clock awake; hidden-surface presents are
@@ -19155,7 +19596,6 @@ impl Conn {
         // (rects_cover_full): the battery's multi-rect leg presents the
         // full frame as two tiles, which a single-full-rect shortcut
         // falsely latched (the moveB pane-center regression).
-        let covers_full = rects_cover_full(&rects, w, h);
         let mut latched = false;
         if let Some(s) = comp.surf_mut(n) {
             s.slots_presented |= 1 << slot;
@@ -20065,6 +20505,7 @@ impl Conn {
         // Cancel site 4 (Tflush): the held reply under oldtag dies; per 9P
         // the client reuses oldtag only after this Rflush.
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
+        if self.ordered_read.is_some_and(|(_,tag)| tag == a.oldtag) {self.ordered_read = None;}
         self.pending_fences.retain(|pf| pf.tag != a.oldtag);
         self.pending_ring_fences.retain(|pf| pf.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
@@ -20120,6 +20561,9 @@ impl Conn {
         if !comp.surf_owned(n, self.conn_id, f.gen) {
             return self.err(tag, p9::E_NOENT);
         }
+        if !comp.surf(n).is_some_and(|s| s.weave.is_some() && s.storage.admits(f.pixel_gen)) {
+            return self.err(tag, p9::E_BADF);
+        }
         match comp.weft_ensure(n) {
             Some((share_id, size)) => p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0),
             None => self.err(tag, p9::E_NOMEM),
@@ -20131,6 +20575,19 @@ impl Conn {
     /// Deliver held event reads whose surfaces have events (or died: EOF).
     /// False = the conn's transport failed (caller closes it).
     pub fn poll_events(&mut self, comp: &mut Comp) -> bool {
+        if let Some((_,tag)) = self.ordered_read {
+            match comp.ordered_pop(self.conn_id) {
+                Ok(Some(record)) => {
+                    self.ordered_read=None;
+                    if !self.deliver_read(tag,&record.encode()) {return false;}
+                }
+                Err(e) => {
+                    self.ordered_read=None;
+                    if !self.deliver_error(tag,e) {return false;}
+                }
+                Ok(None) => {}
+            }
+        }
         let mut i = 0;
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
@@ -20234,6 +20691,12 @@ impl Conn {
         true
     }
 
+    fn deliver_error(&mut self, tag:u16, code:u32)->bool {
+        self.out_buf.clear(); self.out_buf.resize(SRV_MSIZE_USIZE,0);
+        match p9::build_rlerror(&mut self.out_buf,tag,code) {
+            Ok(len)=>self.send_all(len), Err(_)=>false,
+        }
+    }
     fn deliver_read(&mut self, tag: u16, data: &[u8]) -> bool {
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
@@ -20282,4 +20745,3 @@ fn parse_u32(name: &[u8]) -> Option<u32> {
     }
     Some(v)
 }
-

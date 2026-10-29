@@ -1,0 +1,16 @@
+SQ-1 production shape, taken from the KERNEL_TESTS=OFF object that
+tools/check-production.sh --all built (log work/oct12-sq1/check-production-20261012T073104Z.log,
+PASS) on 46f07edc2 + the loom_private_requests_fault_take stub:
+  build/kernel/kernel/CMakeFiles/thylacine.elf.dir/loom.c.obj
+- nm (production-loom.nm): no sq_release_hook / _for_test symbol; loom_sq_release
+  is the only sq_release symbol (T, called externally by loom_service_frontend.c).
+- loom_sq_release (production-loom_sq_release.dis): ldr private head, add, str
+  private, stlr published -- 4 instructions, no hook.
+- loom_drain_sq inlines it (production-loom.dis):
+    valid path   42c8 ldar index ; 42e4..42f8 four ldp = the 64-byte SQE copy ;
+                 4308 add / 430c str private / 4310 stlr published head
+    dropped path 433c..4348 ldxr/stlxr fetch_add(dropped) ;
+                 4354 add / 4358 str private / 435c stlr published head
+  so on both paths every shared-SQ load precedes the release store in the binary.
+The runner's own SHAPE leg (exit 7) refused because the KERNEL_TESTS-off
+compile failed before the stub; this inspection replaces it on the gate's object.

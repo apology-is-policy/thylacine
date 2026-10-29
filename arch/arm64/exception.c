@@ -35,9 +35,6 @@
 #include <thylacine/thread.h>         // R12-uaccess: current_thread()
 #include <thylacine/types.h>
 
-// Vector table from vectors.S.
-extern char _exception_vectors[];
-
 // ---------------------------------------------------------------------------
 // Sanity-check the exception_context layout. vectors.S writes by
 // fixed byte offsets; if the struct ever drifts these asserts fail
@@ -167,8 +164,6 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 #define EL1_SYNC_DEPTH_MAX 3u
 static volatile u8 g_el1_sync_depth[DTB_MAX_CPUS];
 
-extern void _torpor(void) __attribute__((noreturn));
-
 void exception_sync_depth_reset_this_cpu(void) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu < DTB_MAX_CPUS) g_el1_sync_depth[cpu] = 0;
@@ -237,13 +232,17 @@ void exception_unexpected(struct exception_context *ctx, u64 vector_idx) {
 }
 
 // ---------------------------------------------------------------------------
-// exception_init.
+// exception_vectors_verify. Without start.S's install a fault before this point
+// vectors through a reset-UNKNOWN VBAR_EL1 and wedges with no line, and a
+// re-set here would hide that it was missing.
 // ---------------------------------------------------------------------------
 
-void exception_init(void) {
-    u64 vbar = (u64)(uintptr_t)_exception_vectors;
-    __asm__ __volatile__("msr vbar_el1, %0\n" "isb\n"
-                         :: "r" (vbar) : "memory");
+void exception_vectors_verify(void) {
+    u64 vbar;
+    __asm__ __volatile__("mrs %0, vbar_el1" : "=r"(vbar));
+    if (vbar != (u64)(uintptr_t)_exception_vectors)
+        extinction_with_addr("VBAR_EL1 is not the high-VA vector table start.S installs",
+                             (uintptr_t)vbar);
 }
 
 // ---------------------------------------------------------------------------
@@ -442,21 +441,6 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also terminate
 // via proc_fault_terminate (snare:align / snare:bti / snare:brk
 // respectively).
-// P6-pouch-signals-impl (sub-chunk 13a): the EL0-return-tail note-delivery hook
-// (defined in kernel/notes.c). As of #107 it is invoked from the vector tail
-// (vectors.S .Lel0_return, which sync-from-EL0 and, since #964, IRQ-from-EL0
-// both take), not from the C handlers here; the decl is retained for
-// documentation.
-void notes_deliver_at_el0_return(struct exception_context *ctx);
-
-// SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
-// EL0-return-tail die-check (defined in kernel/proc.c). If the calling
-// Thread's Proc is group-terminating, the Thread self-exits here (noreturn);
-// otherwise returns. As of #107 invoked from the vector tails (vectors.S
-// .Lel0_return), AFTER preempt_check_irq -- so a group-terminate
-// landing during the preempt is caught before any EL0 instruction runs.
-void el0_return_die_check(void);
-
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     // 8c-2 (#88): publish THIS EL0-entry frame as the current thread's debug
     // trapframe, so a thread that DETOUR-parks (proc_stop_sleeper_park --

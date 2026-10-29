@@ -1,0 +1,11 @@
+--- control.c
++++ claim_serialization.c
+@@ -2785,7 +2785,7 @@
+         spin_lock(&l->lock);
+         struct loom_service_engine *e=l->service_engine;
+         if(l->service_closing){spin_unlock(&l->lock);return consumed?(int)consumed:-T_E_CANCELED;}
+-        if(e->submitting || e->rejected ||
++        if(e->rejected ||
+            (u32)(l->cq_tail-__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE))>=l->cq_entries ||
+            __atomic_load_n(&h->sq_tail,__ATOMIC_ACQUIRE)==l->sq_head) {
+             spin_unlock(&l->lock);break;

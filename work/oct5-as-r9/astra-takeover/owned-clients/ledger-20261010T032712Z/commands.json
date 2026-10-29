@@ -1,0 +1,42 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "clang-version",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "c-run",
+    "rc": -15,
+    "expected_failure": false
+  }
+]

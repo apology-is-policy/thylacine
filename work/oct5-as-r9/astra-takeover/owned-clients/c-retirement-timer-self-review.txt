@@ -1,0 +1,43 @@
+Astra single-agent self-review: C retirement timer forwarding, October10.
+Uninstalled simulated-backend draft, not an independent audit.
+
+Reviewed C forwarding against Rust RetireQueue next_deadline/expire. Both attached
+and retiring drivers retain deadline responsibility in the bounded manager. The
+minimum scan is bounded by capacity<=64 times fixed cells64, and includes a valid
+zero deadline without sentinel ambiguity. Expiry visits each selected driver at
+most once, with separate ring and fixed budgets and independent rotating cursors.
+Retirement progress uses its old cursor, so repeated cleanup cannot systematically
+skip due timer entries. Empty/reclaimed cells are safe to visit. Retiring drivers
+still own request storage until their existing local proof. No added timer nodes,
+callbacks or allocation, no arithmetic on absolute timestamps. Count cannot exceed
+4096 (64*64). Backend nonblocking/nonreentry and creator-thread contracts remain.
+
+Zero ring or fixed budget dispatches no abort. Caller must continue positive fair
+budgets while next_deadline is due; bounded processing is not a guarantee of timely
+scheduling under zero budgets. No wait primitive, native wake source, concurrent
+thread or RustFuture equivalence is implied by C polling APIs. Root is consumed by
+Drop and cannot be polled afterward; managed/request handles obey prior survival
+rules. Close suppresses later abort dispatch, retains unfinished request backing,
+and completes destruction only after final owner release (independent native pins
+remain an unqualified backend contract). Timer helpers never call progress or free.
+
+Six scenario groups cover attached/retiring deadlines, independent cleanup/timer
+cursors with zero/partial budgets, root close with pending request, terminal READ
+holding backing after client drop, slot reuse/MAXdeadline and all64driver fairness.
+Six mutants detect skipping either driver class, ignored inner/outer budget,
+shared cursor and wrong minimum. Host101819Z passes ASan+UBSan and optimized
+NDEBUG-core, with test assertions enabled. Existing8scenario retirement101844Z
+also passes both profiles and6mutants. Each15source hashes/27commands plus raw
+logs, snapshots and recorded HEAD/diff were checked before documentation edits.
+No failed run. Protected10, clean external61dde37 and parked kernel base verified.
+
+Source review of shutdown boundaries: Rust RetireQueue Drop closes every driver
+and dispatches wake batches outside borrows; Managed Drop retains its preallocated
+cell for progress. C root Drop closes drivers and releases its root reference;
+live managed handles retain manager metadata, requests/results retain their cores.
+Existing retirement fixtures cover attached retention, last-view release, capacity
+before factories and root shutdown. Task-loop tests cover CQ/held READ and task
+cancellation with retirement, but this is not native exec/exit or complete drain
+qualification. Next make an explicit remaining-coverage inventory against AS3
+before adding a new shutdown mechanism. No production integration/activation,
+Main landing, AS4/MM0-MM4 advance,128MiB change or parked-SQ alteration.

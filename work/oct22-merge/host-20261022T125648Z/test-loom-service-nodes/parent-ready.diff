@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ parent-ready.c
+@@ -35,7 +35,7 @@
+                               struct loom_service_ref ref) {
+     struct loom_service_node *p = node_exact(t, nodes, ref, LSLOT_LIVE);
+     return p && t->slots[ref.slot].kind == LOOM_SERVICE_SCOPE &&
+-           p->state == LOOM_SERVICE_READY;
++           p->state != LOOM_SERVICE_EMPTY;
+ }
+ int loom_service_node_prepare(struct loom_slot_table *t,
+                               struct loom_service_node_table *nodes,

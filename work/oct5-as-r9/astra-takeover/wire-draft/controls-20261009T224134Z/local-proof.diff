@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ local-proof.c
+@@ -62,7 +62,7 @@
+     int rc=p9_client_submit_async(c,rpc,loom_private_wire_build,w);
+     // This is the submit return, not callback status. Accepted submissions
+     // return zero even when a later server reply reports EAGAIN.
+-    w->local_again=(rc==-P9_E_AGAIN);
++    w->local_again=true;
+     return rc;
+ }
+ bool loom_private_wire_retry(const struct loom_service_wire *w,int error,

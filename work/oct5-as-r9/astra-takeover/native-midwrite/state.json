@@ -1,0 +1,7 @@
+{
+  "owner": "astra",
+  "installed": true,
+  "state": "verified-smoke",
+  "next": "Owned C/Rust lifetimes and remaining AS3 integration, then AS4/MM0-MM4. No full50boot claim.",
+  "run": "native-midwrite/smoke-20261010T032012Z"
+}

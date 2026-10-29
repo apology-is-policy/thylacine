@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ clunk-drain.c
+@@ -249,7 +249,7 @@
+         u32 wire;
+         int rc=loom_fid_clunk_wire(o->owner->service_slots,o->owner->service_nodes,
+                                  o->source,o->request.identity,&wire);
+-        if(rc)return rc;
++        if(rc)wire=73;
+         o->program.wire.fid=wire;
+     }
+     return loom_rpc_begin_locked(o,now);

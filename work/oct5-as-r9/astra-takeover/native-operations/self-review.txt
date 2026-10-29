@@ -1,0 +1,16 @@
+Single-agent self-review, October 10. No independent audit.
+Native fixture uses real isolated creator, normal/bulk target admission, emitted
+request frames, real engine callbacks and physical cleanup. Shared SQE correlation
+and WALK component are mutated only after acceptance to witness copied ownership.
+Registered page stays mapped while test reads it; engine releases fixed pins before
+unregister. Exact receipt captured before CQ acknowledgement, return validates
+nonce; duplicate return is refused. One-member pool proves consumption is distinct
+from return, no new request while empty/full CQ, two MORE leases then EOF, and reap.
+Observation entry pin is returned before whole-close; endpoint survives until
+close completes. No worker is started, so direct ring observations have no
+concurrent engine driver. No change to kernel production behavior or public gates.
+Failed initializer build and wrong-flag run preserved. Final native1856/1856,
+D7overlap/20cycles,41source/6input hashes stable,minimum8283MiB.
+Limits: controlled responder does not implement filesystem semantics or strict
+per-FID/offset rejection; ordinary worker scheduling and hostile/stalled peer
+AS-3 schedules still require separate coverage. Earlier50boots apply98dd4b618 only.

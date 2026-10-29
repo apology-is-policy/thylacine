@@ -1,0 +1,11 @@
+--- control
++++ omit-private-put
+@@ -339,7 +339,7 @@
+     if (!as->private_rings) extinction("addrspace_private_end without a guard");
+     --as->private_rings;
+     spin_unlock(&as->lock);
+-    addrspace_lifetime_put(as); // may free; never under as->lock
++ // may free; never under as->lock
+ }
+ bool loom_service_pools_empty(const struct loom_service_pool_table *pools) {
+     if (!pools) return false;

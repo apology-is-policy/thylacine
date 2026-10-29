@@ -1,0 +1,9 @@
+error[E0616]: field `mapping` of struct `owned_mapping::OwnedMapping` is private
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/raw-mapping.rs:36:89
+   |
+36 | fn main(){let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _raw=m.mapping.base();}
+   |                                                                                         ^^^^^^^ private field
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0616`.

@@ -1,0 +1,11 @@
+PASS clean
+PASS erase-removal-barrier
+PASS duplicate-owner
+PASS late-owner
+PASS forget-hold
+PASS forget-drop
+PASS double-drop
+PASS active-drop
+PASS borrowed-drop
+PASS stale-identity
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/owner-controls-20261009T213908Z

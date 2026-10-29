@@ -1,0 +1,11 @@
+--- control.c
++++ shared_reread.c
+@@ -2802,7 +2802,7 @@
+         ++l->sq_head;__atomic_store_n(&h->sq_head,l->sq_head,__ATOMIC_RELEASE);
+         spin_unlock(&l->lock);++consumed;
+         if(!valid)continue;
+-        int rc=frontend_dispatch(l,p,&copy);
++        int rc=frontend_dispatch(l,p,(const struct loom_sqe *)(l->ring_kva+l->sqe_off+index*sizeof(copy)));
+         spin_lock(&l->lock);
+         if(!e->submitting || e->rejected)extinction("frontend lost serialized claim");
+         if(rc<0 && !l->service_closing) {

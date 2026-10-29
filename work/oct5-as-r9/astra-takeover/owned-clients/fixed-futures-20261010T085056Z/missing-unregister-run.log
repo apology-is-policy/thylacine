@@ -1,0 +1,78 @@
+
+running 11 tests
+test future_driver_close_and_drop_wake_unfinished ... ok
+test future_drop_unregisters_but_keeps_active_storage ... FAILED
+test future_clone_callback_completion_is_not_lost ... FAILED
+test future_failed_prepare_and_write_result ... FAILED
+test future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test future_malformed_record_wakes_then_fails_closed ... FAILED
+test future_read_wakes_and_retains_result ... FAILED
+test future_completion_before_first_poll ... FAILED
+test future_replaced_waker_drop_can_deliver_completion ... ok
+test future_replaces_waker_without_notifying_old_task ... ok
+test future_wake_callback_polls_outside_hub_borrow ... FAILED
+
+failures:
+
+---- future_drop_unregisters_but_keeps_active_storage stdout ----
+
+thread 'future_drop_unregisters_but_keeps_active_storage' (22444865) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:168:269:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- future_clone_callback_completion_is_not_lost stdout ----
+
+thread 'future_clone_callback_completion_is_not_lost' (22444862) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:181:423:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- future_failed_prepare_and_write_result stdout ----
+
+thread 'future_failed_prepare_and_write_result' (22444866) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:171:133:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- future_malformed_record_wakes_then_fails_closed stdout ----
+
+thread 'future_malformed_record_wakes_then_fails_closed' (22444867) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:170:447:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- future_read_wakes_and_retains_result stdout ----
+
+thread 'future_read_wakes_and_retains_result' (22444868) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:165:391:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- future_completion_before_first_poll stdout ----
+
+thread 'future_completion_before_first_poll' (22444863) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:166:362:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- future_wake_callback_polls_outside_hub_borrow stdout ----
+
+thread 'future_wake_callback_polls_outside_hub_borrow' (22444872) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/test_fixed_futures.rs:183:491:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    future_clone_callback_completion_is_not_lost
+    future_completion_before_first_poll
+    future_drop_unregisters_but_keeps_active_storage
+    future_failed_prepare_and_write_result
+    future_malformed_record_wakes_then_fails_closed
+    future_read_wakes_and_retains_result
+    future_wake_callback_polls_outside_hub_borrow
+
+test result: FAILED. 4 passed; 7 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

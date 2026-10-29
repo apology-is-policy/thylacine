@@ -1,0 +1,11 @@
+--- control
++++ omit-engine-free
+@@ -297,7 +297,7 @@
+         loom_private_drop_buffer(as, b);
+     }
+     l->n_reg_buf = 0;
+-    kfree(l->service_engine);
++
+     kfree(l->service_requests.records);
+     kfree(l->service_nodes);
+     kfree(l->service_targets);

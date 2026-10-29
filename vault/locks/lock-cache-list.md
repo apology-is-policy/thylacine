@@ -6,17 +6,17 @@ kind: spin-irqsave
 guards: "g_cache_list_head and every kmem_cache.next_cache splice/walk"
 orders-before: []
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-27
 ---
 ## Discipline
 
-RW-1 A-F2 ([[fnd-rw1-af2]]). Boot-time cache creates are serial, but
-runtime create/destroy and any diagnostic walker
-(`slub_total_alloc` etc.) race the head-insertion splice without it.
+RW-1 A-F2 ([[fnd-rw1-af2]]). Boot-time cache creates are serial, but a
+runtime create races the head-insertion splice without it, and so does the
+tests' `kmem_cache_destroy`.
 Zero-init = unlocked, so it is valid from the first `init_cache`.
 
 A **strict leaf**: never held across a cache-lock acquire or any
-allocation. `kmem_cache_destroy` unlinks under it, releases, and only
+allocation. `kmem_cache_destroy` (compiled only with the tests) unlinks under it, releases, and only
 then frees the descriptor (via the meta cache — which takes a cache
 lock, hence the ordering).
 

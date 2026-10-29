@@ -1,0 +1,59 @@
+
+running 8 tests
+test executor_never_reclaims_attached_client ... ok
+test executor_failed_factory_does_not_leak_cell ... ok
+test executor_shutdown_closes_once_keeps_live_read_storage ... ok
+test executor_live_request_blocks_reuse_despite_retirement_proof ... FAILED
+test executor_drop_and_progress_do_not_allocate ... FAILED
+test executor_held_terminal_result_blocks_reuse_and_preserves_bytes ... FAILED
+test executor_capacity_precedes_factory_and_survives_abandon ... FAILED
+test executor_rotation_is_bounded_and_does_not_starve_later_cells ... FAILED
+
+failures:
+
+---- executor_live_request_blocks_reuse_despite_retirement_proof stdout ----
+
+thread 'executor_live_request_blocks_reuse_despite_retirement_proof' (22459341) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T090048Z/mutant-early-reclaim/test_retirement_executor.rs:167:174:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- executor_drop_and_progress_do_not_allocate stdout ----
+
+thread 'executor_drop_and_progress_do_not_allocate' (22459338) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T090048Z/mutant-early-reclaim/test_retirement_executor.rs:186:145:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- executor_held_terminal_result_blocks_reuse_and_preserves_bytes stdout ----
+
+thread 'executor_held_terminal_result_blocks_reuse_and_preserves_bytes' (22459340) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T090048Z/mutant-early-reclaim/test_retirement_executor.rs:170:294:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- executor_capacity_precedes_factory_and_survives_abandon stdout ----
+
+thread 'executor_capacity_precedes_factory_and_survives_abandon' (22459337) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T090048Z/mutant-early-reclaim/test_retirement_executor.rs:163:54:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- executor_rotation_is_bounded_and_does_not_starve_later_cells stdout ----
+
+thread 'executor_rotation_is_bounded_and_does_not_starve_later_cells' (22459343) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T090048Z/mutant-early-reclaim/test_retirement_executor.rs:174:38:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    executor_capacity_precedes_factory_and_survives_abandon
+    executor_drop_and_progress_do_not_allocate
+    executor_held_terminal_result_blocks_reuse_and_preserves_bytes
+    executor_live_request_blocks_reuse_despite_retirement_proof
+    executor_rotation_is_bounded_and_does_not_starve_later_cells
+
+test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

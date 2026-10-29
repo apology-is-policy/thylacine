@@ -1,0 +1,18 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+error[E0599]: no method named `clone` found for struct `request_book::RequestBook` in the current scope
+   --> src/tests/request_book.rs:214:44
+    |
+214 | let b=RequestBook::new(2).unwrap();let _=b.clone();
+    |                                            ^^^^^ method not found in `request_book::RequestBook`
+    |
+   ::: src/request_book.rs:75:1
+    |
+ 75 | pub(crate) struct RequestBook {
+    | ----------------------------- method `clone` not found for this struct
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following trait defines an item `clone`, perhaps you need to implement it:
+            candidate #1: `Clone`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

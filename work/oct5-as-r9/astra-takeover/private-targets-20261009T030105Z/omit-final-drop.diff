@@ -1,0 +1,11 @@
+--- control
++++ omit-final-drop
+@@ -60,7 +60,7 @@
+             if (s->pins || !t->view ||
+                 (s->phase != LSLOT_PROVISIONAL && s->phase != LSLOT_LIVE))
+                 extinction("private Loom retained invalid target");
+-            devsrv_service_target_clear(t);
++            if(false) devsrv_service_target_clear(t);
+             *s = (struct loom_service_slot){0};
+         } else if (t->view) {
+             extinction("private Loom retained unowned target");

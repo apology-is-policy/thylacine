@@ -7,8 +7,8 @@
 // directly (which the irqfwd tests already cover at the kernel layer).
 //
 // Setup:
-//   1. devramfs_lookup("bin/irq-probe", ...) — pre-built userspace ELF
-//      from the cpio. Graceful skip if not built (fresh checkout).
+//   1. test_probe_lookup("bin/irq-probe", ...) — pre-built userspace ELF
+//      from the cpio.
 //   2. gic_set_pending_spi(intid) — manually pend selected SPI
 //      at GICD_ISPENDR<n>.bit. The IRQ is now pending but not yet
 //      enabled (no driver has gic_enable_irq'd it), so the GIC keeps
@@ -81,9 +81,8 @@
 //     mutated under r->lock; sleep returns when cond is true. Pins
 //     scheduler.tla I-9 NoMissedWakeup at runtime.
 //
-// If /irq-probe wasn't built (fresh checkout where `tools/build.sh
-// userspace` hasn't run yet), the test prints a skip notice and
-// returns PASS. Production / CI always builds the full ramfs.
+// A missing /irq-probe FAILS the test when the image carries userspace
+// (bin/joey); a userspace-less image makes it a counted skip.
 
 #include "test.h"
 
@@ -97,8 +96,6 @@
 
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
-
-void test_irq_probe_rfork_with_caps(void);
 
 // The kernel selects a synthetic SPI and passes it as argv[1]. The userspace
 // probe has no platform/vector constant that can drift from MSI reservations.
@@ -164,11 +161,8 @@ void test_irq_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/irq-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/irq-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/irq-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
     TEST_ASSERT(size <= IRQ_PROBE_BLOB_MAX,
                 "irq-probe binary too large for static buffer");

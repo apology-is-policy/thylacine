@@ -1,0 +1,11 @@
+--- control
++++ omit-rollback-drop
+@@ -146,7 +146,7 @@
+         }
+     }
+     spin_unlock(&l->lock);
+-    if (!rc) devsrv_service_target_clear(&detached);
++    if (!rc && false) devsrv_service_target_clear(&detached);
+     return rc;
+ }
+ int loom_private_target_rollback(struct Loom *l, struct loom_service_ref ref) {

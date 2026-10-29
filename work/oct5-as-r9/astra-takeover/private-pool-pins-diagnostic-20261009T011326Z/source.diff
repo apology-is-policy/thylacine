@@ -1,0 +1,289 @@
+diff --git a/kernel/include/thylacine/loom.h b/kernel/include/thylacine/loom.h
+index d35ba0c1c..1079e41be 100644
+--- a/kernel/include/thylacine/loom.h
++++ b/kernel/include/thylacine/loom.h
+@@ -658,6 +658,19 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
+ // Public setup/register and private I/O activation remain disabled.
+ int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+                                   const struct loom_buf_reg *bufs, u32 n);
++// Internal provided-buffer owner front-end. Prepare takes an immutable complete
++// kernel record and requires the same stable creator-image contract above.
++// Publish/rollback/reap are retained-Loom kernel-owner continuations; user-facing
++// authority/copyout dispatch is not enabled. Never mix these pin-owning pools
++// with raw ledger-only reservations. No fixed-I/O private engine is enabled;
++// exact accepted-fixed extent integration is still required before activation.
++int loom_private_pool_prepare(struct Loom *, struct Proc *,
++                              const struct loom_service_pool_create *,
++                              struct loom_service_ref *);
++int loom_private_pool_publish(struct Loom *, struct loom_service_ref);
++int loom_private_pool_rollback(struct Loom *, struct loom_service_ref);
++int loom_private_pool_reap(struct Loom *, struct loom_service_ref);
++
+ int loom_register_buffers(struct Loom *l, struct Proc *p,
+                           const struct loom_buf_reg *bufs, u32 n);
+ 
+diff --git a/kernel/loom.c b/kernel/loom.c
+index 71289804c..206861b2f 100644
+--- a/kernel/loom.c
++++ b/kernel/loom.c
+@@ -1035,6 +1035,120 @@ int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+     return rc;
+ }
+ 
++// Internal pool transaction front-end. No public registration is enabled here.
++// The input is a single immutable kernel copy; output lives in kernel memory.
++// As for private buffer registration, the caller holds a Loom and creator Proc
++// reference in its stable syscall image. The ring lock stabilizes the buffer
++// table through canonical resolution, member reservation and pin acquisition.
++int loom_private_pool_prepare(struct Loom *l, struct Proc *p,
++                              const struct loom_service_pool_create *in,
++                              struct loom_service_ref *out) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
++        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
++    if (p->as != l->service_as || p->stripes != l->service_creator)
++        return -T_E_ACCES;
++    if (!l->receipt_size) return -T_E_OPNOTSUPP;
++    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
++        in->reserved || in->result.slot || in->result.reserved ||
++        in->result.incarnation || !in->count ||
++        in->count > LOOM_SERVICE_POOL_MEMBERS) return -T_E_INVAL;
++    for (u32 i = in->count; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
++        const struct loom_service_pool_member *m = &in->members[i];
++        if (m->buffer_index || m->reserved || m->offset || m->length)
++            return -T_E_INVAL;
++    }
++    struct loom_pool_extent extents[LOOM_SERVICE_POOL_MEMBERS];
++    int rc = 0;
++    spin_lock(&l->lock);
++    if (l->service_closing) { rc = -T_E_CANCELED; goto unlock; }
++    // Private legacy dispatch is disabled. Refuse any unexpected legacy work,
++    // including held/local admission, instead of pretending its extents were
++    // checked. The future private engine must add exact accepted-fixed extent
++    // reservations under this SAME lock before it can be enabled.
++    if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
++        l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
++    for (u32 i = 0; i < in->count; ++i) {
++        const struct loom_service_pool_member *m = &in->members[i];
++        if (m->reserved || m->buffer_index >= l->n_reg_buf || !m->length) {
++            rc = -T_E_INVAL; goto unlock;
++        }
++        const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
++        if (!b->burrow || b->burrow == l->ring ||
++            b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
++            m->offset > b->len || m->length > b->len - m->offset) {
++            rc = -T_E_INVAL; goto unlock;
++        }
++        // Integer subtraction avoids pointer-difference UB and overflowing
++        // user offset+length. Table pins guarantee this ANON direct-map base
++        // remains stable even after every original user mapping is detached.
++        u64 base = (u64)pa_to_kva(page_to_pa(b->burrow->pages));
++        u64 kva = (u64)b->kva;
++        if (kva < base || kva - base > b->burrow->size ||
++            b->len > b->burrow->size - (kva - base)) {
++            rc = -T_E_INVAL; goto unlock;
++        }
++        extents[i] = (struct loom_pool_extent){b->burrow,
++                                              kva - base + m->offset,m->length};
++    }
++    rc = loom_service_pool_prepare(l->service_slots,l->service_pools,
++                                   extents,in->count,out);
++    if (!rc) {
++        // One independent pin per member, including disjoint aliases of the
++        // same Burrow. Ref cannot fail; the table's pin prevents destruction.
++        // Provisional membership already excludes table replacement and other
++        // overlapping pool registrations before this lock is released.
++        for (u32 i = 0; i < in->count; ++i)
++            burrow_ref((struct Burrow *)extents[i].backing);
++    }
++unlock:
++    spin_unlock(&l->lock);
++    return rc;
++}
++
++// These are kernel-owner continuations, not authority-bearing user entry points.
++// The caller retains l across copyout and until publish/rollback finishes.
++int loom_private_pool_publish(struct Loom *l, struct loom_service_ref ref) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
++    spin_lock(&l->lock);
++    int rc = loom_service_pool_publish(l->service_slots,l->service_pools,ref);
++    spin_unlock(&l->lock);
++    return rc;
++}
++
++// Rollback/reap may run after close or creator exec. Settlement uses the retained
++// image, never a current Proc. Only pools made by private_pool_prepare belong to
++// this front-end: do not mix raw ledger-only reservations into a private owner.
++// Snapshot pins under the same lock as the joint ledger transition; a refusal
++// drops nothing. Successful removal permits rebinding immediately, but the
++// saved independent pins keep every backing alive across that unlocked gap.
++static int loom_private_pool_remove(struct Loom *l, struct loom_service_ref ref,
++                                    bool rollback) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
++    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];
++    u32 count = 0;
++    spin_lock(&l->lock);
++    for (u32 i = 0; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
++        const struct loom_pool_cell *c = &l->service_pools->bank.cells[i];
++        if (c->phase != LMEMBER_FREE && c->pool.slot == ref.slot &&
++            c->pool.incarnation == ref.incarnation &&
++            c->pool.reserved == ref.reserved)
++            pins[count++] = (struct Burrow *)c->extent.backing;
++    }
++    int rc = rollback ? loom_service_pool_rollback(l->service_slots,l->service_pools,ref)
++                      : loom_service_pool_reap(l->service_slots,l->service_pools,ref);
++    spin_unlock(&l->lock);
++    if (!rc)
++        for (u32 i = 0; i < count; ++i)
++            loom_private_drop_buffer(l->service_as,pins[i]);
++    return rc;
++}
++int loom_private_pool_rollback(struct Loom *l, struct loom_service_ref ref) {
++    return loom_private_pool_remove(l,ref,true);
++}
++int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
++    return loom_private_pool_remove(l,ref,false);
++}
++
+ int loom_register_buffers(struct Loom *l, struct Proc *p,
+                           const struct loom_buf_reg *bufs, u32 n) {
+     if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index 6bdc3e230..acc890f58 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -670,6 +670,7 @@ void test_loom_service_slots(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+ void test_loom_private_buffers(void);
++void test_loom_private_pool_pins(void);
+ void test_loom_create_rejects_bad_args(void);
+ void test_loom_refcount_lifecycle(void);
+ void test_loom_setup_via_proc(void);
+@@ -2744,6 +2745,7 @@ struct test_case g_tests[] = {
+     { "torpor.wake_two_waiters_count_bound",   test_torpor_wake_two_waiters_count_bound,   false, NULL },
+     { "loom.create_geometry",            test_loom_create_geometry,            false, NULL },
+     { "loom.private_buffers",            test_loom_private_buffers,            false, NULL },
++    { "loom.private_pool_pins",          test_loom_private_pool_pins,          false, NULL },
+     { "loom.private_slot_owner",         test_loom_private_slot_owner,         false, NULL },
+     { "loom.service_pool_table",         test_loom_service_pool_table,         false, NULL },
+     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 1f55a91db..bdeef7dc9 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -323,6 +323,115 @@ done:
+ #undef PB_CHECK
+     return error;
+ }
++// Canonical member aliases and real independent pins; no protocol/usercopy path.
++static const char *loom_private_pool_pins_fixture(void) {
++    const char *error = NULL;
++    struct Proc *p = test_proc_make();
++    struct Loom *l = NULL;
++    struct loom_service_ref pool = {0}, again = {0};
++    u64 goal = loom_private_retired(), va = 0;
++    u32 baseline = 0;
++    struct loom_service_pool_create in;
++    for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
++    in.size = sizeof(in); in.version = 1; in.count = 2;
++#define PP_CHECK(c,msg) do { if (!(c)) { error = msg; goto done; } } while (0)
++    PP_CHECK(p, "pool pin creator allocated");
++    baseline = p->as->page_count;
++    l = loom_create_private(p,2,2,true);
++    if (l) goal++;
++    PP_CHECK(l, "pool pin owner allocated");
++    u32 owner_pages = p->as->page_count;
++    s64 attached = sys_burrow_attach_for_proc(p,PAGE_SIZE);
++    PP_CHECK(attached>0, "pool backing attached");
++    va = (u64)attached;
++    struct Burrow *b = vma_lookup(p,va)->burrow;
++    int handles = burrow_handle_count(b);
++    struct loom_buf_reg buffers[2] = {{va+128,1024},{va+192,512}};
++    PP_CHECK(!loom_private_register_buffers(l,p,buffers,2) &&
++             burrow_handle_count(b)==handles+2,"two table aliases pinned");
++    in.members[0] = (struct loom_service_pool_member){0,0,64,64};
++    in.members[1] = (struct loom_service_pool_member){1,0,0,64};
++    PP_CHECK(loom_private_pool_prepare(l,p,&in,&pool)==-T_E_INVAL &&
++             !pool.incarnation && burrow_handle_count(b)==handles+2 &&
++             loom_service_pools_empty(l->service_pools),
++             "different buffer indices cannot hide physical overlap");
++    in.members[1].offset = 64;
++    PP_CHECK(!loom_private_pool_prepare(l,p,&in,&pool) &&
++             burrow_handle_count(b)==handles+4,"disjoint members acquire independent pins");
++    struct loom_pool_cell *c = &l->service_pools->bank.cells[0];
++    PP_CHECK(c->extent.backing==b && c->extent.offset==192 && c->extent.length==64,
++             "canonical offset includes registered slice offset");
++    struct loom_service_pool_create other;
++    for (u32 i = 0; i < sizeof(other); ++i) ((u8 *)&other)[i] = 0;
++    other.size=sizeof(other);other.version=1;other.count=1;
++    other.members[0]=(struct loom_service_pool_member){1,0,0,64};
++    PP_CHECK(loom_private_pool_prepare(l,p,&other,&again)==-T_E_BUSY &&
++             !again.incarnation && burrow_handle_count(b)==handles+4,
++             "provisional canonical extent excludes competing alias");
++    PP_CHECK(loom_private_register_buffers(l,p,NULL,0)==-T_E_BUSY,
++             "provisional pool holds table binding");
++    struct loom_service_ref stale = pool;
++    PP_CHECK(!loom_private_pool_rollback(l,pool) &&
++             burrow_handle_count(b)==handles+2,"copyout rollback releases member pins");
++    pool.incarnation=0;
++    PP_CHECK(!loom_private_pool_prepare(l,p,&in,&pool) &&
++             pool.incarnation!=stale.incarnation,"rollback burns pool identity");
++    PP_CHECK(loom_private_pool_rollback(l,stale)==-T_E_NOENT &&
++             burrow_handle_count(b)==handles+4,"stale rollback cannot release new pins");
++    PP_CHECK(!loom_private_pool_publish(l,pool),"pool published after kernel continuation");
++    spin_lock(&l->lock);
++    int rc=loom_pool_stream_get(&l->service_pools->pools[pool.slot]);
++    spin_unlock(&l->lock);
++    if (!rc) {
++        int refused=loom_private_pool_reap(l,pool);
++        bool unchanged=burrow_handle_count(b)==handles+4;
++        spin_lock(&l->lock);
++        (void)loom_pool_stream_put(&l->service_pools->pools[pool.slot]);
++        spin_unlock(&l->lock);
++        PP_CHECK(refused==-T_E_BUSY && unchanged,"busy reap retains every pin");
++    }
++    PP_CHECK(!rc,"pool stream borrow acquired");
++    PP_CHECK(!sys_burrow_detach_for_proc(p,va,PAGE_SIZE),"pooled backing unmapped");
++    va=0;
++    PP_CHECK(!loom_private_pool_reap(l,pool) &&
++             burrow_handle_count(b)==handles+2,"reap drops member pins after unmap");
++    pool.incarnation=0;
++    u64 destroyed=burrow_total_destroyed();
++    PP_CHECK(!loom_private_register_buffers(l,p,NULL,0) &&
++             burrow_total_destroyed()==destroyed+1 && p->as->page_count==owner_pages,
++             "final table pins free and refund backing exactly once");
++    attached=sys_burrow_attach_for_proc(p,PAGE_SIZE);
++    PP_CHECK(attached>0,"close-race backing attached");va=(u64)attached;
++    buffers[0]=(struct loom_buf_reg){va,PAGE_SIZE};
++    PP_CHECK(!loom_private_register_buffers(l,p,buffers,1),"close-race buffer pinned");
++    in.count=1;in.members[1]=(struct loom_service_pool_member){0};
++    PP_CHECK(!loom_private_pool_prepare(l,p,&in,&pool),"close-race pool prepared");
++    loom_exec_latch(l);
++    PP_CHECK(loom_private_pool_publish(l,pool)==-T_E_CANCELED,
++             "close before publish refuses commit");
++    PP_CHECK(!loom_private_pool_rollback(l,pool),"rollback remains available after close");
++    pool.incarnation=0;
++done:
++    if (l && pool.incarnation) {
++        if (l->service_slots->slots[pool.slot].phase==LSLOT_PROVISIONAL)
++            (void)loom_private_pool_rollback(l,pool);
++        else (void)loom_private_pool_reap(l,pool);
++    }
++    if (l && again.incarnation) (void)loom_private_pool_rollback(l,again);
++    if (p && va) (void)sys_burrow_detach_for_proc(p,va,PAGE_SIZE);
++    if (l) loom_unref(l);
++    if (!lp_wait(goal) && !error) error="private pool pin retirement timed out";
++    if (p && !error && (p->as->page_count!=baseline || p->as->private_rings))
++        error="private pool pin retirement refunds creator";
++    if (p) test_proc_drop(p);
++#undef PP_CHECK
++    return error;
++}
++void test_loom_private_pool_pins(void) {
++    const char *error = loom_private_pool_pins_fixture();
++    TEST_ASSERT(error == NULL, error);
++}
++
+ void test_loom_private_buffers(void) {
+     const char *error = loom_private_buffers_fixture();
+     TEST_ASSERT(error == NULL, error);

@@ -1,0 +1,101 @@
+Astra single-agent self-review: internal readiness executor draft, October 9.
+This is not an independent audit. Canonical ade9c69d17 remains frozen for its
+50-boot controls matrix. The files here are not installed or native-qualified.
+
+Scope and authority
+- Internal creator-ticket admission starts the existing per-ring SQPOLL thread.
+  No setup/syscall/ring dispatch calls it; ordinary private loom_start_sqpoll
+  remains refused. No clipboard activation, Main landing or128MiB change.
+- A start token serializes charge/allocation/publication/rollback. The original
+  creator stripes and retained address-space image feed the existing ticket API.
+  No saved Proc pointer is used by asynchronous refund. Failure frees the never-
+  readied thread before refund; another start cannot reuse a half-settled ticket.
+
+Ownership and physical barriers
+- Round-robin readiness visits retain an exact index entry while sampling native
+  state and driving at most one bounded protocol quantum. They read the cursor
+  under Ll only when the sole unlocked driver flag is false.
+- An armed wait owns all entry pins through the complete unregister sweep.
+  Poll hooks are embedded in the already charged index page; actual ARM64
+  sizeof assertion remains <=4096. No per-wait allocation or per-peer stack.
+- The executor borrows the ring like the existing SQPOLL worker. A last protocol
+  unref can enqueue zero-reference cleanup from that worker, but never joins
+  itself. The existing private retirer retains all storage, wakes/stops, joins,
+  frees the actual thread, then refunds its creator ticket before table teardown.
+- Handle-close DONE now waits for start rollback and actual executor exit, in
+  addition to protocol/request/fixed quiescence. Worker exit supplies the final
+  queue wake after publishing EXITING/exited in the existing IRQ-masked terminal
+  handshake. No new stack is allocated at close. Peer-independent local join
+  still assumes eventual scheduler service; no hard wall-clock bound is claimed.
+
+Locks, sleep and wakeups
+- Ll protects protocol/index snapshots; native poll, client progress, native
+  teardown, wakeups and final drops happen unlocked. The sleep predicate under
+  Rendez reads atomic change/CQ-head/stopping and registered poll flags only.
+  It must never acquire Ll: the existing kernel order forbids that inversion.
+- The native poll registers then returns its channel-locked readiness sample.
+  Work is checked again by the actual tsleep predicate. New owners, installer/
+  driver/teardown returns, external pins and exec/close invalidate the snapshot.
+  Exec's leaf latch changes only the counter under Ll; later close notifies.
+- Counter exhaustion fails closed. Wait owner exclusivity prevents another
+  sweep from resetting linked hooks. All hooks are removed before any wait pin
+  is returned. Disarm wakes the close queue after returning those dependencies.
+- EX-W1 found in review: an idle ready scan originally used a silent temporary
+  pin return. Close, or a concurrent armed collector, could park on that pin
+  and never learn that the dependency ended. Actual-C case12 rejects that draft
+  (pin-return-before.log / controls-20261009T205436Z). The repaired return samples
+  closing/wait-active in the same Ll interval as decrement and notifies after
+  unlock. Cases12/13 plus omit-pin-return/omit-close-return mutants cover it.
+
+Progress and backpressure
+- At most64 bounded snapshots and one actionable owner per ready visit; the
+  shared cursor advances past stalled peers. Poll directions follow the actual
+  handshake phase. A stale readiness sample is harmless because the real step
+  rechecks driver/abort/deadline and never blocks on the peer.
+- Earliest absolute deadline belongs only to ACTIVE CONNECT. READY has no old
+  timer; busy local holders rely on their return wake and then recheck timeout.
+  Cancellation and timeout do not need CQ room. Full-CQ terminals park, and a
+  consumer-head change plus wake resumes delivery without duplicating progress.
+- This handshake executor still does not implement general RPC/FID operations,
+  provided-buffer dispatch, usercopy or public activation. Those and AS3/4 remain
+  before MM0-MM4. Legacy shared-session SQ drain/reader loop remains on its path.
+
+Verification / limitations
+- Actual-C host readiness, worker admission/join, existing engine/CONNECT and
+  constructor/final-free checks are driven by check-reviewed-draft.py. Read its
+  final result and hashes; running/partial logs are not success. Native poll,
+  ticket and scheduler operations are checked boundary doubles in those tests.
+- ARM64 syntax uses actual kernel headers and the page-size assertion. Only the
+  existing eight test missing-prototype warnings are nonfatal.
+- Existing unmodified poll, Loom, private lifecycle and index models were rerun
+  with their configured counterexamples. They do not model the new executor or
+  constitute a C-memory-model/scheduler proof.
+- Native fixture prepared: actual normal/bulk peers, real registered-before-sleep
+  injection, partial first response vs productive second peer, full CQ/drain,
+  absolute timeout, actual handle close, worker-exit barrier and ticket/refund;
+  a second case drops the only creation root while an empty executor is parked,
+  exercising the zero-reference retirer's live-worker join. Still unrun.
+- Native/SMP/UBSan qualification and exact rebuilt artifact matching remain
+  mandatory before this draft can be presented as qualified. Preserve current
+  raw50x1852 first; future fixture should count1853. No independent audit.
+
+Harness issues retained, not hidden
+- Initial close-host expectation assumed the first of two retiring owners would
+  return PARKED; actual close correctly returned MORE. Corrected only that
+  boundary expectation, preserving the failed run.
+- Initial ARM64 compile lacked the explicit srvconn header; added it and passed.
+- Wrapper-script split marker, shadow root/evidence directory creation, and an
+  unused old wake stub were corrected with failed logs retained.
+- Generic TLC driver expected plural temporal wording and a first invariant in
+  a multi-invariant config. It now requires the exact named property/invariant;
+  the observed counterexamples were expected model mutations, not clean failures.
+
+Native capture harness failure: executor-native-20261009T2114Z stopped before
+VM launch because its extra-source list named a nonexistent standalone executor
+file. The worker lives in loom.c. Retained native-launch.log and source capture;
+corrected the harness to require every reviewed manifest source/hash. No native
+result was produced by that launch; new output directory required.
+
+Installed native result: executor-native-20261009T2116Z passes1853/1853 and
+D7 overlap/20cycles with stable source and inputs. Full Mac qualification
+remains pending for this implementation. No public activation.

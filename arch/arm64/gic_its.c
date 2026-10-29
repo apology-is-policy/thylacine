@@ -461,7 +461,6 @@ bool gic_its_set_pending(const struct gic_msi_route *r) {
 #ifdef KERNEL_TESTS
 // Exercise the real mailbox/SGI path without destroying the boot controller.
 // Engine containment itself is tested with private registers below.
-bool gic_its_test_fault_notify(u32 node);
 bool gic_its_test_fault_notify(u32 node) {
     for (u32 n = 0; n < controller_count; n++) {
         if (controllers[n].ready && controllers[n].dt.node == node) {

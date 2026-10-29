@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:15:05
+@@ -15318,7 +15318,7 @@
+ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
+     // Linux reads x8 as `int scno` (el0_svc_common), so a number with bits
+     // above 31 runs the call its low half names; x8 itself stays as written.
+-    u64 nr = ctx->regs[8] & 0xffffffffull;
++    u64 nr = ctx->regs[8]; // MUTANT M17 whole x8
+ #if VIV_TRACE
+     viv_trace_call(nr, p);
+ #endif

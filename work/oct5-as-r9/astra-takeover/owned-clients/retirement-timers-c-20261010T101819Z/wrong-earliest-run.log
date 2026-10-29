@@ -1,0 +1,1 @@
+Assertion failed: (t_retirement_next_deadline(e,&when)&&when==0), function main, file test_retirement_timers.c, line 23.

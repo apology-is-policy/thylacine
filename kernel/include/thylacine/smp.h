@@ -185,7 +185,7 @@ void *smp_bootcpu_idle_stack_top(void);
 
 // P2-Cb: per-CPU main. Called from secondary_entry asm trampoline at
 // the kernel's high VA after PAC + MMU + per-CPU stack are live.
-// Sets VBAR_EL1 to the kernel vector table, TPIDR_EL1 to NULL (no
+// Verifies VBAR_EL1 holds the kernel vector table, sets TPIDR_EL1 to NULL (no
 // per-CPU current thread at P2-Cb), flips g_cpu_alive[idx], and
 // enters an idle WFI loop indefinitely. Noreturn.
 //
@@ -237,23 +237,13 @@ unsigned smp_cpu_idx_self(void);
 // #define IPI_HALT       2u    // SGI 2 — P2-Cd2+ shutdown
 // #define IPI_GENERIC    3u    // SGI 3 — generic callback delivery
 
+#ifdef KERNEL_TESTS
 // P2-Cdc: IPI_RESCHED hit count per CPU. Set by the IPI handler each
 // time a CPU receives an IPI_RESCHED. Tests use this to verify cross-
 // CPU IPI delivery (boot sends to secondary; secondary's slot
 // increments). Read by anyone; only the receiving CPU writes its slot.
 extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
-
-// P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
-// secondary AFTER sched_init + g_cpu_alive flag is set. Performs the
-// per-CPU GIC redistributor + CPU interface init via gic_init_secondary,
-// attaches the IPI_RESCHED handler, enables SGI 0 at the source, and
-// unmasks DAIF.I so IRQs can be delivered. From this point on, the
-// secondary can receive IPIs.
-//
-// Must run BEFORE the secondary's idle loop enters its first WFI; the
-// loop body's `for(;;){sched();wfi;}` pattern relies on IRQs being
-// enabled to wake from WFI when an IPI arrives.
-void smp_cpu_ipi_init(unsigned cpu_idx);
+#endif // KERNEL_TESTS
 
 // #868: attach + enable IPI_RESCHED on the BOOT CPU (cpu0), making it a full
 // SMP scheduling peer -- a peer's sched_notify_idle_peer can wake cpu0's idle
@@ -278,5 +268,9 @@ void smp_resched_others(void);
 // (#810 / invariants I-8, I-17). This is what makes smp_resched_others's
 // "periodic preemption timer is the floor" true on secondaries.
 void smp_enable_secondary_preemption(void);
+
+// start.S: the secondary CPUs' entry trampoline, the address PSCI CPU_ON is
+// given (a PA, so smp.c computes it against _kernel_start).
+void secondary_entry(void);
 
 #endif // THYLACINE_SMP_H

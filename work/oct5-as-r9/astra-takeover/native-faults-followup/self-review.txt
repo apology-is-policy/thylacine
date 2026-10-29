@@ -1,0 +1,31 @@
+Astra single-agent self-review before verification. Applied followup patch from
+native-faults checkpoint. Adds canceled WRITE after captured emitted bytes and
+READ deadline (500ms absolute); both require negative terminal and local scope
+retirement while peer endpoint survives. WRITE cannot be called not-applied:
+peer already captured bytes, and scope BYTES_SENT must remain observable. This
+is conservative diagnostic coverage, not a per-operation remote-commit oracle.
+Partial header/body schedules now observe s2c channel count drained under its
+lock before abort; fragment consumption no longer relies on a yield count.
+No new production path. Eight cases in both classes. Five smoke rows pending.
+Limits: no partial outbound WRITE, actual clipboard protocol, independent media,
+1000 reconnects or owned client API qualification yet. No activation.
+
+Verification completed:
+
+### Astra emitted WRITE and deadline faults verified, October 10
+
+Expanded native fault fixture to eight schedules per normal/bulk class. Canceled
+WRITE is observed after its bytes reach the peer without acknowledgement; its
+negative terminal and retained BYTES_SENT diagnostic do not promise remote
+rollback. Silent READ expires by absolute500ms deadline and locally retires.
+Partial header/body cancellation now waits for actual s2c channel drain under
+the channel lock, establishing consumption before abort instead of yield counts.
+
+Five smoke rows pass1857/1857,D7overlap/20cycles at bdba6bc5e plus diff504cd6018,
+run native-faults-followup/smoke-20261010T023726Z. Reverified10rawlogs,41sources,
+six inputs/row,kernel clones,Stratum clean61dde37 and Astra10preserved hashes.
+Minimum9252MiB; Mac released. No50boot or completeAS3 claim. Single-agent review;
+no production change, private activation or128MiB removal. Next reviewed but
+UNINSTALLED native-reconnect/reconnect.patch adds1000 canceled-before-accept
+attempts alternating classes with complete per-attempt ownership/accounting checks.
+Broader AS3 stage/close/exec/exit/independent-media and owned clients,AS4/MM0-MM4 remain.

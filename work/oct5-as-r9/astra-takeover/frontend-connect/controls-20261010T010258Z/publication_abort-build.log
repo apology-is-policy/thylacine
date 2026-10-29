@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/frontend-connect/controls-20261010T010258Z/publication_abort.c:2402:9: error: unused variable 'rc' [-Werror,-Wunused-variable]
+ 2402 |     int rc=loom_private_connect_publish(p,now);
+      |         ^~
+1 error generated.

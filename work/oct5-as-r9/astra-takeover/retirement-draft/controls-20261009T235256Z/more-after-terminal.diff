@@ -1,0 +1,11 @@
+--- control.c
++++ more-after-terminal.c
+@@ -1115,7 +1115,7 @@
+         u64 user;s32 result;
+         rc=loom_request_peek(&l->service_requests,o->request,&user,&result);
+         if(rc || user!=c->user_data || result!=(s32)c->result){if(!rc)rc=-T_E_IO;goto done;}
+-    } else if(!o->multishot || (o->phase!=LRPC_SETTLING && o->phase!=LRPC_TERMINAL)) {
++    } else if(!o->multishot || o->phase!=LRPC_SETTLING) {
+         rc=-T_E_BUSY;goto done;
+     }
+     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);

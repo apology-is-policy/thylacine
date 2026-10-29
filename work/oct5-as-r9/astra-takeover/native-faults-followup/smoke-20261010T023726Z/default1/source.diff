@@ -1,0 +1,114 @@
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 9a5456e32..ea5057824 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -3104,9 +3104,11 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
+     struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+     bytes[64]=0xa5;bytes[68]=0x5a;
+-    if(!loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
++    bool writing=fault==7,timeout=fault==8;
++    u64 deadline=timeout?timer_now_ns()+500000000ull:0;
++    if(!loom_native_submit(l,creator,(struct loom_sqe){.opcode=writing?LOOM_OP_WRITE:LOOM_OP_READ,
+        .handle_idx=child.slot,.len=5,.user_data=900,
+-       ._resv1={64,child.incarnation,0,0}}))return "fault READ submission";
++       ._resv1={64,child.incarnation,0,deadline}}))return "fault IO submission";
+     u8 request[64];u32 used=0,size=0;u8 type=0;u16 tag=0;
+     u64 end=timer_now_ns()+2000000000ull;
+     do {
+@@ -3120,11 +3122,14 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
+         }
+         sched();
+     }while(timer_now_ns()<end);
+-    if(used!=23 || type!=P9_TREAD || size!=used)return "fault waits for emitted READ";
++    if(used!=(writing?28u:23u) || type!=(writing?P9_TWRITE:P9_TREAD) || size!=used)
++        return "fault waits for emitted IO";
++    if(writing && (request[23]!=0xa5 || request[27]!=0x5a))return "fault WRITE payload bytes";
+     u8 reply[256];int count=canonical_responder(NULL,request,used,reply,sizeof(reply));
+-    if(count!=16)return "fault canonical READ shape";
++    if(count!=(writing?11:16))return "fault canonical reply shape";
+     // 1: no response, 2: partial header, 3: partial body, 4: impossible
+-    // frame length, 5: unexpected reply type, 6: cancellation with full CQ.
++    // frame length, 5: unexpected reply type, 6: cancellation with full CQ,
++    // 7: emitted WRITE without acknowledgement, 8: READ deadline expiry.
+     int send=0;
+     if(fault==2)send=3;
+     if(fault==3)send=13;
+@@ -3132,9 +3137,19 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
+     if(fault==5){reply[4]=P9_RWRITE;send=count;}
+     if(send && srvconn_server_send(server,reply,send)!=send)return "fault response injection";
+     bool malformed=fault==4 || fault==5;
+-    if(!malformed) {
+-        // Let the real worker consume the fragment and park without a terminal.
+-        for(u32 i=0;i<32;++i)sched();
++    if(!malformed && !timeout) {
++        // For fragments, observe actual transport consumption before abort.
++        // A yield count alone does not establish a mid-frame receive boundary.
++        if(send) {
++            bool drained=false;end=timer_now_ns()+2000000000ull;
++            do {
++                spin_lock(&server->s2c.lock);drained=!server->s2c.count;
++                spin_unlock(&server->s2c.lock);
++                if(drained)break;
++                sched();
++            }while(timer_now_ns()<end);
++            if(!drained)return "fault fragment was not consumed";
++        }
+         if(__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE)!=head)
+             return "stalled response completed prematurely";
+         if(fault==6 && (loom_post_cqe(l,800,0,0) || loom_post_cqe(l,801,0,0)))
+@@ -3152,7 +3167,9 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
+         sched();
+     }while(timer_now_ns()<end);
+     if(!retired)return "fault local retirement stalls with retained endpoint";
+-    if(snap.reason>=0 || (!malformed && snap.reason!=-T_E_CANCELED))return "fault retirement reason";
++    s32 expected=timeout?-T_E_TIMEDOUT:-T_E_CANCELED;
++    if(snap.reason>=0 || (!malformed && snap.reason!=expected))return "fault retirement reason";
++    if(writing && !(snap.status_flags&LOOM_SERVICE_BYTES_SENT))return "canceled WRITE loses unknown-outcome diagnostic";
+     if(fault==6) {
+         if(__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE)!=head+2 || !snap.pending_terminals)
+             return "full CQ must retain canceled operation terminal";
+@@ -3166,7 +3183,7 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
+         if(tail!=head) {
+             struct loom_cqe value=cq[head&(l->cq_entries-1u)];
+             if(tail!=head+1 || value.user_data!=900 || value.result>=0 || value.flags ||
+-               (!malformed && value.result!=-T_E_CANCELED))return "fault terminal identity or status";
++               (!malformed && value.result!=expected))return "fault terminal identity or status";
+             completed=true;break;
+         }
+         sched();
+@@ -3372,7 +3389,7 @@ static const char *loom_protocol_fixture(u32 kind) {
+            "zero-reference retirer wakes joins and refunds the live private worker");
+         goto done;
+     }
+-    if (kind>=19 && kind<=30) {
++    if (kind>=19 && kind<=34) {
+         bool bulk=(kind-19)&1u;
+         error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,1+(kind-19)/2);
+         goto done;
+@@ -3541,7 +3558,7 @@ void test_loom_private_native_operations(void) {
+ 
+ void test_loom_private_native_faults(void);
+ void test_loom_private_native_faults(void) {
+-    for(u32 kind=19;kind<=30;++kind) {
++    for(u32 kind=19;kind<=34;++kind) {
+         const char *error=loom_protocol_fixture(kind);
+         TEST_ASSERT(!error,error);
+     }
+diff --git a/work/oct5-as-r9/astra-takeover/pickup-latest.md b/work/oct5-as-r9/astra-takeover/pickup-latest.md
+index 2aeff3f84..883c4e449 100644
+--- a/work/oct5-as-r9/astra-takeover/pickup-latest.md
++++ b/work/oct5-as-r9/astra-takeover/pickup-latest.md
+@@ -61,3 +61,12 @@ already unsafe; do not repeat that repair. Then AS4 clipboard/MODE whole arc,
+ then MM0–MM4. No Main landing, unfinished private async/clipboard activation or
+ 128MiB protection removal. Pause continuation heartbeat only when transferred
+ work is complete/canceled. Full historical record remains pickup.md and status.
++
++## Newer follow-up in flight
++
++The native-faults followup patch is now APPLIED to canonical test source. Read
++native-faults-followup-flight.json before acting. It adds emitted WRITE abort,
++READ deadline expiry and actual channel-drain observation before partial-frame
++abort. Eight schedules per class;1857tests. Native-faults previous six-case
++smoke remains historical. Keep tracked source/HEAD frozen while new runner lives;
++verify raw logs then checkpoint. Do not reapply the patch or duplicate gates.

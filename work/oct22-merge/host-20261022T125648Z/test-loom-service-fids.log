@@ -1,0 +1,7 @@
+PASS control PASS walked FID reap: 4096 bytes
+PASS reap-aborting an aborting scope has not proven quiescence, and the refusal changes nothing
+PASS reap-pinned a pinned FID refuses REAP before any transition
+PASS reap-clunked-only the FIDs of a retired scope reap and release it
+PASS reap-keeps-parent-pin a clunked FID reaps once and unpins its scope
+PASS walk-opened an opened FID is no WALK source, and the refusal changes nothing
+PASS walk-never an unopened FID is a WALK source

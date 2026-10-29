@@ -1,0 +1,26 @@
+
+running 7 tests
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test last_generation_cannot_wrap_or_reuse ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test overlap_and_global64_members_are_rejected ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... FAILED
+
+failures:
+
+---- pool_destroy_error_retains_exclusion_and_incarnation stdout ----
+
+thread 'pool_destroy_error_retains_exclusion_and_incarnation' (22139417) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ring-payload-20261010T035754Z/mutant-failed-destroy/test_ring_payload.rs:28:155:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pool_destroy_error_retains_exclusion_and_incarnation
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

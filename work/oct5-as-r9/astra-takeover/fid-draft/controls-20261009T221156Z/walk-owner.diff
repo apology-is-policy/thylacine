@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -63,7 +63,7 @@
+     struct loom_service_node *n=fid_exact(t,nodes,dest,false);
+     if(!n || t->slots[dest.slot].kind!=LOOM_SERVICE_FID)return -T_E_NOENT;
+     if(!fid_parent(t,n,dest,scope) || !fid_scope_ready(t,nodes,scope))return -T_E_CANCELED;
+-    if(n->state!=LOOM_SERVICE_RESERVED || n->fid_claim!=id || n->fid_flags ||
++    if(n->state!=LOOM_SERVICE_RESERVED || false || n->fid_flags ||
+        !t->slots[dest.slot].pins)return -T_E_BUSY;
+     if(fid_duplicate(t,nodes,scope,wire))return -T_E_BUSY;
+     n->wire_fid=wire;n->fid_flags=LFID_BOUND;n->state=LOOM_SERVICE_READY;

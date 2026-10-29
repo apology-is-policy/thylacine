@@ -1,0 +1,10 @@
+--- control.c
++++ clunk_cancel_spin.c
+@@ -2086,6 +2086,7 @@
+             // engine; repeatedly selecting a known BUSY cancellation would spin.
+             if(o->fid_claim!=P9_TCLUNK || !l->service_nodes->nodes[o->source.slot].fid_borrows)
+                 action=LREADY_CANCEL;
++            else action=LREADY_CANCEL;
+         }
+         else if(o->pool_pending && room)action=LREADY_DELIVER;
+         else if(o->phase==LRPC_TERMINAL) {

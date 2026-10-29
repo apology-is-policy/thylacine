@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+# Exercise bounded readiness aggregation, descriptor lifetime and worker join.
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "kaua-term-probe --readiness"
+expect {
+    -ex "readiness-probe: PASS -- capacity, one-shot wake, fd reuse, rearm, join, rollback" {
+        lc_pass "native readiness aggregation and lifetime"
+    }
+    -re {readiness-probe: FAIL -- ([^\r\n]+)[\r\n]} { lc_fail "Readiness probe: $expect_out(1,string)" }
+    timeout { lc_fail "Readiness probe did not complete" }
+}
+lc_run_expect "echo readiness-shell-live | tr a-z A-Z" "READINESS-SHELL-LIVE"
+
+lc_quit
+exit 0

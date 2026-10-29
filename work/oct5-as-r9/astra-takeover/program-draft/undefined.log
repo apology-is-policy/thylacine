@@ -1,0 +1,5 @@
+                 U __stack_chk_fail
+                 U __stack_chk_guard
+                 U loom_private_wire_retry
+                 U perm_check_identity
+                 U perm_want_for_omode

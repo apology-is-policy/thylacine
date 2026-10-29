@@ -2,8 +2,8 @@
 //
 // Exercises the syscall handler's integration of pipe_create +
 // handle_alloc + KOBJ_SPOOR release-path discipline. Calls
-// `sys_pipe_for_proc(p, ...)` (the non-static inner of the SVC
-// handler) with a test Proc; verifies the resulting handles are
+// `sys_pipe_for_proc(p, ...)` (the SVC handler's core) with a test
+// Proc; verifies the resulting handles are
 // well-formed KOBJ_SPOOR slots; verifies proc_free's
 // handle_table_free walks the table and spoor_clunks each entry
 // end-to-end.
@@ -41,31 +41,6 @@
 
 // The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
 // tests read (/welcome is pinned by tools/build.sh).
-extern struct Dev devramfs;
-
-// Inner SVC handlers (extern declarations; defined in kernel/syscall.c).
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
-extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
-                              s64 off);
-extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                               u64 len, s64 off);
-
-void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
-void test_sys_pipe_proc_free_releases_handles(void);
-void test_sys_pipe_handle_close_releases_one_end(void);
-void test_sys_rw_write_then_read_round_trip(void);
-void test_sys_rw_rights_check(void);
-void test_sys_rw_zero_length_validates_fd(void);
-void test_sys_rw_read_after_close_returns_eof(void);
-void test_sys_rw_write_after_read_close_returns_epipe(void);
-void test_sys_prw_pipe_not_seekable(void);
-void test_sys_pread_devramfs_offset_and_cursor(void);
-void test_sys_prw_rights_and_walkonly(void);
-void test_sys_attach_9p_rejection_paths(void);
-void test_sys_attach_9p_names_root_by_its_pipe(void);
-void test_sys_attach_9p_declarations(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
 // independent so the two test files can be reordered without import
@@ -313,13 +288,6 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
 // the attach sent is read back non-blocking, so "nothing sent" is a measured 0.
 // ---------------------------------------------------------------------------
 
-extern s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
-                                  const u8 *aname, u64 aname_len, u64 n_uname,
-                                  u64 flags);
-extern int canonical_responder(void *ctx, const u8 *req, size_t req_len,
-                               u8 *resp, size_t resp_cap);
-extern struct Dev devnone;
-
 enum pa_ends { PA_PIPES, PA_BOGUS_TX, PA_BOGUS_RX, PA_DEVNONE_TX };
 
 struct pa_seen {
@@ -561,7 +529,7 @@ void test_sys_pread_devramfs_offset_and_cursor(void) {
     // /welcome content is pinned by tools/build.sh: "Welcome to Thylacine
     // ramfs.\n" (28 bytes). Offsets are asserted against it.
     struct Spoor *f = prw_open_ramfs("welcome");
-    if (!f) return;   // initrd without the smoke files (never in CI)
+    TEST_ASSERT(f != NULL, "open welcome");
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);   // adopts the ref
@@ -604,7 +572,11 @@ void test_sys_prw_rights_and_walkonly(void) {
     // A WRITE-only handle cannot pread (the RIGHT_READ gate) -- the
     // omode-derived-rights shape (#46 family) applied to the positioned ops.
     struct Spoor *fw = prw_open_ramfs("welcome");
-    if (!fw) { drop_test_proc(p); return; }
+    if (!fw) {
+        drop_test_proc(p);
+        test_fail("open welcome (w)");
+        return;
+    }
     hidx_t fdw = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, fw);
     TEST_ASSERT(fdw >= 0, "handle_alloc W-only");
     u8 buf[8];
@@ -690,4 +662,43 @@ void test_sys_pipe_fstat_reports_fifo(void) {
     handle_put(&h_rd);
     handle_put(&h_wr);
     drop_test_proc(p);
+}
+
+// A pipe that cannot get both numbers publishes neither: both are reserved
+// before either end is installed. The by-number unwind this replaced installed
+// the read end, then closed it -- one install, and a window in which a peer
+// thread could reuse the number and have its own file closed.
+void test_sys_pipe_full_table_publishes_nothing(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    while (handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL) >= 0) {}
+    int top_closed = handle_close(p, PROC_HANDLE_MAX - 1);
+
+    u64    i0 = handle_table_installs(p);
+    hidx_t rd = -1, wr = -1;
+    int    one     = sys_pipe_for_proc(p, &rd, &wr);
+    u64    i_one   = handle_table_installs(p) - i0;
+    bool   top_res = handle_is_reserved(p, PROC_HANDLE_MAX - 1);
+    hidx_t top     = handle_reserve(p, 0);
+    if (top >= 0) handle_unreserve(p, top);
+
+    int    mid_closed = handle_close(p, 7);
+    u64    i1    = handle_table_installs(p);
+    int    two   = sys_pipe_for_proc(p, &rd, &wr);
+    u64    i_two = handle_table_installs(p) - i1;
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(top_closed, 0, "the top slot was freed");
+    TEST_EXPECT_EQ(one, -1, "one free number is not enough for a pipe");
+    TEST_EXPECT_EQ(i_one, (u64)0, "the refused pipe installed nothing");
+    TEST_ASSERT(!top_res, "and left no reservation behind");
+    TEST_EXPECT_EQ((int)top, PROC_HANDLE_MAX - 1, "the free number is still free");
+    TEST_EXPECT_EQ(mid_closed, 0, "a second number was freed");
+    TEST_EXPECT_EQ(two, 0, "two free numbers make a pipe");
+    TEST_EXPECT_EQ((int)rd, 7, "the read end takes the lower number");
+    TEST_EXPECT_EQ((int)wr, PROC_HANDLE_MAX - 1, "the write end the higher");
+    TEST_EXPECT_EQ(i_two, (u64)2, "two installs, one per end");
 }

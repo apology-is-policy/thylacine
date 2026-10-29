@@ -1,0 +1,4 @@
+loom-client fatal: t_ring_create:13
+loom-client fatal: t_fixed_create:11
+t_mapping_create: no fatal there (status 0)
+Assertion failed: (0), function expect_fatal, file test_fatal.c, line 14.

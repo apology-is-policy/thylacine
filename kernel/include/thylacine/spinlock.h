@@ -98,6 +98,18 @@ typedef struct spin_lock {
 void spin_preempt_inc(void);
 void spin_preempt_dec(void);
 
+// A LEAF lock is one under which no refusing lock is ever taken. Its owner
+// calls spin_leaf_enter right after acquiring it and spin_leaf_exit right
+// before releasing it; a lock that must stay outside every leaf calls
+// spin_leaf_refuse(who) before acquiring, and extincts with `who` if this CPU
+// is inside a leaf hold. Checked on every acquire, contended or not, so an
+// inverted nesting extincts the first time it runs instead of deadlocking the
+// one time two CPUs interleave it. Per-CPU depth: a leaf holder is
+// non-preemptible, so the depth it raised stays on the CPU it runs on.
+void spin_leaf_enter(void);
+void spin_leaf_exit(void);
+void spin_leaf_refuse(const char *who);
+
 static inline void spin_lock_init(spin_lock_t *l) {
     __atomic_store_n(&l->value, 0u, __ATOMIC_RELAXED);
 }

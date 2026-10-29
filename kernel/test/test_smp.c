@@ -251,13 +251,11 @@ void test_smp_ipi_resched_smoke(void) {
             "cpu0 received its own IPI_RESCHED -- it is a full SGI peer (#868)");
     }
 
+    // With only the boot CPU the cpu0 self-reception check above is all that
+    // can run (#868 retired the old "boot CPU can't IPI itself" assumption).
     unsigned cpus = smp_cpu_count();
-    if (cpus < 2) {
-        // Only the boot CPU online -- the cpu0 self-reception check above is the
-        // meaningful coverage; no secondaries to broadcast to. (#868 retired the
-        // old "boot CPU can't IPI itself" assumption.)
+    if (!test_requires(cpus >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
-    }
 
     // Snapshot pre-send counts. Each secondary may have already
     // received some IPIs during bring-up if anyone (e.g., a future
@@ -338,10 +336,8 @@ static void steal_test_entry(void) {
 
 void test_smp_work_stealing_smoke(void) {
     unsigned cpus = smp_cpu_count();
-    if (cpus < 2) {
-        // No secondaries — nothing to steal to. Skip rather than fail.
+    if (!test_requires(cpus >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
-    }
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run trees must be empty at test entry");

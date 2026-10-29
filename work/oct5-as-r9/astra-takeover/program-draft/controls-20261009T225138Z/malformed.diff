@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ malformed.c
+@@ -28,7 +28,7 @@
+ enum loom_program_action loom_private_program_reply(struct loom_service_program *p,
+                             const struct loom_service_reply *r,int capture_error) {
+     if(!p)return LPROGRAM_ABORT;
+-    if(!r || (p->phase!=LPROGRAM_STAT && p->phase!=LPROGRAM_EFFECT) || capture_error)
++    if(!r || (p->phase!=LPROGRAM_STAT && p->phase!=LPROGRAM_EFFECT))
+         return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+     // Only submit-return proof licenses no-wire retry. A server's EAGAIN is
+     // an ordinary terminal error, including after a prior local shortage.

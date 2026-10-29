@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/handle.c	2026-10-15 00:46:40
++++ kernel/handle.c	2026-10-15 00:53:26
+@@ -601,7 +601,7 @@
+     // (and fails) -- never a torn read, never a freed obj under a live ref.
+     table_lock(t);
+     struct Handle *slot = &t->slots[h];
+-    if (slot->magic != HANDLE_MAGIC ||
++    if ((slot->magic != HANDLE_MAGIC && slot->magic != HANDLE_RESERVED) || // MUTANT M3: close vacates a reservation
+         (obj && (slot->kind != kind || slot->obj != obj))) {
+         spin_unlock(&t->lock);
+         return -1;

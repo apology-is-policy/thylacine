@@ -39,6 +39,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <atomic_lse.h>   // t_atomic_fetch_add_relaxed_u32 (W1.5 LSE-patchable)
 
 #include "../arch/arm64/asid.h"     // RW-1 B-F1: asid_resolve (context-switch ASID pre-hook).
@@ -237,6 +238,34 @@ void spin_preempt_dec(void) {
     t->preempt_count--;
 }
 
+// spinlock.h's leaf discipline. Written only by the holder, between its
+// counted acquire and release, so no other CPU touches this CPU's slot.
+static u32 g_spin_leaf_depth[DTB_MAX_CPUS];
+
+void spin_leaf_enter(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS) g_spin_leaf_depth[cpu]++;
+}
+
+void spin_leaf_exit(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) return;
+    if (g_spin_leaf_depth[cpu] == 0u)
+        extinction_with_addr("spin_leaf_exit without a leaf hold",
+                             (uintptr_t)__builtin_return_address(0));
+    g_spin_leaf_depth[cpu]--;
+}
+
+void spin_leaf_refuse(const char *who) {
+    // A thread holding no counted lock holds no leaf, and may migrate, so this
+    // CPU's depth would be a stranger's. One that holds any lock is pinned
+    // here, so the depth is its own.
+    struct Thread *t = current_thread();
+    if (t && t->magic == THREAD_MAGIC && t->preempt_count == 0u) return;
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS && g_spin_leaf_depth[cpu] != 0u) extinction(who);
+}
+
 // #361 (audit-360 F2): the extinction tail of the EL0-return leak detector.
 // The fast-path check (t->preempt_count != 0) is inlined at
 // el0_return_die_check (kernel/proc.c) -- this out-of-line body exists only
@@ -293,10 +322,12 @@ void sched_init(unsigned cpu_idx) {
     cs->initialized  = true;
 }
 
+#ifdef KERNEL_TESTS
 struct Thread *sched_idle_thread(unsigned cpu_idx) {
     if (cpu_idx >= DTB_MAX_CPUS) return NULL;
     return g_cpu_sched[cpu_idx].idle;
 }
+#endif // KERNEL_TESTS
 
 // ============================================================================
 // HMP foundation (#864, ARCH §8.4.4): per-CPU capacity + capacity-aware
@@ -313,6 +344,7 @@ struct Thread *sched_idle_thread(unsigned cpu_idx) {
 // the prev CPU and ready() behaves exactly as it did before #864.
 // ============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps) {
     if (!raw_dmips || !out_caps || n == 0) return false;
 
@@ -344,6 +376,7 @@ bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps) {
     return false;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 unsigned sched_place_by_capacity(u32 util, unsigned prev_cpu,
                                  const u32 *caps, unsigned n, bool hetero) {
     // Homogeneous topology: the placement is the identity -- keep the prev/
@@ -478,6 +511,7 @@ static inline bool thread_may_run_on(const struct Thread *t, unsigned cpu) {
     return true;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     if (!t) return prev_cpu;
     // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
@@ -520,6 +554,7 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     return tgt;
 }
 
+#ifdef KERNEL_TESTS
 bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
     if (cpu >= DTB_MAX_CPUS || !t) return false;
     struct CpuSched *cs = &g_cpu_sched[cpu];
@@ -530,7 +565,6 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
     return present;
 }
 
-#ifdef KERNEL_TESTS
 // Test-support accessors (gated by KERNEL_TESTS, #61): the unit suite reads
 // need_resched_pending() to observe the same-CPU wake-preempt path (RW-11
 // SA-1b) and clears it to establish a clean baseline. Production code never
@@ -553,18 +587,35 @@ void sched_set_need_resched_for_test(unsigned cpu) {
 }
 #endif /* KERNEL_TESTS */
 
-void sched_set_idle_in_wfi(bool in_wfi) {
+// P3-G: WFI signaling for ready/wakeup wake-idle-peer (closes R5-H F78).
+//
+// `sched_set_idle_in_wfi(true)` is called by THIS CPU immediately before
+// entering `wfi` in sched_idle_park (the idle body cpu0's loop and
+// per_cpu_main share); `false` is called immediately after WFI exits. Peer CPUs read these flags via `sched_idle_in_wfi(idx)`
+// to identify wake targets; ready() / wakeup() send IPI_RESCHED to one
+// such target so it wakes from WFI and runs sched (which try_steals the
+// new work). Without this signaling, secondaries (no per-CPU timer at
+// v1.0) starve runnable threads while sitting in WFI.
+//
+// The boot CPU participates too: post-SMP-redesign cpu0 runs a per-CPU pinned
+// in-tree idle (`bootcpu_idle_main`, ARCH §8.4.2) that toggles this flag around
+// its own WFI exactly like a secondary's idle -- the old "boot CPU stays FALSE
+// forever / `_torpor` asm loop with no C hook" special case is retired with the
+// `g_bootcpu_idle` off-tree state. See ARCH §8.4.5 + scheduler.tla `EnterWFI`.
+static void sched_set_idle_in_wfi(bool in_wfi) {
     unsigned idx = smp_cpu_idx_self();
     if (idx >= DTB_MAX_CPUS) return;
     if (!g_cpu_sched[idx].initialized) return;
     g_cpu_sched[idx].idle_in_wfi = in_wfi;
 }
 
+#ifdef KERNEL_TESTS
 bool sched_idle_in_wfi(unsigned cpu_idx) {
     if (cpu_idx >= DTB_MAX_CPUS) return false;
     if (!g_cpu_sched[cpu_idx].initialized) return false;
     return g_cpu_sched[cpu_idx].idle_in_wfi;
 }
+#endif // KERNEL_TESTS
 
 // SMP redesign (ARCH 8.4.2): install cpu0's idle thread. cpu0's idle is an
 // ordinary in-tree pinned thread (thread_create_bootcpu_idle), retiring the old
@@ -803,6 +854,7 @@ void sched_kick_thread(struct Thread *t) {
 // highest-priority band with runnable threads" ON THE WAKE PATH: without it a
 // newly-runnable higher-band thread waited up to a full slice for the next
 // tick-driven preempt.
+VISIBLE_IF_KERNEL_TESTS
 bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle) {
     if (cur_is_idle) return true;
     return woken_band < cur_band;
@@ -1010,10 +1062,12 @@ static void sched_record_space(struct AddrSpace *as) {
     __asm__ __volatile__("dsb ish" ::: "memory");
 }
 
+#ifdef KERNEL_TESTS
 const struct AddrSpace *sched_cpu_space(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return NULL;
     return __atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // Checks of an outstanding ticket between offers of the CPU. An IPI round trip
 // is microseconds; the kernel is not preemptible in a syscall (ARCH 8.12), so
@@ -1636,6 +1690,18 @@ void sched_remove_if_runnable(struct Thread *t) {
     }
 }
 
+VISIBLE_IF_KERNEL_TESTS
+unsigned sched_runnable_count_band(unsigned band) {
+    if (band >= SCHED_BAND_COUNT) return 0;
+    unsigned n = 0;
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        n += __atomic_load_n(&cs->nr_queued[band], __ATOMIC_RELAXED);
+    }
+    return n;
+}
+
 unsigned sched_runnable_count(void) {
     // P2-Cd: aggregate runnable WORK across all CPUs' run trees. Diagnostic
     // only -- not a hot-path operation, and consulted by NO scheduling
@@ -1664,20 +1730,8 @@ unsigned sched_runnable_count(void) {
     return n;
 }
 
-unsigned sched_runnable_count_band(unsigned band) {
-    if (band >= SCHED_BAND_COUNT) return 0;
-    unsigned n = 0;
-    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
-        struct CpuSched *cs = &g_cpu_sched[i];
-        if (!cs->initialized) continue;
-        n += __atomic_load_n(&cs->nr_queued[band], __ATOMIC_RELAXED);
-    }
-    return n;
-}
-
 #ifdef KERNEL_TESTS
 // Each CPU's per-band counts against a walk of its trees, under its lock.
-bool sched_run_counts_match_trees_for_test(void);
 bool sched_run_counts_match_trees_for_test(void) {
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
@@ -1705,7 +1759,7 @@ bool sched_run_counts_match_trees_for_test(void) {
 // a statistic-at-this-instant -- a few-ns-stale yes/no is exactly right for the
 // "was work queued when I parked" sample. SCHED_BAND_IDLE excluded (the per-CPU
 // idle threads are infrastructure, not pending work -- same rule as the count).
-bool sched_has_runnable_work(void) {
+static bool sched_has_runnable_work(void) {
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
         if (!cs->initialized) continue;
@@ -1789,6 +1843,7 @@ u64 sched_cpu_ctxt(unsigned cpu) {
     return __atomic_load_n(&g_cpu_sched[cpu].nctxt, __ATOMIC_RELAXED);
 }
 
+#ifdef KERNEL_TESTS
 // A snapshot of every runnable thread across ALL CPUs' run trees (every band,
 // INCLUDING idle -- the dump shows everything so a quiescence failure can be
 // fingerprinted), with enough identity (cpu / tid / band / state / on_cpu /
@@ -1845,6 +1900,7 @@ void sched_dump_runnable(const char *tag) {
         }
     }
 }
+#endif // KERNEL_TESTS
 
 // ============================================================================
 // Plan 9 wait/wake protocol — sleep + wakeup over Rendez (P2-Bb).
@@ -1941,6 +1997,7 @@ static void timerwait_unlink(struct Thread *t) {
 // nothing), and a mid-switch sleeper's near deadline still needs covering. A
 // deadline already in the past is returned as-is: the one-shot clamp fires it
 // ASAP, which is correct for an overdue sleeper.
+VISIBLE_IF_KERNEL_TESTS
 u64 timerwait_earliest_deadline(void) {
     u64 earliest = 0;
     bool found = false;
@@ -2552,6 +2609,7 @@ static void timerwait_tick(void) {
 // per_cpu_main (smp.c) reach it via the sched.h declaration.
 // ===========================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt) {
     // now_cnt + backstop_cnt cannot overflow on v1.0 targets (a 62.5 MHz CNTVCT
     // has a ~300,000-year horizon before u64 wrap). If it ever did, the wrapped
@@ -2901,6 +2959,17 @@ void preempt_check_irq(void) {
     // .Lexception_return's KERNEL_EXIT eret to whatever the IRQed
     // thread had originally.
     sched();
+}
+
+// The thread-context twin, for a preempt hold that drops with IRQs on (the
+// console gate's per-byte hold): a preempt deferred while the hold was up fires
+// here, not at whichever IRQ happens to land between two holds. An IRQ taken on
+// the next instruction would run the same check, so this adds no switch point a
+// caller could not already meet.
+void sched_take_deferred_preempt(void) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    preempt_check_irq();
+    spin_unlock_irqrestore(NULL, s);
 }
 
 // ============================================================================

@@ -1,0 +1,15 @@
+PASS clean: actual private client fixture
+PASS provided-cap: short provided TX refused
+PASS provided-rx: short provided RX refused
+PASS hidden-bulk: provided bulk uses exact owner storage
+PASS owned-provided: free without allocator ownership
+PASS leak-bulk: legacy bulk keeps ownership
+PASS overwrite-tx: pending TX refuses buffer overwrite
+PASS starve-rx: blocked sender cannot starve reply
+PASS early-reply: malformed or premature reply aborts once
+PASS no-tx-mark: malformed or premature reply aborts once
+PASS lost-terminal: abort completes pending TX once
+PASS double-terminal: abort completes pending TX once
+PASS retain-tx-borrow: abort detaches TX before retirement
+PASS blocking-handshake: blocking engine reached
+PASS blocking-read: blocking engine reached

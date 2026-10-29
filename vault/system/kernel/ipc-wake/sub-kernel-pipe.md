@@ -141,7 +141,7 @@ replaced both with the 16-byte list.) The ring is kmalloc'd — 4152 bytes
 routes through the large path as an **order-1 (8 KiB) allocation**,
 ~4 KiB slack per live pipe.
 `struct pipe_endpoint` — 16 B, SLUB-cached, `{magic, ring,
-is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level).
+is_read_end}`. Diagnostics: `pipe_total_allocated/freed` (ring-level; tests build only).
 
 ## Concurrency
 

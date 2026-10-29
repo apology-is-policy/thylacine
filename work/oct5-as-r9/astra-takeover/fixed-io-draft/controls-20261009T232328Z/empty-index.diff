@@ -1,0 +1,11 @@
+--- control.c
++++ empty-index.c
+@@ -597,7 +597,7 @@
+     int rc=0;
+     spin_lock(&l->lock);
+     if(l->service_closing)rc=-T_E_CANCELED;
+-    else if(index>=l->n_reg_buf)rc=-T_E_INVAL;
++    else if(false)rc=-T_E_INVAL;
+     else {
+         struct loom_reg_buffer *b=&l->reg_buf[index];
+         if(!b->burrow || b->burrow==l->ring || b->burrow->type!=BURROW_TYPE_ANON ||

@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ open-mode.c
+@@ -38,7 +38,7 @@
+         rc=p9_session_send_walk(s,out,cap,w->fid,new_fid,names,&name,&len);break;
+     }
+     case P9_TLOPEN:
+-        if(w->mode>2)return -T_E_INVAL;
++        
+         rc=p9_session_send_lopen(s,out,cap,w->fid,w->mode);break;
+     case P9_TREAD:
+         rc=p9_session_send_read(s,out,cap,w->fid,w->offset,count);break;

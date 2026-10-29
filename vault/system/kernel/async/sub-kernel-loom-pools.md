@@ -1,0 +1,339 @@
+---
+id: sub-kernel-loom-pools
+type: sub
+parent: moc-kernel-async
+title: "Private Loom pool storage and exact payload leases"
+code:
+  - kernel/loom_service_pool.c
+  - kernel/loom_service_pool_table.c
+  - kernel/include/thylacine/loom_service_pool_table.h
+  - kernel/test/loom_pool_table_fixture.h
+  - tools/host-tests/loom-service-pool-table.c
+  - tools/test-loom-service-pool-table.py
+  - kernel/include/thylacine/loom_service_pool.h
+  - kernel/test/private_pool_fixture.h
+  - tools/host-tests/loom-service-pool.c
+  - tools/test-loom-service-pool.py
+audit: hard
+guarded-by: [inv-i29, inv-i30, inv-i32]
+validated-by: [spec-loom-service-buffers]
+locks: []
+abis: [abi-loom-service]
+design:
+  - "docs/ASYNC-SERVICE-BUFFERS.md"
+created: 2026-10-04
+updated: 2026-10-21
+---
+
+## Purpose
+
+The internal C pool module implements bounded metadata transitions without
+allocations, callbacks, usercopy or internal locks. It is compiled into the
+kernel and exercised by the existing Loom buffer-registration test. Private
+syscall setup is still disabled; there is no live ring consumer of this module.
+The owner must hold its ring lock and retain canonical Burrow pins throughout.
+It must resolve authority, mapping ranges and exclusion against accepted fixed
+I/O before prepare. Those are caller obligations, not proven by this helper.
+
+## Contract
+
+All APIs below require caller serialization. No helper wakes a peer or progress
+thread under that lock. Returning payload merely changes metadata; its owner
+must issue any necessary wake after unlocking.
+
+- prepare(bank,pool,ref,extents,count): validates the whole set before mutation,
+  then reserves quota and extents while the slot remains unpublished. Extents
+  compare canonical backing identity and checked exclusive byte ranges, not VAs.
+  Requires0<count<=64 and sufficient combined bank space. Caller has already
+  pinned backing and excluded earlier accepted fixed operations. Invalid input
+  is EINVAL, occupied slot/overlap with existing pool EBUSY, quota ENOSPC.
+- conflicts(bank,extent): includes RESERVED cells. Invalid extents conflict,
+  preventing overflow or zero-length input from bypassing exclusion.
+- publish(pool): RESERVED->LIVE after successful output copy; else EINVAL.
+- rollback(bank,pool): RESERVED only; clears its cells and descriptor, preserving
+  siblings and global nonce. Caller burns slot incarnation and drops pins after
+  exclusion removal; no hidden registration survives a copyout failure.
+- stream_get/put(pool): retain pool from accepted request through its terminal
+  bookkeeping. Get requires LIVE and prevents32-bit wrap; put rejects underflow.
+- claim(bank,pool,maximum,receipt): requires a live referenced pool and a positive
+  signed-CQE-sized maximum fitting EVERY member. Scans from a member cursor,
+  claims only AVAILABLE and mints a nonce before I/O. EAGAIN means wait locally,
+  never emit a Tread. This is member rotation, not inter-stream scheduling.
+- release_busy(bank,pool,receipt): caller has ended all local writers before
+  returning a BUSY member. Exact nonce and full pool reference required.
+- commit(bank,pool,receipt,length,user_data,more): positive result no larger than
+  claimed maximum; BUSY->PENDING preserving full correlation. Caller serializes
+  payload copying and cancellation before this commit. EOF/error uses release_busy
+  and the request's separate terminal record, never a zero-byte payload lease.
+- peek(bank,pool,member,result): copies the stored PENDING result without consuming
+  it. Full CQ therefore needs no allocation or overwrite of committed payload.
+- deliver(bank,pool,receipt): PENDING->LEASED only after copying CQE and receipt,
+  before release-publishing CQ tail under the same owner lock. This function
+  does not itself publish shared memory or prove weak-memory ordering.
+- return(bank,pool,receipt): LEASED->AVAILABLE only for exact pool incarnation,
+  member and nonce. Pending/BUSY/stale/double returns fail; never trust the shared
+  receipt mirror. Bad shape/index is EINVAL, stale identity/state is ENOENT.
+- snapshot(bank,pool,out): one consistent live snapshot; clears unused fields,
+  reports member phases and stream count. It neither publishes nor recycles.
+- reap(bank,pool): EBUSY until streams==0 and all members AVAILABLE. It clears
+  only that pool. PENDING/LEASED cannot be reclaimed by source retirement.
+
+No CQ-head API exists. Reaping a completion does not call into this module and
+cannot return a payload. Whole-ring destruction must first stop actual kernel
+writers; it is not implemented by calling reap on a still-active pool.
+
+## Mechanism
+
+Registration has a validate pass followed by an infallible reservation pass.
+Cells store their pool reference and local ordinal. Lookups scan at most64
+cells, keeping quota and physical overlap global to this ring without a second
+pool-slot registry. A result remains in its cell until publication/return.
+
+
+## Data structures
+
+One zero-initialized loom_pool_bank per ring has64 cells,5128bytes including
+its monotonic last-issued64-bit nonce. Each cell is80bytes: full pool reference,
+canonical backing pointer/offset/length, lease nonce, user_data, member ordinal,
+phase, requested/result lengths and MORE. Each32-byte loom_pool descriptor
+belongs in the shared64-slot service table; this module adds no separate slot
+registry. A48-byte transient result carries a32-byte receipt and completion
+metadata. Static assertions pin all four sizes. These sizes are NOT a charge
+or allocator footprint measurement by themselves. The October8 owner integration
+below now allocates and charges the table; payload backing accounting remains a
+separate caller obligation.
+
+Members have FREE, AVAILABLE, BUSY, PENDING, LEASED phases. Pool descriptors
+are EMPTY, RESERVED or LIVE. The bank's nonce is never reset by pool removal.
+UINT64_MAX can be issued once; a further claim returns ENOSPC without wrapping,
+even if all members are held. Failed/aborted shots burn their nonce.
+
+## Concurrency
+
+No independent lock domain: every operation belongs under the caller's ring
+lock. Pool publication is separate from prepare so usercopy may run unlocked
+while provisional exclusion remains installed. Writers must end before BUSY
+release; callback serialization and wake-after-unlock belong to the owner.
+
+## Invariants enforced
+
+Combined member capacity, nonoverlapping canonical extents, exact phase/receipt
+validation, no nonce wrap, no result larger than its request, no reap of retained
+work, and rollback without touching siblings. CQ consumption has no mutation
+entry point. The model and exact named counterexamples prosecute these rules.
+
+## Error paths
+
+Invalid shapes/ranges/phase controls use EINVAL; stale receipts or unpublished
+pools use ENOENT; reserved extents, active refs or payloads use EBUSY; quota and
+nonce exhaustion use ENOSPC. Empty pool is EAGAIN. No failure allocates or calls
+out. prepare errors leave bank/pool untouched; copyout rollback is explicit.
+
+## Performance
+
+All scans are bounded by64 cells. prepare checks at most64x64 member overlaps;
+claim's cursor search is at most64x64 comparisons. No measured latency claim.
+Member rotation does not establish fairness between streams. Exact structure
+sizes above are compiled assertions, not actual allocator/payer charges.
+
+## Prosecution
+
+Claim/Reply/Deliver/Return in [[spec-loom-service-buffers]] map to claim/commit/
+deliver/return here. Stop maps to release_busy after writer quiescence. Source
+Finalize/Retire and paired CQ stores remain caller integration obligations.
+Physical mapping pins, fixed-I/O admission, usercopy and source locks remain
+outside this helper's verified boundary.
+
+The actual module links directly into tools/test-loom-service-pool.py's host
+fixture, with ASan/UBSan and eleven source mutations. Assertions cover canonical
+aliasing, provisional exclusion/quota, rollback, retained byte patterns A/B/C,
+out-of-order/stale/double returns, pending/source-retirement retention, result
+correlation, nonce exhaustion and reap refusal. The shared native fixture returns
+errors to the outer TEST_ASSERT, avoiding nested void assertions that hide a
+subtest failure. Mutants must fail the exact named assertion, not compilation.
+
+Evidence and native build outcome live in docs/ASYNC-SERVICE-STATUS.md and
+work/oct4-async-service/buffer-pools. No throughput, multi-stream fairness,
+graphical result, syscall activation or complete private-I/O claim follows.
+
+## Seams
+
+Private ring owner, shared slot table, Burrow pin/charge ledger, accepted fixed
+I/O exclusion, ordered completion publication, close/exec reaper and safe userspace
+lease wrappers must be connected before activation. No seam is declared closed
+by a successful pure metadata test.
+
+## Caveats
+
+Extent backing is a trusted pinned canonical object, never a userspace pointer.
+The module neither pins nor checks mapping ownership. Raw alias self-corruption
+is a caller obligation under the approved design. Whole-ring destruction needs
+its own writer-drain path; scope retirement alone cannot release payloads.
+
+## Provenance
+
+Operator-selected option C, scripture30695b43e, ABI3eb14ae73 and modele6a50ae1e.
+AS-2e implementation and native/host evidence are recorded in
+ASYNC-SERVICE-STATUS.md. Review staffing is explicitly single-agent.
+
+## Paired publication integration
+
+`loom_provided_deliver` (`loom_service_provided.c`) supplies the Deliver
+binding, all in one hold of the ring lock. A ring with no receipt geometry is
+refused (-EOPNOTSUPP), and so is a detached request table (-ECANCELED, a
+backstop the engine never reaches; the READY scan keeps publication out of
+close), both before anything is written. A full CQ, or a single-shot terminal
+with no request-delivery room, keeps the member PENDING (-EAGAIN). Otherwise
+the pending cell's result is copied into the CQ slot and receipt that the
+private tail selects. The member then moves PENDING to LEASED, and a
+single-shot terminal's request is delivered. Only after that is the shared
+tail released. The pool must be LIVE in the ring's own table, and the receipt
+must name the exact cell. Source authority and MORE-before-final order remain
+the caller's. The shared receipt fixture drives this function in the guest
+(`loom.create_geometry`) and on the host (`tools/test-loom-receipts.py`,
+eighteen mutants), on the MORE, cancelled-MORE and single-shot terminal arms;
+see [[sub-kernel-loom]], October 21. This section used to name the October 4
+helper `loom_post_pool_cqe`. It was deleted on 2026-10-21: it had no production
+caller.
+
+## October 8, 23:22 UTC: joint pool registration and charged owner storage
+
+The private owner now allocates a zeroed7176-byte pool table (one64-cell bank
+plus64 pool descriptors indexed by the existing shared service slot). Joint
+prepare reserves both identity and member capacity before output copyout.
+Publish rechecks both provisional phases and rejects close without half commit.
+Rollback releases both exclusions; reap refuses borrowers, streams, BUSY,
+PENDING and LEASED members before modifying either ledger. Exact payload return
+permits reap; neither CQ consumption nor slot removal returns a payload. The
+ring-global incarnation/nonce counters never reset. All calls require the same
+Loom lock and retained owner reference; backing pins are released after unlock.
+
+Construction precharges two additional buddy pages and frees pool storage before
+refund on every downstream failure. Retirement requires both tables empty and
+frees them before ring settlement, metadata refund and exact image-pin release.
+Native linked DWARF measures Loom2872bytes (one buddy page), pool table7176bytes
+(two pages), plus the deliberately whole slot page: four metadata pages total.
+Ring backing and conservative Burrow descriptor attribution remain separate.
+See astra-takeover/pool-table-layout.json and retained native link/DWARF output.
+
+Self-review: under the common lock, pool_publish cannot fail after slot_publish
+succeeds because its RESERVED precondition was already checked; rollback and
+reap likewise validate all fallible prerequisites before either ledger is freed.
+Close blocks new registration/publication without destroying retained payloads.
+The existing pre-abort committed-result delivery semantics remain intact.
+
+Bounded ASan/UBSan host evidence: pool-table-20261008T2320Z control plus7 targeted
+transaction mutants; slot-owner-20261008T231734Z nine controls plus10 charge/free/
+close mutants; final-reclaim-20261008T231743Z both owner-drop orders plus6 exact
+omission mutants. Every mutant failed its named assertion. The owner/final-drop
+fixtures use checked allocator, geometry, image, lock and VMA doubles, so these
+are call/free/order witnesses, not guest physical reclamation or race proofs.
+Lifecycle model clean5828 plus7 named counterexamples and buffer models clean464/
+6416 plus11 named counterexamples passed in pool-table-*-model-20261008T2312Z.
+
+Native build/link passes. New loom.service_pool_table shares the transaction
+fixture with host; loom.private_slot_owner now covers pool-allocation refusal,
+downstream unwind and the full metadata charge. Expected suite count1839; the
+full Mac gate is pending for this source. Prior50/50 applies only to7c184b3ef.
+
+Still owed before activation: actual authority/resolution and canonical Burrow
+pins, accepted fixed-I/O exclusion integration, parent scopes, protocol/worker/
+terminal retirement and full client payload lifecycle. These helpers do not
+authorize service syscalls. Guest final allocator reclamation and Pi/A72/KVM
+remain open. Self-review only, no independent audit. Continue async before
+MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.
+
+
+## October 9, 00:01 UTC: pool-owner full Mac gate verified
+
+current-gate-20261008T232028Z finished with gate.rc=runner.rc=0 on exact
+1295a25da8b546498661c359523917187c01d832, tracked source clean throughout.
+All five rows passed10/10 (default smp1/4/8, UBSan smp4/8). Raw-log verification
+confirmed1839/1839 on all50, including service_pool_table, private_slot_owner,
+service_slots and private-owner normal fallthrough. Every boot passed D7 overlap
+and twenty distinct d7user00..19 completed cycles plus the boot banner.
+Ten captured input hashes verified and100 serial/harness logs retained with
+hashes; wrapper exit also matched live immutable build inputs to capture.
+External Stratum remained clean at exact61dde37. Minimum recorded admission
+10974MiB exceeds the unchanged8192MiB floor. Mac lease released; inputs PINNED.
+Optional Venus/Vulkan programs were absent from this ramfs, not qualified.
+
+Evidence: astra-takeover/current-gate-20261008T232028Z-result.json and the run's
+verify.py, verified-logs and input manifest. This source-specific Mac result
+qualifies the pool/slot storage and transaction fixtures, not the remaining
+private authority, buffer-pin/fixed-I/O exclusion, scope/protocol/worker/terminal
+integration. Guest final allocator reclamation and Pi/A72/KVM remain open.
+Next: registered-buffer ownership using the approved canonical Burrow and exact
+creator/image rules. Async work still precedes MM0-MM4. Self-review only; no
+Main landing, private async/clipboard activation or128MiB protection removal.
+
+
+October9: the internal private registered-buffer owner now rejects replacement
+while this pool table contains any provisional or live record, and settles its
+actual table pins against the retained creator image on replacement/retirement.
+This does not yet resolve user pool-member descriptors or take their independent
+canonical backing pins. See sub-kernel-loom's current registered-buffer checkpoint
+for implementation/evidence limits. Public private services remain disabled.
+
+
+October 9 adds internal pin-owning front-ends in loom.c over this ledger. They
+resolve registered aliases into canonical Burrow extents under the owning ring
+lock, reserve membership, and take one independent pin per member. Successful
+rollback/reap snapshots and detaches those pins under the ledger lock and settles
+them against the retained image outside it; failed/stale/busy removal drops none.
+The raw ledger helpers remain pin-neutral and must not be mixed with this owner
+front-end for the same pool. Real accepted-fixed extent integration and public
+copyout/authority dispatch remain pending. Private legacy dispatch remains off.
+Host control plus ten exact mutants and one native 1841-test SMP1 boot passed;
+the new full Mac matrix is pending. See the October 9 loom dossier and pickup
+for exact source/diff and evidence paths. Self-review only.
+
+
+## October 9: canonical pool-pin full Mac qualification
+
+Exact source 6200c9de0121abbfa08bea719f904f20ae5a9ac6 passed all 50 Mac HVF
+boots in current-gate-20261009T011552Z. Default SMP1/4/8 and UBSan SMP4/8
+each passed ten boots, every boot 1841/1841 including loom.private_pool_pins,
+private buffers, pool/slot/owner rows, D7 overlap, twenty distinct d7user00..19
+cycles and boot banner. Gate and runner exit zero. The verifier checked all
+100 copied raw serial/harness logs and ten captured input hashes; inputs are
+PINNED. Stratum remains exact clean 61dde37. Minimum recorded admission free
+space was 9961 MiB, above the 8192 MiB floor. Astra's Mac lease was released.
+See astra-takeover/current-gate-20261009T011552Z-result.json and run verify.py.
+
+This is source-specific Mac qualification of internal canonical pool pins.
+Exact fixed-I/O extent reservations, usercopy/authority dispatch and scope/
+protocol/worker integration remain pending. Pi/A72/KVM, guest final allocator
+reclamation and absent optional Venus/Vulkan probes remain unqualified.
+Self-review only. Async remains ahead of MM0-MM4; no Main landing, private
+async/clipboard activation or removal of the 128 MiB protection.
+
+
+October 9: pool registration now rejects canonical overlaps with accepted private
+fixed-buffer nodes under the same Loom lock used by fixed admission to exclude
+all provisional/live pool cells. Both paths share canonical resolution. Fixed
+nodes retain their own Burrow and Loom pins through table replacement and close;
+release requires local users to end. The 40-byte node belongs in a precharged
+request, and existing CQ capacity bounds node count. No actual request/terminal
+admission or protocol caller is activated by these internal helpers. See the
+Loom dossier's fixed-reservation self-review and focused/native evidence. Full
+Mac qualification of this new source remains pending.
+
+
+## October 9: fixed-reservation full Mac qualification
+
+Exact source d3563f828652709ceb34cc3a94cddf9b42b6d9e0 passed all 50 Mac HVF
+boots in current-gate-20261009T020608Z. Default SMP1/4/8 and UBSan SMP4/8
+each passed ten boots, every boot 1842/1842 including loom.private_fixed,
+pool pins/buffers/slot/owner rows, D7 overlap, twenty distinct d7user00..19
+cycles and boot banner. Both runner and gate exit zero. The verifier checked
+100 copied raw serial/harness logs and ten captured input hashes; inputs are
+PINNED. Stratum remains exact clean 61dde37. Minimum recorded admission free
+space was 9355 MiB, above the 8192 MiB floor. Astra's Mac lease was released.
+See astra-takeover/current-gate-20261009T020608Z-result.json and run verify.py.
+
+This qualifies the internal fixed-reservation checkpoint on Mac. Actual request/
+CQ admission, target/scope/fid ownership and protocol/worker integration remain
+open. Pi/A72/KVM, final guest allocator reclamation and absent optional graphics
+probes remain unqualified. Self-review only. Continue async before MM0-MM4; no
+Main landing, private async/clipboard activation or 128 MiB protection removal.

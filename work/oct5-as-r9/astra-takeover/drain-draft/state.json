@@ -1,0 +1,32 @@
+{
+  "owner": "astra",
+  "state": "qualified-uninstalled-engine-drain",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "dependencies": [
+    "iounit-draft",
+    "action-draft/kernel/include",
+    "ready-draft/kernel/include",
+    "retirement-draft",
+    "program-draft",
+    "wire-draft"
+  ],
+  "overrides": [
+    "kernel/include/thylacine/loom_service_engine.h",
+    "kernel/loom_service_action.c",
+    "kernel/loom_service_connect.c",
+    "kernel/loom_service_engine.c",
+    "kernel/loom_service_protocol.c",
+    "kernel/loom_service_ready.c"
+  ],
+  "run": "work/oct5-as-r9/astra-takeover/drain-draft/controls-20261010T003400Z",
+  "checks": 2885,
+  "mutants": 12,
+  "input_hashes": 53,
+  "raw_pairs": 13,
+  "arm64_objects": 6,
+  "model_run": "work/oct5-as-r9/astra-takeover/drain-draft/lifecycle-models-20261010T003302Z",
+  "model_results": 16,
+  "self_review": "single-agent; not independent",
+  "next": "next-work.txt",
+  "limits": "Actual engine and CONNECT abort/close compose with actual owner stack; initial engine publication, native IO/poll/teardown, parsed successful replies, allocation/refs/notifications and final protocol free remain controlled host boundaries. No installed dispatch or native scheduling qualification."
+}

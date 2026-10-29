@@ -1,0 +1,12 @@
+diff --git a/kernel/loom_service_provided.c b/kernel/loom_service_provided.c
+index efad072b9..ba3842d8c 100644
+--- a/kernel/loom_service_provided.c
++++ b/kernel/loom_service_provided.c
+@@ -146,7 +146,6 @@ int loom_provided_deliver(struct loom_service_operation *o) {
+     if(!o || !o->owner)return -T_E_INVAL;
+     struct Loom *l=o->owner;spin_lock(&l->lock);int rc=0;
+     // Without receipt geometry, receipt_off 0 would aim the receipt at the header.
+-    if(!l->receipt_size){rc=-T_E_OPNOTSUPP;goto done;}
+     struct loom_pool *p=provided_pool(l,o->pool);
+     struct loom_pool_cell *c=provided_cell(o);
+     if(!o->pool_stream || !o->pool_pending || !p || !c ||

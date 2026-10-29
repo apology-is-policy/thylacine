@@ -1,0 +1,13 @@
+diff --git a/kernel/loom_service_syscall.c b/kernel/loom_service_syscall.c
+index e8bb7a6d2..de1e710ba 100644
+--- a/kernel/loom_service_syscall.c
++++ b/kernel/loom_service_syscall.c
+@@ -194,7 +194,7 @@ int loom_private_register_record(struct Loom *l, struct Proc *p, u32 op,
+         struct loom_service_pool_snapshot snap;
+         rc = loom_private_service_pool_query(l, p, record, &snap);
+         if (rc) return rc;
+-        return copyout(ctx, 0, &snap, sizeof(snap)) ? -T_E_FAULT : 0;
++        (void)copyout(ctx, 0, &snap, sizeof(snap)); return 0; // MUTANT M15
+     }
+     default:
+         return -T_E_INVAL;

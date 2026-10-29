@@ -10,6 +10,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/page.h>          // pa_to_kva (P3-Bda relocation)
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../mm/phys.h"              // alloc_pages / free_pages (P3-Bda)
 
@@ -588,6 +589,7 @@ bool dtb_has_compat(const char *compat) {
 // Generic named-property reader + PCI INTx routing / MMIO window (pci-1a).
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 bool dtb_get_compat_prop(const char *compat, const char *prop,
                          const uint8_t **out_data, uint32_t *out_len) {
     if (!g_dtb.ready || !compat || !prop || !out_data || !out_len) return false;
@@ -1295,6 +1297,56 @@ bool dtb_node_parent(u32 node_off, u32 *out_parent_off) {
     return false;
 }
 
+VISIBLE_IF_KERNEL_TESTS
+u32 dtb_bootargs_scan_count(const u8 *args, u32 len, const char *token) {
+    if (!args || !token) return 0;
+    size_t toklen = k_strlen(token);
+    if (toklen == 0) return 0;
+    // A complete whitespace-delimited word, never a substring: serial-sak=10
+    // and another parameter's value must not answer serial-sak=1. A NUL ends
+    // the string, whatever the property length says.
+    u32 count = 0;
+    for (u32 at = 0; at < len && args[at]; ) {
+        while (at < len && (args[at] == ' ' || args[at] == '\t')) at++;
+        u32 start = at;
+        while (at < len && args[at] && args[at] != ' ' && args[at] != '\t') at++;
+        if ((size_t)(at - start) == toklen) {
+            size_t i = 0;
+            while (i < toklen && args[start + i] == (u8)token[i]) i++;
+            if (i == toklen) count++;
+        }
+    }
+    return count;
+}
+
+#ifdef KERNEL_TESTS
+bool dtb_bootargs_scan(const u8 *args, u32 len, const char *token) {
+    return dtb_bootargs_scan_count(args, len, token) > 0;
+}
+#endif // KERNEL_TESTS
+
+VISIBLE_IF_KERNEL_TESTS
+u32 dtb_bootargs_count(const char *token) {
+    static const char chosen[] = "chosen", bootargs[] = "bootargs";
+    struct dtb_node_entry node, prop;
+    u32 root_cursor = 0;
+    while (dtb_node_iter(DTB_NODE_ROOT, &root_cursor, &node)) {
+        if (!node.is_node || node.namelen != sizeof(chosen) - 1 || !k_streq(node.name, chosen))
+            continue;
+        u32 cursor = 0;
+        while (dtb_node_iter(node.off, &cursor, &prop)) {
+            if (prop.is_node || prop.namelen != sizeof(bootargs) - 1 || !k_streq(prop.name, bootargs))
+                continue;
+            return dtb_bootargs_scan_count(prop.data, prop.datalen, token);
+        }
+    }
+    return 0;
+}
+
+bool dtb_bootargs_has_token(const char *token) {
+    return dtb_bootargs_count(token) > 0;
+}
+
 // =============================================================================
 // PCI MSI relationships. These readers do not change the immutable boot DTB.
 // All arithmetic uses wide intermediates; malformed/ambiguous firmware fails
@@ -1424,6 +1476,7 @@ bool dtb_msi_controller_n(u32 index, struct dtb_pci_msi *out) {
         if (msi_controller(node, &r) && index-- == 0) { *out = r; return true; }
     }
 }
+VISIBLE_IF_KERNEL_TESTS
 bool dtb_msi_map_decode(const u8 *data, u32 length, u32 mask, u16 rid,
                         u32 *phandle, u32 *device_id) {
     if (!data || !phandle || !device_id || !length || length % 16 || mask > 0xffffu)

@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: ["docs/NET-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-24
+updated: 2026-10-04
 ---
 ## Purpose
 
@@ -205,3 +205,10 @@ is a separate v1.x add.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Raw Loom caller ownership (October 4)
+
+Net-echo acknowledges raw registration's asynchronous ownership obligation.
+Its registered READ waits for terminal CQE before proceeding; wait failures
+terminate. Weft zero-copy paths now handle tx_buf/rx_buf Result, including
+WouldBlock for unresolved operations. No network wire contract changed.

@@ -1,0 +1,196 @@
+control: 140 of 140 declared tests pass
+composed-ring:wrong-receipt                          rejected    5 failing, 2 named  
+composed-ring:wrong-pool                             rejected    2 failing, 1 named  
+composed-ring:untracked-lease                        no test summary   0 failing, 0 named  
+deadlines:ignore-deadline                            rejected    5 failing, 1 named  
+deadlines:late-deadline                              rejected   10 failing, 4 named  
+deadlines:repeat-cancel                              rejected    8 failing, 3 named  
+deadlines:drop-double-abort                          rejected    3 failing, 2 named  
+deadlines:unbounded-scan                             rejected    2 failing, 1 named  
+deadlines:mutable-active-deadline                    rejected    1 failing, 1 named  
+fixed-futures:missing-wakeup                         rejected   15 failing, 8 named  
+fixed-futures:missing-unregister                     rejected    8 failing, 8 named  
+fixed-futures:stale-waker                            rejected    2 failing, 2 named  
+fixed-futures:callback-under-borrow                  rejected    1 failing, 1 named  
+fixed-futures:clone-after-check                      rejected    1 failing, 1 named  
+fixed-futures:preparation-slot-leak                  rejected    2 failing, 2 named  
+fixed-io:early-fixed-view                            rejected    1 failing, 1 named  
+fixed-io:abandon-refund                              rejected    5 failing, 2 named  
+fixed-io:missing-abort                               rejected   10 failing, 1 named  
+fixed-io:fixed-pool-overlap                          rejected    1 failing, 1 named  
+fixed-io:pool-fixed-overlap                          rejected    1 failing, 1 named  
+fixed-io:early-retired-refund                        rejected    2 failing, 2 named  
+fixed-io:oversized-fixed-result                      rejected    1 failing, 1 named  
+fixed-io:late-write                                  rejected    1 failing, 1 named  
+fixed-requests:unpublished-leak                      rejected    4 failing, 2 named  
+fixed-requests:lost-abandoned-terminal               rejected    4 failing, 1 named  
+fixed-requests:retirement-without-proof              rejected   21 failing, 2 named  
+fixed-requests:retired-metadata-leak                 rejected    2 failing, 2 named  
+fixed-requests:missing-storage-terminal              rejected   20 failing, 4 named  
+fixed-requests:corrupt-keeps-open                    rejected    8 failing, 2 named  
+future-retirement:wake-under-receive-borrow          no named failure shows 'RefCell already'   1 failing, 1 named  
+future-retirement:wake-under-drop-borrow             no test summary   0 failing, 0 named  
+future-retirement:wake-under-shutdown-borrow         no test summary   0 failing, 0 named  
+future-retirement:skip-retire-notification           rejected    1 failing, 1 named  
+future-retirement:early-reclaim                      rejected   18 failing, 2 named  
+future-retirement:close-instead-of-retire            rejected    5 failing, 2 named  
+ledger:owner                                         rejected    1 failing, 1 named  
+ledger:stale                                         rejected    2 failing, 2 named  
+ledger:failed-return                                 rejected    4 failing, 1 named  
+ledger:busy                                          rejected    2 failing, 2 named  
+ledger:final-release                                 rejected    3 failing, 1 named  
+ledger:overlap                                       rejected    1 failing, 1 named  
+local-progress:lost-owner-signal                     rejected    9 failing, 5 named  
+local-progress:missing-cq-signal                     rejected    3 failing, 1 named  
+local-progress:zero-budget-loses-event               rejected    2 failing, 1 named  
+local-progress:lost-partial-sweep                    rejected    2 failing, 1 named  
+local-progress:busy-self-reschedule                  rejected   26 failing, 7 named  
+local-progress:missing-admission-signal              rejected    1 failing, 1 named  
+local-tasks:lost-self-wake                           rejected    2 failing, 1 named  
+local-tasks:poll-quiet-tasks                         rejected    2 failing, 2 named  
+local-tasks:ignore-budget                            rejected    3 failing, 2 named  
+local-tasks:stale-cancel                             rejected    2 failing, 2 named  
+local-tasks:drop-pending-task                        rejected   14 failing, 7 named  
+local-tasks:lost-wake                                rejected   10 failing, 4 named  
+local-wait:skip-local-recheck                        rejected    6 failing, 2 named  
+local-wait:skip-native-recheck                       rejected    1 failing, 1 named  
+local-wait:skip-deadline-recheck                     rejected    3 failing, 1 named  
+local-wait:reset-absolute-deadline                   rejected    4 failing, 1 named  
+local-wait:skip-disarm                               rejected   16 failing, 7 named  
+local-wait:lost-wake-progress                        rejected    3 failing, 2 named  
+owned-mapping:sq-overlap                             rejected    2 failing, 2 named  
+owned-mapping:receipt-stride                         rejected    1 failing, 1 named  
+owned-mapping:failed-close                           rejected    3 failing, 3 named  
+owned-mapping:after-close                            rejected    1 failing, 1 named  
+owned-mapping:fresh-header                           rejected    1 failing, 1 named  
+paired:receipt-index                                 rejected    5 failing, 2 named  
+paired:double-ack                                    rejected    5 failing, 2 named  
+paired:overlap                                       rejected    1 failing, 1 named  
+registration:live-retire                             rejected    4 failing, 2 named  
+registration:pool-closes-ring                        rejected    7 failing, 6 named  
+registration:global-cap                              rejected    2 failing, 2 named  
+registration:cross-pool-overlap                      rejected    3 failing, 3 named  
+registration:failed-destroy                          rejected    1 failing, 1 named  
+registration:stale-pool                              rejected    3 failing, 3 named  
+registration:missing-precharge                       rejected    5 failing, 5 named  
+registration:uncertain-no-close                      rejected    2 failing, 2 named  
+registration:rollback-no-refund                      rejected    1 failing, 1 named  
+registration:accept-nonzero-output                   rejected    1 failing, 1 named  
+request-book:reused-cookie                           rejected    8 failing, 3 named  
+request-book:more-final                              rejected    4 failing, 2 named  
+request-book:duplicate-terminal                      rejected   40 failing, 6 named  
+request-book:wrong-pool                              rejected    2 failing, 1 named  
+request-book:oversized-fixed                         rejected    2 failing, 2 named  
+request-book:repeated-abort                          rejected    1 failing, 1 named  
+retirement-executor:early-reclaim                    no named failure shows 'assertion'  18 failing, 5 named  
+retirement-executor:missing-retire                   no test summary   1 failing, 0 named  
+retirement-executor:frozen-cursor                    no named failure shows 'assertion'   4 failing, 1 named  
+retirement-executor:excess-budget                    no named failure shows 'assertion'   6 failing, 1 named  
+retirement-executor:no-shutdown-close                no named failure shows 'assertion'   3 failing, 1 named  
+retirement-executor:premature-admission              no named failure shows 'unreachable code'   2 failing, 1 named  
+ring-payload:live-retire                             rejected    4 failing, 2 named  
+ring-payload:pool-closes-ring                        rejected    7 failing, 6 named  
+ring-payload:global-cap                              rejected    2 failing, 2 named  
+ring-payload:cross-pool-overlap                      rejected    3 failing, 3 named  
+ring-payload:failed-destroy                          rejected    1 failing, 1 named  
+ring-payload:stale-pool                              rejected    3 failing, 3 named  
+shutdown-audit:lost-shutdown-wakeup                  rejected    4 failing, 1 named  
+shutdown-audit:missing-close                         rejected    3 failing, 1 named  
+shutdown-audit:early-reclaim                         rejected   18 failing, 1 named  
+task-loop:skip-initial-runnable                      rejected    2 failing, 2 named  
+task-loop:skip-final-runnable                        rejected    3 failing, 3 named  
+task-loop:skip-task-dispatch                         rejected    6 failing, 6 named  
+task-loop:ignore-task-budget                         rejected    1 failing, 1 named  
+task-loop:poll-after-outer-expiry                    rejected    1 failing, 1 named  
+task-loop:ready-starves-timers                       rejected    7 failing, 1 named  
+timer-wait:skip-expiry                               rejected    7 failing, 6 named  
+timer-wait:ignore-request-deadline                   rejected    5 failing, 5 named  
+timer-wait:ignore-outer-deadline                     rejected    2 failing, 2 named  
+timer-wait:due-is-outer-timeout                      rejected    3 failing, 3 named  
+timer-wait:unbounded-ring-scan                       rejected    2 failing, 2 named  
+timer-wait:skip-retiring-timers                      rejected    1 failing, 1 named  
+case:deadlines:no-clone-client                       E0599    refused
+case:deadlines:no-send-executor                      E0277    refused
+case:deadlines:valid-client                          control  compiles and passes
+case:fixed-futures:no-clone-future                   E0599    refused
+case:fixed-futures:no-send-future                    E0277    refused
+case:fixed-futures:valid-future                      control  compiles and passes
+case:fixed-io:fixed-borrow                           E0505    refused
+case:fixed-io:fixed-mutable-view                     E0594    refused
+case:fixed-io:return-borrow                          E0505    refused
+case:fixed-io:mutate-view                            E0594    refused
+case:fixed-io:moved-storage                          E0382    refused
+case:fixed-io:legacy-reap                            E0599    refused
+case:fixed-io:valid-return                           control  compiles and passes
+case:fixed-requests:no-active-view                   E0599    refused
+case:fixed-requests:no-clone                         E0599    refused
+case:fixed-requests:result-borrow                    E0505    refused
+case:fixed-requests:no-mutable-result                E0594    refused
+case:fixed-requests:valid-result                     control  compiles and passes
+case:future-retirement:no-clone-client               E0599    refused
+case:future-retirement:no-send-executor              E0277    refused
+case:future-retirement:valid-client                  control  compiles and passes
+case:local-progress:no-clone-client                  E0599    refused
+case:local-progress:no-send-executor                 E0277    refused
+case:local-progress:valid-client                     control  compiles and passes
+case:local-tasks:no-clone-tasks                      E0599    refused
+case:local-tasks:no-send-tasks                       E0277    refused
+case:local-tasks:valid-task                          control  compiles and passes
+case:local-wait:no-clone-client                      E0599    refused
+case:local-wait:no-send-executor                     E0277    refused
+case:local-wait:valid-client                         control  compiles and passes
+case:owned-mapping:moved-backend                     E0382    rc=101, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+case:owned-mapping:clone-owner                       no method named rc=101, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+case:owned-mapping:raw-mapping                       private  rc=101, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+case:owned-mapping:owned-control                     control  positive control failed: rc=101, None, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+case:registration:return-borrow                      E0505    refused
+case:registration:mutate-view                        E0594    refused
+case:registration:moved-storage                      E0382    refused
+case:registration:legacy-reap                        E0599    refused
+case:registration:valid-return                       control  compiles and passes
+case:request-book:clone                              E0599    refused
+case:request-book:send                               E0277    refused
+case:request-book:valid                              control  compiles and passes
+case:retirement-executor:no-clone-client             E0599    refused
+case:retirement-executor:no-send-executor            E0277    refused
+case:retirement-executor:valid-client                control  compiles and passes
+case:ring-payload:return-borrow                      E0505    refused
+case:ring-payload:mutate-view                        E0594    refused
+case:ring-payload:moved-storage                      E0382    refused
+case:ring-payload:legacy-reap                        E0599    refused
+case:ring-payload:valid-return                       control  compiles and passes
+case:shutdown-audit:no-clone-tasks                   E0599    refused
+case:shutdown-audit:no-send-tasks                    E0277    refused
+case:shutdown-audit:valid-task                       control  compiles and passes
+case:task-loop:no-clone-tasks                        E0599    refused
+case:task-loop:no-send-tasks                         E0277    refused
+case:task-loop:valid-task                            control  compiles and passes
+case:timer-wait:no-clone-client                      E0599    refused
+case:timer-wait:no-send-executor                     E0277    refused
+case:timer-wait:valid-client                         control  compiles and passes
+c-codes lease_ledger.h: T_LEASE_BUSY=-3 refused by "lease codes lie in their block"
+c-codes request_book.h: T_REQ_EXHAUSTED=-3 refused by "request book codes lie in their block"
+c-codes owned_mapping.h: T_MAP_CLOSED=-3 refused by "mapping codes lie in their block"
+c-codes paired_cq.h: T_CQ_CORRUPT=-2 refused by "CQ codes lie in their block"
+abi pristine: rc=0
+abi enospc: rc=1
+abi rust-ringhdr: rc=1
+abi rust-constant: rc=1
+abi rust-setup-twin: rc=1
+abi c-setup-twin: rc=1
+abi rust-service: rc=1
+FAILED:
+  composed-ring:untracked-lease: no test summary
+  future-retirement:wake-under-receive-borrow: no named failure shows 'RefCell already'
+  future-retirement:wake-under-drop-borrow: no test summary
+  future-retirement:wake-under-shutdown-borrow: no test summary
+  retirement-executor:early-reclaim: no named failure shows 'assertion'
+  retirement-executor:missing-retire: no test summary
+  retirement-executor:frozen-cursor: no named failure shows 'assertion'
+  retirement-executor:excess-budget: no named failure shows 'assertion'
+  retirement-executor:no-shutdown-close: no named failure shows 'assertion'
+  retirement-executor:premature-admission: no named failure shows 'unreachable code'
+  case:owned-mapping:moved-backend: rc=101, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+  case:owned-mapping:clone-owner: rc=101, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+  case:owned-mapping:raw-mapping: rc=101, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]
+  case:owned-mapping:owned-control: positive control failed: rc=101, None, errors [('E0425', 'src/tests/owned_mapping.rs', 225)]

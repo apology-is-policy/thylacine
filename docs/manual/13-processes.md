@@ -243,6 +243,12 @@ a reader that watched them could learn a password's length and the rhythm of
 its keys. A Linux program in a vivarium that reads `/proc/stat` finds every
 CPU time as zero and no interrupt or context-switch totals.
 
+Halcyon seals each terminal host when starting a tile. The host parses terminal
+output and owns the terminal's master connection. Its seal prevents debugger
+attachment and memory extraction, including by a process with administrative
+capabilities. Programs started inside the terminal do not inherit that seal;
+their usual debugging permissions still apply. Process listings remain available.
+
 A program built with the C library can load a shared library while it runs.
 The library loader is `/lib/libc.so`, and a library named without a directory
 is looked for in the directories the program names and then in `/lib`. The

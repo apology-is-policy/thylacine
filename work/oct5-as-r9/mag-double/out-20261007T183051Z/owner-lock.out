@@ -1,0 +1,114 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=58031)
+  Read of size 4 at 0x0001045fc068 by thread T2:
+    #0 magazines_drain_all extracted.inc:98 (mag-double:arm64+0x100001350)
+    #1 drainer_cross mag-double.c:134 (mag-double:arm64+0x100001350)
+
+  Previous write of size 4 at 0x0001045fc068 by thread T1 (mutexes: write M0):
+    #0 mag_free extracted.inc:88 (mag-double:arm64+0x100000bec)
+    #1 owner_thread mag-double.c:124 (mag-double:arm64+0x10000117c)
+
+  Location is global 'g_percpu' at 0x0001045fc068 (mag-double+0x100008068)
+
+  Mutex M0 (0x0001045fc008) created at:
+    #0 pthread_mutex_lock <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x33b9c)
+    #1 spin_lock_irqsave mag-double.c:99 (mag-double:arm64+0x100000818)
+    #2 mag_alloc extracted.inc:44 (mag-double:arm64+0x100000818)
+    #3 owner_thread mag-double.c:116 (mag-double:arm64+0x10000119c)
+
+  Thread T2 (tid=9540984, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001028)
+
+  Thread T1 (tid=9540983, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001014)
+
+SUMMARY: ThreadSanitizer: data race extracted.inc:98 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=58031)
+  Read of size 8 at 0x0001045fc0a8 by thread T2:
+    #0 magazines_drain_all extracted.inc:99 (mag-double:arm64+0x1000013b0)
+    #1 drainer_cross mag-double.c:134 (mag-double:arm64+0x1000013b0)
+
+  Previous write of size 8 at 0x0001045fc0a8 by thread T1 (mutexes: write M0):
+    #0 mag_free extracted.inc:88 (mag-double:arm64+0x100000bf8)
+    #1 owner_thread mag-double.c:124 (mag-double:arm64+0x10000117c)
+
+  Location is global 'g_percpu' at 0x0001045fc068 (mag-double+0x1000080a8)
+
+  Mutex M0 (0x0001045fc008) created at:
+    #0 pthread_mutex_lock <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x33b9c)
+    #1 spin_lock_irqsave mag-double.c:99 (mag-double:arm64+0x100000818)
+    #2 mag_alloc extracted.inc:44 (mag-double:arm64+0x100000818)
+    #3 owner_thread mag-double.c:116 (mag-double:arm64+0x10000119c)
+
+  Thread T2 (tid=9540984, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001028)
+
+  Thread T1 (tid=9540983, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001014)
+
+SUMMARY: ThreadSanitizer: data race extracted.inc:99 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=58031)
+  Write of size 4 at 0x0001045fc068 by thread T2:
+    #0 magazines_drain_all extracted.inc:99 (mag-double:arm64+0x1000013a0)
+    #1 drainer_cross mag-double.c:134 (mag-double:arm64+0x1000013a0)
+
+  Previous write of size 4 at 0x0001045fc068 by thread T1 (mutexes: write M0):
+    #0 mag_alloc extracted.inc:57 (mag-double:arm64+0x10000092c)
+    #1 owner_thread mag-double.c:116 (mag-double:arm64+0x10000119c)
+
+  Location is global 'g_percpu' at 0x0001045fc068 (mag-double+0x100008068)
+
+  Mutex M0 (0x0001045fc008) created at:
+    #0 pthread_mutex_lock <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x33b9c)
+    #1 spin_lock_irqsave mag-double.c:99 (mag-double:arm64+0x100000818)
+    #2 mag_alloc extracted.inc:44 (mag-double:arm64+0x100000818)
+    #3 owner_thread mag-double.c:116 (mag-double:arm64+0x10000119c)
+
+  Thread T2 (tid=9540984, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001028)
+
+  Thread T1 (tid=9540983, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001014)
+
+SUMMARY: ThreadSanitizer: data race extracted.inc:99 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=58031)
+  Write of size 4 at 0x0001045fc068 by thread T2:
+    #0 magazines_drain_all extracted.inc:99 (mag-double:arm64+0x1000013a0)
+    #1 drainer_cross mag-double.c:134 (mag-double:arm64+0x1000013a0)
+
+  Previous write of size 4 at 0x0001045fc068 by thread T1 (mutexes: write M0):
+    #0 mag_free extracted.inc:88 (mag-double:arm64+0x100000bec)
+    #1 owner_thread mag-double.c:124 (mag-double:arm64+0x10000117c)
+
+  Location is global 'g_percpu' at 0x0001045fc068 (mag-double+0x100008068)
+
+  Mutex M0 (0x0001045fc008) created at:
+    #0 pthread_mutex_lock <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x33b9c)
+    #1 spin_lock_irqsave mag-double.c:99 (mag-double:arm64+0x100000818)
+    #2 mag_alloc extracted.inc:44 (mag-double:arm64+0x100000818)
+    #3 owner_thread mag-double.c:116 (mag-double:arm64+0x10000119c)
+
+  Thread T2 (tid=9540984, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001028)
+
+  Thread T1 (tid=9540983, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001014)
+
+SUMMARY: ThreadSanitizer: data race extracted.inc:99 in magazines_drain_all
+==================
+leg=owner-lock    iters=20000  #807-guard-fires=0  silent-double-alloc=7575  double-free=94
+ThreadSanitizer: reported 4 warnings

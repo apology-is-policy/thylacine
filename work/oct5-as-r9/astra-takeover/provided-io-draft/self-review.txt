@@ -1,0 +1,70 @@
+Astra single-agent self-review, October10,2026. Not an independent audit.
+Uninstalled provided-io-draft supersedes fixed-io-draft working copies; all
+historical evidence retained. Canonical kernel remains97d495fcb. Operation920B
+still fits its charged4096B page; protocol42288B allocation unchanged.
+
+Actual creator/SQE preparation checks pool geometry before stream acquisition;
+every member must cover the requested maximum. Stream references include NEW
+and terminal bookkeeping, protecting canonical pinned pool extents from reap.
+No member/nonce/wire is consumed before driver admission. Begin first checks
+request/scope/deadline, then claims a BUSY member and resolves its actual extent.
+Empty pool returns AGAIN without a wire attempt or nonce; expired deadline and
+nonce exhaustion remain distinct errors. Local proven no-wire retry retains its
+BUSY receipt; a remote EAGAIN ends the operation. No fixed-buffer cleanup can
+clear pooled ownership. Admitted source borrow spans every multishot attempt.
+
+PROVIDED-R1: Single-shot positive result commits the pool PENDING record and the
+request terminal under one Ll interval. Delivery copies CQE + exact receipt,
+makes the lease returnable and marks the request delivered before cq_tail release.
+This is one terminal CQ entry, not a payload followed by a duplicate terminal.
+The future driver MUST route pool_terminal via provided_deliver, never ordinary
+post_terminal. Delivery of committed success has no fresh scope-abort refusal.
+
+Multishot keeps one PENDING result per operation and leaves its distinct terminal
+obligation ACTIVE. No next shot while PENDING; cancellation cannot overtake it.
+Already committed MORE survives abort, while rearm performs fresh abort/deadline
+checks. LEASED remains returnable after request destruction/scope retirement;
+CQ consumption and stream detach never auto-return payload. Explicit RETURN
+alone permits reuse. Stream detach is NEW rollback or RETIRED owner cleanup.
+
+PROVIDED-R2: self-review found that no BUSY/PENDING token alone did not prove a
+successful MORE was published: release_busy after captured positive could have
+allowed a new shot with its prior success lost. Added pool_more_delivered proof,
+set only by CQ publication and consumed exactly once by rearm. Regression test
+releases an uncommitted positive then verifies rearm refusal; removing proof
+check fails. Prior product header/RPC/provided inputs were reconstructed by the
+inverse exact edit and hash-checked against the earlier run before retention
+under controls-20261009T233212Z/before-review. Current sources qualify only the
+latest controls-20261009T233402Z and current ARM objects.
+
+PROVIDED-R3, integration dependency still open: current loom_requests_detach
+requires every request borrow zero. A multishot PENDING result retains its active
+borrow, and ordinary cancel correctly refuses to overtake it. Therefore whole
+ring close cannot wait on this global detach as permission to discard PENDING.
+The close driver needs a separate actual closed-consumer/quiescence edge, then
+operation-aware pending discard and negative settlement, THEN global request
+detach/storage discard. Do not fake a detach bit or interpret scope abort as
+consumer close. All kernel writers must stop before whole-ring pool reclamation.
+This is not wired yet; queue/runtime installation remains barred until coherent.
+
+Validation:554 cumulative ASan/UBSan assertions (268 fixed regressions,286 new
+pool/setup/cleanup assertions),18 exact targeted mutants. Current33 input hashes,
+19 generated-source/binary/log pairs and6 real ARM64 objects/transitive inputs
+reverified. No libc copy/set/move dependency. Early mutation-selector failure and
+consumer-detach witness intercepted by single-shot request-deliver extinction
+are retained; moved detached witness to MORE so it independently tests the CQ
+consumer guard. Missing pending-detach guard isolated from the phase backstop by
+an explicit premature-unlink fault. Tests are not native race qualification.
+
+Actual pool/slot/request/FID ledgers, callback capture, program consumption and
+CQ writes are executed. Synthetic valid parsed replies supply the parser edge;
+no actual transport or async submit. Host address translation, snapshot,
+allocation, engine/ref/wake/physical backing drop and pool registration pins are
+explicit boundaries; admitted destruction remains manual. Existing fixed cases
+are retained. EOF/remote errors return only unpublished BUSY; stale receipts do
+not return new leases. Full CQ retains committed data; detached consumer does
+not publish. Prior native/full Mac gates do not qualify this source.
+
+Next coherent READY/close driver, pool-return wake frontend, real submission and
+shared SQE copy, actual physical destructor and source-matched native gates.
+Preserve iounit semantics. No Main/private async/clipboard or128MiB activation.

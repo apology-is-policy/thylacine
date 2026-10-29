@@ -1,0 +1,27 @@
+{
+  "owner": "astra",
+  "state": "installed; native1851/D7 verified; full Mac matrix pending",
+  "canonical_source": "a978d19c388f512a645cdcbaeea60a81a0a06727",
+  "source_frozen_for": "work/oct5-as-r9/current-gate-20261009T175812Z",
+  "flight": "work/oct5-as-r9/astra-takeover/engine-current-flight.json",
+  "model": "model-1/result.json: 18 clean states, seven expected invariant counterexamples",
+  "actual_draft_c": {
+    "queue": "queue-control-2: clean+10mutants",
+    "engine": "engine-controls-20261009T182754Z:18controls+7mutants",
+    "wrapper": "wrapper-controls-20261009T182803Z:clean+8mutants",
+    "metadata": "metadata-controls-20261009T182735Z:8cases+6mutants",
+    "overlay": "private-fixed-20261009T182404Z, final-reclaim-20261009T182416Z, slot-owner-20261009T182426Z, connect-control-20261009T182456Z under host-tree/work/oct5-as-r9/astra-takeover"
+  },
+  "self_review": "self-review.txt; not an independent audit",
+  "limitations": "Native deterministic owner-boundary tests passed; full SMP/UBSan matrix for new source pending. Host controls remain boundary-double evidence. No private activation.",
+  "resolved_defects": [
+    "CLOSE-HOST-1: Apple clang17 ASan deadlocks before main; minimal reproducer+samples retained; corrected harness to established LLVM22 with both sanitizers."
+  ],
+  "next": [
+    "Commit source and evidence with normal hooks; launch and verify exact-source full50 Mac matrix.",
+    "Freeze canonical source/build through matrix; prepare internal query/reap controls separately.",
+    "Continue remaining private operations/executor, AS-3/4 and MM0-MM4."
+  ],
+  "preservation": "Astra six pending files/four protected drafts and Stratum clean61dde37 verified at launch; no activation/Main/128MiB changes.",
+  "native": "work/oct5-as-r9/astra-takeover/close-diagnostic-20261009T183912Z"
+}

@@ -86,7 +86,9 @@ static inline u32 mmio_read32(const void *p) {
     return io_read32(p);
 }
 
+#ifdef KERNEL_TESTS
 static inline void mmio_write8 (void *p, u8  v) { io_write8(p, v); }
+#endif // KERNEL_TESTS
 static inline void mmio_write16(void *p, u16 v) { io_write16(p, v); }
 static inline void mmio_write32(void *p, u32 v) { io_write32(p, v); }
 
@@ -110,11 +112,13 @@ u32 virtio_pci_cfg_read32(const struct virtio_pci_dev *d, u32 off) {
     return mmio_read32((const u8 *)d->cfg + off);
 }
 
+#ifdef KERNEL_TESTS
 void virtio_pci_cfg_write8(const struct virtio_pci_dev *d, u32 off, u8 val) {
     if (!d || !d->cfg)      return;
     if (off >= 4096)        return;
     mmio_write8((u8 *)d->cfg + off, val);
 }
+#endif // KERNEL_TESTS
 
 void virtio_pci_cfg_write16(const struct virtio_pci_dev *d, u32 off, u16 val) {
     if (!d || !d->cfg)      return;

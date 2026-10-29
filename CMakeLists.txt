@@ -56,12 +56,12 @@ endif()
 #
 # Empty / unset (default): no fault-test code; production behavior.
 #
-# THREE WORKED EXAMPLES FOLLOW -- they are NOT the whole set. The set has
-# grown to eight (kstack_overflow, secondary_stack_guard, bootcpu_idle_guard,
-# recursive_kernel_fault, el1_sync_runaway) and the authoritative list is
-# tools/test-fault.sh::ALL_VARIANTS. Deliberately not duplicated here: this
-# block read as a complete enumeration while naming three of eight, which is
-# how a reader concludes a variant does not exist.
+# THREE WORKED EXAMPLES FOLLOW -- they are NOT the whole set, and no count is
+# kept here: the authoritative list is tools/test-fault.sh::ALL_VARIANTS. This
+# block once read as a complete enumeration while naming three of eight, which
+# is how a reader concludes a variant does not exist. A variant can also be a
+# LAUNCH variant whose define nothing consumes (no_entropy: the launcher, not
+# the build, removes every strong entropy source).
 #
 # "canary_smash":  function writes past stack-array bounds → canary
 #                  check at function epilogue → __stack_chk_fail →
@@ -84,11 +84,6 @@ set(THYLACINE_FAULT_TEST "" CACHE STRING
 if(THYLACINE_FAULT_TEST)
     add_compile_definitions(THYLACINE_FAULT_TEST_${THYLACINE_FAULT_TEST}=1)
 endif()
-
-# Build-time options. Each defaults to off at P1-A and gets enabled at later phases.
-option(THYLACINE_HARDENING_FULL "Enable full hardening (CFI/PAC/MTE/BTI/LSE/canaries) — P1-H+" OFF)
-option(THYLACINE_KASLR          "Enable KASLR — P1-C+" OFF)
-option(THYLACINE_DEBUG_BUILD    "Debug build with extra assertions" ON)
 
 # Compile/link flag plumbing comes from the toolchain file. We re-export here
 # so subdirectories can compose with target_compile_options().

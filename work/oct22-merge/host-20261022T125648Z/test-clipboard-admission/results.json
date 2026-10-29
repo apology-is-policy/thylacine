@@ -1,0 +1,42 @@
+[
+  {
+    "name": "clean",
+    "exit": 0,
+    "intended_failure": false
+  },
+  {
+    "name": "pending-id",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "focus-boundary",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "seat-receipt",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "foreground-receipt",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "owner-revocation",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "completion-tag",
+    "exit": 101,
+    "intended_failure": true
+  },
+  {
+    "name": "request-reuse",
+    "exit": 101,
+    "intended_failure": true
+  }
+]

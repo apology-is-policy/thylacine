@@ -10,6 +10,12 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/ls-halcyon-modes.exp (EXTINCTION: only — modal status and focus witness)"
+  - "tools/interactive/ls-halcyon-hidden-storage.exp"
+  - "tools/interactive/ls-halcyon-storage-output.exp"
+  - "tools/interactive/ls-halcyon-clipboard-pty-capacity.exp"
+  - "tools/interactive/ls-halcyon-clipboard.exp"
+  - "tools/interactive/ls-halcyon-pointer.exp"
   - "tools/interactive/ls-halcyon-session-media.exp"
   - "tools/interactive/ls-graphical-sak.exp"
   - "tools/interactive/ls-graphical-sak-states.exp"
@@ -35,6 +41,7 @@ mirrors:
   - "tools/warp/boot-probe.sh"
   - "tools/interactive/lib.exp"
   - "tools/interactive/dap-nora.exp"
+  - "tools/interactive/nora-demo.exp (EXTINCTION: only — the gopls goodbye legs at each quit)"
   - "tools/interactive/rust-std-hello.exp (EXTINCTION: only — track R's std-on-device gate)"
   - "tools/interactive/lantern.exp (EXTINCTION: only — the deck presenter's gate)"
   - "tools/interactive/ls-halcyon-lantern.exp (EXTINCTION: only — the deck presenter in a Halcyon tile)"
@@ -89,7 +96,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-10-08
+updated: 2026-10-27
 ---
 ## The surface
 
@@ -118,12 +125,26 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on six of them.** `tools/test-fault.sh` runs eight
-variants (`ALL_VARIANTS`), and its `expected_for` case matches six bodies:
-`EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, `... BTI fault`,
+that one gate depends on thirteen of them.** `tools/test-fault.sh` runs eighteen
+variants (`ALL_VARIANTS`), and its `expected_for` case matches thirteen bodies:
+`EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, and since
+2026-10-27 `... PTE violates W^X at install (kernel page)`, `... (kernel L2
+block)`, `... (kernel L1 block)` and `... (user page)` (the
+four `wxe_install_*` variants, printed by `arch/arm64/mmu.c`'s leaf encoders;
+operator vote 22; `extinction_mmu_off`, since 2026-10-27, expects the `(kernel
+page)` body too, printed before the MMU is on), `... BTI fault`,
 `... kernel stack overflow` (three provokers), `... recursive kernel fault`,
-and `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
-guard, not by `extinction()`). The comment directly above it says "Keep the
+`... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
+guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:
+this banner must reach the wire whole` (`extinction_peer_chatter`, which
+`whole_line_for` matches as an entire line, so a banner torn by a peer's
+console byte fails it), and, since 2026-10-26, `EXTINCTION: CSPRNG unseeded:
+neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed entropy;
+refusing to start userspace` (`no_entropy`, printed by `kernel/main.c`'s vote-18 refusal
+on a launch with no strong entropy source), and, since 2026-10-27, `EXTINCTION:
+unhandled kernel alignment fault` (`vbar_pre_reloc` and `vbar_pre_mmu`, printed by
+`arch/arm64/fault.c`'s alignment arm for a fault taken with the MMU off;
+`vbar_boot_main` expects the `PTE violates W^X` body). The comment directly above it says "Keep the
 case below in sync with this" — an instruction to a person, inside the file,
 which is the weakest form of the guarantee ([[dec-2026-08-15-cutover]]).
 Reword one of those messages for clarity and the corresponding
@@ -460,7 +481,7 @@ That is the implementation track's call.
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
-  eight matched variants (six bodies), which is not what "the prefix is the
+  eighteen matched variants (thirteen bodies), which is not what "the prefix is the
   ABI" leads a reader to expect.
 - **Settled 2026-09-25** (the item the 2026-09 recount left open): the
   `el1_sync_runaway` body is already in the pinned set. `test-fault.sh` lists
@@ -492,3 +513,17 @@ That is the implementation track's call.
 [[sub-substrate-gates]] · [[sub-substrate-machine]] ·
 [[sub-substrate-interactive]] · [[moc-substrate]] · [[sub-kernel-cons]] (the
 delivery half).
+
+### Native clipboard qualification consumer (October 3)
+
+The opt-in `ls-halcyon-clipboard` scenario fails on `EXTINCTION:` during boot
+and session work. It is a new mirror of the unchanged prefix, not a new banner
+or message-body contract. Its native byte/SAK workflow is recorded in the
+Halcyon interaction status and substrate interactive dossier.
+
+### Existing PTY-envelope consumer (October 4)
+
+The opt-in `ls-halcyon-clipboard-pty-capacity` scenario also fails on
+`EXTINCTION:` during boot/session setup. Its executable matcher is an ABI mirror,
+not merely a literal mention. The runner keeps the failed larger-workspace
+witness separate from this sixteen-PTY/fourteen-controller qualification.

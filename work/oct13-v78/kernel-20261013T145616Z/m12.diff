@@ -1,0 +1,12 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:13:14
+@@ -8105,8 +8105,7 @@
+                                   u64 min_complete_raw, u64 flags_raw) {
+     struct Thread *t = current_thread();
+     if (!t || !t->proc)                              return -T_E_INVAL;
+-    if ((to_submit_raw | min_complete_raw | flags_raw) > 0xffffffffull)
+-        return -T_E_INVAL;
++    // MUTANT M12: the ENTER width check dropped
+     return (s64)sys_loom_enter_for_proc(t->proc, sys_hidx_arg(loom_fd_raw),
+                                         (u32)to_submit_raw, (u32)min_complete_raw,
+                                         (u32)flags_raw);

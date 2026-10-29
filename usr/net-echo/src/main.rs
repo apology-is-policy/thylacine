@@ -280,7 +280,7 @@ fn weft_async_e2e() -> Result<(), &'static str> {
     //     copy), push (Loom WRITE -> kernel weft fast-path -> Tweftio), wait for the
     //     CQE. The server reads it back over the loopback + verifies.
     {
-        let tx = flow.tx_buf();
+        let tx = flow.tx_buf().map_err(|_| "weft payload busy")?;
         for (i, b) in tx.iter_mut().take(N).enumerate() {
             *b = (i as u8) ^ 0x5A;
         }
@@ -333,7 +333,7 @@ fn weft_async_e2e() -> Result<(), &'static str> {
         let k = core::cmp::min(k, N - total);
         // Read this chunk OUT of the ring (zero-copy view) into the accumulator
         // before the next pop overwrites the payload region.
-        recv[total..total + k].copy_from_slice(&flow.rx_buf()[..k]);
+        recv[total..total + k].copy_from_slice(&flow.rx_buf().map_err(|_| "weft payload busy")?[..k]);
         total += k;
     }
     for i in 0..N {
@@ -746,7 +746,9 @@ fn probe() -> i64 {
         Ok(b) => b,
         Err(_) => fail("net-echo: FAIL -- RegisteredBuffer::new\n"),
     };
-    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
+    // SAFETY: owned byte storage; this client tracks submitted ranges and
+    // borrows them only before submission or after their matching completion.
+    if unsafe { ring.register_buffers(&[buf.buf_reg()]) }.is_err() {
         fail("net-echo: FAIL -- register_buffers\n");
     }
     if ring.register_handles(&[local.as_raw_fd()]).is_err() {

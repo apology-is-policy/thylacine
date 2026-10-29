@@ -1,0 +1,15 @@
+PASS clean
+PASS source-generation
+PASS source-bound
+PASS reserved
+PASS flags
+PASS destination-generation
+PASS same-slot
+PASS buffer-overflow
+PASS component-size
+PASS open-mode
+PASS pool-feature
+PASS pool-empty
+PASS path-slash
+PASS path-dot
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/decode-controls-20261009T211810Z

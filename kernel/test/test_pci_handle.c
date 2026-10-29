@@ -25,29 +25,13 @@
 #include <thylacine/vma.h>             // VMA_PROT_*
 
 #include "../../mm/slub.h"             // kmalloc / kfree / KP_ZERO
+#include <thylacine/syscall.h>
 
-void test_pci_bar_decode_size(void);
-void test_pci_walk_caps_hostile(void);
-void test_pci_walk_caps_shm(void);
-void test_pci_msix_windows(void);
-void test_pci_mapping_holds_function(void);
-void test_pci_claim_rng(void);
-void test_pci_claim_unknown(void);
-void test_pci_claim_exclusive(void);
-void test_pci_claim_nth(void);
-void test_pci_unref_releases_bars(void);
-void test_pci_live_count_balances(void);
-void test_pci_syscall_reject(void);
-void test_pci_syscall_claim_info(void);
-
-// The pci-1c syscall handlers (non-static, like sys_clock_gettime_handler) --
-// driven directly to exercise the cap gate / handle mint / validation paths.
+// The pci-1c syscall handlers are driven directly to exercise the cap gate /
+// handle mint / validation paths.
 // The SUCCESS copy-out (SYS_PCI_INFO) + the BAR burrow-map (SYS_PCI_MAP_BAR)
 // need a real user buffer + user address space, which the in-kernel kproc
 // context cannot supply, so those are proven by the pci-2 userspace probe.
-extern s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
-extern s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw);
-extern s64 sys_pci_info_handler(u64 hraw, u64 info_va);
 
 // Deterministic (no-hardware) regression for the BAR-size decode. A 32-bit
 // BAR's size mask occupies only the low 32 bits, so it MUST be inverted in
@@ -430,12 +414,13 @@ void test_pci_walk_caps_shm(void) {
 // A device-id that is never present on the v1.0 VirtIO device set.
 #define PCI_TEST_ABSENT_DEVICE_ID  0xFFFEu
 
-// True if the idle virtio-rng-pci is present (the claim target). Tests skip
-// gracefully on a config without it (the cfg_read_bounds test sets the
-// precedent); tools/run-vm.sh always attaches it, so the claim path runs in the
-// integration boot.
+// True if the idle virtio-rng-pci is present (the claim target).
+// tools/run-vm.sh always attaches and declares it, so its absence FAILS the
+// test; a launcher that did not declare it makes the test a counted skip.
 static bool rng_pci_present(void) {
-    return virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0) != NULL;
+    return test_requires(virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0) != NULL,
+                         "thylacine.virtio-pci-rng", 0, true,
+                         "no PCI function carries its DeviceID");
 }
 
 // Claim the idle rng-pci, validate the assigned BARs + the resolved COMMON_CFG
@@ -656,8 +641,10 @@ void test_pci_claim_nth(void) {
 
     // The two-instance leg: distinct functions for nth 0 vs nth 1.
     u8 b0, d0, f0, b1, d1, f1;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 1, &b1, &d1, &f1) != 0)
-        return;  // SKIP: fewer than two input functions in this config
+    if (!test_requires(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 1, &b1, &d1, &f1) == 0,
+                       "thylacine.virtio-pci-input", 1, true,
+                       "no second PCI input function resolves"))
+        return;
     TEST_ASSERT(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 0, &b0, &d0, &f0) == 0,
         "nth 1 resolved but nth 0 did not (enumeration walk broken)");
     TEST_ASSERT(b0 != b1 || d0 != d1 || f0 != f1,
@@ -677,6 +664,7 @@ void test_pci_claim_nth(void) {
 // A mapped function cannot be reclaimed after its ordinary handle closes.
 // The retained whole BAR also keeps its excluded routing pages exclusive.
 void test_pci_mapping_holds_function(void) {
+    if (!rng_pci_present()) return;
     struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
     TEST_ASSERT(k != NULL, "claim idle RNG for mapping lifetime");
     struct pci_map_window windows[PCI_MAP_WINDOW_MAX];

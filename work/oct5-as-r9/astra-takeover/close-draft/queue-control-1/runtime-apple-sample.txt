@@ -1,0 +1,75 @@
+Analysis of sampling runtime-apple.exe (pid 40337) every 1 millisecond
+Process:         runtime-apple.exe [40337]
+Path:            /Users/USER/*/runtime-apple.exe
+Load Address:    0x102514000
+Identifier:      runtime-apple.exe
+Version:         ???
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  Python [40327]
+Target Type:     live task
+
+Date/Time:       2026-10-09 20:02:55.075 +0200
+Launch Time:     2026-10-09 20:02:50.030 +0200
+OS Version:      macOS 26.4 (25E246)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         1184K
+Physical footprint (peak):  9840K
+Idle exit:                  untracked
+----
+
+Call graph:
+    761 Thread_20318739: Main Thread   DispatchQueue_<multiple>
+      761 start  (in dyld) + 6904  [0x18e1f7d4c]
+        761 dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const  (in dyld) + 320  [0x18e1f83f0]
+          761 dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)  (in dyld) + 3880  [0x18e1f9334]
+            761 dyld4::APIs::runAllInitializersForMain()  (in dyld) + 100  [0x18e1ec844]
+              761 dyld4::PrebuiltLoader::runInitializers(dyld4::RuntimeState&) const  (in dyld) + 44  [0x18e248d34]
+                761 dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const  (in dyld) + 172  [0x18e21f4ec]
+                  761 dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 516  [0x18e22f984]
+                    761 mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 124  [0x18e26493c]
+                      761 mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const  (in dyld) + 208  [0x18e263094]
+                        761 invocation function for block in mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const  (in dyld) + 312  [0x18e266560]
+                          761 invocation function for block in dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const  (in dyld) + 320  [0x18e22fe90]
+                            761 invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const  (in dyld) + 444  [0x18e21f734]
+                              761 libSystem_initializer  (in libSystem.B.dylib) + 204  [0x19e3d7328]
+                                761 __malloc_init  (in libsystem_malloc.dylib) + 1524  [0x18e3b44ac]
+                                  761 wrap_malloc_default_zone  (in libclang_rt.asan_osx_dynamic.dylib) + 16  [0x102ce9120]
+                                    761 __asan::AsanInitFromRtl()  (in libclang_rt.asan_osx_dynamic.dylib) + 40  [0x102cf2f2c]
+                                      761 <deduplicated_symbol>  (in libclang_rt.asan_osx_dynamic.dylib) + 40  [0x102d32954]
+                                        761 __asan::AsanInitInternal()  (in libclang_rt.asan_osx_dynamic.dylib) + 52  [0x102cf2f6c]
+                                          761 __asan::AsanInitInternal() (.cold.1)  (in libclang_rt.asan_osx_dynamic.dylib) + 260  [0x102d32a78]
+                                            761 __asan::InitializeShadowMemory()  (in libclang_rt.asan_osx_dynamic.dylib) + 104  [0x102cf393c]
+                                              761 __sanitizer::MemoryRangeIsAvailable(unsigned long, unsigned long)  (in libclang_rt.asan_osx_dynamic.dylib) + 172  [0x102d05970]
+                                                761 __sanitizer::MemoryMappingLayout::Next(__sanitizer::MemoryMappedSegment*)  (in libclang_rt.asan_osx_dynamic.dylib) + 148  [0x102d07048]
+                                                  761 __sanitizer::get_dyld_hdr()  (in libclang_rt.asan_osx_dynamic.dylib) + 236  [0x102d06c98]
+                                                    761 dyld_shared_cache_iterate_text_swift  (in Dyld) + 28  [0x24e50ee10]
+                                                      761 _Block_copy  (in libsystem_blocks.dylib) + 84  [0x18e27ed94]
+                                                        761 _malloc_type_malloc_outlined  (in libsystem_malloc.dylib) + 96  [0x18e3c4678]
+                                                          761 _malloc_zone_malloc_instrumented_or_legacy  (in libsystem_malloc.dylib) + 152  [0x18e3e0178]
+                                                            761 __sanitizer_mz_malloc  (in libclang_rt.asan_osx_dynamic.dylib) + 36  [0x102ce99c0]
+                                                              761 __asan::AsanInitFromRtl()  (in libclang_rt.asan_osx_dynamic.dylib) + 40  [0x102cf2f2c]
+                                                                761 <deduplicated_symbol>  (in libclang_rt.asan_osx_dynamic.dylib) + 68  [0x102d32970]
+                                                                  752 __sanitizer::StaticSpinMutex::LockSlow()  (in libclang_rt.asan_osx_dynamic.dylib) + 64  [0x102d04c5c]
+                                                                  + 733 __sanitizer::internal_sched_yield()  (in libclang_rt.asan_osx_dynamic.dylib) + 16  [0x102d01d3c]
+                                                                  + ! 704 cthread_yield  (in libsystem_pthread.dylib) + 36  [0x18e5b0c28]
+                                                                  + ! : 703 swtch_pri  (in libsystem_kernel.dylib) + 8,0  [0x18e56fc88,0x18e56fc80]
+                                                                  + ! : 1 DYLD-STUB$$swtch_pri  (in libsystem_pthread.dylib) + 0  [0x18e5b8818]
+                                                                  + ! 23 cthread_yield  (in libsystem_pthread.dylib) + 36,40  [0x18e5b0c28,0x18e5b0c2c]
+                                                                  + ! 6 DYLD-STUB$$sched_yield  (in libclang_rt.asan_osx_dynamic.dylib) + 0,8  [0x102d36ec4,0x102d36ecc]
+                                                                  + 19 __sanitizer::internal_sched_yield()  (in libclang_rt.asan_osx_dynamic.dylib) + 16  [0x102d01d3c]
+                                                                  9 __sanitizer::StaticSpinMutex::LockSlow()  (in libclang_rt.asan_osx_dynamic.dylib) + 64  [0x102d04c5c]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        swtch_pri  (in libsystem_kernel.dylib)        703
+        cthread_yield  (in libsystem_pthread.dylib)        23
+        __sanitizer::internal_sched_yield()  (in libclang_rt.asan_osx_dynamic.dylib)        19
+        __sanitizer::StaticSpinMutex::LockSlow()  (in libclang_rt.asan_osx_dynamic.dylib)        9
+        DYLD-STUB$$sched_yield  (in libclang_rt.asan_osx_dynamic.dylib)        6
+
+Binary images description not available
+

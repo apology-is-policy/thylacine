@@ -1,0 +1,12 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/extinction.c	2026-10-14 15:54:58
++++ kernel/extinction.c	2026-10-14 16:19:14
+@@ -162,8 +162,7 @@
+     if (cpu >= DTB_MAX_CPUS) cpu = 0;
+     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+     if (token == EXTINCTION_TX_HELD) {
+-        spin_preempt_dec();
+-        sched_take_deferred_preempt();
++        spin_preempt_dec();              // MUTANT M21 no preempt point
+     }
+ }
+ 

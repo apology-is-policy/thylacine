@@ -1,0 +1,3 @@
+argv: clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/dead-creator.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/dead-creator -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 7c8d4d5b404f1575dd95297946eaeb5015f7fd491ea856570dc4fb651b25593e  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-4vosqjn5/dead-creator.c

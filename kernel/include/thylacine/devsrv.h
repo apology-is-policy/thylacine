@@ -41,6 +41,7 @@
 
 struct Dev;
 struct Proc;
+struct ProcServiceIdentity;
 struct Spoor;
 struct SrvConn;
 struct SrvRegistry;
@@ -51,23 +52,18 @@ struct poll_waiter;
 // SYS_POST_SERVICE kernel-stack name scratch.
 #define SRV_NAME_MAX  32u
 
-// Service registry capacity. The "corvus is the sole service; 8 is
-// headroom" era ended: the resident boot posts SIX permanent services
-// (stratum-fs, stratum-ctl, corvus, net, ptyfs, tapestry) and tombstones
-// never free (a dead poster's entry pins its NAME + slot forever -- the
-// stale-handle defense), so the boot-probe socket (pouch-sock-demo) + the
-// login-E2E home-michael tombstones made 8 EXACTLY full at the login
-// prompt (#30): michael forever REBINDS his own tombstone by name (no new
-// slot) while any OTHER user's fresh /srv/home-<user> post found no free
-// slot -> devsrv_create -1 -> the pouch bind's EACCES -> a permanently
-// unprovisionable home. 16 = the 8 occupants + ~8 distinct per-boot
-// usernames of headroom; each unit also costs kernel STACK in
-// srv_registry_drain (SRV_MAX_SERVICES x SRV_ACCEPT_BACKLOG pointers --
-// 2 KiB at 16), so a further raise should land with the real fix: the
-// entry-free-at-last-handle-ref lifecycle that retires tombstone
-// accumulation entirely (the recorded v1.x seam). A post past the cap
-// still fails fast; a TOMBSTONE rebind needs no free slot.
+// Private posting capacity of each registry. Login's D7 factory gives every
+// session its own mortal table; immutable resident routes occupy separate
+// slots. Trusted tombstones reserve their names until that registry retires.
+// Keep this bound tied to the drain stack (16 x 16 pointers ~= 2 KiB), not to
+// the number of usernames that have logged in since boot.
 #define SRV_MAX_SERVICES  16u
+
+// SYS_SRV_REGISTRY_NEW's route manifest; all unused name bytes must be zero.
+struct srv_route { u32 name_len; u32 reserved; u8 name[32]; };
+_Static_assert(sizeof(struct srv_route) == 40, "D7 route ABI size");
+struct Spoor *devsrv_session_root(struct Proc *p, struct Spoor *source,
+    const struct srv_route *routes, u32 count, int *err);
 
 // SRV_SERVICE_MAGIC — sentinel at offset 0 of struct SrvService. Lets the
 // KObj_Srv handle-release path discriminate a service object from a
@@ -91,14 +87,18 @@ struct poll_waiter;
 // §6.2). corvus accepts promptly, so a short backlog suffices.
 #define SRV_ACCEPT_BACKLOG  16u
 
-// Global cap on live /srv connections. Each SrvConn pins two heap rings
-// (2 x 64 KiB at the default class; 2 x 256 KiB for a DMSRVBULK service
-// — CF-3 B) plus a small struct; the cap bounds the worst-case
-// user-drivable exposure at 64 x ~516 KiB ~= 32 MiB if every conn were
-// bulk (realistically only the FS mounts are). CORVUS-DESIGN §6.2 sizes
-// this at corvus's MAX_USERS order (~256); v1.0 caps at 64 — a tunable,
-// raised when a multi-user workload needs the headroom.
-#define SRV_MAX_CONNS  64u
+// October 3 ratified weighted ring budget: 128 KiB per credit, held from
+// pre-allocation admission until final storage destruction. Counts are bounded
+// too, since the smallest connection costs one. These are NOT total-memory caps.
+#define SRV_CREDIT_BYTES (128u * 1024u)
+#define SRV_CREDIT_DEFAULT 1u
+#define SRV_CREDIT_BULK 4u
+#define SRV_CREDITS_GLOBAL 256u
+#define SRV_CREDITS_SESSIONS 192u
+#define SRV_CREDITS_DOMAIN 96u
+#define SRV_MAX_CONNS SRV_CREDITS_GLOBAL
+#define SRV_MAX_DOMAINS 16u
+#define SRV_MAX_ROUTES 16u
 
 // DEVSRV_SVC_MAGIC — sentinel at offset 0 of struct devsrv_svc_ref, the
 // aux of a service Spoor (a /srv root walked to a service name). Lets
@@ -129,6 +129,45 @@ struct devsrv_svc_ref {
     // so it needs no lock.
     int  open_errno;
 };
+
+// AS-2 internal native target/admission API. No userspace layout or raw endpoint
+// escape. The target holds the ACTUAL navigation registry view (including its
+// domain/source), exact name and post generation. A re-post needs a new target.
+struct SrvServiceTarget {
+    struct SrvRegistry *view;
+    struct SrvService *service; // exact fixed slot; generation alone is per-slot
+    u64 generation;
+    u8 name_len;
+    char name[SRV_NAME_MAX];
+};
+struct SrvConnectAdmission {
+    struct SrvRegistry *view;     // own ref keeps the service slot/source alive
+    struct SrvService *service;  // stable storage under view's retained registry
+    struct SrvConn *conn;        // own create ref; borrowed until release
+    u64 generation;
+    bool published;
+};
+// Caller pins the root Spoor through capture. Only an actual native CWALKONLY
+// registry root is accepted. No global fallback, peer I/O or capability mint.
+int devsrv_service_target_init(struct Spoor *root, const char *name, u32 len,
+                               struct SrvServiceTarget *out);
+void devsrv_service_target_clear(struct SrvServiceTarget *target);
+// Prepare owns all local storage/credits before publication. No peer can see it.
+// Target and identity are immutable caller-owned values during this call.
+int devsrv_service_prepare(const struct SrvServiceTarget *target,
+                           const struct ProcServiceIdentity *identity,
+                           struct SrvConnectAdmission *out);
+// Serialize publish with the caller's abort/admission latch. This only takes
+// the registry lock: no allocation, wait, protocol byte or waiter callback.
+// The post generation/LIVE state is rechecked here. Publish at most once.
+int devsrv_connect_publish(struct SrvConnectAdmission *admission);
+// After dropping the caller's lock, wake accept/poll waiters. Admission must
+// remain owned until this returns. A concurrent tombstone cannot free its slot.
+void devsrv_connect_wake(struct SrvConnectAdmission *admission);
+// Drop the create and view refs. Unpublished connections are torn down locally;
+// published consumers must have taken their own conn ref before release. On
+// post-publication failure the caller tears the conn down before releasing.
+void devsrv_connect_release(struct SrvConnectAdmission *admission);
 
 // F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
 // by `devsrv_close` / `devsrv_poll` to discriminate the aux's owning
@@ -286,9 +325,9 @@ extern struct Dev devsrv;
 // heap-allocated, refcounted SrvRegistry reached THROUGH the mounted
 // devsrv root Spoor (the root's `aux`), not a global or a Territory field
 // (Plan-9-true — named through the namespace). Boot mounts one immortal
-// registry on the kproc `/srv` synthetic dir; login (A-5b-body) mounts a
-// fresh per-session registry, so a second user's coordinator is
-// structurally unnameable (I-1).
+// registry on the kproc `/srv` synthetic dir. Login still inherits that
+// boot registry; fresh per-session registries remain the D7 implementation
+// target, not the current isolation mechanism.
 //
 // Registry-ref discipline (mirrors dev9p's attached_owner): EVERY devsrv
 // Spoor instance carrying `aux = reg` holds exactly ONE registry ref — the
@@ -296,12 +335,16 @@ extern struct Dev devsrv;
 // /srv/<name> service-ref Spoor. devsrv_close drops exactly one. spoor_ref
 // (same instance) adds NO registry ref; only a new instance (spoor_clone +
 // walk0, or a fresh service-ref) does. The registry outlives any single
-// Spoor; it is freed at the last srv_registry_unref.
+// Spoor. Each KObj_Srv listener slot and handle_get snapshot also holds
+// one registry ref, released on close/put (poll puts only after its sweep).
+// The registry is freed at the last srv_registry_unref.
 
+#ifdef KERNEL_TESTS
 // srv_registry_create — allocate a fresh registry (ref = 1; stamps each
 // entry's permanent magic + poll_list + reg back-pointer). Returns NULL on
 // OOM. The caller owns the initial reference.
 struct SrvRegistry *srv_registry_create(void);
+#endif // KERNEL_TESTS
 
 // srv_registry_ref / srv_registry_unref — refcount. The last unref drains
 // every pending connection (the srv_registry_reset teardown discipline)
@@ -331,10 +374,12 @@ struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg);
 // cores + srv_registry_reset. NULL before devsrv_init.
 struct SrvRegistry *srv_boot_registry(void);
 
+#ifdef KERNEL_TESTS
 // Cumulative registry lifecycle counters (tests verify drain-on-last-unref
 // without dereferencing a freed registry). (created - destroyed) == live.
 u64 srv_registry_total_created(void);
 u64 srv_registry_total_destroyed(void);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Service registry.
@@ -348,21 +393,14 @@ u64 srv_registry_total_destroyed(void);
 //   srv_commit()   — RESERVING -> LIVE (handle allocated; post succeeded).
 //   srv_abort()    — RESERVING -> prior (handle_alloc failed; rolled back).
 
-// srv_commit — phase 2 (success). RESERVING -> LIVE. Takes the registry
-// lock. `svc` must be a reservation from the reserve phase (srv_reserve_in,
-// the internal slot claim devsrv_post_listener drives).
-void srv_commit(struct SrvService *svc);
-
-// srv_abort — phase 2 (failure). RESERVING -> `prior` (the value the
-// reserve phase returned in *prior_out). Takes the registry lock.
-void srv_abort(struct SrvService *svc, enum srv_state prior);
-
+#ifdef KERNEL_TESTS
 // srv_lookup_in — find a service by name in an explicit `reg` (the devsrv
 // open=connect / walk internal lookup). The in-kernel test harness uses it
 // against srv_boot_registry() now that the name-only SYS_POST_SERVICE /
 // SYS_SRV_CONNECT path is retired (stalk-3c). Takes the registry lock.
 struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
                                  const char *name, u8 name_len);
+#endif // KERNEL_TESTS
 
 // srv_proc_exit_notify — called by every Proc's last live thread out
 // (kernel/proc.c proc_exit_last_out), on either exit path. Any
@@ -372,9 +410,11 @@ struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
 // ServiceTombstone.
 void srv_proc_exit_notify(struct Proc *p);
 
+#ifdef KERNEL_TESTS
 // srv_registry_count — number of non-FREE registry entries. Tests +
 // diagnostics; takes the registry lock.
 int srv_registry_count(void);
+#endif // KERNEL_TESTS
 
 // devsrv_post_listener — the create=post path (stalk-3b, STALK-DESIGN.md §5.3
 // / D2). A SYS_WALK_CREATE against a /srv directory (a devsrv root Spoor) is a
@@ -417,6 +457,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // SrvConn, <thylacine/srvconn.h>). The kernel mints + owns all transport
 // (invariant C-23). CORVUS-DESIGN.md §6.2.
 
+#ifdef KERNEL_TESTS
 // devsrv_open_connect — the open=connect core (stalk-3b-β; STALK-DESIGN.md §5.2).
 // `c` is a /srv/<name> service-ref Spoor (devsrv_walk's product); mint a SrvConn
 // for `p`, enqueue it on the poster's accept backlog, and return the connection
@@ -425,7 +466,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // Returns NULL on bad-Spoor / no-LIVE-service / cap / OOM / handshake failure.
 //
 // The Dev.open vtable slot (devsrv_open) calls this with current_thread()->proc;
-// it is non-static so the test harness can drive it with an explicit Proc.
+// the tests drive it with an explicit Proc.
 struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
 
 // devsrv_srv_connect_authorized -- (U) the connect gate's DECISION, extracted
@@ -444,6 +485,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
 //   caps          the connector's live capability word.
 bool devsrv_srv_connect_authorized(bool byte_mode, bool cap_posted,
                                    bool self_post, caps_t caps);
+#endif // KERNEL_TESTS
 
 // devsrv_open_errno -- the cause a refused connect left on the service-ref
 // Spoor `c` (the devsrv twin of dev9p_open_errno; read through
@@ -475,9 +517,11 @@ struct Spoor *devsrv_make_conn_spoor(struct SrvConn *conn);
 // endpoint handle to its SrvConn through here.
 struct SrvConn *devsrv_conn_of(struct Spoor *c);
 
+#ifdef KERNEL_TESTS
 // srv_backlog_depth — current accept-backlog depth of `svc`. Tests +
 // diagnostics; takes the registry lock.
 int srv_backlog_depth(struct SrvService *svc);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // poll — readiness probe on a KObj_Srv handle (P5-poll-b).
@@ -496,5 +540,13 @@ int srv_backlog_depth(struct SrvService *svc);
 // magic obj — a memory corruption or an unsupported KObj_Srv flavor.
 
 short srv_handle_poll(void *obj, short events, struct poll_waiter *pw);
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into devsrv.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void srv_registry_reset(void);
+bool srv_test_accept_pin(struct SrvService *svc, int mode);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_DEVSRV_H

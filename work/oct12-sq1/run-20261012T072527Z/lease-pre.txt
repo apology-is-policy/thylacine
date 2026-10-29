@@ -1,0 +1,5 @@
+mac   HELD by you for 1m, 2.0h left
+        why: corona: SQ-1 loom_drain_sq copy-before-release -- TLC loom_sq + kernel build + guest control and M1 mutant (work/oct12-sq1/sq1-run.sh)
+        phase: corona: SQ-1 TLC (loom_sq x5, loom.tla x9), then sq1-run.sh control/M1/M2
+pi    FREE
+disk: 10.3 GiB available at /Users/northkillpd/projects/thylacine-corona

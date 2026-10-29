@@ -1,0 +1,66 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 8 tests
+test tests::ring::local_last_future_drop_schedules_after_closing_poll ... FAILED
+test tests::ring::local_native_retirement_requires_explicit_event_not_busy_spin ... FAILED
+test tests::ring::local_pool_and_payload_release_share_noncallback_signal ... ok
+test tests::ring::local_progress::local_admission_signals_before_request_publication ... FAILED
+test tests::ring::local_pulse_drop_and_bounded_progress_do_not_allocate ... FAILED
+test tests::ring::local_result_drop_schedules_retirement_without_new_cq ... FAILED
+test tests::ring::local_terminal_cq_signals_even_without_registered_waker ... FAILED
+test tests::ring::local_zero_partial_budget_and_coalesced_events_preserve_sweep ... FAILED
+
+failures:
+
+---- tests::ring::local_last_future_drop_schedules_after_closing_poll stdout ----
+
+thread 'tests::ring::local_last_future_drop_schedules_after_closing_poll' (30938129) panicked at src/tests/ring.rs:1486:5:
+assertion failed: !e.needs_progress()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::local_native_retirement_requires_explicit_event_not_busy_spin stdout ----
+
+thread 'tests::ring::local_native_retirement_requires_explicit_event_not_busy_spin' (30938130) panicked at src/tests/ring.rs:1498:5:
+assertion failed: !e.needs_progress()
+
+---- tests::ring::local_progress::local_admission_signals_before_request_publication stdout ----
+
+thread 'tests::ring::local_progress::local_admission_signals_before_request_publication' (30938132) panicked at src/tests/ring/local_progress.rs:9:5:
+assertion failed: !e.needs_progress()
+
+---- tests::ring::local_pulse_drop_and_bounded_progress_do_not_allocate stdout ----
+
+thread 'tests::ring::local_pulse_drop_and_bounded_progress_do_not_allocate' (30938133) panicked at src/tests/ring.rs:1582:5:
+assertion failed: !e.needs_progress()
+
+---- tests::ring::local_result_drop_schedules_retirement_without_new_cq stdout ----
+
+thread 'tests::ring::local_result_drop_schedules_retirement_without_new_cq' (30938134) panicked at src/tests/ring.rs:1461:5:
+assertion failed: !e.needs_progress()
+
+---- tests::ring::local_terminal_cq_signals_even_without_registered_waker stdout ----
+
+thread 'tests::ring::local_terminal_cq_signals_even_without_registered_waker' (30938135) panicked at src/tests/ring.rs:1543:5:
+assertion failed: !e.needs_progress()
+
+---- tests::ring::local_zero_partial_budget_and_coalesced_events_preserve_sweep stdout ----
+
+thread 'tests::ring::local_zero_partial_budget_and_coalesced_events_preserve_sweep' (30938136) panicked at src/tests/ring.rs:1532:9:
+assertion `left == right` failed
+  left: true
+ right: false
+
+
+failures:
+    tests::ring::local_last_future_drop_schedules_after_closing_poll
+    tests::ring::local_native_retirement_requires_explicit_event_not_busy_spin
+    tests::ring::local_progress::local_admission_signals_before_request_publication
+    tests::ring::local_pulse_drop_and_bounded_progress_do_not_allocate
+    tests::ring::local_result_drop_schedules_retirement_without_new_cq
+    tests::ring::local_terminal_cq_signals_even_without_registered_waker
+    tests::ring::local_zero_partial_budget_and_coalesced_events_preserve_sweep
+
+test result: FAILED. 1 passed; 7 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

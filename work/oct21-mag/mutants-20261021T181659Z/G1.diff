@@ -1,0 +1,21 @@
+diff --git a/mm/magazines.c b/mm/magazines.c
+index 381e5b29e..33480fcd0 100644
+--- a/mm/magazines.c
++++ b/mm/magazines.c
+@@ -163,7 +163,7 @@ bool mag_free(struct page *p, unsigned order) {
+ void magazines_drain_all(void) {
+     for (int cpu = 0; cpu < NCPUS; cpu++) {
+         struct percpu_data *pc = &g_percpu[cpu];
+-        irq_state_t s = spin_lock_irqsave(&pc->lock);
++        irq_state_t s = spin_lock_irqsave(NULL);
+         for (int idx = 0; idx < NUM_MAG_ORDERS; idx++) {
+             struct magazine *m = &pc->mags[idx];
+             unsigned order = mag_idx_to_order(idx);
+@@ -172,6 +172,6 @@ void magazines_drain_all(void) {
+                 buddy_free(&g_zone0, p, order);
+             }
+         }
+-        spin_unlock_irqrestore(&pc->lock, s);
++        spin_unlock_irqrestore(NULL, s);
+     }
+ }

@@ -1,0 +1,11 @@
+--- control
++++ omit-retire-free
+@@ -290,7 +290,7 @@
+     kfree(l->service_nodes);
+     kfree(l->service_targets);
+     kfree(l->service_pools);
+-    kfree(l->service_slots);
++
+ 
+     // One settled drop rather than claim / drop / restore. The refund is decided
+     // inside the same v->lock interval that decides whether this drop ends the

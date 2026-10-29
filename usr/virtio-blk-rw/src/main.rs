@@ -742,8 +742,10 @@ pub extern "C" fn rs_main() -> i64 {
     let (slot, slot_va) = match find_blk_slot(mmio_base) {
         Some(f) => f,
         None => {
-            log("virtio-blk-rw: SKIP — no virtio-blk-device\n");
-            return 0;
+            // The kernel test spawns this probe only after finding the device,
+            // so a scan that misses it is a probe or transport defect, not a skip.
+            log("virtio-blk-rw: FAIL — no virtio-mmio slot has DeviceID=2, though the kernel found one\n");
+            unsafe { t_exits(1) };
         }
     };
     let intid = VIRTIO_MMIO_GIC_INTID_BASE + slot;

@@ -1,0 +1,11 @@
+--- control.c
++++ canonical-member.c
+@@ -957,7 +957,7 @@
+     if(!b || b->type!=BURROW_TYPE_ANON || !b->pages || !maximum ||
+        maximum>e.length || e.offset>b->size || e.length>b->size-e.offset)
+         return -T_E_INVAL;
+-    if(view)*view=(u8 *)pa_to_kva(page_to_pa(b->pages))+e.offset;
++    if(view)*view=(u8 *)pa_to_kva(page_to_pa(b->pages));
+     return 0;
+ }
+ static void provided_clear(struct loom_service_operation *o) {

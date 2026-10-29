@@ -48,7 +48,7 @@ use libthyla_rs::{
 };
 use tapestry::{
     DisplayInfo, EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY,
-    TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE,
+    TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE, TEV_STORAGE,
 };
 
 use crate::chromeset::{self, read_file, ChromeAction};
@@ -154,6 +154,7 @@ const HALCYON_MOTION_ENV_PATH: &str = "/env/HALCYON_MOTION";
 /// every program in the pane inherits ITS pane's address and the compositor's
 /// own /env stays clean between spawns. `view` opens it to place inline.
 const HALCYON_PLACE_ENV_PATH: &str = "/env/HALCYON_PLACE";
+const HALCYON_INTERACTION_ENV_PATH: &str = "/env/HALCYON_INTERACTION";
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -268,6 +269,7 @@ struct SessionTile {
     cols: u16,
     rows: u16,
     dirty: bool,
+    binding_locator: Option<u64>,
     /// The one-shot "this tile presents objects" witness (test builds).
     #[cfg(feature = "test-mode")]
     objs_said: bool,
@@ -351,6 +353,7 @@ impl SessionTile {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
         let mut cmd = Command::new("/bin/kaua-term");
+        cmd.arg("--interaction");
         // Everything this compositor DECLARES to the tile: the RICH render
         // tier (halcyond rasterizes the transcript, which is what arms a tile
         // shell's zones and a tool's objects -- KAUA-TERM.md R1), and the
@@ -366,6 +369,9 @@ impl SessionTile {
         // programs never spawn as another principal (login masks it too; this
         // is the second hop's own guard).
         cmd.caps(!libthyla_rs::T_CAP_SET_IDENTITY)
+            // The terminal host must be sealed before it can bind an observer.
+            // The ordinary application spawned on its slave does not inherit seals.
+            .perm(libthyla_rs::T_SPAWN_PERM_SEAL)
             .stdin(Stdio::Piped)
             .stdout(Stdio::Piped)
             .stderr(Stdio::Inherit);
@@ -379,6 +385,7 @@ impl SessionTile {
         // its `view` place into a DIFFERENT pane. So a no-channel pane's child
         // snapshots an ABSENT env var, never a stale one.
         let _ = libthyla_rs::fs::remove_file(HALCYON_PLACE_ENV_PATH);
+        let _ = libthyla_rs::fs::remove_file(HALCYON_INTERACTION_ENV_PATH);
         if let Some(addr) = place_addr {
             if File::create(HALCYON_PLACE_ENV_PATH)
                 .and_then(|mut f| f.write_all(addr.as_bytes()))
@@ -389,8 +396,16 @@ impl SessionTile {
                 say!("halcyond: pane leaf={} inline {}", leaf, addr);
             }
         }
+        if let Some(addr) = place_addr.filter(|_| cfg!(feature="interaction-qualification")).and_then(|a| a.strip_suffix("/place")) {
+            let locator = alloc::format!("{}/interaction", addr);
+            if File::create(HALCYON_INTERACTION_ENV_PATH)
+                .and_then(|mut f| f.write_all(locator.as_bytes())).is_err() {
+                let _ = libthyla_rs::fs::remove_file(HALCYON_INTERACTION_ENV_PATH);
+            }
+        }
         let spawned = cmd.spawn();
         let _ = libthyla_rs::fs::remove_file(HALCYON_PLACE_ENV_PATH);
+        let _ = libthyla_rs::fs::remove_file(HALCYON_INTERACTION_ENV_PATH);
         let mut child = spawned.ok()?;
         let pid = child.pid();
         // Stdio::Piped guarantees both ends, but never leak a spawned kaua-term:
@@ -428,6 +443,7 @@ impl SessionTile {
             cols,
             rows,
             dirty: true,
+            binding_locator: None,
             #[cfg(feature = "test-mode")]
             objs_said: false,
             #[cfg(feature = "test-mode")]
@@ -890,8 +906,8 @@ impl SessionTile {
         gs: &mut GlyphSource,
         sheet: &Sheet,
     ) -> bool {
-        if !self.dirty {
-            return true;
+        if !self.dirty || !self.surf.is_drawable() {
+            return true; // retain semantic dirtiness while pixels are absent
         }
         self.dirty = false;
         let (sw, sh) = (self.surf.w as usize, self.surf.h as usize);
@@ -962,7 +978,7 @@ impl SessionTile {
     }
 
     /// Drain one wake's worth of records from the up-pipe into the tile.
-    fn ingest(&mut self, buf: &mut [u8]) -> Ingested {
+    fn ingest(&mut self, buf: &mut [u8], places: &mut Option<PanePlaceServer>) -> Ingested {
         // SAFETY: SVC wrapper over the caller's stack buffer.
         let n = unsafe { t_read(self.up_fd, buf.as_mut_ptr(), buf.len()) };
         if n <= 0 {
@@ -978,6 +994,23 @@ impl SessionTile {
             match self.dec.next_frame() {
                 Some(Ok((tag, payload))) => match parse_record(tag, &payload) {
                     Ok(rec) => {
+                        if let Record::Control(kaua_term::Control::TerminalBinding(id)) = rec {
+                            // A sealed host may announce once. Kernel observer validation follows;
+                            // this locator alone never registers a controller.
+                            if self.binding_locator.is_some() { return Ingested::Crashed; }
+                            self.binding_locator = Some(id);
+                            // No compositor I/O on the UI owner. The executor validates
+                            // this exact route and kernel binding on its ordered lane.
+                            if let Some(p) = places.as_mut() {
+                                if !p.bind_host(self.leaf, self.child.pid() as u32, id) {
+                                    // A pane may legitimately have no media route
+                                    // (e.g. token allocation refused). Keep its terminal;
+                                    // only interaction registration is unavailable.
+                                    say!("halcyond: terminal interaction unavailable leaf={}", self.leaf);
+                                }
+                            }
+                            continue;
+                        }
                         let alt_enter = matches!(rec, Record::Mode(ScreenMode::AltScreen));
                         #[cfg(feature = "test-mode")]
                         match &rec {
@@ -1174,7 +1207,8 @@ fn place_residual(gs: &GlyphSource) -> u64 {
     const BASELINE_RESERVE: u64 = 10 * 1024 * 1024;
     const ATLAS_PAGE_BYTES: u64 = 512 * 512;
     let atlas = gs.evict_pages() as u64 * ATLAS_PAGE_BYTES;
-    BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas)
+    BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas
+        + (libthyla_rs::service_worker::STACK_BYTES + libthyla_rs::service_worker::GUARD_BYTES + if cfg!(feature="interaction-qualification") { halcyond::servicepool::WORKING_RESERVE as u64 } else { 64 * 1024 }))
 }
 
 fn place_cap(gs: &GlyphSource) -> u64 {
@@ -1191,7 +1225,7 @@ fn pane_channel(places: &mut Option<PanePlaceServer>, leaf: u32) -> Option<Strin
     if token == 0 {
         return None;
     }
-    p.register(token, leaf);
+    if !p.register(token, leaf) { return None; }
     Some(p.place_address(token))
 }
 
@@ -1211,6 +1245,7 @@ fn reconcile(
     // The session's resolved terminal palette: a tile created LATER must be
     // born in the same theme as the ones already up.
     palette: vt::Palette,
+    status: &mut statusset::StatusBar,
 ) {
     let layout = match read_file(troot, "layout") {
         Some(s) => s,
@@ -1280,7 +1315,7 @@ fn reconcile(
         // Mint at the leaf's own content rect (a CONFIGURE still corrects any
         // staleness); fall back to the display size if geometry is unreadable.
         let (w, h) = leaf_geometry(troot, leaf).unwrap_or((geom.disp_w, geom.disp_h));
-        let surf = match Surface::open_claim_on(ring, w, h, token) {
+        let surf = match Surface::open_storage_claim_on(ring, w, h, token) {
             Ok(s) => s,
             Err(e) => {
                 // A leaf the compositor cannot host (the surface pool is at
@@ -1291,6 +1326,7 @@ fn reconcile(
                     leaf,
                     e
                 );
+                status.notify("Cannot open terminal: display resources unavailable", true);
                 let mut cmd = alloc::string::String::new();
                 let _ = core::fmt::write(&mut cmd, format_args!("close {}", leaf));
                 layout_verb(troot, &cmd);
@@ -1836,10 +1872,18 @@ pub fn run(home: Option<String>) -> i64 {
     }
     // I-47 (HALCYON.md 14.7.2): the per-user inline-media place service. Posted
     // once (login granted MAY_POST_SERVICE, one hop, as it does for the home
-    // proxy); each tile gets a per-pane routing token. A failed post degrades
-    // cleanly -- the session runs with inline media unavailable.
+    // proxy); each tile gets a per-pane routing token. A
+    // failure before publication leaves inline media unavailable. Once published,
+    // failure must end the poster so its registry name is retired.
     let user = session_user();
-    let mut places: Option<PanePlaceServer> = user.as_deref().and_then(PanePlaceServer::post);
+    let mut places: Option<PanePlaceServer> = match user.as_deref().map(|u| PanePlaceServer::post_on(u,&ring)) {
+        Some(Ok(server)) => Some(server),
+        Some(Err(crate::paneplace::PostError::Published(error))) => {
+            say!("halcyond: published media service failed: {:?}; ending session", error);
+            return 1;
+        }
+        _ => None,
+    };
     let (mut placed_quiet, mut refused_quiet) = (Quiet::default(), Quiet::default());
     match (&places, user.as_deref()) {
         (Some(_), Some(u)) => say!("halcyond: inline-media service /srv/halcyon-{}", u),
@@ -1905,6 +1949,8 @@ pub fn run(home: Option<String>) -> i64 {
     let mut hints: Vec<(String, String)> = Vec::new();
     // The tile-status feed's one-shot refusal notice (the H-3b round F4
     // posture: a refusal drops that exit, the next exit mark retries).
+    #[cfg(feature="interaction-qualification")]
+    say!("halcyond: interaction qualification enabled");
     let mut status_refusal_said = false;
 
     let mut cart = cartoon::Cartoon::new();
@@ -2170,6 +2216,7 @@ pub fn run(home: Option<String>) -> i64 {
         // any wait (first-present-wins scanout; frame ticks reach only visible
         // surfaces).
         for t in tiles.values_mut() {
+            if !t.surf.is_drawable() { continue; }
             // HALCYON 14.3: an open synchronized frame holds this tile's
             // paint, and only this tile's; a gone child's never waits.
             if t.dirty && t.exit.is_none() && t.tile.hold.holds(now_ns) {
@@ -2225,6 +2272,21 @@ pub fn run(home: Option<String>) -> i64 {
                 match t.surf.poll_event() {
                     Ok(Some(e)) => match e.kind {
                         TEV_CLOSE => reap.push(leaf),
+                        TEV_STORAGE => match t.surf.handle_storage(&e) {
+                            Ok(resumed) => {
+                                if resumed { t.fit_to_surface(geom, &mut wire_out); }
+                                t.dirty = true;
+                                t.tile.hold.cut();
+                                #[cfg(feature = "test-mode")]
+                                say!("halcyond: tile {} pixels {}", leaf,
+                                    if t.surf.is_drawable() { "resident" } else { "dormant" });
+                            }
+                            Err(TapError::Busy) => {} // superseded offer, keep the current mapping
+                            Err(e) => {
+                                say!("halcyond: tile {} storage refused {:?}", leaf, e);
+                                status.notify("Tab display unavailable; switch away and back to retry", true);
+                            }
+                        },
                         TEV_CONFIGURE => match t.surf.handle_configure(&e) {
                             Ok(_) => {
                                 t.fit_to_surface(geom, &mut wire_out);
@@ -2242,7 +2304,7 @@ pub fn run(home: Option<String>) -> i64 {
                         // A dead tile's keys drop (its ut is gone); a live
                         // tile only ever sees KEY when focused (compositor
                         // routing), so this is the focus-routed input path.
-                        TEV_KEY if t.exit.is_none() => {
+                        TEV_KEY if t.exit.is_none() && t.surf.is_ready() => {
                             // H-4d: on the VT's normal screen, Esc enters the
                             // transcript's Normal mode and Normal keeps every
                             // key (the Helix-modal boundary, HALCYON.md 4); a
@@ -2269,7 +2331,7 @@ pub fn run(home: Option<String>) -> i64 {
                         // an obj run's glyphs opens its verb menu at the
                         // pointer (the compositor focused the tile on the
                         // press; the menu grabs input while placed).
-                        TEV_PTR_BTN if t.exit.is_none() => {
+                        TEV_PTR_BTN if t.exit.is_none() && t.surf.is_ready() => {
                             if e.code == BTN_LEFT && e.value == 1 {
                                 let req = t.click(&rules, &sheet, &mut gs);
                                 // The receiver's witness (the compositor says
@@ -2361,6 +2423,7 @@ pub fn run(home: Option<String>) -> i64 {
                 home.as_deref(),
                 &mut places,
                 sheet.theme.terminal,
+                &mut status,
             );
             if tiles.is_empty() {
                 break;
@@ -2607,7 +2670,7 @@ pub fn run(home: Option<String>) -> i64 {
             let running = focused_leaf
                 .and_then(|l| tiles.get(&l))
                 .map_or(false, |t| t.tile.scrollback.running());
-            let sm = statusset::model_from(
+            let mut sm = statusset::model_from(
                 chrome.focused(),
                 focused_leaf,
                 &cwd,
@@ -2619,6 +2682,11 @@ pub fn run(home: Option<String>) -> i64 {
                 chrome.workspaces(),
                 hints.clone(),
             );
+            sm.mode = focused_leaf.and_then(|leaf| tiles.get(&leaf))
+                .map(|t| halcyond::modeview::DisplayMode::transcript(
+                    t.mode == Mode::Normal,
+                    t.sel.as_ref().map_or(false, |s| s.anchor.is_some()),
+                )).unwrap_or_default();
             status.refresh(&sm, &sheet, &mut gs);
             // HALCYON-INSTRUMENT 8.1: the top rail -- the focused tile's
             // directory and name, the theme in force, the minute; its
@@ -2794,7 +2862,7 @@ pub fn run(home: Option<String>) -> i64 {
         // spin without ever reading the frame's close (14.3).
         if tiles
             .values()
-            .any(|t| t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
+            .any(|t| t.surf.is_drawable() && t.dirty && !(t.exit.is_none() && t.tile.hold.waiting()))
         {
             continue;
         }
@@ -2829,8 +2897,8 @@ pub fn run(home: Option<String>) -> i64 {
         // wait so a `view` write wakes the loop. Appended AFTER the up entries
         // (the up_leaves[i] <-> fds[i+1] map is untouched) and BEFORE the down
         // entries (so it counts toward the POLL_MAX_NFDS cap); serviced below by
-        // its own non-blocking pass, which re-polls its own fds. Bounded to
-        // 1 + MAX_CONNS fds.
+        // its own non-blocking pass. One worker notice fd represents the whole
+        // service; parsing and image delivery still run on this UI thread.
         if let Some(p) = places.as_ref() {
             p.push_fds(&mut fds);
         }
@@ -2855,7 +2923,9 @@ pub fn run(home: Option<String>) -> i64 {
             }
         }
         let nfds = fds.len();
-        let timeout = if init.is_some() {
+        let timeout = if places.as_ref().is_some_and(|p| p.runnable()) {
+            0 // Buffered complete service frames need no new descriptor edge.
+        } else if init.is_some() {
             INIT_REAP_POLL_MS
         } else if omitted {
             DOWN_OMITTED_POLL_MS
@@ -2877,7 +2947,7 @@ pub fn run(home: Option<String>) -> i64 {
         // may have hidden its cursor, and then there is nothing to wake for.
         // Re-sampled here rather than reused from (0e) so the deadline is
         // measured from the wait it bounds.
-        let caret_tick = if motion && tiles.values().any(|t| t.tile.paints_caret(inst_profile)) {
+        let caret_tick = if motion && tiles.values().any(|t| t.surf.is_drawable() && t.tile.paints_caret(inst_profile)) {
             Some(libhalcyon::motion::caret_next_step_ms(
                 libthyla_rs::time::monotonic_ns() / 1_000_000,
             ))
@@ -2890,7 +2960,7 @@ pub fn run(home: Option<String>) -> i64 {
         let hold_now = libthyla_rs::time::monotonic_ns();
         let hold_due = tiles
             .values()
-            .filter(|t| t.dirty && t.exit.is_none())
+            .filter(|t| t.surf.is_drawable() && t.dirty && t.exit.is_none())
             .filter_map(|t| t.tile.hold.due_ms(hold_now))
             .min();
         let timeout = libhalcyon::motion::fold_timeout(timeout, hold_due);
@@ -2915,7 +2985,11 @@ pub fn run(home: Option<String>) -> i64 {
             let stored_cap = tiles.values().map(|t| t.tile.media.max_pixels())
                 .min().unwrap_or(0);
             p.set_budget(place_cap(&gs).min(stored_cap), place_residual(&gs));
-            p.service();
+            if let Err(error) = p.service() {
+                say!("halcyond: media readiness failed: {:?}; ending session", error);
+                logout = Some(1);
+                break;
+            }
             for img in p.take_completed() {
                 if let Some(t) = tiles.get_mut(&img.leaf) {
                     if !t.tile.place_image(img.id, img.w, img.h, img.argb) {
@@ -2941,7 +3015,7 @@ pub fn run(home: Option<String>) -> i64 {
             let Some(t) = tiles.get_mut(&leaf) else {
                 continue;
             };
-            match t.ingest(&mut inbuf) {
+            match t.ingest(&mut inbuf, &mut places) {
                 Ingested::Live => {
                     if !ingest_announced {
                         ingest_announced = true;

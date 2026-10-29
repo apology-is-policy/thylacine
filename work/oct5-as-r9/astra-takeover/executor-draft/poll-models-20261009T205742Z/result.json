@@ -1,0 +1,105 @@
+{
+  "inputs": {
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_local.cfg": "b195a1099ae984588d77fb4b3ba51bc76408f10bcbff13ab7781c16599faa4d3",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_check_before_register.cfg": "fd43bade3f337f7443a1463376c18793fa26933d4b9188ffbd735fef9216666d",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_clear_after_sample.cfg": "5775d1525305daafb9118df7b4ad6fb6426b707fef07362b7042f105bd91b25b",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_lazy_unregister.cfg": "65bfe03f5506083ec5d39be70a56363c43445634acf19d0cc4a19b4ab5913e48",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_no_loop_die_check.cfg": "554ff142c9201ef88042513fee01672e198279bbb72f6ee067303a7d1e76c5d5",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_no_loop_stop_check.cfg": "d3ba51c36c7c4ba1c7570d075ded50beab84c8d6659afc79d09eaea180e07b20",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_no_retry.cfg": "6d92fe39f61e22b047ac405a035ceee3023e7c83aa689952ee04b3e67fe758ca",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_no_wake.cfg": "c0ffc15d52e618d23235435e9a7b602f11e25998b9d57e5810b3d8d3f8f21625",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_retry_is_timeout.cfg": "e68ec656888757df4b3acaf7dca79f5b0904c1f5a6da6728b43b53a9859a7d54",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_return_on_wake.cfg": "71929dcffb3bc537b18bae6a41e88d5cf2b4c3c26c9c030f7e42dd8373832d5c",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_sweep_leaves_snapshot.cfg": "d4cdb24ab3ba9a8dfeb7983c3186d4b6d60df421eefc9cbd7566f0a9e57526f4",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll_buggy_verdict_before_settle.cfg": "fedc22d5ed2b5516d5d43fdc359daa3b142721b59deb449ec8ebf9182c83fcfa",
+    "/Users/northkillpd/projects/thylacine-corona/specs/poll.tla": "23d6c4d54bc1a098e49ebcc00a163a9aac5d3b88b07de55b2adc4f085e053ddd",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/poll-models.py": "9eb2ee726f45ce9ecac1ce8a1eb3db6ff13f8b61ccf59acab92fd8b97d0c83d6"
+  },
+  "results": [
+    {
+      "config": "poll_local.cfg",
+      "rc": 0,
+      "expected": "Invariants",
+      "ok": true,
+      "sha256": "d29932476023e63588308e576e30dc0c1603292d29b5ce20803b885213e6081a"
+    },
+    {
+      "config": "poll_buggy_check_before_register.cfg",
+      "rc": 12,
+      "expected": "NoMissedPoll",
+      "ok": true,
+      "sha256": "1e91e2da6f1acf13ebf6b92b0a04f5b2425fe8c1d4d55276243ad581d94d3b8b"
+    },
+    {
+      "config": "poll_buggy_clear_after_sample.cfg",
+      "rc": 12,
+      "expected": "NoMissedPoll",
+      "ok": true,
+      "sha256": "bcf140457ebacc154520224ba1004cd590ee8a802972c72867e16bd1aeb09743"
+    },
+    {
+      "config": "poll_buggy_lazy_unregister.cfg",
+      "rc": 12,
+      "expected": "NoStaleHook",
+      "ok": true,
+      "sha256": "784724515f543b8431d74be3c11ec11ad6d3948ef250107ce2e4b24d8ff76088"
+    },
+    {
+      "config": "poll_buggy_no_loop_die_check.cfg",
+      "rc": 13,
+      "expected": "DeathTerminates",
+      "ok": true,
+      "sha256": "c5378dcb362723275f5acba5d6206a5d57c95039ad63a725c50cd3ce958ff04d"
+    },
+    {
+      "config": "poll_buggy_no_loop_stop_check.cfg",
+      "rc": 13,
+      "expected": "StopHonoured",
+      "ok": true,
+      "sha256": "300f2c779ff372a1bdbb7d54bf640e2c3f12bb9dc0afc252c06cb34234c50a1a"
+    },
+    {
+      "config": "poll_buggy_no_retry.cfg",
+      "rc": 12,
+      "expected": "NoMissedPoll",
+      "ok": true,
+      "sha256": "266ca95523deb29f3c6e4e54de9cf5ea3010f62e20e31146dea0f7cd817b5a35"
+    },
+    {
+      "config": "poll_buggy_no_wake.cfg",
+      "rc": 12,
+      "expected": "NoMissedPoll",
+      "ok": true,
+      "sha256": "fa7490fcf7100339996b017bd1698379938c01607a5da18d9194738aeffa7a82"
+    },
+    {
+      "config": "poll_buggy_retry_is_timeout.cfg",
+      "rc": 12,
+      "expected": "NoSpuriousZero",
+      "ok": true,
+      "sha256": "9b6ecba248718767f9ea9be97dfb5dbe345e6a973836c8f79369d5ad37c1503c"
+    },
+    {
+      "config": "poll_buggy_return_on_wake.cfg",
+      "rc": 12,
+      "expected": "NoSpuriousZero",
+      "ok": true,
+      "sha256": "cd51808417892b483f30ea9ac80b243682d92aa082d33ab4033f9a1b03ef8fca"
+    },
+    {
+      "config": "poll_buggy_sweep_leaves_snapshot.cfg",
+      "rc": 12,
+      "expected": "NoSnapshotOutlivesCall",
+      "ok": true,
+      "sha256": "f1f7a42f812d22d4633a49d9e25383928222c6cf9b540d53ff76242e869a24aa"
+    },
+    {
+      "config": "poll_buggy_verdict_before_settle.cfg",
+      "rc": 12,
+      "expected": "NoFalseNotReady",
+      "ok": true,
+      "sha256": "cc3f0e7329d77b1b54f618c606b03e77ce4661d07cccb9c087e47075fad8d981"
+    }
+  ],
+  "limits": "Unmodified existing poll model: local clean plus all configured mutants. Does not model new private executor or prove its C/native scheduling."
+}

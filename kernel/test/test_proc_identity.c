@@ -14,30 +14,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
-
-// Defined in kernel/syscall.c; identity passed as scalars so this test needs
-// no kernel-internal struct spawn_identity. The trailing want_allowance
-// (Menagerie step 5) is the hardware-allowance bundle; these identity tests
-// pass NULL (the broad/inherit path), needing only a forward declaration.
-struct spawn_allowance;
-extern int sys_spawn_full_argv_identity_for_proc(
-        struct Proc *p, const char *name, size_t name_len,
-        const char *argv_data, u32 argv_data_len, u32 argc,
-        const u32 *fds, u32 fd_count,
-        caps_t cap_mask, u32 perm_flags,
-        bool set_identity, u32 principal_id, u32 primary_gid,
-        const u32 *supp_gids, u32 supp_gid_count,
-        const struct spawn_allowance *want_allowance,
-        u32 pheno_flags);
-
-void test_proc_identity_kproc_is_system(void);
-void test_proc_identity_rfork_inherits(void);
-void test_proc_identity_apply_sets_fields(void);
-void test_proc_identity_spawn_set_rejected_without_cap(void);
-void test_proc_identity_spawn_set_accepted_with_cap(void);
-void test_proc_identity_set_rejects_reserved(void);
-void test_proc_identity_set_rejects_system_supp_gid(void);
-void test_proc_identity_peer_snapshot_by_stripes(void);
+#include <thylacine/syscall.h>
 
 static void drain_zombies(void) {
     int status = 0;
@@ -150,7 +127,7 @@ static void reject_child_thunk(void *arg) {
     reject_rc = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, NULL, 0u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     exits("ok");
 }
 void test_proc_identity_spawn_set_rejected_without_cap(void) {
@@ -179,7 +156,7 @@ void test_proc_identity_spawn_set_accepted_with_cap(void) {
     int pid = sys_spawn_full_argv_identity_for_proc(
         t->proc, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, NULL, 0u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     TEST_ASSERT(pid > 0, "capped SET spawn did not return positive pid");
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the child");
@@ -196,17 +173,17 @@ void test_proc_identity_set_rejects_reserved(void) {
     int rc_invalid = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, PRINCIPAL_INVALID, 1000u, NULL, 0u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_invalid, -1, "SET principal_id=INVALID not rejected");
     int rc_system = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, PRINCIPAL_SYSTEM, 1000u, NULL, 0u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_system, -1, "SET principal_id=SYSTEM not rejected");
     int rc_gid = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, 1000u, GID_SYSTEM, NULL, 0u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_gid, -1, "SET primary_gid=SYSTEM not rejected");
     // No grandchildren were spawned (all rejected); nothing to reap.
 }
@@ -224,19 +201,58 @@ void test_proc_identity_set_rejects_system_supp_gid(void) {
     int rc_sys = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, sys_supp, 1u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_sys, -1, "SET supp_gid=SYSTEM not rejected");
     u32 inv_supp[1] = { GID_INVALID };
     int rc_inv = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
         CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, inv_supp, 1u,
-        /*want_allowance=*/NULL, /*pheno_flags=*/0u);
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_inv, -1, "SET supp_gid=INVALID not rejected");
 }
 
 // The peer-snapshot data path that feeds srv_peer_info: looking up kproc by
 // its stripes yields its identity; the 0 sentinel + an unassigned tag fail.
+// Native unpublished fixtures use the production process-table walk; no thread
+// runs in these Procs while the test changes their fields/exec-image pointer.
+static void test_service_admission_identity(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "service identity proc");
+    p->principal_id = 123; p->primary_gid = 456;
+    p->supp_gid_count = 1; p->supp_gids[0] = 789;
+    p->caps = CAP_DAC_OVERRIDE;
+    proc_test_link(p);
+    struct AddrSpace *old = p->as;
+    addrspace_pin(old);
+    struct ProcServiceIdentity id;
+    bool initial = proc_service_snapshot_by_stripes(p->stripes, old, &id);
+    bool values = id.access.principal_id == 123 && id.access.primary_gid == 456 &&
+        id.access.supp_gid_count == 1 && id.access.supp_gids[0] == 789 &&
+        id.access.caps == CAP_DAC_OVERRIDE && id.stripes == p->stripes && id.pid == p->pid;
+    p->caps = CAP_NONE;
+    bool recaptured = proc_service_snapshot_by_stripes(p->stripes, old, &id) &&
+                      id.access.caps == CAP_NONE;
+    struct AddrSpace *replacement = addrspace_alloc(p->page_budget);
+    TEST_ASSERT(replacement != NULL, "replacement image");
+    p->as = replacement; // isolated fixture; production swap is table-locked
+    bool old_rejected = !proc_service_snapshot_by_stripes(p->stripes, old, &id) &&
+                        id.stripes == 0 && id.access.caps == 0;
+    bool new_found = proc_service_snapshot_by_stripes(p->stripes, replacement, &id);
+    p->as = old; addrspace_unref(replacement);
+    u64 stripes = p->stripes;
+    p->state = PROC_STATE_ZOMBIE;
+    bool zombie_rejected = !proc_service_snapshot_by_stripes(stripes, old, &id);
+    proc_test_unlink(p); proc_free(p);
+    bool dead_rejected = !proc_service_snapshot_by_stripes(stripes, old, &id);
+    addrspace_unpin(old);
+    TEST_ASSERT(initial && values, "actual creator identity captured by value");
+    TEST_ASSERT(recaptured, "new admission observes live caps");
+    TEST_ASSERT(old_rejected && new_found, "same stripes cannot borrow replacement image");
+    TEST_ASSERT(zombie_rejected && dead_rejected, "dead creator cannot be admitted");
+}
+
 void test_proc_identity_peer_snapshot_by_stripes(void) {
+    test_service_admission_identity();
     struct Proc *kp = kproc();
     caps_t caps = 0; u32 pid_out = 0xABCDu; u32 gid_out = 0xABCDu;
     int    procpid = -7;

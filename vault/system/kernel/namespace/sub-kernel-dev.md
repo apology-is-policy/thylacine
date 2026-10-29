@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -63,9 +63,9 @@ Spoor is clunked -- a clunk frees the Dev-private struct holding the cause.
 ```c
 int          dev_register(struct Dev *d);       // appends; EXTINCTS on any rejection
 void         dev_init(void);                    // spoor_init + register + walk ->init()
-struct Dev  *dev_lookup_by_dc(int dc);          // NULL if absent
-struct Dev  *dev_lookup_by_name(const char *);  // NULL if absent
-int          dev_count(void);                   // registered, excluding the sentinel
+struct Dev  *dev_lookup_by_dc(int dc);          // NULL if absent (tests build only)
+struct Dev  *dev_lookup_by_name(const char *);  // NULL if absent (tests build only)
+int          dev_count(void);                   // registered, excluding the sentinel (tests build only)
 
 struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype);   // alloc + qid{0,0,qtype}
 struct Spoor *dev_simple_open(struct Spoor *c, int omode);  // set COPEN + mode
@@ -238,7 +238,8 @@ This is worth stating explicitly rather than leaving as an absence: the
 registry is the one piece of Dev infrastructure that is genuinely
 single-threaded, and a future dynamic-Dev path (hot-plug, a driver
 registering at runtime) would need a lock that does not exist today and
-would invalidate every lockless `dev_lookup_by_dc` call site.
+would invalidate every lockless reader of `bestiary[]` (`format_devices`'
+walk; the `dev_lookup_*` helpers are compiled only with the tests).
 
 ## Invariants enforced
 

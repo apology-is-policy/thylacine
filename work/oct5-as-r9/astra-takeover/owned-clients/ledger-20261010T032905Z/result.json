@@ -1,0 +1,174 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "rust_scenarios": 6,
+  "rust_profiles": 2,
+  "c_sanitizers": [
+    "address",
+    "undefined"
+  ],
+  "mutants_rejected": 12,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-owner-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-owner-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-owner-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-owner-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-stale-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-stale-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-stale-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-stale-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-failed-return-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-failed-return-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-failed-return-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-failed-return-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-busy-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-busy-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-busy-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-busy-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-final-release-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-final-release-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-final-release-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-final-release-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-overlap-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-overlap-run",
+      "rc": -6,
+      "expected_failure": true
+    }
+  ],
+  "limits": "Uninstalled metadata ledger only; no safe storage/borrow, syscall, paired-CQ or native client qualification"
+}

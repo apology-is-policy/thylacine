@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ stale-remove.c
+@@ -16,7 +16,7 @@
+     if (!t || !nodes || ref.reserved || !ref.incarnation ||
+         ref.slot >= LOOM_SERVICE_SLOT_COUNT) return NULL;
+     struct loom_service_slot *s = &t->slots[ref.slot];
+-    if (s->phase != phase || s->incarnation != ref.incarnation ||
++    if (s->phase != phase ||
+         (s->kind != LOOM_SERVICE_SCOPE && s->kind != LOOM_SERVICE_FID)) return NULL;
+     return &nodes->nodes[ref.slot];
+ }

@@ -1,0 +1,28 @@
+
+running 9 tests
+test wait_failures_cleanup_without_retry_loop ... ok
+test wait_absolute_deadline_before_and_after_arm ... ok
+test wait_bounded_turn_has_no_internal_allocation ... ok
+test wait_local_release_during_arm_prevents_sleep ... ok
+test wait_timeout_is_not_terminal_storage_proof ... ok
+test wait_native_ready_and_intervening_event_are_not_lost ... ok
+test wait_ready_callback_release_is_checked_last ... ok
+test wait_spurious_wakes_keep_original_deadline_and_schedule_progress ... FAILED
+test wait_zero_and_partial_quantum_do_not_sleep ... ok
+
+failures:
+
+---- wait_spurious_wakes_keep_original_deadline_and_schedule_progress stdout ----
+
+thread 'wait_spurious_wakes_keep_original_deadline_and_schedule_progress' (22539133) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-reset-absolute-deadline/test_local_wait.rs:275:180:
+assertion `left == right` failed
+  left: Some(11)
+ right: Some(10)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    wait_spurious_wakes_keep_original_deadline_and_schedule_progress
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

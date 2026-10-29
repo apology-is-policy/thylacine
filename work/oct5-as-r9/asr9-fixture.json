@@ -1,0 +1,162 @@
+{
+  "base": "5ff62b78809846af4780ec41f82d1676e7584e80",
+  "cc": "/opt/homebrew/opt/llvm@22/bin/clang",
+  "old_functions": [
+    "burrow_unref_freed",
+    "burrow_release_mapping_deferred",
+    "burrow_charge_claim_in",
+    "burrow_charge_restore_in"
+  ],
+  "new_functions": [
+    "burrow_charge_claim_locked",
+    "burrow_charge_claim_in",
+    "burrow_charge_restore_in",
+    "burrow_unref_settled_in",
+    "burrow_release_mapping_settled_deferred",
+    "burrow_unref_freed",
+    "burrow_release_mapping_deferred"
+  ],
+  "legs": [
+    {
+      "leg": "old-handle-handle",
+      "exit": 42,
+      "want": 42,
+      "pass": true,
+      "what": "non-final HANDLE drop, racing final handle drop -> stale restore",
+      "stderr": "extinction: burrow_charge_restore on corrupted BURROW (use-after-free?)"
+    },
+    {
+      "leg": "old-mapping-handle",
+      "exit": 42,
+      "want": 42,
+      "pass": true,
+      "what": "non-final MAPPING drop, racing final handle drop -> stale restore",
+      "stderr": "extinction: burrow_charge_restore on corrupted BURROW (use-after-free?)"
+    },
+    {
+      "leg": "old-handle-mapping",
+      "exit": 42,
+      "want": 42,
+      "pass": true,
+      "what": "non-final HANDLE drop, racing final MAPPING drop -> stale restore",
+      "stderr": "extinction: burrow_charge_restore on corrupted BURROW (use-after-free?)"
+    },
+    {
+      "leg": "old-recycled-clean",
+      "exit": 44,
+      "want": 44,
+      "pass": true,
+      "what": "slot reissued empty -> charge planted on an unrelated region (I-32)",
+      "stderr": "I-32 under-count: 5 pages refunded against a region the payer never bought (planted by the stale restore)"
+    },
+    {
+      "leg": "old-recycled-charged",
+      "exit": 43,
+      "want": 43,
+      "pass": true,
+      "what": "slot reissued charged -> FABRICATED \"re-charged mid-settle\"",
+      "stderr": "extinction: burrow_charge_restore: the region was re-charged mid-settle"
+    },
+    {
+      "leg": "control-no-race",
+      "exit": 1,
+      "want": 1,
+      "pass": true,
+      "what": "CONTROL: same sequence, no racer -> restore completes normally",
+      "stderr": ""
+    },
+    {
+      "leg": "new-handle-handle",
+      "exit": 0,
+      "want": 0,
+      "pass": true,
+      "what": "repaired: settled under one lock, refunded exactly once",
+      "stderr": ""
+    },
+    {
+      "leg": "new-mapping-handle",
+      "exit": 0,
+      "want": 0,
+      "pass": true,
+      "what": "repaired: mapping drop settled under one lock",
+      "stderr": ""
+    },
+    {
+      "leg": "new-handle-mapping",
+      "exit": 0,
+      "want": 0,
+      "pass": true,
+      "what": "repaired: handle drop, racing final mapping drop",
+      "stderr": ""
+    },
+    {
+      "leg": "new-no-race",
+      "exit": 0,
+      "want": 0,
+      "pass": true,
+      "what": "repaired: non-final drop RETAINS the record; exact-payer still holds",
+      "stderr": ""
+    },
+    {
+      "leg": "new-shared-out-settles",
+      "exit": 0,
+      "want": 0,
+      "pass": true,
+      "what": "repaired: shared-out non-final MAPPING drop settles (no later settler exists)",
+      "stderr": ""
+    },
+    {
+      "leg": "new-not-shared-retains",
+      "exit": 0,
+      "want": 0,
+      "pass": true,
+      "what": "repaired: same drop, NOT shared out -> record retained (the pair`s control)",
+      "stderr": ""
+    }
+  ],
+  "legs_all_passed": true,
+  "mutants": [
+    {
+      "mutant": "M1-claim-on-every-drop",
+      "leg": "new-handle-handle",
+      "exit": 70,
+      "want": 70,
+      "pass": true,
+      "why": "claiming on a NON-FINAL drop re-opens the window: the drop that frees finds nothing"
+    },
+    {
+      "mutant": "M2-ignore-shared-out",
+      "leg": "new-shared-out-settles",
+      "exit": 45,
+      "want": 45,
+      "pass": true,
+      "why": "a shared-out region has no later settler, so skipping it strands the charge"
+    },
+    {
+      "mutant": "M3-always-settle-mapping",
+      "leg": "new-not-shared-retains",
+      "exit": 70,
+      "want": 70,
+      "pass": true,
+      "why": "settling a non-final, not-shared-out mapping drop steals the record"
+    },
+    {
+      "mutant": "M4-exact-payer-ignored",
+      "leg": "new-no-race",
+      "exit": 73,
+      "want": 73,
+      "pass": true,
+      "why": "dropping the AddrSpace check refunds a space that never paid for the region"
+    },
+    {
+      "mutant": "M5-claim-does-not-clear",
+      "leg": "new-no-race",
+      "exit": 75,
+      "want": 75,
+      "pass": true,
+      "why": "without the clear the refund is no longer exactly-once"
+    }
+  ],
+  "mutants_all_reddened": true,
+  "all_passed": true
+}

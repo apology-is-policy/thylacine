@@ -1,0 +1,18 @@
+{
+  "cases": [
+    "clean",
+    "ignore-nonce",
+    "ignore-generation",
+    "quota",
+    "provisional-alias",
+    "omit-overlap",
+    "recycle-at-delivery",
+    "reuse-held",
+    "nonce-wrap",
+    "oversized-reply",
+    "reap-payload",
+    "drop-correlation"
+  ],
+  "sanitized": true,
+  "source_sha256": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088"
+}

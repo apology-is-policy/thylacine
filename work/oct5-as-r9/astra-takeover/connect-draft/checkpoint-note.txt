@@ -1,0 +1,50 @@
+
+## October 9: CONNECT ownership, publication and local retirement
+
+Astra bound charged protocol ownership to an exact RESERVED scope and a
+precharged CONNECT terminal obligation. The request and protocol hold separate
+scope pins before native allocation; duplicate scope preparation is refused.
+Native backlog publication and request admission share the Loom lock with
+cancellation and success. No bytes are sent before publication. One driver
+uses the real nonblocking 9P client outside that lock, retaining a parser borrow.
+READY requires actual version/attach completion. The CONNECT deadline ends at
+committed success; later cancellation preserves that success for CQ delivery.
+
+Abort acknowledgement latches transport shutdown; local retirement additionally
+requires cursor abort and no concurrent teardown users. A full CQ retains the
+terminal and protocol storage. The CONNECT owner alone reaps its delivered
+request, drops the other scope pin, destroys local storage, refunds the exact
+image and drops Loom last. Explicit metadata reap still requires no child pins.
+A server-retained endpoint keeps its own native lifetime and weighted credits.
+Protocol failures use EIO and record the attempted handshake phase as required
+by the existing ABI; timeout/cancellation preserve their distinct reasons.
+
+Final actual-C host ASan/UBSan evidence connect-control-20261009T170708Z passes
+11 controls and 12 named mutations, including abort during progress, a second
+driver, a teardown user delaying retirement, full CQ, and recorded failure phase.
+These use checked native/protocol doubles, not a wire or SMP stress proof.
+Existing protocol owner controls pass20+11 mutations, and the request ledger
+passes its control plus13 mutations after factoring the nonmutating admission
+check. Lifecycle model passes5828 states and seven expected counterexamples.
+Self-review is in connect-draft/self-review.txt; no independent audit. It caught
+and repaired the missing protocol failure phase before this checkpoint. Initial
+host-runner mutation-count and unused-stub failures are retained; production
+controls passed, the harness was corrected and all named mutations now fail at
+their intended assertions.
+
+Fresh native connect-diagnostic-20261009T170730Z passes1849/1849 including
+loom.private_connect, real normal/bulk version+attach, error/cancel/timeout,
+CQ backpressure and server-retained endpoint cleanup; D7 overlap, twenty distinct
+login/logout cycles and banner also pass. Exact source diff/new-source hashes,
+six input hashes and rebuilt ELF/bin are retained and stable. The earlier
+170510Z diagnostic passed before adding failure-phase coverage and stays bounded
+to that earlier source. The new full Mac matrix is pending; previous50/50 still
+qualifies only fa7e6c5bc protocol preparation.
+
+Continue autonomously: per-ring CONNECT lookup/entry lifetime and bounded fair
+progress, close/detach retirement queue and query/reap integration, then remaining
+private ops/provided buffers, AS-3/4 and MM0-MM4. This internal engine still has
+an explicit caller-lifetime contract and permits only the handshake; no external
+RPC/fid/payload borrow may escape it. No syscall/ring dispatch or private async/
+clipboard activation, Main landing, or128MiB protection change. Preserve clean
+Stratum61dde37, Astra pending/protected work, and8192MiB runner floor.

@@ -1,0 +1,20 @@
+==> lean --production shape: builds (#228/#229 guard)
+==> Booting kernel under QEMU (timeout 300s)...
+    Log: /Users/northkillpd/projects/thylacine-corona/build/test-boot.log
+==> harness: qemu_alive_at_teardown=1
+==> FAIL: kernel extinction detected.
+--- ELE context ---
+proc: orphan pid=4536 name="ambush-child" (parent pid=4503 name="joey" exiting) -> adopted by pid=0
+
+EXTINCTION: joey: bin/joey exited non-zero 0x0000000000000001
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS: cpu 2  source: bare extinction (no exception frame)
+HALLS: ELR  (stale) 0xffffa0028988a2a4  link 0xffffa0000008a2a4  wait_pid_for+0x1e8
+HALLS: ESR  0x0000000056000000  FAR  0x000000010000ffb8  SPSR 0x0000000060000345
+HALLS: SP   0xffffa00289d83d50
+HALLS: LR   0xffffa00289881314  link 0xffffa00000081314  extinction_with_addr+0xa4
+HALLS: FP   0xffffa00289d83e80
+HALLS:  x0..x28 not captured (bare extinction; fp/lr/sp above)
+HALLS: KASLR offset 0x0000000289800000  kbase 0xffffa00289880000
+HALLS: backtrace (fp-chain; link addrs for addr2line):
+-------------------

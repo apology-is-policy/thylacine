@@ -53,6 +53,22 @@ use libthyla_rs::{
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+// The owner revokes explicitly; copied locators never carry this lifetime.
+struct InteractionBinding(libthyla_rs::pty_observer::BindingId);
+impl InteractionBinding {
+    fn new(master: i64) -> Option<Self> {
+        let peer = libthyla_rs::fs::File::open("/srv/tapestry").ok()?;
+        libthyla_rs::pty_observer::BindingId::bind(
+            i32::try_from(master).ok()?, peer.as_raw_fd(),
+        ).ok().map(Self)
+    }
+}
+impl Drop for InteractionBinding {
+    fn drop(&mut self) {
+        let _ = self.0.unbind();
+    }
+}
+
 const DOWN_FD: i64 = 0;
 const UP_FD: i64 = 1;
 const PUMP_STACK: u64 = 64 * 1024;
@@ -338,6 +354,15 @@ fn run() -> i64 {
         }
     };
     master.seed_winsize(cols, rows);
+    let binding = if cmd.interaction { InteractionBinding::new(master.mfd) } else { None };
+    if cmd.interaction && binding.is_none() {
+        t_putstr("kaua-term: interaction unavailable; ordinary terminal remains active\n");
+    }
+    if let Some(binding) = &binding {
+        let mut frame = Vec::new();
+        encode_record(&Record::Control(Control::TerminalBinding(binding.0.locator())), &mut frame);
+        write_all(UP_FD, &frame);
+    }
     let child = match master.spawn_on_slave(&argv) {
         Ok(c) => c,
         Err(_) => {

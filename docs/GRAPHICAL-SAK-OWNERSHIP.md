@@ -76,6 +76,12 @@ The separation is architectural work, not merely a modal overlay.
 2. The kernel starts a generation and freezes normal presentation/input admission.
    The trusted owner drains previously admitted presentation fences before acknowledging
    exclusive trusted scanout. Corvus cannot accept secret input before this acknowledgement.
+   The October 2 approved clipboard extension additionally requires Tapestry's
+   exact-generation aggregate cancellation acknowledgement before this ACK.
+   A stalled participant uses the existing five-second episode timeout, with
+   no grant or fallback. See `HALCYON-INTERACTION-SEAT-REVIEW.md` option A.
+   That userspace barrier is not yet implemented; display exclusion alone is
+   not proof of clipboard cancellation.
 3. The last completed frame is copied into private immutable trusted backing,
    blurred once and dimmed. If a safe copy is unavailable, use the approved neutral
    field. Cursor updates and outstanding normal scanout work are also excluded.

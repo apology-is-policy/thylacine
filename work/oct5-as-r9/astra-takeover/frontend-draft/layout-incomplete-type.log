@@ -1,0 +1,1 @@
+Initial layout probe omitted loom_service_engine.h: clang rejected sizeof incomplete struct loom_service_engine. Actual frontend and engine object compilation had succeeded. Add actual engine header to layout probe.

@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Actual client functions and full header; real transport/session/wire codecs.
+Host doubles replace scheduler/allocator/cache. Native fixture uses real client.
+Acquire Yip before running. This does not qualify private Loom ownership.
+"""
+from pathlib import Path
+import argparse,importlib.util,os,shlex,subprocess,tempfile,re
+ROOT=Path(__file__).resolve().parent.parent
+spec=importlib.util.spec_from_file_location('host_sanitizer_cc',ROOT/'tools/host-sanitizer-cc.py');sanitizer_cc=importlib.util.module_from_spec(spec);spec.loader.exec_module(sanitizer_cc)
+NAMES=['map_error','client_copy','client_owner','client_register','client_unregister','client_mark_dead_locked','client_send_progress_signal','client_orphan_fid_locked','ownerless_dispatch_locked','client_apply_reply_locked','demux_frame_locked','p9_client_submit_async','p9_client_progress_bind','p9_client_progress_abort','p9_client_progress_step','p9_client_init_storage','p9_client_init','p9_client_init_preallocated','p9_client_destroy','p9_client_handshake','client_max_read_count','client_await_tag_locked','p9_client_read']
+MUTANTS=[
+ ('provided-cap','send_cap < msize','false','short provided TX refused'),
+ ('provided-rx','recv_cap < msize','false','short provided RX refused'),
+ ('hidden-bulk','if (provided) {','if (provided && msize <= P9_CLIENT_OUT_BUF_MAX) {','provided bulk uses exact owner storage'),
+ ('owned-provided','c->out_buf = send_buf;','c->out_buf = send_buf; c->out_buf_owned = true;','free without allocator ownership'),
+ ('leak-bulk','c->out_buf_owned = true;','c->out_buf_owned = false;','legacy bulk keeps ownership'),
+ ('overwrite-tx','if (c->progress && c->progress->io.tx)', 'if (false)', 'pending TX refuses buffer overwrite'),
+ ('starve-rx','if (p->io.tx && !p->rx_next)', 'if (p->io.tx)', 'blocked sender cannot starve reply'),
+ ('early-reply','(!owner || owner->sending)', '(!owner)', 'malformed or premature reply aborts once'),
+ ('no-tx-mark','        rpc->sending = true;', '        rpc->sending = false;', 'malformed or premature reply aborts once'),
+ ('lost-terminal','            r->on_complete(r, async_status, NULL);', '            (void)async_status;', 'abort completes pending TX once'),
+ ('double-terminal','            r->on_complete(r, async_status, NULL);', '            r->on_complete(r, async_status, NULL); r->on_complete(r, async_status, NULL);', 'abort completes pending TX once'),
+ ('retain-tx-borrow','        c->progress->sending = NULL;', '        (void)c->progress;', 'abort detaches TX before retirement'),
+ ('blocking-handshake','if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);\n\n', 'if (false) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);\n\n', 'blocking engine reached'),
+ ('blocking-read','if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);\n    if (c->dead)', 'if (false) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);\n    if (c->dead)', 'blocking engine reached'),
+]
+def function(s,name):
+ m=re.search(r'^(?:static )?[a-zA-Z_][\w *]*\b'+name+r'\([^;]*?\)\s*\{',s,re.M);assert m,name
+ start=m.start();i=m.end();depth=1
+ # Braces inside this source's comments balance; discard comments before locating end.
+ while depth:
+  if s.startswith('//',i):i=s.index('\n',i);continue
+  if s.startswith('/*',i):i=s.index('*/',i)+2;continue
+  if s[i]=='{':depth+=1
+  if s[i]=='}':depth-=1
+  i+=1
+ return s[start:i]
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);p.add_argument('--sanitize',action='store_true');p.add_argument('--mutants',action='store_true');a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
+ source=(ROOT/'kernel/9p_client.c').read_text();actual='\n\n'.join(function(source,n) for n in NAMES)
+ template=(ROOT/'tools/host-tests/9p-client-progress.c').read_text();assert template.count('/* ACTUAL_CLIENT */')==1
+ cc,cc_extra=sanitizer_cc.select(a.logs,a.sanitize)
+ with tempfile.TemporaryDirectory(prefix='9p-client-progress-') as tmp:
+  for label,old,new,want in [('clean',None,None,None)]+(MUTANTS if a.mutants else []):
+   altered=actual
+   if old:
+    assert altered.count(old)==1,(label,altered.count(old))
+    altered=altered.replace(old,new)
+   src=Path(tmp)/(label+'.c');src.write_text(template.replace('/* ACTUAL_CLIENT */',altered));exe=src.with_suffix('')
+   cmd=[cc,'-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I',str(ROOT/'kernel/include'),'-I',str(ROOT/'kernel/test'),'-I',str(ROOT/'tools/host-tests/host-env'),str(src),str(ROOT/'kernel/9p_transport.c'),str(ROOT/'kernel/9p_session.c'),str(ROOT/'kernel/9p_wire.c'),'-o',str(exe)]+cc_extra+shlex.split(os.environ.get('CFLAGS',''))
+   if a.sanitize:cmd+=sanitizer_cc.SANITIZE
+   sanitizer_cc.build(cmd,a.logs/(label+'-build.log'))
+   r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(label+'.log')).write_text(r.stdout+r.stderr)
+   sanitizer_cc.check(label,r,want)
+   print('PASS '+label+(': '+want if want else ': actual private client fixture'),flush=True)
+if __name__=='__main__':main()

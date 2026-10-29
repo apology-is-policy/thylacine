@@ -1,0 +1,73 @@
+{
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": null,
+      "source_sha256": "9bfa56b160a41b3160775444772ef2ad96ab98d428ed46ab9fd41ab06e835425",
+      "log_sha256": "ee112f6c9ebf278f6d9b38fba1799c6af03aba29d836cffb3347459f992c17ce"
+    },
+    {
+      "case": "missing-root",
+      "rc": 11,
+      "expected": "handle close acquires one independent queue root",
+      "source_sha256": "7683226abca8c92ecddf9db9bd556e757c9439cc02ec7042a8b97bf0ca98017f",
+      "log_sha256": "327b947ccd8af0d7333d9a47ee08c1b502e5e17afb971d49982f92191da55586"
+    },
+    {
+      "case": "duplicate-root",
+      "rc": 11,
+      "expected": "duplicate close does not duplicate root",
+      "source_sha256": "d58381c551c856704246c50757623499126ac54165196416a6f9e54ec524118f",
+      "log_sha256": "841e2c9a39a105834ec8b2f9a179264972368b2139cd5c3b153c3d94787adc5e"
+    },
+    {
+      "case": "resurrection",
+      "rc": 11,
+      "expected": "zero ref enqueue never resurrects close root",
+      "source_sha256": "56cca0f1cacaf3e869791e4a9399049d10692274e53274956e76b4b6f682c3ee",
+      "log_sha256": "43b801973cdc52a8c6897f72626a5cb593303e977e4b45e12911b9ce7e14f684"
+    },
+    {
+      "case": "leaf-wake",
+      "rc": 11,
+      "expected": "scheduler wake outside locks",
+      "source_sha256": "772f3bc492bcbf53980147c4b9d1a7c0ec39b24dc39624f24953126725ecec46",
+      "log_sha256": "c73c790c1333914d505cbe1e597beaf980fdf4e0a64def5b18a0a53132efdfb6"
+    },
+    {
+      "case": "leak-root",
+      "rc": 11,
+      "expected": "completion transfers one queue root outside lock",
+      "source_sha256": "1871247162100ed24a12e3678dfbdea9c20fb11e6c76d07d5b14297f19cff580",
+      "log_sha256": "5c3ff04e9d9255f326f3519e272997c2ff82c2619c0b246b1aa7e6afdee00056"
+    },
+    {
+      "case": "early-root-drop",
+      "rc": 11,
+      "expected": "blocked close parks with one root",
+      "source_sha256": "281fd02a9766e3bd92a4d7526d910a7cdd6f5ffa68aa2e8bf63e9b4d55b27494",
+      "log_sha256": "71a01efde13a93c22358c14954722bc0c830be7ba0398c57fa17fc691a0c17bc"
+    },
+    {
+      "case": "drop-under-Q",
+      "rc": 11,
+      "expected": "no queue/Loom lock nesting",
+      "source_sha256": "20fa1190a601f35d3df10e9c9ff1f0612e46bbbd4c29fe444399d5d7db3fe5f5",
+      "log_sha256": "b31361a2c7f3252d7d0f08dd46d3c02baa2577d640be2d6255fa8895820ed5ca"
+    },
+    {
+      "case": "starve-destroy",
+      "rc": 11,
+      "expected": "busy close cannot starve independent final destruction",
+      "source_sha256": "ce72d34132900a257239af238eb347551e10f15bf4da9064ad063815c9d71e03",
+      "log_sha256": "750992682691e40b9ebb77677874f2555140062bcef5d21bf00fe30716fc3a6b"
+    }
+  ],
+  "inputs": {
+    "kernel/loom.c": "705af9512e9262e020a5843ac4acf60c4fecd6b49fdf7db628fcd1fa7994b269",
+    "kernel/loom_service_close_queue.c": "ceaea22a952b8d675f2371449abd16630e50ea853ae623e1f917ab5251d0cda0",
+    "driver": "f810bdda65a30aa983da8282ce5769444604784ad7a36c3909aa158561805525"
+  },
+  "limits": "Extracted actual queue/root/retirer wrapper C with checked lock, scheduler, close-progress and allocator boundaries. Sequential simulated event interleavings; not native SMP or allocator qualification."
+}

@@ -1,0 +1,7 @@
+leg      : interior-unmap
+at       : 2026-10-07T10:31:25Z
+HEAD     : 2666645b7bcc94446dad7ea82d69c590cd2f6f67
+test.sh  : rc=1
+serial   : 113106 bytes, sha256 0be3c8571069a0ff1c06aa8cd292d9d22eb315739903daeff4e782fa16fcb8c1
+burrow.c: e892125251bc0bc1646c15af1de68ea6d32d714c
+loom.c: dcad40afc6ea7eea67df1a15885128bebdab3651

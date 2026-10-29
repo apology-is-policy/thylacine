@@ -1,0 +1,138 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 9,
+  "profiles": 2,
+  "compile_fail": 2,
+  "positive_compile_control": 1,
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "9 passed; 0 failed"
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "9 passed; 0 failed"
+    },
+    {
+      "name": "no-clone-tasks-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "no-send-tasks-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0277"
+    },
+    {
+      "name": "valid-task-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "valid-task-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "skip-initial-runnable-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "skip-initial-runnable-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "skip-final-runnable-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "skip-final-runnable-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "skip-task-dispatch-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "skip-task-dispatch-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "ignore-task-budget-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "ignore-task-budget-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "poll-after-outer-expiry-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "poll-after-outer-expiry-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "ready-starves-timers-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "ready-starves-timers-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    }
+  ],
+  "limits": "Bounded task/timer/retirement composition with simulated creator-thread event callbacks; no native/cross-thread wake-to-park qualification."
+}

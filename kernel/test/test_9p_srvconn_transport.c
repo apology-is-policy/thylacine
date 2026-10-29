@@ -52,40 +52,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include "../../arch/arm64/uart.h"
-
-// Test-support registry wipe (non-static; defined in kernel/devsrv.c).
-extern void srv_registry_reset(void);
-extern u64 timer_now_ns(void);
-
-// The shared 9P2000.L canned-reply builder (non-static; defined in
-// test_9p_client.c). The SrvConn-vehicle device-gone tests pre-stage their
-// handshake replies through it -- one source of truth for the reply byte
-// layouts, so a future wire change cannot silently desync this file.
-int canonical_responder(void *ctx, const u8 *req, size_t req_len,
-                        u8 *resp, size_t resp_cap);
-
-// Forward decls for the registered test entries (suppress -Wmissing-
-// prototypes; matches the rest of the kernel test corpus pattern).
-void test_9p_srvconn_transport_init_destroy(void);
-void test_9p_srvconn_transport_init_null_rejected(void);
-void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
-void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
-void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
-void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
-void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
-void test_9p_srvconn_transport_recv_ready_tracks_s2c(void);
-void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
-void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
-void test_9p_srvconn_transport_death_tears_down_the_conn(void);
-void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void);
-void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void);
-void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
-void test_9p_srvconn_transport_large_frame_roundtrip(void);
-void test_9p_srvconn_transport_cape_attach(void);
-void test_9p_srvconn_transport_cape_attach_srv(void);
-void test_9p_srvconn_transport_srv_attach_names_root(void);
-void test_9p_srvconn_transport_remote_attach(void);
-void test_9p_srvconn_transport_remote_attach_srv(void);
+#include "../../arch/arm64/timer.h"
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -1291,8 +1258,6 @@ void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
 // (the stale-pts fail-closed arm).
 // =============================================================================
 
-extern int spoor_devclass(struct Spoor *c);   // kernel/syscall.c (the syscall's body)
-
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void) {
     srv_registry_reset();
 
@@ -1470,10 +1435,6 @@ static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_re
     drop_test_proc(client);
     return r;
 }
-
-extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
-                                      const u8 *aname, u64 aname_len,
-                                      u64 n_uname, u64 flags);
 
 // SYS_ATTACH_9P_SRV's own half, through its inner: the flags word reaches the
 // helper, and a refused word sends nothing (n_uname stays the 0xBAD0 no-frame

@@ -1,0 +1,18 @@
+D7 overlapping-login witnesses, counted PER BOOT from the retained serial logs
+(SMP_KEEP_LOGS=1; raw logs under build/multiboot-logs/, not committed -- ~10MB)
+run 20261007T104019Z, HEAD 2666645b7, default kernel 5ced18c43ae8302a
+
+witness string: 'joey: D7 overlapping login probe PASS'
+
+label           boots  reached  PASS  FAIL
+default-smp1    10     10       10    0
+default-smp4    10     10       10    0
+default-smp8    10     10       10    0
+ubsan-smp4      10     10       10    0
+ubsan-smp8      10     10       10    0
+TOTAL           50     50       50    0
+
+REACHED is counted separately from PASS on purpose: a zero FAIL count is
+satisfied by a probe that never ran, so the close condition is the pair.
+The predicate is shown to discriminate -- a copy of one log with PASS
+rewritten to FAIL reads reached=1, PASS=0.

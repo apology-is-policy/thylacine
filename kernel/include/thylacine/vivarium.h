@@ -260,8 +260,8 @@ enum {
     //     never authority. A mis-declared Proc is comprehensively broken
     //     either way; I-43 is about what it can REACH, not whether it works.
     //
-    // A future row below 100 owes the same paragraph. Do not reach for the
-    // ceiling argument again without checking the number.
+    // A future row at or below VIV_NATIVE_CEILING owes the same paragraph. Do
+    // not reach for the ceiling argument again without checking the number.
     VIV_LINUX_PSELECT6    = 72,
     VIV_LINUX_PPOLL       = 73,
 
@@ -518,8 +518,8 @@ enum {
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
-// above this is free of collision by construction; the two rows below it
-// (pselect6 72, ppoll 73) carry their own per-number argument, above.
+// above this is free of collision by construction; every row below it carries
+// its own per-number argument (pselect6 72 and ppoll 73 were the first).
 //
 // THE OBLIGATION, and the reason this is a symbol: a new native syscall above
 // the ceiling makes the ceiling argument stop holding for every row at or below
@@ -563,8 +563,13 @@ enum {
 // is now per-number (vivarium.c): its row is VIV_ENOSYS, consumed before the
 // native switch, so a Linux Proc's 128 never reaches the sync, and a native
 // program mis-declared as Linux loses the sync, which confers nothing anyway.
-// The lowest signal-family number still argued by the ceiling is kill (129).
-#define VIV_NATIVE_CEILING 128
+//
+// D7 places SYS_SRV_REGISTRY_NEW at 134 (vote 13: 129..133 are held for b3's
+// syscalls), and the ceiling rises over the signal family's 129..134. Only
+// rt_sigaction (134) meets a native number there. The arguments for it and for
+// the empty 129..133 are per-number, in vivarium.c, and the lowest
+// signal-family number still argued by the ceiling is rt_sigprocmask (135).
+#define VIV_NATIVE_CEILING 134
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -1082,6 +1087,7 @@ enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
 enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
                                                  u64 fd, u64 offset);
 
+#ifdef KERNEL_TESTS
 // True iff no argument tuple is admitted by more than ONE mmap arm. Pure; exists
 // so the disjointness the arms' comments CLAIM is a checked fact rather than a
 // set of assertions that agree with each other. Covers all four arms pairwise --
@@ -1090,6 +1096,7 @@ enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
 // those equalities into a mask test.
 bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
                                  u64 fd, u64 offset);
+#endif // KERNEL_TESTS
 
 // -----------------------------------------------------------------------------
 // TIER 2 — mprotect (B-1a; ARCH 6.5 "The permission ceiling"). A translated row
@@ -1255,6 +1262,7 @@ enum viv_signote viv_signal_note(u64 signum);
 // One past the last real note kind -- the array bound for a per-note table.
 #define VIV_SIGNOTE_COUNT ((u32)VIV_SIGNOTE_TTY_CONT + 1u)
 
+#ifdef KERNEL_TESTS
 // Does `signum` EXCLUSIVELY own its note -- is it the ONLY Linux signal this
 // map routes there? PURE.
 //
@@ -1287,6 +1295,7 @@ bool viv_signal_owns_note_exclusively(u64 signum);
 // what already happens) but can NEVER be caught or ignored. A guest that installs a
 // SIGSEGV handler is told so, rather than discovering it at the first fault.
 bool viv_signote_is_deliverable(enum viv_signote note);
+#endif // KERNEL_TESTS
 
 // The kill family (kill 129, tkill 130, tgkill 131; VIVARIUM 6.22): what a
 // signal number asks of the shell. PURE.
@@ -1539,12 +1548,29 @@ _Static_assert(sizeof(struct viv_sock) == 32, "viv_sock pinned at 32 bytes "
 // The cache never outlives the fds it serves: exit resets the table with the
 // handle table (a zombie pins no netd fid), and exec's sweeps clear the rows
 // whose fds the exec closes.
+//
+// THE CTL IDENTITY. ctl[i] is the ctl Spoor s[i] was claimed with by socket(),
+// one reference the row owns. It is NULL for an accepted row (born CONNECTED:
+// its fd is data), from connect()'s CONNECTED commit on (the fd is data then,
+// and a held ctl would cost netd a second fid for the connection), and in a
+// FREE slot. The arms that write netd a ctl verb -- connect's dial, listen's
+// announce, the datagram sendto's re-dial -- find the row by number and then
+// the fd's Spoor by number, and a peer thread's dup3 can fall between the two
+// (it installs the new object before it drops the old row), leaving a row that
+// still names the socket over a slot that holds a file. So each such arm
+// proves the Spoor it pinned IS ctl[i] before writing (viv_socktab_ctl_is).
+// The row's reference makes that pointer comparison exact: the Spoor cannot be
+// freed, nor its address reused, while the row lives. It is identity, not a
+// cache, so UNLIKE ready[] a fork copy and an alias copy carry it, each with a
+// reference of its own -- the copied fd holds the same Spoor. Every slot clear
+// detaches it with ready[], under the lock, and clunks it after the unlock.
 struct Spoor;
 struct viv_socktab {
     spin_lock_t     lock;       // leaf; held only over array ops, never across I/O
     u64             next_epoch; // monotonic; stamps each claim's viv_sock.epoch
     struct viv_sock s[VIV_SOCK_MAX];
     struct Spoor   *ready[VIV_SOCK_MAX];
+    struct Spoor   *ctl[VIV_SOCK_MAX];
 };
 
 // Snapshot the entry for `fd` into `*out` (which may be NULL for an existence
@@ -1562,15 +1588,29 @@ bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out);
 // is cleared in the same critical section rather than left ahead of the fresh
 // row, where find_locked would keep returning it. `born` is FRESH for
 // socket() and CONNECTED for accept() (an accepted fd IS data, born connected).
+// `ctl` is the row's ctl identity: socket() passes the ctl Spoor it will
+// install, and the row takes a reference of its own (the caller keeps its
+// one); accept() passes NULL.
 bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
-                       enum viv_net_proto proto, u32 n, enum viv_sock_state born);
+                       enum viv_net_proto proto, u32 n, enum viv_sock_state born,
+                       struct Spoor *ctl);
+
+// True iff `fd`'s row still names the socket the caller snapshotted (epoch ==
+// expect_epoch) AND `sp` is that row's ctl Spoor. A ctl-verb arm asks it of the
+// Spoor it pinned from the fd, before it writes anything. Takes the lock.
+bool viv_socktab_ctl_is(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                        const struct Spoor *sp);
 
 // Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
 // plain file, or a socket already dropped) is a no-op, which is what lets the
 // close hook run unconditionally for a phenotyped Proc. Takes the lock; the
-// row's cached readiness Spoor, if any, is clunked after the unlock, so this
-// may block on that Spoor's Tclunk.
+// Spoors the row holds (its readiness cache and its ctl identity) are clunked
+// after the unlock, so this may block on a Tclunk.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
+// close()'s hook: viv_socktab_drop, except while `fd` is another call's
+// reservation (that call's own row).
+struct Proc;
+void viv_socktab_drop_closing(struct viv_socktab *tab, struct Proc *p, s32 fd);
 
 // The readiness cache (NP-5). ready_get snapshots `fd`'s row into `*out` (may
 // be NULL) and returns true iff the row exists; `*ready_out` gets the cached
@@ -1588,16 +1628,16 @@ bool viv_socktab_ready_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out
 bool viv_socktab_ready_install(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                struct Spoor *sp);
 
-// proc_free's release: clunk every cached readiness Spoor, then free the table.
-// The at-exit reset has normally emptied the cache already; this covers the
-// Procs freed without it (rollback, orphan). The Proc is past its last thread,
-// so nothing can reach the table. NULL-safe.
+// proc_free's release: clunk every Spoor the rows hold (readiness and ctl), then
+// free the table. The at-exit reset has normally emptied it already; this covers
+// the Procs freed without it (rollback, orphan). The Proc is past its last
+// thread, so nothing can reach the table. NULL-safe.
 void viv_socktab_free(struct viv_socktab *tab);
 
 // Reset the WHOLE table in place under its lock -- every slot cleared, the
 // object kept (#254: cross-Proc-reachable; proc_free is the only free), the
-// epoch counter untouched (monotonic for the table's life), every cached
-// readiness Spoor clunked after the unlock. execve's NATIVE arm calls it
+// epoch counter untouched (monotonic for the table's life), every Spoor the
+// rows held clunked after the unlock. execve's NATIVE arm calls it
 // (proc_exec_drop_image_state, Design D audit F2): a native image has no
 // sockets, and native close() never drops a row, so a Linux image's rows would
 // otherwise outlive their fds and greet the next Linux image's recycled fd
@@ -1612,9 +1652,10 @@ void viv_socktab_reset(struct viv_socktab *tab);
 //   prepare  -- allocate the child's table with no lock held; -1 on OOM and
 //               the caller fails the fork (the sigtab shape). A parent with no
 //               table leaves f->dst NULL and every later step a no-op.
-//   snapshot -- the handle_table_copy_into_hooked hook: every row + the epoch
-//               counter, copied field-wise under the PARENT's socktab lock,
-//               nested inside the parent's handle lock the copy is holding.
+//   snapshot -- the handle_table_copy_into_hooked hook: every row, its ctl
+//               identity (a reference of the child's own) and the epoch
+//               counter, copied under the PARENT's socktab lock, nested
+//               inside the parent's handle lock the copy is holding.
 //               That nesting is the whole point (the socktab holotype F1): a
 //               peer thread cannot close fd N and reopen it as a different
 //               socket between the handle snapshot and this one, because both
@@ -1640,7 +1681,8 @@ void viv_socktab_fork_snapshot(void *arg);      // arg: the struct viv_socktab_f
 void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f);
 
 // The alias rule for dup / dup3 / F_DUPFD of a socket (the same vote): the
-// new number carries its OWN copy of the source's row with a FRESH epoch. A
+// new number carries its OWN copy of the source's row with a FRESH epoch, and
+// the source's ctl identity with a reference of its own. A
 // state mutation through one alias -- connect/bind/listen, which also swaps
 // THAT handle ctl->data -- is not seen through another; Linux shares one
 // description and this does not (VIVARIUM 5.5.2 + the section-9 row record
@@ -1660,8 +1702,8 @@ bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd);
 // stale row and dial its dead connection. Still load-bearing. Reads cloexec
 // live from the handle table; runs in execve's sole-live-thread window
 // (proc_exec_claim), so it takes NO socktab lock -- there is no peer thread to
-// race, and taking the lock would nest it under the handle table's own lock
-// (handle_get_cloexec requires t->lock) for no benefit. NULL-safe.
+// race, and holding it would put the handle table's lock (handle_get_cloexec)
+// inside a socket-table hold, the nesting the leaf guard refuses. NULL-safe.
 struct Proc;
 void viv_socktab_drop_cloexec(struct Proc *p);
 
@@ -1681,11 +1723,9 @@ bool viv_socktab_has_room(struct viv_socktab *tab);
 // snapshotted (a monotonic per-claim stamp; see the struct comment for why NOT n).
 //   set_state    -- listen(): FRESH -> LISTENING.
 //   set_bound    -- bind(): record the requested local endpoint.
-//   record_remote-- connect()/sendto(): record the peer; also_connect
-//                   additionally transitions to CONNECTED in the same lock hold
-//                   (so a peer recvmsg never sees CONNECTED with an unset
-//                   remote), which connect() passes true and the connectionless
-//                   datagram sendto passes false.
+//   record_remote-- the connectionless datagram sendto: record the peer a
+//                   recvmsg reports. connect()'s CONNECTED transition is
+//                   viv_socktab_connected_locked, below.
 //   begin_connect-- connect()'s dial was accepted: FRESH -> CONNECTING with the
 //                   dialed peer recorded, in one hold (so no reader sees a stream
 //                   row that is FRESH with a remote). False unless the row is
@@ -1698,10 +1738,36 @@ bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
 bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port);
 bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
-                               u32 addr, u16 port, bool also_connect);
+                               u32 addr, u16 port);
 bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port);
 bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch);
+
+// connect()'s commit: the hook handle_replace_hooked runs INSIDE the hold that
+// swaps the fd from ctl onto data (handle -> socktab, the fork snapshot's
+// order). Keyed like the writers above, it records the peer, transitions the
+// row CONNECTED and detaches its ctl identity -- so the swap and the transition
+// are ONE step to anything that reads both: an arm whose pinned Spoor is no
+// longer the row's ctl finds the row CONNECTED whenever the swap is why. The
+// remote is written before the state, so a reader that sees CONNECTED sees the
+// peer. It lands on the row the caller snapshotted (`expect_epoch`), or on one
+// re-made meanwhile that carries the same ctl identity (`ctl`, the Spoor the
+// swap took out): a dup of the socket dup3'd back onto the number is the same
+// socket, and the fd now holds its connection -- left CONNECTING over data, the
+// number would refuse every later use. `detached` comes back holding the row's
+// ctl reference, for the caller to clunk once it holds no lock; `ok` says
+// whether the commit landed.
+struct viv_socktab_connected {
+    struct viv_socktab *tab;
+    s32                 fd;
+    u64                 expect_epoch;
+    const struct Spoor *ctl;
+    u32                 addr;
+    u16                 port;
+    bool                ok;
+    struct Spoor       *detached;
+};
+void viv_socktab_connected_locked(void *arg);   // arg: struct viv_socktab_connected
 
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable
 // domain, and if so which /net protocol directory it names. PURE.
@@ -2924,7 +2990,8 @@ enum {
     VIV_LINUX_CREAD  = 0x00000080u,
 };
 
-// C2-k1b PURE translation helpers (non-static for the unit tests, the
+#ifdef KERNEL_TESTS
+// C2-k1b PURE translation helpers (split out for the unit tests, the
 // getdents64-transform precedent): the error-prone flag/grammar logic, isolated
 // from the fd + uaccess glue. viv_cons_to_linux_termios maps the cons 5-flag
 // word to a Linux termios (TCGETS content); viv_linux_termios_to_grammar builds
@@ -2934,13 +3001,14 @@ void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out);
 int  viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g);
 
 // C2-k1b test shim: drive the ioctl shell without a phenotype dispatch. Mirrors
-// viv_readv_for_test -- the non-static shell entry the test suite calls.
+// viv_readv_for_test -- the shell entry the test suite calls.
 s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp);
 
 // C2-k2 test shim: drive a session/pgrp TIER2 shell (SETSID/SETPGID) through the
 // real viv_tier2 arm, so the ACCES->PERM errno remap is exercised on an explicit
 // Proc. linux_num is VIV_LINUX_SETSID or VIV_LINUX_SETPGID; a0/a1 are pid/pgid.
 s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1);
+#endif // KERNEL_TESTS
 
 // -----------------------------------------------------------------------------
 // uname (#150). A fabrication -- there is no underlying Thylacine call -- so the
@@ -3074,12 +3142,14 @@ s32 vivarium_clock_nanosleep_decide(u64 linux_clk_id, u64 flags,
 // length in ns, saturated at U64_MAX.
 bool vivarium_sleep_req_ns(s64 tv_sec, s64 tv_nsec, u64 *ns_out);
 
+#ifdef KERNEL_TESTS
 // What ended a sleep's wait means, in Linux's do_nanosleep order: `ts` is the
 // TSLEEP_* outcome; `deadline` and `now` are on one clock. 0 once now has
 // reached the deadline, whatever ended the wait -- the expiry wins over a
 // note; 0 for death; -T_E_INTR for a caught note before the deadline, with what
 // was left in *rem_ns when rem_ns is not NULL; 1 to sleep again.
 s64 vivarium_sleep_verdict(int ts, u64 deadline, u64 now, u64 *rem_ns);
+#endif // KERNEL_TESTS
 
 // The sleep under both rows (the shells in syscall.c do the uaccess). `wall`
 // picks CLOCK_REALTIME, which matters only to an absolute sleep: a relative one
@@ -3211,5 +3281,12 @@ enum viv_verdict vivarium_pipe2_decide(u64 flags, bool *cloexec_out);
 // the verdict cannot act on a stale true). The fd arguments are STATE, not
 // arguments in this sense, and are the shell's business.
 enum viv_verdict vivarium_dup3_decide(u64 flags, bool *cloexec_out);
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into vivarium.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u32 vivarium_t1_count_for_test(void);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_VIVARIUM_H

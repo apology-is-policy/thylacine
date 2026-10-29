@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ expect-fid.c
+@@ -21,7 +21,7 @@
+         if(w->offset>UINT64_MAX-count)return -T_E_INVAL;
+     }
+     int rc;
+-    u32 new_fid=w->fid;
++    u32 new_fid=0;
+     u64 attr_mask=0;
+     u16 names=0;
+     switch(w->kind) {

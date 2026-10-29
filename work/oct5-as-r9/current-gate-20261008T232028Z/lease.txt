@@ -1,0 +1,4 @@
+mac   HELD by you for 7m, 1.9h left
+        why: Astra joint slot/member pool transaction host/model and native verification
+pi    FREE
+disk: 11.2 GiB available at /Users/northkillpd/projects/thylacine-astra

@@ -1,0 +1,32 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 12 tests
+test tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference ... ok
+test tests::ring::future_clone_callback_completion_is_not_lost ... FAILED
+test tests::ring::future_completion_before_first_poll ... ok
+test tests::ring::future_driver_close_and_drop_wake_unfinished ... ok
+test tests::ring::future_drop_unregisters_but_keeps_active_storage ... ok
+test tests::ring::future_failed_prepare_and_write_result ... ok
+test tests::ring::future_malformed_record_wakes_then_fails_closed ... ok
+test tests::ring::future_read_wakes_and_retains_result ... ok
+test tests::ring::future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test tests::ring::future_replaced_waker_drop_can_deliver_completion ... ok
+test tests::ring::future_replaces_waker_without_notifying_old_task ... ok
+test tests::ring::future_wake_callback_polls_outside_hub_borrow ... ok
+
+failures:
+
+---- tests::ring::future_clone_callback_completion_is_not_lost stdout ----
+
+thread 'tests::ring::future_clone_callback_completion_is_not_lost' (30926961) panicked at src/tests/ring.rs:1124:5:
+assertion failed: matches!(poll(&mut f,&w),Poll::Ready(Ok(r))if r.result()==2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::future_clone_callback_completion_is_not_lost
+
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -47,9 +47,10 @@
 //     Real hardware behavior would need a per-device reset hook on
 //     release, Phase 5+.
 //
-// SKIP path: if `virtio-blk-probe` binary is missing from devramfs OR
-// no virtio-mmio slot has DeviceID=2, prints a SKIP notice + returns
-// PASS (same gating shape as test_virtio_blk_probe.c).
+// A missing `virtio-blk-probe` FAILS the test when the image carries
+// userspace (bin/joey), and a missing DeviceID=2 slot FAILS it when the
+// launcher declared one; otherwise each is a counted skip (the gates of
+// test_virtio_blk_probe.c).
 
 #include "test.h"
 
@@ -67,8 +68,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_driver_crash_recovery(void);
-
 // QEMU virt's virtio-mmio bank constants — mirror the userspace driver.
 // SPI base = 32 + 16 = 48; slot stride = 0x200; slot index derives from
 // (pa - VIRTIO_MMIO_BASE_PA) / VIRTIO_MMIO_SLOT_STRIDE.
@@ -80,14 +79,14 @@ void test_driver_crash_recovery(void);
 #define VIRTIO_BLK_PROBE_BLOB_MAX 32768
 static _Alignas(16) u8 g_blk_probe_blob[VIRTIO_BLK_PROBE_BLOB_MAX];
 
-struct exec_args {
+struct crash_exec_args {
     const void *blob;
     size_t      size;
 };
 
 __attribute__((noreturn))
 static void blk_probe_thunk(void *arg) {
-    struct exec_args *ea = (struct exec_args *)arg;
+    struct crash_exec_args *ea = (struct crash_exec_args *)arg;
     struct Thread *t = current_thread();
     if (!t) extinction("blk_probe_thunk: no current_thread");
     struct Proc *p = t->proc;
@@ -111,7 +110,7 @@ static void blk_probe_thunk(void *arg) {
 
 // Spawn one virtio-blk-probe child + wait for it to terminate. Returns
 // child's exit status (or -1 if reap mismatched).
-static int spawn_blk_probe_and_reap(struct exec_args *args, const char *label) {
+static int spawn_blk_probe_and_reap(struct crash_exec_args *args, const char *label) {
     uart_puts("    crash-recovery: spawning ");
     uart_puts(label);
     uart_puts(" child\n");
@@ -149,18 +148,12 @@ void test_driver_crash_recovery(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
     struct virtio_mmio_dev *blk_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_BLOCK);
-    if (!blk_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=2 (run-vm.sh missing -device virtio-blk-device?)\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_BLOCK, "thylacine.virtio-blk");
+    if (!blk_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_BLK_PROBE_BLOB_MAX,
                 "virtio-blk-probe binary too large for crash-recovery buffer");
@@ -191,7 +184,7 @@ void test_driver_crash_recovery(void) {
     TEST_ASSERT(!kobj_irq_intid_claimed(blk_intid),
                 "virtio-blk INTID already claimed before first spawn");
 
-    struct exec_args args = {
+    struct crash_exec_args args = {
         .blob = g_blk_probe_blob, .size = size
     };
 

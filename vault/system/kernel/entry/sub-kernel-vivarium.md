@@ -3,7 +3,7 @@ id: sub-kernel-vivarium
 type: sub
 title: "The Linux phenotype: the syscall translation table"
 parent: moc-kernel-entry
-code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c"]
+code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c", "kernel/test/test_vivarium.c"]
 audit: hard
 guarded-by: [inv-i43]
 validated-by: [prose, gate-smp]
@@ -12,6 +12,30 @@ design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
 updated: 2026-10-27
 ---
+## Native ceiling 134
+
+The native ceiling is SRV_REGISTRY_NEW, at 134 since vote 13 (2026-10-19)
+moved it from 127 and left 127..133 to other branches' syscalls. Raising the
+ceiling from 127 to 134 put seven signal-family rows below it, and the
+ceiling assert stopped the build until each was argued on its own in
+vivarium.c. rt_sigaction (134) collides with SRV_REGISTRY_NEW: its row is
+TIER2, sound by the arm's reach -- it reads and writes only memory the
+caller's own registers name and installs into the caller's own sigtab, the
+pselect6 envelope -- so a native caller mis-declared as Linux can break itself
+and reach nothing. A well-formed registry call never gets that far: its zero
+flags word arrives as sigsetsize, which `vivarium_sigaction_decide` refuses
+before anything is written. restart_syscall (128) meets
+SYS_ICACHE_SYNC_SPACE, an ENOSYS row with its own collision assert. kill,
+tkill, tgkill, sigaltstack and rt_sigsuspend (129..133) meet an empty gap,
+pinned by `syscall.native_gap_unassigned` (it counts the native switch's
+unknown arm, so a handler answering -1 cannot pass it), and each is consumed
+before the native switch (the kill family is TIER2 through
+`vivarium_kill_decide`; the other two are ENOSYS rows), pinned by name in
+`vivarium.rejects_are_deliberate`. The ceiling argument now starts
+at rt_sigprocmask (135). There is no Linux phenotype factory operation; the
+entry is native only and keeps the kernel role gate. See
+[[sub-kernel-syscall-abi]].
+
 ## Purpose
 
 A Linux binary issues Linux syscall numbers. This layer decides, for each
@@ -257,7 +281,9 @@ row's cached readiness Spoor, beside the rows rather than inside `viv_sock` so
 that no snapshot or copy of a row can carry a borrowed pointer; each row owns
 one reference, a FREE row's is NULL, rows naming one connection (a socket and
 its dups) share one Spoor, and the cache (not the table) is released at exit
-(below). That sentence was incomplete when written — the table was also
+(below). Since 17:09Z it also holds `ctl[VIV_SOCK_MAX]`, each socket()-born
+row's ctl Spoor as an exact identity, one reference per row (the section of
+that date). That sentence was incomplete when written — the table was also
 freed at exec, unmentioned — and it became true by the other free site being
 *deleted* rather than by the prose being edited (see Concurrency). `viv_sigtab`
 is indexed by *note kind*, not by signal number, which is legitimate only
@@ -1065,3 +1091,191 @@ group, a dead child, the tid forms, the refusals), and `viv-pheno-probe` L334-L3
 (a child's `tkill(gettid(), SIGABRT)` reads `SIGABRT`; a child killed with
 `SIGTERM` reads `SIGTERM`; the probe's parent is `EPERM`; the refusals by
 shape; a `SIGTERM` handler runs once per call while `SIGINT` is ignored).
+## Linux's narrow words stay in the phenotype (2026-10-13, vote 8)
+
+A Linux guest may leave junk in the high half of a word its prototype declares
+`int` or `unsigned int`: AAPCS64 leaves those bits unspecified and Linux's
+`SYSCALL_DEFINE` narrows them by construction. Since operator vote 8 the native
+handlers refuse a word that does not fit (ERRORS.md principle 6,
+[[sub-kernel-syscall-abi]]), so the phenotype narrows first and the truncation
+stays Linux's. `struct viv_row` gains two masks, `u32_words` and `s32_words`
+(bit n = word n), zero when a row omits them; `vivarium_translate` cuts a
+`u32` word to its low half and sign-extends an `s32` word from it, and copies
+every other word whole. The filled rows are read, write, close, pread64 and
+pwrite64 (`unsigned int fd`), lseek (fd and `unsigned int whence`), and
+getpgid and getsid (`pid_t`). exit_group stays whole: the native handler keeps
+only the status byte. The T2 shells narrow their own words by their own
+prototype: fsync and fdatasync, fstat and both mmap file arms pass the fd as
+`unsigned int` (mmap reads it through `fget(unsigned int)`), getrandom drops
+the high half of `unsigned int flags`, and readlinkat reads `int bufsiz`,
+refusing a value that is not positive before the path, as Linux does. Until
+then readlinkat passed bufsiz whole, so a negative bufsiz, or junk over a
+positive one, copied the whole link target into a buffer the guest had sized
+by the low half: an overrun inside the guest (the copy-out is still validated,
+so no kernel memory was reached). getrandom's shell answered EAGAIN for a high
+half Linux drops. Tests: `vivarium.t1_narrows_linux_widths` (every row's
+words against Linux's prototypes; a `_Static_assert` on the table's row count
+beside `VIV_T1_COUNT` makes a new row join the test's list) and
+`vivarium.t2_shells_narrow_linux_widths` (readlinkat's bufsiz, getrandom's
+flags).
+
+**Width audit round 1 append (2026-10-14).** The narrowing is now pinned to
+the table's derived count (`vivarium_t1_count_for_test`; the literal
+`_Static_assert` is gone), and exit_group's row narrows its `int` status
+(`s32_words` 0x1). Four more T2 shells hand Linux's fd to a native handler and
+now narrow it first: readv and writev (`fdget_pos(unsigned int)`), sendto and
+recvfrom (`int fd`). `viv_sock_row` and fcntl compare a Linux fd by its low
+half. The dispatch reads x8 by its low 32 bits, as Linux's `int scno` does,
+and a renumbered (T1) call returns the guest's x1-x5 and x8 untouched: the
+renumber writes the native number and the narrowed words into the frame for
+the native switch (`syscall_native_switch`, split out of
+`syscall_dispatch_body`), and Linux hands back every register but x0, which
+musl's asm relies on. Before, a guest that reused x8 after getpid issued 72,
+Linux's pselect6. Tests: `vivarium.t1_keeps_guest_registers` (a child Proc
+turned Linux guest, through the real dispatch) and writev/readv legs in
+`vivarium.t2_shells_narrow_linux_widths`. sendto/recvfrom have no runtime leg:
+no socket test drives either call.
+
+**Width audit round 2 append (2026-10-14).** The guest's x1-x5 and x8 go back
+when the native handler returns, not before: a debugger reading a Linux
+guest's registers while that thread is stopped inside a T1 call (blocked in
+read, say) sees the native number in x8 and the narrowed words in x1-x5. Every
+return to EL0 sees the guest's own.
+
+## Every phenotype unwind returns a reservation (2026-10-14, vote 10)
+
+The T2 shells that could fail after their descriptor existed now reserve the
+number first ([[sub-kernel-handle]]).
+- **socket**: reserve, the private /net open, N read off the Spoor
+  (`spoor_read_on`), the FRESH row on the reserved number, the nonblock bit
+  and the netd verb on the Spoor, then install with SOCK_CLOEXEC in the same
+  hold. `viv_sock_sync_nonblock_fd` is gone.
+- **accept**: reserves before it blocks (Linux's order), so a full table
+  never hangs up on a connected peer. It claims the CONNECTED row and copies
+  out the peer address before the install. A fault drops the row keyed on its
+  own number, returns the number, and clunks the data Spoor, which frees M.
+- **dup and F_DUPFD**: reserve, copy the alias row onto the number, then
+  `handle_dup_into_reserved`. A refused dup drops that row and returns the
+  number.
+- **pipe2**: copies the two numbers out between the reservation and the
+  install.
+- **openat** (both arms): installs close-on-exec in the install's hold, and
+  checks O_DIRECTORY before any install.
+- **mkdirat and fchmodat**: never take a descriptor. fchmodat's old shape
+  looked its number up a second time for the wstat, so a peer that closed and
+  reused the number in between would have had its own file's mode changed.
+- **dup3** answers EBUSY onto a reserved number.
+- **connect** takes the socket's ctl Spoor once, before it sleeps. The dial is
+  written to it and its O_NONBLOCK bit is copied onto the private data Spoor,
+  and `handle_replace_hooked` swaps only while the number still names that ctl. Before,
+  the dial was written by number, the swap took whatever Spoor the number named
+  once the TCP handshake ended, and the bit was set by number afterwards. A
+  peer that closed the socket during the handshake and opened its own file at
+  the number lost that file to the connection. Now connect answers EIO and the
+  file stays. The witness is `vivsock.connect_keeps_a_reused_number`, whose /net
+  stub stages the peer's close and reuse inside the data open.
+- **close()**: its hook now calls `viv_socktab_drop_closing`, which keeps the
+  row while the number is reserved: that row is the reserving call's own, and
+  the close answers EBADF. The drop runs inside the handle-table hold that
+  answers the question (`handle_locked_unless_reserved`), so no call can
+  reserve the number between the answer and the drop. The socket-table lock
+  nests inside that hold, as the fork snapshot nests it; the first version
+  nested them the other way, a deadlock against a concurrent fork (audit r1
+  F1). The socket-table lock is now a marked leaf (`socktab_lock`), and a
+  handle-table acquire under it extincts. The witness is
+  `vivarium.close_keeps_a_reserved_row`, through the real dispatcher.
+  `vivarium.unwinds_publish_nothing` drives each failure past a reservation.
+- **The socket arms** (`viv_sock_row`: bind, listen, accept, connect,
+  getsockopt, sendto, recvfrom, recvmsg) ask the slot before the row. socket()
+  and accept() claim their row while the number is still reserved, so a peer's
+  bind on that number found a FRESH row and succeeded where Linux answers
+  EBADF. The witness is the bind leg of `vivarium.close_keeps_a_reserved_row`,
+  whose control is a live slot carrying the same row: it reaches bind's address
+  copy (EFAULT for a NULL address), the one gate past the row and its state.
+
+## The verb arms write only to the socket's own ctl (2026-10-19, 17:09Z)
+
+**The window.** connect's dial, listen's announce and the connectionless
+datagram sendto's re-dial each write netd a ctl verb. Each found the socket's
+row by fd number and then reached the fd's Spoor by number in a second lookup.
+`dup3` installs the new object before it drops the old row (the alias rule's
+order, operator-voted), so a peer thread's `dup3(file, sockfd)` between the two
+lookups left the socket's row over a slot that held the guest's file: the verb
+was written into the file, and connect's ctl-keyed `handle_replace` could swap
+the file out for a connection. The vote-10 pin-once defended only connect's
+later sleep, not this first window.
+
+**The identity.** `struct viv_socktab` gains `ctl[VIV_SOCK_MAX]`, parallel to
+`ready[]` and kept out of `viv_sock` for the same reason: a row is snapshotted
+and copied by value, and a copy must not carry a borrowed pointer. `ctl[i]` is
+the ctl Spoor a socket()-born row was claimed with (`viv_socktab_claim`'s
+`ctl` argument; accept passes NULL), one reference the row owns. It is NULL for
+an accepted row (born CONNECTED: its fd is data), from connect's CONNECTED
+commit on, and in a FREE slot. The reference is what makes the check exact:
+while the row lives the Spoor cannot be freed, so no other object can appear at
+its address. Rejected, each measured: a qid in the row (row 126 forbids
+decoding netd's qid layout, and netd's ctl qid carries no generation), a bare
+pointer (an ABA inside a dup3 window), a handle-slot generation (`struct
+Handle` has none), `Spoor->path` (I-33), and reordering dup3's drop
+(operator-voted).
+
+**The check.** `viv_sock_pin_ctl` ([[sub-kernel-syscall-dispatch]]) pins the
+fd with the right the write needs and asks `viv_socktab_ctl_is` -- under the
+lock: the row is present, its epoch is the arm's snapshot, and `ctl[i]` is the
+pinned Spoor -- before anything is written. A refusal answers what the number
+earns now: EBADF if it is closed, ENOTSOCK if it is anything else. The one
+exception is a row that is still the same socket and went CONNECTED meanwhile
+(a peer thread's connect swapped the fd onto data): the arm answers as the
+connected socket does -- connect EISCONN (0 for a CONNECTING snapshot, whose
+wait is over), listen EINVAL, the datagram sendto EISCONN, the errnos
+`vivarium_listen_decide` and `vivarium_sendto_decide` give a CONNECTED row.
+
+**Lifecycle.** NP-5's release rule applies verbatim: every clear detaches
+ready AND ctl under the lock and clunks both after the unlock
+(`socktab_clear_slot` returns a `struct socktab_detached`, `socktab_release`
+clunks it) -- replace-on-claim, drop, drop_closing, reset, the fork filter, an
+alias onto an occupied number, and drop_cloexec; `viv_socktab_free` clunks both
+directly. Unlike ready[], which is a cache and starts empty in a fork child or
+an alias, ctl[] is identity: the fork snapshot (inside the hooked copy's hold)
+and the alias COPY it with a reference of their own. The copied fd holds the
+same Spoor, so the copied row and its fd agree as the source's did.
+
+**The connected commit.** The check needs connect's swap and its CONNECTED
+transition to be one step to a reader of both. As two holds, a peer pinning
+just after the swap would see the fd on data while the row still read
+CONNECTING, and refuse its legitimate verb ENOTSOCK.
+`viv_socktab_connected_locked` records the peer, marks the row CONNECTED and
+detaches its ctl (handed back for the caller to release), and connect runs it
+inside the swap's own handle-table hold (`handle_replace_hooked`,
+[[sub-kernel-handle]]): handle -> socktab, the order the fork snapshot and the
+close hook take. The detach keeps netd at one fid per connection once the fd is
+data. The commit lands on the row connect snapshotted (its epoch) or on a row a
+peer re-made meanwhile with the same ctl identity: a dup of the socket dup3'd
+back onto the number leaves the number's slot on ctl, so connect's swap goes
+through, and the re-made row (a fresh epoch) is the same socket. Keyed on the
+epoch alone, as first written, that row stayed CONNECTING over a data fd and
+the number answered ENOTSOCK to every later use (audit r1 F1;
+`vivsock.connect_commits_a_realiased_row`). `record_remote` lost its
+`also_connect` flag; the datagram sendto is its only caller. A refused swap whose same-epoch row is now CONNECTED returns 0:
+two threads can finish one interrupted connect (a read on the CONNECTING fd
+while connect() is retried), and the loser's refusal used to answer EIO.
+
+**Witnesses.** `vivsock.ctl_verbs_need_their_ctl` holds each arm's number at
+dup3's window (the slot swapped to a writable /net file, the row untouched) and
+requires ENOTSOCK with no byte written to the file, no verb to any ctl, no data
+file opened and the file left at the number -- beside the control one variable
+away: the same arms on unraced sockets write their verbs to ctl, a
+socket()-made row holds ctl with a reference of its own, and a connect gives it
+up and releases the ctl fid. `vivsock.ctl_verbs_meet_a_racing_peer` runs a peer
+thread's connect or close between the row read and the pin (a KERNEL_TESTS hook
+at the top of `viv_sock_pin_ctl`) and derives the expected errnos from the
+decides. `vivsock.ctl_identity_travels_with_the_fd` drives dup and fork with
+exact reference counts, `vivsock.connect_finished_by_a_peer` stages the double
+finish, and `vivsock.connect_commits_a_realiased_row` the re-made row. Each went
+RED under its sabotage (work/oct19-1709z/mutate.py M1-M11). One property has no unit form: that the commit stays inside the swap's
+hold needs an SMP interleaving, so it rests on the audit's reading.
+
+The arms that open a /net file by path from the row's N (accept's listen walk,
+recvmsg's data open) still trust the row; for them the socktab holotype's F2
+gap stands (VIVARIUM.md 5.5.2), closed only by the socket object.
+

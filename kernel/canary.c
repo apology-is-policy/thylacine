@@ -104,7 +104,9 @@ u64 canary_get_cookie(void) {
 
 // __stack_chk_fail is the ABI symbol clang generates calls to on a
 // canary mismatch. Must not return — the stack is corrupt; nothing
-// downstream can trust it.
+// downstream can trust it. Declared here, not in a header: only the
+// compiler's emitted code calls it.
+__attribute__((noreturn)) void __stack_chk_fail(void);
 __attribute__((noreturn))
 void __stack_chk_fail(void) {
     extinction("stack canary mismatch (smashed stack)");

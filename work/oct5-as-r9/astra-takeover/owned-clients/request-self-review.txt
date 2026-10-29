@@ -1,0 +1,60 @@
+Astra single-agent self-review, October10: request correlation metadata.
+Uninstalled; no independent audit, native I/O ownership or executor qualification.
+
+Capacity is validated power-of-two CQ size<=8192, matching existing native request
+obligation envelope, never a new allowance. One allocation before admission; all
+reserve/publish/accept/abandon/consume operations scan bounded preallocated records
+and never allocate. Worst lookup/reserve is O(CQcapacity); native executor must
+bound completions per tick and measure latency before activation. Exact native
+metadata allocation/payer accounting remains required.
+
+Library-wide monotone atomic cookies are never user-chosen, zero or reused. MAX
+exhaustion refuses admission unchanged; cancelled unpublished requests burn their
+cookie. Separate rings with matching scope/pool slots cannot alias cookies within
+this library instance. This is correlation, not security authentication against a
+malicious kernel or arbitrary raw CQ access. Caller owns mapping/exclusive consumer.
+Prepared can roll back only before SQ-tail publication. Publish precedes release
+SQ-tail with no intervening fallible local action. Failed ENTER cannot imply no
+admission and cannot return registered storage. Active completion transitions to
+Terminal exactly once; terminal metadata remains charged until executor consumes.
+CQ receipt acknowledgment and terminal consumption do not return payload leases.
+
+Pooled completion binds exact expected pool slot/incarnation, positive bounded
+length, member<64/nonzero lease/reserved=0 and only BUFFER/MORE bits. MORE requires
+multishot request. EOF/error has zero flags and entirely zero receipt. Fixed I/O
+rejects receipt/MORE and oversized success; control rejects positive success.
+Full pool ledger must still verify actual member geometry and lease monotonicity.
+A malformed record leaves request record intact; outer integrated owner must
+close/retire rather than silently discard it after paired CQ acknowledgment.
+
+REQUEST-REVIEW-R1: Delivery carries the copied CQE+receipt for the sole payload
+transfer. Stored terminal keeps CQE only so terminal consumption cannot appear to
+supply another payload lease. Delivery is still internal metadata, not an owned
+PayloadLease; actual integration must transfer or return abandoned payloads before
+settling a terminal, and fail closed on receipt-ledger disagreement. No safe public
+arbitrary-record accept API is introduced. C caller must not alias output into
+input/book and must not destroy occupied book until whole-owner retirement is
+proved; Rust book likewise owns only metadata, independent storage owners required.
+
+Abandon Active marks it once and returns scope for explicit scope-wide ABORT;
+siblings are affected by the outer cancellation operation, not automatically by
+this table. No refund/reuse happens on abandon. MORE remains deliverable with the
+abandoned flag (executor returns its lease); final retains its metadata until
+executor settles. Abandon after already committed terminal does not rewrite its
+result or request a new abort. Repeated abandon produces no duplicate abort request
+for that request. Independent requests may request the same idempotent scope abort.
+
+Seven scenarios per language: bounded prepared/terminal admission; MORE/final
+separation; nine malformed receipt/flag/length mutations; abandoned future/sibling
+terminal handling; fixed/control restrictions; cross-ring cookies; maximum8192
+capacity and cookie exhaustion. Rustopt0/2 plus Clone/Send compile failures and
+positive control; C LLVM22ASan+UBSan and optimizedNDEBUG core with test assertions.
+Twelve runtime mutants rejected. Source manifests, copied sources and40raw commands
+verified in request-book-20261010T062909Z. Initial041455Z Rust passes but C build
+refused misleading indentation (-Werror); REQUEST-BUILD-R1 preserved and corrected,
+no C pass attributed to initial run. Astra10hashes and cleanexternal61dde37 preserved.
+
+Next compose paired reader, request ledger and pool leases with actual owned
+mapping/backing/syscall adapter, then fixed-I/O owners/futures/scope cancellation/
+bounded executor retirement. Native public setup/register/ENTER stay gated until
+approved qualification. No Main/private activation/128MiB protection change.

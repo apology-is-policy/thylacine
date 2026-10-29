@@ -11,18 +11,9 @@
 
 #include "../../arch/arm64/halls.h"
 #include "../../arch/arm64/halls_symtab.h"
+#include "../../arch/arm64/kaslr.h"
 
 #include <thylacine/types.h>
-
-void test_halls_fp_sane_accepts_valid(void);
-void test_halls_fp_sane_rejects_misaligned(void);
-void test_halls_fp_sane_rejects_non_increasing(void);
-void test_halls_fp_sane_rejects_out_of_range(void);
-void test_halls_link_addr_removes_slide(void);
-void test_halls_link_addr_underflow_guarded(void);
-void test_halls_frame_enter_leave_nesting(void);
-void test_halls_frame_is_live_gate(void);
-void test_halls_symbolize_table(void);
 
 // A plausible kernel-stack window for the gate tests.
 #define LO  0xffff000000010000ull
@@ -70,6 +61,24 @@ void test_halls_link_addr_underflow_guarded(void) {
                    0x100ull, "below offset -> unchanged");
     TEST_EXPECT_EQ(halls_link_addr(0xDEADBEEFull, 0ull),
                    0xDEADBEEFull, "zero offset -> unchanged");
+}
+
+void test_halls_code_link_addr_rebases_the_image_pa(void) {
+    // Code run before the MMU executes at the load PA, which the slide does not
+    // map: an address in the image's PA range rebases onto the link VA.
+    const u64 ps = 0x40080000ull, pe = 0x40680000ull, koff = 0x183800000ull;
+    TEST_EXPECT_EQ(halls_code_link_addr(ps, koff, ps, pe), KASLR_LINK_VA,
+                   "the image's first PA -> the link base");
+    TEST_EXPECT_EQ(halls_code_link_addr(ps + 0x1434ull, koff, ps, pe),
+                   KASLR_LINK_VA + 0x1434ull, "inside the image -> link base + offset");
+    TEST_EXPECT_EQ(halls_code_link_addr(KASLR_LINK_VA + koff + 0x10ull, koff, ps, pe),
+                   KASLR_LINK_VA + 0x10ull, "a slid VA takes the slide");
+    TEST_EXPECT_EQ(halls_code_link_addr(pe, koff, ps, pe), pe,
+                   "the end is exclusive (and below the offset: untouched)");
+    TEST_EXPECT_EQ(halls_code_link_addr(ps - 4ull, koff, ps, pe), ps - 4ull,
+                   "below the image: untouched");
+    TEST_EXPECT_EQ(halls_code_link_addr(ps + 8ull, koff, 0ull, 0ull), ps + 8ull,
+                   "an empty range (before kaslr_init records it) rebases nothing");
 }
 
 void test_halls_frame_enter_leave_nesting(void) {
@@ -169,4 +178,40 @@ void test_halls_symbolize_table(void) {
     // Query whose offset overflows the u32 window -> NULL.
     s = halls_symbolize_table(tab, 3u, names, base, base + 0x100000000ull, &off);
     TEST_ASSERT(s == (const char *)0,    "offset > u32 -> NULL");
+}
+
+// A return address is named at its call. alpha's last instruction is a call at
+// 0x3c, so its return address 0x40 is beta's first byte: the frame is alpha's,
+// and the offset printed is the return address's own (0x40 - 0x10).
+void test_halls_symbolize_return_table(void) {
+    static const char names[] = "alpha\0beta\0gamma";   // offs 0, 6, 11
+    static const struct halls_sym tab[] = {
+        { 0x010u, 0u },    // "alpha"
+        { 0x040u, 6u },    // "beta"
+        { 0x100u, 11u },   // "gamma"
+    };
+    const u64 base = 0xffffa00000080000ull;
+    u64 off = 0xdeadu;
+    const char *s;
+
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x040u, &off);
+    TEST_ASSERT(s == &names[0],          "ra at beta's first byte -> alpha (the call's function)");
+    TEST_EXPECT_EQ(off, 0x30u,           "-> alpha+0x30, the return address's own offset");
+
+    // Inside a function the call's name is the return address's.
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x05cu, &off);
+    TEST_ASSERT(s == &names[6],          "ra 0x5c -> beta");
+    TEST_EXPECT_EQ(off, 0x1cu,           "ra 0x5c -> beta+0x1c");
+
+    // No symbol owns an instruction before the first one.
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x010u, &off);
+    TEST_ASSERT(s == (const char *)0,    "ra at the first symbol's start -> NULL");
+
+    // The call's address must not wrap: with a base this high, 2 - 4 would
+    // land inside the u32 window and name gamma.
+    s = halls_symbolize_return_table(tab, 3u, names, 0xffffffff00000000ull, 2u, &off);
+    TEST_ASSERT(s == (const char *)0,    "ra below one instruction -> NULL");
+
+    s = halls_symbolize_return_table(tab, 3u, names, base, base + 0x040u, (u64 *)0);
+    TEST_ASSERT(s == &names[0],          "a NULL out_off still names the frame");
 }

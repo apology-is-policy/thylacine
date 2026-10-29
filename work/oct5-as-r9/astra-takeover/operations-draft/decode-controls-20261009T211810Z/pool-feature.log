@@ -1,0 +1,2 @@
+pool feature absent: got0 want-95
+Assertion failed: (0), function check, file pool-feature.c, line 73.

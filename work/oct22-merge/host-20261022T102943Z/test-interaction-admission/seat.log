@@ -1,0 +1,18 @@
+
+running 1 test
+test seat_generation_change_between_loop_and_request_revokes_context ... FAILED
+
+failures:
+
+---- seat_generation_change_between_loop_and_request_revokes_context stdout ----
+
+thread 'seat_generation_change_between_loop_and_request_revokes_context' (67231603) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T102943Z/test-interaction-admission/seat.rs:483:5:
+assertion failed: !check(&mut c, p)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    seat_generation_change_between_loop_and_request_revokes_context
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+

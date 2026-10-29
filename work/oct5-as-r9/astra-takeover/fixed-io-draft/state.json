@@ -1,0 +1,25 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "source_base": "cbdfb2c418bf61c5ba9c7accaa9257f0d4fe93bc",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "state": "verified-uninstalled-fixed-sqe-preparation",
+  "run": "work/oct5-as-r9/astra-takeover/fixed-io-draft/controls-20261009T232328Z",
+  "checks": 268,
+  "mutants": 17,
+  "operation_bytes": 864,
+  "protocol_bytes": 42288,
+  "arm64": "arm64-result.json",
+  "dependencies": [
+    "program-draft",
+    "wire-draft",
+    "canonical FID/request/node/slot/pool/fixed helpers"
+  ],
+  "review": "single-agent self-review; not independent audit",
+  "utc": "2026-10-09T23:26:02.861623+00:00",
+  "next": "next-work.txt",
+  "limits": "Real data headers and actual SQE preparation, fixed helper, constructor, FID allocator and ledger/program code. Host address translation, allocation, Proc snapshot, refs/wake/engine and physical backing drop boundaries. No wire dispatch; admitted destructor is manual fixture cleanup. No native frontend/driver/close/concurrency proof.",
+  "verified_input_count": 30,
+  "verified_source_binary_pairs": 18,
+  "verified_arm_objects": 5
+}

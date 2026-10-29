@@ -14,12 +14,14 @@ Generated — do not edit between the markers (`quaestor render`).
 | arc | status | chunks |
 |---|---|---|
 | [[arc-arch81]] | active | 1 |
+| [[arc-astra-halcyon-followup]] | active | 4 |
 | [[arc-boosty]] | active | 5 |
 | [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
 | [[arc-deep-smp-review]] | active | 4 |
 | [[arc-go-build]] | active | 27 |
 | [[arc-go-ide]] | active | 2 |
+| [[arc-halcyon-interaction]] | active | 11 |
 | [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
 | [[arc-life-support]] | active | 2 |
@@ -34,11 +36,12 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-revenant]] | complete | 0 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
+| [[arc-user-authority]] | active | 2 |
 | [[arc-vault]] | active | 33 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 83
+## Open seams: 81
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -90,7 +93,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
 - [[seam-nuname-trust-stamp]] (sub-kernel-syscall-dispatch, sub-kernel-ninep-attach)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
-- [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
 - [[seam-pouch-dirfd]] (sub-pouch-fs)
 - [[seam-pouch-dup2-target]] (sub-pouch-process)
 - [[seam-pouch-errno-channel]] (sub-pouch-seam, sub-pouch-fs, sub-pouch-net)
@@ -102,7 +104,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-pouch-sigmask-per-thread]] (sub-pouch-signal)
 - [[seam-pouch-sigtstp-ignore]] (sub-pouch-signal, sub-pouch-tty)
 - [[seam-pouch-sock-single-user]] (sub-pouch-net)
-- [[seam-pouch-spawn-envp]] (sub-pouch-process)
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
 - [[seam-proc-name-torn-read]] (sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc)
 - [[seam-proxy-coord-eof]] (sub-stratum-session)
@@ -113,7 +114,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-slub-debug-mode]] (sub-kernel-mm-slub)
 - [[seam-sparse-mpidr]] (sub-kernel-sched-smp)
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
-- [[seam-srv-registry-lifecycle]] (sub-kernel-devsrv)
+- [[seam-stratum-final-eviction-failure]] (sub-stratum-session)
 - [[seam-stratum-notify-peercred]] (sub-stratum-session, sub-stratum-server)
 - [[seam-tapestry-battery-unowned]] (sub-tapestryd)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
@@ -129,9 +130,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7-close]] — Thread-model C7 close: round 2, the C11 join fix, the final gates
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7]] — Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 - 2026-10-28 [[chg-2026-10-28-poll-hook-walks]] — Hook walks are batched, and none runs under its owner's lock (poll chunk, votes 12 + 13)
+- 2026-10-28 [[chg-2026-10-28-spawn-env]] — The spawn environment tail: a spawner names its child's whole environment (env-a kernel + native, env-c pouch)
 - 2026-10-22 [[chg-2026-10-22-thread-cap-live]] — The thread cap charges live threads (thread-model C1, vote 7)
 - 2026-10-22 [[chg-2026-10-22-thread-model-c1]] — Thread-model C1: an exited user thread is freed by the resume path of its last switch-out
 - 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
-- 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
 <!-- generated:end -->

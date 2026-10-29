@@ -1,0 +1,13 @@
+{
+  "owner": "astra",
+  "state": "staged-dac-program-verified-integration-next",
+  "installed": false,
+  "source_base": "dc47871be976e8a04233b2942f1e652cde7c85dc",
+  "utc": "2026-10-09T22:53:46.368154+00:00",
+  "run": "work/oct5-as-r9/astra-takeover/program-draft/controls-20261009T225138Z",
+  "assertions": 18711,
+  "permission_cases": 4608,
+  "mutants": 15,
+  "arm64": "arm64-result.json",
+  "limits": "Uninstalled staged program; actual perm and wire/client-submit path with explicit host boundaries. Creator snapshot, FID/payload admission, engine progress/close and native concurrency remain unqualified."
+}

@@ -312,14 +312,14 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size,
     return c;
 }
 
+#ifdef KERNEL_TESTS
 void kmem_cache_destroy(struct kmem_cache *c) {
     if (!c) return;
 
     // Contract: the caller must have quiesced the cache (no concurrent
     // kmem_cache_alloc/free on any CPU) AND freed every object. Both are
-    // the caller's responsibility -- same discipline as magazines_drain_all
-    // -- so the live-count read + the partial-drain below run without
-    // c->lock (RW-1 F-S2).
+    // the caller's responsibility, so the live-count read + the partial-drain
+    // below run without c->lock (RW-1 F-S2).
     //
     // RW-1 F-S1: a cache holding ANY live object must not be destroyed.
     // The partial-drain below returns each partial slab's page to the
@@ -361,6 +361,7 @@ void kmem_cache_destroy(struct kmem_cache *c) {
     // Return the cache descriptor itself.
     kmem_cache_free(&g_meta_cache, c);
 }
+#endif // KERNEL_TESTS
 
 // ---------------------------------------------------------------------------
 // kmalloc / kfree / kzalloc / kcalloc.
@@ -405,10 +406,53 @@ void *kzalloc(size_t n, unsigned flags) {
     return kmalloc(n, flags | KP_ZERO);
 }
 
+#ifdef KERNEL_TESTS
 void *kcalloc(size_t n, size_t size, unsigned flags) {
     if (n != 0 && size > (~(size_t)0) / n) return NULL;     // overflow check
     return kzalloc(n * size, flags);
 }
+
+#include <thylacine/thread.h>
+
+static const void *g_kfree_large_watch;
+static struct Thread *g_kfree_large_watch_thread;
+static bool g_kfree_large_watch_fired;
+
+void kfree_large_watch_arm_for_test(const void *obj) {
+    struct Thread *me = current_thread();
+    if (!me || !obj) extinction("kfree_large_watch_arm_for_test without a thread or object");
+    __atomic_store_n(&g_kfree_large_watch_fired, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_kfree_large_watch_thread, me, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_kfree_large_watch, obj, __ATOMIC_RELEASE);
+}
+
+void kfree_large_watch_disarm_for_test(void) {
+    __atomic_store_n(&g_kfree_large_watch, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kfree_large_watch_thread, NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_kfree_large_watch_fired, false, __ATOMIC_RELEASE);
+}
+
+bool kfree_large_watch_armed_for_test(void) {
+    return __atomic_load_n(&g_kfree_large_watch, __ATOMIC_ACQUIRE) != NULL;
+}
+
+bool kfree_large_watch_fired_for_test(void) {
+    return __atomic_load_n(&g_kfree_large_watch_fired, __ATOMIC_ACQUIRE);
+}
+
+// Keyed to the arming thread as well as the pointer, and nothing of the object
+// or its page is read. A notifier on any other thread never stores, however late
+// it runs, so a free of a reused address on another CPU cannot land on a later
+// arming; the arming thread's own store completes inside its own kfree.
+static void kfree_large_watch_note(const void *p) {
+    struct Thread *me = current_thread();
+    if (!me || me != __atomic_load_n(&g_kfree_large_watch_thread, __ATOMIC_ACQUIRE)) return;
+    if (p == __atomic_load_n(&g_kfree_large_watch, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&g_kfree_large_watch_fired, true, __ATOMIC_RELEASE);
+}
+#else
+static inline void kfree_large_watch_note(const void *p) { (void)p; }
+#endif
 
 void kfree(void *p) {
     if (!p) return;
@@ -442,6 +486,7 @@ void kfree(void *p) {
             extinction("kfree: large-allocation pointer not page-aligned "
                        "(interior pointer?)");
         }
+        kfree_large_watch_note(p);
         free_pages(page, page->order);
     }
 }
@@ -472,36 +517,7 @@ void slub_init(void) {
 // Diagnostics.
 // ---------------------------------------------------------------------------
 
-u64 slub_total_alloc(void) {
-    u64 total = 0;
-    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
-    for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
-        total += c->alloc_count;
-    }
-    spin_unlock_irqrestore(&g_cache_list_lock, s);
-    return total;
-}
-
-u64 slub_total_free(void) {
-    u64 total = 0;
-    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
-    for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
-        total += c->free_count;
-    }
-    spin_unlock_irqrestore(&g_cache_list_lock, s);
-    return total;
-}
-
-u64 slub_active_slabs(void) {
-    u64 total = 0;
-    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
-    for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
-        total += c->slabs_active;
-    }
-    spin_unlock_irqrestore(&g_cache_list_lock, s);
-    return total;
-}
-
+#ifdef KERNEL_TESTS
 // Live (currently-allocated) object count for one cache: the quantity the
 // RW-1 F-S1 destroy guard tests. A diagnostic snapshot (cumulative counters
 // are u64; a lock-free read may be momentarily stale under concurrent
@@ -510,3 +526,4 @@ u64 kmem_cache_live_count(const struct kmem_cache *c) {
     if (!c) return 0;
     return c->alloc_count - c->free_count;
 }
+#endif // KERNEL_TESTS

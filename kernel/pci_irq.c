@@ -493,10 +493,7 @@ struct KObj_PCI *pci_irq_owner(struct KObj_IRQ *k) {
 #ifdef KERNEL_TESTS
 // Inject dispatch over synthetic config bytes; never writes a real device's
 // read-only PCI Interrupt Status. Tests use a DTB-routed, otherwise idle line.
-void pci_irq_test_controller_fault(u32 node);
 void pci_irq_test_controller_fault(u32 node) { controller_fault(node); }
-void pci_irq_test_msix_dispatch(u32 intid);
 void pci_irq_test_msix_dispatch(u32 intid) { pci_msix_dispatch(intid, NULL); }
-void pci_irq_test_dispatch(u32 intid);
 void pci_irq_test_dispatch(u32 intid) { pci_intx_dispatch(intid, NULL); }
 #endif

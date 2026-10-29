@@ -1,0 +1,11 @@
+--- control
++++ omit-unwind-pool-free
+@@ -123,7 +123,7 @@
+     struct Loom *l = (!slots || !pools || layout_fault) ? NULL :
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+-        kfree(pools);
++
+         kfree(slots);
+         spin_lock(&as->lock);
+         addrspace_uncharge_pages(as, metadata + backing);

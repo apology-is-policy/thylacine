@@ -12,6 +12,16 @@ design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
 updated: 2026-10-29
 ---
+## Session registry retirement
+
+`srv_proc_exit_notify` marks the Proc posting latch closed and detaches its
+registry memberships under the posting lock. It then tombstones matching
+services and drops covering refs outside that lock. Concurrent posting must
+finish its reserve/install/commit before this detach, or observe the closed
+latch and fail. Repeated notification is empty; proc_free covers paths that
+skip ordinary exits. Neither the mutable namespace nor boot-only scanning
+decides which registries are drained.
+
 ## Purpose
 
 Terminating a Proc is a **cascade, not a call**. No Thread is ever torn down
@@ -158,7 +168,7 @@ exit and a kill alike:
 
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
 waking, the parent could be reaped and freed by the *grandparent*'s
-`wait_pid`, and the wake would touch freed memory.
+`wait_pid_for`, and the wake would touch freed memory.
 
 **A peer Thread's own exit carries the pthread-join wakeup.** `thread_exit_self`
 runs `thread_clear_child_tid_handoff` before it departs: if the Thread registered
@@ -286,7 +296,7 @@ departures, `proc_close_handles_at_exit`, the weft release), re-take, assert the
   assert;
 - `t` has not committed, so nothing frees the closer mid-close (only the
   resume path of its last switch-out frees it), and `p` is still ALIVE, so
-  `wait_pid` cannot free the Proc;
+  `wait_pid_for` cannot free the Proc;
 - `live_peers == 0` means every peer has committed EXITING (whose residual
   execution never touches the handle table) and no new peer can spawn
   without a RUNNING thread.
@@ -657,6 +667,16 @@ What a change **must** re-establish:
   (`notes_exit_drop_locked`, under the process-table lock), and the walk runs
   again if a family's note is still queued.
 
+## Descriptor retention after last process (AS-2a)
+
+Last-driver VMA quiescence counts AddrSpace process owners, excluding kernel
+cleanup pins. A pin cannot suppress MMIO reset before the driver's mappings
+are drained. The last owner retains a total reference while VMA teardown may
+sleep; subsequent private-service cleanup can retain the exact descriptor and
+independent anonymous buffers without retaining the process or its file VMAs.
+ZOMBIE/death-wake ordering is unchanged. [[sub-kernel-addrspace]] owns the split;
+ASYNC-SERVICE-SELF-REVIEW.md records native device and post-death refund tests.
+
 ## Provenance
 
 [[chg-2026-08-15-proc-lineage]] is the re-sweep after the LINEAGE arc: the
@@ -711,6 +731,14 @@ The handle sweep also resolves a PCI endpoint's retained function. It therefore
 quiesces DMA and revokes delivery even if both parent handle and register mappings
 were closed while an IRQ endpoint survived. Owner quiescence's terminal flag
 prevents concurrent ARM/COMPLETE from restoring delivery during teardown.
+
+## Terminal observers at death
+
+`proc_become_zombie_locked` retires terminal interaction bindings where the dying
+process is binder or observer and invalidates its controller nomination before
+publishing death. Wake references protect retired poll lists through the later
+wake; no Proc pointer is retained. The existing death, reparenting and wait
+semantics remain unchanged. See [[sub-kernel-pts]].
 
 ## The exit close releases the phenotype's socket cache (2026-09-29, NP-5)
 
@@ -800,3 +828,51 @@ and the device only its mapping claims, by the drain's)
 and `virtio.last_unref_quiesces_mapped_device` (a holder that saw a second
 reference skipped, then a bare last drop: the drain resets).
 
+(`vivarium.socktab_ready_release_paths`). Since 17:09Z (2026-10-19) each
+socket()-born row also holds a reference to its ctl Spoor, the identity its
+verb arms check ([[sub-kernel-vivarium]]); that is the fid the fd holds, and
+the same reset releases the row's reference, so the ctl fid closes with the fds
+rather than at reap.
+
+## AS-2b admission (October 4)
+
+Asynchronous admission snapshots never retain a Proc pointer. The table-locked
+ALIVE+stripes+exact-AddrSpace check refuses zombie/reaped creators and the old
+image after exec; only values escape. This prerequisite adds no death hook or
+retirement worker yet. The eventual scope latch must close admission before
+owner cleanup, and descriptor/buffer pins must outlive pending local borrows.
+
+## Private ring sharing and fork exclusion
+
+A private-ring guard is a descriptor pin, not a process owner. Last-owner death
+still drains VMAs; the guard's eventual local-retirement release can destroy the
+remaining descriptor without a second drain or a dead Proc pointer. Guard hooks
+for the private Loom consumer are pending; no new death sweep is active.
+
+## Private worker refund after reap
+
+The pending private owner uses ProcSqpollTicket, not a saved Proc pointer.
+Release consumes the ticket under lifecycle lock even after the creator has
+been reaped; only a still-present matching stripes identity has its count
+decremented. ZOMBIE retains a counter, exec retains that same process counter,
+and replacement descriptors are untouched. Actual worker retirement must precede
+release. This adds no active death/close hook yet; see [[sub-kernel-proc]].
+
+## 2026-10-07: flagged by co-tenancy, nothing owed (AS-R9)
+
+`kernel/proc.c` moved +6 lines since this dossier's date and `quaestor stale`
+flagged it, as it flags every owner of that file -- churn is measured per FILE,
+not per surface ([[chg-2026-08-15-stale-by-cotenancy]], which recorded the same
+disposition for this surface once before).
+
+The entire delta is ONE hunk: `handle_private_exec_latch(p)` plus its five-line
+comment inside `proc_exec_replace`. Checked by bounded token count against this
+dossier's own material rather than by eye (word-bounded: the first pass of the 08-15 sweep reported churn that did not exist because `sid` matched inside `ASID`):
+
+    proc_exec_replace        0 mentions in this dossier
+    handle_private_exec_latch / private_exec   0
+    close_on_exec                              0
+
+This dossier never names the exec-replace path at all, and the hunk touches no part of the death path -- not the ZOMBIE chokepoint, not the universal death-wake, not reaping. Nothing of its material moved. The fact is owed by [[sub-kernel-proc]], which owns
+`proc_exec_replace`, and it is recorded there. Dated current rather than left
+flagged, so the next session does not redo this check.

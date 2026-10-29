@@ -1,0 +1,11 @@
+--- control
++++ omit-retire-pool-free
+@@ -171,7 +171,7 @@
+             extinction("private Loom retained a service slot");
+     if (!loom_service_pools_empty(l->service_pools))
+         extinction("private Loom retained pool storage");
+-    kfree(l->service_pools);
++
+     kfree(l->service_slots);
+ 
+     // One settled drop rather than claim / drop / restore. The refund is decided

@@ -1,0 +1,29 @@
+PASS: domains, partitions, retained tickets, allocation rollback, in-flight admission, retained teardown, final free
+EXPECTED FAILURE combined-bulk-undercharge: srvconn_unreserve: corrupt admission count
+EXPECTED FAILURE bulk-unit-charge: bulk must cost four credits
+EXPECTED FAILURE bulk-return-one: bulk final free did not return four credits
+EXPECTED FAILURE local-domain-limit: local domain limit bypass
+EXPECTED FAILURE combined-domain-limit: session combined limit bypass
+EXPECTED FAILURE domain-retention: srv_domain_unref: charged domain
+EXPECTED FAILURE ignored-admission-refusal: in-flight or retained storage lost its reservation
+EXPECTED FAILURE missing-reservation: srvconn_unreserve: corrupt admission count
+EXPECTED FAILURE struct-rollback-leak: reservation leaked after rollback or destruction
+EXPECTED FAILURE ring-rollback-leak: reservation leaked after rollback or destruction
+EXPECTED FAILURE premature-release: in-flight or retained storage lost its reservation
+/tmp/srvconn-admission-l3cd_nh_/fixture.c: In function ‘srvconn_create_in’:
+/tmp/srvconn-admission-l3cd_nh_/fixture.c:168:59: error: unused parameter ‘server_principal’ [-Werror=unused-parameter]
+  168 |                                   u64 server_stripes, u32 server_principal,
+      |                                                       ~~~~^~~~~~~~~~~~~~~~
+cc1: all warnings being treated as errors
+Traceback (most recent call last):
+  File "/home/cora/corona-harness-d7d77ebed/tools/test-srvconn-admission.py", line 305, in <module>
+    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra",
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    "-Werror", "-Wno-unused-function", str(path / "fixture.c"),
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    "-o", str(path / "fixture")], check=True)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '/tmp/srvconn-admission-l3cd_nh_/fixture.c', '-o', '/tmp/srvconn-admission-l3cd_nh_/fixture']' returned non-zero exit status 1.

@@ -1,0 +1,36 @@
+
+running 9 tests
+test timer_polling_driver_uses_same_queue_and_no_allocation ... ok
+test timer_publication_during_arm_prevents_stale_sleep ... ok
+test timer_retiring_driver_still_owns_deadline ... ok
+test timer_future_cancel_waits_for_actual_terminal ... ok
+test timer_due_after_arm_retries_then_cancels ... ok
+test timer_queue_minimum_and_independent_fair_cursor ... ok
+test timer_wait_uses_earliest_and_expiry_preserves_storage ... FAILED
+test timer_outer_deadline_keeps_separate_policy ... FAILED
+test timer_zero_expiry_budgets_preserve_due_work ... ok
+
+failures:
+
+---- timer_wait_uses_earliest_and_expiry_preserves_storage stdout ----
+
+thread 'timer_wait_uses_earliest_and_expiry_preserves_storage' (22511134) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T093908Z/mutant-ignore-outer-deadline/test_timer_wait.rs:291:443:
+assertion `left == right` failed
+  left: None
+ right: Some(10)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- timer_outer_deadline_keeps_separate_policy stdout ----
+
+thread 'timer_outer_deadline_keeps_separate_policy' (22511129) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T093908Z/mutant-ignore-outer-deadline/test_timer_wait.rs:304:240:
+assertion `left == right` failed
+  left: Some(5)
+ right: Some(3)
+
+
+failures:
+    timer_outer_deadline_keeps_separate_policy
+    timer_wait_uses_earliest_and_expiry_preserves_storage
+
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.00s
+

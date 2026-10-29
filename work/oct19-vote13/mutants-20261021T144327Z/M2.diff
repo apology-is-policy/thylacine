@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 198118c9b..dc8496a54 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -16538,6 +16538,10 @@ static void syscall_native_switch(struct exception_context *ctx) {
+                                                     ctx->regs[1]);
+         return;
+ 
++    case 130:
++        ctx->regs[0] = (u64)(s64)-1;
++        return;
++
+     default:
+         // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;
+         // v1.0 returns -1 (ENOSYS) and lets userspace decide.

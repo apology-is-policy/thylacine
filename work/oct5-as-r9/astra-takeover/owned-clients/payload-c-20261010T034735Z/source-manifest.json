@@ -1,0 +1,9 @@
+{
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/payload_owner.c": "a7d812efb85669235ac71fccc5f1b8171e37ea36816e0df93fe983eecfb0c967",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/payload_owner.h": "fedc3a83673cf7d85ac3553d769e80dab10ed22ac6ddca18fe7d19b4474e2204",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/test_payload_owner.c": "f9e96d8d4a30b0c73e5bf913896fc80924565ed5a0a60160eb3dae2aebb64e5f",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/lease_ledger.c": "99bb71ec5c6f3584ff9fac74bb80b0ac252ca1078394fe745b4f7a0b6cfe9053",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/lease_ledger.h": "89ee516207a8529d6636cac9f3d89a121ce500a61f7c4413614465657380f3ec",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/run-payload-c.py": "dd0a012f5cee7585da8ad565a594b7e6bad57b75ec0f3496cfd14acf46a88603",
+  "/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include/thyla/loom_service.h": "7f04aa8ba5033fa895f4dcd3fde9c8fb8e95efe77ecf5999da275db4cd0f5db0"
+}

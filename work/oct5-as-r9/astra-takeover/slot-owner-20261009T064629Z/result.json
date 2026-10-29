@@ -1,0 +1,344 @@
+{
+  "source_head": "f02248334aa3a2de18e75f75482b2d1dbf3ab22c",
+  "source_hashes": {
+    "kernel/loom.c": "b733c3a9d2c81ca3e3ce865f1e1e3d94b52d64ea63a32c4e95daa8ee3ecab067",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/include/thylacine/loom_service_pool_table.h": "c2327245ad5493c5620581b4d957e33d015debe5628790735f54e638929ce78e",
+    "kernel/include/thylacine/loom_service_pool.h": "8f22047d00024268d5fbefbe0b65c450466aed8f905cfa205c60e4e11afceb85",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/include/thylacine/loom_service_nodes.h": "9cfafbb971b46ce2b992d7c331cd83b06a204b05eda96d4cc8fbd550865a9c81",
+    "kernel/include/thylacine/loom_service_targets.h": "3777d2f1a872046c2f9032853e6fdd28175c7c7fa8a6f87c5ee6413ea86285d3",
+    "kernel/loom_service_requests.c": "a924c923f4ac0e2ca4b7be930193917e10b05a36eb468ecff2fd6667415f165e",
+    "kernel/include/thylacine/loom_service_requests.h": "5449b34aecd4693d4479aff9da5a12ab7bf77535aaeacf2dc43e5891748a635a",
+    "work/oct5-as-r9/slot-owner-control.py": "910b99bd1d3ef3930099bd2ab621876055cc30442ccfe68affd1853d655851f8"
+  },
+  "results": [
+    {
+      "case": "control",
+      "mode": 0,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 1,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 2,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 3,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 4,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 5,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 6,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 7,
+      "rc": 12,
+      "expected": "private Loom retained active or invalid node",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 8,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 9,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 10,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 11,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 12,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 13,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 14,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 15,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 16,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 17,
+      "rc": 12,
+      "expected": "private Loom retained active or invalid node",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 18,
+      "rc": 12,
+      "expected": "private Loom retained unowned node",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 19,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 20,
+      "rc": 0,
+      "expected": "PASS refusal",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 21,
+      "rc": 0,
+      "expected": "PASS owner",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 22,
+      "rc": 12,
+      "expected": "private Loom retained admitted request",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "control",
+      "mode": 23,
+      "rc": 12,
+      "expected": "private Loom retained request payload",
+      "generated_sha256": "b3e9e199d8efa34574e79460cba521489c279d84a98f935cc05c6dbcc81a46de"
+    },
+    {
+      "case": "omit-slot-charge",
+      "mode": 0,
+      "rc": 11,
+      "expected": "slot and pool pages charged in metadata",
+      "generated_sha256": "fa62cf03fa943c7070f347552ab5c5451866f425e7eb436d8c9ab01edec264ee"
+    },
+    {
+      "case": "omit-target-charge",
+      "mode": 0,
+      "rc": 11,
+      "expected": "slot and pool pages charged in metadata",
+      "generated_sha256": "520bc2fc1e596ffe35cb87e4aa36b619456010618542b0cf8d82e4b1e282b593"
+    },
+    {
+      "case": "omit-target-unwind",
+      "mode": 4,
+      "rc": 11,
+      "expected": "rollback frees slot and pool pages",
+      "generated_sha256": "443a232b37b396442132f7c93d0f80e5390189ad5736f01cbe6e9a49641add73"
+    },
+    {
+      "case": "omit-target-free",
+      "mode": 0,
+      "rc": 11,
+      "expected": "retirement frees owner and tables",
+      "generated_sha256": "dd718b29e5251791dd9526e9a5a292792f8334d0e6b1fe13db634fc89539b892"
+    },
+    {
+      "case": "omit-pool-charge",
+      "mode": 0,
+      "rc": 11,
+      "expected": "slot and pool pages charged in metadata",
+      "generated_sha256": "78f82978f61269885a03a808d74ab177c7c4a1b321c304da64ae1bfe58b973ec"
+    },
+    {
+      "case": "omit-unwind-pool-free",
+      "mode": 4,
+      "rc": 11,
+      "expected": "rollback frees slot and pool pages",
+      "generated_sha256": "2214dedd67885a03e61cba985f964b33fd9b93f091f576bb661ea1b970a6e2eb"
+    },
+    {
+      "case": "omit-retire-pool-free",
+      "mode": 0,
+      "rc": 11,
+      "expected": "retirement frees owner and tables",
+      "generated_sha256": "1cc91da973ef6c99711a200aa21ba2ff1c4d1c0388e62201676601829c2fdc33"
+    },
+    {
+      "case": "omit-unwind-free",
+      "mode": 4,
+      "rc": 11,
+      "expected": "rollback frees slot and pool pages",
+      "generated_sha256": "dc1bca11243b1888ed0daf28678c096339a774f4f488119cc83a0e106fd45f14"
+    },
+    {
+      "case": "omit-unwind-refund",
+      "mode": 2,
+      "rc": 11,
+      "expected": "refusal restores accounting",
+      "generated_sha256": "2da32af60a1c0f2817778fa2b24a749493581031a07d75f919d877e2a0a15759"
+    },
+    {
+      "case": "omit-unwind-pin",
+      "mode": 2,
+      "rc": 11,
+      "expected": "refusal restores lifetime",
+      "generated_sha256": "d5a6182603b3d29b5f8babcb70c46df8e83ca91f3a86565bb026455dd1770105"
+    },
+    {
+      "case": "omit-retire-free",
+      "mode": 0,
+      "rc": 11,
+      "expected": "retirement frees owner and tables",
+      "generated_sha256": "f47dcf4a17c6c17d516fc63a9c9722a5c4881e9ca1b5ac8d034f8e9e8d59436f"
+    },
+    {
+      "case": "omit-close",
+      "mode": 0,
+      "rc": 11,
+      "expected": "close freezes ledger",
+      "generated_sha256": "989a5f03684c1d4f8e627ca4cc5b1fa892b9ad8408647c6e415affa58b55aef5"
+    },
+    {
+      "case": "parent-before-child",
+      "mode": 15,
+      "rc": 12,
+      "expected": "private Loom retained active or invalid node",
+      "generated_sha256": "7a9fe3f86ba1413613eff268627a796f82a173039b454485cbf3ef1b5bf2328c"
+    },
+    {
+      "case": "omit-node-cleanup",
+      "mode": 13,
+      "rc": 12,
+      "expected": "private Loom retained a service slot",
+      "generated_sha256": "5e005507c66ac064c3e7edc5445c989618a3e00b15eff8560cda097007f53884"
+    },
+    {
+      "case": "omit-node-charge",
+      "mode": 0,
+      "rc": 11,
+      "expected": "slot and pool pages charged in metadata",
+      "generated_sha256": "d67d39ee8a7606c12da0976966803fed849922cf9c0dfa00931d89da9159bbcc"
+    },
+    {
+      "case": "omit-node-unwind",
+      "mode": 4,
+      "rc": 11,
+      "expected": "rollback frees slot and pool pages",
+      "generated_sha256": "8bc6379287032f6d362aa4da3dea8a596c97a38e1469b909d76d4cde582a27ee"
+    },
+    {
+      "case": "omit-node-free",
+      "mode": 0,
+      "rc": 11,
+      "expected": "retirement frees owner and tables",
+      "generated_sha256": "14b4c94140cfde0c38c3db3a33396f344fb196de3345108b945bf0f30d8b62b7"
+    },
+    {
+      "case": "omit-node-orphan-guard",
+      "mode": 18,
+      "rc": 11,
+      "expected": "invalid node retirement returned",
+      "generated_sha256": "1e7ec4c917c6e0db2bc68d6d0a69bf7eb38c93005ac1dba2c091d04d6df24449"
+    },
+    {
+      "case": "omit-request-charge",
+      "mode": 0,
+      "rc": 11,
+      "expected": "slot and pool pages charged in metadata",
+      "generated_sha256": "ac2d923317543e8b44722c22d8b37a7b382f720f40e3710f8de1cfd60f31b9db"
+    },
+    {
+      "case": "omit-request-unwind",
+      "mode": 4,
+      "rc": 11,
+      "expected": "rollback frees slot and pool pages",
+      "generated_sha256": "f0d7467d5d6be3307893f5078ea3be08ac204feead85b98c233ae099f3ff1666"
+    },
+    {
+      "case": "omit-request-free",
+      "mode": 0,
+      "rc": 11,
+      "expected": "retirement frees owner and tables",
+      "generated_sha256": "94a71b94e025a815e1f638172302585f3e9d823cddeb4d036f124757ede7afce"
+    },
+    {
+      "case": "omit-request-cleanup",
+      "mode": 21,
+      "rc": 12,
+      "expected": "private Loom retained active or invalid node",
+      "generated_sha256": "31dfdfd4a6f1b1ab6a8b4eae4ab128297d1c8b23a676ef878340c3b5fd424fdc"
+    }
+  ],
+  "scope": "Extracted private constructor/close/destructor plus real slot and pool modules.\n\nHost ASan/UBSan with checked allocator, geometry, Loom layout, image and lock\ndoubles. Validates rollback/free/call ordering, not guest physical accounting,\nactual image races or protocol retirement. Requires Astra's Mac lease, 8 GiB.\n"
+}

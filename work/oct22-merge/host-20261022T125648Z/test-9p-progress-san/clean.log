@@ -1,0 +1,1 @@
+PASS AS-1 framing: every partial boundary, bounded steps, cancellation, EOF, malformed and coalesced frames

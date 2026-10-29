@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-09-23
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -57,7 +57,7 @@ void         pagemap_take(struct pagemap *pm, spin_lock_t *lock, size_t idx, str
 size_t       pagemap_take_next(struct pagemap *pm, spin_lock_t *lock, size_t from, size_t hi,
                                struct AddrSpace *as, struct page **out_pg, struct page **freed, u32 *nfreed);
                                                                       // the first resident slot in [from, hi), taken; or hi
-u64          pagemap_walk_steps(void);                                // node entries pagemap_take_next has visited since boot
+u64          pagemap_walk_steps(void);                                // node entries pagemap_take_next has visited since boot (tests build only)
 bool         pagemap_swap(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                           struct page *expect, struct page *replacement);
 int          pagemap_mirror(struct pagemap *dst, const struct pagemap *src, struct page **pool, u32 pool_n,

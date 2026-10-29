@@ -1,0 +1,4 @@
+mac   HELD by you for 2m, 2.0h left
+        why: Astra close lifecycle native verification
+pi    FREE
+disk: 11.5 GiB available at /Users/northkillpd/projects/thylacine-astra

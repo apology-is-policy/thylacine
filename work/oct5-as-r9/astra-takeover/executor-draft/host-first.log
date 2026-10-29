@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/control.py", line 164, in <module>
+    assert run.returncode==(11 if want else 0) and run.stdout==(want or 'PASS readiness control')+'\n' and not run.stderr,(tag,n,run.returncode,output,out)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('control', 9, 11, 'wait sweep retains both retired owners\n', PosixPath('/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/controls-20261009T204500Z'))

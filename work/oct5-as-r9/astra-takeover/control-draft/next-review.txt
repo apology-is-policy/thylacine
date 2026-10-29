@@ -1,0 +1,51 @@
+Astra next checkpoint preparation, October9; not installed or qualified.
+Wait for the close checkpoint's native result and clean source boundary before
+copying any implementation. Do not modify close-draft/install-manifest inputs
+while its continuation is active. This is a planning note, not a new approval.
+
+Approved references: ASYNC-SERVICE-LIFECYCLE sections4/5/7 and
+ASYNC-SERVICE-ABI Versioned register records. Numeric ABI already reserved:
+ABORT_SCOPE4, QUERY_SERVICE_SLOT5, REAP_SERVICE_SLOT6. Keep setup/dispatch disabled
+until the full active engine and clients qualify; first implement internal
+creator-authorized controls and exact snapshots, then dispatch as one final gate.
+
+Required review before query implementation:
+- Snapshot must outlive protocol collection: current nodes retain only state
+  and parent; abort reason/failure phase live in the protocol object and vanish
+  when its delivered terminal permits collection. Retain terminal diagnostics
+  in charged node metadata before owner destruction. An expanded internal node
+  can still fit its separately charged buddy page; verify physical rounding,
+  all zero/remove paths and existing metadata fixtures before changing it.
+- Snapshot reads exactly one incarnation under Ll, output untouched on refusal.
+  Scope=self for SCOPE, parent for FID, zero for TARGET. Input has only exact
+  size/version/object, no output fields/flags/reserved payload. Authorization
+  remains actual creator image/incarnation, not worker identity.
+- Count matching PREPARED/ACTIVE request obligations separately from retained
+  TERMINAL CQ obligations; do not infer from raw protocol/index counts. Document
+  whether delivered records awaiting collection count as active owners or only
+  storage, matching ABI wording. REAP requires no exact slot/child/request/index
+  pins and terminal publication, even if state already reads RETIRED.
+- Never read p9 progress cursors under Ll while another driver writes them outside
+  Ll. p9_transport_progress.bytes_sent is sticky but not an atomic public query.
+  Publish completed driver diagnostics under Ll, and report may-have-escaped
+  conservatively while a real non-aborting driver is in progress; do not invent
+  server rollback or imply local retirement refunds a server-retained endpoint.
+- ABORT of a RESERVED scope with an unindexed constructor must latch scope
+  admission closed so subsequent publication fails even before index adoption.
+  Marking RETIRED too early would bypass the constructing request/native owner.
+  Last constructor rollback must finish any pending metadata-only abort exactly
+  once and wake the appropriate engine. Full CQ cannot block the control.
+- Existing loom_engine_abort needs an indexed entry; existing connect_reap
+  assumes already RETIRED. A user-facing control must cover unused reservations,
+  expired admission, INSTALLING, already ABORTING/RETIRED, child-held parent,
+  target borrow and stale identity without narrowing these approved semantics.
+- Query failure after copyout has no side effects. Reap is a control with no
+  result payload; verify ordinary single-copy user input authority and lock
+  boundaries before final syscall integration. No partial new handler exposure.
+
+Required cases: stale incarnation/output untouched, noncreator image, malformed
+records, empty/RESERVED/INSTALLING/READY/ABORTING/RETIRED snapshots, full-CQ abort,
+immutable success plus later reason, borrow-held reap refusal, delivered terminal
+reap, child pins, unindexed constructor aborted then rollback, expired admission,
+repeated control idempotence, and retained native peer. Keep self-review and
+actual-C mutation controls separate from native/SMP qualification.

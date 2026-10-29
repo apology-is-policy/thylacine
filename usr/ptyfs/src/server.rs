@@ -82,6 +82,12 @@ const MAX_FIDS: usize = PTS_MAX * FIDS_PER_PTS + 16;
 /// kaua program run by another one more. The selftest binds this set.
 const FIDS_PER_PTS: usize = 7;
 
+/// The per-connection ceiling on parked reads and on parked writes, kept apart
+/// from the fid table so the table can grow without growing it. A raw protocol
+/// peer needs this server-side bound; the kernel client's own is its shared
+/// tag pool.
+const MAX_PENDING: usize = 80;
+
 /// Max live pts pairs. A bound, not headroom: an unbounded pts table is a DoS
 /// vector (#65 resource floor), so clone-minting fails (ENFILE) past this.
 const PTS_MAX: usize = 16;
@@ -1611,7 +1617,7 @@ impl Conn {
                 }
                 p9::ReadyAnswer::Refuse(ecode) => self.err(tag, ecode),
                 p9::ReadyAnswer::Defer { mask, len } => {
-                    if self.pending_reads.len() >= MAX_FIDS {
+                    if self.pending_reads.len() >= MAX_PENDING {
                         return self.err(tag, p9::E_PROTO);
                     }
                     self.pending_reads.push(PendingRead {
@@ -1653,7 +1659,7 @@ impl Conn {
             RecvOutcome::Data(k) => p9::build_rread(&mut self.out_buf, tag, &scratch[..k]),
             RecvOutcome::Eof => p9::build_rread(&mut self.out_buf, tag, &[]),
             RecvOutcome::WouldBlock => {
-                if self.pending_reads.len() >= MAX_FIDS {
+                if self.pending_reads.len() >= MAX_PENDING {
                     return self.err(tag, p9::E_PROTO);
                 }
                 self.pending_reads.push(PendingRead {
@@ -1751,13 +1757,13 @@ impl Conn {
             };
             if consumed == 0 {
                 // The binding bound is the SHARED kernel 9P tag pool, NOT this
-                // per-Conn MAX_FIDS: a parked write holds its tag until
+                // per-Conn MAX_PENDING: a parked write holds its tag until
                 // poll_writes replies, and every Proc shares ONE /dev/pts
                 // client. Since ARCH 21.11 an op waits for a tag rather than
                 // failing, and the op share (P9_OPS_MAX, 32767) takes that many
                 // parked threads to fill (F1 -- the parked-READ class).
-                // MAX_FIDS caps only THIS Conn's contribution.
-                if self.pending_writes.len() >= MAX_FIDS {
+                // MAX_PENDING caps only THIS Conn's contribution.
+                if self.pending_writes.len() >= MAX_PENDING {
                     return self.err(tag, p9::E_PROTO);
                 }
                 self.pending_writes.push(PendingWrite {
@@ -2022,7 +2028,104 @@ pub fn post_srv_ptyfs() -> Result<i64, ()> {
 // =============================================================================
 
 /// Returns Ok(()) or a stage name on failure.
+/// Exercise the actual binding/refcount table at the ordinary terminal shape.
+/// No kernel registrations: these local pairs have pts_id == 0, so teardown
+/// cannot emit real terminal signals or unregister someone else's terminal.
+fn selftest_fid_capacity() -> Result<(), &'static str> {
+    let mut ptys = Ptys::new();
+    let mut conn = Conn::new(-1);
+    for _ in 0..2 {
+        // Two retained roots are present in the real shared mount witness;
+        // another fourteen entries cover transient walks and temporary opens.
+        for fid in 0..16 {
+            if !conn.fid_set(&mut ptys, fid, P_ROOT) {
+                return Err("fid-headroom");
+            }
+        }
+        let mut fid = 16;
+        // The FIDS_PER_PTS set: the shell's ready file and its kaua program's.
+        let tile = [FK_MASTER, FK_SLAVE, FK_SLAVE, FK_SLAVE, FK_CTL, FK_READY, FK_READY];
+        if tile.len() != FIDS_PER_PTS {
+            return Err("fid-tile-shape");
+        }
+        for _ in 0..PTS_MAX {
+            let n = ptys.mint().ok_or("fid-pair-mint")? as u32;
+            for kind in tile {
+                if !conn.fid_set(&mut ptys, fid, make_pts(n, kind)) {
+                    return Err("fid-terminal-capacity");
+                }
+                fid += 1;
+            }
+        }
+        if ptys.mint().is_some() {
+            return Err("fid-pair-bound");
+        }
+        if conn.fid_set(&mut ptys, fid, P_ROOT) {
+            return Err("fid-table-unbounded");
+        }
+        // A refused bind must not damage retained state. Reclaim one entry,
+        // reuse it, then drop the whole connection and prove all pairs freed.
+        if !conn.fid_clunk(&mut ptys, 0) || !conn.fid_set(&mut ptys, fid, P_ROOT) {
+            return Err("fid-slot-reuse");
+        }
+        conn.teardown(&mut ptys);
+        if ptys.slots.iter().any(Option::is_some) || conn.fids.iter().any(Option::is_some) {
+            return Err("fid-teardown-reclaim");
+        }
+    }
+    Ok(())
+}
+
+/// Drive the real three parking arms through their historic eighty-operation
+/// ceiling. Enlarging the fid table must not enlarge retained payload queues.
+fn selftest_pending_capacity() -> Result<(), &'static str> {
+    for (kind, write) in [(FK_SLAVE, false), (FK_READY, false), (FK_SLAVE, true)] {
+        let mut ptys = Ptys::new();
+        let n = ptys.mint().ok_or("pending-mint")? as u32;
+        ptys.open_inc(n, true);
+        ptys.open_inc(n, false);
+        ptys.set_tio(n, 0);
+        let mut conn = Conn::new(-1);
+        if !conn.fid_set(&mut ptys, 1, make_pts(n, kind)) {
+            return Err("pending-fid");
+        }
+        let i = conn.fid_find(1).ok_or("pending-find")?;
+        conn.fids[i].as_mut().unwrap().opened = true;
+        if write && ptys.slave_write(n, &alloc::vec![b'x'; RING_CAP]) != RING_CAP {
+            return Err("pending-fill");
+        }
+        // Actual Tread/Twrite payload (the handlers parse the complete frame).
+        let mut frame = alloc::vec![0u8; if write { 24 } else { 23 }];
+        let frame_len = frame.len() as u32;
+        frame[0..4].copy_from_slice(&frame_len.to_le_bytes());
+        frame[4] = if write { p9::P9_TWRITE } else { p9::P9_TREAD };
+        frame[7..11].copy_from_slice(&1u32.to_le_bytes());
+        if kind == FK_READY { frame[11..19].copy_from_slice(&(POLLIN as u64).to_le_bytes()); }
+        frame[19..23].copy_from_slice(&(if kind == FK_READY { 4u32 } else { 1u32 }).to_le_bytes());
+        if write { frame[23] = b'y'; }
+        for tag in 0..=80 {
+            frame[5..7].copy_from_slice(&(tag as u16).to_le_bytes());
+            let hdr = p9::peek_header(&frame).map_err(|_| "pending-header")?;
+            match (tag < 80, conn.dispatch(&mut ptys, &frame, hdr)) {
+                (true, Disp::Deferred) => {}
+                (false, Disp::Reply(n)) if n > 0 && conn.out_buf[4] == p9::P9_RLERROR => {}
+                (true, _) => return Err("pending-early-refusal"),
+                (false, _) => return Err("pending-ceiling-expanded"),
+            }
+        }
+        let held = if write { conn.pending_writes.len() } else { conn.pending_reads.len() };
+        if held != 80 { return Err("pending-count"); }
+        conn.teardown(&mut ptys);
+        if !conn.pending_reads.is_empty() || !conn.pending_writes.is_empty() || ptys.live(n) {
+            return Err("pending-teardown");
+        }
+    }
+    Ok(())
+}
+
 pub fn selftest() -> Result<(), &'static str> {
+    selftest_fid_capacity()?;
+    selftest_pending_capacity()?;
     let mut ptys = Ptys::new();
     let n = ptys.mint().ok_or("mint")? as u32;
     // Simulate both ends open (a real pts opens the master via clone + the slave

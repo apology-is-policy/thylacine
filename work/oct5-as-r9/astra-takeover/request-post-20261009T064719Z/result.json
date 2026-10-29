@@ -1,0 +1,56 @@
+{
+  "scope": "Actual terminal-post C with real request ledger; checked sequential CQ/lock doubles.\nNative owner fixture separately tests actual allocation and ring geometry.\n",
+  "source_head": "f02248334aa3a2de18e75f75482b2d1dbf3ab22c",
+  "hashes": {
+    "kernel/loom.c": "b733c3a9d2c81ca3e3ce865f1e1e3d94b52d64ea63a32c4e95daa8ee3ecab067",
+    "kernel/include/thylacine/loom.h": "3b8f3930ca2ec1630bf0f781a12f3c6d68c615a0b334d76f61c052df389ba22a",
+    "kernel/loom_service_requests.c": "a924c923f4ac0e2ca4b7be930193917e10b05a36eb468ecff2fd6667415f165e",
+    "kernel/include/thylacine/loom_service_requests.h": "5449b34aecd4693d4479aff9da5a12ab7bf77535aaeacf2dc43e5891748a635a",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "work/oct5-as-r9/request-post-control.py": "0e8cdb4a45ac7f5027ec028330424ab7bc2f5689eee208c79deb46ba48f5a527"
+  },
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS actual request terminal post",
+      "generated_sha256": "8b9c67e3905760f1861d38574690157a2823d493688180cdbeb97738901c1d8e"
+    },
+    {
+      "case": "overwrite-full",
+      "rc": 11,
+      "expected": "full CQ leaves terminal and output unchanged",
+      "generated_sha256": "d88a9b28c9a86e0dbe1049e5b1726c81b2ca902923bf2c791fbcce34dc76b394"
+    },
+    {
+      "case": "shared-tail",
+      "rc": 11,
+      "expected": "full CQ leaves terminal and output unchanged",
+      "generated_sha256": "cb96eee866ea06b75b2d5112d3a83658475de5172d9bab473e4c7bfb6a675562"
+    },
+    {
+      "case": "omit-deliver",
+      "rc": 11,
+      "expected": "terminal delivered exactly once",
+      "generated_sha256": "c79fb5bcf60c66c22b55cc7deaf8557e8cc67f247323a769541eeb0d8172c9aa"
+    },
+    {
+      "case": "omit-receipt",
+      "rc": 11,
+      "expected": "exact scalar terminal clears old receipt",
+      "generated_sha256": "9281b3c1f1bba1237363856ff0c45e494b04570c41f9baa0ea7047d6de68ea68"
+    },
+    {
+      "case": "close-reject",
+      "rc": 11,
+      "expected": "prior committed terminal posts after close using private tail",
+      "generated_sha256": "e64d805b68a1d96129626b3b44302c7b61fa3fde3343d7c5dd4724ab62ce7094"
+    },
+    {
+      "case": "wake-under-lock",
+      "rc": 11,
+      "expected": "wake outside owner lock",
+      "generated_sha256": "c4b5a38a0a8d43a703aaecfd85a921385e74b9bdd01c2aefe5e6093c2f554e99"
+    }
+  ]
+}

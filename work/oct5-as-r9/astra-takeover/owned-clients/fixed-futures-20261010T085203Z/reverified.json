@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "sources": 9,
+  "commands": 21,
+  "raw_logs_verified": true,
+  "source_and_diff_verified": true,
+  "log_sha256": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "7de48fdee5cd771b0289aead03761cc49d6bb394a69caf421e6be9ebd8a86782",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "e7f73dfe7bfb40204c2b06484903059d0a2b6851bf296c712d3a7f86640daa00",
+    "no-clone-future-build": "8d96419a19ed534aadbaf06c4a0ae03ee871bb4d2900229b281a7765e8bdef15",
+    "no-send-future-build": "db0a8fac1f776dd833284d11fc8b5eea50f19e956e57fac1e89dfbffb27cb5af",
+    "valid-future-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "valid-future-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-wakeup-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-wakeup-run": "31e819b252b91118ae474ba0c66468edf654e4c3b139450150479b5e586d6a40",
+    "missing-unregister-build": "23b456d4b9459c11e660dfb3840df23af57017cc546b26aac7140ef08624c43c",
+    "missing-unregister-run": "9525f93a154698f67e8ddb8ac603a4b6ae443515049140f18d087da47ecaf57f",
+    "stale-waker-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stale-waker-run": "428d1daac6d45a30d196a0a4324c169cb5aa857bc98f264fa90ced41c7d90407",
+    "callback-under-borrow-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "callback-under-borrow-run": "e5bc413bfd15c00a6618e19e807835ac26aaa2f7cfc81e02ac43271b811ecdc2",
+    "clone-after-check-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "clone-after-check-run": "2923fbb8b8f16669d37327c4dfd3582dfcd4b580d2998083aa01c8ae19a43b95",
+    "preparation-slot-leak-build": "0d9efc919ccf6cbfb64918e7941408d7abb1341c7bd124debebba2c487bee58a",
+    "preparation-slot-leak-run": "2cca02f725dc52498a3191f13bed432be911f19b002299e27d8511478fae79f9"
+  }
+}

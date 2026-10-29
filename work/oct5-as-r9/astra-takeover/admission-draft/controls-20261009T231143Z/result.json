@@ -1,0 +1,227 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/admission-draft/kernel/loom_service_rpc.c": "f90c53bc0bc2a42c365eac7c1810a46f8b1e0e49344ba7f17174b6f8b2e60163",
+    "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_rpc.h": "71791b4b5f13312b4c1875b571b840c4e759f06d3b83196aba51957d3c88e757",
+    "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_operation.h": "eb226d5000d6d038b4f2163fa1ec4fa2831e8ea4477c993c12d2958c81a9d5d5",
+    "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/admission-draft/fixture.c": "58a64cba0c1cfd34b488571869fa06dc419d931a35cc79aec027a36ee937c280",
+    "work/oct5-as-r9/astra-takeover/admission-draft/run-controls.py": "d24ed2b6f6d5191a0d07755a9d28594df155b3fd9ded7ea70254067b0be787bc",
+    "work/oct5-as-r9/astra-takeover/admission-draft/kernel/loom_service_admission.c": "1660d2cc6666adf2cc1fb2bab139b257a8a1bf61691aec085bb2694a39be0e7d",
+    "work/oct5-as-r9/astra-takeover/admission-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/include/thylacine/loom_service_wire.h": "c3d55e55fd8f61f00cadd7343fc310ce0adef99377ef7e7e7f973b28f1e7a4f3",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/include/thylacine/loom_service_program.h": "85a744f3c29f7391ecb16303cee55861ee35ae54fe28a945c9c887e93262e969",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "kernel/include/thylacine/9p_client.h": "0eced1c09aacd120201d689b78e03bd6f05381dc28b102f3d361a0fcbaf43c35",
+    "kernel/include/thylacine/9p_session.h": "e5e218787c4a4d25986a664eafe9ba59c6e6093de0317ce934db6b24fbdab402",
+    "kernel/include/thylacine/9p_wire.h": "03729e7a047ae83fb63bd9e3805f43f9ed263f4e517e7c76c9840b3b4f37e3ff",
+    "kernel/include/thylacine/9p_transport.h": "e378b16a654450977085ff1923eaba37c66dd96c6af0ba2680d80ffd3c098756",
+    "kernel/include/thylacine/loom_service_reply.h": "46da857bd6dacdd0576ba3f01c2f0c55bc6cbacc56ade8da1f7c7ffbd4fd2465",
+    "kernel/include/thylacine/proc.h": "37cbad04d411160469a2c910a17e131bc025cc784e7aae8baf4c53103219f3ec",
+    "kernel/include/thylacine/perm.h": "55565ef5194458234fdeb081813d39251ad7c0650894daa9395daf817db94670",
+    "kernel/include/thylacine/caps.h": "932af679d5d137e129f647d988af662fae67d0475ee240027c8e361c33bcf478"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "aa2b452e5c3d74dedb67ccce804c2201dcee636de5dde529980272b84ebe1c2d",
+      "binary_sha256": "664f410f7d9cfbc744d29e4b5b4fcfae8e433083280f42dcf71718b6f86daf88"
+    },
+    {
+      "case": "submit-once",
+      "expected": "one submission per attempt",
+      "rc": 1,
+      "source_sha256": "4e4c5ea9784b6f7ad405dfac65e2e003d54440051f8604e7a8a43abb07e8bef7",
+      "binary_sha256": "442b30c35cce0bd013137efd0ab0aa217b07ac9b16eeb63a4616622e8f6ffb04"
+    },
+    {
+      "case": "advance-once",
+      "expected": "one advance per callback",
+      "rc": 1,
+      "source_sha256": "07524732b7f9a55f4f9dc4d06b95ea9fe319b98e54d6705827e66fb05361c094",
+      "binary_sha256": "19b05ea73099ed3a8e9ab03ca30e81212c0133477d43aa90e66ff66c78f2bf6c"
+    },
+    {
+      "case": "advance-early",
+      "expected": "no advance before submission",
+      "rc": 1,
+      "source_sha256": "8e7c4d4a14be249890b4b2d16685bb86431ba8115d6fe8a709cf7601cf8bb93e",
+      "binary_sha256": "eaf1e12990f155dea6d47d4bcfdbb09b6d6fee461924d37a7d35329cbca983a5"
+    },
+    {
+      "case": "advance-sender",
+      "expected": "sender blocks advance and settlement",
+      "rc": 1,
+      "source_sha256": "27ecb0cd29fd8000e8034e611c334c7c48e7b2e2026faf1f4394c644cd91a431",
+      "binary_sha256": "86b193e60702ead8eeeb2359650bf263bdd09d617819a7bd95c3c90aab619b83"
+    },
+    {
+      "case": "fallback",
+      "expected": "invalid client refusal captured locally",
+      "rc": 1,
+      "source_sha256": "248fded11a7efb5d07fa8b352ab1aff4b60477c0c0596ca356132978e257a117",
+      "binary_sha256": "f18a21e9686ba4c87d0b0385fe39432b029cee7bd0cd2dab56be079bfdc116a9"
+    },
+    {
+      "case": "double-capture",
+      "expected": "synchronous refusal captured once",
+      "rc": 1,
+      "source_sha256": "c1d6160ebf49a0b18096d857968612f2ba1d2f26700770f08877882d98923fb6",
+      "binary_sha256": "b428d401ddb6ce36744089994519704e2024744d3d7ac6db59bace234b736e4f"
+    },
+    {
+      "case": "terminal-retry",
+      "expected": "terminal program never requeues",
+      "rc": 1,
+      "source_sha256": "0dfb887338ea5beaedc95de2afd0292b1fb9ec0ca3e282f63a2aeeefd0055274",
+      "binary_sha256": "f2d5a3c750785f30be1ed13428ffe3ff425ba0673d6670c46f50c4f677567943"
+    },
+    {
+      "case": "unadvanced-retry",
+      "expected": "no unadvanced requeue",
+      "rc": 1,
+      "source_sha256": "a7cc7fd16c8f3be0f53f4b40d7cfea47a3f98ba33d04e6ec1ad3986d8d888940",
+      "binary_sha256": "92610ea603a5a7edfe42e2d47f0eb6d087fe9aaedb9ba27c718d1bbb52f1c3a3"
+    },
+    {
+      "case": "retry-expiry",
+      "expected": "deadline bars next stage",
+      "rc": 1,
+      "source_sha256": "7244e8916604395a522037638130a0f389d6074a2f5eec3f779efb7c9e61567d",
+      "binary_sha256": "45c521276b1afdd54f860dadf5b1e73784bebb998c58f170630d2d9780fce0a5"
+    },
+    {
+      "case": "payload",
+      "expected": "builder and capture share retained payload",
+      "rc": 1,
+      "source_sha256": "fbe55052a3acfd24cc55b50b80bf99e6ba1000893c023f8743d0260fb0cc8a3b",
+      "binary_sha256": "5aca9c5094cb19847383566b74e9c52c5758952baa86469e4f528794023f4a54"
+    },
+    {
+      "case": "success-program",
+      "expected": "denied program cannot publish success",
+      "rc": 1,
+      "source_sha256": "561c13e3ee9240e3b8a1d2b6a621ad8594738c3de77bbc325e717bc12eac0c16",
+      "binary_sha256": "992edefef543dc87c5f3c0d821220bded7ce03502f7666c732ac20e70a1fa4f5"
+    },
+    {
+      "case": "success-advance",
+      "expected": "stat cannot bypass program advance",
+      "rc": 1,
+      "source_sha256": "e10871628b88442492a9490e141aef1412e245c7eb4efd426b90a9b1a2db6490",
+      "binary_sha256": "91c6e2002c3ea5b324c966b95331a0ca3c8cffe77763c1a4b59a703ca7606510"
+    },
+    {
+      "case": "reset-attempt",
+      "expected": "new attempt resets consumed edges",
+      "rc": 1,
+      "source_sha256": "5df9c3930fa775ddd3c690b9800e8a0c5e1e89dc69ad7d4c975466d96d67b3fa",
+      "binary_sha256": "9ba6908a50878125dc948f09e19e59fabadbd2d3371965523f26ca288226e5d1"
+    },
+    {
+      "case": "duplicate-callback",
+      "expected": "duplicate callback poisons scope",
+      "rc": 1,
+      "source_sha256": "379245dc0263cbf4066de9c7c90f1924949dd550c9535ba1b01ea70ad2614dbd",
+      "binary_sha256": "a2cdc7841534e891cfab00d6bc64f0fd882eebe0050c34710da2042438180d16"
+    },
+    {
+      "case": "early-settle",
+      "expected": "no early settlement",
+      "rc": 1,
+      "source_sha256": "f62dead983a7dc671042da5bb7ceac75d101d87394fdefc55fb2fefe41d02b1d",
+      "binary_sha256": "68f60d02789c559fa4da1e0f3ce18ae12fc1e94c5d105f4e2b51d71c88ca1061"
+    },
+    {
+      "case": "finish-expiry",
+      "expected": "deadline beats success",
+      "rc": 1,
+      "source_sha256": "936c591697281ca27ae85ba05fa25ae5ed0c42c51b8457d508203c3c042a48f7",
+      "binary_sha256": "6bbadb823de10f8557b3bd14415e9a06c7b07c8d5ff09263b57053d47889ecb6"
+    },
+    {
+      "case": "abort-latch",
+      "expected": "poison cannot finish without scope abort",
+      "rc": 1,
+      "source_sha256": "a9c3541ce8b59568ce7d780e3b34ecaed2d87ea0932ae8e60f23c0c2f6ece5d9",
+      "binary_sha256": "426bcb2947938536e35f94b1246cda57dbfc92a2a0c678c7244b4f488168ec0f"
+    },
+    {
+      "case": "source-incarnation",
+      "expected": "full source incarnation and untouched output",
+      "rc": 1,
+      "source_sha256": "6265efe4cb66b5e3a0e8473ec4863c15619cebc033be00d8c2d7d2a06632a9f1",
+      "binary_sha256": "4e1bd07a018fc4ce2ba66ef5f2ddb4635f245c85aa5dc00d775bc2c3801e3db1"
+    },
+    {
+      "case": "write-access",
+      "expected": "write needs opened access",
+      "rc": 1,
+      "source_sha256": "bdf3d40e724c3047a06a1080f4b4cd9ee2467b0f6b676e83785708e31c2a75b1",
+      "binary_sha256": "7be1a73bdf744ad449184d57b5832df3d74f4f610e450f3a1bc53185061c60db"
+    },
+    {
+      "case": "failed-destination",
+      "expected": "failed destination returns source borrow",
+      "rc": 1,
+      "source_sha256": "4c5268b72db2a6796e132577d5ddd350782686ed7873eaa9f493ce034d10caaa",
+      "binary_sha256": "372611ff0f6565eed9cfb095038c10d5b1868aa82e5e9265f1126723d3646cd9"
+    },
+    {
+      "case": "source-put",
+      "expected": "read commits and returns source hold",
+      "rc": 1,
+      "source_sha256": "baef7abfbe34118f2322e9086af234e5ca6ec55386d7f7d7ac6bac1621282951",
+      "binary_sha256": "6402ed2a340c63d43a719de9030b52360017d183073bda4115c03ea51380db67"
+    },
+    {
+      "case": "walk-slot-result",
+      "expected": "walk publication and terminal share identity",
+      "rc": 1,
+      "source_sha256": "829f68f7adb52ebb867a79474c9ab7126aec91a3f331ae73c19f284cbef28929",
+      "binary_sha256": "de2396ee1df465d79beac4111a3155bd02bbd7c2e8503b48d00c199fc80520e6"
+    },
+    {
+      "case": "drop-claim",
+      "expected": "walk publication and terminal share identity",
+      "rc": 1,
+      "source_sha256": "3459ead892bacfcda31d5008f43a41e010526ae77a54dc453c60ef2427d5e31f",
+      "binary_sha256": "40c4fc87a7bc93d5e5e5c7739f074b5fab114e0c423be4a422329d271a5d3739"
+    },
+    {
+      "case": "clunk-drain",
+      "expected": "clunk waits for earlier borrowers",
+      "rc": 1,
+      "source_sha256": "5c986b4e10cc95f9976fa616bb516214c083885664ea6d47f482a4f1befc621c",
+      "binary_sha256": "da3a46d3b01b513c399d4112f1c5d3ca32704efc4fb2c03a729bdbb817048546"
+    },
+    {
+      "case": "clunk-quiescence",
+      "expected": "clunk error requires actual abort proof",
+      "rc": 1,
+      "source_sha256": "ec0855571eee22fa62fbdb479a6bd3e03884e9226ec1b87bbb645495b67e1aed",
+      "binary_sha256": "f5fcf438527adf59ddcb01896bc2fcd4bcd83857cb0f7c9a5f13287bfb150f9d"
+    },
+    {
+      "case": "clunk-latch",
+      "expected": "clunk abort proof also needs latch",
+      "rc": 1,
+      "source_sha256": "aebcbccf9d949a6df3c288ab4c9fbb596f97f05deee4b3f620e0c4b96b5a7559",
+      "binary_sha256": "58a0b29328368150db3bda92aa8c3d2e81f5f5d4d131e58bf1ded9253d64f5ea"
+    }
+  ],
+  "limits": "Actual combined RPC/program/wire/perm/request/node/slot/session/codec/transport/capture, real header layouts and extracted real submit. Host minimal Loom and sequential lock/wake/death stand-ins, direct dispatch, already-attached sessions. Actual FID claims/admission/publication tested with explicit synthetic successful program outcomes. Canonical buffer ownership, frontend, real driver/abort/close/concurrency remain unqualified."
+}

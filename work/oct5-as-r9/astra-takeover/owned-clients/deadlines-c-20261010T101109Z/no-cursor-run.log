@@ -1,0 +1,1 @@
+Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, file test_deadlines.c, line 41.

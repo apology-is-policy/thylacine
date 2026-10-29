@@ -1,0 +1,11 @@
+--- control.c
++++ pending-rearm.c
+@@ -668,7 +668,7 @@
+ 
+ int loom_rpc_rearm_read_locked(struct loom_service_operation *o,u64 now) {
+     if(!o || !o->pool_stream || !o->multishot || o->pool_busy ||
+-       o->pool_pending || o->pool_terminal || o->program.operation!=P9_TREAD ||
++       o->pool_terminal || o->program.operation!=P9_TREAD ||
+        o->program.result<=0)return -T_E_BUSY;
+     int rc=loom_rpc_check_finish_locked(o,o->program.result,now);if(rc)return rc;
+     // One continuous request/source borrow across shots. Offset and identity

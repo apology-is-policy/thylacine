@@ -1,0 +1,11 @@
+--- control.c
++++ quiescence.c
+@@ -1622,7 +1622,7 @@
+     switch(s.action) {
+     case LREADY_QUIESCE:
+         rc=action_abort(p,s.reason);if(rc<0)return rc;
+-        rc=loom_retirement_quiesce(p);return rc?rc:1;
++        return 1;
+     case LREADY_CANCEL:return action_cancel(o,s.reason);
+     case LREADY_SUBMIT:
+         spin_lock(&l->lock);

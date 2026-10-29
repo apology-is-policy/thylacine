@@ -1,0 +1,57 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:213:6: warning: no previous prototype for function 'test_loom_service_pool_table' [-Wmissing-prototypes]
+  213 | void test_loom_service_pool_table(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:213:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  213 | void test_loom_service_pool_table(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:355:6: warning: no previous prototype for function 'test_loom_private_slot_owner' [-Wmissing-prototypes]
+  355 | void test_loom_private_slot_owner(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:355:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  355 | void test_loom_private_slot_owner(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:668:6: warning: no previous prototype for function 'test_loom_private_fixed' [-Wmissing-prototypes]
+  668 | void test_loom_private_fixed(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:668:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  668 | void test_loom_private_fixed(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:673:6: warning: no previous prototype for function 'test_loom_private_pool_pins' [-Wmissing-prototypes]
+  673 | void test_loom_private_pool_pins(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:673:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  673 | void test_loom_private_pool_pins(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:678:6: warning: no previous prototype for function 'test_loom_private_buffers' [-Wmissing-prototypes]
+  678 | void test_loom_private_buffers(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:678:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  678 | void test_loom_private_buffers(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:683:6: warning: no previous prototype for function 'test_loom_service_slots' [-Wmissing-prototypes]
+  683 | void test_loom_service_slots(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:683:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  683 | void test_loom_service_slots(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:691:6: warning: no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]
+  691 | void test_loom_private_owner_lifecycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:691:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  691 | void test_loom_private_owner_lifecycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:1669:6: warning: no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]
+ 1669 | void test_loom_sqpoll_charges_thread_budget(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/kernel/test/test_loom.c:1669:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1669 | void test_loom_sqpoll_charges_thread_budget(void) {
+      | ^
+      | static 
+8 warnings generated.

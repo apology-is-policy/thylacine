@@ -1,0 +1,11 @@
+--- control
++++ omit-stale
+@@ -73,7 +73,7 @@
+         return NULL;
+     struct loom_service_slot *s = &l->service_slots->slots[ref.slot];
+     struct SrvServiceTarget *t = &l->service_targets->targets[ref.slot];
+-    return s->incarnation == ref.incarnation && s->kind == LOOM_SERVICE_TARGET &&
++    return s->kind == LOOM_SERVICE_TARGET &&
+            s->phase == phase && t->view ? t : NULL;
+ }
+ int loom_private_target_prepare(struct Loom *l, struct Proc *p,

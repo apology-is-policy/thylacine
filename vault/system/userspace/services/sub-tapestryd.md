@@ -3,20 +3,115 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [usr/tapestryd/src/storage.rs, usr/kaua-term-probe/src/storage.rs, tools/interactive/tapestry-storage.exp, usr/kaua-term-probe/src/seat_control.rs, usr/kaua-term-probe/src/admission.rs, tools/interactive/interaction-seat.exp, usr/tapestryd/src/seat_coordinator.rs, usr/tapestryd/src/interaction.rs, usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
-validated-by: [spec-tapestry-present, prose, gate-smp]
+validated-by: [spec-tapestry-storage, spec-tapestry-present, prose, gate-smp]
 locks: []
 hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-04
 ---
+## Cooperative hidden storage (October 4)
+
+TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and
+the five-row50boot SMP/UBSan matrix pass.
+Owned content opt-in, TEV_STORAGE13 and exact visibility tokens preserve the
+semantic surface while retiring hidden pixels. Fresh pixel generations bind
+weave/present fids; full unheld repaint precedes publication. Client mapping,
+Tapestry generation, backend import and scanout each retain their own lifetime
+obligation. There is no quota increase or forced reclaim. Legacy clients keep
+their prior lifecycle. The library exposes open_storage_claim_on, handle_storage,
+is_drawable and is_ready; the renderer must quiesce pixel borrows before handling
+storage, and withhold blind input until a successful repaint.
+
+[[spec-tapestry-storage]]:287states/7namedmutants; existing present model6clean/
+10namedmutants.122Tapestry+23library tests;11actual-source mutations. Native
+stale offer/fid, mapping pin/nonalias, first-full-frame, abort/retry and legacy
+checks pass. Actual mapping refusal after22retained generations recovers after
+release without surface destruction. Full-width16PTY/14controller physicalF10
+passes; hidden output survives reveal and resize. The matrix has50individualPASS outcomes and zero in every failure class.
+Its boot coverage does not qualify graphical workloads, Pi or minimum displays;
+real Halcyon failed-reveal capture and application activation remain open. Evidence and limitations:
+docs/HALCYON-INTERACTION-STATUS.md, work/oct4-hidden-storage/self-review.md.
+
+## Ordered ownership journal
+
+A fresh live kernel peer matching the declared session may select HIO1 on one
+unused ctl fid. The normal compositor owner orders terminal snapshots, focus
+loss, retirement, reset and HIA decisions in one bounded 64-record journal per
+connection. At most one read parks on that fid. Clunk/reset/disconnect removes
+it; flush cancels the pending tag. Overflow poisons all unread history and clears
+that connection's published contexts. Exact HIA retries use the existing cached
+decision and never repeat kernel ACK/CHECK. Kernel generation zero is the initial
+normal seat, and valid successful receipts preserve it. Coalesced TEV notices
+remain a drawing mechanism. This adds no kernel authority or clipboard endpoint.
+
+## Clipboard cancellation progress boundary
+
+A guarded independent service thread owns `seat_coordinator` and the reserved
+`/srv/tapestry-interaction` route. Its Lictor connection is separate from normal
+GPU RPCs. The fixed eight-member table binds an HSR reservation on the declared
+renderer connection to a fresh kernel-stripes-matched HSC physical lane. At
+most two unbound lanes and ten total connections exist, each with four fids and
+4 KiB input/output. Unknown peers are refused before protocol use.
+
+A frozen generation/revision requires exact cancellation from every potentially
+active member. Raw EOF or normal declaration loss does not discharge a live
+obligation; a retained FD supports fresh kernel death proof. Orderly Retire is
+explicit. Exact retries cache decisions, Tflush preserves request history,
+identity counters never wrap, and State waits at most 250ms. The short table
+lock is never held across 9P/GPU I/O, allocation or joins. The 10ms coordinator
+loop may send Lictor opcode 66 only after the aggregate is ready; physical keys
+and hardware quiescence remain separate gates. A posted coordinator failure
+ends Tapestry before any console write that might park during EXCLUSIVE.
+
+The test-only one-shot present control forces a real ordinary GPU query to park
+during QUIESCING. Native evidence proves cancellation opens trusted input while
+that RPC and the application present remain pending, then both resume normally.
+The complete kernel-memory/idle-cost ledger and application clipboard endpoint
+remain outstanding; see HALCYON-INTERACTION-STATUS.
+
+## Terminal admission (October 1)
+
+`interaction.rs` implements HIA1 on the declared renderer connection. Binding
+retains the exact leaf/surface incarnation and kernel observer watch, checking
+the expected sealed child PID. Publish clears old context before kernel ACK;
+Check requires matching scope, fresh kernel ownership, actual focus and normal
+seat. Watches precede connection requests in the poll pass; newly accepted
+connections have no result in that pass. Surface reuse, watch retirement and
+SAK invalidate contexts. Each request resamples the seat to catch transitions
+since the loop's sample. Connection and surface-incarnation IDs stop at exhaustion; layout epochs
+saturate and saturated admission is refused. Each ctl caches one exact HIA1 request/decision (including errno). Exact retries
+return that result without a second operation; only a higher request ID may
+replace it. Old or altered IDs are refused. The cached receipt remains immutable
+until replacement, and a HIA1 ctl refuses subsequent text verbs. This supports
+a setup-opened asynchronous channel without adding Loom fid-lifecycle ops.
+The compile-time 160-byte Fid ceiling bounds eight 512-entry fid tables to
+640 KiB, including that full request/decision cache.
+No application clipboard endpoint is activated by this layer.
+
+
+## October 1 startup recheck
+
+The fresh merged boot still logs missing `/lib/halcyon/profile` and
+`/lib/halcyon/theme.toml`, selecting BuiltIn/Legacy in `system_theme()`.
+Warden starts Tapestry before Joey pivots to the pool, so the compositor's
+startup namespace does not supply those files. Halcyon's later bundle push
+works; it does not make the advertised startup read effective. This remains
+an open startup contract issue. Evidence: Astra's
+`work/oct1-reconciliation/aux-boot-uart.log`.
+
+
+## Shared capacity
+
+The pane tree re-exports `libhalcyon::layout::MAX_PANES` (32), the same constant used for interaction controller capacity. No layout, tree capacity or wire value changes.
+
 ## Purpose
 
-The compositor: it owns both graphics-path PCI functions, serves
+The compositor serves
 `/dev/tapestry`, and holds the server half of [[inv-i40]]. Clients hand
 it pixels through a shared page (a *weave*) and a 32-byte present
 descriptor; it transfers, flushes, and either scans a client's resource
@@ -2974,6 +3069,23 @@ cannot spin on shared-line retries. Live verification passes on ITS/TCG (176 sec
 ITS disabled (174 seconds). The latter samples sound stable at 190 deliveries
 while GPU advances 309 -> 339 over eight seconds, with no retries/cooldowns.
 The full controller/mode/SMP matrix remains open. This work is not yet in main.
+
+## Native pointer (HI-0)
+
+The compositor resolves live hover, menu ownership and divider dragging at the
+frame boundary, then sends changed shape/scale/position through Lictor. It never
+paints over a stale CPU mirror of accelerated content or restores saved pointer
+background pixels. Preferences live in surface incarnations and vanish with
+them. A seat generation change invalidates the last-sent pointer state because
+Lictor hid it during the trusted episode. The portable cursor raster lives in
+[[sub-libhalcyon]]; VirtIO queue ownership and exclusion live in [[sub-lictor]].
+
+HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM
+with the 2D and VirGL/EGL backends at 1280x800, scale 100. Actual VNC cursor
+planes show five shapes, edge clipping, divider selection and owner retirement;
+the SAK plane is fully transparent and the cursor returns after restoration.
+Raw fixture interiors remain byte-exact before and after pointer changes.
+This qualifies those composed paths, not bare-metal Pi or direct scanout.
 
 ## A backgrounded leaf is transparent to a newcomer's share and to a move (2026-09-28)
 

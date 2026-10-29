@@ -1,0 +1,14 @@
+floor refusal: expected=3 actual=3
+== ci-smp-gate: bake config -- CLADE=0 GOROOT=1 ==
+== ci-smp-gate: building kernels (default=1 ubsan=1) ==
+== ci-smp-gate: disk before-default-build: 9020 MiB free, floor 99999999 ==
+ci-smp-gate: disk floor REFUSAL at before-default-build
+
+invalid floor: expected=2 actual=2
+invalid SMP_GATE_MIN_FREE_MIB
+
+existing capture destination: expected=3 actual=3
+mkdir: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9: File exists
+ci-smp-gate: capture directory must be new
+
+Existing kernel unchanged: aa7b16dc8fdfad3b4c271ce9ac1adc47480a09fa20c29d8eaa07215744e07404

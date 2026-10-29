@@ -1,0 +1,36 @@
+
+running 20 tests
+test apprecord::tests::new_header_reuses_request_budget_and_cancel_clears_cached_output ... ok
+test apprecord::tests::clunk_and_fid_reuse_cannot_accept_an_old_completion ... ok
+test apprecord::tests::failures_are_replayed_and_old_ids_cannot_replace_newer_results ... ok
+test apprecord::tests::all_fids_share_input_and_output_budgets_including_cache_capacity ... ok
+test apprecord::tests::pending_write_refusal_does_not_lose_admission_and_cancel_burns_id ... ok
+test apprecord::tests::protocol_failures_preserve_the_reserved_error_codes ... ok
+test apprecord::tests::surplus_wrong_offsets_and_invalid_bodies_never_dispatch ... ok
+test apprecord::tests::every_fragment_boundary_and_exact_replay_dispatch_only_once ... ok
+test interaction_body::tests::refuses_reserved_bits_bad_text_zero_id_and_overflow_before_allocation ... ok
+test interaction_body::tests::independent_c_rust_wire_fixtures ... ok
+test apprecord::tests::same_id_changed_header_or_body_never_replays ... ok
+test interaction_frame::tests::declared_extent_and_connection_allowance_bound_allocation ... ok
+test interaction_frame::tests::errors_poison_until_reset_and_cannot_be_repaired_by_a_suffix ... ok
+test interaction_wire::tests::bounds_and_unknown_envelope_fields_refuse ... ok
+test interaction_body::tests::successful_responses_are_bound_to_the_exact_operation_and_request ... ok
+test interaction_wire::tests::fixed_fixture_and_exact_extent ... ok
+test interaction_frame::tests::every_split_and_byte_at_a_time_withhold_partial_records ... ok
+test interaction_body::tests::borrowed_response_ranges_match_wire_fixture_without_copying_payload ... ok
+test interaction_body::tests::every_body_roundtrips_and_refuses_truncation_trailing_or_wrong_direction ... ok
+test interaction_wire::tests::clipboard_is_canonical_text_without_terminal_controls ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+collapsed-wire-error: intended assertion failure at protocol_failures_preserve_the_reserved_error_codes
+changed-replay-body: intended assertion failure at same_id_changed_header_or_body_never_replays
+same-id-redispatch: intended assertion failure at every_fragment_boundary_and_exact_replay_dispatch_only_once
+fid-reuse-receipt: intended assertion failure at clunk_and_fid_reuse_cannot_accept_an_old_completion
+cancel-id-reuse: intended assertion failure at pending_write_refusal_does_not_lose_admission_and_cancel_burns_id
+reordered-fragments: intended assertion failure at surplus_wrong_offsets_and_invalid_bodies_never_dispatch
+output-capacity-undercharge: intended assertion failure at all_fids_share_input_and_output_budgets_including_cache_capacity
+uncounted-prefix: intended assertion failure at pending_write_refusal_does_not_lose_admission_and_cancel_burns_id
+late-reply-exposed: intended assertion failure at every_fragment_boundary_and_exact_replay_dispatch_only_once
+body-validation-skipped: intended assertion failure at surplus_wrong_offsets_and_invalid_bodies_never_dispatch

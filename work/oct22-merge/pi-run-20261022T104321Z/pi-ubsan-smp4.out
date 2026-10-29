@@ -1,0 +1,13 @@
+  [pi-ubsan-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [pi-ubsan-smp4 1/10] PASS (160s)
+  [pi-ubsan-smp4 2/10] PASS (163s)
+  [pi-ubsan-smp4 3/10] PASS (159s)
+  [pi-ubsan-smp4 4/10] PASS (166s)
+  [pi-ubsan-smp4 5/10] PASS (161s)
+  [pi-ubsan-smp4 6/10] PASS (170s)
+  [pi-ubsan-smp4 7/10] PASS (161s)
+  [pi-ubsan-smp4 8/10] PASS (163s)
+  [pi-ubsan-smp4 9/10] PASS (160s)
+  [pi-ubsan-smp4 10/10] PASS (161s)
+== pi-ubsan-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== pi-ubsan-smp4: exposure 1624s total, ~162s mean/boot; per-boot: 160 163 159 166 161 170 161 163 160 161 ==

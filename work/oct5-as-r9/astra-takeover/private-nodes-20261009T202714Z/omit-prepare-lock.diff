@@ -1,0 +1,11 @@
+--- control
++++ omit-prepare-lock
+@@ -48,7 +48,7 @@
+     if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
+         in->flags || in->reserved || in->result.slot || in->result.reserved ||
+         in->result.incarnation) return -T_E_INVAL;
+-    spin_lock(&l->lock);
++    /* lock omitted */
+     int rc = l->service_closing ? -T_E_CANCELED :
+         loom_service_node_prepare(l->service_slots, l->service_nodes,
+                                   in->kind, in->scope, out);

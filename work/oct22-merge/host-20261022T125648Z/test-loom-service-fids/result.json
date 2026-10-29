@@ -1,0 +1,66 @@
+{
+  "inputs": {
+    "kernel/loom_service_fids.c": "079db3ce797e3752d6c037caaed0099ec1749c1dc58e8cd222caca5d70b3b156",
+    "kernel/include/thylacine/loom_service_fids.h": "ef233162330737a173c02e2dac381b8bc849c9c3be9dbc3bbbd41bed09415285",
+    "kernel/test/loom_fids_fixture.h": "10fedb50606cf2aa6d84b20ad5203a941be6c94ef2b4546e9caff8f7b43097f8",
+    "tools/host-tests/loom-service-fids.c": "836bcc974467a38117349b3f6055e6cc08fb8db3641641ba24ebb79771ca47b2",
+    "tools/test-loom-service-fids.py": "4a92d59f8ab9b07e7b2a0a3342548bd91f20cab89671154c24026f42c0de78e6",
+    "kernel/loom_service_nodes.c": "a4885e505fbe072b6c7994615dd172b2c444b82507f40fb8149c692f0b10dc27",
+    "kernel/include/thylacine/loom_service_nodes.h": "9ae5536a56f5db164d312772652eb36c25a67ad955f79d9490b76259a7b0aa1a",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "079db3ce797e3752d6c037caaed0099ec1749c1dc58e8cd222caca5d70b3b156",
+      "binary_sha256": "cca3aab162832b323c9ff950d0a6bcb55fd847a5b2e2745748c7c81f52fcf19f"
+    },
+    {
+      "case": "reap-aborting",
+      "expected": "an aborting scope has not proven quiescence, and the refusal changes nothing",
+      "rc": 1,
+      "generated_sha256": "5f8e69e92c3a4a70b117c46c4ef1c302453c2c8e1a2f8e56b95f88c3f7d81e5b",
+      "binary_sha256": "c1ee54fda4b465f9a2478a2d9bda02d68239783f77f7424715d864125ba442d3"
+    },
+    {
+      "case": "reap-pinned",
+      "expected": "a pinned FID refuses REAP before any transition",
+      "rc": 1,
+      "generated_sha256": "b1172d50b98c1c1344832a46c7f507d854d96b22cc043bdc5a69e6b0f9e8ab33",
+      "binary_sha256": "c83917cab308277592c4dd29c6f198b2c111b9abab72f9466be578c8e78849e3"
+    },
+    {
+      "case": "reap-clunked-only",
+      "expected": "the FIDs of a retired scope reap and release it",
+      "rc": 1,
+      "generated_sha256": "ebef71160ea2128d129de76ac6585c3650ef2d2548de299ec49fe1b65e0a22e1",
+      "binary_sha256": "f33405b2bd9b6b62be75c6b529ddf0b159c0bc5e3787812d118f4eceadb779e6"
+    },
+    {
+      "case": "reap-keeps-parent-pin",
+      "expected": "a clunked FID reaps once and unpins its scope",
+      "rc": 1,
+      "generated_sha256": "6ebd1e75c72ddf532bda29ddecf461d65465f57bae9a2f350f4682d71bdf30e6",
+      "binary_sha256": "75587c1eb6e398ee10618dff3a5ec9e946151c83287e6b9aeee1e76eb391dbbc"
+    },
+    {
+      "case": "walk-opened",
+      "expected": "an opened FID is no WALK source, and the refusal changes nothing",
+      "rc": 1,
+      "generated_sha256": "143f218e01f6079c8e3bd0bdd6b92e9f29dceca07b537f4ef97773c7a2ecc046",
+      "binary_sha256": "b170d929b1602c4e1d9a30ca89a1ca388292881dd675e029901abc56074a1595"
+    },
+    {
+      "case": "walk-never",
+      "expected": "an unopened FID is a WALK source",
+      "rc": 1,
+      "generated_sha256": "b2aceab235cabfee902d3d55b98266a7051b83ec50b415f9c6418382ea5d0f57",
+      "binary_sha256": "f19fd85bbb4fac21398f5d1e3e7338333e37937d2850ce4846ff9da0b4a0dc91"
+    }
+  ]
+}

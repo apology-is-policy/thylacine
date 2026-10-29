@@ -1,0 +1,31 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:20:21.939578+00:00",
+  "source_count": 11,
+  "command_count": 21,
+  "source_and_snapshot_match": true,
+  "head_and_diff_match_before_docs": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "59efa7a8f0cd07bab2cca41cfa44bc9302fa0e28b65554a30c48f44a6fb9cc14",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "84a3d6cc706d81eee75505923086f8635f4fb1a1155b900e9f8d54236f071302",
+    "no-clone-client-build": "17b878ad0a658313520316b2ef1ceb4c7cc61e458c5e563e916a98a543bbf46c",
+    "no-send-executor-build": "eb6264af9f455ef1d659f9a18bfc853a035c6a68d5a15d9a2669a596563d4bdb",
+    "valid-client-build": "61b7b9238d54dd8b428e76c75038fe273d790501e5c6f54a931185c0ed3c757f",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-local-recheck-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-local-recheck-run": "f59deeeaaad0f6ca76ca065996c338853505b60f519670fb4a13d4a59b219d89",
+    "skip-native-recheck-build": "f2a445fe84fb1eacaa439e02b3c6693ced0c79d946c34b3dc78cf3801605798b",
+    "skip-native-recheck-run": "29da7f7b6a030b75539d5333ee740c3c207fd3b42fa67ce5924f6fe34f41f30a",
+    "skip-deadline-recheck-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-deadline-recheck-run": "dcb31af1496ba640c0272b319f5a964b1f55c2fae7914d5f43850836c30d8b10",
+    "reset-absolute-deadline-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "reset-absolute-deadline-run": "7d43634dd132db9a83a601749ba2a7b2ba36e92d6e878c12fc63fa04e6fd28c4",
+    "skip-disarm-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-disarm-run": "06cb7abe089ac48801d527597f275e00b33098f56ff8fb2ba2ff4a372b35d808",
+    "lost-wake-progress-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-wake-progress-run": "f3cbf6eca003bdb848c0953bea7ceed60a195abd8d440a360ad5f324e100ee7e"
+  }
+}

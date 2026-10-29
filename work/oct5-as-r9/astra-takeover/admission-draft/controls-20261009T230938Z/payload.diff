@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ payload.c
+@@ -76,7 +76,7 @@
+         o->capture_error=-T_E_IO;return;
+     }
+     o->capture_error=loom_private_reply_capture(&o->program.wire.expect,status,reply,
+-                                      o->program.wire.payload,o->program.wire.payload_capacity,&o->reply);
++                                      NULL,0,&o->reply);
+     o->callback_seen=true;
+ }
+ int loom_rpc_requeue_locked(struct loom_service_operation *o,u64 now) {

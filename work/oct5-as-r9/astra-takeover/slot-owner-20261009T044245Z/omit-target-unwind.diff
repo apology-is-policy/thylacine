@@ -1,0 +1,11 @@
+--- control
++++ omit-target-unwind
+@@ -148,7 +148,7 @@
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+         kfree(nodes);
+-        kfree(targets);
++
+         kfree(pools);
+         kfree(slots);
+         spin_lock(&as->lock);

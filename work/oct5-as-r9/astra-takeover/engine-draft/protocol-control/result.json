@@ -1,0 +1,194 @@
+{
+  "source": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_protocol.c",
+  "source_sha256": "a1a00a94e294abe6ecc8783c667b25b2a25f269076b37ed548b2c4af03a29206",
+  "runner_sha256": "d4e10234c93a2cb9c8c218f4aad75130e91576214ec3a3f45e14cf4df5ffa390",
+  "limits": "host boundary doubles; no wire/guest retirement qualification",
+  "results": [
+    {
+      "name": "control",
+      "case": 0,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 1,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 2,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 3,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 4,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 5,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 6,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 7,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 8,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 9,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 10,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 11,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 12,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 13,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 14,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 15,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 16,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 17,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 18,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "control",
+      "case": 19,
+      "rc": 0,
+      "expected": null
+    },
+    {
+      "name": "omit-deadline",
+      "case": 2,
+      "rc": 21,
+      "expected": "expired deadline refuses before native allocation"
+    },
+    {
+      "name": "omit-owner-ref",
+      "case": 0,
+      "rc": 21,
+      "expected": "allocation after charge and owner pin"
+    },
+    {
+      "name": "omit-target-put",
+      "case": 0,
+      "rc": 21,
+      "expected": "exact preallocated client storage"
+    },
+    {
+      "name": "omit-owner-charge",
+      "case": 0,
+      "rc": 21,
+      "expected": "complete protocol charge"
+    },
+    {
+      "name": "omit-send-charge",
+      "case": 1,
+      "rc": 21,
+      "expected": "complete protocol charge"
+    },
+    {
+      "name": "alias-inline",
+      "case": 0,
+      "rc": 21,
+      "expected": "provided buffers disjoint from client"
+    },
+    {
+      "name": "omit-recv-free",
+      "case": 0,
+      "rc": 21,
+      "expected": "refund after storage before owner drop"
+    },
+    {
+      "name": "omit-native-release",
+      "case": 0,
+      "rc": 21,
+      "expected": "refund after storage before owner drop"
+    },
+    {
+      "name": "omit-published-guard",
+      "case": 14,
+      "rc": 21,
+      "expected": "native release outside locks and unpublished"
+    },
+    {
+      "name": "omit-close-recheck",
+      "case": 13,
+      "rc": 21,
+      "expected": "refusal preserves output"
+    },
+    {
+      "name": "early-owner-drop",
+      "case": 15,
+      "rc": 21,
+      "expected": "last Loom drop follows all releases"
+    }
+  ]
+}

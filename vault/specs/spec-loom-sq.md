@@ -56,6 +56,10 @@ acquire on the tail; the code's C11 orders are argued in the dossier, not here.
 - `Claim` / `Finish` — `kernel/loom.c::loom_drain_sq` under `l->lock`: the index
   read and the copy (or the dropped count), then `loom_sq_release`, the only
   writer of the published head.
+  read and the copy (or the dropped count), then `loom_sq_release`. The private
+  consumer `kernel/loom_service_frontend.c::loom_private_submit` follows the same
+  order and publishes through the same `loom_sq_release`, the only writer of the
+  published head.
 - The buggy order is `loom_drain_sq` through main a7353c36f.
 - Runtime witnesses: `loom.sq_release_after_copy`, `_after_index`,
   `_after_copy_chain` (the hook runs inside `loom_sq_release`).

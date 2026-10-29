@@ -174,6 +174,7 @@ bool gic_msi_retire(const struct gic_msi_route *route, bool source_quiesced) {
     return drained;
 }
 
+#ifdef KERNEL_TESTS
 bool gic_msi_set_pending(const struct gic_msi_route *r) {
     if (!r) return false;
     if (r->intid >= GIC_LPI_MIN) return gic_its_set_pending(r);
@@ -190,3 +191,4 @@ u32 gic_msi_live_count(void) {
     u32 count = live_vectors;
     spin_unlock_irqrestore(&msi_lock, f); return count;
 }
+#endif // KERNEL_TESTS

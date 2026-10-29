@@ -1,0 +1,46 @@
+anchors ok: M1 M2 M3 M4 M5 M6 M7
+2026-10-21T14:43:27Z  HEAD 5266dea09aadca9efac97290c4cb9e0ff46ded8f, clean; go fork a6567baeaa716811783031fdf543477fdcd1707d, clean; anchors checked; verdict self-check passes; mutants: M1 M2 M3 M4 M5 M6 M7
+2026-10-21T14:43:28Z  disk M1: 10644 MiB free (floor 6144)
+2026-10-21T14:46:00Z  M1: syscall.native_gap_unassigned -> FAIL: a native number in 127..133 must reach the unknown arm on this tree
+2026-10-21T14:46:00Z  M1: (also) vivarium.rejects_are_deliberate -> PASS
+2026-10-21T14:46:00Z  M1: (also) loom.create_geometry -> PASS
+2026-10-21T14:46:00Z  M1: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:46:00Z  M1: KILLED
+2026-10-21T14:46:00Z  disk M2: 10575 MiB free (floor 6144)
+2026-10-21T14:47:10Z  M2: syscall.native_gap_unassigned -> FAIL: a native number in 127..133 must reach the unknown arm on this tree
+2026-10-21T14:47:10Z  M2: (also) vivarium.rejects_are_deliberate -> PASS
+2026-10-21T14:47:10Z  M2: (also) loom.create_geometry -> PASS
+2026-10-21T14:47:10Z  M2: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:47:10Z  M2: KILLED
+2026-10-21T14:47:11Z  disk M3: 10589 MiB free (floor 6144)
+2026-10-21T14:48:16Z  M3: syscall.native_gap_unassigned -> FAIL: 134 is SYS_SRV_REGISTRY_NEW: it never reaches the unknown arm
+2026-10-21T14:48:16Z  M3: (also) vivarium.rejects_are_deliberate -> PASS
+2026-10-21T14:48:16Z  M3: (also) loom.create_geometry -> PASS
+2026-10-21T14:48:16Z  M3: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:48:16Z  M3: KILLED
+2026-10-21T14:48:16Z  disk M4: 10595 MiB free (floor 6144)
+2026-10-21T14:49:24Z  M4: vivarium.rejects_are_deliberate -> FAIL: a well-formed registry call (flags 0 as sigsetsize 0) is refused first
+2026-10-21T14:49:25Z  M4: (also) syscall.native_gap_unassigned -> PASS
+2026-10-21T14:49:25Z  M4: (also) loom.create_geometry -> PASS
+2026-10-21T14:49:25Z  M4: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:49:25Z  M4: KILLED
+2026-10-21T14:49:25Z  disk M5: 10580 MiB free (floor 6144)
+2026-10-21T14:50:35Z  M5: vivarium.rejects_are_deliberate -> FAIL: rt_sigsuspend (133) is an ENOSYS row
+2026-10-21T14:50:35Z  M5: (also) syscall.native_gap_unassigned -> PASS
+2026-10-21T14:50:35Z  M5: (also) loom.create_geometry -> PASS
+2026-10-21T14:50:35Z  M5: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:50:35Z  M5: KILLED
+2026-10-21T14:50:35Z  disk M6: 10562 MiB free (floor 6144)
+2026-10-21T14:51:41Z  M6: loom.create_geometry -> FAIL: detached consumer refuses publication
+2026-10-21T14:51:41Z  M6: (also) syscall.native_gap_unassigned -> PASS
+2026-10-21T14:51:41Z  M6: (also) vivarium.rejects_are_deliberate -> PASS
+2026-10-21T14:51:41Z  M6: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:51:41Z  M6: KILLED
+2026-10-21T14:51:41Z  disk M7: 10548 MiB free (floor 6144)
+2026-10-21T14:52:54Z  M7: loom.create_geometry -> FAIL: legacy ring refuses paired publication
+2026-10-21T14:52:54Z  M7: (also) syscall.native_gap_unassigned -> PASS
+2026-10-21T14:52:54Z  M7: (also) vivarium.rejects_are_deliberate -> PASS
+2026-10-21T14:52:54Z  M7: tally 1899/1900; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-21T14:52:54Z  M7: KILLED
+2026-10-21T14:52:54Z  ALL KILLED: M1 M2 M3 M4 M5 M6 M7 (build/ holds the last mutant's kernel -- run gate.sh next)
+2026-10-21T14:52:54Z  exit 0

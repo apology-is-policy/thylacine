@@ -1,0 +1,116 @@
+wrapper test, scratch in /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T//red-legs-wrapper-test.77239
+
+-- S1 happy path: both legs red for their own reason, green clean
+OK    S1 exit status (0)
+OK    S1 credits leg 1
+OK    S1 credits leg 2
+OK    S1 derives the expected suite size
+OK    S1 pins the tally to the registrations
+OK    S1 reports both as witnesses
+OK    S1 source restored (yes)
+OK    S1 marker removed on qualification (absent)
+OK    S1 built three times (3)
+
+-- S2 the first mutant build fails
+OK    S2 refuses (3)
+OK    S2 names the failing build
+OK    S2 source restored anyway (yes)
+OK    S2 marker present
+OK    S2 marker separates the three facts
+
+-- S3 test.sh exits before producing a new serial log, with a stale FAIL log present
+OK    S3 refuses (3)
+OK    S3 refuses for absent NEW evidence
+OK    S3 credits nothing
+OK    S3 displaced the stale log (kept)
+OK    S3 source restored (yes)
+
+-- S4 the intended test reddens, but for a different assertion
+OK    S4 refuses (3)
+OK    S4 names the wrong reason
+OK    S4 credits nothing
+
+-- S5 the intended test reddens and so does another
+OK    S5 refuses (3)
+OK    S5 names the other failure
+OK    S5 calls it unattributed
+
+-- S6 the named test shows FAIL but test.sh exited 0
+OK    S6 refuses (3)
+OK    S6 refuses on the suite status
+
+-- S7 green control passes every test but runs fewer than are registered
+OK    S7 fails the run (1)
+OK    S7 names the missing tests
+OK    S7 withholds the claim
+OK    S7 marker KEPT though source is clean and image rebuilt (present)
+OK    S7 marker says rebuilt but not green
+OK    S7 source restored (yes)
+
+-- S8 a third party edits a mutated file mid-run
+OK    S8 refuses to mutate the changed file
+OK    S8 refuses to overwrite the foreign edit
+OK    S8 still credits leg 1, which did complete
+OK    S8 forces a nonzero status (nonzero)
+OK    S8 leaves the foreign edit in place (1)
+OK    S8 marker present
+
+-- S9 SIGTERM arrives during the first mutant build
+OK    S9 explicit SIGTERM status (143)
+OK    S9 names the signal
+OK    S9 stops its own child first
+OK    S9 source restored (yes)
+OK    S9 marker present
+
+-- S12 leg 1 judged from a REAL mutant boot (split FAIL, runnable dump, CRLF)
+OK    S12 credits leg 1 from real kernel output
+OK    S12 reads the real reason
+OK    S12 cross-checks the kernel's own tally
+OK    S12 parses every verdict in the real log
+
+-- S11 green control reads a REAL recorded boot log (1835 [test] lines, pre-dating both new tests)
+  real log: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/boot-logs/boot-confirm-232503Z.log (1835 [test] lines)
+OK    S11 fails the run (1)
+OK    S11 reads the real tally
+OK    S11 catches the stale image by count
+OK    S11 finds the real boot banner
+OK    S11 finds no failing test in 1835 real verdict lines
+OK    S11 reports the absent new test as ABSENT, not as a pass
+OK    S11 marker kept (present)
+
+-- S10 the owned-QEMU filter discriminates (recorded input; signals nothing)
+  filter under test: $2 ~ /qemu-system-aarch64$/ && index($0, r) { print $1 }
+OK    S10 matches this tree's guest only (22222)
+OK    S10 matches the peer's guest only when given the peer's root (11406)
+  the sh decoy naming qemu and this build path is excluded by the comm test
+
+-- S13 the first mutant build leaves a grandchild running after it exits
+  grandchild was pid 79794
+OK    S13 the grandchild is reaped, not merely unwaited (dead)
+OK    S13 says it found the group occupied
+OK    S13 the run still completes (0)
+OK    S13 source restored (yes)
+OK    S13 marker removed (absent)
+
+-- S14 the grandchild ignores SIGTERM (graces shortened; escalation is what is under test)
+OK    S14 escalates to KILL
+OK    S14 the TERM-proof grandchild is dead (dead)
+OK    S14 the run still completes (0)
+
+-- S15 the group can never be proven empty (fake ps): the run must fail CLOSED
+OK    S15 refuses (3)
+OK    S15 names the live group
+OK    S15 refuses to restore under it
+OK    S15 leaves the mutant rather than racing a writer (no)
+OK    S15 names the originals
+OK    S15 marker present (present)
+OK    S15 marker records the unproven quiescence
+
+-- S16 HEAD moves during the green control: suite green, provenance lost
+OK    S16 the green control itself passed
+OK    S16 catches the moved HEAD
+OK    S16 marker KEPT although the suite was green (present)
+OK    S16 marker says why it was kept
+OK    S16 exit status is not success (nonzero)
+
+== 77 passed, 0 wrong (scratch kept at /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T//red-legs-wrapper-test.77239)

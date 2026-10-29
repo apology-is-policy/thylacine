@@ -52,6 +52,7 @@ void halls_dump(const struct exception_context *ctx);
 const struct exception_context *halls_enter_frame(const struct exception_context *ctx);
 void halls_leave_frame(const struct exception_context *prev);
 
+#ifdef KERNEL_TESTS
 // The current per-CPU live exception frame (NULL if none). For tests.
 const struct exception_context *halls_current_frame(void);
 
@@ -70,12 +71,20 @@ bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi);
 // at a freed/other-thread stack (gap huge or negative) and is rejected, so a
 // stale slot never produces a fabricated dump nor suppresses capture-current.
 bool halls_frame_is_live(u64 frame, u64 cur_sp);
+#endif // KERNEL_TESTS
 
 // Translate a runtime code address to its link-time address by removing the
 // KASLR slide (so `addr2line -e thylacine.elf <link-addr>` resolves it).
 // Underflow-guarded: if addr < offset (addr is not a slid kernel code
 // address -- a stack/heap/zero value), returns addr unchanged.
 u64 halls_link_addr(u64 addr, u64 kaslr_offset);
+
+#ifdef KERNEL_TESTS
+// The dump's translation of a return address: one inside the kernel image's PA
+// range [pa_start, pa_end) -- code that ran before the MMU -- is rebased onto
+// KASLR_LINK_VA; any other address goes through halls_link_addr.
+u64 halls_code_link_addr(u64 addr, u64 kaslr_offset, u64 pa_start, u64 pa_end);
+#endif // KERNEL_TESTS
 
 // 8a-1b-gamma-3 (I-39; DEBUG-FS-DESIGN.md section 4.6): walk a LIVE stopped
 // thread's kernel frame-pointer chain into `out` -- canonical (PAC-stripped)
@@ -85,8 +94,10 @@ u64 halls_link_addr(u64 addr, u64 kaslr_offset);
 // unlike the dying-machine halls_dump path -- this is fault-safe on the live
 // debug path (there is no HX-I1 guard to catch a bad read there). A SEPARATE
 // function from halls_backtrace so the audited dump path stays byte-unchanged.
-// Returns the frame count (>= 1 when max >= 1). Symbolize each result via
-// halls_link_addr (KASLR) + halls_symbolize (halls_symtab.h).
+// Returns the frame count (>= 1 when max >= 1). Translate each result via
+// halls_link_addr (KASLR), then name out[0] with halls_symbolize and out[1..]
+// with halls_symbolize_return (halls_symtab.h). out[0] is not named at a call:
+// a thread that has never run resumes at its trampoline's first instruction.
 unsigned halls_walk_kernel_frames(u64 pc, u64 start_fp, u64 lo, u64 hi,
                                   u64 *out, unsigned max);
 

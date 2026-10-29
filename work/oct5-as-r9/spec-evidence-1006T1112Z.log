@@ -1,0 +1,53 @@
+# AS-R9 spec obligation -- RETAINED OUTPUT, extracted 2026-10-07
+#
+# PROVENANCE, stated because it is not a run artifact: the lease-runbook's spec
+# stage captures TLC's stdout into a shell variable and prints only grep-matched
+# lines (lease-runbook.sh, the `out=$(...)` capture), so the FULL TLC stdout for
+# this run was never written to a file. What follows is the stage's own printed
+# output, recovered verbatim from the session transcript block timestamped
+# 2026-10-06T11:12:38.076Z -- the only place it was retained. The state counts and the
+# version banner are TLC's; the `-- <cfg>` and `OK:` lines are the stage's.
+#
+# Tool: TLC2 (tla2tools.jar at /tmp/tla2tools.jar, the SPEC-POLICY jar, NOT the
+# stale ~/tla2tools.jar), invoked as: java -cp $JAR tlc2.TLC -workers auto
+#   -deadlock -config <cfg>.cfg <burrow|capacity>.tla
+# Expected verdicts: the three burrow cfgs must report `Invariant Invariants is
+# violated` (their cfgs declare ONE conjunction, so TLC names the conjunction and
+# never NoUseAfterFree); the two capacity cfgs must report `Invariant NoOrphan is
+# violated` with ChargeConserved HOLDING (a ChargeConserved violation instead
+# would be a DIFFERENT finding, not a pass).
+#
+# A buggy cfg that stops violating is a FINDING: it means the spec no longer
+# constrains what it was written to catch.
+# -----------------------------------------------------------------------------
+
+both assertion blocks replaced by exact line span
+parses
+
+########## STAGE 0 ##########
+-- stage 'start': 13 GiB free (floor 8)
+-- provenance recorded: stage-start (nothing built yet) (-> work/oct5-as-r9/provenance.log)
+   java: /opt/homebrew/opt/openjdk/bin/java
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+-- burrow_buggy_free_on_close (expect: NoUseAfterFree VIOLATED)
+Error: Invariant Invariants is violated.
+145 states generated, 59 distinct states found, 20 states left on queue.
+   OK: violation reported
+-- burrow_buggy_free_on_unmap (expect: NoUseAfterFree VIOLATED)
+Error: Invariant Invariants is violated.
+98 states generated, 56 distinct states found, 24 states left on queue.
+   OK: violation reported
+-- burrow_buggy_never_free (expect: NoUseAfterFree VIOLATED)
+Error: Invariant Invariants is violated.
+66 states generated, 41 distinct states found, 20 states left on queue.
+   OK: violation reported
+-- capacity_buggy_detach_no_refund (expect: NoOrphan VIOLATED, ChargeConserved HOLDING)
+Error: Invariant NoOrphan is violated.
+60 states generated, 38 distinct states found, 21 states left on queue.
+   OK: NoOrphan violated, ChargeConserved holding
+-- capacity_buggy_replace_orphans (expect: NoOrphan VIOLATED, ChargeConserved HOLDING)
+Error: Invariant NoOrphan is violated.
+91 states generated, 57 distinct states found, 40 states left on queue.
+   OK: NoOrphan violated, ChargeConserved holding
+-- stage 'post-specs': 13 GiB free (floor 8)
+CLONE_APPROVED!=1 -- not cloning astra's build/. Her artifacts, her ruling (yip 0169).

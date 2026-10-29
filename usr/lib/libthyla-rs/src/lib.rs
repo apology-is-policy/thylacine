@@ -85,6 +85,11 @@ pub mod net;
 pub use ninep;
 pub mod notes;
 pub mod poll;
+pub mod pty_interaction;
+pub use pty_interaction::*;
+pub mod pty_observer;
+pub mod poll_worker;
+pub mod service_worker;
 pub mod process;
 pub mod rand;
 pub mod sched;
@@ -112,6 +117,7 @@ pub const T_SYS_PIPE: u64            = 8;
 pub const T_SYS_READ: u64            = 9;
 pub const T_SYS_WRITE: u64           = 10;
 pub const T_SYS_CLOSE: u64           = 11;
+pub const T_SYS_DUP: u64             = 12;
 // P5-attach-syscall: a 9P attach over a byte-pipe pair (tx, rx). Backs
 // t_attach_9p; the byte-mode /srv twin is T_SYS_ATTACH_9P_SRV (52).
 pub const T_SYS_ATTACH_9P: u64       = 13;
@@ -468,6 +474,8 @@ pub const T_S_IFLNK: u32              = 0o120000;
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 pub const T_SYS_SPAWN_ARGV_MAX: usize        = 512;
 pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 65536;
+// Mirror SYS_SPAWN_ENV_DATA_MAX: the T_SPAWN_EXT_ENV tail's records, in bytes.
+pub const T_SYS_SPAWN_ENV_DATA_MAX: usize    = 32768;
 
 // Maximum binary name length (mirror SYS_SPAWN_NAME_MAX).
 pub const T_SPAWN_NAME_MAX: usize    = 256;
@@ -550,6 +558,14 @@ pub const T_SPAWN_EXT_CWD: u32 = 1 << 0;
 // T_SPAWN_EXT_THREADS: a TSpawnExtThreads sets the child's thread budget (ARCH
 // 7.3.5), after the cwd tail when both are set.
 pub const T_SPAWN_EXT_THREADS: u32 = 1 << 1;
+// T_SPAWN_EXT_ENV: a TSpawnExtEnv names the child's whole environment as
+// NUL-terminated "NAME=VALUE" records (ARCH 9.7), after the cwd and thread tails
+// whose bits are set.
+pub const T_SPAWN_EXT_ENV: u32 = 1 << 2;
+// Every bit the kernel knows (mirror SPAWN_EXT_FLAGS_ALL); a bit outside it is
+// refused with -1. tools/check-spawn-args-mirrors.py holds the members and this
+// mask to the kernel's.
+pub const T_SPAWN_EXT_FLAGS_ALL: u32 = T_SPAWN_EXT_CWD | T_SPAWN_EXT_THREADS | T_SPAWN_EXT_ENV;
 
 /// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
 /// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
@@ -572,6 +588,18 @@ pub struct TSpawnExtThreads {
 }
 const _: () = assert!(core::mem::size_of::<TSpawnExtThreads>() == 8);
 const _: () = assert!(core::mem::offset_of!(TSpawnExtThreads, threads_flags) == 4);
+
+/// The T_SPAWN_EXT_ENV tail (mirror `struct sys_spawn_ext_env`;
+/// tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtEnv {
+    pub env_va:    u64, // 0 — the records; may be 0 when env_len is 0
+    pub env_len:   u32, // 8 — 0..T_SYS_SPAWN_ENV_DATA_MAX incl. the NULs
+    pub env_flags: u32, // 12 — must be 0
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtEnv>() == 16);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_len) == 8);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtEnv, env_flags) == 12);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
@@ -1535,6 +1563,16 @@ pub unsafe fn t_pipe() -> (i64, i64) {
         options(nostack)
     );
     (x0, x1)
+}
+
+/// Duplicate a descriptor with the requested subset of its current rights.
+/// The caller must keep oldfd live through this call; success owns a new fd.
+#[inline(always)]
+pub unsafe fn t_dup(oldfd: i64, rights: u32) -> i64 {
+    let mut result = oldfd;
+    asm!("svc #0", inlateout("x0") result, in("x1") rights as u64,
+         in("x8") T_SYS_DUP, options(nostack));
+    result
 }
 
 // t_read — read up to `len` bytes from `fd` into `buf`. Returns:
@@ -2569,7 +2607,7 @@ pub unsafe fn t_burrow_protect(vaddr: u64, length: u64, prot: u64, flags: u64) -
 // t_loom_setup — create a Loom ring with `entries` SQ slots; the kernel maps the
 // SQ/CQ Burrow into this Proc and fills the `struct loom_params` at `params_va`
 // with the ring geometry (ring_va + region offsets/sizes). Returns the loom_fd
-// (>= 0) or -1. Backs t::loom::Ring::setup (Loom-6d).
+// (>= 0) or a negated errno (LOOM.md 8.2a). Backs t::loom::Ring::setup (Loom-6d).
 #[inline(always)]
 pub unsafe fn t_loom_setup(entries: u64, params_va: u64) -> i64 {
     let mut x0: i64 = entries as i64;
@@ -2585,7 +2623,8 @@ pub unsafe fn t_loom_setup(entries: u64, params_va: u64) -> i64 {
 
 // t_loom_register — install fixed handles (op = 0) or pin buffers (op = 1) for a
 // ring. `arg_va` points at `nargs` elements (u32 fd indices, or struct
-// loom_buf_reg). Returns 0 / -1. Backs t::loom::Ring::register_*.
+// loom_buf_reg). Returns 0 or a negated errno: -EBADF when `fd` names no ring
+// (LOOM.md 8.2a). Backs t::loom::Ring::register_*.
 #[inline(always)]
 pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) -> i64 {
     let mut x0: i64 = loom_fd as i64;
@@ -2603,7 +2642,9 @@ pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) ->
 
 // t_loom_enter — consume up to `to_submit` queued SQEs, then block until at least
 // `min_complete` CQEs are available (unless LOOM_ENTER_NONBLOCK in `flags`).
-// Returns the SQEs consumed (>= 0) or -1. Backs t::loom::Ring::enter.
+// Returns the SQEs consumed (>= 0) or a negated errno: -EBADF when `fd` names
+// no ring (LOOM.md 8.2a).
+// Backs t::loom::Ring::enter.
 #[inline(always)]
 pub unsafe fn t_loom_enter(loom_fd: u64, to_submit: u64, min_complete: u64, flags: u64) -> i64 {
     let mut x0: i64 = loom_fd as i64;
@@ -3964,4 +4005,19 @@ macro_rules! eprintln {
     ($($arg:tt)*) => {{
         $crate::eprint!("{}\n", core::format_args!($($arg)*));
     }};
+}
+
+// D7: explicit login-only factory role; never a fork-grantable capability.
+pub const T_SPAWN_PERM_SESSION_REGISTRY: u64 = 1 << 11;
+pub const T_SYS_SRV_REGISTRY_NEW: u64 = 134;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SrvRoute { pub name_len: u32, pub reserved: u32, pub name: [u8; 32] }
+const _: () = assert!(core::mem::size_of::<SrvRoute>() == 40);
+#[inline(always)]
+pub unsafe fn t_srv_registry_new(source: i64, routes: *const SrvRoute, count: usize, flags: u64) -> i64 {
+    let mut x0 = source;
+    asm!("svc #0", inlateout("x0") x0, in("x1") routes, in("x2") count,
+         in("x3") flags, in("x8") T_SYS_SRV_REGISTRY_NEW, options(nostack));
+    x0
 }

@@ -4,6 +4,8 @@ type: sub
 title: "libthyla-rs — the native runtime: RAII over the handle table, one error type, and two invariants it makes unexpressible"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libthyla-rs/src/service_worker.rs
+  - usr/kaua-term-probe/src/service_owner.rs
   - usr/lib/libthyla-rs/src/alloc.rs
   - usr/lib/libthyla-rs/src/cap.rs
   - usr/lib/libthyla-rs/src/env.rs
@@ -20,9 +22,14 @@ code:
   - usr/lib/libthyla-rs/src/io.rs
   - usr/lib/libthyla-rs/src/jit.rs
   - usr/lib/libthyla-rs/src/loom.rs
+  - usr/lib/libthyla-rs/src/loom/ring_abi.rs
   - usr/lib/libthyla-rs/src/net.rs
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
+  - usr/lib/libthyla-rs/src/poll_worker.rs
+  - usr/lib/libthyla-rs/src/poll_worker/qualification.rs
+  - usr/kaua-term-probe/src/readiness_qualification.rs
+  - usr/lib/libthyla-rs/src/pty_observer.rs
   - usr/lib/libthyla-rs/src/process.rs
   - usr/lib/libthyla-rs/src/rand.rs
   - usr/lib/libthyla-rs/src/sched.rs
@@ -42,8 +49,26 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-28
 ---
+## Dedicated service owner (October 2)
+
+`ServiceWorker<S>` owns shared state, four nonblocking pipe FDs and a 128-KiB
+stack plus 4-KiB guard. Its child borrows those allocations until kernel clear-tid
+join. Setup and explicit shutdown have five-second bounds; ambiguous join
+retains storage until Proc exit rather than freeing live memory. Drop emits no
+ordinary console write, which could park during SAK. Pipe bytes are coalesced
+wake hints; durable caller state and stop/status atomics carry meaning. Reads
+drain bounded 64-byte batches; EAGAIN on a write means a wake already exists.
+
+The API deliberately differs from PollWorker: the service owner runs protocol
+work itself and never borrows rendering state. Native tests cover progress while
+the UI waits, fault notice, joined/idempotent stop, partial-pipe FD rollback and
+16,384 wake hints. The explicit `poll-worker-test` feature also supplies service
+constructor/publication/loop fault hooks for opt-in probe images. Default builds
+contain no armed fault controls. Media failure tests now assert executor-driven
+Proc exit and registry repost, not PollWorker's old UI error seam.
+
 ## Purpose
 
 The runtime every *authored* Thylacine program stands on. The native half of
@@ -335,6 +360,21 @@ None crossing a boundary; every ABI record belongs to
   bad `dir` fails `spawn` with chdir's error and the caller's cwd never moves; a
   relative program name is looked up from `dir`
   ([[sub-kernel-syscall-dispatch]]).
+- **`Command::env`, `env_remove`, `env_clear`** (2026-10-28,
+  [[dec-2026-10-28-spawn-env]]) -- the child's environment. With none of the
+  three, the record carries no tail and the child gets the kernel's copy of the
+  caller's `/env`. Any of them makes `spawn` send the `T_SPAWN_EXT_ENV` tail
+  (`TSpawnExtEnv`, at +104, or at +120 after a cwd tail, each pairing one
+  `#[repr(C)]` record). Its block is the caller's live `/env`, listed and read
+  variable by variable from `/env` itself, so it needs no `/proc` in the
+  caller's namespace (a variable unset between the listing and its read is
+  skipped; any other failure fails `spawn`), with the calls applied in order --
+  or only the calls after `env_clear` -- and it becomes the child's whole
+  environment. The caller's own `/env` never changes. A key that is empty or
+  holds `=` or a NUL, or a value holding a NUL, fails `spawn` with
+  `InvalidArgument` before the syscall; a key `/env` would refuse fails it in
+  the kernel. A caller variable the flat form cannot carry (a name holding `=`,
+  a value holding a NUL) does not reach a child given the tail.
 - **`Command::debug_held`** (2026-09-29) — spawns the child held
   ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
   image and parked before its first instruction, and the child runs only when a
@@ -705,3 +745,163 @@ retain the kernel-reported selection, and drivers skip ISR reads in MSI-X mode.
 This helper runs before DMA setup; a subsequent driver reset would erase the
 selected vectors and is forbidden until rollback or shutdown. Full fallback
 fault-injection and the cross-controller matrix remain required.
+
+## Terminal interaction capacity error
+
+`Error::NoSpace` maps ENOSPC=28 in both directions and reports "no space left".
+The kernel terminal interaction pool uses it for bounded capacity or identifier
+exhaustion. Existing unknown-error passthrough and the -1 sentinel treatment are
+unchanged. The `pty_interaction` records remain pure ABI definitions.
+
+## Typed terminal observer client
+
+`pty_observer::BindingId` accepts only nonzero locators up to INT64_MAX and is
+copyable. Construction from an announced locator confers no role; every syscall
+rechecks the actual process. `bind` borrows master and observer descriptor numbers,
+`state` supplies a fully initialized 80-byte output, and `acknowledge`/`check` build
+the exact versioned 24-byte input. Subject zero is allowed for APP acknowledgement;
+it cannot pass the kernel's CHECK. A CHECK result does not prove graphical focus.
+Unbinding is explicit, so dropping a copied locator cannot revoke another holder.
+
+`watch` adopts the new read-only descriptor in an owning File. Watch implements
+AsFd for the existing PollSet; Drop closes only this watch, not its binding. A
+read returns one complete state, None on retirement, or the existing WouldBlock
+error for an unchanged revision. Partial records are Io errors. The state has
+only integer fields and compile-time assertions rule out padding; a mutable byte
+view is valid for native reads. Other kernel errors use the shared typed mapping.
+No wrapper allocates a maximum buffer or polls periodically. AArch64 checks and the production native EL0 probe pass. Actual application
+use and positive observer ACK/CHECK remain the integration obligation in the
+Halcyon interaction status.
+
+The native `kaua-term-probe --observer` scenario exercises positive STATE copyout,
+watch read/poll/Drop/reopen, observer-only ACK/CHECK refusal and retirement over
+real ptyfs and Tapestry transports. A supervisor spawns the binding process sealed;
+that process also checks an ordinary child's seals are clear. The probe is added
+beside the existing transport test, which keeps its no-argument behavior. Runtime
+results belong to the interaction status, not to the probe's mere existence.
+
+## Native readiness aggregation
+
+`poll_worker::PollWorker::new(capacity)` accepts 1..63 watches, reserving the
+64th native poll entry for configuration and shutdown. It starts one thread,
+registers its clear-child-tid word before publishing startup, and returns only
+after observing that handshake. The worker reads no application data and grants
+no authority. `AsFd` exposes its private notification reader; `take_ready`
+returns a fixed batch. Every ready slot is disarmed until explicit `rearm`.
+
+`register(&File, interest)` duplicates the open object before publishing it.
+`File::try_clone` uses existing SYS_DUP (12) with the wrapper's current rights;
+the kernel rejects amplification. File offset/open-object state remain shared,
+and each descriptor owns its reference. Native raw `t_dup` now mirrors the
+existing C wrapper; no syscall number or behavior changed.
+
+`register_owned(File, interest)` instead consumes the sole owned descriptor,
+closing it on registration refusal. This is required for /srv listeners and
+connection Spoors: the kernel's NoSrvSpoorDup contract deliberately rejects their
+duplication. It is not an exception to that rule. `with_fd(id, closure)` resolves
+a live slot under the mutex, releases the mutex and invokes the closure while
+holding exclusive access to the owner. Removal/shutdown therefore cannot occur;
+the worker cannot close a live slot. The returned integer is borrowed for that
+closure only and may not be closed or retained for later unsafe I/O. No mutable
+slot reference escapes synchronization. This path adds no allocation.
+
+A WatchId includes a process-local monotone worker identity, slot and registration
+generation. Every arm has another monotone ticket. `remove` immediately rejects
+further use of the ID, but the worker retains its owned handle until returning from
+its previous poll; only then can the slot be recycled. Old results require both
+matching registration and arm tickets. A token from another worker is refused.
+All counters refuse exhaustion rather than wrap. Full tables report Busy;
+retired entries can briefly keep a table full until the worker reclaims them.
+
+Shared metadata and each pipe's pending-byte latch are protected by one mutex.
+A producer writes only to an empty private pipe; its consumer drains exactly that
+one byte before clearing the latch under the same lock. Poll, allocation, final
+reference close and join run outside the lock. Both endpoints stay owned until
+join. All descriptors have one poll entry even for combined READ/WRITE interest.
+The worker blocks indefinitely on readiness; startup and shutdown have separate
+five-second waits, not periodic service polling.
+
+Allocation bounds are compile-time asserted: boxed metadata at most 4096 bytes,
+returned batch at most 4096 bytes, owner at most 32 bytes, plus a 64 KiB worker
+stack and a 4 KiB guard reservation. Temporary poll/ticket/retirement arrays use
+that stack. There are at most capacity owned watch handles plus four pipe handles
+and one thread, with no request queue or application-buffer allocation.
+`shutdown` joins before freeing anything borrowed by the worker. On ambiguous
+join failure it retains ownership for retry; Drop reports and retains that
+storage until process teardown. Allocation/setup/spawn errors unwind acquired
+objects; partial pipe construction is exercised by actual handle exhaustion.
+
+The native readiness probe covers 39 service slots, the 63-slot constructor,
+readiness before registration, one-shot disarming, re-arm, independent peer
+progress, 64 close/reuse cycles, cross-worker token refusal, joined shutdown and
+partial setup rollback. Named mutants remove disarming and worker-ID checks;
+both must fail their corresponding diagnostic, followed by a restored pass.
+The existing two-connection session media server now uses this worker.
+`free_slots` includes retired entries until reclamation completes; listener
+admission therefore waits for the worker's reclamation notice. The compositor
+charges MEMORY_RESERVE (72 KiB) against its image residual.
+
+The nondefault poll-worker-test feature adds bounded before/after-poll gates,
+one-shot acquisition faults, and test-only stack/context accounting. Its native
+probe controls stale-result/rearm and last-slot retirement schedules; separate
+negative controls must fail the named assertions. The opt-in service-failure
+probe checks unpublished rollback and process-exit/repost, not Warden recovery.
+See the interaction status for actual results and outstanding expanded-service
+qualification. No production ABI or externally writable fault control exists.
+
+## Private Loom ABI module and open ownership work
+
+The private-service mirror `service_abi` moved into the loom-client crate in
+NA-3 ([[sub-loom-client]]), beside the Rust client cores that use it, and is
+re-exported here as `loom::service_abi`. Its 30 constants and 10 repr(C) records
+still match kernel and native C under the independent byte gate. The ring
+records (`Params`, `Sqe`, `Cqe`, `BufReg` and a `RingHdr` struct) moved into
+`loom/ring_abi.rs`, a file with no crate dependency that
+tools/check-loom-service-abi.py compiles against the ring layout table; `loom.rs`
+re-exports the public names and derives its header offsets from `RingHdr`.
+NA-4b adds the private client: `loom::native` re-exports the adapter
+([[sub-loom-native-adapter]]), and `ThylaKernel` implements its `Kernel` trait,
+one system call per method (SYS_LOOM_SETUP/REGISTER/ENTER, poll on one
+descriptor, close, SYS_BURROW_ATTACH/DETACH, the monotonic clock), with the poll
+bits asserted equal to `T_POLL*` at compile time. `ServiceRing` names the ring;
+its setup succeeds only in the qualification image.
+
+The legacy `Ring` passes the kernel's errno through `Error::from_syscall_return`
+(2026-10-13; it reported every SETUP, REGISTER and ENTER refusal as
+`InvalidArgument`): a ring descriptor that names nothing reads as `BadHandle`,
+a page cap as `NoMemory`, and so on (LOOM.md 8.2a). No caller matched
+`InvalidArgument`; libtapestry maps every Ring error to its own `Loom` error
+or passes `as_errno()` into `Transport`.
+
+AS-R8 raw registration is now explicitly unsafe: integer VAs carry the full
+asynchronous lifetime and alias-exclusion obligation through terminal completion
+or local retirement, including wait errors and table replacement. The owned pool
+API remains an AS-3 gate; these declarations alone do not provide it.
+
+## Registered payload ownership correction (AS-R8)
+
+`Ring::register_buffers` is an unsafe raw API. A kernel pin keeps allocation
+backing alive; it does not authorize overlapping Rust references during I/O.
+The caller must exclude accesses through every alias and retain that obligation
+after a failed enter, cancellation request or table replacement until actual
+completion/retirement. It cannot infer retirement from CQ head movement.
+
+`RegisteredBuffer::as_slice_range(Range<usize>) -> Option<&[u8]>` and
+`as_mut_range -> Option<&mut [u8]>` check ordered in-bounds ranges before directly
+forming only that slice, with no intermediate reference to the whole registered
+allocation. Empty end ranges work; reversed/overflow-shaped ranges fail. These
+methods do not inspect kernel state: raw registration's caller must ensure the
+chosen range is locally owned. The future safe pool wrapper will own that state.
+
+`WeftFlow::tx_buf` and `rx_buf` now return Result slices, refusing WouldBlock while
+inflight is set. This covers successful admission followed by an enter/reap
+error: wait preserves inflight on those errors, and neither getter can create a
+reference until the matching terminal CQE is consumed. Ordinary successful
+push/wait/pop use is unchanged apart from explicit Result handling. The separate
+Weft readiness header retains its atomic protocol.
+
+Actual Loom module compile-fail tests require unsafe registration and reject
+range alias/drop misuse. Actual Weft getters/wait are exercised with controlled
+enter/reap failures; two removed-guard mutations fail the named borrow assertions.
+These host syscall doubles do not qualify real transport ownership. Native
+caller build, boot and graphical results are in ASYNC-SERVICE-STATUS.md.

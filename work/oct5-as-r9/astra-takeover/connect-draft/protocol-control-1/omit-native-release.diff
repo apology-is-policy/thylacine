@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -42,7 +42,7 @@
+     struct Loom *l = p->owner;
+     u32 pages = p->charged_pages;
+     p9_client_destroy(&p->client);
+-    devsrv_connect_release(&p->admission);
++    /* omit native release */
+     if (p->send_storage) kfree(p->send_storage);
+     if (p->recv_storage) kfree(p->recv_storage);
+     kfree(p);

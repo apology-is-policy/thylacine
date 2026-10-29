@@ -1,0 +1,11 @@
+--- control.c
++++ drop-barrier.c
+@@ -617,7 +617,7 @@
+     if(!o || !o->owner || o->fixed_dropping || o->rpc.sending ||
+        (o->phase!=LRPC_NEW && o->phase!=LRPC_SETTLING) || o->rpc.on_complete)
+         return -T_E_BUSY;
+-    o->fixed_dropping=true;
++    o->fixed_dropping=false;
+     int rc=o->fixed.owner?loom_private_fixed_release(o->owner,&o->fixed):0;
+     o->fixed_dropping=false;
+     if(!rc){o->program.wire.payload=NULL;o->program.wire.payload_capacity=0;}

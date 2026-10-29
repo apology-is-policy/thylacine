@@ -1,0 +1,11 @@
+--- control.c
++++ physical_before_obligation.c
+@@ -2092,7 +2092,7 @@
+     }
+     struct loom_service_ref scope=p->scope;
+     struct loom_request_ref request=p->request;
+-    p->connect_bound = false;
++    /* fault: release still-bound protocol */
+     spin_unlock(&l->lock);
+     // Retain the PREPARED obligation and scope pins while real cursor/storage
+     // destruction runs unlocked. A closing worker must still see this owner.

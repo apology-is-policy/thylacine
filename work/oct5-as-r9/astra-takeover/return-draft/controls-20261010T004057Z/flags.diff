@@ -1,0 +1,11 @@
+--- control.c
++++ flags.c
+@@ -2690,7 +2690,7 @@
+         const struct loom_service_buffer_return *in) {
+     int rc=control_owner(l,p);if(rc)return rc;
+     if(!in || in->size!=sizeof(*in) || in->version!=LOOM_SERVICE_ABI_VERSION ||
+-       in->flags || in->receipt.reserved || in->receipt.pool.reserved ||
++       false || in->receipt.reserved || in->receipt.pool.reserved ||
+        !in->receipt.pool.incarnation || in->receipt.pool.slot>=LOOM_SERVICE_SLOT_COUNT ||
+        in->receipt.member>=LOOM_SERVICE_POOL_MEMBERS)return -T_E_INVAL;
+     if(!l->receipt_size)return -T_E_OPNOTSUPP;

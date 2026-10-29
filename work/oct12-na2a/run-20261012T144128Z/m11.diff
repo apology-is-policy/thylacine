@@ -1,0 +1,13 @@
+diff --git a/kernel/test/test_loom_bridge_probe.c b/kernel/test/test_loom_bridge_probe.c
+index b341e4312..7a2658366 100644
+--- a/kernel/test/test_loom_bridge_probe.c
++++ b/kernel/test/test_loom_bridge_probe.c
+@@ -20,7 +20,7 @@
+ 
+ void test_loom_bridge_probe(void);
+ 
+-#ifdef LOOM_PRIVATE_QUALIFICATION
++#ifndef LOOM_PRIVATE_QUALIFICATION // MUTANT M11
+ #define BRIDGE_PROBE_STATUS 71
+ #define BRIDGE_PROBE_RINGS  4ull // the first, two rolled back, the last
+ #else

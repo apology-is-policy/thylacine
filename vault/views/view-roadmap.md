@@ -13,12 +13,14 @@ Generated from note fields — do not edit between the markers
 | arc | status | chunks landed | follow-ons |
 |---|---|---|---|
 | [[arc-arch81]] | active | 1 |  |
+| [[arc-astra-halcyon-followup]] | active | 4 |  |
 | [[arc-boosty]] | active | 5 |  |
 | [[arc-clade]] | active | 7 |  |
 | [[arc-corvus-srv]] | active | 3 | seam-srv-registry-lifecycle |
 | [[arc-deep-smp-review]] | active | 4 | seam-hmp-push, seam-sparse-mpidr |
 | [[arc-go-build]] | active | 27 |  |
 | [[arc-go-ide]] | active | 2 |  |
+| [[arc-halcyon-interaction]] | active | 11 |  |
 | [[arc-holotype-rw]] | active | 9 |  |
 | [[arc-identity-detour]] | active | 12 |  |
 | [[arc-life-support]] | active | 2 |  |
@@ -29,6 +31,7 @@ Generated from note fields — do not edit between the markers
 | [[arc-pty]] | active | 4 |  |
 | [[arc-tapestry]] | active | 3 |  |
 | [[arc-tickless-idle]] | active | 2 | seam-tickless-bare-metal |
+| [[arc-user-authority]] | active | 2 |  |
 | [[arc-vault]] | active | 33 |  |
 | [[arc-vivarium]] | active | 2 |  |
 | [[arc-weft]] | active | 4 |  |

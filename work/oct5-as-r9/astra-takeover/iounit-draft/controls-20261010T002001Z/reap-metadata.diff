@@ -1,0 +1,11 @@
+--- control.c
++++ reap-metadata.c
+@@ -394,7 +394,7 @@
+     // Exact parent remains pinned until the child identity and payload are gone.
+     // Explicit bytes avoid a freestanding libc dependency for the 64-byte node.
+     u8 *bytes=(u8 *)n;
+-    for(size_t i=0;i<sizeof(*n);++i)bytes[i]=0;
++    u32 stale_iounit=n->fid_iounit;for(size_t i=0;i<sizeof(*n);++i)bytes[i]=0;n->fid_iounit=stale_iounit;
+     (void)loom_slot_reap(t,source);
+     (void)loom_slot_unpin(t,parent);
+     return 0;

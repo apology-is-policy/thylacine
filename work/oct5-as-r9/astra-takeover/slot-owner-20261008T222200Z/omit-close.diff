@@ -1,0 +1,11 @@
+--- control
++++ omit-close
+@@ -134,7 +134,7 @@
+     if (!loom_is_private(l)) return;
+     spin_lock(&l->lock);
+     l->service_closing = true;
+-    loom_slots_close(l->service_slots);
++
+     spin_unlock(&l->lock);
+ }
+ static void loom_private_destroy(struct Loom *l) {

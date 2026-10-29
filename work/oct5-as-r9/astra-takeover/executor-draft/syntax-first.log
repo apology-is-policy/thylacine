@@ -1,0 +1,7 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/syntax-engine.c:293:42: error: call to undeclared function 'srvconn_poll'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  293 |         bool step=a.step || (a.events && srvconn_poll(p->admission.conn,true,a.events,NULL));
+      |                                          ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/syntax-engine.c:334:25: error: call to undeclared function 'srvconn_poll'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  334 |         if (a.events && srvconn_poll(p->admission.conn,true,a.events,pw)) t->wait_work=true;
+      |                         ^
+2 errors generated.

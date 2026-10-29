@@ -1,0 +1,24 @@
+Continue as Astra, single agent. No checkpoint handoff/approval required.
+Canonical kernel still97d495; action-draft adds executor and corrected selector,
+using retirement-draft, program-draft and wire-draft dependencies. Do not install
+partial pieces or re-run historical installers. Older draft evidence stays exact.
+
+Next implement IOUNIT-R1: negotiated Rlopen iounit in unused 64-byte FID ledger
+space, clearing on new mapping/reap; read/write admission copies it into immutable
+wire context, preserving zero/no-additional-limit semantics. Qualify negotiated
+limits and stale FID reuse. Then coherent working-set installation:
+- engine holds independent entry+Loom roots through ready_step, value-only interest,
+  poll register-before-recheck, actual RETURN/CQ/driver-return wake predicates;
+- CONNECT handshake state routed separately from READY/aborted operation owners;
+- native local retirement only after users/writers/local FID/request borrows end,
+  without waiting for committed pending CQ delivery or independent payload leases;
+- close visits locally-retired scopes with remaining ops, drain actual per-owner
+  disposal before global zero-entry-pin/detach/destruction;
+- immutable shared SQE frontend, no mutable user lookup after admission;
+- bound dispatch and fairness to existing executor quantum/accounting.
+
+Qualified host executor is NOT installed native dispatch. Run actual ARM64 full
+link and targeted native normal/bulk/fullCQ/empty/late-buffer/abort/deadline/CLUNK/
+close/exec fixtures, then source-matched Mac gates. AS3/4 then MM0-MM4 remain.
+Preserve 8GiBfloor, all evidence, clean Stratum61dde37 and Astra6pending+4protected
+hashes. No Main/private async/clipboard activation or128MiB protection removal.

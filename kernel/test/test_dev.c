@@ -34,19 +34,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
-
-void test_dev_boot_registration_smoke(void);
-void test_dev_lookup_unknown(void);
-void test_dev_devnone_ops_smoke(void);
-void test_dev_vtable_slot_coverage(void);
-void test_spoor_alloc_unref_round_trip(void);
-void test_spoor_ref_lifecycle(void);
-void test_spoor_clone_lifecycle(void);
-void test_spoor_clone_copies_state(void);
-void test_spoor_clunk_dispatches_close(void);
-void test_spoor_close_error_reaches_close_syscall(void);
-s64 sys_close_for_test(struct Proc *p, u64 h);
-void test_spoor_alloc_10k_no_leak(void);
+#include <thylacine/syscall.h>
 
 // =============================================================================
 // Counter snapshots — tests assert deltas rather than absolute counts so

@@ -1,0 +1,163 @@
+{
+  "source_head": "6573436166b6c0e3e4f38442d108fe1c5b54b906",
+  "source_hashes": {
+    "kernel/addrspace.c": "7cb1d6a1089a33a2c2781d4c58f6771fd7ec191ecb58a167d8e094b8ad52b80f",
+    "kernel/include/thylacine/addrspace.h": "749ad99d9d5869f02c03da94017be0511b8a0fa3f2e56c5326756995484e6095",
+    "arch/arm64/mmu.c": "cdf5f6ca4da9b711dc27f52e86bfc7922f280da8479163754045c9d6da455a51",
+    "kernel/loom.c": "1a9f7b39fda082c379c6ea1eaaa8df9f5f544c488e205a55d497658e202a4fa3"
+  },
+  "free_bytes_before": 10994782208,
+  "results": [
+    {
+      "variant": "control",
+      "owner_drop_order": 0,
+      "rc": 0,
+      "expected": 0,
+      "matched": true,
+      "expected_assertion": null,
+      "source_sha256": "46efb4a4c65961db1b8f5439851ad72bdd938203ed9698652ccc8f0cd63a4d44",
+      "command": [
+        "/opt/homebrew/opt/llvm@22/bin/clang",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-g",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/control.c",
+        "-o",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/control"
+      ]
+    },
+    {
+      "variant": "control",
+      "owner_drop_order": 1,
+      "rc": 0,
+      "expected": 0,
+      "matched": true,
+      "expected_assertion": null,
+      "source_sha256": "46efb4a4c65961db1b8f5439851ad72bdd938203ed9698652ccc8f0cd63a4d44",
+      "command": [
+        "/opt/homebrew/opt/llvm@22/bin/clang",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-g",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/control.c",
+        "-o",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/control"
+      ]
+    },
+    {
+      "variant": "omit-private-put",
+      "owner_drop_order": 0,
+      "rc": 11,
+      "expected": 11,
+      "matched": true,
+      "expected_assertion": "final descriptor reclaimed exactly once",
+      "source_sha256": "d30dea04b80ea499ea63c0640a76e1ffc2b80e7ee22ead1af6f158492898e61e",
+      "command": [
+        "/opt/homebrew/opt/llvm@22/bin/clang",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-g",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-private-put.c",
+        "-o",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-private-put"
+      ]
+    },
+    {
+      "variant": "omit-descriptor-free",
+      "owner_drop_order": 0,
+      "rc": 11,
+      "expected": 11,
+      "matched": true,
+      "expected_assertion": "final descriptor reclaimed exactly once",
+      "source_sha256": "ab35dce9d684c3b47b4058399d1d3689f212d5ebaeb9071032719cd9d4ff0748",
+      "command": [
+        "/opt/homebrew/opt/llvm@22/bin/clang",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-g",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-descriptor-free.c",
+        "-o",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-descriptor-free"
+      ]
+    },
+    {
+      "variant": "omit-table-destroy",
+      "owner_drop_order": 0,
+      "rc": 11,
+      "expected": 11,
+      "matched": true,
+      "expected_assertion": "all four page-table levels reclaimed exactly once",
+      "source_sha256": "bce182372b3f8d8ef4c4ebe4f0e70c3c2fc8ef75b3e77d0ce111a86088ec7856",
+      "command": [
+        "/opt/homebrew/opt/llvm@22/bin/clang",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-g",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-table-destroy.c",
+        "-o",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-table-destroy"
+      ]
+    },
+    {
+      "variant": "omit-root-free",
+      "owner_drop_order": 0,
+      "rc": 11,
+      "expected": 11,
+      "matched": true,
+      "expected_assertion": "all four page-table levels reclaimed exactly once",
+      "source_sha256": "71072633a842b8e5a236de1f7d9bc916fd244e838be25c83fe19736e6927d042",
+      "command": [
+        "/opt/homebrew/opt/llvm@22/bin/clang",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-g",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "-isysroot",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-root-free.c",
+        "-o",
+        "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211401Z/omit-root-free"
+      ]
+    }
+  ],
+  "scope": "Extracted retirement -> AddrSpace -> page-table destruction, host boundary.\n\nActual C functions and AddrSpace declaration; real host heap frees, with doubles\nfor allocator entry points, locks, VMA drain, ring refund and Loom layout.\nSequential schedules only. Does not certify guest buddy/magazine reclamation,\nARM scheduling, or an engine that is not implemented. Requires Mac lease and\n8 GiB disk admission. Leaves all generated sources, diffs and logs per run.\n"
+}

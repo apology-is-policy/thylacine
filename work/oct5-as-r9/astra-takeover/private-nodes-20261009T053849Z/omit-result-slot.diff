@@ -1,0 +1,11 @@
+--- control
++++ omit-result-slot
+@@ -46,7 +46,7 @@
+     if (p->as != l->service_as || p->stripes != l->service_creator)
+         return -T_E_ACCES;
+     if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
+-        in->flags || in->reserved || in->result.slot || in->result.reserved ||
++        in->flags || in->reserved || in->result.reserved ||
+         in->result.incarnation) return -T_E_INVAL;
+     spin_lock(&l->lock);
+     int rc = l->service_closing ? -T_E_CANCELED :

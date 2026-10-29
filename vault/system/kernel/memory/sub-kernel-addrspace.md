@@ -3,15 +3,24 @@ id: sub-kernel-addrspace
 type: sub
 title: "The shared address space and the copy-on-write break"
 parent: moc-kernel-memory
-code: ["kernel/addrspace.c", "kernel/include/thylacine/addrspace.h", "kernel/cow.c", "kernel/include/thylacine/cow.h"]
+code: ["kernel/addrspace.c", "kernel/include/thylacine/addrspace.h", "kernel/cow.c", "kernel/include/thylacine/cow.h", "tools/test-addrspace-lifetime.py", "tools/host-tests/addrspace-lifetime.c"]
 audit: hard
 guarded-by: [inv-i44, inv-i32]
 validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-10-22
+updated: 2026-10-27
 ---
+
+## Shared retention design review
+
+addrspace_charge_shared_map still enforces PROC_SHARED_MAP_MAX_PAGES per
+address space; it is separate from the capacity-derived private-page budget.
+The approved replacement is docs/SHARED-MEMORY-ACCOUNTING.md, reviewed with the
+async prerequisite in docs/ASYNC-MEMORY-DESIGN-REVIEW.md. No replacement account,
+pressure API or relaxed mapping admission is implemented by those drafts.
+
 ## Purpose
 
 "Two Procs, one address space" was **unrepresentable** until L-1, because
@@ -36,11 +45,13 @@ stay on `Proc`.
 
 | Entry | Effect |
 |---|---|
-| `addrspace_alloc(page_budget)` | fresh L0 table, `ref = 1`; **NULL on a 0 budget** |
-| `addrspace_ref(as)` | +1; extincts on NULL or on a dead object |
-| `addrspace_unref(as)` | -1; the last drop **drains the VMA list**, destroys the table, frees |
+| `addrspace_alloc(page_budget)` | fresh L0 table, `ref = owners = 1`; **NULL on a 0 budget** |
+| `addrspace_ref(as)` (tests build only; production takes `addrspace_try_ref`) | +1 owner and total lifetime; requires a live owner |
+| `addrspace_unref(as)` | -1 owner; last owner drains VMAs while retaining its total reference, then releases that reference |
+| `addrspace_pin/unpin(as)` (tests build only) | kernel descriptor lifetime only; final total drop destroys page tables and descriptor, never drains VMAs |
 | `addrspace_clone(src, exempt)` | the COW fork; a fresh space, or NULL having freed everything |
-| `addrspace_ref_count(as)` | for "am I the last holder" only — **not a lock** |
+| `addrspace_owner_count(as)` | constructor/Proc ownership snapshot for sharing and last-driver predicates; not a lock |
+| `addrspace_ref_count(as)` | total lifetime including kernel pins; diagnostic only, not a mapping count |
 | `addrspace_charge_*` / `uncharge_*` | the six I-32 counter operations, per address space only: the machine-wide bound is physical and lives with the allocator ([[sub-kernel-mm-phys]]; B-1a' round-1 close) |
 | `addrspace_charge_table(as, exempt)` / `addrspace_uncharge_table(as)` | one hardware page table charged to the space (`page_count` + the `pgtable_pages` telemetry) or returned; the MMU calls them around `alloc_user_pages` / `free_pages` ([[sub-kernel-mmu]]; B-1a' audit F1) |
 | `addrspace_charge_file(as, exempt)` / `addrspace_uncharge_file(as, n)` | one mapped FILE page charged to the space (`page_count` + the `file_pages` telemetry) per leaf the fault installs; `n` returned per leaf a range clear removes ([[sub-kernel-fault]], [[sub-kernel-vma]]; B-1a' audit F8) |
@@ -121,7 +132,7 @@ nothing for it to miss.
 the latent-P1 shape, and the cost of getting it right immediately was one
 line.
 
-**The drain moved to the last reference (L-3), and that is a fix rather
+**The drain moved to the last owner reference (L-3), and that is a fix rather
 than a tidy-up.** It used to run in `proc_free` and in
 `proc_exec_replace`, which was correct only while `ref` could never exceed
 1: draining at *a death* and draining at *the last reference* are the same
@@ -154,7 +165,7 @@ and the rollover's per-CPU flush runs before that value can go live again
 ([[sub-kernel-asid]]). Each caller separately owes only "no CPU translates
 under this ASID *now*" — `proc_free` by running only after every thread has
 switched out for the last time and been freed ([[inv-i48]]), `proc_exec_replace` by writing the new TTBR0 (a *different*
-ASID) and `isb`-ing first. `vma_drain` issues **no TLBI at all**, measured
+ASID) and `isb`-ing first. `vma_drain_in` issues **no TLBI at all**, measured
 at L-2; an earlier claim that it did was fiction.
 
 **The clone is three phases, and the order is the whole safety argument.**
@@ -265,7 +276,7 @@ have a buggy cfg in [[spec-cow]].
 
 ## Data structures
 
-`struct AddrSpace` — 72 bytes, asserted (a drift alarm, not an ABI).
+`struct AddrSpace` — 80 bytes, asserted (a drift alarm, not an ABI).
 `ref` / `lock` / `pgtable_root` / `context_id` / `vmas` / `page_count` /
 `vma_count` / `shared_map_pages` / `page_budget` / `page_peak` /
 `pgtable_pages` (B-1a' audit F1: the hardware tables inside `page_count`,
@@ -277,6 +288,8 @@ ORed in at each departure and never cleared; the I-39 image join weighs them,
 [[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
 from a global counter, never reused; the eager charge record's key, audit F4).
 The struct is 80 bytes.
+telemetry) / `id` (a u64 from a global counter, never reused; the eager
+charge record's key, audit F4) / `owners` (AS-2a: process/constructor owners, excluding kernel descriptor pins).
 
 `context_id` lives here because **the ASID names a translation table**,
 which is what the allocator always semantically meant. Two Procs sharing
@@ -586,5 +599,55 @@ dying with pages, nodes and an eager region returns all of it) and
 spawn-resolve test exercises the raise from a narrowed parent -- the only
 parent a raise can matter to when the default is already the maximum.
 
+## Kernel descriptor pins (AS-2a)
+
+Kernel pins retain the exact account and page-table storage, not arbitrary VMAs.
+Only the last owner runs the potentially sleeping FILE-mapping drain, before
+releasing its total reference. Concurrent unpins cannot free that reference out
+from under the drain. A single final-total atomic transition controls destruction;
+no independent pair of zero tests can free twice. Pins cannot create an owner
+from an ownerless descriptor, install TTBR0 or translate user addresses.
+Independent Burrow references keep registered I/O buffers alive. The existing
+no-CPU-under-old-ASID requirement remains at final owner teardown.
+
+Proc authority-image join/stamping and last-driver quiescence, plus spawn budget
+stamping, count owners. Retirement is not another process sharing authority.
+The current accounting cap stays in force; this prerequisite is not the approved
+replacement shared-memory account hierarchy. Ownerless legacy counters may retain
+non-admitting residue until final descriptor destruction.
+
+The host fixture (`tools/test-addrspace-lifetime.py`) compiles the actual
+declaration and lifecycle, the release/destroy pair with it, and the actual
+`addrspace_quiesce_mapped_devices`; allocator, VMA drain, page-table destruction
+and the device resets are host doubles, and its VMA list is real nodes the walk
+can follow. The drain double has the kernel's external linkage, so a mutant
+that removes destroy's only drain still compiles and meets its assertion. Its mutants carry the last-owner/last-pin counterexamples onto the
+split: a release that drains while another owner remains, a destroy without its
+drain or with its lifetime drop first, a last-owner release that drops the
+lifetime destroy still needs, a release that calls itself last one owner early.
+Two more are the devices': no quiesce, and quiesce after the drain. A direct
+case drives `addrspace_release` and `addrspace_destroy` apart and observes the
+interval between them: the space ownerless and still held by the last owner's
+lifetime reference, its mappings and devices untouched, a pin dropped inside
+the interval freeing nothing, then destroy stopping the device before the drain
+and freeing once. Its controls: a release that tears down early (the device
+quiesce moved into release), which only this case can see; and, run on this
+case alone, a last release that drops its lifetime and a lifetime drop that
+frees under a live reference (the kernel's own drain-before-free extinction).
+Each mutant is killed by its named assertion, ordinary and under ASan/UBSan. Native
+process/device/refund tests are recorded in ASYNC-SERVICE-SELF-REVIEW.md. Source
+extraction excludes clone/MMU code; existing COW/capacity models do not model
+this descriptor-pin distinction.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Private ring sharing and fork exclusion
+
+Private-ring admission and addrspace_try_ref serialize under the AS lock.
+Only one process owner may start a guard; any outstanding guard refuses another
+owner. Each guard owns a kernel descriptor pin until local retirement, including
+after last-owner mapping drain. proc_alloc_in handles refusal through ordinary
+unpublished rollback. The count uses former padding: sizeof AddrSpace remains80.
+Native Proc/COW tests and actual-source ASan/UBSan concurrency/mutations qualify
+the helpers; private runtime consumers remain pending.

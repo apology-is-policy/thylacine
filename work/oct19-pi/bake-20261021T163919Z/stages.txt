@@ -1,0 +1,13 @@
+2026-10-21T16:39:19Z  occurs self-check: a true count passes, a false one fails
+2026-10-21T16:39:20Z  HEAD 293cdbabeabead031d3510c6b7506d0e3b20dab4, clean; expected tests (derived from test.c): 1900; last registered: stalk.open_create_containment_and_denials
+2026-10-21T16:39:20Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla'; no untracked build input
+2026-10-21T16:39:20Z  go fork /Users/northkillpd/projects/go-thylacine-pin-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+909b4c3047ad702740fc6d46085e355f3052874d09e5958a4f1bdcce83dae7bf  build/kernel/thylacine.elf
+abed765847a70303c952c20e199679d7463ee3e1a39d7957c8c007013adb0e4f  build/kernel/thylacine.bin
+c1622a7e8ad31fb21d9f976c0aea0fee7de106be65f3b948f2615767636b53b3  build/kernel-undefined/thylacine.elf
+59d8ed28cb945f8a555e70277569a5aaa2ee1b633869443c9b7e1cfe11b33931  build/kernel-undefined/thylacine.bin
+7f033896f50c529c8eb2723c93f82d3aebce7fe6387d7c40581049a42b074f91  build/ramfs.cpio
+08d8c861a8fc808026a465ff32b70b16ad2a48aee476e0235cc569c57c3ebd97  build/disk.img
+9da1c8b4004e0dd784cd81ae59ea53f6672511329af6e935970cf3dc8585e950  build/fixtures/pool.img
+2026-10-21T16:41:05Z  BAKE DONE: 293cdbabeabead031d3510c6b7506d0e3b20dab4 -> work/oct19-pi/bake-20261021T163919Z. Release the mac now.
+2026-10-21T16:41:05Z  exit 0

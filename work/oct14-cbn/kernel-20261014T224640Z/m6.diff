@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 00:57:58
+@@ -14158,7 +14158,7 @@
+             return -(s64)T_E_MFILE;
+         }
+         if (handle_dup_into_reserved(p, (hidx_t)oldfd, nfd, false) < 0) {
+-            viv_socktab_drop(stab, (s32)nfd);       // the reserved number's own row
++            (void)stab; /* MUTANT M6: the refused dup keeps its alias row */       // the reserved number's own row
+             handle_unreserve(p, nfd);
+             if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
+             return -(s64)T_E_MFILE;

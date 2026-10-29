@@ -1,0 +1,71 @@
+=== preconditions ===
+2026-10-19T09:59:23Z  asr9 HEAD 107c5c1bdb7bbfaf32480eb94fbca2d2df4d7ff4 on main 11546588847f36d4f77a36b08f87b6b46a814cfd, clean
+2026-10-19T09:59:23Z  expected tests: 2005 (main's 2000 + the five)
+2026-10-19T09:59:23Z  stratum at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla', no untracked build input
+2026-10-19T09:59:23Z  go fork /Users/northkillpd/projects/go-thylacine at f67e51e66a99cb02b7418cedee7200665210c58b dirty=0 (shared, unpinned)
+2026-10-19T09:59:23Z  disk pre: 9391 MiB free (floor 6144)
+=== DEFAULT ===
+2026-10-19T10:06:15Z  disk post-default-build: 7424 MiB free (floor 6144)
+2026-10-19T10:06:16Z  DEFAULT: the five AS-R9 test names are in thylacine.elf
+2026-10-19T10:06:16Z  default kernel 0bd67a7c2b575b688935ec7b4173a9be154c6ec3a6f6203bb35396d7c3114660
+2026-10-19T10:07:16Z  default: test.sh exit 0
+2026-10-19T10:07:16Z  default GREEN: 2005/2005, 0 FAIL lines, no EXTINCTION, the five AS-R9 tests PASS
+=== FAULT ===
+2026-10-19T10:21:49Z  FAULT GREEN: ==> [el1_sync_runaway] PASS (saw 'EXTINCTION: el1-sync recursion'; 'console-ring: NOT held' absent)  ==> Summary: 8 PASS, 0 FAIL out of 8 
+2026-10-19T10:21:49Z  disk post-fault: 6740 MiB free (floor 6144)
+=== CI ===
+2026-10-19T10:22:45Z  disk post-ci-build: 6741 MiB free (floor 6144)
+2026-10-19T10:22:47Z  CI: the five AS-R9 test names are in thylacine.elf
+2026-10-19T10:22:47Z  ci kernel 0bd67a7c2b575b688935ec7b4173a9be154c6ec3a6f6203bb35396d7c3114660
+2026-10-19T10:23:46Z  ci: test.sh exit 0
+2026-10-19T10:23:46Z  ci GREEN: 2005/2005, 0 FAIL lines, no EXTINCTION, the five AS-R9 tests PASS
+=== UBSAN ===
+2026-10-19T10:25:18Z  disk post-ubsan-build: 6665 MiB free (floor 6144)
+2026-10-19T10:25:20Z  UBSAN: the five AS-R9 test names are in thylacine.elf
+2026-10-19T10:25:20Z  ubsan kernel 2a4b8dee30d0dd161a857f1b4a17bfcef14844046e07904dfc788fb070effa24
+2026-10-19T10:26:20Z  ubsan: test.sh exit 0
+2026-10-19T10:26:20Z  ubsan GREEN: 2005/2005, 0 FAIL lines, no EXTINCTION, the five AS-R9 tests PASS
+=== SMP ===
+ci-smp-gate.sh exit 1
+    - stratumd: built from /Users/northkillpd/projects/stratum/v2 @7dd103d (dirty: YES)
+    - gopls: LSP server cross-compile (GOOS=thylacine, stripped) -> /goroot/bin (Stage 8d)
+    - ambush: Delve port -> /goroot/bin (Stage 8e-3e nora :debug)
+    - nora-demo: Go debug demo (unstripped) + source -> /goroot/bin + /goroot/demo (nora :debug demo)
+    - Go GOROOT: cross-built toolchain + trimmed stdlib src staged at /Users/northkillpd/projects/thylacine-asr9/build/go/goroot (Stage 6 default-on)
+    - Go 4c: seed-warmed GOCACHE + probe source staged (Stage 4c; baked at /go-cache + /go4c)
+    - viv bundles: /vivarium staged (probe + alpine + alpine-ash + alpine-trap + alpine-net + git-probe + alpine-stock)
+    - pool.img + system.key: REGENERATED (fresh random key, seed=0xde924eff349f3742) -- the ramfs MUST be re-baked so /bin/system.key matches
+    - go-hello + go-goroutines + go-fs + go-exec + go-net + go-env + go-web + go-get: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes + Stage 5 on-demand probes)
+    - ambush: Delve port cross-compile (GOOS=thylacine, stripped) -> ramfs (Stage 8c-1 debugger)
+    - ramfs.cpio: TLS bins stripped for ramfs economy (tls-smoke + https + curl + wget + tlsperf); net-echo ships UNSTRIPPED (~1.1 MiB) -- the live REVENANT R-4 >1-MiB-exec proof
+    - ramfs.cpio: staged DX2C.COM (DX-2c DOS run-a-program witness)
+    - ramfs.cpio: staged DX3K.COM (DX-3 DOS keystroke witness)
+    - ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)
+    - ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)
+    - disk.img: REBUILT
+==> [build.sh] note: a pouch ABI/patch change auto-triggers a sysroot REBUILT above
+    (any patch newer than libc.a); 'tools/build.sh clean' forces a full from-scratch rebuild.
+
+698 hunks checked: 0 error(s), 0 warning(s)
+spawn-args mirror check: kernel 104 B / 20 fields, every u64 classified; 3 in-tree mirrors ok (libt, libthyla-rs, pouch); go fork ok (offsets, sizes, pointer-typed addresses; /Users/northkillpd/projects/go-thylacine/src/syscall/exec_thylacine.go)
+check-flag-words: proc_flags: 20 defines (1 built from members), 19 bits owned, free 12-17,22-28
+check-flag-words: spawn perms: 11 defines (1 built from members), 10 bits owned, free 10-31
+check-flag-words: spawn identity flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn allowance flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn phenotype flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: spawn debug flags: 2 defines (1 built from members), 1 bits owned, free 1-31
+check-flag-words: walk-create mode word: 7 defines (1 built from members), 14 bits owned, free 9-21,26-30
+check-flag-words: 9P attach flags: 3 defines (0 built from members), 3 bits owned, free 3-31
+check-flag-words: mount flags: 7 defines (0 built from members), 7 bits owned, free 7-31
+check-flag-words: 9 words ok; the self-test caught all 45 mutations
+==> REFUSING target 'kernel': 5982 MB free on /Users/northkillpd/projects/thylacine-asr9/build's volume, below the 6 GB floor -- free space, or set THYLACINE_MIN_FREE_GB=<GB> (0 disables)
+    largest entries under /Users/northkillpd/projects/thylacine-asr9/build (du counts APFS-cloned blocks in full):
+      229M	/Users/northkillpd/projects/thylacine-asr9/build/go
+      257M	/Users/northkillpd/projects/thylacine-asr9/build/icu-host
+      1.0G	/Users/northkillpd/projects/thylacine-asr9/build/instrument-goldens
+      1.7G	/Users/northkillpd/projects/thylacine-asr9/build/usr-rs
+      2.1G	/Users/northkillpd/projects/thylacine-asr9/build/clade
+      2.2G	/Users/northkillpd/projects/thylacine-asr9/build/fixtures
+ci-smp-gate: ubsan kernel build FAILED
+2026-10-19T10:27:18Z  exit 0
+work/oct19-asr9/gate.sh: line 35: 48915 Terminated: 15          watchdog $$

@@ -1,0 +1,14 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes.c:7:
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-retirement_executor/thyla/loom_client/retirement_executor.h:18:61: error: static assertion failed due to requirement '((-1202)) > -(1000) - 100': executor codes lie in the -1000 block
+   18 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_RETIREMENT_FULL,1000)&&T_LOOM_CLIENT_LOCAL(T_RETIREMENT_CAPACITY,1000),"executor codes lie in the -1000 block");
+      |                                                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-retirement_executor/thyla/loom_client/base.h:16:60: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                                            ^~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-retirement_executor/thyla/loom_client/retirement_executor.h:18:61: note: expression evaluates to '-1202 > -1100'
+   18 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_RETIREMENT_FULL,1000)&&T_LOOM_CLIENT_LOCAL(T_RETIREMENT_CAPACITY,1000),"executor codes lie in the -1000 block");
+      |                                                             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-retirement_executor/thyla/loom_client/base.h:16:66: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                                            ~~~~~~^~~~~~~~~~~~~
+1 error generated.

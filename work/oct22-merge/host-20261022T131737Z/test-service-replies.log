@@ -1,0 +1,29 @@
+
+running 14 tests
+test servicewire::tests::cancellation_preserves_ticket_monotonicity_and_drops_old_park ... ok
+test servicewire::tests::buffered_frames_continue_without_another_read_edge ... ok
+test servicewire::tests::exact_park_resumes_only_after_immediate_reply_drains ... ok
+test servicewire::tests::growing_frame_cannot_borrow_protocol_cache_reservation ... ok
+test servicewire::tests::cancelled_output_discards_buffered_input_and_partial_frames_poison ... ok
+test servicewire::tests::malformed_deferred_transitions_and_failed_builders_refuse ... ok
+test servicewire::tests::over_budget_output_is_refused_before_any_wire_byte ... ok
+test servicewire::tests::malformed_size_and_truncated_disconnect_never_dispatch ... ok
+test servicewire::tests::parked_read_allows_flush_and_stale_resumption_cannot_replace_output ... ok
+test servicewire::tests::short_writes_do_not_repeat_dispatch_or_lose_a_byte ... ok
+test servicewire::tests::transport_shares_budgets_with_retained_protocol_caches ... ok
+test servicewire::tests::stalled_peer_cannot_consume_another_peers_turn ... ok
+test servicewire::tests::deadline_and_byte_limit_yield_without_losing_progress ... ok
+test servicewire::tests::every_split_and_full_size_frame_survives_backpressure ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+
+input-allowance-ignored: intended assertion failure at transport_shares_budgets_with_retained_protocol_caches
+frame-length-as-capacity: intended assertion failure at transport_shares_budgets_with_retained_protocol_caches
+output-quota-ignored: intended assertion failure at over_budget_output_is_refused_before_any_wire_byte
+overwrite-busy: intended assertion failure at exact_park_resumes_only_after_immediate_reply_drains
+wrong-ticket: intended assertion failure at exact_park_resumes_only_after_immediate_reply_drains
+retain-cancelled-park: intended assertion failure at cancellation_preserves_ticket_monotonicity_and_drops_old_park
+reuse-park-ticket: intended assertion failure at cancellation_preserves_ticket_monotonicity_and_drops_old_park
+reuse-partial-frame: intended assertion failure at cancelled_output_discards_buffered_input_and_partial_frames_poison
+retain-buffered-input: intended assertion failure at cancelled_output_discards_buffered_input_and_partial_frames_poison

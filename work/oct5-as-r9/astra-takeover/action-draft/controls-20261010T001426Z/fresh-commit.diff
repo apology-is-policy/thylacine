@@ -1,0 +1,13 @@
+--- control.c
++++ fresh-commit.c
+@@ -1654,8 +1654,8 @@
+             rc=loom_private_io_drop_fixed(o);if(rc)return rc;
+         }
+         spin_lock(&l->lock);
+-        rc=o->pool_stream?loom_provided_commit_locked(o,timer_now_ns()):
+-                          loom_admission_commit_locked(o,timer_now_ns());
++        rc=o->pool_stream?loom_provided_commit_locked(o,0):
++                          loom_admission_commit_locked(o,0);
+         spin_unlock(&l->lock);
+         return rc?action_abort(p,rc):1;
+     case LREADY_DELIVER:

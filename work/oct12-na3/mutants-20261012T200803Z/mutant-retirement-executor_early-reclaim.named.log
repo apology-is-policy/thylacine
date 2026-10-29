@@ -1,0 +1,83 @@
+warning: method `progress` is never used
+   --> src/fixed_futures.rs:200:19
+    |
+113 | impl<B: RingBackend> FutureDriver<B> {
+    | ------------------------------------ method in this implementation
+...
+200 |     pub(crate) fn progress(&mut self) -> bool {
+    |                   ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `progress` is never used
+  --> src/retirement_executor.rs:41:8
+   |
+25 | pub(crate) trait Retirable {
+   |                  --------- method in this trait
+...
+41 |     fn progress(&mut self) -> bool;
+   |        ^^^^^^^^
+
+warning: `loom-client` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 8 tests
+test tests::ring::executor::executor_capacity_precedes_factory_and_survives_abandon ... FAILED
+test tests::ring::executor::executor_drop_and_progress_do_not_allocate ... FAILED
+test tests::ring::executor::executor_failed_factory_does_not_leak_cell ... ok
+test tests::ring::executor::executor_held_terminal_result_blocks_reuse_and_preserves_bytes ... FAILED
+test tests::ring::executor::executor_live_request_blocks_reuse_despite_retirement_proof ... FAILED
+test tests::ring::executor::executor_never_reclaims_attached_client ... ok
+test tests::ring::executor::executor_rotation_is_bounded_and_does_not_starve_later_cells ... FAILED
+test tests::ring::executor::executor_shutdown_closes_once_keeps_live_read_storage ... ok
+
+failures:
+
+---- tests::ring::executor::executor_capacity_precedes_factory_and_survives_abandon stdout ----
+
+thread 'tests::ring::executor::executor_capacity_precedes_factory_and_survives_abandon' (30951377) panicked at src/tests/ring/executor.rs:36:9:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::executor::executor_drop_and_progress_do_not_allocate stdout ----
+
+thread 'tests::ring::executor::executor_drop_and_progress_do_not_allocate' (30951378) panicked at src/tests/ring/executor.rs:167:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::executor::executor_held_terminal_result_blocks_reuse_and_preserves_bytes stdout ----
+
+thread 'tests::ring::executor::executor_held_terminal_result_blocks_reuse_and_preserves_bytes' (30951380) panicked at src/tests/ring/executor.rs:83:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::executor::executor_live_request_blocks_reuse_despite_retirement_proof stdout ----
+
+thread 'tests::ring::executor::executor_live_request_blocks_reuse_despite_retirement_proof' (30951381) panicked at src/tests/ring/executor.rs:60:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::executor::executor_rotation_is_bounded_and_does_not_starve_later_cells stdout ----
+
+thread 'tests::ring::executor::executor_rotation_is_bounded_and_does_not_starve_later_cells' (30951383) panicked at src/tests/ring/executor.rs:101:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    tests::ring::executor::executor_capacity_precedes_factory_and_survives_abandon
+    tests::ring::executor::executor_drop_and_progress_do_not_allocate
+    tests::ring::executor::executor_held_terminal_result_blocks_reuse_and_preserves_bytes
+    tests::ring::executor::executor_live_request_blocks_reuse_despite_retirement_proof
+    tests::ring::executor::executor_rotation_is_bounded_and_does_not_starve_later_cells
+
+test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

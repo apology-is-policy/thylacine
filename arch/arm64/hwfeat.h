@@ -100,12 +100,14 @@ void hw_cpu_ident_detect(unsigned cpu);
 // must handle NULL: a DTB-declared CPU that failed PSCI never records one.
 const struct hw_cpu_ident *hw_cpu_ident(unsigned cpu);
 
+#ifdef KERNEL_TESTS
 // Does this CTR_EL0 describe an I-cache that an invalidate by one VA may leave
 // holding a line fetched through ANOTHER VA of the same PA? Anything but PIPT
 // (L1Ip, bits 15:14, != 0b11). A VIPT I-cache whose way exceeds the page aliases
 // (Cortex-A53: 32 KiB, 2 ways), and Linux assumes every VIPT one does
 // (cpuinfo_detect_icache_policy); so does this.
 bool hw_ctr_icache_aliases(u64 ctr);
+#endif // KERNEL_TESTS
 
 // True once ANY CPU recorded an aliasing I-cache at bring-up (hw_cpu_ident_detect).
 // arch_icache_sync_range then invalidates the whole I-cache instead of by VA.

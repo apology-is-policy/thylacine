@@ -1,0 +1,203 @@
+diff --git a/kernel/CMakeLists.txt b/kernel/CMakeLists.txt
+index b5481d3a6..db68ca48f 100644
+--- a/kernel/CMakeLists.txt
++++ b/kernel/CMakeLists.txt
+@@ -69,6 +69,7 @@ set(KERNEL_SRCS
+     loom_service_slots.c
+     loom_service_nodes.c
+     loom_service_requests.c
++    loom_service_protocol.c
+     weft.c
+     vma.c
+     elf.c
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index 87f35f968..2aff63cf5 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -670,6 +670,7 @@ void test_loom_service_slots(void);
+ void test_loom_service_nodes(void);
+ void test_loom_service_requests(void);
+ void test_loom_private_requests(void);
++void test_loom_private_protocol(void);
+ void test_loom_private_node_owner(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+@@ -2759,6 +2760,7 @@ struct test_case g_tests[] = {
+     { "loom.private_node_owner",         test_loom_private_node_owner,         false, NULL },
+     { "loom.service_requests",           test_loom_service_requests,           false, NULL },
+     { "loom.private_requests",           test_loom_private_requests,           false, NULL },
++    { "loom.private_protocol",           test_loom_private_protocol,           false, NULL },
+     { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
+     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
+     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 5215ed620..942eeb3b9 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -1,3 +1,5 @@
++#include <thylacine/loom_service_protocol.h>
++#include <thylacine/srvconn.h>
+ // Loom-2a tests -- the KObj_Loom ring substrate.
+ //
+ // Covers loom_create geometry + the kobj refcount lifecycle + the
+@@ -2105,3 +2107,147 @@ void test_loom_private_targets(void) {
+     const char *error = loom_targets_fixture();
+     TEST_ASSERT(!error, error);
+ }
++
++// Actual native target, caller snapshot, weighted connection admission and
++// charged preallocated client. No server thread: preparation must perform no
++// transport I/O and must leave the backlog empty. This does not exercise CONNECT
++// publication, request binding, handshake progress or retirement of active work.
++static const char *loom_protocol_fixture(void) {
++    const char *error = NULL;
++    struct Proc *p = test_proc_make(), *poster = test_proc_make();
++    struct SrvRegistry *reg = NULL;
++    struct Spoor *root = NULL;
++    struct Loom *l = NULL;
++    struct loom_service_protocol *prepared = NULL;
++    struct loom_service_ref refs[2] = {{0},{0}};
++    u64 goal = loom_private_retired();
++    u32 base = p ? p->as->page_count : 0;
++    u32 old_budget = p ? p->as->page_budget : 0;
++    bool owner_dropped = false;
++#define PO(c,m) do { if (!(c)) { error=m; goto done; } } while (0)
++    PO(p && poster,"protocol fixture processes");
++    p->principal_id = 42;
++    proc_mark_may_post_service(poster);
++    reg = srv_registry_create();
++    PO(reg,"protocol fixture registry");
++    root = devsrv_attach_registry(reg);
++    PO(root,"protocol navigation root");
++    root->flag |= CWALKONLY;
++    const char *names[2] = {"small","large"};
++    for (u32 n=0;n<2;++n)
++        PO(devsrv_post_listener(poster,root,names[n],5,SRV_MODE_9P,n==1,false,false)>=0,
++           "protocol strict native posts");
++    spoor_ref(root);
++    int fd = handle_alloc(p,KOBJ_SPOOR,RIGHT_READ,root);
++    if (fd < 0) spoor_clunk(root);
++    PO(fd>=0,"protocol navigation descriptor");
++    l=loom_create_private(p,2,2,true);
++    if (l) ++goal;
++    PO(l,"protocol private owner");
++    for (u32 n=0;n<2;++n) {
++        struct loom_service_target in;
++        for (u32 i=0;i<sizeof(in);++i) ((u8 *)&in)[i]=0;
++        in.size=sizeof(in);in.version=1;in.registry_fd=fd;in.name_len=5;
++        for (u32 i=0;i<5;++i) in.name[i]=names[n][i];
++        PO(!loom_private_target_prepare(l,p,&in,&refs[n]),"protocol target prepare");
++        PO(!loom_private_target_publish(l,refs[n]),"protocol target publish");
++    }
++    u32 owner_pages = p->as->page_count;
++    u64 freed = srvconn_total_freed();
++    loom_private_protocol_fault_arm_for_test(1);
++    PO(loom_private_protocol_prepare(l,refs[0],10,10,&prepared)==-T_E_TIMEDOUT &&
++       !prepared && !loom_private_protocol_fault_pending_for_test(),
++       "expired preparation consumes fault without ownership");
++    PO(srvconn_total_freed()==freed && p->as->page_count==owner_pages,
++       "expired preparation allocates no connection or pages");
++    p->state=PROC_STATE_ZOMBIE;
++    int gone = loom_private_protocol_prepare(l,refs[0],0,0,&prepared);
++    p->state=PROC_STATE_ALIVE;
++    PO(gone==-T_E_ACCES && !prepared,"dead creator cannot borrow worker authority");
++    for (u32 n=0;n<2;++n) {
++        u32 msize = n ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE;
++        u32 expected = (u32)burrow_backing_pages(sizeof(*prepared)) +
++                       (u32)burrow_backing_pages(msize)*2u;
++        struct SrvService *svc = srv_lookup_in(reg,names[n],5);
++        for (u32 stage=1;stage<=3u;++stage) {
++            loom_private_protocol_fault_arm_for_test(stage);
++            PO(loom_private_protocol_prepare(l,refs[n],1000,1,&prepared)==-T_E_NOMEM &&
++               !prepared && !loom_private_protocol_fault_pending_for_test(),
++               "protocol allocation refusal leaves output untouched");
++            ++freed;
++            PO(srvconn_total_freed()==freed,"protocol failure frees native endpoint");
++            PO(p->as->page_count==owner_pages && srv_backlog_depth(svc)==0,
++               "protocol failure refunds complete charge without admission");
++        }
++        spin_lock(&p->as->lock);p->as->page_budget=owner_pages;spin_unlock(&p->as->lock);
++        int limited=loom_private_protocol_prepare(l,refs[n],0,0,&prepared);
++        spin_lock(&p->as->lock);p->as->page_budget=old_budget;spin_unlock(&p->as->lock);
++        ++freed;
++        PO(srvconn_total_freed()==freed,"budget refusal frees native endpoint");
++        PO(limited==-T_E_NOMEM && !prepared && p->as->page_count==owner_pages,
++           "captured ordinary principal pays image budget");
++        PO(!loom_private_protocol_prepare(l,refs[n],1000,1,&prepared),
++           "real preallocated protocol prepare");
++        PO(prepared && prepared->identity.stripes==p->stripes &&
++           prepared->identity.access.principal_id==42 &&
++           prepared->admission.conn->peer_stripes==p->stripes &&
++           prepared->admission.conn->peer_pid==p->pid,
++           "protocol and native connection capture actual caller");
++        PO(prepared->owner==l && !prepared->admission.published &&
++           !srv_backlog_depth(svc) && !prepared->admission.conn->c2s.count &&
++           !prepared->admission.conn->s2c.count,
++           "preparation publishes no backlog or protocol bytes");
++        PO(prepared->charged_pages==expected && p->as->page_count==owner_pages+expected,
++           "entire owner and msize storage charge precedes allocation");
++        PO(prepared->client.progress==&prepared->progress &&
++           prepared->client.out_buf_cap==msize && !prepared->client.out_buf_owned &&
++           prepared->client.transport.recv_buf==prepared->recv_storage &&
++           prepared->client.out_buf==prepared->send_storage &&
++           prepared->client.out_buf!=prepared->client.out_buf_inline,
++           "exclusive client uses charged provided storage without degradation");
++        PO(prepared->client.transport.ops.send(NULL,NULL,0)<0 &&
++           prepared->client.transport.ops.recv(NULL,NULL,0)<0 &&
++           prepared->client.transport.ops.close(NULL)<0,
++           "legacy transport access fails locally");
++        // This is a guard test, not an actual publication or retirement witness.
++        prepared->admission.published=true;
++        int busy=loom_private_protocol_release_unused(prepared);
++        prepared->admission.published=false;
++        PO(busy==-T_E_BUSY && p->as->page_count==owner_pages+expected,
++           "unused cleanup cannot assert admitted protocol quiescence");
++        PO(!loom_private_protocol_release_unused(prepared),"unused protocol releases locally");
++        prepared=NULL;
++        ++freed;
++        PO(srvconn_total_freed()==freed,"unused release frees native endpoint");
++        PO(p->as->page_count==owner_pages && !srv_backlog_depth(svc),
++           "unused protocol refunds exact image after storage release");
++    }
++    PO(!loom_private_protocol_prepare(l,refs[0],0,0,&prepared),"last owner protocol prepare");
++    loom_exec_latch(l);
++    struct loom_service_protocol *refused=NULL;
++    PO(loom_private_protocol_prepare(l,refs[0],0,0,&refused)<0 && !refused,
++       "close refuses new protocol construction");
++    loom_unref(l);owner_dropped=true;
++    PO(loom_private_retired()<goal && p->as->private_rings,
++       "prepared protocol retains image and closing owner");
++    PO(!loom_private_protocol_release_unused(prepared),"last protocol drops owner last");
++    prepared=NULL;l=NULL;
++    PO(lp_wait(goal) && p->as->page_count==base && !p->as->private_rings,
++       "final protocol owner retires and refunds ring");
++done:
++    loom_private_protocol_fault_arm_for_test(0);
++    if (p) { spin_lock(&p->as->lock);p->as->page_budget=old_budget;spin_unlock(&p->as->lock); }
++    if (prepared) (void)loom_private_protocol_release_unused(prepared);
++    if (l && !owner_dropped) loom_unref(l);
++    if (!lp_wait(goal) && !error) error="protocol cleanup retirement timeout";
++    if (root) spoor_clunk(root);
++    test_proc_drop(p);test_proc_drop(poster);
++    if (reg) srv_registry_unref(reg);
++#undef PO
++    return error;
++}
++void test_loom_private_protocol(void);
++void test_loom_private_protocol(void) {
++    const char *error=loom_protocol_fixture();
++    TEST_ASSERT(!error,error);
++}
+diff --git a/vault/system/kernel/async/sub-kernel-loom.md b/vault/system/kernel/async/sub-kernel-loom.md
+index a5554123f..9c99d9a33 100644
+--- a/vault/system/kernel/async/sub-kernel-loom.md
++++ b/vault/system/kernel/async/sub-kernel-loom.md
+@@ -7,6 +7,8 @@ code:
+   - kernel/loom.c
+   - kernel/loom_service_slots.c
+   - kernel/loom_service_requests.c
++  - kernel/loom_service_protocol.c
++  - kernel/include/thylacine/loom_service_protocol.h
+   - kernel/include/thylacine/loom_service_requests.h
+   - kernel/test/loom_requests_fixture.h
+   - tools/host-tests/loom-service-requests.c

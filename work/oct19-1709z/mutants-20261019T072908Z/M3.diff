@@ -1,0 +1,15 @@
+diff --git a/kernel/vivarium.c b/kernel/vivarium.c
+index 785615c2c..decd9cb7b 100644
+--- a/kernel/vivarium.c
++++ b/kernel/vivarium.c
+@@ -2194,8 +2194,8 @@ void viv_socktab_fork_snapshot(void *arg) {
+     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+         f->dst->s[i] = src->s[i];
+         struct Spoor *ctl = src->ctl[i];
+-        if (ctl) spoor_ref(ctl);
+-        f->dst->ctl[i] = ctl;
++        (void)ctl;
++        f->dst->ctl[i] = NULL;
+     }
+     f->dst->next_epoch = src->next_epoch;
+     socktab_unlock(src);

@@ -16,6 +16,52 @@
 
 extern crate alloc;
 
+#[path = "../../halcyond/src/application.rs"]
+mod application;
+#[path = "../../halcyond/src/apprecord.rs"]
+mod apprecord;
+#[path = "../../halcyond/src/servicepool.rs"]
+mod servicepool;
+mod clipboard_client;
+mod admission_deadline;
+mod observer;
+mod admission;
+mod storage;
+#[path = "../../halcyond/src/clipboard.rs"]
+mod clipboard;
+#[path = "../../halcyond/src/clipbroker.rs"]
+mod clipbroker;
+#[path = "../../halcyond/src/controllers.rs"]
+mod controllers;
+#[path = "../../halcyond/src/interaction.rs"]
+mod interaction;
+#[path = "../../halcyond/src/hostbindings.rs"]
+mod hostbindings;
+mod readiness;
+mod service_owner;
+mod seat_control;
+#[cfg(feature = "readiness-qualification")]
+mod readiness_qualification;
+mod service;
+#[path = "../../halcyond/src/inlineaccum.rs"]
+mod inlineaccum;
+#[path = "../../halcyond/src/paneroute.rs"]
+mod paneroute;
+macro_rules! say {
+    ($($arg:tt)*) => { libthyla_rs::t_putstr(&alloc::format!("{}\n", alloc::format!($($arg)*))) };
+}
+#[allow(dead_code)]
+#[path = "../../halcyond/src/paneplace.rs"]
+mod paneplace;
+#[path = "../../halcyond/src/session_seat.rs"]
+mod session_seat;
+// Use the shipped pump and syscall adapter, not a probe reimplementation.
+extern crate self as halcyond;
+#[path = "../../halcyond/src/servicewire.rs"]
+mod servicewire;
+#[path = "../../halcyond/src/serviceio.rs"]
+mod serviceio;
+
 use alloc::string::String;
 use kaua_term::wire::{parse_record, FrameDecoder};
 use kaua_term::{Control, Record};
@@ -128,5 +174,27 @@ fn run() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    if let Some(arg) = libthyla_rs::env::args().nth(1) {
+        #[cfg(feature = "readiness-qualification")]
+        if arg == b"--readiness-qualification" { return readiness_qualification::run(); }
+        #[cfg(feature = "readiness-qualification")]
+        if arg == b"--service-readiness-failure" { return readiness_qualification::media_failure(); }
+        #[cfg(feature = "readiness-qualification")]
+        if arg == b"--readiness-failure-server" { return readiness_qualification::failure_server(); }
+        if arg == b"--service-owner" { return service_owner::run(); }
+        if arg == b"--readiness" { return readiness::run(); }
+        if arg == b"--storage" { return storage::run(); }
+        if arg == b"--clipboard" { return clipboard_client::run(); }
+        if arg == b"--service-capacity" { return service::capacity(); }
+        if arg == b"--service-capacity-excess" { return service::capacity_excess(); }
+        if arg == b"--service" { return service::run(); }
+        if arg == b"--service-transport" { return service::transport_child(); }
+        if arg == b"--service-media-client" { return service::media_client(); }
+        if let Some(result) = seat_control::run(arg) { return result; }
+        if let Some(result) = admission::run(arg) { return result; }
+        if let Some(result) = observer::run(arg) {
+            return result;
+        }
+    }
     run()
 }

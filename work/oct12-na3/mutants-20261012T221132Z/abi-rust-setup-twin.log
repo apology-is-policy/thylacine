@@ -1,0 +1,22 @@
+
+thread 'main' (31873337) panicked at /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-2bekminp/rust-ring.rs:7:49:
+assertion `left == right` failed: owned_mapping::Setup.hdr_off
+  left: 28
+ right: 24
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 264, in <module>
+    run(parser.parse_args().root.resolve())
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 253, in run
+    got=subprocess.check_output([str(tmp/'rust-ring')],text=True).splitlines()
+        ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 473, in check_output
+    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+           ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               **kwargs).stdout
+               ^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-2bekminp/rust-ring']' returned non-zero exit status 101.

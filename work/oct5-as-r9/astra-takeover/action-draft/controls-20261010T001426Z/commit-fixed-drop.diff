@@ -1,0 +1,11 @@
+--- control.c
++++ commit-fixed-drop.c
+@@ -1650,7 +1650,7 @@
+         return 1;
+     case LREADY_COMMIT:
+         if(o->program.result<0)return action_cancel(o,o->program.result);
+-        if(o->fixed.owner || o->fixed_dropping) {
++        if(false) {
+             rc=loom_private_io_drop_fixed(o);if(rc)return rc;
+         }
+         spin_lock(&l->lock);

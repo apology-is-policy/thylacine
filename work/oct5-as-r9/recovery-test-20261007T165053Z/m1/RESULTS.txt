@@ -1,0 +1,39 @@
+recovery-harness run 20261007T165055Z
+script under test : /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/recovery-test-20261007T165053Z/m1.sh
+  sha256          : f443ac1962fac38ee406dffe4a37a4aafb67d576e199a17698611bf963dbef6c
+  git HEAD         : 3ca0dd45fba90f77d4efa2a1f516bc43095cdce4
+  fns sha256       : 51167ceb477ab9df5e2d052a81af2886197291a29122ded2ebc887d4acd8da69
+  ok   extracted recover() from the live script
+  ok   extracted on_exit() from the live script
+  ok   extracted free_gb() from the live script
+R1 a PRE-MUTATION exit: no quarantine, source restored, status preserved
+  ok   R1 exit status is the run's own, not the recovery's (3)
+  ok   R1 no quarantine before a mutation
+  ok   R1 restores and verifies the source anyway
+  ok   R1 prints the lease-release line on a refusal path
+R2 the HAPPY path: quarantine, restore, byte-identical rebuild, exit 0
+  ok   R2 exits 0 (0)
+  ok   R2 the mutant image is quarantined, not deleted (it is evidence)
+  ok   R2 byte identity is asserted, not assumed
+  ok   R2 build/ holds a kernel image again
+R3 the REBUILD DIFFERS -- astra's named case: it must FAIL CLOSED
+  WRONG: R3 exits 9 although the run itself exited 0 -- expected [9] got [0]
+  ok   R3 says so in words, not only in the status
+R4 the DISK FLOOR: no rebuild, quarantine stands, status preserved
+  ok   R4 keeps the finding's own status (2), since quarantine IS safe (2)
+  ok   R4 refuses the rebuild on the re-measured floor
+  ok   R4 leaves build/ imageless, so nothing can boot the mutant
+R5 the LEASE IS GONE: no rebuild, and the cores are not taken back
+  ok   R5 keeps the run's status (2)
+  ok   R5 refuses the rebuild without a lease
+R6 the RECOVERY BUILD FAILS: fail closed, and the log is named
+  ok   R6 exits 9 (9)
+  ok   R6 names the failed build and its log
+R7 a FAILED SOURCE RESTORE must be nonzero, not a printed remark
+  ok   R7 exits 9 on a restore whose hash does not verify (9)
+  ok   R7 tells the reader where the pristine copy is
+L1 THE LAYOUT, asked of the REAL tree and not of a stub
+  ok   L1 build/kernel/thylacine.elf exists in the real build tree
+  ok   L1 build/kernel/thylacine.bin exists in the real build tree
+
+RESULT: 23 pass, 1 wrong

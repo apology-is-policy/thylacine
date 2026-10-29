@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/worker-control.py", line 6, in <module>
+    exec((D/'control.py').read_text().split("out=D/('controls-'")[0],e)
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 6
+    prior=(R/'work/oct5-as-r9/astra-takeover/engine-draft/control.py').read_text().split("
+                                                                                         ^
+SyntaxError: unterminated string literal (detected at line 6)

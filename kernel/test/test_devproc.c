@@ -22,6 +22,9 @@
 
 #include "../../arch/arm64/mmu.h"        // 8a-1b-gamma-1: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
 #include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
+#include "../../arch/arm64/halls.h"
+#include "../../arch/arm64/halls_symtab.h"
+#include "../../arch/arm64/kaslr.h"
 #include "../../mm/phys.h"               // alloc_pages / free_pages
 
 #include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
@@ -42,71 +45,8 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
-
-void test_devproc_bestiary_smoke(void);
-void test_devproc_attach_returns_dir(void);
-void test_devproc_walk_root_to_kproc_dir(void);
-void test_devproc_walk_unknown_pid_misses(void);
-void test_devproc_walk_to_status_file(void);
-void test_devproc_walk_dotdot_to_root(void);
-void test_devproc_read_status_format(void);
-void test_devproc_read_cmdline_kproc(void);
-void test_devproc_read_ns_format(void);
-void test_devproc_read_ctl_returns_zero(void);
-void test_devproc_write_ctl_rejects(void);
-void test_devproc_read_dir_returns_neg1(void);
-void test_devproc_read_partial_offset(void);
-// A-4b: cross-process kill via /proc/<pid>/ctl.
-void test_devproc_kill_authorized_predicate(void);
-void test_devproc_none_owns_nothing(void);    // IDENTITY-DESIGN reserved ids: Plan 9's nonone
-void test_devproc_none_walled(void);
-void test_devproc_stat_native_ctl_owner(void);
-void test_devproc_write_ctl_kill_dispatch(void);
-void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
-// 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
-void test_devproc_debug_authorized_predicate(void);
-void test_devproc_debug_cap_cover_predicate(void);
-void test_devproc_debug_cap_cover_attach(void);
-void test_devproc_debug_attach_detach_lifecycle(void);
-void test_devproc_debug_stop_start_resume(void);
-void test_devproc_debug_birth_hold_ctl(void);
-void test_devproc_debug_mem(void);
-void test_devproc_debug_regs(void);
-void test_devproc_debug_kregs_kstack_wait(void);
-void test_devproc_debug_kstack_settled(void);
-void test_devproc_debug_step_cancel_on_stop(void);
-void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
-void test_devproc_read_cwd(void);            // VIVARIUM V-4b-1
-void test_devproc_maps(void);                // VIVARIUM V-4b-2
-void test_devproc_environ(void);             // VIVARIUM V-4b-6
-// prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
-void test_devproc_sched_gate_predicate(void);
-void test_devproc_sched_read_gated(void);
-void test_devproc_read_sched_format(void);
-// #133: the settled-park decision (a stale park must not read as stopped).
-void test_devproc_park_state_settled(void);
-// IM-2: /proc/<pid>/imperium (the legate scope; owner-or-CAP_HOSTOWNER).
-void test_devproc_imperium_read_gated(void);
-void test_devproc_read_imperium_format(void);
-
-// A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
-// (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
-bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
-bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target);
-bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
-size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
-size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
-                                char *buf, size_t cap, bool *denied);
-size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
-                                   char *buf, size_t cap, bool *denied);   // IM-2
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state);
-bool devproc_all_threads_parked(struct Proc *target);
+#include <thylacine/devctl.h>
+#include <thylacine/devproc.h>
 
 // =============================================================================
 // Helpers.
@@ -380,7 +320,6 @@ void test_devproc_read_status_format(void) {
 //   (a) proc_set_name extracts the basename correctly, and
 //   (b) the ctx-switch run_ns accounting is LIVE: kproc's cpu_ns accrues
 //       after forced yields and never decreases.
-void test_proc_cpu_ns_accounting(void);
 void test_proc_cpu_ns_accounting(void) {
     // (a) proc_set_name basename extraction -- pure, on a stack Proc (only
     // p->name is touched, so no other field need be valid).
@@ -426,7 +365,6 @@ void test_proc_cpu_ns_accounting(void) {
 // substrate. Drives the SAME forced-yield vehicle as the run_ns test above: a
 // yield switches the running thread OUT then a peer/idle switches it back IN, so
 // nsched grows; the burned slice guarantees a real switch rather than a no-op.
-void test_sched_prowl_counters(void);
 void test_sched_prowl_counters(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t != NULL, "current thread present");
@@ -1837,8 +1775,6 @@ static void birth_hold_target_free(struct Proc *p) {
 // the proc table stalls whichever later test walks it.
 #define BHC_UNSEEN 0xDEADu
 
-int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
-
 static u32 bhc_hold(struct Proc *p) {
     return __atomic_load_n(&p->debug_birth_hold, __ATOMIC_ACQUIRE);
 }
@@ -2125,8 +2061,6 @@ void test_devproc_debug_stop_start_resume(void) {
     //     thread of the debugger resumes the target, whose step trap then finds
     //     no owner and delivers no stop, so waiting for the re-stop would last
     //     until the target exits. /proc/<pid>/wait (ctl NULL) is not slot-bound.
-    extern int devproc_wait_state_for_test(int pid, struct Proc *caller,
-                                           struct Spoor *ctl);
     struct Spoor *gctl = open_ctl_for_pid(tgt->pid);
     long g_attach = 0, g_stop = 0, g_detach = 0;
     int g_owned = -9, g_released = -9, g_wait = -9;
@@ -2177,7 +2111,6 @@ void test_devproc_debug_stop_start_resume(void) {
                    "the resumed target reads not-yet to /proc/<pid>/wait, which the slot does not bind");
     // The scan's state only ends the wait through its verdict: a released slot
     // must END it, where a live, not-yet-stopped target polls on.
-    extern int devproc_wait_verdict_for_test(int state);
     int v_released = devproc_wait_verdict_for_test(2);
     int v_gone     = devproc_wait_verdict_for_test(-1);
     int v_stopped  = devproc_wait_verdict_for_test(1);
@@ -2191,7 +2124,6 @@ void test_devproc_debug_stop_start_resume(void) {
     TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1 && v_notyet != v_released,
                 "a live target not yet stopped polls on");
     // And the step write answers each verdict: only a re-stop completes the step.
-    extern long devproc_step_result_for_test(int ev, long n);
     TEST_EXPECT_EQ(devproc_step_result_for_test(v_stopped, 5L), 5L,
                    "a re-stopped target completes the step");
     TEST_EXPECT_EQ(devproc_step_result_for_test(v_gone, 5L), (long)(-T_E_SRCH),
@@ -2223,7 +2155,6 @@ void test_devproc_debug_stop_start_resume(void) {
     // freestanding kernel does not link). ft is never linked into the proc table;
     // the lock is the selector's contract. Recorded under it, asserted after the
     // stack Threads are unlinked.
-    extern struct Thread *devproc_focus_thread(struct Proc *target);
     struct Proc *ft = proc_alloc();
     TEST_ASSERT(ft != NULL, "alloc focus-select target");
     ft->state = PROC_STATE_ALIVE;
@@ -2271,7 +2202,6 @@ void test_devproc_debug_stop_start_resume(void) {
 // whole-Proc stop does (8a-2c F1): left armed, the head's step trap would stop
 // the target for whoever attached next, before it asked. A zeroed stack Thread
 // carries the armed step; the target is linked so its ctl resolves.
-void test_devproc_debug_release_cancels_step(void);
 void test_devproc_debug_release_cancels_step(void) {
     struct Thread *tt = current_thread();
     TEST_ASSERT(tt && tt->proc, "test thread has a proc");
@@ -3037,6 +2967,100 @@ void test_devproc_debug_kstack_settled(void) {
     TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: every thread EXITING -> empty read (never walk a dying thread)");
 }
 
+static void put_str(char *b, size_t cap, size_t *n, const char *s) {
+    while (*s && *n + 1 < cap) b[(*n)++] = *s++;
+    b[*n] = '\0';
+}
+
+// devproc's fmt_hex form: "0x" and the minimal lowercase digits.
+static void put_hex(char *b, size_t cap, size_t *n, u64 v) {
+    char d[16];
+    int m = 0;
+    do { u64 x = v & 0xfu; d[m++] = (char)(x < 10u ? ('0' + x) : ('a' + (x - 10u))); v >>= 4; } while (v);
+    put_str(b, cap, n, "0x");
+    while (m && *n + 1 < cap) b[(*n)++] = d[--m];
+    b[*n] = '\0';
+}
+
+// kstack names a saved LR at its call, and frame 0 at itself. Both frames hold
+// the same address, a function's first instruction, read from the real symbol
+// table: as frame 0 it is a never-run thread's resume PC (its trampoline's
+// entry), named proc_alloc+0x0; as frame 1 it is the return address of a call
+// that ended the function before it, which is where the frame is.
+void test_devproc_debug_kstack_names_returns_at_call(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *caller = tt->proc;
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
+                "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the owner axis prints names only)");
+
+    u64 code = (u64)(uintptr_t)proc_alloc;
+    u64 link = halls_link_addr(code, kaslr_get_offset());
+    u64 entry_off = 1, call_off = 1;
+    const char *entry_name = halls_symbolize(link, &entry_off);
+    const char *call_name  = halls_symbolize(link - 4u, &call_off);
+    TEST_ASSERT(entry_name && entry_off == 0u,
+                "proc_alloc's entry is a symbol start in the linked table (not the stub)");
+    TEST_ASSERT(call_name != (const char *)0, "a symbol owns the instruction before it");
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc debug target");
+    tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    struct page *kstk = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!kstk) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
+    TEST_ASSERT(kstk != NULL, "alloc synthetic kstack");
+    u8 *kbase = (u8 *)pa_to_kva(page_to_pa(kstk));
+
+    // One frame record whose next fp ends the walk: frames #0 and #1.
+    u8 *fp0 = kbase + THREAD_KSTACK_TOTAL_SIZE - 256;
+    *(volatile u64 *)fp0       = 0;
+    *(volatile u64 *)(fp0 + 8) = code;
+
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic             = THREAD_MAGIC;
+    th.state             = THREAD_SLEEPING;
+    th.kstack_base       = kbase;
+    th.kstack_size       = THREAD_KSTACK_TOTAL_SIZE;
+    th.on_cpu            = false;
+    th.rendez_blocked_on = NULL;
+    th.next_in_proc      = NULL;
+    th.ctx.fp            = (u64)(uintptr_t)fp0;
+    th.ctx.lr            = code;
+
+    tgt->threads        = &th;
+    tgt->debug_stop_req = 0;
+    proc_test_link(tgt);
+
+    char sbuf[256]; for (size_t i = 0; i < sizeof(sbuf); i++) sbuf[i] = 0;
+    long slen = -999;
+    struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (ks) { slen = devproc.read(ks, sbuf, (long)sizeof(sbuf) - 1, 0); spoor_clunk(ks); }
+
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;
+    free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    char want[256];
+    size_t wn = 0;
+    put_str(want, sizeof(want), &wn, "#0  ");
+    put_str(want, sizeof(want), &wn, entry_name);
+    put_str(want, sizeof(want), &wn, "+0x0\n#1  ");
+    put_str(want, sizeof(want), &wn, call_name);
+    put_str(want, sizeof(want), &wn, "+");
+    put_hex(want, sizeof(want), &wn, call_off + 4u);
+    put_str(want, sizeof(want), &wn, "\n");
+
+    TEST_ASSERT(wn + 1 < sizeof(want), "the expected text fits");
+    TEST_EXPECT_EQ(slen, (long)wn, "kstack is the two named frames");
+    TEST_ASSERT(streq(sbuf, want),
+                "frame 0 named at its address, frame 1 at its call with the return address's offset");
+}
+
 // =============================================================================
 // VIVARIUM V-4a-0: /proc/<pid>/exe -- the executable's namespace name.
 // =============================================================================
@@ -3258,11 +3282,6 @@ void test_devproc_maps_code_visible(void) {
     TEST_ASSERT(self_notrace, "B-2b: but a Proc always sees its own code addresses");
     TEST_ASSERT(!nobody, "B-2b: a reader with no Proc sees none");
 }
-
-s64 sys_jit_create_region(struct Proc *p, u64 length_raw, u64 *out_w, u64 *out_x);
-s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
-                                 u64 length_raw, u64 *out_exec);
-s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 
 // "0x<hex>-": how a maps row starting at `va` begins (fmt_hex's format).
 static void maps_va_prefix(u64 va, char out[24]) {

@@ -1,0 +1,35 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/extinction.c	2026-10-14 15:54:58
++++ kernel/extinction.c	2026-10-14 16:20:19
+@@ -144,16 +144,13 @@
+ // TPIDR_EL1 may be wild (#806) and a fault on the banner's first byte would
+ // park the CPU with nothing printed.
+ int extinction_tx_enter(void) {
+-    u64 daif;
+-    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+-    int held = !(daif & (1ull << 7));
+-    if (held) spin_preempt_inc();
++    spin_preempt_inc();                  // MUTANT M22 round-2 gate: hold even masked, no preempt point
+     unsigned cpu = smp_cpu_idx_self();
+     if (cpu >= DTB_MAX_CPUS) cpu = 0;
+     if (extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                 g_extinction_owner[cpu]))
+-        return held ? EXTINCTION_TX_HELD : EXTINCTION_TX_BYTE;
+-    if (held) spin_preempt_dec();
++        return EXTINCTION_TX_HELD;
++    spin_preempt_dec();
+     return 0;
+ }
+ 
+@@ -161,10 +158,8 @@
+     unsigned cpu = smp_cpu_idx_self();
+     if (cpu >= DTB_MAX_CPUS) cpu = 0;
+     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+-    if (token == EXTINCTION_TX_HELD) {
+-        spin_preempt_dec();
+-        sched_take_deferred_preempt();
+-    }
++    (void)token;
++    spin_preempt_dec();
+ }
+ 
+ // Set if the claim ran with IRQs on: the claiming thread could then be switched

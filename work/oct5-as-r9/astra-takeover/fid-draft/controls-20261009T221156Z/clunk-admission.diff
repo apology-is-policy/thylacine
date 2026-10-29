@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -139,7 +139,7 @@
+     int rc=loom_slot_pin(t,source,LOOM_SERVICE_FID);
+     if(rc)return rc;
+     n->fid_claim=id;n->fid_flags|=LFID_CLUNKING;n->state=LOOM_SERVICE_ABORTING;
+-    (void)loom_slot_retire(t,source);
++    (void)0;
+     return 0;
+ }
+ int loom_fid_clunk_wire(struct loom_slot_table *t,struct loom_service_node_table *nodes,

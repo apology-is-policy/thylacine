@@ -8,11 +8,20 @@ pinned-by:
   - "kernel/include/thylacine/loom.h: _Static_assert on all five sizes; offsets on sqe(2) cqe(2) hdr(1) params(1) buf_reg(1)"
   - "kernel/loom.c: _Static_assert on p9_attr / p9_setattr / p9_statfs sizes + 12 offsets"
 mirrors:
-  - "usr/lib/libthyla-rs/src/loom.rs: Sqe / Cqe / BufReg / Params (size + full offset_of! sets)"
-  - "usr/lib/libthyla-rs/src/loom.rs: the ring header as five bare offset constants (HDR_SQ_HEAD=0 .. HDR_FLAGS=32), no struct, no assert"
+  - "usr/lib/libthyla-rs/src/loom/ring_abi.rs: Sqe / Cqe / BufReg / Params / RingHdr and the ring constants; tools/check-loom-service-abi.py asserts every field against the layout table (NA-3); loom.rs derives its header offsets from RingHdr"
+  - "the client cores' own copies, checked field by field against the same table: t_owned_setup / t_owned_cqe (libt thyla/loom_client) and Setup / Completion (usr/lib/loom-client)"
+  - "usr/lib/libt/include/thyla/loom.h: t_loom_params / t_loom_sqe / t_loom_cqe / t_loom_ring_hdr / t_loom_buf_reg (size + every field offset) and the opcode/flag constants; tools/check-loom-service-abi.py asserts them and the kernel's against one layout table; loom-bridge-probe checks the fields the kernel writes"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-12
 ---
+## Private service reservations (AS-0)
+
+The approved lifecycle extension reserves setup bit2, register subops2..6 and
+SQE opcode20. See docs/ASYNC-SERVICE-ABI.md for exact versioned records and
+private-only field meanings. Opcode19 remains reserved. These allocations do
+not enable the feature or change the legacy valid masks; compiled C/Rust record
+mirrors are pinned by [[abi-loom-service]]; runtime implementation follows.
+
 ## The surface
 
 Loom is the io_uring inversion: userspace posts 9P-shaped op descriptors into
@@ -21,7 +30,25 @@ drives them, and R-messages return as completion entries. The whole
 transport is **five structures on a page both sides write**, so the layout is
 not a convenience — it is the protocol.
 
-Unlike [[abi-t-stat]], this ABI has exactly **one** mirror, `libthyla-rs`.
+These five ring structures have two mirrors. `libthyla-rs` has had one since
+Loom-2. Native C gained the second on 2026-10-12 (`thyla/loom.h`, NA-2a). It has
+a static assert on every field offset, and `loom-bridge-probe` checks it against
+a live ring's params, header words and CQEs.
+
+`tools/check-loom-service-abi.py` holds one layout table for the five records:
+every field with its size, plus the setup, enter, register, SQE, CQE and opcode
+constants. It asserts that table against the kernel's header and the native C
+mirror, both compiled for AArch64, so the two cannot disagree on a field's order,
+size or presence. Before it, the kernel pinned only some offsets (the ring
+header: its size and `sq_head`), and swapping two of its header words would have
+passed every assert. Since NA-3 the Rust mirror is in that table too: its records
+moved out of `loom.rs` into `loom/ring_abi.rs`, which depends on no crate, and the
+ring header became a `RingHdr` struct whose offsets `loom.rs` derives. The client
+cores' own copies of the setup record and the CQE, in C and Rust, are checked
+field by field against the same table.
+Since NA-2b the same table also pins the errno a full table answers (28): the
+kernel's `T_E_NOSPC` and the native C client cores' `T_LOOM_CLIENT_ENOSPC`
+([[sub-libt-loom-client]]).
 Neither pouch nor the Go fork speaks Loom; the ring is native-only.
 
 | struct | size | role | writer |
@@ -82,6 +109,12 @@ on the kernel's. `Cqe` has three and two. `Params` has four and one.
 `BufReg` has two and one. The header, which both sides write concurrently,
 has one and zero. The pinning tracks *how easy the struct was to assert*, not
 *how much a mistake would cost*. Tracked as task #44.
+
+**Closed by NA-2a and NA-3 (October 12).** The checker's layout table now names
+all twelve header fields, and it asserts them against the kernel's header, libt's
+`t_loom_ring_hdr` and, since NA-3, a Rust `RingHdr` struct in `loom/ring_abi.rs`.
+`loom.rs` derives the five offsets it reads from that struct with `offset_of!`,
+so they cannot drift from what the checker measured.
 
 Those Rust `offset_of!` sets exist because a Loom-6d audit found them
 missing and asked for them. The finding's reasoning was general — a
@@ -158,3 +191,26 @@ what tells the author their edit reached a userspace ABI at all.
 
 [[sub-kernel-loom]] · [[spec-loom]] · [[abi-t-stat]] · [[abi-ninep-wire]] ·
 [[moc-boundary]].
+
+The AS-R8 Rust API correction makes raw buffer registration unsafe and adds
+range-bounded views; all shared structures, syscall numbers, flags and offsets
+above are unchanged. No kernel/C mirror change is required for a Rust safety
+qualifier. Actual full-module host and native compilation check the caller API.
+
+## Optional internal receipt geometry
+
+The internal constructor now builds the approved64-aligned array of32-byte
+receipts after the CQ, without changing legacy rings or loom_params. Maximum
+page-rounded layout675840bytes is verified natively and on host. Publication
+pairs CQE/receipt/lease before release-tail and clears receipts for ordinary
+CQEs. Public PRIVATE_SERVICE/SERVICE_BUFFERS setup remains rejected; output
+parameter wiring and owned client consumption remain activation obligations.
+
+## Qualification bridge (October 12)
+
+The default image still rejects PRIVATE_SERVICE/SERVICE_BUFFERS setup, now with
+-EOPNOTSUPP. Before the bridge it returned -1; no userspace caller depended on
+that value. Only a kernel built with `PRIVATE_ASYNC_QUAL` routes it
+([[sub-kernel-loom-bridge]]). With the lever, params echo the granted flags and
+carry the receipt geometry in `_resv1[0..2]`: offset, size, and the size of one
+receipt. No struct, flag, offset or syscall number changes.

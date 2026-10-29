@@ -155,6 +155,13 @@ func validate(reg *Registry, preErrors []string) (fails, warns []string) {
 				"%s: frontmatter id '%s' != filename '%s'",
 				n.Rel, f.Str("id"), n.ID))
 		}
+		// A repeated key is not an error to YAML readers, which keep one
+		// value silently: an older `updated:` can win and blind `stale`.
+		for _, k := range f.Repeated() {
+			fails = append(fails, fmt.Sprintf(
+				"%s: frontmatter key '%s' repeated (only the last is read)",
+				n.Rel, k))
+		}
 		if !typeKnown(t) {
 			fails = append(fails, fmt.Sprintf(
 				"%s: unknown type '%s'", n.Rel, t))

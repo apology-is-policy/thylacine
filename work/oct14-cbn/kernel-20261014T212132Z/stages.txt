@@ -1,0 +1,10 @@
+2026-10-14T21:21:32Z  HEAD 165ca638a779b497970b8f451e505d0b4bd8f3c0
+2026-10-14T21:21:32Z  predictions derived: each kernel message inside its registered test
+2026-10-14T21:21:32Z  expected tests (derived from test.c): 1891
+2026-10-14T21:21:32Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-14T21:21:32Z  go fork /Users/northkillpd/projects/go-thylacine at 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean
+2026-10-14T21:21:33Z  anchor census: 17 mutants, each anchor once in its file
+2026-10-14T21:21:33Z  disk pre: 10612 MiB free (floor 8192)
+2026-10-14T21:22:23Z  disk post-control-build: 10611 MiB free (floor 8192)
+2026-10-14T21:26:44Z  control: test.sh exit 1
+2026-10-14T21:26:44Z  exit 1

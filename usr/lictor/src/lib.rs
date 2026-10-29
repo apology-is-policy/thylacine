@@ -9,11 +9,14 @@ pub mod endpoint;
 pub mod wire;
 pub mod model;
 pub mod render;
+mod typography;
 
 pub mod skein;
 pub mod keymap;
 pub mod limits;
+pub mod quiescence;
 pub mod fence;
+pub mod cursor_queue;
 #[cfg(feature = "backend")]
 pub mod backend;
 pub mod gpu_api;

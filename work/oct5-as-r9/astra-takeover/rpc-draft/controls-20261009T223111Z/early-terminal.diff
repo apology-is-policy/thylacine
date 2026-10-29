@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ early-terminal.c
+@@ -71,7 +71,7 @@
+     }
+     o->capture_error=loom_private_reply_capture(&o->expect,status,reply,
+                                       o->payload,o->payload_capacity,&o->reply);
+-    o->callback_seen=true;
++    o->callback_seen=true;o->phase=LRPC_TERMINAL;
+ }
+ int loom_rpc_requeue_locked(struct loom_service_operation *o) {
+     struct loom_service_request *r=rpc_record(o);

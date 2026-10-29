@@ -1,0 +1,93 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+error[E0277]: `std::rc::Rc<RefCell<Hub>>` cannot be sent between threads safely
+    --> src/tests/ring.rs:2663:94
+     |
+2663 | fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);
+     |                                                                                         ---- ^ `std::rc::Rc<RefCell<Hub>>` cannot be sent between threads safely
+     |                                                                                         |
+     |                                                                                         required by a bound introduced by this call
+     |
+     = help: within `ReadFuture<ring::Backing>`, the trait `Send` is not implemented for `std::rc::Rc<RefCell<Hub>>`
+note: required because it appears within the type `ReadFuture<ring::Backing>`
+    --> src/fixed_futures.rs:103:19
+     |
+ 103 | pub(crate) struct ReadFuture<B: RingBackend> {
+     |                   ^^^^^^^^^^
+note: required by a bound in `send`
+    --> src/tests/ring.rs:2663:11
+     |
+2663 | fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);
+     |           ^^^^ required by this bound in `send`
+
+error[E0277]: `std::rc::Rc<RefCell<fixed_requests::Core<ring::Backing>>>` cannot be sent between threads safely
+    --> src/tests/ring.rs:2663:94
+     |
+2663 | fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);
+     |                                                                                         ---- ^ `std::rc::Rc<RefCell<fixed_requests::Core<ring::Backing>>>` cannot be sent between threads safely
+     |                                                                                         |
+     |                                                                                         required by a bound introduced by this call
+     |
+     = help: within `ReadFuture<ring::Backing>`, the trait `Send` is not implemented for `std::rc::Rc<RefCell<fixed_requests::Core<ring::Backing>>>`
+note: required because it appears within the type `fixed_requests::Request<ring::Backing>`
+    --> src/fixed_requests.rs:38:8
+     |
+  38 | struct Request<B: RingBackend> {
+     |        ^^^^^^^
+note: required because it appears within the type `ReadRequest<ring::Backing>`
+    --> src/fixed_requests.rs:44:19
+     |
+  44 | pub(crate) struct ReadRequest<B: RingBackend> {
+     |                   ^^^^^^^^^^^
+note: required because it appears within the type `ReadFuture<ring::Backing>`
+    --> src/fixed_futures.rs:103:19
+     |
+ 103 | pub(crate) struct ReadFuture<B: RingBackend> {
+     |                   ^^^^^^^^^^
+note: required by a bound in `send`
+    --> src/tests/ring.rs:2663:11
+     |
+2663 | fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);
+     |           ^^^^ required by this bound in `send`
+
+error[E0277]: `std::rc::Rc<ring_payload::Core<ring::Backing>>` cannot be sent between threads safely
+    --> src/tests/ring.rs:2663:94
+     |
+2663 | fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);
+     |                                                                                         ---- ^ `std::rc::Rc<ring_payload::Core<ring::Backing>>` cannot be sent between threads safely
+     |                                                                                         |
+     |                                                                                         required by a bound introduced by this call
+     |
+     = help: within `ReadFuture<ring::Backing>`, the trait `Send` is not implemented for `std::rc::Rc<ring_payload::Core<ring::Backing>>`
+note: required because it appears within the type `FixedIo<ring::Backing>`
+    --> src/ring_payload.rs:195:19
+     |
+ 195 | pub(crate) struct FixedIo<B: RingBackend> {
+     |                   ^^^^^^^
+note: required because it appears within the type `Option<FixedIo<ring::Backing>>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:597:10
+     |
+ 597 | pub enum Option<T> {
+     |          ^^^^^^
+note: required because it appears within the type `fixed_requests::Request<ring::Backing>`
+    --> src/fixed_requests.rs:38:8
+     |
+  38 | struct Request<B: RingBackend> {
+     |        ^^^^^^^
+note: required because it appears within the type `ReadRequest<ring::Backing>`
+    --> src/fixed_requests.rs:44:19
+     |
+  44 | pub(crate) struct ReadRequest<B: RingBackend> {
+     |                   ^^^^^^^^^^^
+note: required because it appears within the type `ReadFuture<ring::Backing>`
+    --> src/fixed_futures.rs:103:19
+     |
+ 103 | pub(crate) struct ReadFuture<B: RingBackend> {
+     |                   ^^^^^^^^^^
+note: required by a bound in `send`
+    --> src/tests/ring.rs:2663:11
+     |
+2663 | fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);
+     |           ^^^^ required by this bound in `send`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `loom-client` (lib test) due to 3 previous errors

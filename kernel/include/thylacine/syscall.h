@@ -40,6 +40,11 @@
 #include <thylacine/errno.h>
 #include <thylacine/types.h>
 
+#ifdef KERNEL_TESTS
+#include <thylacine/caps.h>       // caps_t, in the tests' declarations below
+#include <thylacine/handle.h>     // hidx_t, likewise
+#endif
+
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
 enum {
     SYS_EXITS       = 0,
@@ -1483,12 +1488,13 @@ enum {
     //                  rights snapshotted (the I-30 submit-time-pin substrate).
     //                  LOOM_REGISTER_BUFFERS -> a struct loom_buf_reg[nargs].
     //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES (or LOOM_MAX_REG_BUFFERS).
-    // -EBADF: loom_fd or a listed fd is not open. -EFAULT: the array is
-    // unreadable. A dev9p Spoor's write-behind flush failing, or an error an
-    // earlier flush latched, returns that errno (-ENOSPC, the server's -EIO, a
-    // caught note's -EINTR; operator vote 2026-10-07). -EINVAL otherwise:
-    // loom_fd not a Loom, an unknown op, nargs out of range, a non-KOBJ_SPOOR
-    // fd, a buffer range that is not one writable anon VMA.
+    // -EBADF: loom_fd names no ring (closed, or not a Loom), or a listed fd is
+    // not open or not a Spoor. -EFAULT: the array is unreadable. A dev9p
+    // Spoor's write-behind flush failing, or an error an earlier flush latched,
+    // returns that errno (-ENOSPC, the server's -EIO, a caught note's -EINTR;
+    // operator vote 2026-10-07). -EINVAL otherwise: an unknown op, nargs out of
+    // range, a buffer range that is not one writable anon VMA. loom_fd, op and
+    // nargs are refused, never truncated, when they do not fit 32 bits.
     SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
 
     // SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) -> n / -1  (Loom-3)
@@ -1501,7 +1507,10 @@ enum {
     //                       by in-flight ops -- never blocks for completions that
     //                       cannot arrive). The wait is death-interruptible (#811).
     //   x3 = flags        : LOOM_ENTER_* (LOOM_ENTER_GETEVENTS / _NONBLOCK).
-    // Returns the number of SQEs consumed (>= 0), or -1 on bad args. Per-op
+    // Returns the number of SQEs consumed (>= 0), -T_E_BADF when loom_fd names
+    // no ring (a descriptor wider than an index names none), or -T_E_INVAL
+    // for an unknown flag; to_submit, min_complete and flags are refused
+    // (-T_E_INVAL), never truncated, when they do not fit 32 bits. Per-op
     // failures (bad opcode / handle / rights) surface as an error CQE (result <
     // 0), NOT a syscall error -- the SQE was still consumed. v1.0 dispatches the
     // no-payload opcodes (NOP / FSYNC); the payload opcodes (READ/WRITE/GETATTR/
@@ -2491,6 +2500,14 @@ enum {
     //   Errors: -EINVAL only for a caller with no address space (never EL0).
     SYS_ICACHE_SYNC_SPACE = 128,
 
+    // D7: a session's private /srv registry root (docs/SRV-SESSION-REGISTRY-
+    // DESIGN.md). Explicitly 134, not the next free number: 129..133 belong to
+    // syscalls b3 assigned first, and the operator fixed this one at 134 so the
+    // branches can land in any order (vote 13, 2026-10-19). This tree assigns
+    // nothing in 129..133; vivarium.c argues the Linux rows that the gap and
+    // the higher ceiling expose.
+    SYS_SRV_REGISTRY_NEW = 134, // boot O_PATH fd, 40-byte routes, count, flags=0
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2582,6 +2599,67 @@ _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_r
 #define PTY_REG_MINT   0u
 #define PTY_REG_SLAVE  1u
 #define PTY_REG_FREE   2u
+
+// HI-1 terminal ownership ABI; kernel observation and admission operations.
+// SYS_PTY_REGISTER subops 16..21: docs/HALCYON-INTERACTION-PTY-ABI.md.
+// Existing server-only subops 0..2 keep their contract. Records are little-endian
+// on the native AArch64 ABI. No padding, pointer fields or userspace bearer grant.
+#define PTY_INTERACTION_BIND 16u
+#define PTY_INTERACTION_UNBIND 17u
+#define PTY_INTERACTION_WATCH 18u
+#define PTY_INTERACTION_STATE 19u
+#define PTY_INTERACTION_ACK 20u
+#define PTY_INTERACTION_CHECK 21u
+#define PTY_INTERACTION_VERSION 1u
+#define PTY_INTERACTION_STATE_BYTES 80u
+#define PTY_INTERACTION_CHECK_BYTES 24u
+#define PTY_INTERACTION_LIVE 1u
+#define PTY_INTERACTION_ACKNOWLEDGED 2u
+#define PTY_INTERACTION_ID_MAX 0x7fffffffffffffffULL
+
+struct t_pty_interaction_state {
+    u32 version;
+    u32 flags;
+    u64 binding_id;
+    u64 pts_id;
+    u64 foreground_epoch;
+    u64 acknowledged_epoch;
+    u64 revision;
+    u32 controlling_sid;
+    u32 foreground_pgid;
+    u64 subject_stripes;
+    u64 binder_stripes;
+    u32 binder_pid;
+    u32 reserved;
+};
+_Static_assert(sizeof(struct t_pty_interaction_state) == 80, "t_pty_interaction_state: size");
+_Static_assert(_Alignof(struct t_pty_interaction_state) == 8, "t_pty_interaction_state: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, version) == 0, "t_pty_interaction_state: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, flags) == 4, "t_pty_interaction_state: flags");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binding_id) == 8, "t_pty_interaction_state: binding_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, pts_id) == 16, "t_pty_interaction_state: pts_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_epoch) == 24, "t_pty_interaction_state: foreground_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, acknowledged_epoch) == 32, "t_pty_interaction_state: acknowledged_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, revision) == 40, "t_pty_interaction_state: revision");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, controlling_sid) == 48, "t_pty_interaction_state: controlling_sid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_pgid) == 52, "t_pty_interaction_state: foreground_pgid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, subject_stripes) == 56, "t_pty_interaction_state: subject_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_stripes) == 64, "t_pty_interaction_state: binder_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_pid) == 72, "t_pty_interaction_state: binder_pid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, reserved) == 76, "t_pty_interaction_state: reserved");
+
+struct t_pty_interaction_check {
+    u32 version;
+    u32 size;
+    u64 expected_epoch;
+    u64 subject_stripes;
+};
+_Static_assert(sizeof(struct t_pty_interaction_check) == 24, "t_pty_interaction_check: size");
+_Static_assert(_Alignof(struct t_pty_interaction_check) == 8, "t_pty_interaction_check: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, version) == 0, "t_pty_interaction_check: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, size) == 4, "t_pty_interaction_check: size");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, expected_epoch) == 8, "t_pty_interaction_check: expected_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, subject_stripes) == 16, "t_pty_interaction_check: subject_stripes");
 
 // SYS_TTY_SIGNAL classes. Values are ABI (append-only). The class carries
 // no payload; WINCH consumers re-read the winsize from the pts ctl (the
@@ -2836,6 +2914,7 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // lowering needs no authority, NOT a cap (rfork does not propagate it) though
 // the budget itself is inherited.
 #define SPAWN_PERM_MAY_RAISE_THREAD_BUDGET (1u << 10)
+#define SPAWN_PERM_SESSION_REGISTRY (1u << 11)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
@@ -2846,10 +2925,10 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SEAT_SERVICE | \
                                       SPAWN_PERM_SEAT_CLIENT | \
                                       SPAWN_PERM_SEAL | \
-                                      SPAWN_PERM_MAY_RAISE_THREAD_BUDGET)
-// Disjoint iff the popcount of the union is the sum of the popcounts, derived
-// from the list as PROC_FLAGS_ALL's check is: two branches once took bit 10
-// each, and a merge that keeps both definitions compiles silently without it.
+                                      SPAWN_PERM_MAY_RAISE_THREAD_BUDGET | \
+                                      SPAWN_PERM_SESSION_REGISTRY)
+// Derived from the list, as PROC_FLAGS_ALL's check is: the bits are disjoint iff
+// the union's popcount is the sum of theirs, so two perms given one bit fail here.
 _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
     __builtin_popcount(SPAWN_PERM_MAY_POST_SERVICE) +
     __builtin_popcount(SPAWN_PERM_CONSOLE_TRUSTED) +
@@ -2861,8 +2940,9 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
     __builtin_popcount(SPAWN_PERM_SEAT_SERVICE) +
     __builtin_popcount(SPAWN_PERM_SEAT_CLIENT) +
     __builtin_popcount(SPAWN_PERM_SEAL) +
-    __builtin_popcount(SPAWN_PERM_MAY_RAISE_THREAD_BUDGET),
-    "SPAWN_PERM_* bits alias");
+    __builtin_popcount(SPAWN_PERM_MAY_RAISE_THREAD_BUDGET) +
+    __builtin_popcount(SPAWN_PERM_SESSION_REGISTRY),
+    "two SPAWN_PERM_* bits alias");
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id
@@ -2957,7 +3037,19 @@ _Static_assert(__builtin_popcount(SPAWN_PERM_ALL) ==
 // PROC_FLAG_MAY_RAISE_THREAD_BUDGET; over proc_thread_budget_hard_max() is
 // refused (-1), never clamped.
 #define SPAWN_EXT_THREADS            (1u << 1)
-#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS)
+// SPAWN_EXT_ENV: a struct sys_spawn_ext_env names the child's WHOLE environment
+// (ARCH 9.7; dec-2026-10-28-spawn-env): env_len bytes of NUL-terminated
+// "NAME=VALUE" records at env_va, the argv packing. The child's /env holds
+// exactly those records, in place of the copy of the spawner's; a later record
+// for a name replaces an earlier one, and env_len 0 is an empty environment.
+// The spawner's kernel builds the child's group before any child exists, so a
+// refusal makes no child: -T_E_2BIG for env_len past SYS_SPAWN_ENV_DATA_MAX, a
+// value past ENV_VALUE_MAX or more than ENV_MAX_ENTRIES names; -T_E_INVAL for an
+// unterminated block, a record with no '=', or a name /env refuses (empty, at
+// least ENV_NAME_MAX bytes, or holding a '/'); -1 for env_flags != 0. Ungated:
+// the spawner could write the same variables into its own /env before spawning.
+#define SPAWN_EXT_ENV                (1u << 2)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD | SPAWN_EXT_THREADS | SPAWN_EXT_ENV)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -3388,6 +3480,12 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // (EXEC_USER_STACK_SIZE; 1 MiB until B-1b) with all but that to spare.
 #define SYS_SPAWN_ARGV_DATA_MAX  65536u
 
+// Maximum bytes of the SPAWN_EXT_ENV tail's records. It is the bound exec holds
+// a child's environment to when it projects /env onto the new image's stack
+// (EXEC_ENV_DATA_MAX; syscall.c asserts the two equal), so the tail admits no
+// environment the child could not be exec'd with.
+#define SYS_SPAWN_ENV_DATA_MAX   32768u
+
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the
 // Plan 9 + 9P2000.L practical cap for a single path element; bounds the
 // kernel-stack scratch + the per-byte uaccess loop. 255 = the Linux
@@ -3812,6 +3910,25 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, thread_budget) =
 _Static_assert(__builtin_offsetof(struct sys_spawn_ext_threads, threads_flags) == 4,
                "sys_spawn_ext_threads.threads_flags at ABI offset 4");
 
+// The SPAWN_EXT_ENV tail, after the cwd and thread tails whose bits are set, else
+// directly after the record. Every tail before it is a multiple of 8 bytes, so
+// env_va is always 8-aligned.
+struct sys_spawn_ext_env {
+    u64 env_va;         // user-VA of the records; may be 0 when env_len is 0
+    u32 env_len;        // 0..SYS_SPAWN_ENV_DATA_MAX bytes incl. the NULs; past it -> T_E_2BIG
+    u32 env_flags;      // must be 0 -> else -1, the unknown-bits rule
+};
+_Static_assert(sizeof(struct sys_spawn_ext_env) == 16,
+               "struct sys_spawn_ext_env is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "16 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_va) == 0,
+               "sys_spawn_ext_env.env_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_len) == 8,
+               "sys_spawn_ext_env.env_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_env, env_flags) == 12,
+               "sys_spawn_ext_env.env_flags at ABI offset 12");
+
 struct exception_context;
 
 // Dispatch entry called from arch/arm64/exception.c::exception_sync_lower_el
@@ -3825,18 +3942,24 @@ struct exception_context;
 // switch-out frees it (ARCH 7.3.2).
 void syscall_dispatch(struct exception_context *ctx);
 
+struct Spoor;
+
+#ifdef KERNEL_TESTS
+// Calls that reached the native switch's unknown arm (defined in syscall.c).
+// A test tells "no native handler" from a handler that also answers -1 by it.
+u64 syscall_unknown_count(void);
+
 // The follow-up round's F1 gate predicate (defined in syscall.c): SYS_ATTACH_9P
 // admits pipe pairs ONLY -- the spoor transport is sound solely over a
 // non-blocking tx, and CNBFRAME is honored by devpipe alone (a /srv byte-conn or
 // a dev9p file tx BLOCKS under the 9P client's held c->lock, the #360 lock-
-// across-sleep extinction). Non-static so the regression (test_pipe.c) exercises
-// the ACTUAL predicate the handler gates on, not a re-derivation.
-struct Spoor;
+// across-sleep extinction). The regression (test_pipe.c) exercises the ACTUAL
+// predicate the handler gates on, not a re-derivation.
 bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
+#endif // KERNEL_TESTS
 
 // The identity cape's and the remote declaration's two admission predicates
-// (defined in syscall.c; non-static so the regressions exercise the handlers'
-// own rules):
+// (defined in syscall.c; the regressions exercise the handlers' own rules):
 //   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE and
 //     SYS_ATTACH_9P_REMOTE (`srv` false); SYS_ATTACH_9P_SRV takes
 //     SYS_ATTACH_9P_LOOSE only;
@@ -3844,6 +3967,202 @@ bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx
 //     bits only, and DMSRVCAPE only beside DMSRVBYTE (DMSRVREMOTE with
 //     either mode).
 bool sys_attach_9p_flags_ok(u64 flags, bool srv);
+#ifdef KERNEL_TESTS
 bool sys_srv_post_perm_ok(u32 perm);
+#endif // KERNEL_TESTS
+
+struct AddrSpace;
+struct Burrow;
+struct KObj_PCI;
+struct Proc;
+struct spawn_allowance;
+struct srv_route;
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into syscall.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void apply_spawn_perms(struct Proc *p, u32 perm_flags);
+u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw);
+s64 exec_claim_or_drop_for_test(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe);
+s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out);
+struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                        struct Spoor *sp, u64 offset, u64 length);
+int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
+int spoor_devclass(struct Spoor *c);
+s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
+                           const u8 *aname, u64 aname_len, u64 n_uname,
+                           u64 flags);
+s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
+                               const u8 *aname, u64 aname_len,
+                               u64 n_uname, u64 flags);
+s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+                                 u64 length_raw, u64 prot_raw, u64 flags_raw,
+                                 u64 addr_raw);
+s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                                u64 prot_raw, u64 flags_raw);
+s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+                                u64 align_log2);
+s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3);
+s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3);
+s64 sys_close_for_test(struct Proc *p, u64 h);
+hidx_t sys_console_open_for_proc(struct Proc *p);
+s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+                        char *joined, u32 joined_cap,
+                        char *name, u32 name_cap);
+s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries);
+__attribute__((noreturn)) void sys_exit_group_for_test(u64 status);
+s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length);
+s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va);
+s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+                          u64 *out_writer, u64 *out_exec);
+s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+                                 u64 length_raw, u64 *out_exec);
+s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
+int sys_mlockall_for_proc(struct Proc *p, u32 flags);
+s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+                           bool exec, u64 offset);
+s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+                                 u32 pr);
+s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+                                 u64 length_raw, u32 pr, u64 offset);
+int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+                       struct Spoor *mountpoint, u32 flags);
+s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                   const char *kpath, u64 klen,
+                                   u64 omode_raw, u64 perm_raw);
+s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
+                             u64 omode, bool create, u64 perm, bool cloexec,
+                             bool dir_required, struct Spoor **keep);
+s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
+s64 sys_pci_info_handler(u64 hraw, u64 info_va);
+s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw);
+int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name);
+s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
+s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off);
+s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3);
+s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+                        s64 off);
+s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
+s64 sys_rfork_handler(struct exception_context *ctx);
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
+int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
+int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len);
+int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags,
+        const char *cwd, u32 cwd_len, u32 req_threads);
+int sys_spawn_full_argv_env_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags,
+        const char *cwd, u32 cwd_len, u32 req_threads,
+        bool env_set, const char *env_block, u32 env_len);
+int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags);
+int sys_spawn_full_argv_for_proc(struct Proc *p,
+                                 const char *name, size_t name_len,
+                                 const char *argv_data, u32 argv_data_len,
+                                 u32 argc,
+                                 const u32 *fds, u32 fd_count,
+                                 caps_t cap_mask, u32 perm_flags);
+int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance);
+int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req);
+int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+                            const u32 *fds, u32 fd_count, caps_t cap_mask);
+void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+                                 caps_t cap_mask);
+int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+                                const u32 *fds, u32 fd_count);
+int sys_spawn_with_perms_for_proc(struct Proc *p,
+                                  const char *name, size_t name_len,
+                                  const u32 *fds, u32 fd_count,
+                                  caps_t cap_mask, u32 perm_flags);
+int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
+int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+                          struct srv_peer_info *out);
+s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+    const struct srv_route *routes, u64 count, u64 flags);
+s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+                      u32 stalk_flags, struct t_stat *out_k);
+s64 sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
+s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg);
+s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class);
+int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint);
+s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
+                                   const char *kname, u64 klen,
+                                   u64 omode_raw, u64 perm_raw);
+s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
+s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
+s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                       u32 uid, u32 gid, u64 size);
+s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+                      u64 in_ordinal);
+s64 viv_accept_for_test(struct Proc *p, u64 fd);
+s64 viv_clone_thread_for_test(struct exception_context *ctx, const u64 *args);
+u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+                            u8 *dst, u64 dst_cap,
+                            u64 *last_cookie_out);
+s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
+s64 viv_dup_for_test(struct Proc *p, u64 fd);
+s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
+s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
+s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
+                            u64 optval_va, u64 optlen_va);
+s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
+s64 viv_listen_for_test(struct Proc *p, u64 fd);
+s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);
+s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
+s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
+s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd);
+s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
+void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
+s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
+s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_SYSCALL_H

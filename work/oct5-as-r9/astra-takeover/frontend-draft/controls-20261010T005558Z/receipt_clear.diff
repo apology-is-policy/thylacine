@@ -1,0 +1,11 @@
+--- control.c
++++ receipt_clear.c
+@@ -2760,7 +2760,7 @@
+     cq[at]=(struct loom_cqe){.user_data=e->rejected_user_data,.result=e->rejected_result};
+     if(l->receipt_size) {
+         struct loom_service_buffer_receipt *receipts=(void *)(l->ring_kva+l->receipt_off);
+-        receipts[at]=(struct loom_service_buffer_receipt){0};
++        (void)receipts;
+     }
+     e->rejected=false;e->rejected_user_data=0;e->rejected_result=0;
+     ++l->cq_tail;__atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);

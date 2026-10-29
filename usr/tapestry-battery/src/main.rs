@@ -443,6 +443,47 @@ fn drain_settle(surf: &mut Surface) {
     }
 }
 
+/// Deliberately plain fixture for the real cursor plane. The host moves the
+/// pointer, Space changes shape, Enter reports the compositor's acknowledged
+/// pointer, and Escape exits. No privileged test verb or raw GPU access.
+fn cursor_demo(root: i64) -> i64 {
+    use tapestry::CursorShape;
+    let mut surface = match Surface::fullscreen() { Ok(s) => s, Err(_) => return 1 };
+    let shapes = [CursorShape::Arrow, CursorShape::Text, CursorShape::Link,
+        CursorShape::ResizeHorizontal, CursorShape::ResizeVertical];
+    let mut index = 0;
+    fill(&mut surface, 0xff17_211d);
+    if surface.present(None).is_err() || surface.set_cursor(shapes[index]).is_err() { return 1; }
+    say!("cursor-demo: ready {:?}", shapes[index]);
+    loop {
+        let ev = match surface.wait_event() { Ok(e) => e, Err(_) => return 1 };
+        if ev.kind == TEV_CONFIGURE {
+            if surface.handle_configure(&ev).is_err() { return 1; }
+            fill(&mut surface, 0xff17_211d);
+            if surface.present(None).is_err() { return 1; }
+        } else if ev.kind == TEV_CLOSE { break; }
+        else if ev.kind == TEV_KEY && ev.value == 1 {
+            match ev.code {
+                1 => break,
+                57 => {
+                    index = (index + 1) % shapes.len();
+                    if surface.set_cursor(shapes[index]).is_err() { return 1; }
+                    say!("cursor-demo: shape {:?}", shapes[index]);
+                }
+                28 => {
+                    let ctl = read_file(root, "ctl").unwrap_or_default();
+                    if let Some(line) = ctl.lines().find(|line| line.starts_with("cursor ")) {
+                        say!("pointer-probe: {}", line);
+                    }
+                }
+                _ => {},
+            }
+        }
+    }
+    say!("cursor-demo: done");
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // The driver session (layout ops are compositor-global; surfaces stay
@@ -458,6 +499,21 @@ pub extern "C" fn rs_main() -> i64 {
     if root < 0 {
         say!("tapestry-battery: FAIL no /srv/tapestry ({})", root);
         return 1;
+    }
+    if libthyla_rs::env::args().any(|arg| arg == b"--pointer-state") {
+        let ctl = read_file(root, "ctl").unwrap_or_default();
+        let line = ctl.lines().find(|line| line.starts_with("cursor "));
+        match line {
+            Some(line) => say!("pointer-probe: {}", line),
+            None => say!("pointer-probe: FAIL missing cursor state"),
+        }
+        unsafe { t_close(root); }
+        return if line.is_some() { 0 } else { 1 };
+    }
+    if libthyla_rs::env::args().any(|arg| arg == b"--cursor-demo") {
+        let verdict = cursor_demo(root);
+        unsafe { t_close(root); }
+        return verdict;
     }
     let ctl = match read_file(root, "ctl") {
         Some(s) => s,

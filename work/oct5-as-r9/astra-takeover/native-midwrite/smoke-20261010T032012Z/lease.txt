@@ -1,0 +1,4 @@
+mac   HELD by you for 1s, 19m left
+        why: Astra native partial WRITE cancellation smoke
+pi    FREE
+disk: 9.0 GiB available at /Users/northkillpd/projects/thylacine-astra

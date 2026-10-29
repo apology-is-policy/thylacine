@@ -441,6 +441,7 @@ extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15,
 // test would let a server-backed fd impersonate the console.
 bool spoor_is_console(struct Spoor *sp);
 
+#ifdef KERNEL_TESTS
 // devramfs diagnostics (used by tests).
 int  devramfs_entry_count(void);       // loaded archive entries: files and directories
 int  devramfs_root_child_count(void);  // entries whose parent is the root
@@ -448,6 +449,7 @@ int  devramfs_synth_dir_count(void);   // count of synthetic mount-point dirs (s
 bool devramfs_initialized(void);
 int  devramfs_skipped_count(void);     // archive entries the load could not place
 bool devramfs_truncated(void);         // the archive overflowed the entry table
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Shared helpers for leaf-file Devs (P4-B).
@@ -490,6 +492,7 @@ void dev_init(void);
 // by name will find it after this call returns.
 int dev_register(struct Dev *d);
 
+#ifdef KERNEL_TESTS
 // Look up a registered Dev by its device character. Returns NULL if no
 // dev matches. Linear scan; v1.0 cost is negligible (< 16 entries).
 struct Dev *dev_lookup_by_dc(int dc);
@@ -501,6 +504,7 @@ struct Dev *dev_lookup_by_name(const char *name);
 // Number of Devs registered (excluding the sentinel). Tests use this to
 // verify boot-time registration count.
 int dev_count(void);
+#endif // KERNEL_TESTS
 
 // spoor_open_errno — the cause a FAILED `Dev.open` left on `c`, dispatched by
 // the Spoor's Dev. Returns a value in [-4095,-2], or -1 when the Dev has no

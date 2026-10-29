@@ -1,0 +1,25 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-09T18:39:05.596113+00:00",
+  "base_head": "28156ba02bb4b192def4b86e684dce95ea17bf8d",
+  "manifest_sha256": "6d114903faa506546c339eb3f0795b46e3050bd59fe19eab14f82fa0d1c9c740",
+  "paths": [
+    "kernel/loom_service_connect.c",
+    "kernel/loom_service_engine.c",
+    "kernel/CMakeLists.txt",
+    "kernel/loom_service_close_queue.c",
+    "kernel/loom.c",
+    "kernel/test/test_loom.c",
+    "kernel/test/test.c",
+    "kernel/include/thylacine/loom.h",
+    "kernel/include/thylacine/loom_service_nodes.h",
+    "kernel/include/thylacine/loom_service_connect.h",
+    "kernel/include/thylacine/loom_service_engine.h",
+    "kernel/include/thylacine/loom_service_close_queue.h",
+    "work/oct5-as-r9/final-reclaim-control.py",
+    "work/oct5-as-r9/slot-owner-control.py",
+    "work/oct5-as-r9/private-fixed-control.py",
+    "work/oct5-as-r9/connect-control.py"
+  ],
+  "state": "installed; native build/diagnostic pending"
+}

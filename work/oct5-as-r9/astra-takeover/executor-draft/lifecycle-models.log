@@ -1,0 +1,14 @@
+PASS loom.cfg Invariants
+PASS loom_buggy_cqwait_check_early.cfg NoMissedCqWake
+PASS loom_buggy_cqwait_no_wake.cfg NoMissedCqWake
+PASS loom_buggy_double_post.cfg NoDoubleCompletion
+PASS loom_buggy_live_sqe_reread.cfg ArgPinnedToSnapshot
+PASS loom_buggy_lost_on_full.cfg CqNeverOverfull
+PASS loom_buggy_recheck_at_completion.cfg ObjPinnedToSnapshot
+PASS loom_buggy_stale_after_teardown.cfg NoStaleCompletion
+PASS loom_service.cfg TypeOK
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/lifecycle-models.py", line 20, in <module>
+    assert valid,(cfg.name,r.returncode,text[-1500:],out)
+           ^^^^^
+AssertionError: ('loom_service_buggy_cqfull.cfg', 12, 'charged = {1}\n/\\ success = {1}\n/\\ retired = {}\n\nState 5: <Deliver(1) line 70, col 15 to line 75, col 80 of module loom_service>\n/\\ phase = "ready"\n/\\ lateSuccess = FALSE\n/\\ cancelled = {}\n/\\ terminal = {1}\n/\\ delivered = {1}\n/\\ accepted = {1, 2}\n/\\ doubleTerminal = FALSE\n/\\ cq = {1}\n/\\ localRefs = {1}\n/\\ pins = {2}\n/\\ staleUse = FALSE\n/\\ observed = {}\n/\\ borrows = {2}\n/\\ ringClosed = FALSE\n/\\ gen = 1\n/\\ peerRefs = {1}\n/\\ charged = {1}\n/\\ success = {1}\n/\\ retired = {}\n\nState 6: <Reply(2) line 48, col 13 to line 56, col 45 of module loom_service>\n/\\ phase = "ready"\n/\\ lateSuccess = FALSE\n/\\ cancelled = {}\n/\\ terminal = {1, 2}\n/\\ delivered = {1}\n/\\ accepted = {1, 2}\n/\\ doubleTerminal = FALSE\n/\\ cq = {1}\n/\\ localRefs = {1}\n/\\ pins = {}\n/\\ staleUse = FALSE\n/\\ observed = {}\n/\\ borrows = {}\n/\\ ringClosed = FALSE\n/\\ gen = 1\n/\\ peerRefs = {1}\n/\\ charged = {1}\n/\\ success = {1, 2}\n/\\ retired = {}\n\nState 7: <Deliver(2) line 70, col 15 to line 75, col 80 of module loom_service>\n/\\ phase = "ready"\n/\\ lateSuccess = FALSE\n/\\ cancelled = {}\n/\\ terminal = {1, 2}\n/\\ delivered = {1, 2}\n/\\ accepted = {1, 2}\n/\\ doubleTerminal = FALSE\n/\\ cq = {1, 2}\n/\\ localRefs = {1}\n/\\ pins = {}\n/\\ staleUse = FALSE\n/\\ observed = {}\n/\\ borrows = {}\n/\\ ringClosed = FALSE\n/\\ gen = 1\n/\\ peerRefs = {1}\n/\\ charged = {1}\n/\\ success = {1, 2}\n/\\ retired = {}\n\n158 states generated, 87 distinct states found, 39 states left on queue.\nThe depth of the complete state graph search is 7.\nFinished in 00s at (2026-10-09 23:01:12)\n', PosixPath('/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/lifecycle-models-20261009T210107Z'))

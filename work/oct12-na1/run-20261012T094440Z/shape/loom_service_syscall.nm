@@ -1,0 +1,7 @@
+0000000000000060 T loom_private_enter
+0000000000000020 T loom_private_record_size
+0000000000000054 T loom_private_register_buffers_routed
+000000000000000c T loom_private_register_op
+000000000000006c T loom_private_register_record
+0000000000000000 T loom_private_routed
+0000000000000048 T loom_private_setup_for_proc

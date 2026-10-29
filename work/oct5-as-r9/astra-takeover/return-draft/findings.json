@@ -1,0 +1,13 @@
+{
+  "owner": "astra",
+  "findings": [
+    {
+      "id": "RETURN-T1",
+      "kind": "fixture defect",
+      "state": "corrected",
+      "problem": "Initial test attempted replacement-pool registration after whole-ring close; actual unchanged slot ledger correctly refused.",
+      "correction": "Scope-only abort, terminal drain and protocol collection precede pool reap/reuse; no live close latch is reset.",
+      "evidence": "controls-20261010T003926Z/control.log"
+    }
+  ]
+}

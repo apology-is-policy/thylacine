@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -58,7 +58,7 @@
+         else if(o->phase==LRPC_TERMINAL) {
+             if(r->phase==LREQ_DELIVERED)action=LREADY_FREE;
+             else if(!o->pool_pending && room)action=LREADY_POST;
+-        } else if(o->phase==LRPC_INFLIGHT && o->callback_seen && !o->rpc.sending)
++        } else if(o->phase==LRPC_INFLIGHT && o->callback_seen)
+             action=LREADY_ADVANCE;
+         else if(o->phase==LRPC_SETTLING && !o->pool_pending)
+             action=o->pool_more_delivered?LREADY_REARM:LREADY_COMMIT;

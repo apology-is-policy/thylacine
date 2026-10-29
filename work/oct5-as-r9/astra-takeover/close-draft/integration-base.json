@@ -1,0 +1,9 @@
+{
+  "kernel/loom.c": "e6ed13c4e9977899a10076fd6273c63a17bafd52f4a08b6ddeba15860abd0798",
+  "kernel/include/thylacine/loom.h": "7254fc45a6a6883595ca712b551deacf455bb9bdbc67c29da05d53d4996a77a8",
+  "kernel/loom_service_engine.c": "b40ce94467702873874cae331880a316853263bc96a8cc9247baa3b74765a48a",
+  "kernel/include/thylacine/loom_service_engine.h": "2c2f3cd2aef1cbd4df641e9fa040cacb40271aee840762b0e8a485aaa4fe12fd",
+  "kernel/loom_service_connect.c": "3c737a4f8b0dd6f4837663303f422d320508812d37df401c513929504a067e47",
+  "kernel/include/thylacine/loom_service_connect.h": "bd6564e93d9e5ff8ae1dbc61914510cfaddb7025a489785d385f5d04dcc0658a",
+  "kernel/CMakeLists.txt": "d2254e52688ef39fe0d86297cc008891c4e3aa411fb3e5bc3fce29a224874e00"
+}

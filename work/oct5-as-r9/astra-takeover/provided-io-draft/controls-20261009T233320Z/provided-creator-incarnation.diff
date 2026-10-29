@@ -1,0 +1,11 @@
+--- control.c
++++ provided-creator-incarnation.c
+@@ -982,7 +982,7 @@
+                           u64 now,struct loom_service_operation **out) {
+     if(!l || l->magic!=LOOM_MAGIC || !loom_is_private(l) || !p ||
+        p->magic!=PROC_MAGIC || !s || !out)return -T_E_INVAL;
+-    if(p->as!=l->service_as || p->stripes!=l->service_creator)return -T_E_ACCES;
++    if(p->as!=l->service_as)return -T_E_ACCES;
+     int rc=loom_private_sqe_shape(s,l->receipt_size!=0);if(rc)return rc;
+     if(s->opcode!=LOOM_OP_READ || !(s->flags&LOOM_SQE_BUFFER_SELECT) ||
+        s->len>INT32_MAX)return -T_E_INVAL;

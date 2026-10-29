@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -75,7 +75,7 @@
+     if(!n)return -T_E_NOENT;
+     if((n->fid_flags&LFID_CLUNKING) && n->state!=LOOM_SERVICE_RETIRED)return -T_E_BUSY;
+     if(!id || n->fid_claim!=id || !t->slots[dest.slot].pins)return -T_E_BUSY;
+-    int rc=loom_slot_unpin(t,dest);
++    int rc=0;
+     if(!rc){n->fid_claim=0;n->fid_flags&=~LFID_OPENING;}
+     return rc;
+ }

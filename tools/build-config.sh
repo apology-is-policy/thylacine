@@ -50,18 +50,15 @@ bc_def compile BOOT_PROBES bool n "var:boot_probes" \
 bc_def compile DEV_ACCOUNTS bool y "var:dev_accounts" \
   "Bake a dev login account" \
   "Provisions the daily-use login accounts (michael + cora) at first boot so a lean image is loginnable -- without it, --production has no accounts and you cannot log in (the finding-#1 fix; before this axis, accounts rode BOOT_PROBES). The full michael/susan/cora/wheel fixture set is created only when the boot-probe ladder (BOOT_PROBES) also runs. Turn OFF only for a bare image an installer/first-boot flow will provision."
-bc_def compile HARDENING_FULL bool n "var:hardening_full" \
-  "Full P1-H hardening" \
-  "Enables the full hardening flag set (PAC/BTI where the CPU has them, plus extra guards). A small size/complexity cost; on for production-like images."
-bc_def compile KASLR bool n "var:kaslr" \
-  "Kernel ASLR" \
-  "Randomizes the kernel base address at each boot (invariant I-16). On for production-like images; off makes crash addresses stable for debugging."
 bc_def compile SANITIZE "choice:none,ubsan" none "sanitize:sanitize" \
   "Kernel sanitizer" \
   "ubsan = UndefinedBehaviorSanitizer (trapping); builds into a separate dir so it never clobbers the normal kernel. none for everything else."
 bc_def compile TICKLESS bool y "varinv:no_tickless" \
   "Tickless idle" \
   "NO_HZ_IDLE: an idle CPU sleeps without a periodic timer tick. Leave on. Off forces the old 1 kHz-always tick and is a diagnostic-only baseline."
+bc_def compile PRIVATE_ASYNC_QUAL bool n "var:private_async_qual" \
+  "Private async qualification kernel" \
+  "Routes the reserved private Loom service ABI (setup PRIVATE_SERVICE, register ops 2..9, ENTER, poll) to the kernel's private stack so its native clients can be qualified (docs/ASYNC-SERVICE-ABI.md, Qualification bridge). NOT a release default and in no preset: off, every private route returns EOPNOTSUPP. Builds into its own kernel dir so it never replaces the image it is not."
 
 # bake-content ----------------------------------------------------------------
 bc_def bake CHUNK_GOROOT bool y "env:THYLACINE_BAKE_GOROOT" \
@@ -127,6 +124,10 @@ bc_def display HALCYON_THEME string "" "env:THYLACINE_HALCYON_THEME" \
   "Halcyon theme" \
   "Name of a theme in usr/lib/halcyon/themes/ (without .toml) to bake as /lib/halcyon/theme.toml. Empty = the PROFILE's own compiled-in theme. A theme file declares the profile it was designed for (profile = \"instrument-v1\" in its [meta]; none = the legacy schema); one baked under the other profile is PROJECTED onto it rather than refused, so it works but is not what its author drew -- the wizard tags each file with its schema so the pairing is a choice. The TYPE here is a free string rather than a choice on purpose -- the bake installs whatever *.toml is in that directory, so an enumerated list would refuse a theme the bake would take. The WIZARD reads the directory at run time and offers the real files as a numbered menu, so dropping a .toml in is all it takes to make it selectable. Needs a Halcyon renderer (either lever above) to be visible; on a pure-aurora image the file is baked and simply unread."
 
+bc_def display HALCYON_INTERACTION_QUALIFICATION bool n "env:THYLACINE_INTERACTION_QUALIFICATION" \
+  "Halcyon interaction qualification (development only)" \
+  "Opt in to the native HIN1 clipboard adapter and expanded session service pool. Remains off pending HI1-R24 capacity and failure qualification; this does not deliver the modal terminal or Nora clients. Normal builds expose only the existing media routes."
+
 # pool-control ----------------------------------------------------------------
 bc_def pool DISK_SIZE string 16M "env:THYLACINE_DISK_SIZE" \
   "Scratch disk size" \
@@ -174,7 +175,7 @@ bc_validate() {
 bc_set_one() {
     local name="$1" val="$2" idx
     if ! idx="$(bc_index_of "$name")"; then
-        echo "build-config: unknown symbol '$name' (ignored)" >&2; return 1
+        echo "build-config: unknown symbol '$name'" >&2; return 1
     fi
     if ! bc_validate "${BC_TYPE[$idx]}" "$val"; then
         echo "build-config: '$val' is not valid for $name (${BC_TYPE[$idx]})" >&2; return 1
@@ -210,7 +211,7 @@ bc_load_file() {
         key="${line%%=*}"; val="${line#*=}"
         key="${key%"${key##*[![:space:]]}"}"     # rtrim key
         val="${val#"${val%%[![:space:]]*}"}"     # ltrim val
-        bc_set_one "$key" "$val" || true
+        bc_set_one "$key" "$val" || echo "build-config: $path: ignoring '$line'" >&2
     done < "$path"
 }
 
@@ -279,7 +280,7 @@ bc_export() {
             buildtype) printf -v "$target" '%s' "$([[ "$val" == release ]] && echo Release || echo Debug)" ;;
             sanitize)  printf -v "$target" '%s' "$([[ "$val" == none ]] && echo "" || echo "$val")" ;;
             def)       extra_cmake_args+=("-D${target}=$(bc__onoff "$val")") ;;
-            env)       bc__export_env "$target" "$(bc__envval "$val")" ;;
+            env)       bc__export_env "$target" "$(bc__envval "$val")" "$name" "${BC_TYPE[$i]}" ;;
             want)      [[ "$val" == y ]] && export "$target"=1 || export "$target"=0 ;;
         esac
     done
@@ -292,11 +293,27 @@ bc__envval()    { case "$1" in y) echo 1 ;; n) echo 0 ;; *) echo "$1" ;; esac; }
 # D-b transition shim: if the caller already set a legacy THYLACINE_* env var, HONOR
 # it (do not clobber); otherwise export the config's value. So build-everything.sh's
 # pre-set THYLACINE_BAKE_* (e.g. its clade-staged detection) still wins during the
-# transition. eval-based existence test for bash 3.2 (no ${!name+x} composition).
+# transition. An honoured value is also written back to SYM, because build/.config
+# must name what the later stages read, not the value they ignored.
+# eval-based existence test for bash 3.2 (no ${!name+x} composition).
 bc__export_env() {
-    local name="$1" cfgval="$2" isset
+    local name="$1" cfgval="$2" sym="$3" type="$4" isset cur
     eval "isset=\"\${$name+set}\""
-    [[ "$isset" == set ]] || eval "export $name=\"\$cfgval\""
+    if [[ "$isset" == set ]]; then
+        eval "cur=\"\$$name\""
+        bc__set_raw "$sym" "$(bc__envval_back "$type" "$cur")"
+    else
+        eval "export $name=\"\$cfgval\""
+    fi
+}
+# The inverse of bc__envval for a recorded value: a bool reads 1/0 back as y/n; any
+# other value is kept raw, so a caller's malformed setting shows as itself.
+bc__envval_back() {
+    if [[ "$1" == bool ]]; then
+        case "$2" in 1) echo y ;; 0) echo n ;; *) echo "$2" ;; esac
+    else
+        echo "$2"
+    fi
 }
 # --sanitize=undefined is the legacy spelling of ubsan (both -> the schema's ubsan).
 bc__san_alias() { case "$1" in undefined) echo ubsan ;; *) echo "$1" ;; esac; }

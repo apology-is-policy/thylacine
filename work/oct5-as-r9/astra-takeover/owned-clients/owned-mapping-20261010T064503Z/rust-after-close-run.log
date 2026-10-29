@@ -1,0 +1,22 @@
+
+running 5 tests
+test every_region_pair_rejects_overlap ... ok
+test malformed_geometry_cleanup ... ok
+test fresh_header_checks_and_wakeup ... ok
+test post_setup_corruption_is_detected ... ok
+test min_max_copy_and_cleanup ... FAILED
+
+failures:
+
+---- min_max_copy_and_cleanup stdout ----
+
+thread 'min_max_copy_and_cleanup' (22288910) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/mutant-rust-after-close/test_owned_mapping.rs:22:22:
+assertion failed: matches!(m.reap(),Err(Error::Closed))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    min_max_copy_and_cleanup
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

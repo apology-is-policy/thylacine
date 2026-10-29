@@ -185,6 +185,7 @@ enum note_default {
     NOTE_DFL_IGNORE    = 2,  // child_exit, tty:winch, tty:cont
 };
 
+#ifdef KERNEL_TESTS
 // The default action for a supported note name; NOTE_DFL_TERMINATE for an
 // unknown one. PURE -- a table lookup with no side effects, which is the point:
 // the policy is unit-testable without driving the noreturn terminate leg.
@@ -194,6 +195,7 @@ enum note_default {
 // majority disposition, and an unknown name cannot actually arrive: every
 // caller passes a name that came out of `g_known_notes` in the first place.
 enum note_default notes_default_action(const char *name);
+#endif // KERNEL_TESTS
 
 // In-kernel note record. The ring lives in `struct NoteQueue.ring` (inline
 // — the queue is heap-allocated once per Proc at proc_alloc).
@@ -451,6 +453,7 @@ void notes_queue_free(struct NoteQueue *q);
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic);
 
+#ifdef KERNEL_TESTS
 // Dequeue the next deliverable note for `t` — the DISPATCHER variant.
 // Two passes: (1) kill-first scan regardless of mask (N-4 non-catchable),
 // (2) first mask-permitted non-kill entry. Returns 1 if a note was popped
@@ -463,6 +466,7 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
 // (R2-F1: a Proc reading /dev/notes would otherwise consume its own kill).
 int notes_dequeue_locked(struct Proc *p, struct Thread *t,
                          struct Note *out);
+#endif // KERNEL_TESTS
 
 // Peek the dispatcher's next deliverable note (kill-first; mask-permitted
 // otherwise). Returns 1 if an entry exists (copied to *out), 0 if empty.
@@ -506,6 +510,7 @@ int notes_name_is_kill(const char *name);
 // makes "no stale ignored note survives" hold. See kernel/notes.c.
 u32 notes_discard_name(struct Proc *p, const char *name);
 
+#ifdef KERNEL_TESTS
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure
 // and by notes_deliver_at_el0_return on user-stack-push failure to
@@ -525,6 +530,7 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 // the full decision without the noreturn exits() path. Caller MUST hold
 // p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
+#endif // KERNEL_TESTS
 
 // Would `name` take its DEFAULT action on `p`? False iff something intercepts
 // it: a native handler (handler_va), a phenotype sigtab handler, or a phenotype
@@ -537,6 +543,7 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 // rather than during the post.
 bool notes_proc_default_applies(struct Proc *p, const char *name);
 
+#ifdef KERNEL_TESTS
 // PTY-1b: the name-returning generalization of the above -- the canonical
 // (.rodata, program-lifetime) name of the first DELIVERABLE terminate-class
 // note (interrupt / tty:quit / tty:hup: queued AND its family bit unmasked
@@ -582,6 +589,7 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t);
 // selected its note by class. Caller MUST hold p->notes->lock.
 int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
                               struct Note *out);
+#endif // KERNEL_TESTS
 
 // PTY-1b (PTY-DESIGN.md section 4): kernel-synthetic note fan-out to a
 // process group -- the pgrp generalization of proc_console_post_interrupt.
@@ -646,6 +654,14 @@ void notes_set_handler(struct Proc *p, u64 handler_va);
 // q->lock, same serialization rationale as notes_set_handler.
 void notes_mark_self_managing(struct Proc *p);
 
+// The SYS_NOTED bodies. notes_noted_restore puts back the user context saved
+// at delivery (NCONT): 0, or -1 when `t` is not in a handler. notes_noted_default
+// takes the note's default action (NDFLT); its STOP and IGNORE dispositions
+// return.
+struct exception_context;
+int notes_noted_restore(struct exception_context *ctx, struct Thread *t);
+int notes_noted_default(struct exception_context *ctx, struct Thread *t);
+
 // The WIDENED #811 death predicate (ARCH 8.8.1 + 8.8.2): true iff `t`, on
 // returning to its EL0-return tail now, will die there -- its Proc is
 // group-terminating (group_exit_msg set), OR a terminate-disposition
@@ -680,6 +696,7 @@ void notes_fault_dying_latch(struct Thread *t);
 // comes.
 bool thread_death_reaches(struct Thread *t);
 
+#ifdef KERNEL_TESTS
 // item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
 // notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-
@@ -702,6 +719,7 @@ bool thread_caught_note_deliverable(struct Thread *t);
 // releases it and walks the Proc again if its note is still queued. The sleep
 // sites evaluate it LAST, only when every other unwind gate has passed.
 bool thread_caught_note_claim(struct Thread *t);
+#endif // KERNEL_TESTS
 
 // ARCH 8.8.3 (dec-2026-10-12-note-target): the posting walk's designation.
 // thread_caught_wait_kind is the enum caught_wait of the wait `t` is entering
@@ -775,9 +793,18 @@ void notes_post_pipe(struct Proc *writer);
 // Bring-up
 // =============================================================================
 
-// Initialize a NoteQueue in place. Used by notes_queue_alloc; exposed for
-// kernel-test harnesses that drive the queue directly without going through
-// the proc_alloc path.
-void notes_queue_init(struct NoteQueue *q);
+// The last leg of every EL0-return tail (vectors.S), after the die and stop
+// checks: delivers the deliverable notes before the thread re-enters EL0.
+void notes_deliver_at_el0_return(struct exception_context *ctx);
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into notes.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+const char *notes_known_name_for_test(u32 i);
+u32 notes_name_terminate_latch_for_test(const char *name);
+void notes_release_claims_for_test(struct Thread *t);
+const char *notes_snare_death_name_for_test(u32 i);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_NOTES_H

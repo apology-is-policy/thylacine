@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ readwrite.c
+@@ -56,7 +56,7 @@
+             if(r->attr.qid.type&P9_QTSYMLINK)
+                 return program_end(p,-T_E_LOOP,LPROGRAM_TERMINAL);
+             if(p->wire.mode>2)return program_end(p,-T_E_INVAL,LPROGRAM_TERMINAL);
+-            want=perm_want_for_omode(p->wire.mode);
++            want=PERM_R;
+         } else return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+         if(perm_check_identity(&p->identity,&st,want))
+             return program_end(p,-T_E_ACCES,LPROGRAM_TERMINAL);

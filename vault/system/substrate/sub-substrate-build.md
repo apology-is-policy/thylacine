@@ -4,6 +4,11 @@ type: sub
 parent: moc-substrate
 title: "The build — targets, the ledger, and the four guards on a stale artifact"
 code:
+  - .gitignore
+  - third_party/rust/smoltcp/.vscode/settings.json
+  - third_party/rust/thiserror/build/probe.rs
+  - third_party/libsodium/builds/msvc/build/buildall.bat
+  - third_party/libsodium/builds/msvc/build/buildbase.bat
   - tools/build.sh
   - tools/mkcpio.py
   - tools/mkdisk.py
@@ -15,6 +20,8 @@ code:
   - tools/configure.sh
   - tools/test-configure.sh
   - tools/check-flag-words.py
+  - tools/check-audit-rows.py
+  - tools/check-test-registry.py
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -22,7 +29,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -52,6 +59,27 @@ know the resulting state rather than inferring it from the target name.
 
 ## Mechanism
 
+### Fresh-checkout vendor integrity
+
+Generic `build/` and `.vscode/` ignore rules also match inside vendored source.
+Exact exceptions in `.gitignore` preserve smoltcp's editor settings,
+thiserror's build probe and libsodium's two MSVC build scripts. These are
+upstream source, not generated artifacts. Cargo validates the Rust files
+against each crate's `.cargo-checksum.json`, so omitting them aborts a fresh
+worktree's build before compilation. The MSVC files do not participate in the
+ARM build, but must remain present to preserve the vendored tree.
+
+The September 24 repair was verified by enumerating all Cargo manifest paths
+and SHA-256 hashes, restoring the two absent Rust files only after hash
+comparison, comparing both libsodium files between the established Main/Aux
+checkouts, and completing a fresh `tools/build.sh kernel`. The broader local
+check is `git ls-files --others --ignored --exclude-standard third_party/`:
+review any result before vendoring or landing. A clean clone cannot detect
+files that were never committed; run that check in the populated source tree
+as well. An automatic build guard is a separate Aux follow-up.
+
+See [[chg-2026-09-24-vendor-checkout-integrity]].
+
 ### Typed configuration and external inputs
 
 `build-config.sh` loads the typed configuration axes, presets and fragments;
@@ -60,6 +88,49 @@ inputs, while `forage.sh` resolves and checks those inputs before a build.
 `MANIFEST` and `FORAGE_ROOT` isolate fixture tests; they are not permission to
 silently substitute downloaded bytes for a pinned archive. DOSBox and game
 baking follow the same configured input path as the existing toolchain.
+
+The display-group `HALCYON_INTERACTION_QUALIFICATION` bool defaults off in all
+presets. Its environment shim is `THYLACINE_INTERACTION_QUALIFICATION`; the
+Rust build maps the enabled value to `halcyond/interaction-qualification` and
+logs it. This development option exposes the HIN1 adapter and expanded pool
+for HI1-R24 qualification. Normal builds keep media-only discovery. Tests pin
+the production/default refusal and explicit enabled export.
+
+The kernel-group `PRIVATE_ASYNC_QUAL` bool, default off and in no preset, sets
+the CMake option `THYLACINE_PRIVATE_ASYNC_QUALIFICATION`. CMake announces the build as not a
+release default, and `build.sh` builds that kernel into
+`build/kernel-private-async-qual`, so a qualification build never replaces
+`build/kernel`. It routes the reserved private Loom ABI
+([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
+the export.
+
+KASLR (I-16) and the kernel hardening flags are not configuration: every
+image has both ([[dec-2026-10-27-build-knobs]]). The schema has no `KASLR` or
+`HARDENING_FULL` symbol and `build.sh` no `--kaslr` or `--hardening-full`.
+A profile that still names a symbol the schema lacks loads anyway:
+`bc_set_one` names the symbol, `bc_load_file` names the file and the line it
+skips, and the lines after it apply. On the command line an unknown `--set`
+symbol, an unknown flag or a missing `--with` fragment stops the build.
+`test-build-config.sh` pins the stale-profile load and that every shipped
+preset and fragment loads without a warning.
+
+A legacy `THYLACINE_*` variable the caller already set wins over the config
+(the D-b transition shim), and `bc_export` writes the value it honoured back
+into the config, so `build/.config` records what the later stages read: a
+`THYLACINE_BAKE_CLADE=1` bake records `CHUNK_CLADE = y` over the preset's `n`.
+A bool's `1`/`0` reads back as `y`/`n`, and any other value is recorded as
+itself. Until 2026-10-29 the record kept the overridden value. The record says
+what was asked for, not what landed: a clade bake with no staged toolchain is
+skipped with a warning, and populate's "payloads verified PRESENT" line is the
+content truth. `configure.sh` writes profiles through the same emitter but
+never exports, so a profile records the user's choices, not the shell's. And
+`--show-config` still writes `build/.config` before it exits, whether or not an
+image was built from it (OPEN-BUGS 2026-10-29T02:30Z).
+
+The lever selects a kernel, never a ramfs. `build/ramfs.cpio` is shared by every
+kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,
+`loom-bridge-probe`, therefore sits in the curated `usr_bins` list of every
+image. The kernel test holds it to the verdict its own lever implies.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a
@@ -536,3 +607,47 @@ below the target/ledger granularity (no target-set change).
 [[chg-2026-09-06-9p-identity-absorb]] folds the A-3 bake-value pass absorbed from
 docs/reference/100: the `PRINCIPAL_SYSTEM` no-brick stamping (`stratum-mkfs
 --root-uid` + `stratumd --bake-owner-uid`).
+
+## Cleared Aux integration (2026-09-24)
+The native workspace and ramfs lists retain Lantern, the existing capacity and
+bus probes, and the optional Track-R r1hello fixture together. Corvus authority
+is a workspace library, not a staged executable. Merged CI build and production
+shape compile; no absent optional fixture is counted as coverage.
+
+## The argument width check (2026-10-13)
+
+`build_ramfs` runs `tools/check-arg-width.py` on `kernel/syscall.c` right after
+the invariant registry check: fatal, no skip switch, self-testing (it refuses to
+run if its own planted cases do not read as expected). It fails a build that
+casts a raw syscall argument to a narrower type with no full-width check first
+(ERRORS.md principle 6; [[sub-kernel-syscall-dispatch]]).
+
+## The audit-trigger row check (2026-10-28)
+
+`build_ramfs` runs `tools/check-audit-rows.py` after the argument width check:
+fatal, no skip switch, its self-test first. A session finds its row in
+`docs/AUDIT-TRIGGERS.md` by the first cell, so the check fails a build when a
+first cell occurs twice, or when an unpushed merge (reachable from HEAD, not
+from any origin ref) lost a row its parents carried or dropped one parent's
+change to a row whole, and the tree being built still shows it. It compares
+each row against every merge base; a row whose first cell differs from the
+base's has no anchor, so only the loss and copy halves judge it. A resolution
+that meant it names the row in an `Audit-row-dropped:` or
+`Audit-row-one-side:` trailer, on the merge or any later unpushed commit. A
+row the resolution retitled reads as lost; the report names the merge's new
+row that opens the same way.
+`--merge REV` reads one merge of history unfiltered: at the corona main merge
+c59c2a6fb it reports the lost VMO / BURROW row and the four rows it copied.
+
+## The kernel test registry check (2026-10-28)
+
+`build_kernel` runs `tools/check-test-registry.py` after the cross-file
+declaration check, in every configuration (it reads the sources, not the
+build): fatal, self-test first. A kernel test runs only if
+`kernel/test/test.c`'s `g_tests` names it, so the check fails a build when a
+non-static `void test_*(void)` under `kernel/test/` or a `test_registry.h`
+declaration is not an entry, when an entry's function or name appears twice,
+or when an entry has no definition its pattern parses (so a definition it
+cannot read fails instead of escaping). `test_devcap_clearance_audio_graph`
+ran zero times for 51 days that way; the check fails the tree just before its
+registration (a3144a8c5^) on exactly that test.

@@ -1,0 +1,11 @@
+--- control
++++ omit-close
+@@ -220,7 +220,7 @@
+     // Leaf-only exec latch: publish predicate change without entering scheduler.
+     if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+         extinction("private executor change counter exhausted");
+-    loom_slots_close(l->service_slots);
++
+     spin_unlock(&l->lock);
+ }
+ static void loom_private_drop_buffer(struct AddrSpace *as, struct Burrow *b) {

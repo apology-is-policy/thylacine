@@ -7,9 +7,6 @@
 #include <thylacine/errno.h>
 #include "../../mm/slub.h"
 
-void pci_irq_test_dispatch(u32 intid);
-void test_pci_irq_shared_tickets(void);
-
 struct fixture {
     struct KObj_PCI *pci;
     struct virtio_pci_dev dev;
@@ -97,10 +94,11 @@ void test_pci_irq_shared_tickets(void) {
 // Controller allocation tests never publish a message address to a device,
 // so source quiescence is known independently of device-reset machinery.
 #include "../../arch/arm64/gic_msi.h"
-void test_pci_msi_allocator(void);
 void test_pci_msi_allocator(void) {
     struct dtb_pci_msi dt;
-    if (!dtb_pci_msi_route(8, &dt)) return;
+    if (!test_requires(dtb_pci_msi_route(8, &dt), "thylacine.msi", 0, false,
+                       "the DTB routes no PCI MSI"))
+        return;
     struct gic_msi_route a, b;
     TEST_ASSERT(gic_msi_alloc(8, 0, &a), "firmware-selected MSI allocation");
     TEST_ASSERT(gic_msi_reserved(a.intid), "allocated SPI is reserved");
@@ -132,8 +130,10 @@ void test_pci_msi_allocator(void) {
     TEST_ASSERT(n == bound && exhausted && cleaned, "bounded pool exhaustion and complete unwind");
 }
 
-void test_pci_restart_placement(void);
 void test_pci_restart_placement(void) {
+    if (!test_requires(virtio_pci_find_by_device_id(4, 0) != NULL, "thylacine.virtio-pci-rng", 0,
+                       true, "no PCI function carries its DeviceID"))
+        return;
     u64 pa[PCI_BAR_COUNT], size[PCI_BAR_COUNT];
     u64 before = kobj_pci_live_count();
     for (u32 round = 0; round < 16; round++) {
@@ -166,10 +166,14 @@ static bool rng_used(volatile u16 *used, u16 expected) {
     __asm__ volatile("dsb sy" ::: "memory");
     return true;
 }
-void test_pci_msix_rng(void);
 void test_pci_msix_rng(void) {
     struct dtb_pci_msi route;
-    if (!dtb_pci_msi_route(8, &route)) return;
+    if (!test_requires(dtb_pci_msi_route(8, &route), "thylacine.msi", 0, false,
+                       "the DTB routes no PCI MSI"))
+        return;
+    if (!test_requires(virtio_pci_find_by_device_id(4, 0) != NULL, "thylacine.virtio-pci-rng", 0,
+                       true, "no PCI function carries its DeviceID"))
+        return;
     struct KObj_PCI *pci = kobj_pci_claim(4, 0);
     struct KObj_IRQ *irq = NULL;
     struct KObj_DMA *dma = NULL;
@@ -268,10 +272,7 @@ cleanup:
 #include <thylacine/thread.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
-void pci_test_msix_fail(struct KObj_PCI *pci, u32 stages);
-void pci_irq_test_msix_dispatch(u32 intid);
-void pci_irq_test_controller_fault(u32 node);
-bool gic_its_test_fault_notify(u32 node);
+#include "../../arch/arm64/gic_its.h"
 static struct KObj_IRQ *fault_wait_irq;
 static volatile bool fault_wait_exited;
 static int fault_wait_result;
@@ -285,10 +286,14 @@ static bool fault_wait_parked(struct Thread *thread) {
     bool parked = fault_wait_irq->rendez.waiter == thread;
     spin_unlock_irqrestore(&fault_wait_irq->rendez.lock, f); return parked;
 }
-void test_pci_msix_failures(void);
 void test_pci_msix_failures(void) {
     struct dtb_pci_msi route;
-    if (!dtb_pci_msi_route(8, &route)) return;
+    if (!test_requires(dtb_pci_msi_route(8, &route), "thylacine.msi", 0, false,
+                       "the DTB routes no PCI MSI"))
+        return;
+    if (!test_requires(virtio_pci_find_by_device_id(4, 0) != NULL, "thylacine.virtio-pci-rng", 0,
+                       true, "no PCI function carries its DeviceID"))
+        return;
     u32 baseline = gic_msi_live_count();
     struct KObj_PCI *pci = kobj_pci_claim(4, 0);
     struct KObj_IRQ *a = NULL, *b = NULL;
@@ -361,7 +366,6 @@ cleanup:
 }
 
 
-void test_pci_intx_recovery(void);
 void test_pci_intx_recovery(void) {
     u32 intid = 0;
     TEST_ASSERT(dtb_pci_intx_route(0, 1, &intid), "recovery fixture route");
@@ -428,7 +432,6 @@ static void close_race_entry(void) {
     }
     test_kthread_park_terminal(&close_race_exited);
 }
-void test_pci_intx_close_dispatch(void);
 void test_pci_intx_close_dispatch(void) {
     u64 baseline = kobj_irq_live_count();
     u32 intid = 0;

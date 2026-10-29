@@ -1,0 +1,21 @@
+{
+  "owner": "astra",
+  "state": "qualified-uninstalled-return-control",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "dependencies": [
+    "drain-draft and its exact next-work overlay order"
+  ],
+  "overrides": [
+    "kernel/loom_service_control.c",
+    "kernel/include/thylacine/loom_service_control.h"
+  ],
+  "run": "work/oct5-as-r9/astra-takeover/return-draft/controls-20261010T004057Z",
+  "checks": 3125,
+  "mutants": 10,
+  "input_hashes": 55,
+  "raw_pairs": 11,
+  "arm64_objects": 2,
+  "self_review": "single-agent; not independent",
+  "next": "next-work.txt",
+  "limits": "Actual creator-authorized copied-record RETURN plus engine wait/next-shot transitions; native wake/poll/IO/backing/ref/protocol-destruction boundaries remain controlled. No syscall/shared-SQE/native scheduling qualification."
+}

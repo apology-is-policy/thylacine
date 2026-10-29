@@ -1,0 +1,13 @@
+{
+  "source": "a978d19c388f512a645cdcbaeea60a81a0a06727",
+  "recorded_utc": "2026-10-09T18:04:31.519154+00:00",
+  "files": {
+    "kernel/loom_service_close_queue.c": "ceaea22a952b8d675f2371449abd16630e50ea853ae623e1f917ab5251d0cda0",
+    "kernel/include/thylacine/loom_service_close_queue.h": "6a3fe97f5f9afeb11f731caee4f2ce87d9102e4be6b085a1fbc56d4ce06d3ea5",
+    "check-model.py": "9aa279e8db4c66fadc2a14c4c0c73eb1c30be0b87d1fd97e0a6648ff4a09ac8b",
+    "queue-control.py": "1a5fcee24b698f6ddef7f59fa5225cedf27fd0f8f4db3b5a60f068a884dc007a",
+    "self-review.txt": "a35c5499c025e8ca3dc37ece769900ff506bceffdaceca50ee39bbc45bdb1384",
+    "status.json": "a01a374c79d38ed2ab119b7e0ea598ee4b1200b42d10ec5a770b454455b94e73"
+  },
+  "installed": false
+}

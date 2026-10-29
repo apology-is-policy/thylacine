@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ list-tail.c
+@@ -46,7 +46,7 @@
+         extinction("RPC lost fresh request borrow");
+     o->prev=p->op_tail;
+     if(p->op_tail)p->op_tail->next=o;else p->op_head=o;
+-    p->op_tail=o;++p->op_count;o->phase=LRPC_QUEUED;
++    p->op_tail=NULL;++p->op_count;o->phase=LRPC_QUEUED;
+     return 0;
+ }
+ int loom_rpc_begin_locked(struct loom_service_operation *o,u64 now) {

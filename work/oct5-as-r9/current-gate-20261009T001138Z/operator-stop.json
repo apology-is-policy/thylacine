@@ -1,0 +1,7 @@
+{
+  "at": "2026-10-09T00:14:06.812130+00:00",
+  "actor": "Astra",
+  "action": "SIGTERM own detached runner process group",
+  "pid": 42797,
+  "reason": "Repeated native loom.private_buffers failure at foreign mappings detached; stop redundant boots, preserve raw evidence for diagnosis."
+}

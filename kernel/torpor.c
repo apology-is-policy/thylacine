@@ -119,7 +119,7 @@ static void torpor_bucket_unlink_locked(struct torpor_waiter *w) {
 // `uaccess_load_u32` — the asm primitive's fault-fixup table catches
 // translation/permission faults only (`arch/arm64/exception.c`); an
 // unaligned LDR on SCTLR_EL1.A-checking memory would alignment-fault
-// to the "unclassified kernel fault" extinction path, not the fixup
+// to the "unhandled kernel alignment fault" extinction, not the fixup
 // recovery. Rejecting unaligned addr_va here keeps the fault-class
 // invariant intact at the C boundary.
 static int torpor_addr_va_ok(u64 addr_va) {

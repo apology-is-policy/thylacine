@@ -1,0 +1,14 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/uart.c	2026-10-14 15:54:58
++++ arch/arm64/uart.c	2026-10-14 16:21:25
+@@ -278,10 +278,7 @@
+ // Once a peer's extinction owns the console, this CPU's byte is dropped: the
+ // banner must reach the wire whole, and every gate matches it at column 0.
+ void uart_putc(char c) {
+-    int token = extinction_tx_enter();
+-    if (!token) return;
+-    uart_putc_wire(c);
+-    extinction_tx_exit(token);
++    uart_putc_wire(c);   // MUTANT B1 no gate
+ }
+ 
+ // #67 regression (test-only; production callers never touch this). Proves

@@ -1,0 +1,2 @@
+same shared slot: got0 want-22
+Assertion failed: (0), function check, file same-slot.c, line 73.

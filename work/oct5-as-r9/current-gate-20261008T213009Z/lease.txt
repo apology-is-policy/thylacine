@@ -1,0 +1,4 @@
+mac   HELD by you for 2m, 2.0h left
+        why: Astra takeover: shared slot ledger host controls, lifecycle model and native qualification
+pi    FREE
+disk: 11.6 GiB available at /Users/northkillpd/projects/thylacine-astra

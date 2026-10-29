@@ -1,0 +1,163 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/loom_service_admission.c": "019e34f95f4b67508a6b998daf00b590e6d1b069cc0fcd2f6f6aca48a49f166b",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/loom_service_operation.c": "1df2965317944a15f10cdca9c86115c84aa7234f1bdec43642018764915e2023",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/loom_service_rpc.c": "f90c53bc0bc2a42c365eac7c1810a46f8b1e0e49344ba7f17174b6f8b2e60163",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/loom_service_io.c": "ec41d2cf6b45efe884a1586bb55c79404f9d50355574a97471839b046d8a22eb",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom_service_rpc.h": "71791b4b5f13312b4c1875b571b840c4e759f06d3b83196aba51957d3c88e757",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom_service_operation.h": "7065aac1ce0bb15b11706845aaf25af8f4359d7cbc2377570d70833717dd8fbd",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/fixture.c": "b96938b98049bdc85667659602eb6c9645c2e33aad86e905d5439d984c05ed6d",
+    "work/oct5-as-r9/astra-takeover/fixed-io-draft/run-controls.py": "a6f9c006c0ed0fbaa9b238a8adc6130b31d52f4cfc13d61c85c43088182786f6",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/loom.c": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom_service_decode.c": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "f412809a1fe152dbb725cbdb272ff36dc77b5fbefc925121bf621549b15ae087",
+      "binary_sha256": "87509f087b9c48720e743ceaa3df8e08d3d818be100427ec4a56810a1d412a9a"
+    },
+    {
+      "case": "creator-image",
+      "expected": "exact creator image refusal",
+      "rc": 1,
+      "source_sha256": "917682e457f507a716fbc4bdc67b2bbe8b91c19afd1963c5bfecabcf83a54027",
+      "binary_sha256": "cb409332c54ec9ff5d4e38451280fbc962a2031de88ca9045dd89b5c1f9d5697"
+    },
+    {
+      "case": "creator-incarnation",
+      "expected": "exact creator incarnation refusal",
+      "rc": 1,
+      "source_sha256": "79e211395347cf7b3660993c5d9b4b30f266dac42a3ebba21b839d97bc2fd760",
+      "binary_sha256": "00e9a965a661e48e06de477d06697103ab45a1952997cce79ebf5f208f4564c9"
+    },
+    {
+      "case": "canonical-offset",
+      "expected": "prepared canonical slice owns independent pin",
+      "rc": 1,
+      "source_sha256": "f49f9e327285ca8d33b433e81e1e5b45694c99150aa3aa65db19e78280ea8cc0",
+      "binary_sha256": "863e7a527e09b601c9e32f1d5ee4ac8ec8a1579c6dc1ea935314e052014abab5"
+    },
+    {
+      "case": "component-copy",
+      "expected": "walk owns copied component and burns wire fid",
+      "rc": 1,
+      "source_sha256": "9eaa837769bc15b9f0e7b9a6212e1320414def9413610943f23bb7ef4408ddf8",
+      "binary_sha256": "c7d9db30c24e573425ce82672fbc4c7e73957e941db23487f86f480a45f33033"
+    },
+    {
+      "case": "component-validate",
+      "expected": "invalid component unwinds before fid allocation",
+      "rc": 1,
+      "source_sha256": "fffe315a5a59f0b7667dc700820acf0854fde839d96984255df44ed54d3c13fa",
+      "binary_sha256": "bd6f9ba7c43f260f7cbfc0895904fd720579cb430ef4ba99c225207902bea3e5"
+    },
+    {
+      "case": "empty-offset",
+      "expected": "empty extent still bounds offset",
+      "rc": 1,
+      "source_sha256": "0eacf689e405ddff84b841a3dd27947b61dc4999c542ecdc081f9f1cedfb073b",
+      "binary_sha256": "71c8ac12a5fed4144cab16e12025db5bbf5acf044b2debfcb864dfe41bc5b724"
+    },
+    {
+      "case": "empty-index",
+      "expected": "empty extent still validates registration",
+      "rc": 1,
+      "source_sha256": "bd8c0d2f1eb8ffe7f9b2a8a6e37934660a35e2acaf5e7009917560046b6a4f67",
+      "binary_sha256": "b382322c45e6852803e3c7852eba952d6729b78912fe4233128cebdb90373f2f"
+    },
+    {
+      "case": "fid-exhaustion",
+      "expected": "exhausted monotone allocator unwinds",
+      "rc": 1,
+      "source_sha256": "a2120442a6e13776c5eed6a6f18c618d70f151f93b9a0d2ced5bbddbcacaf430",
+      "binary_sha256": "15263f0f05c70f3ad98f304c147de7fe6406fe4b3a91f9ff0ff6c7a193635410"
+    },
+    {
+      "case": "payload-pointer-clear",
+      "expected": "physical payload release clears pointer",
+      "rc": 1,
+      "source_sha256": "104ab5bc82a7d0a6d7b11ebc42941d303ae2d257f7b5850f07f0123d243dc9dd",
+      "binary_sha256": "ab8e7035566c0f839cba68dc28f0167d4ba79af46209030864b5e6e6a2efcb31"
+    },
+    {
+      "case": "payload-capacity-clear",
+      "expected": "physical payload release clears pointer",
+      "rc": 1,
+      "source_sha256": "fd5ee4f00982c8d0cec92e31a444fcff8e286303e3e46f221957d0459f80da31",
+      "binary_sha256": "9242875d229df3a625b3022c2cb2419b40b11b4146adbafd9a3d2a71a34e4e52"
+    },
+    {
+      "case": "queued-drop",
+      "expected": "queued ownership cannot release payload",
+      "rc": 1,
+      "source_sha256": "91cf310f3f638b207db397ccef3e71d1e28ee780a6d843f281c95d1657172e5b",
+      "binary_sha256": "bafbb2ee5c25dc941fc84c36078a60317bf1eaa327192a18003c87b21c7d4830"
+    },
+    {
+      "case": "drop-barrier",
+      "expected": "unlink is not physical settlement",
+      "rc": 1,
+      "source_sha256": "5a90bb7c0d6552150d5cb9f6a840d1cc1967383e4c4b5585aaf6a784140e946e",
+      "binary_sha256": "86bead96af5c748d46828d69da3738f9c1f3a20ef99f54ecd140affdd695f5b0"
+    },
+    {
+      "case": "fixed-owner-free",
+      "expected": "storage free after physical holds",
+      "rc": 1,
+      "source_sha256": "ea1d4466847f10b69128d7a1b8332b8f82f0582a231df4fb609792251ed12918",
+      "binary_sha256": "b3ea71e905bd45e9a2ea23b2498b478a1345e5001c20eec5d233522581914230"
+    },
+    {
+      "case": "backing-pin",
+      "expected": "prepared canonical slice owns independent pin",
+      "rc": 1,
+      "source_sha256": "dc79a64931f0b0f3c3384b6e6bcc58a7ec8fb2a4c92bf1f37b9b5485e85c0327",
+      "binary_sha256": "594c98696ed8fa479ebe55f86984b6fb69811abf8fe31fc8847f402ce6e8b258"
+    },
+    {
+      "case": "fixed-ref",
+      "expected": "prepared canonical slice owns independent pin",
+      "rc": 1,
+      "source_sha256": "4d53b1e57017679a9c9d7c5275781aa5ded48957c73f18b3b1f4895ba2b01545",
+      "binary_sha256": "869e778d442ff7eab920e163270b8b1386d23adef7485b48eec86566288e7562"
+    },
+    {
+      "case": "wire-fid-burn",
+      "expected": "walk owns copied component and burns wire fid",
+      "rc": 1,
+      "source_sha256": "17e7a5a88dfacd4f4882ab1eb42b5a19d0e6296f3bdf7555c83bbdf324bba731",
+      "binary_sha256": "2c0453f6f04cd42feace5982a3db1f00f1bb8123ac096fd4ca4e7855e96f1646"
+    },
+    {
+      "case": "fresh-publish-time",
+      "expected": "fresh publication deadline retains provisional hold",
+      "rc": 1,
+      "source_sha256": "1c265c84e70ffd915d11ff5903f1cdfff85e598555cfb8b4b2b372a675266955",
+      "binary_sha256": "fcfd0fae42702c0c3499048bfcb974c5ce5f83cf0a9283c50883e3a44754bfc5"
+    }
+  ],
+  "limits": "Real data headers and actual SQE preparation, fixed helper, constructor, FID allocator and ledger/program code. Host address translation, allocation, Proc snapshot, refs/wake/engine and physical backing drop boundaries. No wire dispatch; admitted destructor is manual fixture cleanup. No native frontend/driver/close/concurrency proof."
+}

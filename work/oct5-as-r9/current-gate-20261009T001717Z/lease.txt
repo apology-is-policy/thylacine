@@ -1,0 +1,4 @@
+mac   HELD by you for 2m, 2.0h left
+        why: Astra correct private-buffer native fixture VA/locking and diagnose before rerunning gates
+pi    FREE
+disk: 10.2 GiB available at /Users/northkillpd/projects/thylacine-astra

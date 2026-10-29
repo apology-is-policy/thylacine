@@ -1,0 +1,12 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:08:15
+@@ -10728,8 +10728,7 @@
+ s64 sys_rfork_handler(struct exception_context *ctx) {
+     if (!ctx) return -(s64)T_E_INVAL;
+     // A flags word that does not fit is refused like an unknown flag.
+-    if (ctx->regs[0] > 0xffffffffull) return -(s64)T_E_INVAL;
+-    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1],
++    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1], // width: MUTANT M10 no compare
+                           ctx->regs[2]);
+ }
+ 

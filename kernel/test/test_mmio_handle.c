@@ -21,18 +21,6 @@
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
 
-void test_mmio_handle_create_basic(void);
-void test_mmio_handle_create_misaligned_rejected(void);
-void test_mmio_handle_create_zero_size_rejected(void);
-void test_mmio_handle_create_overflow_rejected(void);
-void test_mmio_handle_create_overlap_rejected(void);
-void test_mmio_handle_create_adjacent_ok(void);
-void test_mmio_handle_create_unref_releases_slot(void);
-void test_mmio_handle_double_unref_extincts(void);
-void test_mmio_handle_create_kernel_reserved_rejected(void);
-void test_mmio_handle_virtio_mmio_claimable(void);
-void test_mmio_handle_create_out_of_ips_rejected(void);
-
 // Synthetic PA range used by the tests. Page-aligned. Picked
 // arbitrarily — claim tracking doesn't touch the actual memory.
 #define TEST_MMIO_PA_A   0x100000000ull
@@ -124,12 +112,6 @@ void test_mmio_handle_create_unref_releases_slot(void) {
 // after `virtio_init` boot probe; the F154 close was over-broad). See
 // `test_mmio_handle_virtio_mmio_claimable` for the positive-case test.
 void test_mmio_handle_create_kernel_reserved_rejected(void) {
-    struct dtb_pci_msi msi;
-    for (u32 i = 0; dtb_msi_controller_n(i, &msi); i++) {
-        TEST_ASSERT(!kobj_mmio_create(msi.pa & ~4095ull, 4096),
-                    "MSI controller page must never be claimable by EL0");
-    }
-
     // GIC distributor on QEMU virt: PA 0x08000000, 64 KiB. The
     // reservation is page-aligned outward so the entire range is
     // protected. A kobj_mmio_create at the exact GIC PA must fail.
@@ -157,6 +139,16 @@ void test_mmio_handle_create_kernel_reserved_rejected(void) {
         struct KObj_MMIO *k3 = kobj_mmio_create(0x08090000ull, 0x20000ull);
         TEST_ASSERT(k3 == NULL,
                     "kobj_mmio_create overlapping GIC redist must be rejected");
+    }
+
+    // Every MSI controller's doorbell page (v2m frame, ITS translater).
+    struct dtb_pci_msi msi;
+    if (!test_requires(dtb_msi_controller_n(0, &msi), "thylacine.msi", 0, false,
+                       "the DTB names no MSI controller"))
+        return;
+    for (u32 i = 0; dtb_msi_controller_n(i, &msi); i++) {
+        TEST_ASSERT(!kobj_mmio_create(msi.pa & ~4095ull, 4096),
+                    "MSI controller page must never be claimable by EL0");
     }
 }
 
@@ -229,8 +221,6 @@ void test_mmio_handle_double_unref_extincts(void) {
     // is verified by inspection of kobj_mmio_unref's `ref <= 0` check.
 }
 
-extern bool kobj_mmio_test_reservation_union(void);
-void test_mmio_kernel_reservation_union(void);
 void test_mmio_kernel_reservation_union(void) {
     TEST_ASSERT(kobj_mmio_test_reservation_union(),
                 "partial/transitive overlap must reserve entire union atomically");

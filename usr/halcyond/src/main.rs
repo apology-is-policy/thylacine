@@ -62,7 +62,9 @@ mod chromeset;
 mod menuset;
 mod railset;
 mod paneplace;
+mod session_seat;
 mod placesrv;
+mod serviceio;
 mod session;
 mod statusset;
 
@@ -1430,6 +1432,7 @@ pub extern "C" fn rs_main() -> i64 {
                     let nfds = waitfds.len();
                     let clock = statusset::clock_timeout_ms();
                     let timeout = libhalcyon::motion::fold_timeout(clock, status.notice_timeout_ms());
+                    let timeout = if places.as_ref().is_some_and(|p| p.runnable()) { 0 } else { timeout };
                     if unsafe { t_poll(waitfds.as_mut_ptr(), nfds, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;

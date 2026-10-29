@@ -1,0 +1,68 @@
+
+running 9 tests
+test loop_quiet_step_has_no_internal_allocation ... FAILED
+test loop_fixed_cq_completion_and_last_result_retirement ... FAILED
+test loop_wake_during_readiness_is_seen_before_wait ... FAILED
+test loop_expired_outer_deadline_does_not_poll_tasks ... ok
+test loop_wake_during_final_clock_sample_is_seen ... ok
+test loop_self_wake_prevents_wait_without_starving_expiry ... FAILED
+test loop_wake_during_arm_is_seen_before_wait ... FAILED
+test loop_cancellation_does_not_reclaim_before_retirement ... ok
+test loop_zero_and_partial_task_budget_preserve_readiness ... FAILED
+
+failures:
+
+---- loop_quiet_step_has_no_internal_allocation stdout ----
+
+thread 'loop_quiet_step_has_no_internal_allocation' (22537624) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/task-loop-20261010T095847Z/mutant-skip-task-dispatch/test_task_loop.rs:383:361:
+assertion `left == right` failed
+  left: Retry
+ right: Woke(Spurious)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- loop_fixed_cq_completion_and_last_result_retirement stdout ----
+
+thread 'loop_fixed_cq_completion_and_last_result_retirement' (22537623) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/task-loop-20261010T095847Z/mutant-skip-task-dispatch/test_task_loop.rs:377:357:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- loop_wake_during_readiness_is_seen_before_wait stdout ----
+
+thread 'loop_wake_during_readiness_is_seen_before_wait' (22537628) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/task-loop-20261010T095847Z/mutant-skip-task-dispatch/test_task_loop.rs:363:362:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- loop_self_wake_prevents_wait_without_starving_expiry stdout ----
+
+thread 'loop_self_wake_prevents_wait_without_starving_expiry' (22537625) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/task-loop-20261010T095847Z/mutant-skip-task-dispatch/test_task_loop.rs:357:355:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- loop_wake_during_arm_is_seen_before_wait stdout ----
+
+thread 'loop_wake_during_arm_is_seen_before_wait' (22537626) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/task-loop-20261010T095847Z/mutant-skip-task-dispatch/test_task_loop.rs:360:368:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- loop_zero_and_partial_task_budget_preserve_readiness stdout ----
+
+thread 'loop_zero_and_partial_task_budget_preserve_readiness' (22537629) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/task-loop-20261010T095847Z/mutant-skip-task-dispatch/test_task_loop.rs:371:356:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    loop_fixed_cq_completion_and_last_result_retirement
+    loop_quiet_step_has_no_internal_allocation
+    loop_self_wake_prevents_wait_without_starving_expiry
+    loop_wake_during_arm_is_seen_before_wait
+    loop_wake_during_readiness_is_seen_before_wait
+    loop_zero_and_partial_task_budget_preserve_readiness
+
+test result: FAILED. 3 passed; 6 failed; 0 ignored; 0 measured; 83 filtered out; finished in 0.00s
+

@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ driver-begin.c
+@@ -52,7 +52,7 @@
+ int loom_rpc_begin_locked(struct loom_service_operation *o,u64 now) {
+     struct loom_service_request *r=rpc_record(o);
+     if(!r)return -T_E_NOENT;
+-    if(!o->protocol->driving || o->phase!=LRPC_QUEUED ||
++    if(o->phase!=LRPC_QUEUED ||
+        r->phase!=LREQ_ACTIVE || r->borrows!=1 || o->rpc.sending)return -T_E_BUSY;
+     int rc=rpc_ready(o);if(rc)return rc;
+     if(o->capture_error || o->callback_seen)return -T_E_IO;

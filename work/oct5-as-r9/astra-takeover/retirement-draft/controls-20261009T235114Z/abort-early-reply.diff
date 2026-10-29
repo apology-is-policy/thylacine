@@ -1,0 +1,11 @@
+--- control.c
++++ abort-early-reply.c
+@@ -1253,7 +1253,7 @@
+         // hold before callbacks can settle/free it, including an early-replied
+         // RPC already removed from inflight[]. Legacy blocking senders retain
+         // their existing ownership; this edge is progress-mode only.
+-        if (sending) sending->sending = false;
++        if (sending && c->inflight[0]==sending) sending->sending = false;
+     }
+     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
+         struct p9_rpc *r = c->inflight[tag];

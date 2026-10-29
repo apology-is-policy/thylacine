@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -15,7 +15,7 @@
+                 if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
+                     n->parent.reserved || n->parent.incarnation || n->reserved)
+                     extinction("private Loom retained pinned retired scope");
+-                *n=(struct loom_service_node){0};
++                /* omitted */
+                 if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))
+                     extinction("private Loom lost retired scope metadata");
+                 continue;

@@ -1,0 +1,11 @@
+--- control
++++ shared-tail
+@@ -24,7 +24,7 @@
+     if (rc) { spin_unlock(&l->lock); return rc; }
+     if (t->detached) { spin_unlock(&l->lock); return -T_E_CANCELED; }
+     struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
+-    u32 tail = l->cq_tail;
++    u32 tail = h->cq_tail;
+     u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+     if ((u32)(tail-head) >= l->cq_entries) {
+         spin_unlock(&l->lock);

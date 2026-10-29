@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ retry-expiry.c
+@@ -87,7 +87,7 @@
+        r->phase!=LREQ_ACTIVE || r->borrows!=1)
+         return -T_E_BUSY;
+     int rc=rpc_ready(o);if(rc)return rc;
+-    if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
++    if(false)return -T_E_TIMEDOUT;
+     o->rpc.on_complete=NULL;o->callback_seen=false;o->phase=LRPC_QUEUED;
+     return 0;
+ }

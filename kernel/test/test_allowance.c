@@ -21,26 +21,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>       // VIRTIO_DEVICE_ID_RNG
-
-void test_allowance_null_is_broad(void);
-void test_allowance_mmio_containment(void);
-void test_allowance_irq_membership(void);
-void test_allowance_dma_cap(void);
-void test_allowance_revoked_permits_nothing(void);
-void test_allowance_confer_rejects_overcap(void);
-void test_allowance_handle_alloc_broad(void);
-void test_allowance_handle_alloc_revoked_aborts(void);
-void test_allowance_clone_inherit(void);
-void test_allowance_free_null_tolerant(void);
-void test_allowance_pci_membership(void);
-void test_allowance_pci_claim_handler_gate(void);
-void test_allowance_confer_within_parent(void);
-
-// The SYS_PCI_CLAIM handler is not header-declared (a syscall handler); the
-// F2 regression drives it directly (the established test-TU extern pattern).
-extern s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
-void test_allowance_revoke_on_group_terminate(void);
-void test_allowance_narrowed_proc_cannot_spawn(void);
+#include <thylacine/syscall.h>
 
 // Mirror the test_handle.c proc make/drop: proc_alloc gives a fresh Proc with
 // an empty handle table + a NULL (broad) allowance; test_proc_drop ZOMBIEs +
@@ -256,32 +237,34 @@ void test_allowance_pci_membership(void) {
     TEST_ASSERT(PCI_BDF_PACK(0xFF, 0x1F, 0x07) == ((0xFFu << 16) | (0x1Fu << 8) | 0x07u),
         "full-range pack matches the bit layout");
 
-    // The resolve leg, IF the live rng-pci is present (some configs have no
-    // PCIe root). Confer the rng's OWN bdf -> permits; confer a fabricated bdf
-    // -> denies the rng's. The SYS_PCI_CLAIM handler resolves the same bdf
-    // (kobj_pci_resolve_bdf == the first match kobj_pci_claim picks).
+    // The resolve leg, on the live rng-pci (test_requires). Confer the rng's
+    // OWN bdf -> permits; confer a fabricated bdf -> denies the rng's. The
+    // SYS_PCI_CLAIM handler resolves the same bdf (kobj_pci_resolve_bdf == the
+    // first match kobj_pci_claim picks).
     u8 rb, rd, rf;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) == 0) {
-        u32 rng_bdf = PCI_BDF_PACK(rb, rd, rf);
-        struct Proc *q = amk();
-        TEST_ASSERT(q != NULL, "proc_alloc q");
-        u32 qpci[1] = { rng_bdf };
-        TEST_ASSERT(proc_confer_allowance(q, NULL, 0, NULL, 0, 0, qpci, 1) == 0, "confer rng bdf");
-        TEST_ASSERT(allowance_permits(q, HW_RES_PCI, rng_bdf, 0),
-            "narrowed-to-rng permits the rng claim (SYS_PCI_CLAIM would pass)");
-        adrop(q);
+    if (!test_requires(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) == 0,
+                       "thylacine.virtio-pci-rng", 0, true,
+                       "no PCI function carries its DeviceID"))
+        return;
+    u32 rng_bdf = PCI_BDF_PACK(rb, rd, rf);
+    struct Proc *q = amk();
+    TEST_ASSERT(q != NULL, "proc_alloc q");
+    u32 qpci[1] = { rng_bdf };
+    TEST_ASSERT(proc_confer_allowance(q, NULL, 0, NULL, 0, 0, qpci, 1) == 0, "confer rng bdf");
+    TEST_ASSERT(allowance_permits(q, HW_RES_PCI, rng_bdf, 0),
+        "narrowed-to-rng permits the rng claim (SYS_PCI_CLAIM would pass)");
+    adrop(q);
 
-        // A driver narrowed to a DIFFERENT function is denied the rng claim --
-        // the bypass the v1.0 fail-closed reject crudely covered, now precise.
-        struct Proc *r = amk();
-        TEST_ASSERT(r != NULL, "proc_alloc r");
-        u32 other = PCI_BDF_PACK((u8)(rb + 1), rd, rf);   // a neighbouring bus
-        u32 rpci[1] = { other };
-        TEST_ASSERT(proc_confer_allowance(r, NULL, 0, NULL, 0, 0, rpci, 1) == 0, "confer other bdf");
-        TEST_ASSERT(!allowance_permits(r, HW_RES_PCI, rng_bdf, 0),
-            "narrowed-to-other denied the rng claim (SYS_PCI_CLAIM would reject)");
-        adrop(r);
-    }
+    // A driver narrowed to a DIFFERENT function is denied the rng claim --
+    // the bypass the v1.0 fail-closed reject crudely covered, now precise.
+    struct Proc *r = amk();
+    TEST_ASSERT(r != NULL, "proc_alloc r");
+    u32 other = PCI_BDF_PACK((u8)(rb + 1), rd, rf);   // a neighbouring bus
+    u32 rpci[1] = { other };
+    TEST_ASSERT(proc_confer_allowance(r, NULL, 0, NULL, 0, 0, rpci, 1) == 0, "confer other bdf");
+    TEST_ASSERT(!allowance_permits(r, HW_RES_PCI, rng_bdf, 0),
+        "narrowed-to-other denied the rng claim (SYS_PCI_CLAIM would reject)");
+    adrop(r);
 }
 
 void test_allowance_pci_claim_handler_gate(void) {
@@ -289,12 +272,15 @@ void test_allowance_pci_claim_handler_gate(void) {
     // Proc -- the wiring (resolve -> allowance_permits(HW_RES_PCI) -> claim/deny)
     // the pci_membership unit test (predicate + resolve in isolation) leaves
     // uncovered. A refactor that dropped the gate call at syscall.c would pass
-    // the predicate test but FAIL here. Guarded on the live rng-pci (no PCIe root
-    // -> SKIP). Drives it on kproc (CAP_ALL, so the CAP_HW_CREATE gate passes),
+    // the predicate test but FAIL here. Needs the live rng-pci (test_requires).
+    // Drives it on kproc (CAP_ALL, so the CAP_HW_CREATE gate passes),
     // temporarily narrowed + restored to broad before return (the
     // narrowed_proc_cannot_spawn discipline; single-threaded test window).
     u8 rb, rd, rf;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) != 0) return;  // SKIP
+    if (!test_requires(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) == 0,
+                       "thylacine.virtio-pci-rng", 0, true,
+                       "no PCI function carries its DeviceID"))
+        return;
 
     struct Proc *me = kproc();
     TEST_ASSERT(me != NULL && me->allowance == NULL, "kproc broad");

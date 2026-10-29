@@ -1,0 +1,9 @@
+{
+  "Loom": 2864,
+  "loom_slot_table": 1552,
+  "loom_buddy_pages": 1,
+  "slot_buddy_pages": 1,
+  "private_metadata_pages": 2,
+  "native_elf_sha256": "6e1e2521e2189ac36f99f02cd4ebce79e5ac0ad4e6c9db75fa0e8b8a73fd7b9c",
+  "scope": "Native linked layout only; no runtime claim"
+}

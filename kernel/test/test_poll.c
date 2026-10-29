@@ -41,57 +41,7 @@
 
 // V-5c-2: poll.sleep_for_waits MEASURES the sleep, so it needs the clock.
 #include "../../arch/arm64/timer.h"
-
-extern s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds,
-                             u64 nfds, s32 timeout_ms);
-
-// devsrv test-support — non-static cores of the SYS_POST_SERVICE +
-// SYS_SRV_ACCEPT syscall + the test-only registry reset.
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
-extern void srv_registry_reset(void);
-
-// #103: the console Dev + its IRQ-side input hook + the test drive of the
-// deferred-wake relay -- to exercise a real sys_poll_for_proc-blocked thread
-// woken through the cons deferred path (nora's exact path).
-extern struct Dev devcons;
-
-void test_poll_ready_immediately_pollin(void);
-void test_poll_ready_immediately_pollout(void);
-void test_poll_timeout_zero_not_ready(void);
-void test_poll_timeout_positive_fires(void);
-void test_poll_block_then_wake_pollin(void);
-void test_poll_cons_deferred_block_then_wake(void);
-void test_poll_pollhup_on_close_write_end(void);
-void test_poll_multi_fd_one_ready(void);
-void test_poll_bad_fd_revents_pollnval(void);
-void test_poll_bad_args_rejected(void);
-void test_poll_always_ready_null_dev_poll(void);
-void test_poll_pollerr_on_write_after_read_close(void);
-void test_poll_unregister_after_fast_path(void);
-
-void test_poll_devsrv_listener_immediate_pollin(void);
-void test_poll_devsrv_listener_empty_not_ready(void);
-void test_poll_devsrv_listener_block_then_wake(void);
-void test_poll_devsrv_listener_pollhup_on_tombstone(void);
-void test_poll_devsrv_conn_pollin_on_send(void);
-void test_poll_devsrv_conn_pollout_immediate(void);
-void test_poll_devsrv_conn_pollhup_on_teardown(void);
-void test_poll_devsrv_conn_block_then_wake_pollin(void);
-void test_poll_devsrv_client_row(void);
-void test_poll_devsrv_client_wakes_on_reply_only(void);
-void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
-void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void);
-void test_poll_devsrv_client_kernel_attached_pollnval(void);
-void test_poll_devsrv_client_wakes_on_teardown(void);
-void test_poll_timeout_survives_a_busy_list(void);
-void test_poll_death_ends_a_noise_driven_poll(void);
-void test_poll_stop_parks_a_noise_driven_poll(void);
-void test_poll_noise_keeps_it_looping(void);
-void test_poll_noise_keeps_the_deadline(void);
-void test_poll_null_obj_spoor_pollnval(void);
-void test_poll_mixed_spoor_and_srv(void);
-void test_poll_max_nfds(void);
-void test_poll_pre_resolved_spoor(void);
+#include <thylacine/syscall.h>
 
 // =============================================================================
 // Helpers: test Proc + per-test Spoor → fd installation.
@@ -1768,7 +1718,6 @@ void test_poll_pre_resolved_spoor(void) {
 // waited at all would also satisfy -- the phenotype has no clock_gettime row,
 // so the guest cannot tell the difference. Here timer_now_ns() is reachable, so
 // this is the half that proves the sleep is a sleep.
-void test_poll_sleep_for_waits(void);
 void test_poll_sleep_for_waits(void) {
     // A zero timeout is a no-op, not a trip through the scheduler.
     u64 t0 = timer_now_ns();
@@ -1837,7 +1786,6 @@ static struct test_caught_leg cpq_leg(bool linux_pheno, bool primed, s32 timeout
     return leg;
 }
 
-void test_poll_caught_note_ends_park(void);
 void test_poll_caught_note_ends_park(void) {
     struct test_caught_leg leg = cpq_leg(true, false, -1, false);
     struct test_caught_leg ctl = cpq_leg(false, false, -1, false);
@@ -1853,7 +1801,6 @@ void test_poll_caught_note_ends_park(void) {
 }
 
 // The order, with the note already pending as the call starts.
-void test_poll_caught_note_after_readiness_before_deadline(void);
 void test_poll_caught_note_after_readiness_before_deadline(void) {
     struct test_caught_leg rdy  = cpq_leg(true, true,  -1, true);
     struct test_caught_leg none  = cpq_leg(true, false, -1, true);
@@ -1894,7 +1841,6 @@ static void pcn_poll_entry(void) {
     test_thread_park_terminal(&g_pcn_exited);
 }
 
-void test_poll_caught_note_ends_a_noise_driven_poll(void);
 void test_poll_caught_note_ends_a_noise_driven_poll(void) {
     busy_reset();
     g_pcn_result = -999; g_pcn_return_ns = 0; g_pcn_exited = false;
@@ -1954,7 +1900,6 @@ static long cps_sleep(void *arg) {
 // last leg is pause() itself: with no deadline tsleep takes sleep_common's
 // caught arm, not tsleep_common's, and a kernel without the opt-in leaves it
 // asleep for good (the fixture keeps its Proc).
-void test_poll_caught_note_ends_pause(void);
 void test_poll_caught_note_ends_pause(void) {
     g_cps_timeout = 300;
     struct Proc *lin = test_caught_proc(true);

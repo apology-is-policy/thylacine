@@ -1,0 +1,138 @@
+{
+  "inputs": {
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom.cfg": "719afbbc40080c2c741b3976f0a09fb38e8f0ef9471e3ecb2e57dc05822b865a",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_cqwait_check_early.cfg": "b4bdb584cc1e706a0685e1e9e96472acce147654c994f5fe9db7fcbcf68e9356",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_cqwait_no_wake.cfg": "5279944dc24e16752fdc115cabfb6e8cba5d936a6ed68b6f6001b9f39874f67f",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_double_post.cfg": "5212345bdb1044ddd7c2f823301b64ff4510c88214cd06b44abe0ecf2404de2d",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_live_sqe_reread.cfg": "1ac2a1dca6f00a74faba2c9be5d4db4fd3cdc29efb515e46199c055bc9842ca2",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_lost_on_full.cfg": "9d51b10c009201eb578a4ae26bd445f7568e40131c727241c4f8eefbee9869dc",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_recheck_at_completion.cfg": "912dbdaa8f6f2f7a5bb8f8efe4b2479fad5019335d5dfc3e055da75e7e8b5f6d",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_buggy_stale_after_teardown.cfg": "b510dbd6f6d0f843f0d907f28e9cf5271746d2144d9157fe6f522fb3a91649f7",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service.cfg": "bead6101d372bdc644fab1065cf77b9620be32efb1e939c2840190ed4c812907",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_cqfull.cfg": "5a28f468172fc9c9aa58e7c89598ba7b1697a5412418ab559d485f4f2bd2042e",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_double.cfg": "929a84c0c8dac1422bde6685cb18e445d7eb7ac7d47ffe0ec20813f050a2cd2c",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_earlyfree.cfg": "139de6f234429224d10d479d90635692f8092457d8f5c887a44c55ed237d1d96",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_late.cfg": "57c9f65ce5fe5efdf205275f8dae1ab127457d2fa88dcb6fc01c69dd0b9a8b76",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_peerwait.cfg": "ad2e45dc23a158c541d773c05e693ffd1b76f0de1aced1e99f16fea324f6f913",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_refund.cfg": "900cc60603f0baa5cf4f62cde77b3b00a225c7bdc00fa43ebce60c4dce6aa352",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service_buggy_reuse.cfg": "1f9e3dc6fd7a061d44f1275eb42bd27d63adc5a27d8aa97a8746ceecd196b41a",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom.tla": "7458567490c38b7bc4ad0bb33a36180ba8b96badc78dc4eaae8c671b09f04ad9",
+    "/Users/northkillpd/projects/thylacine-corona/specs/loom_service.tla": "79c3ed474dec56fe955c40d16c9791cfe1e8f668956f9100550d0d9a0551666e",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/lifecycle-models.py": "161a7e912768432c40bcb92993a7772d897850b052668d01d7992685ee234f9b"
+  },
+  "results": [
+    {
+      "config": "loom.cfg",
+      "rc": 0,
+      "expected": "Invariants",
+      "ok": true,
+      "sha256": "aec6955d495c22b4d6c20bf52ef811fb25c1bdabbf3a5630addc3d069404fe95"
+    },
+    {
+      "config": "loom_buggy_cqwait_check_early.cfg",
+      "rc": 12,
+      "expected": "NoMissedCqWake",
+      "ok": true,
+      "sha256": "61b2f9a403def31c3490a7cc1adb3faec1159aeac2534c6b032de4d31a4bb0e5"
+    },
+    {
+      "config": "loom_buggy_cqwait_no_wake.cfg",
+      "rc": 12,
+      "expected": "NoMissedCqWake",
+      "ok": true,
+      "sha256": "8a800fe4a8e26a65a85950f2152a07c256de4cc32137de35da5afff3ea394d76"
+    },
+    {
+      "config": "loom_buggy_double_post.cfg",
+      "rc": 12,
+      "expected": "NoDoubleCompletion",
+      "ok": true,
+      "sha256": "a87a679852532fa1b6f3b0a34c83391bf6a31d85529978a52addca97572312e9"
+    },
+    {
+      "config": "loom_buggy_live_sqe_reread.cfg",
+      "rc": 12,
+      "expected": "ArgPinnedToSnapshot",
+      "ok": true,
+      "sha256": "c53498b9617ca5410cea2138e402162cbd0c96099d1ff8ca3627b5dcd9183fd7"
+    },
+    {
+      "config": "loom_buggy_lost_on_full.cfg",
+      "rc": 12,
+      "expected": "CqNeverOverfull",
+      "ok": true,
+      "sha256": "5eec8299dc996340c5eb0031a1af35502d0e31c0e9a4282afb1cfe2c7f36327d"
+    },
+    {
+      "config": "loom_buggy_recheck_at_completion.cfg",
+      "rc": 12,
+      "expected": "ObjPinnedToSnapshot",
+      "ok": true,
+      "sha256": "9c350d16e8046fb91d5a2e81916ea18faabc4a56961ce7812d314a2897954e48"
+    },
+    {
+      "config": "loom_buggy_stale_after_teardown.cfg",
+      "rc": 12,
+      "expected": "NoStaleCompletion",
+      "ok": true,
+      "sha256": "ae39fb1dc07d21eb9182ade6355a8b8d35fdc36af19b491a2827c929036e84e0"
+    },
+    {
+      "config": "loom_service.cfg",
+      "rc": 0,
+      "expected": "TypeOK",
+      "ok": true,
+      "sha256": "93a3e11628ba2f63a5db0d2a70ab9df7e134b38e1356f99b1ae959a1943b5987"
+    },
+    {
+      "config": "loom_service_buggy_cqfull.cfg",
+      "rc": 12,
+      "expected": "CqBounded",
+      "ok": true,
+      "sha256": "0b7ba12e5feb6dc5fe0d4658bf9c6d52f5319c66701b8535024d4b775a87b0c7"
+    },
+    {
+      "config": "loom_service_buggy_double.cfg",
+      "rc": 12,
+      "expected": "NoDoubleTerminal",
+      "ok": true,
+      "sha256": "5caceeac74335d715ac18a765a328e78f9be2202080218f2bebb685a7cd50d69"
+    },
+    {
+      "config": "loom_service_buggy_earlyfree.cfg",
+      "rc": 12,
+      "expected": "NoEarlyFree",
+      "ok": true,
+      "sha256": "8425eccef214e7d08435221f4e68cceefcd1d8a5ca9f21e4878d32441a9d5b5b"
+    },
+    {
+      "config": "loom_service_buggy_late.cfg",
+      "rc": 12,
+      "expected": "NoLateSuccess",
+      "ok": true,
+      "sha256": "a4a5823f960bc6f8d1919f786cdeb7a069f30c4537e93c4b6d11f8435ce37cef"
+    },
+    {
+      "config": "loom_service_buggy_peerwait.cfg",
+      "rc": 13,
+      "expected": "RetirementProgress",
+      "ok": true,
+      "sha256": "4ecd687d6aea29c3742f7f8ed89cbc1cbcbb7edda6bfa2dbbf01e4255906c80c"
+    },
+    {
+      "config": "loom_service_buggy_refund.cfg",
+      "rc": 12,
+      "expected": "CreditsRetained",
+      "ok": true,
+      "sha256": "921fb57137a7103f721b27c167b8994d3d03424c97fb86e919bb5b55db15e3b8"
+    },
+    {
+      "config": "loom_service_buggy_reuse.cfg",
+      "rc": 12,
+      "expected": "NoStaleSlot",
+      "ok": true,
+      "sha256": "a9574673edc8123a7248648cc5f6a4e0740d4aef143b9473842917e563c64539"
+    }
+  ],
+  "limits": "Unmodified existing Loom and private lifecycle models with configured counterexamples. Does not model the new executor or prove its C/native scheduling."
+}

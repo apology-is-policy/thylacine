@@ -1,0 +1,40 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 20 and seed 9060068093622149060 with 8 workers on 8 cores with 1820MB heap and 64MB offheap memory [pid: 81529] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/handle_slots.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-3120203243387908506/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-3120203243387908506/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-3120203243387908506/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module handle_slots
+Linting of module handle_slots
+Starting... (2026-10-14 23:32:15)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-14 23:32:15.
+Error: Invariant FailedPublishesNothing is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ slot = (0 :> "free" @@ 1 :> "free" @@ 2 :> "free")
+/\ foreign_closed = FALSE
+/\ cnum = 3
+/\ published = FALSE
+/\ cpc = "idle"
+
+State 2: <CTake line 64, col 5 to line 74, col 31 of module handle_slots>
+/\ slot = (0 :> "mine" @@ 1 :> "free" @@ 2 :> "free")
+/\ foreign_closed = FALSE
+/\ cnum = 0
+/\ published = TRUE
+/\ cpc = "published"
+
+State 3: <CFailByNumber line 99, col 5 to line 103, col 36 of module handle_slots>
+/\ slot = (0 :> "free" @@ 1 :> "free" @@ 2 :> "free")
+/\ foreign_closed = FALSE
+/\ cnum = 0
+/\ published = TRUE
+/\ cpc = "failed"
+
+227 states generated, 56 distinct states found, 5 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 00s at (2026-10-14 23:32:15)

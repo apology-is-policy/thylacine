@@ -1,0 +1,7 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/ready-draft/kernel/loom_service_ready.c:8:54: error: incomplete definition of type 'struct loom_service_pool_table'
+    8 |     struct loom_pool_bank *b=&o->owner->service_pools->bank;
+      |                               ~~~~~~~~~~~~~~~~~~~~~~~^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom.h:48:8: note: forward declaration of 'struct loom_service_pool_table'
+   48 | struct loom_service_pool_table;
+      |        ^
+1 error generated.

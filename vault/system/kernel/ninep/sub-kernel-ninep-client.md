@@ -11,6 +11,8 @@ code:
   - kernel/9p_transport_mq.c
   - kernel/9p_attach.c
   - kernel/include/thylacine/9p_client.h
+  - tools/test-9p-client-progress.py
+  - tools/host-tests/9p-client-progress.c
 audit: hard
 guarded-by: [inv-i9, inv-i10, inv-i11]
 validated-by: [spec-9p-client, spec-reader-frame, spec-tag-pool, gate-smp]
@@ -92,7 +94,7 @@ One function per op, `0` on success / `-errno` on failure:
   `struct p9_reader_hook` to learn when pumping could progress: a HELD role
   on `role_waiters_list`, a FREE role with nothing to read on the transport's
   readiness list, never both; dead -> `-EIO`, a frame on a free role -> 0 and
-  nothing filed, hooked -> 1), `p9_client_handoff_reader`, and
+  nothing filed, hooked -> 1), `p9_client_handoff_reader` (tests build only), and
   `p9_client_abandon_async`. The fan-in waiters -- the Loom `ENTER`, the
   SQPOLL kthread ([[sub-kernel-loom]]) and the dev9p poll kthread
   ([[sub-kernel-ninep-dev9p-poll]]) -- pump and hook every client they wait
@@ -428,7 +430,9 @@ its served endpoint → the consumer's rings EOF → its reader sees `recv 0` �
 in-flight Loom ops complete `-ENODEV`, the whole chain automatic with **no
 warden code on the consumer's client**. `p9_client_mark_devgone(c)` is the
 explicit secondary entry (a device-teardown hook that holds the client),
-idempotent — the first death's reason stands. The reason rides only the async
+idempotent — the first death's reason stands; no production code calls it
+yet, so it is compiled only with the tests, and production marks devgone only
+through the automatic chain. The reason rides only the async
 path because it is a Loom-completion (I-29) property the sync ABI does not
 expose; the audited #841 synchronous surface is untouched. Exactly-once holds
 by the demux dropping the registration **before** completing, so a reply and a
@@ -776,3 +780,75 @@ the reader unwinds at any byte).
 (generated — incoming `touched` backlinks, newest first; never hand-written.
 Until the renderer emits this section, walk the backlinks of this id in
 `record/changes/`: the [[lin-9p-client]] members are the curated spine.)
+
+
+## Private progress foundation (AS-1)
+
+The existing shared client's blocking/elected-reader behavior is unchanged.
+The same underlying transport/session modules now provide exclusive nonblocking
+frame cursors and native-root handshake helpers, documented in
+[[sub-kernel-ninep-transport]]. They are not a second protocol engine and are not
+yet bound to live private Loom scopes. The shared session validator rejects
+unsupported Rversion dialects and framing-impossible sizes before VERSIONED;
+legacy handshakes inherit that correction. AS-2 supplies owner/slot/retirement
+bindings before these helpers become userspace-accessible.
+
+## Exclusive native request progress
+
+p9_client_progress_bind attaches caller-owned progress storage to a fresh,
+unpublished client and queues native version/attach without I/O. The scope must
+retain both until client destruction and cannot export the client as a Spoor.
+The regular async submission builds into out_buf and retains it across partial
+TX, refusing another build with EAGAIN until that borrow ends. Progress alternates
+TX/RX, one backend call per visit, and reuses the ordinary session and demux.
+Unknown or not-yet-sent reply tags abort this private stream. Blocking builders
+and reader pumps refuse private clients before accessing that buffer.
+
+Terminal paths clear TX ownership before callbacks; each inflight slot is removed
+before its callback can free the RPC. Explicit abort has no peer-dependent wait.
+Private abandon suppresses its one RPC callback as before, then terminally aborts
+the exclusive stream. Whole-ring consumers must detach delivery before discarding
+completions; scope consumers use abort. This helper does not implement Loom's
+completion reservations, slots, deadline scheduling or retirement owner.
+
+Host actual-source ASan/UBSan/fourteen mutations and the shared native fixture
+qualify partial framing, duplex fairness, every byte cancellation, hostile replies
+and callbacks freeing their storage. With the tag pool the fixture extracts the
+registration helpers (`client_owner`, `client_register`, `client_unregister`),
+`client_apply_reply_locked` and `client_await_tag_locked`; the session's tag
+table allocates through host `kmalloc`/`kfree` doubles that own and leak-check
+it, and the sync tag wait, like `client_run`, fails the run if reached. Fresh CPU1 boot1830/1830 and existing
+9p_client197states/five mutants pass. No new broad/graphics/private ABI activation.
+
+## Preallocated private transport storage
+
+`p9_client_init_preallocated` initializes the same client/session/transport using
+caller-owned RX and TX regions large enough for the proposed msize. It does not
+allocate a bulk transmit buffer; these regions and the client itself belong to
+the future charged private scope. They must be mutually disjoint, exclusively
+owned and retained through destroy and its abort callbacks. The constructor
+checks capacities before publication; it does not establish ring authority or
+perform an accounting transaction.
+
+The internal `out_buf_owned` flag records only an allocation made by the legacy
+initializer. Destroy frees that allocation once, clears the flag and pointer,
+and leaves supplied storage to its owner. The original initializer retains its
+heap-allocation/inline-fallback bulk behavior. Shared native/host private-client
+fixtures use provided storage through partial progress, malformed replies and
+abort; bulk/reinit checks, five additional storage mutants, existing eight
+progress mutants and native1830/1830 pass. Existing9p_client model197states/five
+counterexamples pass. Broad qualification and charged private-owner integration
+remain owed; no new userspace ABI is activated.
+
+## Private operation abort and TX ownership (October10)
+
+The integrated progress-mode abort now clears the sending RPC's TX hold after
+handshake/transport cursor abort and before completion callbacks can settle or
+free the RPC. This also covers an early-replied RPC removed from inflight[] but
+still borrowed by the TX cursor. The legacy blocking sender retains its existing
+ownership. The actual-client defect was reproduced and repaired in Astra's
+retirement-draft, then carried unchanged into coherent async integration.
+Host actual-source sanitizer/mutation controls exercise this transition; native
+1855/D7/20cycle integration passes with source hashes. Native general operation
+and provided-payload traffic/full Mac gates remain owed. Public private ENTER
+stays disabled; single-agent self-review is not an independent audit.

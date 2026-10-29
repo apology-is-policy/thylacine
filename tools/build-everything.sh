@@ -16,7 +16,7 @@
 # The resulting IMAGE boots fast.
 #
 # Usage:
-#   tools/build-everything.sh [extra build.sh flags...]   # e.g. --release --kaslr
+#   tools/build-everything.sh [extra build.sh flags...]   # e.g. --release
 #   SKIP_CLADE=1 tools/build-everything.sh                # skip the slow LLVM build
 #
 # After it finishes:  tools/run-vm.sh   (or: make run)

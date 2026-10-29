@@ -1,0 +1,128 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "8 passed; 0 failed"
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "8 passed; 0 failed"
+  },
+  {
+    "name": "no-clone-client-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0599"
+  },
+  {
+    "name": "no-send-executor-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0277"
+  },
+  {
+    "name": "valid-client-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "valid-client-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "early-reclaim-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "early-reclaim-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  },
+  {
+    "name": "missing-retire-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "missing-retire-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  },
+  {
+    "name": "frozen-cursor-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "frozen-cursor-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  },
+  {
+    "name": "excess-budget-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "excess-budget-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  },
+  {
+    "name": "no-shutdown-close-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "no-shutdown-close-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  },
+  {
+    "name": "premature-admission-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "premature-admission-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "unreachable code"
+  }
+]

@@ -1,0 +1,10 @@
+--- control.c
++++ clunk_close_spin.c
+@@ -2079,6 +2079,7 @@
+         if(l->service_closing && p->rpc_quiesced) {
+             if(o->fid_claim!=P9_TCLUNK || !l->service_nodes->nodes[o->source.slot].fid_borrows)
+                 action=LREADY_DISCARD;
++            else action=LREADY_DISCARD;
+         }
+         else if(why && !p->rpc_quiesced)action=LREADY_QUIESCE;
+         else if(why && active) {

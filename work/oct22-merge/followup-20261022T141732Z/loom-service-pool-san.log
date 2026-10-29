@@ -1,0 +1,12 @@
+PASS clean PASS actual pool state: bank=5128 pool=32 cell=80 result=48
+PASS ignore-nonce wrong nonce cannot return
+PASS ignore-generation wrong incarnation cannot return
+PASS quota combined member ceiling
+PASS provisional-alias provisional extent excludes fixed I/O
+PASS omit-overlap canonical aliases rejected
+PASS recycle-at-delivery snapshot conserves members
+PASS reuse-held empty pool waits without reusing payload
+PASS nonce-wrap exhaustion cannot wait or wrap
+PASS oversized-reply reply bounded by request
+PASS reap-payload retirement cannot recycle held payload
+PASS drop-correlation receipt correlation intact

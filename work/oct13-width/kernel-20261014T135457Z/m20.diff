@@ -1,0 +1,25 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/extinction.c	2026-10-14 15:54:58
++++ kernel/extinction.c	2026-10-14 16:18:09
+@@ -147,13 +147,12 @@
+     u64 daif;
+     __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+     int held = !(daif & (1ull << 7));
+-    if (held) spin_preempt_inc();
++    (void)0;                             // MUTANT M20 no preempt hold
+     unsigned cpu = smp_cpu_idx_self();
+     if (cpu >= DTB_MAX_CPUS) cpu = 0;
+     if (extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                 g_extinction_owner[cpu]))
+         return held ? EXTINCTION_TX_HELD : EXTINCTION_TX_BYTE;
+-    if (held) spin_preempt_dec();
+     return 0;
+ }
+ 
+@@ -162,7 +161,6 @@
+     if (cpu >= DTB_MAX_CPUS) cpu = 0;
+     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+     if (token == EXTINCTION_TX_HELD) {
+-        spin_preempt_dec();
+         sched_take_deferred_preempt();
+     }
+ }

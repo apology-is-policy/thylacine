@@ -1,0 +1,2 @@
+double owner drop rejected
+Assertion failed: (0), function main, file double-drop.c, line 213.

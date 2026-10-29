@@ -1,0 +1,8 @@
+work/oct5-as-r9/astra-takeover/private-pool-pins-20261009T011209Z/control.c:209:25: error: call to undeclared function 'loom_slot_close'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  209 |  l.service_closing=true;loom_slot_close(&slots);
+      |                         ^
+work/oct5-as-r9/astra-takeover/private-pool-pins-20261009T011209Z/control.c:209:25: note: did you mean 'loom_slots_close'?
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_slots.h:40:6: note: 'loom_slots_close' declared here
+   40 | void loom_slots_close(struct loom_slot_table *);
+      |      ^
+1 error generated.

@@ -50,18 +50,6 @@
 #include "../../mm/slub.h"       // #140: kmalloc for the oversize-env probe
 #include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
 
-void test_exec_setup_smoke(void);
-void test_exec_setup_segment_data_copied(void);
-void test_exec_setup_constraints(void);
-void test_exec_setup_multi_segment(void);
-void test_exec_setup_lifecycle_round_trip(void);
-void test_exec_user_stack_guard(void);
-void test_exec_setup_auxv(void);
-void test_exec_setup_auxv_no_phdr_segment(void);
-void test_exec_from_spoor_rodata_dispatch(void);
-void test_exec_setup_env_frame(void);            // #140
-void test_exec_stage_env_bounds(void);           // #140
-
 #define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
 // 16-byte alignment for safety (struct Elf64_Ehdr alignment fits inside).
@@ -802,6 +790,41 @@ void test_exec_setup_auxv(void) {
     drop_proc(p);
 }
 
+// Vote 18: a refused AT_RANDOM draw fails the exec; the image never runs on
+// zeros. The boot refuses userspace on an unseeded pool, so only the hook can
+// make the draw refuse here.
+void test_exec_at_random_refusal_fails_exec(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    exec_random_refuse_for_test(true);
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    exec_random_refuse_for_test(false);
+
+    // Read what the asserts need, then release the Proc, so a red here is one
+    // red and not a leaked Proc besides.
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    bool stack_mapped = sv != NULL && sv->burrow != NULL;
+    bool frame_populated = stack_mapped &&
+        lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE) != NULL;
+    drop_proc(p);
+    TEST_EXPECT_EQ(rc, -1, "a refused AT_RANDOM draw fails the exec");
+    TEST_EXPECT_EQ(sp, 0ull, "a refused exec hands back no stack pointer");
+    TEST_ASSERT(stack_mapped,
+        "the stack was mapped, so the refusal came from the frame builder");
+    TEST_ASSERT(!frame_populated, "no frame page was populated: the draw precedes the frame");
+
+    // One variable away: the hook released, the same exec succeeds.
+    struct Proc *q = make_proc();
+    TEST_ASSERT(q != NULL, "proc_alloc (control)");
+    int served = exec_setup(q, g_elf_blob, size, &entry, &sp);
+    drop_proc(q);
+    TEST_EXPECT_EQ(served, 0, "the same exec succeeds once the draw is served");
+    TEST_ASSERT(sp != 0, "the served exec hands back a stack pointer");
+}
+
 // #140: a Proc with a real /env gets a real envp on its new image's stack.
 //
 // This is the test the bug survived for lack of. Every other frame test above
@@ -1134,13 +1157,6 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
 // as about where the VMAs landed.
 // =============================================================================
 
-void test_execve_load_into_detached(void);
-void test_execve_load_into_rejects_dirty(void);
-void test_execve_load_refuses_nomem_at_the_pool_edge(void);
-void test_execve_load_refuses_nomem_on_the_frame(void);
-void test_execve_failed_load_leaves_target_drainable(void);
-void test_exec_native_rejects_dynamic_linux(void);
-
 // B-1a' audit F15: a refused allocation inside the load is a resource refusal
 // (-T_E_NOMEM), not a malformed binary (-1, which sys_execve_core reports as
 // EINVAL); the syscall reports the one the load returns.
@@ -1435,9 +1451,6 @@ void test_exec_native_rejects_dynamic_linux(void) {
 // 13.10.6) -- under either field value, since B-1d took the phenotype out of the
 // load. Both field values are driven, so a loader that reset the field to either
 // one would fail the other leg.
-extern void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t,
-                                                u32 pheno);
-void test_exec_load_failure_leaves_phenotype(void);
 void test_exec_load_failure_leaves_phenotype(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1496,7 +1509,6 @@ void test_exec_load_failure_leaves_phenotype(void) {
 // "the signal mask is inherited"). Read the field instead and a Linux git
 // exec'ing the native nora keeps git's blocked-note mask across the exec.
 // The hook must also never write the field itself (only the commit does).
-void test_exec_reset_follows_decided_phenotype(void);
 void test_exec_reset_follows_decided_phenotype(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1583,7 +1595,6 @@ void test_exec_reset_follows_decided_phenotype(void) {
 // it; now it loads the interpreter. The CONTROL is the same fixture with no
 // namespace, which disables the rewrite, so a pass cannot come from a loader
 // that ignores PT_INTERP altogether.
-void test_exec_interp_dispatch_every_phenotype(void);
 void test_exec_interp_dispatch_every_phenotype(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");

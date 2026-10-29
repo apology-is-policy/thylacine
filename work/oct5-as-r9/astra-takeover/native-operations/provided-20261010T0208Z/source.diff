@@ -1,0 +1,242 @@
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index f5d2014ad..a3abfe540 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -678,6 +678,7 @@ void test_loom_private_control(void);
+ void test_loom_private_executor(void);
+ void test_loom_private_operation_storage(void);
+ void test_loom_private_frontend(void);
++void test_loom_private_native_operations(void);
+ void test_loom_private_node_owner(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+@@ -2772,6 +2773,7 @@ struct test_case g_tests[] = {
+     { "loom.private_engine",             test_loom_private_engine,             false, NULL },
+     { "loom.private_control",            test_loom_private_control,            false, NULL },
+     { "loom.private_executor",           test_loom_private_executor,           false, NULL },
++    { "loom.private_native_operations", test_loom_private_native_operations, false, NULL },
+     { "loom.private_frontend", test_loom_private_frontend, false, NULL },
+     { "loom.private_operation_storage",  test_loom_private_operation_storage,  false, NULL },
+     { "loom.private_close",              test_loom_private_close,              false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 38deb9e7f..18fdc19d0 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -1,3 +1,4 @@
++#include <thylacine/page.h>
+ #include <thylacine/loom_service_frontend.h>
+ #include <thylacine/loom_service_fids.h>
+ #include <thylacine/loom_service_operation.h>
+@@ -2991,6 +2992,193 @@ done:
+     return error;
+ }
+ 
++// Real SrvConn framing and installed engine, with a deterministic wire peer.
++// The peer reads every emitted request before replying; it is not a filesystem
++// server and the fixture drives bounded engine visits instead of its worker.
++struct loom_native_peer {
++    u8 request[512];
++    u32 used, seen;
++};
++static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *peer) {
++    static const u8 sequence[]={P9_TVERSION,P9_TATTACH,P9_TGETATTR,P9_TWALK,
++        P9_TGETATTR,P9_TLOPEN,P9_TREAD,P9_TWRITE,
++        P9_TREAD,P9_TREAD,P9_TREAD,P9_TREAD,P9_TCLUNK};
++    long n=srvconn_server_recv(cn,peer->request+peer->used,sizeof(peer->request)-peer->used);
++    if(n<0)return -1;
++    peer->used+=(u32)n;
++    if(peer->used<P9_HDR_LEN)return 0;
++    u32 size;u8 type;u16 tag;
++    if(p9_peek_header(peer->request,peer->used,&size,&type,&tag)<0 || size>sizeof(peer->request))return -1;
++    if(peer->used<size)return 0;
++    if(peer->seen>=sizeof(sequence) || type!=sequence[peer->seen])return -1;
++    if(type==P9_TWALK && (size!=23 || peer->request[15]!=1 || peer->request[17]!=4 ||
++       peer->request[19]!='f' || peer->request[20]!='i' || peer->request[21]!='l' || peer->request[22]!='e'))return -1;
++    if(type==P9_TWRITE && (size!=28 || peer->request[19]!=5 ||
++       peer->request[23]!='h' || peer->request[24]!='e' || peer->request[25]!='l' ||
++       peer->request[26]!='l' || peer->request[27]!='o'))return -1;
++    u8 reply[256];
++    int count=canonical_responder(NULL,peer->request,size,reply,sizeof(reply));
++    if(count<=0)return -1;
++    if(type==P9_TGETATTR) {
++        reply[15]=peer->seen==2?P9_QTDIR:P9_QTFILE;
++        (void)p9_pack_u32(reply+28,sizeof(reply)-28,0777);
++        (void)p9_pack_u32(reply+32,sizeof(reply)-32,42);
++    }
++    if(type==P9_TREAD && peer->seen==11) {
++        count=11;(void)p9_pack_u32(reply,sizeof(reply),11);
++        (void)p9_pack_u32(reply+7,sizeof(reply)-7,0); // terminal EOF
++    }
++    if(srvconn_server_send(cn,reply,count)!=count)return -1;
++    for(u32 i=size;i<peer->used;++i)peer->request[i-size]=peer->request[i];
++    peer->used-=size;++peer->seen;return 1;
++}
++static bool loom_native_completion_flags(struct Loom *l,struct SrvConn *cn,
++    struct loom_native_peer *peer,u64 data,s32 result,u32 flags,
++    struct loom_service_buffer_receipt *receipt) {
++    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
++    struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
++    u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
++    u64 end=timer_now_ns()+2000000000ull;
++    do {
++        (void)loom_engine_visit(l,timer_now_ns());
++        if(loom_native_peer_step(cn,peer)<0)return false;
++        if(l->cq_tail!=head) {
++            struct loom_cqe copy=cq[head&(l->cq_entries-1u)];
++            if(l->cq_tail!=head+1 || copy.user_data!=data || copy.result!=result || copy.flags!=flags)return false;
++            if(receipt) {
++                struct loom_service_buffer_receipt *paired=(void *)(l->ring_kva+l->receipt_off);
++                *receipt=paired[head&(l->cq_entries-1u)];
++            }
++            __atomic_store_n(&h->cq_head,head+1,__ATOMIC_RELEASE);
++            // Delivery can precede physical owner destruction. Drain bounded
++            // cleanup before admitting the next request to this two-slot ring.
++            for(u32 i=0;i<16;++i)(void)loom_engine_visit(l,timer_now_ns());
++            return true;
++        }
++        sched();
++    }while(timer_now_ns()<end);
++    return false;
++}
++static bool loom_native_completion(struct Loom *l,struct SrvConn *cn,
++    struct loom_native_peer *peer,u64 data,s32 result) {
++    return loom_native_completion_flags(l,cn,peer,data,result,0,NULL);
++}
++static bool loom_native_submit(struct Loom *l,struct Proc *creator,struct loom_sqe s) {
++    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
++    struct loom_sqe *sq=(void *)(l->ring_kva+l->sqe_off);
++    u32 *indices=(void *)(l->ring_kva+l->sq_array_off);
++    u32 at=l->sq_head&(l->sq_entries-1u);
++    sq[at]=s;indices[at]=at;
++    __atomic_store_n(&h->sq_tail,l->sq_head+1,__ATOMIC_RELEASE);
++    int rc=loom_private_submit(l,creator,1);
++    sq[at].user_data=0xdead; // no completion may consult the shared copy later
++    return rc==1;
++}
++static const char *loom_native_operations_case(struct Loom *l,struct Proc *creator,
++    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
++    const char *error=NULL;u64 va=0;
++    struct SrvConn *server=NULL;struct loom_service_protocol *held=NULL;
++    struct loom_service_ref scope={0},child={0};
++    struct loom_native_peer peer;
++    for(u32 i=0;i<sizeof(peer);++i)((u8 *)&peer)[i]=0;
++    struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
++#define NO(c,m) do{if(!(c)){error=m;goto done;}}while(0)
++    NO(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
++       "native operation scope reservation");
++    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_SERVICE_CONNECT,
++       .handle_idx=target.slot,.offset=scope.slot,.user_data=100,
++       ._resv1={0,target.incarnation,scope.incarnation,0}}),"native CONNECT submission");
++    NO(!loom_engine_get(l,scope,&held),"native operation observation pin");
++    server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
++    NO(server==held->admission.conn && loom_native_completion(l,server,&peer,100,(s32)scope.slot),
++       "native emitted version and attach complete CONNECT");
++    s64 attached=sys_burrow_attach_for_proc(creator,PAGE_SIZE);
++    NO(attached>0,"native operation backing");va=(u64)attached;
++    struct Burrow *backing=vma_lookup(creator,va)->burrow;
++    u8 *bytes=pa_to_kva(page_to_pa(backing->pages));
++    struct loom_buf_reg buf={va,PAGE_SIZE};
++    NO(!loom_private_register_buffers(l,creator,&buf,1),"native registered payload");
++    bytes[0]='f';bytes[1]='i';bytes[2]='l';bytes[3]='e';
++    reserve.kind=LOOM_SERVICE_FID;reserve.scope=scope;
++    NO(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child),
++       "native child reservation");
++    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_WALK,
++       .handle_idx=scope.slot,.offset=child.slot,.len=4,.user_data=101,
++       ._resv1={0,scope.incarnation,child.incarnation,0}}),"native WALK submission");
++    bytes[0]='X'; // accepted WALK must own its component copy
++    NO(loom_native_completion(l,server,&peer,101,(s32)child.slot),"native search and copied WALK completion");
++    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_LOPEN,
++       .handle_idx=child.slot,.offset=2,.user_data=102,._resv1={0,child.incarnation,0,0}}) &&
++       loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
++    NO(l->service_nodes->nodes[child.slot].fid_iounit==4096,"native negotiated iounit retained");
++    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
++       .handle_idx=child.slot,.len=5,.user_data=103,._resv1={64,child.incarnation,0,0}}) &&
++       loom_native_completion(l,server,&peer,103,5),"native fixed READ completion");
++    NO(bytes[64]=='h' && bytes[65]=='e' && bytes[66]=='l' && bytes[67]=='l' && bytes[68]=='o',
++       "native READ lands in exact retained registered slice");
++    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_WRITE,
++       .handle_idx=child.slot,.len=5,.user_data=104,._resv1={64,child.incarnation,0,0}}) &&
++       loom_native_completion(l,server,&peer,104,5),"native WRITE emits exact read bytes");
++    struct loom_service_pool_create pool_in;
++    for(u32 i=0;i<sizeof(pool_in);++i)((u8 *)&pool_in)[i]=0;
++    pool_in.size=sizeof(pool_in);pool_in.version=1;pool_in.count=1;
++    pool_in.members[0]=(struct loom_service_pool_member){.buffer_index=0,.offset=128,.length=5};
++    struct loom_service_ref pool={0};
++    NO(!loom_private_pool_prepare(l,creator,&pool_in,&pool) && !loom_private_pool_publish(l,pool),
++       "native one-member provided pool");
++    struct loom_sqe pooled={.opcode=LOOM_OP_READ,.flags=LOOM_SQE_BUFFER_SELECT,
++       .handle_idx=child.slot,.buf_idx_or_off=pool.slot,.len=5,.user_data=106,
++       ._resv1={0,child.incarnation,pool.incarnation,0}};
++    struct loom_service_buffer_receipt receipt={0};
++    NO(loom_native_submit(l,creator,pooled) &&
++       loom_native_completion_flags(l,server,&peer,106,5,0,&receipt),"native single provided READ");
++    NO(receipt.pool.slot==pool.slot && receipt.pool.incarnation==pool.incarnation &&
++       !receipt.member && receipt.lease && bytes[128]=='h' && bytes[132]=='o',
++       "native paired receipt names exact payload lease");
++    NO(loom_private_pool_reap(l,pool)==-T_E_BUSY,"CQ consumption leaves payload leased");
++    pooled.flags|=LOOM_SQE_MULTISHOT;pooled.user_data=107;
++    NO(loom_native_submit(l,creator,pooled),"native MORE stream accepted with empty pool");
++    for(u32 i=0;i<32;++i)(void)loom_engine_visit(l,timer_now_ns());
++    NO(peer.seen==9 && !server->c2s.count,"empty pool emits no premature next READ");
++    struct loom_service_buffer_return give={.size=sizeof(give),.version=1,.receipt=receipt};
++    NO(!loom_private_service_return(l,creator,&give),"native payload return releases next shot");
++    NO(loom_private_service_return(l,creator,&give)<0,"native duplicate return refused before reuse");
++    NO(loom_native_completion_flags(l,server,&peer,107,5,LOOM_CQE_MORE,&receipt) &&
++       receipt.lease!=give.receipt.lease,"native MORE shot acquires fresh receipt");
++    give.receipt=receipt;
++    NO(!loom_post_cqe(l,800,0,0) && !loom_post_cqe(l,801,0,0),"native fills CQ before RETURN");
++    u64 epoch=l->service_engine->change;
++    NO(!loom_private_service_return(l,creator,&give) && l->service_engine->change!=epoch,
++       "native RETURN changes wake epoch independently of full CQ");
++    for(u32 i=0;i<32;++i)(void)loom_engine_visit(l,timer_now_ns());
++    NO(peer.seen==10 && !server->c2s.count,"full CQ prevents next provided dispatch");
++    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
++    __atomic_store_n(&h->cq_head,l->cq_tail,__ATOMIC_RELEASE);
++    NO(loom_private_submit(l,creator,0)==0 &&
++       loom_native_completion_flags(l,server,&peer,107,5,LOOM_CQE_MORE,&receipt) &&
++       receipt.lease!=give.receipt.lease,"native CQ drain resumes next MORE shot");
++    give.receipt=receipt;
++    NO(!loom_private_service_return(l,creator,&give) &&
++       loom_native_completion_flags(l,server,&peer,107,0,0,&receipt) && !receipt.lease,
++       "native EOF ends MORE without transferring an empty payload lease");
++    NO(!loom_private_pool_reap(l,pool),"native completed stream releases every pool hold");
++    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_CLUNK,
++       .handle_idx=child.slot,.user_data=105,._resv1={0,child.incarnation,0,0}}) &&
++       loom_native_completion(l,server,&peer,105,0),"native CLUNK completes");
++    NO(peer.seen==13 && !peer.used && !l->service_fixed_count && l->service_requests.occupied==1,
++       "native exact wire sequence frees general request and fixed owners");
++    NO(!loom_private_register_buffers(l,creator,NULL,0),"native unregister after physical retirement");
++    NO(!sys_burrow_detach_for_proc(creator,va,PAGE_SIZE),"native payload mapping release");va=0;
++done:
++    if(held)(void)loom_engine_put(l,scope,held);
++    loom_handle_closed(l);
++    if(!loom_close_wait_state(l,LCLOSE_DONE) && !error)error="native operation close timeout";
++    if(va)(void)sys_burrow_detach_for_proc(creator,va,PAGE_SIZE);
++    if(server)srvconn_unref(server);
++#undef NO
++    return error;
++}
++
+ static const char *loom_protocol_fixture(u32 kind) {
+     const char *error = NULL;
+     struct Proc *p = test_proc_make(), *poster = test_proc_make();
+@@ -3066,6 +3254,7 @@ static const char *loom_protocol_fixture(u32 kind) {
+            "zero-reference retirer wakes joins and refunds the live private worker");
+         goto done;
+     }
++    if (kind==17 || kind==18) {error=loom_native_operations_case(l,p,poster,reg,refs[kind==18],kind==18);goto done;}
+     if (kind==15 || kind==16) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==16],kind==16,true);goto done;}
+     if (kind==13 || kind==14) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==14],kind==14,false);goto done;}
+     if (kind>=7) {error=loom_close_boundary_case(&l,p,poster,reg,refs[0],kind-6,goal,base);goto done;}
+@@ -3219,3 +3408,10 @@ void test_loom_private_frontend(void) {
+     if(!error)error=loom_protocol_fixture(16);
+     TEST_ASSERT(!error,error);
+ }
++
++void test_loom_private_native_operations(void);
++void test_loom_private_native_operations(void) {
++    const char *error=loom_protocol_fixture(17);
++    if(!error)error=loom_protocol_fixture(18);
++    TEST_ASSERT(!error,error);
++}

@@ -1,0 +1,11 @@
+--- control.c
++++ wire-fid-burn.c
+@@ -161,7 +161,7 @@
+         return P9_NOFID;       // exhausted
+     }
+     u32 fid = c->next_fid;
+-    c->next_fid++;
++    /* rewind bug */
+     spin_unlock(&c->lock);
+     return fid;
+ }

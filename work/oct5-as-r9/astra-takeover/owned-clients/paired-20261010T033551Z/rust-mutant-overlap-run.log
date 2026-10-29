@@ -1,0 +1,21 @@
+
+running 4 tests
+test refuses_corrupt_distance_or_second_head_writer ... ok
+test copies_receipt_before_slot_reuse_and_wrap ... ok
+test geometry_refuses_overlap_alignment_and_overflow ... FAILED
+test concurrent_pair_publication_and_reuse ... ok
+
+failures:
+
+---- geometry_refuses_overlap_alignment_and_overflow stdout ----
+
+thread 'geometry_refuses_overlap_alignment_and_overflow' (22116412) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired-20261010T033551Z/rust-mutant-overlap/test_paired_cq.rs:32:3:
+assertion failed: matches!(unsafe{PairedCq::new(m.base(),len,h,c,r,n)},Err(CqError::Geometry))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    geometry_refuses_overlap_alignment_and_overflow
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

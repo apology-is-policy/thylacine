@@ -1,0 +1,11 @@
+--- control
++++ fixed-over-pool
+@@ -111,7 +111,7 @@
+         rc = -T_E_BUSY;
+     else if (l->service_fixed_count + l->service_fixed_settling >= l->cq_entries) rc = -T_E_AGAIN;
+     else if ((rc = loom_private_extent_locked(l,m,&e)) == 0) {
+-        if (loom_pool_conflicts(&l->service_pools->bank,e)) rc = -T_E_BUSY;
++        if (loom_pool_conflicts(&l->service_pools->bank,e) && false) rc = -T_E_BUSY;
+         else {
+             // Existing CQ capacity bounds traversal. Actual request admission
+             // still owes its own shared terminal reservation before dispatch.

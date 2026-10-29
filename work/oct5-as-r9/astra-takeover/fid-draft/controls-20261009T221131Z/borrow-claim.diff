@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -86,7 +86,7 @@
+     if(!n)return -T_E_NOENT;
+     if(!fid_parent(t,n,source,scope) || !fid_scope_ready(t,nodes,scope))return -T_E_CANCELED;
+     if(n->state!=LOOM_SERVICE_READY || !(n->fid_flags&LFID_BOUND))return -T_E_NOENT;
+-    if(n->fid_claim)return -T_E_BUSY;
++    if(false)return -T_E_BUSY;
+     if(n->fid_borrows==UINT32_MAX)return -T_E_NOSPC;
+     if(need && (!(n->fid_flags&LFID_OPEN) || (n->fid_access&need)!=need))return -T_E_ACCES;
+     int rc=loom_slot_pin(t,source,t->slots[source.slot].kind);

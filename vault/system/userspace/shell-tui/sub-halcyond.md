@@ -4,7 +4,19 @@ type: sub
 title: "halcyond — the Halcyon environment client: the transcript renderer and the per-user session compositor"
 parent: moc-userspace-shell-tui
 code:
+  - tools/interactive/ls-halcyon-modes.exp
+  - tools/interactive/ls-halcyon-hidden-storage.exp
+  - tools/interactive/ls-halcyon-storage-output.exp
+  - usr/halcyond/src/hostbindings.rs
+  - tools/test-host-bindings.py
+  - tools/fixtures/interaction-protocol.rs
+  - tools/test-pane-routes.py
+  - usr/halcyond/src/interaction.rs
+  - usr/halcyond/src/controllers.rs
+  - usr/halcyond/src/session_seat.rs
   - usr/halcyond/src/lib.rs
+  - usr/halcyond/src/clipboard.rs
+  - usr/halcyond/src/clipbroker.rs
   - usr/halcyond/src/main.rs
   - usr/halcyond/src/transcript.rs
   - usr/halcyond/src/layout.rs
@@ -15,6 +27,7 @@ code:
   - usr/halcyond/src/chromeset.rs
   - usr/halcyond/src/menu.rs
   - usr/halcyond/src/menuset.rs
+  - usr/halcyond/src/modeview.rs
   - usr/halcyond/src/status.rs
   - usr/halcyond/src/statusset.rs
   - usr/halcyond/src/session.rs
@@ -45,8 +58,283 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-29
+updated: 2026-10-05
 ---
+## Modal status presentation
+
+`modeview` supplies five labels and opaque Nora-compatible palette roles for
+both legacy and Instrument status painters. Each painter reserves the maximum
+label width across all five modes so mode transitions do not move adjacent
+slots. Context gives way to the chip: long legacy notices are truncated to
+half the bar, Instrument host labels to one third. Labels use contrasting
+black/white ink; this brightness rule is not a measured accessibility guarantee.
+
+The session derives only its existing transcript states from the focused leaf:
+Normal without an anchor is NOR, Normal with an anchor is VIS, otherwise APP.
+No application identity/title or alternate-screen guess produces INS/CMD.
+Application reports, read-only flags and the complete text/caret/clipboard arc
+remain unconnected. Menus preserve the transcript base mode. The existing
+fullscreen and SAK chrome policies are unchanged. Status diagnostics include
+mode/slot coordinates, keyed on actual mode transitions rather than every paint.
+Validation:558 host tests, native CI build/CPU1 boot1830/1830, and
+`ls-halcyon-modes` plus the Lantern graphical regression at1280x800. Host
+painter cases cover both profiles at100/200percent and800/1280pixel widths;
+this is not native800x720 or Pi qualification.
+
+## Hidden terminal pixel residency (October 4)
+
+Terminal content uses the opt-in TAPESTRY-STORAGE lifecycle. Dormant tiles keep
+jobs/transcripts and dirty state, consume output, and skip pixel, caret and
+held-frame wake work. Resume maps fresh pixels and fully repaints before input
+is forwarded. A refused reveal preserves the job and displays a bounded notice;
+switch away/back retries. New-terminal admission failure also displays a notice.
+No private heap or shared-map quota increase. Full-width16PTY/14controllerF10
+and hidden-output/resize witnesses pass at1280x800; broader qualification and
+actual failed-reveal notice capture remain open. See interaction status.
+
+## Prepared application transaction integration
+
+[[sub-halcyond-interaction-record]] owns fragmented HIN1 records and replay
+lifetimes. [[sub-halcyond-service-wire]] exposes transport capacity and remaining
+budget hooks. Their application dispatcher and HSC output barrier are not yet
+active. Host Bindings retains foreground snapshots received on the ordered
+compositor channel, including snapshots before the Bind decision. Lookup needs
+remote success, a live exact route and the current desired host; retirement and
+failed Bind discard observations. SAK retires controller contexts while keeping
+the kernel terminal observer. Interaction::publish_on uses the observed binding
+and foreground with freshly supplied Peer metadata and app context names. It
+cannot infer app ownership from a path token or unacknowledged subject zero.
+
+## Trusted terminal host handoff
+
+The UI receives the one-shot binding locator from its sealed kaua-term child.
+`PanePlaceServer::bind_host` captures the child PID and exact live Route under
+the mailbox lock; it performs no compositor I/O. Missing routes refuse only
+interaction registration, preserving the pane's terminal. Host metadata is a
+fixed 32-entry desired table, pruned with route removal. It is not an application
+registration endpoint and does not make a path token an authority credential.
+
+`session_seat::Link` dispatches Bind/Unbind through the already-preopened ordered
+HIA channel on the dedicated service executor. Interaction supplies the shared
+request sequence and transport slot. `hostbindings::Bindings` separately tracks
+remote observer obligations: raw successful Bind requires cleanup even if the
+local receipt became unusable. Cleanup precedes replacement on the same leaf;
+ordered Retired before a late Decision cannot resurrect an observer. A refusal
+is attempted at most once per normal seat generation. ENOENT confirms absence;
+EPERM does not. Full tables retain old cleanup obligations and wait for room.
+
+Seat suspension clears local controller authority while the compositor retains
+its terminal observer. An enabled NORMAL snapshot restores Interaction's seat
+generation. The independent HSC pump runs first; no console diagnostic is printed
+by the service executor. Test counters cross the mailbox and print from the UI.
+All-flight expiry closes the ordered channel before notifying terminal closure:
+Channel field order drops/joins the ring before releasing its registered buffer.
+A posted executor failure keeps the existing process-exit policy. A deliberately
+stalled-lane runtime teardown experiment remains an activation requirement.
+
+The desired table is bounded at 4096 bytes and the remote-obligation table at
+4096 bytes by compile-time assertions; exact route storage remains bounded at
+2048 bytes. No new connections, threads, syscalls or dynamic payload storage.
+Focused host fixtures cover coalescing, exact metadata, full-table draining,
+late success, retirement, refusal and suspension, including intended mutations.
+Current measured native evidence and limits are in HALCYON-INTERACTION-STATUS
+and work/oct3-hi-bindings. Public clipboard dispatch remains disabled.
+
+## Pane route lifetimes
+
+The fixed desired route table in paneroute allocates nonzero monotone local
+incarnations. Re-registering a live pair is idempotent; live token retargeting
+and duplicate leaves refuse. Coalescing remove/recreate cannot hide retirement,
+even with identical token and leaf. Removal remains possible at capacity and
+allocator exhaustion. The table has a 2048-byte compile-time metadata ceiling.
+
+Media fids pin their route on the first walk into a token directory. Every
+subsequent walk/clone, open, read, write and stat requires that exact lifetime;
+stale operations return ENOENT and release a matching partial accumulator.
+Clunk still works. Completions carry the incarnation and are rechecked at both
+mailbox publication and UI drain. The service compares desired snapshots and
+retires missing broker routes before consuming the next admission record.
+No new authority, endpoint, connection capacity or dynamic payload allocation
+is added. Public clipboard dispatch remains gated; see work/oct2-hi-routes and
+HALCYON-INTERACTION-STATUS for measured verification and remaining adapters.
+
+## Deferred output retirement
+
+The common stream pump accepts explicit parked replies and exact-ticket resumption.
+Media adapters continue to return immediate replies; publication still precedes
+Rwrite. Stream cancellation discards unsent output/input, while partial output
+permanently closes the connection. The interaction adapter must also retire its
+own semantic/cache state before HSC acknowledgement. That adapter remains gated.
+
+Interaction exposes drain_required even when a cancelled CHECK's expiry returns
+no second app result. The transport owner must drain or close/join before reuse.
+Current focused results are in HALCYON-INTERACTION-STATUS and
+work/oct2-hi-replies; public clipboard dispatch remains disabled.
+
+## Initial seat and control deadlines
+
+Some(0) is the initial normal seat; only None removes membership. Both the
+controller table and shared owner preserve that distinction. Seat revocation
+retires scopes even when a later join carries the same generation.
+
+Every shared-owner request carries the existing 30-second admission allowance.
+Expiry of host control or publication returns one failure without freeing its
+transport slot. Provisional publication is retired, and exact late completion
+only drains. Completion checks time independently of the timer pass. Clock
+regression fails closed; deadline overflow is refused before mutation. Confirmed
+channel closure retires modes/transfers and permanently disables that owner.
+The runtime adapter must close/join the real channel before notifying closure;
+these pure transitions alone do not implement I/O teardown or public dispatch.
+
+507 host tests, 63 owner cases with 15 intended counterexamples and 37 controller
+cases with eight counterexamples pass; guest Halcyon/probe compile. Native results
+and limits are recorded in the interaction status. No clipboard activation is
+claimed. Review is single-agent and the October 2 gate waiver still applies.
+
+## Local ordered-stream progress
+
+The ordered exchange exposes runnable local work: a deliverable retained record
+or a read/write needing submission. The service folds this into its poll timeout,
+so consuming a record rearms the channel without waiting for an unrelated seat
+State timeout. Pending I/O and decisions awaiting their write CQE do not spin.
+HSC remains first in the executor pass; no extra timer or authority is introduced.
+
+## Ordered ownership consumption
+
+The session service owns an HIO1 channel alongside independent HSC cancellation.
+HSC pumps first. Ordered terminal/focus/retirement records resolve leaf plus
+binding to an exact local controller route; stale bindings cannot retire a
+replacement. Reset retires payload/controller state without adding seat membership.
+Stream faults take the existing posted-service fatal exit. Public application
+registration and decision dispatch remain disabled pending reply retirement,
+control deadlines and the complete resource ledger. See the interaction status
+for native evidence and the remaining modal/clipboard work.
+
+## Shared interaction execution owner (October 2)
+
+The session's HSC Link now holds `Interaction`: the existing controller table
+and Broker with one request sequence and one in-flight transport slot. Local
+cancellation does not permit reuse until the exact completion drains. Bind
+tracks route incarnation before an entry exists; host Unbind retires local
+transfers before sending. CHECK refuses zero focus epochs. Seat transitions
+retire both subsystems before HSC acknowledgement; a late reply cannot recreate
+authority even after restoration. Focus loss alone retains the mode record and
+the earliest Get/Commit boundary. Combined inline metadata is at most 18 KiB;
+the guarded service stack is 128 KiB, with peak usage not measured here.
+
+499 host tests, 49 actual-source schedules, nine owner mutants and no_std guest
+binary check pass; the existing 37-test/eight-mutant controller gate also passes.
+The native probe includes the same owner modules; its initial missing-import
+build failure is retained. The corrected full image passes CPU1 1830/1830 and
+physical F10 SAK in 89.07s, with inspected 1280x800 screenshots. Its controller
+table is empty while app dispatch is off: populated cancellation remains host
+evidence. Limits and artifacts are in the phase status and `work/oct2-hi-owner/`.
+Single-agent review only.
+
+HIA application dispatch stays idle, and the public endpoint stays disabled.
+Ordered authenticated event delivery, control/publication timeout teardown,
+partial application replies, total resource accounting and clients remain owed.
+
+## Controller lifecycle core (October 2)
+
+`controllers` is a pure terminal adapter core, now held by the
+service executor through Interaction. It reserves 32 entries and at most one pending publication,
+with no heap allocation and a compile-time 16 KiB metadata ceiling. A host
+Terminal record carries exact local route incarnation, leaf, observer binding,
+foreground epoch, context and epoch. Peer carries a freshly sampled connection
+incarnation, live process stripes and principal; neither is decoded authority.
+
+Prepare burns a monotone controller generation and emits HIA Publish. Exact
+successful receipt, normal seat/foreground and fresh matching peer are required
+before authority lookup succeeds. Refusal retires that provisional entry;
+wrong/old requests cannot consume another entry. The eventual channel owner
+must serialize all HIA operations with one sequence and retain borrowed storage
+through cancellation. This core neither opens descriptors nor performs kernel
+checks. Each clipboard admission still uses the existing compositor CHECK.
+
+Mode records contain a 64-byte inline UTF-8 label, readonly bit, mode and strictly
+increasing sequence. Invalid reports preserve prior state. Presentation selects
+an exact focused route; unknown/pending owners return no report. Retirement
+invokes a synchronous callback with the old broker Owner. Both foreground epoch
+and nominated subject are checked, because an ACK can replace a nomination at
+the same epoch. Seat restoration never resurrects old scopes. Focus-only changes
+retain registration and use the broker's separate ordered admission boundary.
+
+Verification: 487 host tests; 37 combined actual-source schedules including 11
+controller cases; eight named mutants; no_std guest library compile. Evidence
+and self-review: `work/oct2-hi-controllers/`. Runtime event delivery, dispatch,
+reply retirement, clients and the aggregate resource ledger remain activation
+prerequisites; no new graphical result is claimed. The operator-approved visual
+direction is now accent-filled chips and proportional NOR/VIS background blocks
+with contrasting text, plus an INS bar; native implementation is still owed.
+
+## Clipboard seat-ordering seam
+
+The session media service now runs on one dedicated `ServiceWorker`, replacing
+its readiness-only worker. It owns the two protocol connections, Broker, idle
+HIA channel and independent HSC cancellation lane. UI commands are a fixed
+32-route desired-state table plus budgets; results are two moved raster slots.
+No mutable transport/graphics buffer is lent between owners. Exact routing
+tokens survive to publication, which precedes the client's successful Rwrite.
+A leaf reused under a new token cannot consume an old completion.
+
+The HSC link applies local cancellation before exact-generation/revision ACK.
+The broker is empty because the public application clipboard adapter is still
+disabled. Future application reply queues must be cancelled/retired before ACK;
+the current empty-owner test is not proof for that unfinished adapter.
+Independent progress, physical F10 while GPU/present are parked, bounded refusal,
+media delivery without UI service, posted-process failure/repost and graphical
+regressions are recorded in HALCYON-INTERACTION-STATUS. Lictor still owns all
+trusted display/input. No new kernel role or syscall is introduced.
+
+## Pending clipboard admission (October 1)
+
+`clipbroker` owns the Clipboard and one pending compositor decision. Routing
+supplies authenticated Authority and an exact connection/fid-incarnation/request
+Target; these are not peer-decoded credentials. Get pins bytes and Commit
+validates the upload and generation before CHECK. A matching reply consumes
+that pending action once. Wrong/late/duplicate replies cannot authorize a new
+action. The 30-second deadline joins the payload store's next deadline.
+
+Ordered focus-loss epochs cancel Begin and unprepared writes. Get/Commit keep
+the earliest loss boundary and may finish only with a receipt that precedes it;
+later returned focus cannot revive them. A read already admitted can finish
+after focus changes. Controller loss, peer disconnect, exact cancellation and
+trusted-seat generation changes release pending tickets; SAK cancels all
+transfers, retaining only the committed clipboard value. Public service
+activation still requires peer/controller binding and delivery of ordered
+revocation/seat notifications to this owner. Native probe success does not
+mean an application clipboard endpoint is enabled.
+
+## Terminal observer registration (October 1)
+
+The session accepts one binding announcement from its sealed Kaua child and
+registers it with the actual child PID, leaf and owning Tapestry connection.
+Duplicate announcements retire the terminal. Refusal leaves ordinary input
+alive without interaction authority. This one-time synchronous setup does not
+nominate an app. The pure asynchronous broker and native channel are implemented; application
+nomination, session notification wiring, clipboard activation and the mode
+widget remain unfinished.
+
+
+## October 1 integration verification
+
+Qualified Main/Aux are composed with the owned PollWorker/Stream service:
+nonblocking acceptance and principal admission precede connection publication;
+watch retirement precedes reuse; buffered work remains runnable; failed service
+publication still ends the poster. Aux's limit read and Quiet counters preserve
+that ownership path. Tokens route same-principal media; they do not authorize
+foreground clipboard access. No live clipboard endpoint is enabled.
+
+The combined tree passes the full 2275-test Mac host gate, 1830-test boot,
+native observer/readiness/service-wire, graphical media/Lantern/manual, three
+F10 SAK scenarios at 1280x800, and all 50 default/UBSan SMP boots with no failure
+classifications. One ignored Haul and 69 stranded libutopia host tests remain;
+no new Pi hardware, Linux host or minimum-display qualification is claimed.
+The review is single-agent. Evidence: `work/oct1-reconciliation/` and
+`docs/HALCYON-INTERACTION-STATUS.md`.
+
+
 ## Purpose
 
 `halcyond` is the rich-transcript console renderer -- the first inhabitant of
@@ -56,6 +344,36 @@ the fontdue rasterizer + atlas cache, the paper-light stylesheet, and the
 per-frame **cartoon** display list ([[sub-cartoon]]) that an in-process CPU
 executor weaves into a [[sub-libtapestry]] surface. It is the format-fuzz
 frontier for the display: every byte it renders is untrusted app output.
+
+## Native integration update (October 3)
+
+The nondefault interaction-qualification build dispatches HIN1 operations through
+Link/Interaction; see HALCYON-INTERACTION-STATUS for current qualification.
+It samples peers per frame and receipt, retires application connections before
+HSC ACK, and enforces the 32/2/4 pool. The image residual reserves protocol,
+clipboard and native metadata separately from media. Deadline polling uses the
+earliest transfer/admission/handshake expiry. Full pressure/activation remains
+HI1-R24; modal/editor clients are not delivered by this adapter alone.
+
+## Qualification allocation accounting (October 4)
+
+The opt-in interaction build logs native Conn/Link/Shared/Pool sizes and slot
+count when its protocol owner starts. Link exposes its fixed size separately
+from retained payloads. The startup heap number is process-wide and precedes
+Link construction; it is not a worker peak. These diagnostics support HI1-R24's
+still-open complete ledger. They do not change quotas or activate interaction
+in normal builds. Existing full-size pressure reaches the shared-map ceiling;
+see the unratified HALCYON-HIDDEN-WEAVE-REVIEW scope proposal.
+
+## Saturated listener progress (October 4)
+
+The service continues polling and accepting its listener while all native slots
+are occupied. One excess endpoint per pass is closed before Conn or buffer
+allocation; it cannot wait indefinitely for an admitted peer to disconnect.
+Existing peers keep their allocations and rotating work budget. HSC is still
+processed first. The listener is omitted only while the service is stopping.
+The native service-capacity fixture proves the old blocked attach, prompt
+refusal with two media peers retained, and three waves of close/reuse.
 
 ## Contract
 
@@ -81,7 +399,57 @@ console trio; on `/srv/tapestry` the `layout` file (visible leaves), `pane/<id>/
 `/lib/halcyon/renderer` (joey's system-renderer choice) and
 `/lib/halcyon/session` (login's per-user choice) -- both one-token, fail-safe.
 
+## Prepared connection admission
+
+The pure library exports `servicepool`, owned by [[sub-halcyond-service-wire]].
+It reserves controller/media/handshake capacity and retains retiring quotas until
+watch reclamation. No production adapter calls it yet: session media keeps two
+connections and clipboard remains unavailable. Capacity checks cannot replace
+kernel host ownership or ordered Tapestry focus admission.
+
 ## Mechanism
+
+### Session clipboard storage (HI-1b; no live endpoint yet)
+
+`clipboard::Clipboard` is the pure storage half. Its nonzero session generation
+must be freshly chosen by the future session broker. `Owner` combines the
+broker's authenticated connection identity with the issued controller/context
+scope; it is not taken on trust from request bytes. Exact owner equality gates
+chunks, cancellation and admission completion. One transfer per controller is
+shared across its contexts, and each session has two write slots and two read
+slots. The current value plus these four slots conservatively reserve at most
+5 MiB payload. Capacity, not written length, is counted; shared read buffers may
+be counted twice. This is the storage ledger only: connection buffers and the
+complete 7.375 MiB service ledger remain an adapter obligation.
+
+BeginCopy follows a successful broker focus check. It reserves the full declared
+capacity before returning a transfer. Contiguous nonempty chunks cannot exceed
+16 KiB or the declared extent. `prepare_commit` requires full canonical UTF-8,
+compares the expected generation and serializes all pending commits. Its ticket
+freezes staging before the broker asks for authoritative focus admission.
+`publish` consumes that ticket, checks its lifetime and moves the preallocated
+immutable buffer into the current value without allocation or text scanning.
+Generation exhaustion refuses rather than wrapping. Cancellation cannot undo an
+already published value. Source exit retains the current value.
+
+Get pins the current `Rc<Vec<u8>>` before the focus request; the pending read is
+unreadable until its matching ticket is admitted. Later copies cannot mix its
+bytes or alter its generation. Admitted reads can finish after focus loss;
+unfinished writes are cancelled by the ordered focus-loss callback. Peer/context
+loss and trusted-seat takeover cancel pending and admitted transfers, making
+late tickets stale. The future adapter must serialize those callbacks with
+Tapestry replies; these pure methods neither authenticate focus nor prove that
+integration. They are not connected to the pane service yet.
+
+Thirty-second idle and 120-second absolute deadlines use monotonic milliseconds.
+`next_deadline` integrates with an event-loop timeout without a polling timer.
+An operation that observes expiry returns Timeout and retires its slot; an ID
+already reaped by `expire` is Gone. Wrong owner is Denied, generation mismatch
+Conflict, pool/identifier exhaustion Busy, malformed offsets/text Invalid,
+oversize input TooLarge, and refused payload reservation NoMemory. Chunk and
+read failures leave contents untouched and do not refresh deadlines. The fixed
+slot arrays, transfer metadata and bounded Rc control blocks do not grow with
+traffic; the final adapter must include their sizes in its metadata ledger.
 
 ### lib is the brain, bin is the body
 
@@ -796,6 +1164,22 @@ while the reader is back in history an append keeps them there -- so the
 indicator never reports "at end" until they return.** The picker reuses the same
 arithmetic through `thumb_raw` with its own smaller floor (`PICKER_MIN_THUMB`).
 
+### Bounded service transport (HI-1)
+
+Both media servers now explicitly mark accepted connections nonblocking and use
+[[sub-halcyond-service-wire]] for framing, reply offsets and bounded turns. A
+partial reply is retained until writable; complete buffered input makes the UI
+loop runnable without another read edge. Connection order rotates within the
+shared service deadline. The session server transfers its listener and accepted
+handles into PollWorker and appends one notification fd to the UI poll set.
+Retirement keeps handles alive until the old poll returns; server Drop joins.
+The console keeps direct polling/RAII close. A published session-service failure
+ends the posting compositor: closing a listener alone cannot unpost a service.
+The image residual charges the worker's 72 KiB reservation. Existing one-console/
+two-session capacity and routing/image rules remain; there is no live clipboard
+endpoint. The full 38-connection ledger and session recovery remain separate
+activation obligations.
+
 ### The inline-media place channel (I-47; the `view` reader side)
 
 halcyond receives decoded rasters from a short-lived `view` process and injects
@@ -1080,7 +1464,11 @@ presents are a recorded optimization.
 - **The identity of spawned tiles.** halcyond spawns every kaua-term with
   `.caps(!T_CAP_SET_IDENTITY)`; the kernel intersects with login's `SHELL_CAPS`,
   so no tile program can spawn as another principal (the C-F1 P0: `Command`
-  inherits all caps by default).
+  inherits all caps by default). The terminal host additionally receives
+  T_SPAWN_PERM_SEAL atomically at spawn, before its first instruction. Its
+  ordinary slave-side application uses the default unsealed spawn; H3+C clears
+  seals across that child boundary. No authority binding or clipboard endpoint
+  is activated by the seal alone.
 - **The declared seat.** The takeover rule (idle vs hosting), the retry +
   undeclared fallback, the re-declare after the first mint; a refusal must never
   exit into the login loop.
@@ -1152,6 +1540,14 @@ presents are a recorded optimization.
   lines there wait for its close. Tracked in OPEN-BUGS.
 
 ## Tests
+
+- **HI-1b, September 24:** 335/335 Halcyon library tests pass on Linux/aarch64,
+  including nine clipboard storage tests for generations, pinning, ownership,
+  deferred publication, cancellation, expiry and capacity bounds. Evidence:
+  `work/hi1b-pi-deadline-fixed.log`. No live clipboard adapter is tested yet.
+
+
+
 
 - **The I-47 close (2026-09-29): 445 lib tests, all green.**
   `a_block_lays_one_raster_per_picture_and_width` (one picture on the page and in
@@ -1721,3 +2117,12 @@ Completion rechecks the current cap before replying, so a split during upload
 cannot report success for a now-oversized raster. Session uploads require a
 nonzero HPL2 image ID, and a token whose pane disappeared returns ENOENT;
 the legacy console's id-less wire path remains separate.
+
+## Application request dispatch (October 3)
+
+[[sub-halcyond-application]] now owns eight HIN1 transaction fids per connection,
+all ten operation dispatches, exact asynchronous completion/cancellation and
+borrowed snapshot responses. It composes the existing Interaction authority owner
+with the record layer; it is not a new authority table. Its decision entry checks
+fresh peer metadata before Publish and CHECK. The native 9P adapter and aggregate
+HSC output barrier remain unwired; public clipboard access is still disabled.

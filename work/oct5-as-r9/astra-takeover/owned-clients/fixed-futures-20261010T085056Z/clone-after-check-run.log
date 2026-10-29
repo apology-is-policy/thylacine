@@ -1,0 +1,28 @@
+
+running 11 tests
+test future_completion_before_first_poll ... ok
+test future_failed_prepare_and_write_result ... ok
+test future_malformed_record_wakes_then_fails_closed ... ok
+test future_drop_unregisters_but_keeps_active_storage ... ok
+test future_read_wakes_and_retains_result ... ok
+test future_driver_close_and_drop_wake_unfinished ... ok
+test future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test future_replaced_waker_drop_can_deliver_completion ... ok
+test future_replaces_waker_without_notifying_old_task ... ok
+test future_wake_callback_polls_outside_hub_borrow ... ok
+test future_clone_callback_completion_is_not_lost ... FAILED
+
+failures:
+
+---- future_clone_callback_completion_is_not_lost stdout ----
+
+thread 'future_clone_callback_completion_is_not_lost' (22445155) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-clone-after-check/test_fixed_futures.rs:181:353:
+assertion failed: matches!(poll(&mut f,&w),Poll::Ready(Ok(r))if r.result()==2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    future_clone_callback_completion_is_not_lost
+
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

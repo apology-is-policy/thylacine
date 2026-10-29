@@ -181,7 +181,9 @@ pub extern "C" fn rs_main() -> i64 {
         Err(_) => fail("loom-bench: FAIL -- RegisteredBuffer::new\n"),
     };
     rect.as_mut_slice()[..seed.len()].copy_from_slice(seed);
-    if ring.register_buffers(&[rect.buf_reg()]).is_err() {
+    // SAFETY: owned byte storage; this client tracks submitted ranges and
+    // borrows them only before submission or after their matching completion.
+    if unsafe { ring.register_buffers(&[rect.buf_reg()]) }.is_err() {
         fail("loom-bench: FAIL -- register_buffers\n");
     }
 

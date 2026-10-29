@@ -1,0 +1,18 @@
+
+running 1 test
+test surface_reuse_retires_watch_and_binding ... FAILED
+
+failures:
+
+---- surface_reuse_retires_watch_and_binding stdout ----
+
+thread 'surface_reuse_retires_watch_and_binding' (68191386) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T125648Z/test-interaction-admission/surface.rs:427:5:
+assertion failed: !check(&mut c, p)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    surface_reuse_retires_watch_and_binding
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+

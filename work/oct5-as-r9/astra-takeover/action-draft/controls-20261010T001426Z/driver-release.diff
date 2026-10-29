@@ -1,0 +1,11 @@
+--- control.c
++++ driver-release.c
+@@ -1680,7 +1680,7 @@
+     struct Loom *l=p->owner;struct loom_ready_selection s;
+     spin_lock(&l->lock);int rc=loom_ready_claim_locked(p,now,native_ready,&s);spin_unlock(&l->lock);
+     if(rc)return rc==-T_E_BUSY || rc==-T_E_AGAIN?0:rc;
+-    rc=action_execute(p,s);
++    p->driving=false;rc=action_execute(p,s);
+     // s.operation may have been freed. Only the caller's separate entry/root
+     // licenses p/l access here; no operation-derived lifetime is sufficient.
+     spin_lock(&l->lock);p->driving=false;spin_unlock(&l->lock);

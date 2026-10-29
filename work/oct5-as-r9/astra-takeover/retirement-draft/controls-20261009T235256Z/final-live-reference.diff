@@ -1,0 +1,11 @@
+--- control.c
++++ final-live-reference.c
+@@ -1293,7 +1293,7 @@
+ }
+ static int loom_private_pools_destroy(struct Loom *l) {
+     if(!l || !l->service_pools || !l->service_slots || !l->service_engine ||
+-       __atomic_load_n(&l->refcount,__ATOMIC_ACQUIRE) || !l->service_closing ||
++       !l->service_closing ||
+        !l->service_slots->closing || !loom_engine_empty(l->service_engine) ||
+        !loom_requests_empty(&l->service_requests) || l->service_fixed ||
+        l->service_fixed_count || l->service_fixed_settling)return -T_E_BUSY;

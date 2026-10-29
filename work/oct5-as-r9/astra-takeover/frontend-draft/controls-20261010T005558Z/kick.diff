@@ -1,0 +1,11 @@
+--- control.c
++++ kick.c
+@@ -2777,7 +2777,7 @@
+     // Caller retains l across every unlock and notification in this function.
+     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+     __atomic_fetch_and(&h->flags,~(u32)LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+-    loom_private_close_changed(l);
++    /* fault: omitted ENTER kick */
+     if(budget>l->sq_entries)budget=l->sq_entries;
+     u32 consumed=0;
+     for(u32 i=0;i<budget;++i) {

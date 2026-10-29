@@ -95,12 +95,13 @@ struct AddrSpace;             // <thylacine/addrspace.h>: the user tree's owner 
 // W^X invariant (I-12) — composite attribute helpers.
 //
 // A "writable" PTE has AP[2:1] in {0b00, 0b01} (i.e., not 0b10/0b11).
-// An "executable-at-EL1" PTE has PXN = 0.
-// W^X forbids: writable AND executable-at-EL1.
+// An executable PTE has PXN = 0 (EL1) or UXN = 0 (EL0).
+// W^X forbids: writable AND executable at either EL.
 //
 // We supply four helpers — KERN_TEXT, KERN_RO, KERN_RW, DEVICE — that
-// guarantee the invariant by construction. Static asserts at the bottom
-// catch any future addition that violates the rule.
+// guarantee the invariant by construction. Static asserts in mmu.c catch any
+// future addition that violates the rule, and every leaf encoder checks the
+// value it builds (pte_violates_wxe).
 // ---------------------------------------------------------------------------
 
 #define PTE_KERN_TEXT \
@@ -238,11 +239,22 @@ void mmu_enable(u64 slide);
 // Idempotent within a CPU; the SCTLR.M OR-in is harmless when set.
 void mmu_program_this_cpu(void);
 
+#ifdef KERNEL_TESTS
 // Inspect a PTE for W^X compliance. Returns true iff the PTE is writable
 // AND executable at EITHER EL (PXN clear for EL1, or UXN clear for EL0) --
-// the forbidden combination (I-12). Used by the audit-trigger surface
-// verifier (and by tests at P1-I+).
+// the forbidden combination (I-12). Every leaf encoder in mmu.c asks it before
+// a table can hold the value, and extincts on a yes.
 bool pte_violates_wxe(u64 pte);
+#endif // KERNEL_TESTS
+
+#if defined(THYLACINE_FAULT_TEST_wxe_install_kernel) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_block) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_gib) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_user)
+// The I-12 encoder provoker (kernel/fault_test.c): have the variant's encoder
+// build a writable + executable leaf. Returns only if no check fired.
+void mmu_fault_test_wxe_install(void);
+#endif
 
 // P3-Bda: retire the TTBR0 identity map. Zeros every L2 entry in
 // l2_ttbr0[0..3] (the 4-GiB identity map) so any subsequent TTBR0 walk
@@ -269,6 +281,7 @@ bool pte_violates_wxe(u64 pte);
 // dsb_ish, isb).
 void mmu_retire_ttbr0_identity(void);
 
+#ifdef KERNEL_TESTS
 // P3-Bca: per-thread kstack guard pages — direct map flavor.
 //
 // `mmu_set_no_access(pa)` makes the 4 KiB page at PA unreadable +
@@ -305,6 +318,7 @@ void mmu_retire_ttbr0_identity(void);
 // is outside the direct-map range (PA < 1 GiB or PA >= 9 GiB at v1.0).
 bool mmu_set_no_access(paddr_t pa);
 bool mmu_restore_normal(paddr_t pa);
+#endif // KERNEL_TESTS
 
 // Batched variants for callers protecting / unprotecting a contiguous
 // run of pages within a single 2 MiB L2 block (the common case for
@@ -343,12 +357,14 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
 // 8 GiB reach by phys.c. Blocks outside [1 GiB, 9 GiB) are skipped.
 void mmu_pagemap_directmap(paddr_t base, paddr_t end);
 
+#ifdef KERNEL_TESTS
 // #808 diagnostic: true iff the 2 MiB direct-map block containing `pa` is
 // demoted to a page-grain L3 table (both the L1 and the covering L2 entry
 // are table descriptors). When true, the runtime kstack-guard poke takes the
 // fast path with no block->table break-before-make. Non-mutating. False for
 // PAs outside the direct-map range. Used by the boot-pass regression test.
 bool mmu_directmap_is_pagemapped(paddr_t pa);
+#endif // KERNEL_TESTS
 
 // P3-Bdb: PA of the kernel-only TTBR0 page table (l0_ttbr0). Used as the
 // pgtable_root for kproc threads (which have proc->pgtable_root = 0).
@@ -500,39 +516,18 @@ int mmu_replace_user_pte_attr(struct AddrSpace *as, bool exempt,
 // such a leaf.
 bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec);
 
-// P6 hardening #2 / F1: clear a single leaf PTE at `vaddr` in `as`'s
-// TTBR0 tree AND issue tlbi vaae1is + dsb ish + isb to invalidate any cached
-// translation. Symmetric counterpart to mmu_install_user_pte's leaf install.
-// A clear that empties its L3 table reclaims the table -- unlinked from its
-// parent, invalidated, freed (the pool's charge returns), uncharged from `as`
-// -- and its ancestors if they empty too (B-1a' audit F1).
-//
-// Returns 0 in three cases (all benign):
-//   - PTE was VALID and is now cleared + TLB invalidated.
-//   - PTE was already not-VALID (idempotent).
-//   - The walk found an L1/L2/L3 sub-table not yet allocated (nothing
-//     mapped at vaddr -> nothing to clear).
-//
-// Returns -1 only on argument-validation failure (a NULL or rootless `as`,
-// misaligned vaddr, vaddr >> 47 != 0, or a malformed table descriptor
-// found mid-walk).
-//
-// Per audit F1 (P1): without this call from burrow_unmap (and any
-// future mmap-unmap path), SYS_BURROW_DETACH leaves stale PTEs in
-// the per-Proc tree AND stale TLB entries on the CPU. A later
-// user-mode access to the same VA (dangling pointer, overflow,
-// buddy-LIFO-returns-different-PA on re-attach) silently routes
-// to the recycled physical page -> content-sensitive heap
-// corruption that fires only under specific allocation patterns
-// (the suspected root cause of the AEGIS-256 / mallocng bug).
-int mmu_uninstall_user_pte(struct AddrSpace *as, u64 vaddr);
-
-// Range form: clear every leaf in [vaddr_start, vaddr_end) (half-open,
-// both page-aligned), walking by SUBTREE so an absent L0 / L1 / L2 entry
-// skips its whole span -- the cost is the pages present, never the range,
+// Clear every leaf PTE in [vaddr_start, vaddr_end) of `as`'s TTBR0 tree
+// (half-open, both page-aligned) and invalidate each cleared translation
+// (tlbi vaae1is + dsb ish + isb), walking by SUBTREE so an absent L0 / L1 / L2
+// entry skips its whole span -- the cost is the pages present, never the range,
 // which may be a whole reservation (up to the burrow window since B-1a').
+// Every unmap path runs this before the pages go back to the buddy: a stale
+// PTE or TLB entry would route a later access to the recycled page (P6
+// hardening #2 / audit F1).
 //
-// Tables the range empties are reclaimed as the single form reclaims them.
+// A clear that empties an L3 table reclaims it -- unlinked from its parent,
+// invalidated, freed (the pool's charge returns), uncharged from `as` -- and
+// its ancestors if they empty too (B-1a' audit F1).
 //
 // Returns the number of VALID leaves cleared (0 when nothing in the range was
 // mapped) -- what a caller attributing the pages to their holder refunds
@@ -551,11 +546,12 @@ long mmu_uninstall_user_range(struct AddrSpace *as,
 long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
                                           u64 vaddr_start, u64 vaddr_end);
 
-// Diagnostic (B-1a audit F2): leaf visits so far -- one per
-// mmu_uninstall_user_pte call, one per page visited inside a PRESENT table by
-// the range form -- the witness that the range form skips absent subtrees
-// instead of visiting pages.
+#ifdef KERNEL_TESTS
+// Diagnostic (B-1a audit F2): leaf visits so far -- one per page visited
+// inside a PRESENT table by the range clear -- the witness that it skips
+// absent subtrees instead of visiting pages.
 u64 mmu_uninstall_pte_calls(void);
+#endif // KERNEL_TESTS
 
 // 8a-1b-gamma (I-39; docs/DEBUG-FS-DESIGN.md 4.5): read-only, non-growing
 // cross-Proc user-memory access for /proc/<pid>/mem. Walk `pgtable_root` (the
@@ -570,5 +566,14 @@ u64 mmu_uninstall_pte_calls(void);
 // fault mutates the tree).
 long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len);
 long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len);
+
+#ifdef KERNEL_TESTS
+// The in-kernel tests' reach into mmu.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
+u64 mmu_guard_toggles_for_test(void);
+bool mmu_kva_readable_for_test(const void *kva);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_ARCH_ARM64_MMU_H

@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ uncaptured-success.c
+@@ -101,7 +101,7 @@
+        r->phase!=LREQ_ACTIVE || r->borrows!=1 || o->rpc.on_complete || o->rpc.sending)
+         return -T_E_BUSY;
+     if(result>=0) {
+-        if(!o->callback_seen || o->capture_error || o->reply.result<0)return -T_E_IO;
++        if(false)return -T_E_IO;
+         int rc=rpc_ready(o);if(rc)return rc;
+         if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
+     }

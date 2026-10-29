@@ -1,0 +1,20 @@
+==> lean --production shape: builds (#228/#229 guard)
+==> Booting kernel under QEMU (timeout 300s)...
+    Log: /Users/northkillpd/projects/thylacine-corona/build/test-boot.log
+==> harness: qemu_alive_at_teardown=1
+==> FAIL: kernel extinction detected.
+--- ELE context ---
+    [test] vivarium.unwinds_publish_nothing ... PASS
+    [test] vivarium.close_keeps_a_reserved_row ... 
+EXTINCTION: handle table lock taken under a leaf lock
+HALLS: --- Halls of Extinction (crash dump) ---
+HALLS: cpu 0  source EL0 (userspace fault)
+HALLS: ELR  0x0000000000000000
+HALLS: ESR  0x0000000000000039  FAR  0x0000000000000000  SPSR 0x0000000000000000
+HALLS: SP   0xffff000044b37ed0
+HALLS: LR   0x0000000000000000
+HALLS: FP   0x0000000000000000
+HALLS:  x0  = 0x0000000000000000  x1  = 0x0000000000000000
+HALLS:  x2  = 0x0000000000000000  x3  = 0x0f28289aab3db87d
+HALLS:  x4  = 0xffff000044b37e10  x5  = 0xba8ba002bb0da578
+-------------------

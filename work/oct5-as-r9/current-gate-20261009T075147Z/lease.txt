@@ -1,0 +1,4 @@
+mac   HELD by you for 16s, 2.0h left
+        why: --help
+pi    FREE
+disk: 15.1 GiB available at /Users/northkillpd/projects/thylacine-astra

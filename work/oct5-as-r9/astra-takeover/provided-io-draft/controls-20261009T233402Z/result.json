@@ -1,0 +1,173 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_admission.c": "d1be069a19bca05dc8390226ef362bfe414c4f5883d7e98de4b789d67a4de438",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_operation.c": "e25d14e906ff7f107fdac7744a204615106c57657e1946a88aef1b72c1545b9f",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_rpc.c": "9d26e0371fc7abab936710ca193517f001aef48ca763da6e450e3cd7b2156ed7",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_provided.c": "fd3f8b091f2eb9af696111b27dcb3364534948bfcaf330a6dca6c4f887aeba02",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_io.c": "bc30a868c29f1ede1988da4ffff2883a442afed82d69f07ec62ef4389bab63ba",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_rpc.h": "ac57d3c6651e7579f8adc823614314e9ac94a42320112cf63cd2b64bae9a3e0d",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_operation.h": "a6ddce1e36960bbc3b018e32bec97ba991528be649b1ba5bbbe99819753ca1cd",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_provided.h": "f768a1759959793850de44bdecd8140967de6ff846db31321b947cbd992a02dd",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/fixture.c": "1359609b8af86aa2a4d1ca23fc2316ea5b24c65487158c7f8450964c3f6ab280",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/run-controls.py": "ad58fd649c6e34d099a20a969465e9c9ea8310971e8c954c7e4dcc03e9a06b49",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom.c": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+    "kernel/loom_service_decode.c": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "bdcbb947b5e8ec5952acc5ce9608c03dd3b140ca8d1f2b54d64bcd49fb9bffb0",
+      "binary_sha256": "628c781755b74fcfb130da87d439ff511b2b7f13ddc661efbfdfeab312287968"
+    },
+    {
+      "case": "provided-creator-image",
+      "expected": "provided creator image exact",
+      "rc": 1,
+      "source_sha256": "bf63337c7985b820bfcf718d133e50e109216b962c234ae45442059669380ba4",
+      "binary_sha256": "22e840faca2bf2e915d544fbd9cb3ff6a439203eca71250bae594d03cfc98613"
+    },
+    {
+      "case": "provided-creator-incarnation",
+      "expected": "provided creator incarnation exact",
+      "rc": 1,
+      "source_sha256": "2c9a46cb1158eece94f02362070e4d91887023160e27cc2e133126f35382c269",
+      "binary_sha256": "5601a70f91b65f2235bed6fdcbe69b0a524979340eac8dbf329ac75eb658b3aa"
+    },
+    {
+      "case": "all-member-bounds",
+      "expected": "all member bounds precede stream ownership",
+      "rc": 1,
+      "source_sha256": "b21d20b4c639e438d21f2d2f9f0af45ef7b37051e345607cda80e227adb96b4d",
+      "binary_sha256": "c455846d6d47c0b371e2f75310310d1e824bb53cac7f513c5d624232f07481b4"
+    },
+    {
+      "case": "receipt-copy",
+      "expected": "single CQE and receipt share publication",
+      "rc": 1,
+      "source_sha256": "7991f8231c05abc101020773fc108749cc611da4b6bef2f90ecca5cdefbd2831",
+      "binary_sha256": "23f0e39e858c0ed15464f76e50495b18abaadee9cd9d61bcbb8f84b3bf7a5370"
+    },
+    {
+      "case": "consumer-detached",
+      "expected": "detached consumer cannot publish",
+      "rc": 1,
+      "source_sha256": "aeb06796f09a8131d13ef7a489f2b83ea89b462f8ae46709c1832bb5eb9c950f",
+      "binary_sha256": "4890cf1de7f25461d42480123f33e21cefe231d282e8b1ffa738527ddd1acc3a"
+    },
+    {
+      "case": "pool-stream-free",
+      "expected": "storage free after physical holds",
+      "rc": 1,
+      "source_sha256": "3fbe8235bd99cd242569dbacd6b46b209505db8b2229c2d3a2658c0270d25c44",
+      "binary_sha256": "019c8f6a3d8948f822c8b711f2f1a8bb732a88018a246260493c5fc7f757643f"
+    },
+    {
+      "case": "pool-detach-pending",
+      "expected": "terminal bookkeeping retains stream",
+      "rc": 1,
+      "source_sha256": "a39228eb0d3ce4c7c7d77157ed60063b3637e4966f422fef52c1157990455830",
+      "binary_sha256": "6595563b724b8cca146b6e0ecff77f0fd61b2563f4045dd3efb17ac224368f33"
+    },
+    {
+      "case": "pool-claim-required",
+      "expected": "raw begin refuses unclaimed pool",
+      "rc": 1,
+      "source_sha256": "8f6a453082a2f45ae9d136cdb0916bc53d4055892b92086fd648ae838bc0b19b",
+      "binary_sha256": "087f604d4bd6f869efebd9e4676c61001d3e3fbe5a6b63093ea6c0c0795b8949"
+    },
+    {
+      "case": "canonical-member",
+      "expected": "selected canonical member before read",
+      "rc": 1,
+      "source_sha256": "e9c7589f5b3a2d97c5d96826382684396670fd115150028ecf3452d7025fb9a1",
+      "binary_sha256": "b9e7e69a4fe82bbec355265caf8057ce50993dbb049324bf0722bbf39c753bae"
+    },
+    {
+      "case": "pending-terminal-order",
+      "expected": "cancellation cannot overtake pending MORE",
+      "rc": 1,
+      "source_sha256": "76ceaf5a7fe75e086fbdb2baa2751e1a348a8911a7ee125c3be5e113d8fc3302",
+      "binary_sha256": "90c68a93dddb8a36fcc2703b75586e349028ed079c36fa01a812b976752dd600"
+    },
+    {
+      "case": "delivered-more-proof",
+      "expected": "new shot requires delivered MORE proof",
+      "rc": 1,
+      "source_sha256": "a370421b037dbd683f4cc6c3dd91e3570ff5b64b0b572224e0a866921241f173",
+      "binary_sha256": "7df811484f4655e5269f4878592478000c404a99f34224b9ca8dca8ddf4a73fe"
+    },
+    {
+      "case": "fresh-rearm",
+      "expected": "abort preserves MORE but bars new shot",
+      "rc": 1,
+      "source_sha256": "49924f505fef8d02549ee4de6a439b4b936b23c286502921860768eedc49bdea",
+      "binary_sha256": "6be64d8e3de29d61c802d12efe0e337fbb661cae4d790bb08ce465d45e5298a1"
+    },
+    {
+      "case": "cq-full",
+      "expected": "full CQ preserves committed payload",
+      "rc": 1,
+      "source_sha256": "249d99972af95a4de2df39f1622f72d77623cf73ee2de921df8aef65fc03d12d",
+      "binary_sha256": "2c8333cad93108eb7f06feec3cbed2ed4b19c33e8f82767b28212a9483c83139"
+    },
+    {
+      "case": "single-delivery",
+      "expected": "committed single survives scope abort and delivers once",
+      "rc": 1,
+      "source_sha256": "dbf9066a704a29e1ebf1ef37e09e2ef46c9a591adf1058699fbefdaa67fb7b0c",
+      "binary_sha256": "a53aee31adddab318445f10c9766c7e5c612de931bd2fec647e85cc70ad0287f"
+    },
+    {
+      "case": "more-flag",
+      "expected": "MORE delivery has explicit receipt",
+      "rc": 1,
+      "source_sha256": "2cc1a97e2ed287254bd4d3a30048aeff6fda6baa4f355a759318874db96742c9",
+      "binary_sha256": "188a5c13793187e6a045179523aa3a39a053b7ef868bd76ad2ec4dbdff17bc63"
+    },
+    {
+      "case": "member-view-clear",
+      "expected": "single positive commits terminal and pending payload",
+      "rc": 1,
+      "source_sha256": "4a6d0a35ec0b20b857ea8bd121241535715ebf913756fcbac4023c2f04b969c2",
+      "binary_sha256": "9ed4c844c266a7a85aef9c61b78c3721513b337ccf5e9a3bd3f50d4056f490f4"
+    },
+    {
+      "case": "nonce-reuse",
+      "expected": "return enables fresh monotone lease",
+      "rc": 1,
+      "source_sha256": "0fef3ff9fcabb1fcea6efde336ed287a764c3221a36598cd58853c9c5c27bac8",
+      "binary_sha256": "8c9e9659e4629bd7d771ed7eddeb33b467764792ab7b41381ee990853d4fd054"
+    },
+    {
+      "case": "pending-return",
+      "expected": "pending payload cannot return",
+      "rc": 1,
+      "source_sha256": "b4d6bd6d3fcd01ca2f1a1ddd633dcab8efb0d7bb033e18a3fe4d21529672eade",
+      "binary_sha256": "49f7a863e38707b9fa807eee6033db429cfa17c1f7bca24edf788362529e9436"
+    }
+  ],
+  "limits": "Synthetic parsed dispatch replies; no real submit/wire. Actual CQ/receipt publication, pool/slot/request/FID ledger, capture and program transitions. Registration physical pins are fixture boundaries. Whole-ring pending discard and real READY driver remain pending. Real data headers and actual SQE preparation, fixed helper, constructor, FID allocator and ledger/program code. Host address translation, allocation, Proc snapshot, refs/wake/engine and physical backing drop boundaries. No wire dispatch; admitted destructor is manual fixture cleanup. No native frontend/driver/close/concurrency proof."
+}

@@ -21,17 +21,6 @@
 #include <thylacine/rendez.h>
 #include <thylacine/types.h>
 
-void test_9p_transport_init_destroy(void);
-void test_9p_transport_round_trip(void);
-void test_9p_transport_send_frame_size_mismatch_rejected(void);
-void test_9p_transport_recv_frame_too_large_rejected(void);
-void test_9p_transport_partial_read_aggregation(void);
-void test_9p_transport_backend_error_transitions_to_error(void);
-void test_9p_transport_close_idempotent(void);
-void test_9p_transport_exchange_drives_session_handshake(void);
-void test_9p_transport_exchange_drives_session_walk(void);
-void test_9p_transport_loopback_recv_ready(void);
-
 // 4 KiB transport receive buffer + 4 KiB outbound staging buffer
 // + 4 KiB loopback response staging.
 static u8 g_recv_buf[4096];

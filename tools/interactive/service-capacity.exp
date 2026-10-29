@@ -1,0 +1,29 @@
+#!/usr/bin/expect -f
+# Native full-service refusal and reclamation; explicitly enable the serial test posture.
+set ::env(THYLACINE_SERIAL_SAK) 1
+source [file join [file dirname [info script]] lib.exp]
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+# This gate needs the CI clearance/key fixture, not just lean login accounts.
+lc_send "imperium --list"
+lc_expect "imperium (distinct key, via the SAK)" "CI imperium enrollment required"
+lc_send "imperium post"
+lc_expect "as pid" "post request"
+lc_raw_send "\001b" "serial SAK fixture"
+lc_expect "CONFERRING IMPERIUM" "trusted provincia"
+lc_expect "CAP_POST_SERVICE" "posting authority"
+lc_expect "imperium key: " "trusted key prompt"
+lc_raw_send "imperium-key-michael-v1\r" "fixture key"
+lc_expect "imperium: conferred" "post capability conferred"
+set timeout 20
+lc_send "kaua-term-probe --service-capacity"
+expect {
+    -ex "service-capacity: PASS -- full refusal, live peers and reclamation" {
+        lc_pass "full adapter refusal and recovery"
+    }
+    -re {service-capacity: FAIL -- ([^\r\n]+)[\r\n]} { lc_fail "Service probe: $expect_out(1,string)" }
+    timeout { lc_fail "Service probe did not complete" }
+}
+lc_run_expect "echo service-shell-live | tr a-z A-Z" "SERVICE-SHELL-LIVE"
+lc_quit
+exit 0

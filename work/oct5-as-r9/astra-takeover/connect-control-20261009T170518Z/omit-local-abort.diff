@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -183,7 +183,7 @@
+     // Sole driver, no escaped RPCs: abort returns with local RX/TX cursors and
+     // callbacks detached. Teardown alone could not establish this fact.
+     srvconn_teardown(p->admission.conn);
+-    p9_client_progress_abort(&p->client);
++    (void)p9_client_progress_abort; /* omitted cursor retirement */
+     spin_lock(&l->lock);
+     if (r->phase == LREQ_ACTIVE &&
+         loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,p->request,reason))

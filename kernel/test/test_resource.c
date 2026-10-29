@@ -42,26 +42,6 @@
 #include "../include/thylacine/errno.h"
 #include "../../mm/phys.h"         // C6: the thread budget's hard max is the pool's
 
-// The _for_proc inners of the burrow SVC handlers (non-static cores in
-// kernel/syscall.c), driven directly -- the same pattern test_sys_burrow uses.
-extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
-
-// Test-only Proc list helpers (no production caller; defined in kernel/proc.c).
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-
-void test_resource_exempt_only_system(void);
-void test_resource_page_charge_caps(void);
-void test_resource_thread_cap_ok(void);
-void test_resource_child_cap_ok(void);
-void test_resource_child_count_tracks_list(void);
-void test_resource_child_count_rfork_reap(void);
-void test_resource_page_cap_attach_enforced(void);
-void test_resource_vma_cap(void);
-void test_resource_attach_charges_buddy_rounded(void);
-void test_resource_detach_shared_in_keeps_page_count(void);
-
 #define A_REAL_USER 1000u
 
 static struct Proc *res_make(u32 principal) {

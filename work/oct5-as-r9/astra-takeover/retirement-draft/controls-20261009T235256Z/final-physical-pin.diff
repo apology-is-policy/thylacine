@@ -1,0 +1,11 @@
+--- control.c
++++ final-physical-pin.c
+@@ -1341,7 +1341,7 @@
+     }
+     // Ledger exclusions are gone but saved pins keep every backing alive until
+     // its physical settled drop. Never turn this into a metadata-only memset.
+-    for(u32 i=0;i<count;++i)loom_private_drop_buffer(l->service_as,pins[i]);
++    for(u32 i=0;i<count;++i)(void)pins[i];
+     return 0;
+ }
+ static struct loom_sqe sqe(unsigned opcode) {

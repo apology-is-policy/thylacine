@@ -30,9 +30,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_userspace_first_iteration(void);
-void test_userspace_second_iteration(void);
-
 // Hand-encoded AArch64 program: SYS_EXITS(0).
 //   0xd2800000 movz x0, #0          ; status 0
 //   0xd2800008 movz x8, #0          ; SYS_EXITS
@@ -137,7 +134,6 @@ static void exec_thunk(void *arg) {
     uart_puts("\n");
 
     // Read L0[0] via the direct map (pgtable_root PA → KVA).
-    extern void *pa_to_kva(u64);
     u64 *l0 = (u64 *)pa_to_kva(p->as->pgtable_root);
     uart_puts("    [iteration ");
     uart_putdec((u64)ea->iteration);

@@ -28,6 +28,7 @@
 
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 // Per-CPU live-exception-frame slot + re-entrancy guard. No atomics are needed:
 // each CPU's slot is written ONLY by that CPU's own exception wrappers
@@ -83,10 +84,13 @@ void halls_leave_frame(const struct exception_context *prev) {
     g_halls_frame[halls_cpu()] = prev;
 }
 
+#ifdef KERNEL_TESTS
 const struct exception_context *halls_current_frame(void) {
     return g_halls_frame[halls_cpu()];
 }
+#endif // KERNEL_TESTS
 
+VISIBLE_IF_KERNEL_TESTS
 bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi) {
     if (fp & 0xfu)        return false;   // AAPCS64: frames are 16-aligned
     if (fp <= prev_fp)    return false;   // strictly increasing -> no cycles
@@ -95,6 +99,7 @@ bool halls_fp_is_sane(u64 fp, u64 prev_fp, u64 lo, u64 hi) {
     return true;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool halls_frame_is_live(u64 frame, u64 cur_sp) {
     return frame >= cur_sp && (frame - cur_sp) <= HALLS_LIVE_FRAME_SLACK;
 }
@@ -106,6 +111,15 @@ u64 halls_link_addr(u64 addr, u64 kaslr_offset) {
     // constant) -- leave it untouched so the operator is not misled.
     if (addr < kaslr_offset) return addr;
     return addr - kaslr_offset;
+}
+
+// Code that ran before the MMU -- and start.S's frame beneath boot_main -- ran
+// at the image's load PA, which no slide maps: an address inside the image's
+// PA range is rebased onto the link VA. Every other address takes the slide.
+VISIBLE_IF_KERNEL_TESTS
+u64 halls_code_link_addr(u64 addr, u64 kaslr_offset, u64 pa_start, u64 pa_end) {
+    if (addr >= pa_start && addr < pa_end) return addr - pa_start + KASLR_LINK_VA;
+    return halls_link_addr(addr, kaslr_offset);
 }
 
 // Return addresses spilled to the kernel stack are PAC-signed on a FEAT_PAuth
@@ -165,6 +179,7 @@ static void halls_puthex(u64 v) {
 // one). Returns the greatest entry with `off <= (link_va - base)`. Reads only
 // the .rodata table (no faulting stack reads) and is bounded by log2(count),
 // so it is safe to call from the dying-machine dump path.
+VISIBLE_IF_KERNEL_TESTS
 const char *halls_symbolize_table(const struct halls_sym *tab, u32 count,
                                   const char *names, u64 base,
                                   u64 link_va, u64 *out_off) {
@@ -190,23 +205,65 @@ const char *halls_symbolize(u64 link_va, u64 *out_off) {
                                  link_va, out_off);
 }
 
+#define HALLS_A64_INSN_BYTES  4u
+
+// The name is looked up at the call, the instruction before the return
+// address: a call that ends its function (a noreturn callee: extinction,
+// _torpor) returns to the next function's first byte. The offset stays the
+// return address's own, so name+off still equals the printed link address,
+// as gdb's frame names and Linux's %pB do.
+VISIBLE_IF_KERNEL_TESTS
+const char *halls_symbolize_return_table(const struct halls_sym *tab, u32 count,
+                                         const char *names, u64 base,
+                                         u64 link_ra, u64 *out_off) {
+    if (link_ra < HALLS_A64_INSN_BYTES) return (const char *)0;
+    u64 off = 0;
+    const char *name = halls_symbolize_table(tab, count, names, base,
+                                             link_ra - HALLS_A64_INSN_BYTES, &off);
+    if (name && out_off) *out_off = off + HALLS_A64_INSN_BYTES;
+    return name;
+}
+
+const char *halls_symbolize_return(u64 link_ra, u64 *out_off) {
+    return halls_symbolize_return_table(halls_symtab, halls_symtab_count,
+                                        halls_symtab_names, halls_symtab_link_base,
+                                        link_ra, out_off);
+}
+
+// What a printed code address is, which decides how it is rebased and named.
+enum halls_code_kind {
+    HALLS_CODE_STALE,   // an ELR no live frame owns: whatever the last exception left
+    HALLS_CODE_PC,      // a live exception frame's ELR: the instruction it took
+    HALLS_CODE_RET,     // a return address: the instruction after a call
+};
+
 // One "raw  (link 0x...)" code-address line: strip the PAC, print the
 // canonical address, then -- unless it is a userspace VA (skip_link; F5) --
 // its KASLR link-time form for addr2line, and (HX-2) its live `name+0xN`
 // symbolization. A user VA minus the kernel KASLR offset is nonsense, so both
-// the link and the symbol are suppressed for EL0-source frames.
-static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool skip_link) {
+// the link and the symbol are suppressed for EL0-source frames. A PC this CPU
+// took (a return address, or the ELR of a live exception frame) inside the
+// image's PA range is rebased: code runs at its PA before the MMU and through
+// the TTBR0 identity until the long branch, and a PA branch target that
+// faulted names the function it pointed at. A stale ELR is whatever the last
+// exception left and never is. Only a return address is named at its call.
+static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool skip_link,
+                                 enum halls_code_kind kind) {
     u64 a = halls_strip_pac(addr);
     uart_puts(label);
     uart_puthex64(a);
     if (!skip_link) {
-        u64 link = halls_link_addr(a, koff);
+        u64 link = kind != HALLS_CODE_STALE
+                       ? halls_code_link_addr(a, koff, kaslr_kernel_pa_start(),
+                                              kaslr_kernel_pa_end())
+                       : halls_link_addr(a, koff);
         uart_puts("  link ");
         uart_puthex64(link);
         // HX-2: live symbolization. NULL (a stub/count-0 table, or an address
         // outside .text) falls back to the raw+link form -- the HX-1 behaviour.
         u64 off = 0;
-        const char *name = halls_symbolize(link, &off);
+        const char *name = kind == HALLS_CODE_RET ? halls_symbolize_return(link, &off)
+                                                  : halls_symbolize(link, &off);
         if (name) {
             uart_puts("  ");
             uart_puts(name);
@@ -227,9 +284,11 @@ static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool ski
 // user memory from EL1 (via TTBR0) and let a faulting Proc plant fake
 // "kernel" backtrace entries, so the walk is skipped and the link addrs
 // suppressed (the register block + ESR/FAR remain, which carry the signal).
-static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool el0_source) {
+static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool el0_source,
+                            bool from_exception) {
     uart_puts("HALLS: backtrace (fp-chain; link addrs for addr2line):\n");
-    halls_emit_code_addr("HALLS:   #0  ", ctx->elr, koff, el0_source);
+    halls_emit_code_addr("HALLS:   #0  ", ctx->elr, koff, el0_source,
+                         from_exception ? HALLS_CODE_PC : HALLS_CODE_STALE);
     if (el0_source) {
         uart_puts("HALLS:   (EL0 source -- userspace fp not walked from EL1)\n");
         return;
@@ -245,7 +304,7 @@ static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool 
         uart_puts("HALLS:   #");
         uart_putdec((u64)(i + 1));
         uart_puts(i + 1 < 10 ? "  " : " ");
-        halls_emit_code_addr("", ra, koff, false);
+        halls_emit_code_addr("", ra, koff, false, HALLS_CODE_RET);
         prev = fp;
         fp = halls_peek(fp);   // next frame
     }
@@ -256,8 +315,9 @@ static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool 
 // with the canonical (PAC-stripped) addresses of a STOPPED thread's kernel
 // frame-pointer chain: out[0] = strip(pc) (the frame-0 resume/interrupt PC),
 // out[1..] = strip(saved LR) walking the x29 chain from start_fp. Returns the
-// frame count (>= 1 when max >= 1). Symbolize each via halls_link_addr +
-// halls_symbolize.
+// frame count (>= 1 when max >= 1). Translate each via halls_link_addr, then
+// name out[0] with halls_symbolize and the return addresses with
+// halls_symbolize_return.
 //
 // TWO changes from halls_backtrace make this fault-safe on the LIVE path, where
 // a bad read is NOT caught by HX-I1 (there is no dump guard -- a fault would
@@ -329,7 +389,8 @@ static void halls_emit(const struct exception_context *ctx, u64 ksp,
                              : "  source: bare extinction (no exception frame)\n");
 
     halls_emit_code_addr(from_exception ? "HALLS: ELR  " : "HALLS: ELR  (stale) ",
-                         ctx->elr, koff, el0_source);
+                         ctx->elr, koff, el0_source,
+                         from_exception ? HALLS_CODE_PC : HALLS_CODE_STALE);
 
     uart_puts("HALLS: ESR  ");
     uart_puthex64(ctx->esr);
@@ -342,7 +403,9 @@ static void halls_emit(const struct exception_context *ctx, u64 ksp,
     uart_puts("HALLS: SP   ");
     uart_puthex64(ksp);
     uart_puts("\n");
-    halls_emit_code_addr("HALLS: LR   ", ctx->regs[30], koff, el0_source);
+    // x30 is a return address except just after cpu_switch_context's ret has
+    // entered a never-run thread's trampoline, where it is the entry itself.
+    halls_emit_code_addr("HALLS: LR   ", ctx->regs[30], koff, el0_source, HALLS_CODE_RET);
     uart_puts("HALLS: FP   ");
     uart_puthex64(ctx->regs[29]);
     uart_puts("\n");
@@ -369,7 +432,7 @@ static void halls_emit(const struct exception_context *ctx, u64 ksp,
     uart_puthex64(kaslr_kernel_high_base());
     uart_puts("\n");
 
-    halls_backtrace(ctx, koff, el0_source);
+    halls_backtrace(ctx, koff, el0_source, from_exception);
     halls_stack_hexdump(ksp);
     uart_puts("HALLS: --- end ---\n");
 }

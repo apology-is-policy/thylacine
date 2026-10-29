@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ negotiated.c
+@@ -4,7 +4,7 @@
+ int loom_private_wire_build(struct p9_session *s,u8 *out,size_t cap,void *ctx) {
+     struct loom_service_wire *w=ctx;
+     if(!s || !out || !w || w->built || w->fid==P9_NOFID)return -T_E_INVAL;
+-    u32 msize=s->negotiated_msize?s->negotiated_msize:s->msize;
++    u32 msize=s->msize;
+     if(cap>msize)cap=msize;
+     u32 count=w->count;
+     if(w->kind==P9_TREAD || w->kind==P9_TWRITE) {

@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-loom-service-pool.py", line 38, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-loom-service-pool.py", line 33, in main
+    r=subprocess.run([str(exe)],capture_output=True,text=True,timeout=20);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 557, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 1221, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 2154, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 1268, in _check_timeout
+    raise TimeoutExpired(
+    ...<2 lines>...
+            stderr=b''.join(stderr_seq) if stderr_seq else None)
+subprocess.TimeoutExpired: Command '['/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-pool-fixture-424occmn/clean']' timed out after 20 seconds

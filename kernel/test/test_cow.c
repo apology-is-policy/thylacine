@@ -80,21 +80,6 @@
 //     completely untouched -- no half-flagged VMAs, no gratuitously dropped PTEs
 //     -- which is why the flag/write-protect pass runs only on success.
 
-void test_cow_set_sole_never_inherits(void);
-void test_cow_get_put_reports_last_holder(void);
-void test_cow_break_decide_is_sole(void);
-void test_burrow_lazy_free_is_conditional_on_share(void);
-void test_cow_burrow_clone_shares_resident_pages(void);
-void test_cow_addrspace_clone_shares_and_writeprotects(void);
-void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
-void test_cow_clone_shares_readonly_eager_anon(void);
-void test_cow_break_read_then_write_copies(void);
-void test_cow_break_sole_holder_takes_in_place(void);
-void test_cow_break_copy_pins_the_original_until_replaced(void);
-void test_cow_read_queued_behind_break_is_handled(void);
-void test_cow_break_copy_releases_the_share_on_a_failed_replace(void);
-void test_cow_break_copy_last_share_frees_after_the_replace(void);
-
 // One page's worth of Burrow -- enough for every property here, and it keeps
 // the filepages[] allocation identical between the two differential runs.
 #define COW_ONE_PAGE  4096ull
@@ -445,7 +430,45 @@ void test_cow_clone_shares_readonly_eager_anon(void) {
     drop_proc_for_cow(parent);
 }
 
+// Private ring omission is selective. Protect must preserve its kernel tag,
+// and ordinary I/O/storage VMAs retain their existing COW behavior.
+static const char *private_ring_clone_failure(void) {
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
+    struct Burrow *ring = burrow_create_anon(2 * PAGE_SIZE, false);
+    struct Burrow *buffer = burrow_create_anon_lazy(PAGE_SIZE);
+    if (!as || !ring || !buffer) {
+        addrspace_unref(as); burrow_unref(ring); burrow_unref(buffer);
+        return "private COW fixtures";
+    }
+    spin_lock(&as->lock);
+    int r = burrow_map_in(as, true, ring, COW_TEST_VA, 2 * PAGE_SIZE, VMA_PROT_RW);
+    int b = burrow_map_in(as, true, buffer, COW_TEST_VA + 4 * PAGE_SIZE, PAGE_SIZE, VMA_PROT_RW);
+    struct Vma *rv = vma_lookup_in(as, COW_TEST_VA);
+    if (rv) rv->flags |= VMA_FLAG_PRIVATE_RING;
+    int protected = r == 0 ? burrow_protect_in(as, true, COW_TEST_VA, PAGE_SIZE,
+                                               VMA_PROT_READ, false) : -1;
+    rv = vma_lookup_in(as, COW_TEST_VA);
+    struct Vma *tail = vma_lookup_in(as, COW_TEST_VA + PAGE_SIZE);
+    bool tagged = rv && tail && rv != tail && (rv->flags & VMA_FLAG_PRIVATE_RING) &&
+                  (tail->flags & VMA_FLAG_PRIVATE_RING);
+    spin_unlock(&as->lock);
+    struct AddrSpace *child = addrspace_clone(as, true);
+    bool omitted = child && !vma_lookup_in(child, COW_TEST_VA) &&
+                   !vma_lookup_in(child, COW_TEST_VA + PAGE_SIZE);
+    struct Vma *bv = child ? vma_lookup_in(child, COW_TEST_VA + 4 * PAGE_SIZE) : NULL;
+    bool copied = bv && bv->burrow != buffer && (bv->flags & VMA_FLAG_COW);
+    bool refs = burrow_mapping_count(ring) == 2;
+    addrspace_unref(child); addrspace_unref(as); burrow_unref(ring); burrow_unref(buffer);
+    if (!(r == 0 && b == 0 && protected == 0 && tagged))
+        return "private ring protect/split keeps kernel-only tag on both pieces";
+    if (!(omitted && refs)) return "COW child omits private ring mapping and reference";
+    if (!copied) return "COW child still clones ordinary user buffer";
+    return NULL;
+}
+
 void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void) {
+    const char *private_failure = private_ring_clone_failure();
+    TEST_ASSERT(private_failure == NULL, private_failure);
     struct Proc *parent = proc_alloc();
     TEST_ASSERT(parent != NULL, "proc_alloc");
 
@@ -911,8 +934,9 @@ static void f20_last_share_probe(struct Proc *p, struct page *original) {
     if (g_f20_probe_calls++ != 0) return;
     // The other holder's mapping goes: its share is put (2 -> 1). The Burrow's
     // free runs deferred, after the parent's own lock; the buddy sits below
-    // every lock held here, and the harness's secondaries are parked, so the
-    // magazine drain is the quiescent one it is documented as.
+    // every lock held here. The drain takes each set's own lock, so it is safe;
+    // what the count below still needs is that no peer refills a set between
+    // the drain and the sample.
     vma_drain_in(g_f20_parent->as);
     g_f20_share_after_drain = cow_page_share_for_test(original);
     magazines_drain_all();

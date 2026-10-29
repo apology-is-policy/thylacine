@@ -1070,8 +1070,8 @@ void test_rendez_reader_recv_unwinds_death(void) {
     ready(reader);
     // The deadline bounds the old rule's block-through, so this wait ends
     // either way; the verdict is which return it saw.
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
-    bool joinable  = g_rf_run_cnt >= 2u;
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2);
+    bool joinable  = g_rf_run_cnt >= 2;
     int  rc        = g_rf_sleep_rc;
     bool backref   = g_rf_unhooked;
     bool no_waiter = g_rf_rendez.waiter == NULL;
@@ -1118,24 +1118,24 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
     int rtid = reader->tid;
     ready(reader);
     // reader is compared as a value only, while it sleeps (it cannot be freed).
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1u && test_thread_sleeping(g_rf_proc, rtid));
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1 && test_thread_sleeping(g_rf_proc, rtid));
     bool slept = g_rf_run_cnt == 1u && test_thread_sleeping(g_rf_proc, rtid) &&
                  g_rf_rendez.waiter == reader;
 
     // The death, as the group-termination cascade delivers it to a sleeper.
     __atomic_store_n(&g_rf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
     int woke = wakeup(&g_rf_rendez);
-    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
-    bool unwound = g_rf_run_cnt >= 2u;
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2);
+    bool unwound = g_rf_run_cnt >= 2;
     int  rc      = g_rf_sleep_rc;
     // The old rule re-slept here; its cond releases it, so a RED run still
     // joins its thread.
     if (!unwound) {
         g_rf_cond = 1;
         (void)wakeup(&g_rf_rendez);
-        TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
+        TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2);
     }
-    bool joinable = g_rf_run_cnt >= 2u;
+    bool joinable = g_rf_run_cnt >= 2;
     if (joinable) {
         test_thread_join_last(g_rf_proc, &g_rf_exited);
         test_proc_free_drained(g_rf_proc);
@@ -1160,11 +1160,6 @@ void test_rendez_reader_recv_unwinds_death_sleep(void) {
 // must leave the sleeper asleep. A leg releases and joins its sleeper before
 // the test asserts anything, so a RED run leaks no parked thread.
 // ---------------------------------------------------------------------------
-
-extern void proc_test_link(struct Proc *p);
-extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
-extern void proc_test_unlink(struct Proc *p);
-extern void proc_test_orphan_rule(struct Proc *dying);
 
 static volatile u32  g_cw_run;
 static volatile int  g_cw_rc;
@@ -1623,8 +1618,6 @@ void test_rendez_caught_note_one_unwind(void) {
 // ---------------------------------------------------------------------------
 // The claim ends at the claimant's EL0-return tail (VIV-EINTR round-2 F1).
 // ---------------------------------------------------------------------------
-
-void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 // The EL0-return tail of the call that just returned, run on this kernel
 // thread. The sp passes the tail's own checks but sits below a Linux signal
@@ -2136,15 +2129,12 @@ static bool nt_teardown(struct Thread *t[2]) {
     return true;
 }
 
-void notes_release_claims_for_test(struct Thread *t);
-
 // rendez.caught_note_prefers_awake -- the walk prefers a thread that is not
 // blocked: main, awake, is designated and the peer asleep in an unwinding wait
 // is not woken (the L285 shape). Main then enters an unwinding wait and unwinds
 // at once, its designation turned into its claim. The control, one variable
 // away: once main's claim is released, the walk reaches the peer, so the peer's
 // stillness was the pick's doing.
-void test_rendez_caught_note_prefers_awake(void);
 void test_rendez_caught_note_prefers_awake(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2184,7 +2174,6 @@ void test_rendez_caught_note_prefers_awake(void) {
 // rendez.caught_note_poster_first -- the walk prefers the posting thread. The
 // same two awake threads; only the poster differs. Posted from outside the
 // Proc, the note goes to main; posted by the peer, to the peer.
-void test_rendez_caught_note_poster_first(void);
 void test_rendez_caught_note_poster_first(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2233,14 +2222,13 @@ static void nt_handoff_leg(u32 main_step, u32 peer_step, int peer_rc, bool *ok,
     *down = nt_teardown(t);
 }
 
-void test_rendez_caught_note_handoff(void);
 void test_rendez_caught_note_handoff(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     static const char *const why[3] = {
         "main blocked in a wait that holds: the peer was designated and unwound",
         "main masked the family and blocked: the peer was designated and unwound",
-        "main blocked in a timed wait that holds: the peer, in a timed wait that "
-        "unwinds, was designated and unwound",
+        ("main blocked in a timed wait that holds: the peer, in a timed wait that "
+         "unwinds, was designated and unwound"),
     };
     bool ok[3], tgt[3], unw[3], held[3], drop[3], down[3];
     nt_handoff_leg(NT_HWAIT,  NT_UWAIT,  SLEEP_NOTEINTR,
@@ -2264,7 +2252,6 @@ void test_rendez_caught_note_handoff(void) {
 // the THREAD_EXITING commit, and the walk goes on to a thread that can take the
 // note. Main, awake and designated, exits through thread_exit_self; the peer,
 // asleep in an unwinding wait, is designated and unwinds.
-void test_rendez_caught_note_exit_drop(void);
 void test_rendez_caught_note_exit_drop(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2295,7 +2282,6 @@ void test_rendez_caught_note_exit_drop(void) {
 // queued. A second interrupt finds the family claimed,
 // so no thread is picked: only the walk's re-wake of the holder ends main's
 // wait (caught_target.tla BUGGY_NO_REKICK).
-void test_rendez_caught_note_holder_rewake(void);
 void test_rendez_caught_note_holder_rewake(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
@@ -2363,7 +2349,6 @@ static void nt_native_leg(bool linux_pheno, bool main_awake, struct nt_native *o
     o->down = nt_teardown(t);
 }
 
-void test_rendez_caught_note_native_kicks_only(void);
 void test_rendez_caught_note_native_kicks_only(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct nt_native nat, lin, nat_awake, lin_awake;
@@ -2395,9 +2380,6 @@ void test_rendez_caught_note_native_kicks_only(void) {
 // threads sleep in unwinding waits; the stale picks are forced. The control,
 // one variable away, forces one stale pick fewer: the last re-pick designates
 // main, which unwinds alone while the peer sleeps on.
-u32 caught_force_stale_for_test(struct Proc *p, u32 n);
-u32 caught_repicks_for_test(void);
-
 struct nt_repick {
     bool ok, down;
     u32  left;          // forced stale picks the walk did not consume
@@ -2447,7 +2429,6 @@ static void nt_repick_leg(u32 stale, struct nt_repick *o) {
     o->down = nt_teardown(t);
 }
 
-void test_rendez_caught_note_repick_fallback(void);
 void test_rendez_caught_note_repick_fallback(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     const u32 n = caught_repicks_for_test();
@@ -2520,7 +2501,6 @@ static struct test_caught_leg cwt_leg(bool linux_pheno, bool *kid_kept) {
     return leg;
 }
 
-void test_rendez_caught_note_ends_wait4(void);
 void test_rendez_caught_note_ends_wait4(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     bool kept = false, ctl_kept = false;

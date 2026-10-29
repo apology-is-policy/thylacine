@@ -1,0 +1,11 @@
+{
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/loom_service_operation.c": "d8978b61079b08356b6dd2a3cffad8c2b405ffeef8bdedbae6ac16cebed02d47",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/loom_service_rpc.c": "f4f0c58850c5e49ad23127ca2764ae1ff601acc25e372f7854ee295039b5000e",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/include/thylacine/loom_service_rpc.h": "fa070b15fc278f86e281acd1999a42e3228a6b37385358730ae20ccb43ed04bc",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/include/thylacine/loom_service_operation.h": "848abe5dfc1a47afb823103b1ee7092fbabfa9674aaba32d9d86ff43ec23b7e7",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/fixture.c": "13833c3b5f9ba517be39d07df01db28094c3f1d267e93bbf090e5872041b77fe",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/run-controls.py": "f659dc3938c42ef3ec3662a0dc77fbd38e742a656d2a74a81a2e27dc25286690",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/check-operation.py": "6e753ecf127ba373f853f7e0a5bd6524b38c8b2686a17a1f9de018ace0ce6078",
+  "work/oct5-as-r9/astra-takeover/owner-program-draft/check-arm64.py": "4441b4ef07bd9c628f7b14f4203c31694c1432753285567fe233d3dfcadd0ff3"
+}

@@ -1,0 +1,40 @@
+{
+  "owner": "astra",
+  "results": [
+    {
+      "label": "default1",
+      "minimum": 9059,
+      "serial": "4c80ef33b4dd651a5e35422f2a41e777444593323acb7cf54575037d68818b35",
+      "harness": "9f89799524ffccbc51ccc143395b6e8a9d23638c78478ea60d83c17a193be156"
+    },
+    {
+      "label": "default4",
+      "minimum": 9176,
+      "serial": "d4e767faa56e159391aedeae05da771496d5466bdad6eb7c30e9da2c5d13e7ca",
+      "harness": "c97e7a8d7f45b0781e325109019208b75d4c626e428a018f627c36a2fb54776c"
+    },
+    {
+      "label": "default8",
+      "minimum": 9330,
+      "serial": "661d5235445f304280f3221be91819d2dee04bf286ebb8972dbcd4ceff8f9815",
+      "harness": "2973fd1009bcc8a9a2fdd36bac385e77301738721f4d2e8880d3bc64813e012b"
+    },
+    {
+      "label": "ubsan4",
+      "minimum": 9311,
+      "serial": "1919b451a2470c6fd4e5246b06eac656b869c5374e249ffb500fe099d0444058",
+      "harness": "536e9d65c569da66e9a5dcd5e4ae90f50f136efda2a8bf94e8b341ef27ae6fbe"
+    },
+    {
+      "label": "ubsan8",
+      "minimum": 9311,
+      "serial": "ef1522121587db4139021256bccdbde0367caaad0976143cd9a84e01f29331ac",
+      "harness": "53c45cc51d2c6bf4ace7027d349e77334f2f324f5cb5090eea4467533d889cdc"
+    }
+  ],
+  "source": "7f3f90471804f3162f969724e1f2b107c71058a4",
+  "diff_sha256": "3bd2727fab51e62de9738dfbaf23defe3c25e142b6fcdf381cf127ab2a9ce459",
+  "astra_preserved": 10,
+  "stratum": "clean61dde37",
+  "limit": "Five one-boot smoke rows, not50boot gate. Controlled peer; hostile fault schedules and safe clients remain."
+}

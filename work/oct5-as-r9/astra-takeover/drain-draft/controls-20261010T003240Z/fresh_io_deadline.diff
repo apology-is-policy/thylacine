@@ -1,0 +1,11 @@
+--- control.c
++++ fresh_io_deadline.c
+@@ -2174,7 +2174,7 @@
+             extinction("IO preflight operation list corrupt");
+         struct loom_service_request *r=&l->service_requests.records[o->request.index];
+         if(r->identity!=o->request.identity)extinction("IO preflight request changed");
+-        if(!reason && o->phase!=LRPC_TERMINAL && r->deadline && r->deadline<=now)
++        if(false && !reason && o->phase!=LRPC_TERMINAL && r->deadline && r->deadline<=now)
+             reason=-T_E_TIMEDOUT;
+     }
+     if(count!=p->op_count)extinction("IO preflight operation count corrupt");

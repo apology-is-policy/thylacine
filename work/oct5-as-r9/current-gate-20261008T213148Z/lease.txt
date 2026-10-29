@@ -1,0 +1,4 @@
+mac   HELD by you for 48s, 2.0h left
+        why: Astra: correct native fixture memset dependency, rerun controls and full gate
+pi    FREE
+disk: 11.6 GiB available at /Users/northkillpd/projects/thylacine-astra

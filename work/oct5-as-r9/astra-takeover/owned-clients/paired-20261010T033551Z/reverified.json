@@ -1,0 +1,28 @@
+{
+  "owner": "astra",
+  "source_files": 9,
+  "commands": 20,
+  "logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "clang-version": "317c2c7c562ce9acb2c712c2fbcaaf7da6f4502b839213e835fe114f158f790e",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "5de4b690f8c450dc4195e8c66b4242906886af2337b4d5e3d8fa0ca9660fb646",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "1f3c4db0ca109d15213788ea2dcf94e0c3c697e907508cb5799fa5f4b5fa8323",
+    "c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-run": "95a79953ff58a3d4ce0af2a5ff672230d795bbd6c361bd7a2c0e33b0bf472c1d",
+    "rust-mutant-receipt-index-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-mutant-receipt-index-run": "4906950391b8cecfbcc7dee0606242954fe231540842c0a6bd148cfcb801a77f",
+    "c-mutant-receipt-index-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-mutant-receipt-index-run": "7088aeb9cc31310679ad50a9ae0b7fe443df1f409e7a7dbb4b4ca776cc0ce13e",
+    "rust-mutant-double-ack-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-mutant-double-ack-run": "44305e49f3a712805df65a2910cc8bc9ef7deb192daacdd39b5524ad93af94ae",
+    "c-mutant-double-ack-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-mutant-double-ack-run": "fde9adcbad6410dee24a89037dc422e698d9cbc5fb2adcf879545c0ad005fd4f",
+    "rust-mutant-overlap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-mutant-overlap-run": "ff9470966a9a9bfc3a90501a1db03fd31a9631d426ac0d03fab9966bcfa1178d",
+    "c-mutant-overlap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-mutant-overlap-run": "52fde652f2bce86c4a0bd7181afb2fd04578d45f961f75b38170772f6afd8641"
+  },
+  "limits": "Single-agent raw evidence verification; uninstalled reader, not memory-model proof or owned-client qualification"
+}

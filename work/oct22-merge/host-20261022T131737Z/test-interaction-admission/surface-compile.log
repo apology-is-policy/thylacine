@@ -1,0 +1,85 @@
+warning: constant `T_PTY_INTERACTION_BIND` is never used
+ --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:6:11
+  |
+6 | pub const T_PTY_INTERACTION_BIND: u64 = 16;
+  |           ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `T_PTY_INTERACTION_UNBIND` is never used
+ --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:7:11
+  |
+7 | pub const T_PTY_INTERACTION_UNBIND: u64 = 17;
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_WATCH` is never used
+ --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:8:11
+  |
+8 | pub const T_PTY_INTERACTION_WATCH: u64 = 18;
+  |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_STATE` is never used
+ --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:9:11
+  |
+9 | pub const T_PTY_INTERACTION_STATE: u64 = 19;
+  |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_ACK` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:10:11
+   |
+10 | pub const T_PTY_INTERACTION_ACK: u64 = 20;
+   |           ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_CHECK` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:11:11
+   |
+11 | pub const T_PTY_INTERACTION_CHECK: u64 = 21;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_VERSION` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:12:11
+   |
+12 | pub const T_PTY_INTERACTION_VERSION: u64 = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_STATE_BYTES` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:13:11
+   |
+13 | pub const T_PTY_INTERACTION_STATE_BYTES: u64 = 80;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_CHECK_BYTES` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:14:11
+   |
+14 | pub const T_PTY_INTERACTION_CHECK_BYTES: u64 = 24;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_LIVE` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:15:11
+   |
+15 | pub const T_PTY_INTERACTION_LIVE: u64 = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_ACKNOWLEDGED` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:16:11
+   |
+16 | pub const T_PTY_INTERACTION_ACKNOWLEDGED: u64 = 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_PTY_INTERACTION_ID_MAX` is never used
+  --> /Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/pty_interaction.rs:17:11
+   |
+17 | pub const T_PTY_INTERACTION_ID_MAX: u64 = 0x7fff_ffff_ffff_ffff;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `generation` is never read
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T131737Z/test-interaction-admission/surface-body.rs:14:5
+   |
+10 | pub(super) struct Binding {
+   |                   ------- field in this struct
+...
+14 |     generation: u32,
+   |     ^^^^^^^^^^
+
+warning: 13 warnings emitted
+

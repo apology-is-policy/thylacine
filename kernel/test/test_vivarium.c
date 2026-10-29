@@ -43,20 +43,10 @@
 #include <thylacine/dev.h>           // C2-k1b F1: devcons/devramfs + spoor_is_console
 
 #include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
-
-void test_vivarium_t1_renumbers(void);
-void test_vivarium_rejects_are_deliberate(void);
-void test_vivarium_unknown_forwards(void);
-void test_vivarium_fails_closed(void);
-void test_vivarium_no_wide_alias(void);
-void test_vivarium_openat_domain(void);
-void test_vivarium_openat_at_fdcwd(void);
-void test_vivarium_openat_build(void);
-void test_vivarium_stat_to_linux(void);
-void test_vivarium_fstatat_domain(void);
-void test_vivarium_mmap_domain(void);
-void test_vivarium_clone_domain(void);
-void test_vivarium_wait4_domain(void);
+#include "../../arch/arm64/exception.h"
+#include "../../arch/arm64/uart.h"
+#include <thylacine/errno.h>
+#include <thylacine/thread.h>
 
 // A recognisable argument vector: every word distinct and non-zero, so a
 // dropped, duplicated, or reordered word is visible rather than accidentally
@@ -109,6 +99,149 @@ void test_vivarium_t1_renumbers(void) {
     TEST_EXPECT_EQ((int)T_SEEK_SET, 0, "T_SEEK_SET == Linux SEEK_SET");
     TEST_EXPECT_EQ((int)T_SEEK_CUR, 1, "T_SEEK_CUR == Linux SEEK_CUR");
     TEST_EXPECT_EQ((int)T_SEEK_END, 2, "T_SEEK_END == Linux SEEK_END");
+}
+
+// A word Linux declares narrower than a register arrives with an unspecified
+// high half (AAPCS64), and Linux's SYSCALL_DEFINE narrows it by construction.
+// The native handlers refuse a word that does not fit (ERRORS.md principle 6),
+// so a T1 row narrows exactly the words Linux's prototype names and carries the
+// rest whole. The expected widths are Linux's prototypes, not the table:
+//   read/write/close(unsigned int fd, ...), lseek(unsigned int fd, off_t,
+//   unsigned int whence), pread64/pwrite64(unsigned int fd, ...),
+//   getpgid/getsid(pid_t), exit_group(int). exit and getpid read no word. The
+//   list is every row of g_viv_t1, and its length is checked against the table.
+void test_vivarium_t1_narrows_linux_widths(void) {
+    static const struct { u64 nr; u8 u32w, s32w; const char *what; } rows[] = {
+        { VIV_LINUX_READ,       0x1, 0,   "read" },
+        { VIV_LINUX_WRITE,      0x1, 0,   "write" },
+        { VIV_LINUX_CLOSE,      0x1, 0,   "close" },
+        { VIV_LINUX_LSEEK,      0x5, 0,   "lseek" },
+        { VIV_LINUX_PREAD64,    0x1, 0,   "pread64" },
+        { VIV_LINUX_PWRITE64,   0x1, 0,   "pwrite64" },
+        { VIV_LINUX_GETPGID,    0,   0x1, "getpgid" },
+        { VIV_LINUX_GETSID,     0,   0x1, "getsid" },
+        { VIV_LINUX_EXIT_GROUP, 0,   0x1, "exit_group" },
+        { VIV_LINUX_EXIT,       0,   0,   "exit" },
+        { VIV_LINUX_GETPID,     0,   0,   "getpid" },
+    };
+    TEST_EXPECT_EQ((u64)(sizeof rows / sizeof rows[0]), (u64)vivarium_t1_count_for_test(),
+                   "the list names every T1 row: a new row joins it");
+    for (u32 r = 0; r < sizeof rows / sizeof rows[0]; r++) {
+        u64 args[VIV_NARGS];
+        struct viv_call out;
+        // Junk above every low half, and bit 31 set in it, so a zero-extension
+        // and a sign-extension give different words.
+        for (u32 i = 0; i < VIV_NARGS; i++) args[i] = 0xA5A5000000000000ull | (0x80001000u + i);
+        TEST_EXPECT_EQ((int)vivarium_translate(rows[r].nr, args, &out), (int)VIV_TRANSLATED,
+                       rows[r].what);
+        for (u32 i = 0; i < VIV_NARGS; i++) {
+            u64 want = args[i];
+            if (rows[r].u32w & (1u << i))      want = (u64)(u32)args[i];
+            else if (rows[r].s32w & (1u << i)) want = (u64)(s64)(s32)(u32)args[i];
+            TEST_EXPECT_EQ(out.args[i], want, rows[r].what);
+        }
+    }
+}
+
+static s64 viv_shell_call(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3) {
+    struct exception_context c;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = nr;
+    c.regs[0] = a0; c.regs[1] = a1; c.regs[2] = a2; c.regs[3] = a3;
+    bool native = viv_linux_dispatch_for_test(&c, kproc());
+    current_thread()->note_interruptible = false;   // syscall_dispatch's job on the way out
+    return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
+}
+
+// A T2 shell narrows its own words by its own Linux prototype. readlinkat's
+// bufsiz is an int: Linux refuses one that is not positive before it reads the
+// path, and a high half it never sees cannot widen the copy. getrandom's flags
+// is an unsigned int: a high half Linux drops must not reach the native
+// handler, which refuses one.
+void test_vivarium_t2_shells_narrow_linux_widths(void) {
+    const u64 at_fdcwd = (u64)(s64)VIV_AT_FDCWD, bad_path = 0x10;
+    s64 neg  = viv_shell_call(VIV_LINUX_READLINKAT, at_fdcwd, bad_path, 0x20, (u64)-1ll);
+    s64 zero = viv_shell_call(VIV_LINUX_READLINKAT, at_fdcwd, bad_path, 0x20, 0);
+    s64 junk = viv_shell_call(VIV_LINUX_READLINKAT, at_fdcwd, bad_path, 0x20,
+                              0xFFFFFFFF00000010ull);
+    s64 rnd0 = viv_shell_call(VIV_LINUX_GETRANDOM, 0, 0, 0, 0);
+    s64 rndw = viv_shell_call(VIV_LINUX_GETRANDOM, 0, 0, 1ull << 32, 0);
+    // writev/readv take the fd as fdget_pos's unsigned int. A zero-count call
+    // still looks the fd up (a dead one answers EBADF), so the narrow call is
+    // the control and the wide one must answer the same.
+    hidx_t rd = -1, wr = -1;
+    int pipe_rc = sys_pipe_for_proc(kproc(), &rd, &wr);
+    s64 wv  = viv_shell_call(VIV_LINUX_WRITEV, (u64)wr, 0, 0, 0);
+    s64 wvw = viv_shell_call(VIV_LINUX_WRITEV, (1ull << 32) | (u64)wr, 0, 0, 0);
+    s64 rv  = viv_shell_call(VIV_LINUX_READV, (u64)rd, 0, 0, 0);
+    s64 rvw = viv_shell_call(VIV_LINUX_READV, (1ull << 32) | (u64)rd, 0, 0, 0);
+    if (pipe_rc == 0) { (void)handle_close(kproc(), rd); (void)handle_close(kproc(), wr); }
+
+    TEST_EXPECT_EQ(neg, -(s64)T_E_INVAL, "readlinkat: a negative bufsiz is refused before the path");
+    TEST_EXPECT_EQ(zero, -(s64)T_E_INVAL, "readlinkat: a zero bufsiz is refused");
+    TEST_EXPECT_EQ(junk, -(s64)T_E_FAULT,
+                   "readlinkat: junk over a positive low half reaches the path read");
+    TEST_EXPECT_EQ(rnd0, (s64)0, "getrandom: an empty request answers 0");
+    TEST_EXPECT_EQ(rndw, rnd0, "getrandom: a high half in flags is Linux's to drop");
+    TEST_ASSERT(pipe_rc == 0, "fixture: a pipe in the dispatching Proc");
+    TEST_EXPECT_EQ(wv, (s64)0, "writev: a zero-count call on a live fd answers 0");
+    TEST_EXPECT_EQ(wvw, wv, "writev: a high half on the fd is Linux's to drop");
+    TEST_EXPECT_EQ(rv, (s64)0, "readv: a zero-count call on a live fd answers 0");
+    TEST_EXPECT_EQ(rvw, rv, "readv: a high half on the fd is Linux's to drop");
+}
+
+// A renumbered (T1) call hands back every register but x0 as the guest left it,
+// as Linux does (ret_to_user restores pt_regs); musl's syscall asm declares x8
+// and x1-x5 inputs, so a compiler may reuse them after the svc. Before the
+// restore the guest's x8 came back as the native number -- getpid's 72 is
+// Linux's pselect6 -- and a narrowed word came back narrowed. And Linux reads
+// x8 as an int, so a number with junk above bit 31 is the call its low half
+// names. Run in a child Proc that turns itself into a Linux guest, through the
+// real dispatch.
+#define VIV_REGS_JUNK 0xA5A5000000000000ull
+static void viv_t1_regs_child(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    self->phenotype = PHENO_LINUX;
+    u32 bad = 0;
+
+    struct exception_context c;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = (1ull << 32) | VIV_LINUX_GETPID;
+    for (u32 i = 1; i < VIV_NARGS; i++) c.regs[i] = VIV_REGS_JUNK | i;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)self->pid)                    bad |= 1u << 0;
+    if (c.regs[8] != ((1ull << 32) | VIV_LINUX_GETPID)) bad |= 1u << 1;
+    for (u32 i = 1; i < VIV_NARGS; i++)
+        if (c.regs[i] != (VIV_REGS_JUNK | i))           bad |= 1u << 2;
+
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_LSEEK;
+    c.regs[0] = 0x7ffff000u;                            // no such fd
+    c.regs[1] = 0;
+    c.regs[2] = VIV_REGS_JUNK | 0u;                     // SEEK_SET under junk
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)               bad |= 1u << 3;
+    if (c.regs[2] != (VIV_REGS_JUNK | 0u))              bad |= 1u << 4;
+    if (c.regs[8] != VIV_LINUX_LSEEK)                   bad |= 1u << 5;
+
+    self->phenotype = PHENO_NATIVE;
+    if (bad) {
+        uart_puts("    viv_t1_regs_child: failed checks mask ");
+        uart_puthex64(bad);
+        uart_puts("\n");
+    }
+    exits(bad ? "fail" : "ok");
+}
+
+void test_vivarium_t1_keeps_guest_registers(void) {
+    int pid = rfork(RFPROC, viv_t1_regs_child, NULL);
+    TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
+    TEST_EXPECT_EQ(status, 0,
+        "a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half");
 }
 
 // The rejections are DECISIONS, not gaps, so they are asserted by name. If a
@@ -238,6 +371,38 @@ void test_vivarium_rejects_are_deliberate(void) {
                 "pselect6 collides with SYS_GETPID -- known, and reachable by neither");
     TEST_ASSERT(VIV_LINUX_PPOLL == SYS_GETUID,
                 "ppoll collides with SYS_GETUID -- known, and reachable by neither");
+
+    // Vote 13 moved SYS_SRV_REGISTRY_NEW to 134, which lifted the ceiling over
+    // the signal family's 128..134 (vivarium.c argues each). rt_sigaction is
+    // the one that meets a native number. Its soundness is the arm's reach --
+    // the caller's own memory and its own sigtab, argued in vivarium.c -- and
+    // these asserts pin only the common case: a WELL-FORMED registry call from
+    // a native caller mis-declared as Linux arrives with its flags word, 0, as
+    // sigsetsize, and the decision refuses that before anything is written.
+    // The control one variable away is the same call at the size musl passes,
+    // which is also what a malformed flags-8 call gets: translated.
+    TEST_ASSERT(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
+                "rt_sigaction collides with SYS_SRV_REGISTRY_NEW -- known, and reachable by neither");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 0) == VIV_FORWARD,
+                "a well-formed registry call (flags 0 as sigsetsize 0) is refused first");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 8) == VIV_TRANSLATED,
+                "control: the same call at sigsetsize 8 translates");
+
+    // restart_syscall (128) meets SYS_ICACHE_SYNC_SPACE (asserted in
+    // vivarium.c); the other four meet an empty gap (syscall.native_gap_
+    // unassigned pins it). Each is consumed before the native switch: its
+    // verdict, by name. (sigaltstack, 132, is pinned to ENOSYS above for the
+    // 6.23 detector.)
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RESTART_SYSCALL, args, &out),
+                   (int)VIV_ENOSYS, "restart_syscall (128) is an ENOSYS row");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_KILL, args, &out),
+                   (int)VIV_TIER2, "kill (129) is a TIER2 row (vivarium_kill_decide)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TKILL, args, &out),
+                   (int)VIV_TIER2, "tkill (130) is a TIER2 row (vivarium_kill_decide)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TGKILL, args, &out),
+                   (int)VIV_TIER2, "tgkill (131) is a TIER2 row (vivarium_kill_decide)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
+                   (int)VIV_ENOSYS, "rt_sigsuspend (133) is an ENOSYS row");
 }
 
 void test_vivarium_unknown_forwards(void) {
@@ -2064,7 +2229,6 @@ void test_vivarium_notemask_to_sigset(void) {
 // the point where the V-6b exclusivity rule stops being tidiness and becomes
 // load-bearing: without it there would be no single answer to give.
 // -----------------------------------------------------------------------------
-void test_vivarium_signote_reverse(void);
 void test_vivarium_signote_reverse(void) {
     // Every signal that owns its note exclusively must round-trip through both
     // directions. Driven from viv_signal_note itself so a future row cannot be
@@ -2107,7 +2271,6 @@ void test_vivarium_signote_reverse(void) {
 // -----------------------------------------------------------------------------
 // vivarium.sigframe — the Tier-1 frame the guest reads (V-6c).
 // -----------------------------------------------------------------------------
-void test_vivarium_sigframe(void);
 void test_vivarium_sigframe(void) {
     // The layout constants ARE the ABI. These are the numbers the aarch64
     // target compiler produces for musl's own declarations; the host compiler
@@ -2186,7 +2349,6 @@ void test_vivarium_sigframe(void) {
 // command builder, the connection-number parse, and the table.
 // =============================================================================
 
-void test_vivarium_socket_domain(void);
 void test_vivarium_socket_domain(void) {
     enum viv_net_proto proto = (enum viv_net_proto)0xff;
     s32 err = 0;
@@ -2240,7 +2402,6 @@ void test_vivarium_socket_domain(void) {
     TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_UDP)[0] == 'u', "udp dir");
 }
 
-void test_vivarium_getsockopt_domain(void);
 void test_vivarium_getsockopt_domain(void) {
     s32 err = -1;
 
@@ -2267,7 +2428,6 @@ void test_vivarium_getsockopt_domain(void) {
     TEST_ASSERT(!vivarium_getsockopt_decide(1, 4, NULL), "NULL err -> false");
 }
 
-void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sendrecv_domain(void) {
     s32 err = -1;
     const u8 CONN = 2;   // VIV_SOCK_CONNECTED
@@ -2343,7 +2503,6 @@ void test_vivarium_sendrecv_domain(void) {
     TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 0, false, NULL), "NULL err -> false");
 }
 
-void test_vivarium_sockaddr(void);
 void test_vivarium_sockaddr(void) {
     u8  ip[4];
     u16 port = 0;
@@ -2370,7 +2529,6 @@ void test_vivarium_sockaddr(void) {
     TEST_ASSERT(!vivarium_sockaddr_in_parse(NULL, 16, ip, &port), "NULL refused");
 }
 
-void test_vivarium_net_cmd(void);
 void test_vivarium_net_cmd(void) {
     char buf[48];
     u8   ip[4] = { 10, 0, 2, 2 };
@@ -2396,7 +2554,6 @@ void test_vivarium_net_cmd(void) {
     TEST_ASSERT(vivarium_net_cmd_ipport(NULL, 48, "connect", ip, 80) == 0, "NULL -> 0");
 }
 
-void test_vivarium_conn_n(void);
 void test_vivarium_conn_n(void) {
     u32 n = 0xffffffffu;
     TEST_ASSERT(vivarium_parse_conn_n("0", 1, &n) && n == 0, "connection 0 is valid");
@@ -2419,7 +2576,6 @@ void test_vivarium_conn_n(void) {
 // The socktab is thread-safe since N-3 (peer threads share Proc.socktab). Its
 // API is snapshot-read (get) + identity-guarded keyed writes -- a returned entry
 // pointer no longer exists -- so these drive it through that surface.
-void test_vivarium_socktab(void);
 void test_vivarium_socktab(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2431,13 +2587,13 @@ void test_vivarium_socktab(void) {
     TEST_ASSERT(!viv_socktab_get(&tab, 0, &e), "fd 0 does not match a free entry");
     TEST_ASSERT(!viv_socktab_get(NULL, 3, &e), "NULL table is safe");
 
-    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5, VIV_SOCK_FRESH, NULL),
                 "fd 0 is a claimable socket");
     TEST_ASSERT(viv_socktab_get(&tab, 0, &e) && e.fd == 0 && e.n == 5, "found by fd");
     TEST_ASSERT(e.state == VIV_SOCK_FRESH, "a new socket is FRESH, not CONNECTED");
     TEST_ASSERT(!viv_socktab_get(&tab, 1, NULL), "a different fd does not match");
 
-    TEST_ASSERT(viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2, VIV_SOCK_FRESH),
+    TEST_ASSERT(viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2, VIV_SOCK_FRESH, NULL),
                 "second, distinct");
     TEST_ASSERT(viv_socktab_get(&tab, 9, &e) && e.proto == VIV_NET_UDP,
                 "the second is a distinct UDP entry");
@@ -2451,7 +2607,7 @@ void test_vivarium_socktab(void) {
     viv_socktab_drop(&tab, 12345);          // an fd that was never a socket
     viv_socktab_drop(NULL, 9);              // NULL-safe
 
-    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77, VIV_SOCK_FRESH),
+    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77, VIV_SOCK_FRESH, NULL),
                 "reclaim fd 0");
     TEST_ASSERT(viv_socktab_get(&tab, 0, &e) && e.n == 77 && e.state == VIV_SOCK_FRESH,
                 "a reused slot carries no stale (proto, N) -- the close-hook "
@@ -2460,11 +2616,11 @@ void test_vivarium_socktab(void) {
     // Exhaustion is EMFILE-shaped (false), not a wrap or an overwrite.
     u32 claimed = 2;   // fds 0 and 9 are live
     for (s32 fd = 100; claimed < VIV_SOCK_MAX; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL)) break;
         claimed++;
     }
     TEST_ASSERT(claimed == VIV_SOCK_MAX, "the table fills to exactly VIV_SOCK_MAX");
-    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH),
+    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL),
                 "a full table refuses rather than overwriting");
 }
 
@@ -2475,7 +2631,6 @@ void test_vivarium_socktab(void) {
 // control one variable away: a sibling row survives the replace; the epoch
 // stays monotonic across the reset so a keyed write from before it lands
 // nowhere.
-void test_vivarium_socktab_reset(void);
 void test_vivarium_socktab_reset(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2486,12 +2641,12 @@ void test_vivarium_socktab_reset(void) {
     struct viv_sock e;
 
     // Replace-on-claim: fd 5 claimed twice ends up as ONE row, the second.
-    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 7, VIV_SOCK_FRESH), "claim fd 5 (tcp,7)");
-    TEST_ASSERT(viv_socktab_claim(&tab, 6, VIV_NET_TCP, 8, VIV_SOCK_FRESH), "claim fd 6 (sibling)");
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 7, VIV_SOCK_FRESH, NULL), "claim fd 5 (tcp,7)");
+    TEST_ASSERT(viv_socktab_claim(&tab, 6, VIV_NET_TCP, 8, VIV_SOCK_FRESH, NULL), "claim fd 6 (sibling)");
     TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.proto == VIV_NET_TCP && e.n == 7,
                 "pre: fd 5 is (tcp,7)");
     u64 stale_epoch = e.epoch;
-    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_UDP, 9, VIV_SOCK_FRESH), "re-claim fd 5 (udp,9)");
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_UDP, 9, VIV_SOCK_FRESH, NULL), "re-claim fd 5 (udp,9)");
     u32 rows = 0, rows_fd5 = 0;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         if (tab.s[i].state != VIV_SOCK_FREE) { rows++; if (tab.s[i].fd == 5) rows_fd5++; }
@@ -2514,7 +2669,7 @@ void test_vivarium_socktab_reset(void) {
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) if (tab.s[i].state != VIV_SOCK_FREE) rows++;
     TEST_EXPECT_EQ((u64)rows, 0ull, "no slot left claimed");
     TEST_ASSERT(viv_socktab_has_room(&tab), "the table is usable after the reset");
-    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 1, VIV_SOCK_FRESH), "re-claim after the reset");
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL), "re-claim after the reset");
     TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.epoch > epoch_before_reset,
                 "the epoch stays monotonic across a reset");
     TEST_ASSERT(!viv_socktab_set_state(&tab, 5, epoch_before_reset, VIV_SOCK_CONNECTED),
@@ -2533,7 +2688,6 @@ void test_vivarium_socktab_reset(void) {
 // next fd-creating syscall gets that index back, and a later connect() finds a
 // stale entry -- writing a dial verb to a STRANGER'S connection. That is the
 // failure this asserts is impossible once drop has run.
-void test_vivarium_socktab_close_hook(void);
 void test_vivarium_socktab_close_hook(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2543,7 +2697,7 @@ void test_vivarium_socktab_close_hook(void) {
 
     // fd 4 is a TCP socket on connection 11, born CONNECTED (accept's shape).
     struct viv_sock e;
-    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED),
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED, NULL),
                 "claim fd 4 connected");
     TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTED,
                 "an accepted fd is born CONNECTED, not FRESH");
@@ -2558,7 +2712,7 @@ void test_vivarium_socktab_close_hook(void) {
                 "entry, connect() on an unrelated file would dial connection 11");
 
     // And when fd 4 legitimately becomes a socket again, it is a FRESH one.
-    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3, VIV_SOCK_FRESH),
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3, VIV_SOCK_FRESH, NULL),
                 "reclaim fd 4");
     TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_FRESH,
                 "the new socket is FRESH, not CONNECTED");
@@ -2570,7 +2724,6 @@ void test_vivarium_socktab_close_hook(void) {
 // V-5b: the bind fields are part of the recycled-slot contract too. A slot that
 // kept the previous socket's port would let listen() announce a port THIS
 // socket never asked for -- the close-hook bug wearing a different hat.
-void test_vivarium_socktab_bind_fields(void);
 void test_vivarium_socktab_bind_fields(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2583,7 +2736,7 @@ void test_vivarium_socktab_bind_fields(void) {
     TEST_ASSERT(!viv_socktab_has_room(NULL), "NULL has no room (and does not fault)");
 
     struct viv_sock e;
-    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3, VIV_SOCK_FRESH), "claim fd 7");
+    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3, VIV_SOCK_FRESH, NULL), "claim fd 7");
     TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_addr == 0 && e.bound_port == 0,
                 "a fresh socket carries NO bind");
 
@@ -2596,7 +2749,7 @@ void test_vivarium_socktab_bind_fields(void) {
 
     viv_socktab_drop(&tab, 7);
 
-    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4, VIV_SOCK_FRESH), "reclaim fd 7");
+    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4, VIV_SOCK_FRESH, NULL), "reclaim fd 7");
     TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_port == 0 && e.bound_addr == 0,
                 "the recycled slot carries NO stale bind -- if it did, this "
                 "socket's listen() would announce 127.0.0.1!7789");
@@ -2607,13 +2760,26 @@ void test_vivarium_socktab_bind_fields(void) {
     // has to hang up on it.
     u32 claimed = 1;
     for (s32 fd = 200; claimed < VIV_SOCK_MAX; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL)) break;
         claimed++;
     }
     TEST_ASSERT(claimed == VIV_SOCK_MAX, "filled to VIV_SOCK_MAX");
     TEST_ASSERT(!viv_socktab_has_room(&tab), "a full table reports no room");
-    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH),
+    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL),
                 "and a claim on it does fail -- has_room agrees with claim");
+}
+
+// connect()'s commit, run as handle_replace_hooked runs it but with no handle
+// lock: the keying under test is the hook's own.
+static bool socktab_commit(struct viv_socktab *tab, s32 fd, u64 epoch,
+                           u32 addr, u16 port) {
+    struct viv_socktab_connected c = {
+        .tab = tab, .fd = fd, .expect_epoch = epoch, .ctl = NULL,
+        .addr = addr, .port = port, .ok = false, .detached = NULL,
+    };
+    viv_socktab_connected_locked(&c);
+    spoor_clunk(c.detached);
+    return c.ok;
 }
 
 // N-3's concurrency-fix core invariant: a keyed write to a slot that was closed
@@ -2629,7 +2795,6 @@ void test_vivarium_socktab_bind_fields(void) {
 // recycled socket. The epoch key must refuse it: a fresh claim takes a strictly
 // greater monotonic epoch. A test that recycled to a DIFFERENT n would pass on
 // the broken n-key too, and prove nothing.
-void test_vivarium_socktab_keyed_write_identity(void);
 void test_vivarium_socktab_keyed_write_identity(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -2643,7 +2808,7 @@ void test_vivarium_socktab_keyed_write_identity(void) {
     struct viv_sock e;
 
     // fd 3 is connection n=5; a connect() on it snapshotted its epoch, then blocked.
-    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH, NULL),
                 "claim fd 3 n=5");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e), "snapshot fd 3");
     u64 stale_epoch = e.epoch;
@@ -2652,7 +2817,7 @@ void test_vivarium_socktab_keyed_write_identity(void) {
     // While it blocked, a peer close()d fd 3 and socket()ed a new one that netd
     // handed the SAME n=5 (its lowest-free default) at the SAME fd number.
     viv_socktab_drop(&tab, 3);
-    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH, NULL),
                 "reclaim fd 3 with the SAME n=5 (netd's default recycle)");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e), "snapshot the recycled fd 3");
     TEST_ASSERT(e.n == 5 && e.epoch > stale_epoch,
@@ -2662,7 +2827,7 @@ void test_vivarium_socktab_keyed_write_identity(void) {
 
     // The stale connect's commit, keyed on the epoch IT snapshotted, must be
     // REFUSED even though n is unchanged -- the corruption an n-key would allow.
-    TEST_ASSERT(!viv_socktab_record_remote(&tab, 3, stale_epoch, 0x0A000001u, 53, true),
+    TEST_ASSERT(!socktab_commit(&tab, 3, stale_epoch, 0x0A000001u, 53),
                 "a keyed write on a stale epoch is refused -- EVEN WITH THE SAME n");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
                 e.n == 5 && e.state == VIV_SOCK_FRESH && e.remote_port == 0,
@@ -2677,7 +2842,7 @@ void test_vivarium_socktab_keyed_write_identity(void) {
                 e.bound_port == 0, "the stale-epoch refusals changed nothing");
 
     // The matching-epoch write (the non-raced common case) DOES apply.
-    TEST_ASSERT(viv_socktab_record_remote(&tab, 3, fresh_epoch, 0x0A000002u, 80, true),
+    TEST_ASSERT(socktab_commit(&tab, 3, fresh_epoch, 0x0A000002u, 80),
                 "a keyed write on the CURRENT epoch applies");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
                 e.state == VIV_SOCK_CONNECTED && e.remote_port == 80 &&
@@ -2692,7 +2857,6 @@ void test_vivarium_socktab_keyed_write_identity(void) {
 // and connect()'s success records the peer and CONNECTED from either. Each
 // writer refuses a row in the wrong state and a stale epoch, one variable away
 // from the write it allows.
-void test_vivarium_socktab_connecting(void);
 void test_vivarium_socktab_connecting(void) {
     static struct viv_socktab tab;
     tab.lock = SPIN_LOCK_INIT;
@@ -2705,7 +2869,7 @@ void test_vivarium_socktab_connecting(void) {
     tab.next_epoch = 0;
     struct viv_sock e;
 
-    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 7, VIV_SOCK_FRESH), "claim fd 4");
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 7, VIV_SOCK_FRESH, NULL), "claim fd 4");
     TEST_ASSERT(viv_socktab_get(&tab, 4, &e), "snapshot fd 4");
     u64 ep = e.epoch;
 
@@ -2733,7 +2897,7 @@ void test_vivarium_socktab_connecting(void) {
                 "FRESH again with the peer forgotten, so a retry dials anew");
 
     TEST_ASSERT(viv_socktab_begin_connect(&tab, 4, ep, 0x0A000002u, 80), "dial again");
-    TEST_ASSERT(viv_socktab_record_remote(&tab, 4, ep, 0x0A000002u, 80, true),
+    TEST_ASSERT(socktab_commit(&tab, 4, ep, 0x0A000002u, 80),
                 "the handshake completed");
     TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTED &&
                 e.remote_port == 80, "CONNECTED from CONNECTING");
@@ -2743,7 +2907,6 @@ void test_vivarium_socktab_connecting(void) {
                 "still CONNECTED");
 }
 
-void test_vivarium_listen_decide(void);
 void test_vivarium_listen_decide(void) {
     s32 err = -1;
 
@@ -2792,7 +2955,6 @@ void test_vivarium_listen_decide(void) {
 // V-5c: the ppoll timeout conversion. The rounding direction is the whole test
 // -- truncating a sub-millisecond wait to 0 turns a poll into a spin, and a
 // spin is the failure a poll loop would never notice and never stop paying for.
-void test_vivarium_timespec_to_ms(void);
 void test_vivarium_timespec_to_ms(void) {
     s32 ms = -99, err = -1;
 
@@ -2835,7 +2997,6 @@ void test_vivarium_timespec_to_ms(void) {
 // V-5c: the ppoll argument domain. Two of the three refusals are ENOSYS rather
 // than EINVAL, and that distinction is the point -- the arguments are valid
 // Linux, and it is this kernel that cannot serve them.
-void test_vivarium_ppoll_decide(void);
 void test_vivarium_ppoll_decide(void) {
     s32 err = -1;
 
@@ -2878,7 +3039,6 @@ void test_vivarium_ppoll_decide(void) {
 }
 
 // V-5c-2: the pselect6 argument domain + the nfds clamp.
-void test_vivarium_pselect6_decide(void);
 void test_vivarium_pselect6_decide(void) {
     s32 err = -1;
     u32 n   = 99;
@@ -2928,7 +3088,6 @@ void test_vivarium_pselect6_decide(void) {
 }
 
 // V-5c-2: FDS_BYTES -- how much of an fd_set covers the low nfds bits.
-void test_vivarium_fdset_bytes(void);
 void test_vivarium_fdset_bytes(void) {
     // Rounded up to whole 8-byte longs, which is what Linux's get_fd_set and
     // set_fd_set touch. Copying more could fault on a caller that sized its
@@ -2945,7 +3104,6 @@ void test_vivarium_fdset_bytes(void) {
 }
 
 // V-5c-2: the forward conversion, three fd_sets -> a pollfd array.
-void test_vivarium_fdset_to_pollfds(void);
 void test_vivarium_fdset_to_pollfds(void) {
     u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
     struct pollfd out[POLL_MAX_NFDS];
@@ -3034,7 +3192,6 @@ void test_vivarium_fdset_to_pollfds(void) {
 }
 
 // V-5c-2: the reverse conversion -- the asymmetric mapping and the BIT count.
-void test_vivarium_pollfds_to_fdset(void);
 void test_vivarium_pollfds_to_fdset(void) {
     u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
     struct pollfd pfds[4];
@@ -3119,7 +3276,6 @@ void test_vivarium_pollfds_to_fdset(void) {
 // V-5b: the announce builder. The wildcard/concrete split is load-bearing --
 // netd migrates an EXPLICIT 127.x listener onto its loopback stack while a `*`
 // listener stays on the NIC, so these two reach different listeners.
-void test_vivarium_announce_cmd(void);
 void test_vivarium_announce_cmd(void) {
     char buf[48];
 
@@ -3149,7 +3305,6 @@ void test_vivarium_announce_cmd(void) {
 // V-5b: the endpoint parser -- the inverse of the ipport builder, reading
 // netd's `remote` file for accept()'s peer address. A garbled endpoint must
 // never become a plausible-looking address.
-void test_vivarium_parse_ipport(void);
 void test_vivarium_parse_ipport(void) {
     u8  ip[4];
     u16 port = 0;
@@ -3191,7 +3346,6 @@ void test_vivarium_parse_ipport(void) {
 
 // V-5b: the peer-address builder. accept() writes this into guest memory, so
 // the byte layout is a Linux ABI, not an internal choice.
-void test_vivarium_sockaddr_build(void);
 void test_vivarium_sockaddr_build(void) {
     u8 sa[16];
     for (u32 i = 0; i < 16; i++) sa[i] = 0xAA;
@@ -3220,7 +3374,6 @@ void test_vivarium_sockaddr_build(void) {
 // V-5b: bind()'s parse accepts what connect()'s refuses. 0.0.0.0:0 is an
 // ordinary bind and a malformed dial, so the two callers need different
 // strictness over the same bytes.
-void test_vivarium_sockaddr_parse_any(void);
 void test_vivarium_sockaddr_parse_any(void) {
     u8  sa[16] = {0};
     u8  ip[4];
@@ -3264,7 +3417,6 @@ void test_vivarium_sockaddr_parse_any(void) {
 //
 // If this test fails, the fix is NOT to delete the line. It is to extend the
 // close hook to the newly-served number, in the same commit.
-void test_vivarium_fd_freeing_rows_stay_unserved(void);
 void test_vivarium_fd_freeing_rows_stay_unserved(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;
@@ -3354,7 +3506,6 @@ static bool viv_str_eq(const char *a, const char *b) {
 // fail a test rather than pass silently. The tier split is the interesting part
 // -- getuid and getgid have exact native twins and matching arity and are still
 // T2, so "it renumbers cleanly" is visibly not the criterion.
-void test_vivarium_startup_batch_rows(void);
 void test_vivarium_startup_batch_rows(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;
@@ -3439,7 +3590,6 @@ void test_vivarium_startup_batch_rows(void) {
 }
 
 // B-1a: the mprotect domain is the prot word alone.
-void test_vivarium_mprotect_domain(void);
 void test_vivarium_mprotect_domain(void) {
     const u64 a = 0x10000ull, l = 0x1000ull;
     TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)VIV_PROT_NONE),
@@ -3471,7 +3621,6 @@ void test_vivarium_mprotect_domain(void) {
 
 // B-1b: the madvise domain is the advice word alone, sorted into a release,
 // a hint, or a decline.
-void test_vivarium_madvise_domain(void);
 void test_vivarium_madvise_domain(void) {
     enum viv_madvise_kind k;
     k = (enum viv_madvise_kind)77;
@@ -3517,7 +3666,6 @@ void test_vivarium_madvise_domain(void) {
 // and the deadline verdict, which decides the race a running kernel cannot be
 // made to hit on demand (a note landing after the deadline, before the sleeper
 // runs).
-void test_vivarium_nanosleep_domain(void);
 void test_vivarium_nanosleep_domain(void) {
     u64  clk = 77;
     bool abs = true;
@@ -3619,7 +3767,6 @@ void test_vivarium_nanosleep_domain(void) {
                    "a death at the deadline: the expiry wins");
 }
 
-void test_vivarium_writev_domain(void);
 void test_vivarium_writev_domain(void) {
     u32 count = 0xFFFFFFFFu;
 
@@ -3680,7 +3827,6 @@ void test_vivarium_writev_domain(void) {
     TEST_EXPECT_EQ((int)vivarium_writev_accumulate(NULL, 1), 0, "a NULL total fails closed");
 }
 
-void test_vivarium_uname_fill(void);
 void test_vivarium_uname_fill(void) {
     struct viv_linux_utsname uts;
 
@@ -3730,7 +3876,6 @@ void test_vivarium_uname_fill(void) {
     vivarium_uname_fill(NULL);
 }
 
-void test_vivarium_identity_map(void);
 void test_vivarium_identity_map(void) {
     // The sentinel. Passed through raw, PRINCIPAL_SYSTEM reads to a Linux guest
     // as (uid_t)-2 -- historically "nobody", the number meaning LEAST
@@ -3774,7 +3919,6 @@ void test_vivarium_identity_map(void) {
 // #151. The fcntl classifier. The served set is MEASURED (busybox issues exactly
 // F_SETFD(FD_CLOEXEC) and F_DUPFD_CLOEXEC(10) at startup), so both of those get
 // their own case here spelled with the values the guest actually sends.
-void test_vivarium_fcntl_domain(void);
 void test_vivarium_fcntl_domain(void) {
     enum viv_fcntl_op op;
     bool cx;
@@ -3882,7 +4026,6 @@ void test_vivarium_fcntl_domain(void) {
 // request classifier -- the decode that lands before the shell (the V-6a
 // pattern). isatty()'s gate is TIOCGWINSZ, so its classification is the
 // load-bearing row; the three TCSETS* forms must collapse to one op.
-void test_vivarium_ioctl_decide(void);
 void test_vivarium_ioctl_decide(void) {
     enum viv_ioctl_op op;
 
@@ -3947,7 +4090,6 @@ void test_vivarium_ioctl_decide(void) {
 // four call sites through musl's pipe() with a hardcoded `mov x1, #0`, and two
 // through pipe2() with `mov w1, #0x80000`. Everything else declines.
 // -----------------------------------------------------------------------------
-void test_vivarium_pipe2_domain(void);
 void test_vivarium_pipe2_domain(void) {
     bool cx;
 
@@ -4003,7 +4145,6 @@ void test_vivarium_pipe2_domain(void) {
                    "NULL cloexec_out -> FORWARD");
 }
 
-void test_vivarium_dup3_domain(void);
 void test_vivarium_dup3_domain(void) {
     bool cx;
 
@@ -4068,7 +4209,6 @@ void test_vivarium_dup3_domain(void) {
 // legs L217-L228 drive them through a real fork + execve). Each leg names the
 // row that would read wrong under the OLD behaviour (a full zero at exec; no
 // copy at fork).
-void test_vivarium_sigtab_fork_exec_rule(void);
 void test_vivarium_sigtab_fork_exec_rule(void) {
     struct viv_sigtab *tab =
         (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
@@ -4176,9 +4316,6 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
     bare->state   = PROC_STATE_ZOMBIE; proc_free(bare);
 }
 
-extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
-extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
-extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 // The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
 //
 // The decide half above is pure; this drives the arm that turns a decision into
@@ -4194,7 +4331,6 @@ extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 //
 // Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
 // exception frame, which the FCNTL case never reads).
-void test_vivarium_fcntl_dupfd_errnos(void);
 void test_vivarium_fcntl_dupfd_errnos(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4260,8 +4396,6 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
 // (which sets CNONBLOCK directly); THIS covers the fcntl -> handle-helper -> Spoor
 // leg, which otherwise only the SKIPpable git-workflow E2E exercises. Also pins F2
 // (a pipe write end reports OWRITE, not a misleading OREAD).
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
-void test_vivarium_fcntl_nonblock_roundtrip(void);
 void test_vivarium_fcntl_nonblock_roundtrip(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4305,7 +4439,6 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
 // and the source row is untouched. (Until this vote landed the arm DECLINED a
 // socket source with ENOSYS.) The EBADF/EMFILE split itself rides the identical
 // handle_dup_posix primitive proven in test_vivarium_fcntl_dupfd_errnos above.
-void test_vivarium_dup_arm(void);
 void test_vivarium_dup_arm(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4327,7 +4460,7 @@ void test_vivarium_dup_arm(void) {
     TEST_ASSERT(p->socktab != NULL, "socktab alloc");
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
     hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
-    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200, VIV_SOCK_FRESH, NULL);
     struct viv_sock eo_pre;
     bool sock_pre = viv_socktab_get(p->socktab, (s32)sockfd, &eo_pre);
     s64 dup_sock = viv_dup_for_test(p, (u64)sockfd);
@@ -4390,7 +4523,6 @@ static void socktab_fork_hook_witness(void *arg) {
     viv_socktab_fork_snapshot(&w->f);
 }
 
-void test_vivarium_socktab_clone_into(void);
 void test_vivarium_socktab_clone_into(void) {
     struct Proc *parent = proc_alloc();
     struct Proc *child  = proc_alloc();
@@ -4415,8 +4547,8 @@ void test_vivarium_socktab_clone_into(void) {
     TEST_ASSERT(parent->socktab != NULL, "socktab alloc");
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) parent->socktab->s[i].fd = -1;
     hidx_t h0 = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);   // fd 0
-    viv_socktab_claim(parent->socktab, (s32)h0, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED);
-    viv_socktab_claim(parent->socktab, 7, VIV_NET_UDP, 12, VIV_SOCK_FRESH); // no handle
+    viv_socktab_claim(parent->socktab, (s32)h0, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED, NULL);
+    viv_socktab_claim(parent->socktab, 7, VIV_NET_UDP, 12, VIV_SOCK_FRESH, NULL); // no handle
     struct viv_sock p0;
     viv_socktab_get(parent->socktab, (s32)h0, &p0);
     u64 parent_next = parent->socktab->next_epoch;
@@ -4486,7 +4618,6 @@ void test_vivarium_socktab_clone_into(void) {
 // precedes the install); a REFUSED dup3 (a closed source -> EBADF; old == new
 // -> EINVAL) leaves the live row at the target number alone; and F_DUPFD of a
 // socket mints the alias row (fresh epoch) at the number the arm chose.
-void test_vivarium_socktab_arm_refusals(void);
 void test_vivarium_socktab_arm_refusals(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4498,8 +4629,8 @@ void test_vivarium_socktab_arm_refusals(void) {
     hidx_t sock = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);    // fd 0
     hidx_t nine = -1;
     while ((nine = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL)) >= 0 && nine < 9) { }
-    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED);
-    viv_socktab_claim(p->socktab, 9, VIV_NET_UDP, 301, VIV_SOCK_FRESH);   // a live row at 9
+    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED, NULL);
+    viv_socktab_claim(p->socktab, 9, VIV_NET_UDP, 301, VIV_SOCK_FRESH, NULL);   // a live row at 9
     struct viv_sock e9_before;
     viv_socktab_get(p->socktab, 9, &e9_before);
 
@@ -4522,7 +4653,7 @@ void test_vivarium_socktab_arm_refusals(void) {
     // ---- The socket table FULL: dup / F_DUPFD of a socket are EMFILE and the
     // handle table is UNTOUCHED (room is checked before the install). ----
     for (s32 fd = 100; ; fd++)
-        if (!viv_socktab_claim(p->socktab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+        if (!viv_socktab_claim(p->socktab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL)) break;
     bool full = !viv_socktab_has_room(p->socktab);
     int  handles_before = handle_table_count(p->handles);
     s64  r_dup   = viv_dup_for_test(p, (u64)sock);
@@ -4553,7 +4684,6 @@ void test_vivarium_socktab_arm_refusals(void) {
 
 // The alias rule's table op, directly: copy-with-fresh-epoch, replace-on-claim
 // at the target, the non-socket no-op, and the full-table refusal.
-void test_vivarium_socktab_alias(void);
 void test_vivarium_socktab_alias(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -4564,7 +4694,7 @@ void test_vivarium_socktab_alias(void) {
     tab.lock = SPIN_LOCK_INIT;
     struct viv_sock e, a;
 
-    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 40, VIV_SOCK_CONNECTED), "claim fd 3");
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 40, VIV_SOCK_CONNECTED, NULL), "claim fd 3");
     TEST_ASSERT(viv_socktab_set_bound(&tab, 3, 1, 0x7f000001u, 8080)
                 || viv_socktab_get(&tab, 3, &e), "bound fields (epoch 1) or readable");
     viv_socktab_get(&tab, 3, &e);
@@ -4580,7 +4710,7 @@ void test_vivarium_socktab_alias(void) {
     TEST_EXPECT_EQ(viv_socktab_alias(&tab, 5, 10), 0, "a non-socket source is a no-op");
     TEST_ASSERT(!viv_socktab_get(&tab, 10, NULL), "...and mints no row");
     // Replace-on-claim at the target: a stale row keyed on 9 is REPLACED.
-    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 41, VIV_SOCK_FRESH), "claim fd 4");
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 41, VIV_SOCK_FRESH, NULL), "claim fd 4");
     TEST_EXPECT_EQ(viv_socktab_alias(&tab, 4, 9), 1, "alias fd 4 -> 9 (over the old alias)");
     u32 rows9 = 0;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++)
@@ -4591,7 +4721,7 @@ void test_vivarium_socktab_alias(void) {
     TEST_ASSERT(viv_socktab_alias_fits(&tab, 5, 12), "fits: a non-socket source needs no row");
     // Fill the table; then an alias onto a FRESH number has no room.
     for (s32 fd = 100; ; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH, NULL)) break;
     }
     TEST_ASSERT(!viv_socktab_alias_fits(&tab, 3, 200), "full: an alias onto a fresh number does not fit");
     TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 200), -1, "...and the alias refuses (-1)");
@@ -4603,7 +4733,6 @@ void test_vivarium_socktab_alias(void) {
 // The alias rule AT THE dup3 ARM (the inetd idiom, dup2(connfd, 0)): a socket
 // source's row is copied onto the target number; a non-socket source onto a
 // socket number DROPS that number's row (the fd-freeing obligation).
-void test_vivarium_dup3_alias(void);
 void test_vivarium_dup3_alias(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4614,7 +4743,7 @@ void test_vivarium_dup3_alias(void) {
 
     hidx_t sock = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);    // fd 0
     hidx_t file = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p); // fd 1
-    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED);
+    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED, NULL);
 
     s64 r1 = viv_dup3_for_test(p, (u64)sock, 9, 0);          // socket -> 9
     struct viv_sock e9;
@@ -4648,7 +4777,6 @@ void test_vivarium_dup3_alias(void) {
 //   - a plain (kept) socket        -> SURVIVES (a sweep that over-drops fails);
 //   - a stale entry at a CLOSED fd -> SURVIVES (handle_get_cloexec == -1; a sweep
 //     written `!= 0` instead of `== 1` would wrongly drop it).
-void test_vivarium_exec_drops_cloexec_sockets(void);
 void test_vivarium_exec_drops_cloexec_sockets(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -4665,9 +4793,9 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
                 "three handles allocated");
     handle_set_cloexec(p, cloexec_fd, true);
 
-    viv_socktab_claim(p->socktab, (s32)cloexec_fd, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
-    viv_socktab_claim(p->socktab, (s32)plain_fd,   VIV_NET_TCP, 101, VIV_SOCK_FRESH);
-    viv_socktab_claim(p->socktab, (s32)stale_fd,   VIV_NET_TCP, 102, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)cloexec_fd, VIV_NET_TCP, 100, VIV_SOCK_FRESH, NULL);
+    viv_socktab_claim(p->socktab, (s32)plain_fd,   VIV_NET_TCP, 101, VIV_SOCK_FRESH, NULL);
+    viv_socktab_claim(p->socktab, (s32)stale_fd,   VIV_NET_TCP, 102, VIV_SOCK_FRESH, NULL);
     // Close the stale fd's HANDLE via the primitive (not the close syscall), so
     // its entry lingers at a now-closed fd -- the shape a pre-existing stale row
     // has, and the case the sweep must NOT touch.
@@ -4734,7 +4862,6 @@ static int viv_ready_refs(struct Spoor *sp) {
 // drop, claim's replace, the alias's replace, the reset, the free -- releases
 // that row's reference exactly once. Results are taken first and asserted after
 // the teardown, so a failing leg still frees the table.
-void test_vivarium_socktab_ready_cache(void);
 void test_vivarium_socktab_ready_cache(void) {
     struct viv_socktab *tab = (struct viv_socktab *)kzalloc(sizeof(*tab), 0);
     TEST_ASSERT(tab != NULL, "socktab alloc");
@@ -4762,7 +4889,7 @@ void test_vivarium_socktab_ready_cache(void) {
     bool none_got = (got == NULL);
 
     // A fresh row is uncached; an install hands the table the caller's reference.
-    bool claimed5 = viv_socktab_claim(tab, 5, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED);
+    bool claimed5 = viv_socktab_claim(tab, 5, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED, NULL);
     bool row5     = viv_socktab_ready_get(tab, 5, &e, &got);
     bool fresh5   = (got == NULL);
     u64  ep5      = e.epoch;
@@ -4784,7 +4911,7 @@ void test_vivarium_socktab_ready_cache(void) {
     spoor_clunk(got);
 
     // Identity: another row's epoch, a later epoch, an fd with no row, NULLs.
-    bool claimed6  = viv_socktab_claim(tab, 6, VIV_NET_UDP, 4, VIV_SOCK_FRESH);
+    bool claimed6  = viv_socktab_claim(tab, 6, VIV_NET_UDP, 4, VIV_SOCK_FRESH, NULL);
     viv_socktab_ready_get(tab, 6, &e, NULL);
     u64  ep6       = e.epoch;
     bool other_ep  = viv_socktab_ready_install(tab, 6, ep5, sp[1]);
@@ -4803,7 +4930,7 @@ void test_vivarium_socktab_ready_cache(void) {
 
     // Replace-on-claim: a row still keyed on a reissued fd is released with it.
     bool inst6        = viv_socktab_ready_install(tab, 6, ep6, sp[1]);
-    bool reclaim6     = viv_socktab_claim(tab, 6, VIV_NET_TCP, 9, VIV_SOCK_FRESH);
+    bool reclaim6     = viv_socktab_claim(tab, 6, VIV_NET_TCP, 9, VIV_SOCK_FRESH, NULL);
     u32  reclaim_rel  = closes[1];                         // 1
     viv_socktab_ready_get(tab, 6, &e, &got);
     bool reclaim_cold = (got == NULL);
@@ -4815,7 +4942,7 @@ void test_vivarium_socktab_ready_cache(void) {
     // the same n under the other protocol -- never shares; an alias onto a
     // cached row of another connection releases that row's Spoor; and dropping
     // sharers keeps the Spoor for the one left.
-    bool claimed7  = viv_socktab_claim(tab, 7, VIV_NET_TCP, 10, VIV_SOCK_CONNECTED);
+    bool claimed7  = viv_socktab_claim(tab, 7, VIV_NET_TCP, 10, VIV_SOCK_CONNECTED, NULL);
     viv_socktab_ready_get(tab, 7, &e, NULL);
     bool inst7     = viv_socktab_ready_install(tab, 7, e.epoch, sp[2]);
     int  alias1    = viv_socktab_alias(tab, 7, 8);
@@ -4831,14 +4958,14 @@ void test_vivarium_socktab_ready_cache(void) {
     bool twelve_shares = (got == sp[2]);
     spoor_clunk(got);
     if (!inst12) spoor_clunk(sp[3]);                       // a refused offer stays ours
-    bool claimed15 = viv_socktab_claim(tab, 15, VIV_NET_UDP, 10, VIV_SOCK_FRESH);
+    bool claimed15 = viv_socktab_claim(tab, 15, VIV_NET_UDP, 10, VIV_SOCK_FRESH, NULL);
     viv_socktab_ready_get(tab, 15, &e, &got);
     bool udp_cold  = (got == NULL);
     bool inst15    = viv_socktab_ready_install(tab, 15, e.epoch, sp[7]);
-    bool claimed16 = viv_socktab_claim(tab, 16, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED);
+    bool claimed16 = viv_socktab_claim(tab, 16, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED, NULL);
     viv_socktab_ready_get(tab, 16, &e, &got);
     bool n11_cold  = (got == NULL);
-    bool claimed14 = viv_socktab_claim(tab, 14, VIV_NET_TCP, 30, VIV_SOCK_CONNECTED);
+    bool claimed14 = viv_socktab_claim(tab, 14, VIV_NET_TCP, 30, VIV_SOCK_CONNECTED, NULL);
     viv_socktab_ready_get(tab, 14, &e, NULL);
     bool inst14    = viv_socktab_ready_install(tab, 14, e.epoch, sp[6]);
     int  alias3    = viv_socktab_alias(tab, 7, 14);        // over tcp/30's cached row
@@ -4859,7 +4986,7 @@ void test_vivarium_socktab_ready_cache(void) {
                       !viv_socktab_ready_get(tab, 8, NULL, NULL);
 
     // free releases what is still cached.
-    bool claimed9 = viv_socktab_claim(tab, 9, VIV_NET_TCP, 11, VIV_SOCK_FRESH);
+    bool claimed9 = viv_socktab_claim(tab, 9, VIV_NET_TCP, 11, VIV_SOCK_FRESH, NULL);
     viv_socktab_ready_get(tab, 9, &e, NULL);
     bool inst9    = viv_socktab_ready_install(tab, 9, e.epoch, sp[5]);
     viv_socktab_free(tab);
@@ -4918,8 +5045,6 @@ void test_vivarium_socktab_ready_cache(void) {
 // cloexec socket's Spoor is released, a kept socket's is not), and exit (the
 // rest goes with the fds, in the at-exit close -- not at reap, so a zombie pins
 // no netd fid).
-extern void proc_close_handles_at_exit_for_test(struct Proc *p);
-void test_vivarium_socktab_ready_release_paths(void);
 void test_vivarium_socktab_ready_release_paths(void) {
     struct Proc *parent = proc_alloc();
     struct Proc *child  = proc_alloc();
@@ -4939,10 +5064,10 @@ void test_vivarium_socktab_ready_release_paths(void) {
     hidx_t hc = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);
     handle_set_cloexec(parent, hc, true);
     struct viv_sock e;
-    viv_socktab_claim(parent->socktab, (s32)hk, VIV_NET_TCP, 20, VIV_SOCK_CONNECTED);
+    viv_socktab_claim(parent->socktab, (s32)hk, VIV_NET_TCP, 20, VIV_SOCK_CONNECTED, NULL);
     viv_socktab_ready_get(parent->socktab, (s32)hk, &e, NULL);
     bool inst_k = kept && viv_socktab_ready_install(parent->socktab, (s32)hk, e.epoch, kept);
-    viv_socktab_claim(parent->socktab, (s32)hc, VIV_NET_TCP, 21, VIV_SOCK_CONNECTED);
+    viv_socktab_claim(parent->socktab, (s32)hc, VIV_NET_TCP, 21, VIV_SOCK_CONNECTED, NULL);
     viv_socktab_ready_get(parent->socktab, (s32)hc, &e, NULL);
     bool inst_c = cx && viv_socktab_ready_install(parent->socktab, (s32)hc, e.epoch, cx);
 
@@ -5000,9 +5125,6 @@ void test_vivarium_socktab_ready_release_paths(void) {
 // buffer receiving 0/4 -- needs a live EL0 mapping the kernel unit harness
 // cannot stage; it is the curl-demo E2E's job, where verifyconnect reads a 0
 // and the fetch completes.)
-extern s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level,
-                                   u64 optname, u64 optval_va, u64 optlen_va);
-void test_vivarium_getsockopt_shell_guards_uaccess(void);
 void test_vivarium_getsockopt_shell_guards_uaccess(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5012,7 +5134,7 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 
     hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
     TEST_ASSERT(sockfd >= 0, "a handle for the socket entry");
-    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 100, VIV_SOCK_FRESH, NULL);
 
     // A user-range address that PASSES sys_validate_user_buf (in range,
     // non-NULL) without needing to be mapped -- the validate is pure, and it
@@ -5111,7 +5233,6 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 // F2 witness through the real handle_alloc geometry: BOTH arms read UDP, the
 // bug arm because replace-on-claim evicted the stale row). Two negatives, each
 // with its positive one variable away.
-void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void);
 void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     // ---- ARM 1: WITH the sweep (the fix). ----
     struct Proc *pf = proc_alloc();
@@ -5122,7 +5243,7 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
 
     hidx_t f_a = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
     TEST_ASSERT(f_a >= 0, "socket_A handle (fix arm)");
-    viv_socktab_claim(pf->socktab, (s32)f_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    viv_socktab_claim(pf->socktab, (s32)f_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH, NULL);
     handle_set_cloexec(pf, f_a, true);
 
     // the exec sweep, exactly as sys_execve_core orders it (syscall.c:8455 then
@@ -5137,7 +5258,7 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     struct viv_sock ef;
     int fix_file_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
     // Then a socket() claim on the same number (the replace-on-claim witness).
-    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
+    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH, NULL);
     int fix_sock_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
 
     pf->state = PROC_STATE_ZOMBIE;
@@ -5153,7 +5274,7 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
 
     hidx_t b_a = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
     TEST_ASSERT(b_a >= 0, "socket_A handle (bug arm)");
-    viv_socktab_claim(pb->socktab, (s32)b_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    viv_socktab_claim(pb->socktab, (s32)b_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH, NULL);
     handle_set_cloexec(pb, b_a, true);
 
     // NO viv_socktab_drop_cloexec here -- this arm IS the missing-call world.
@@ -5163,7 +5284,7 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     bool bug_reused = (b_b == b_a);
     struct viv_sock eb;
     int bug_file_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
-    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
+    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH, NULL);
     int bug_sock_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
 
     pb->state = PROC_STATE_ZOMBIE;
@@ -5193,7 +5314,6 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
 // test_dev9p.c (loopback errno legs).
 // =============================================================================
 
-void test_vivarium_openat_create_domain(void);
 void test_vivarium_openat_create_domain(void) {
     u32 omode = 0, perm = 0;
     bool cx = false;
@@ -5269,7 +5389,6 @@ void test_vivarium_openat_create_domain(void) {
                 "S_IFREG|setuid still declines -- the mask spares 07000");
 }
 
-void test_vivarium_mkdirat_domain(void);
 void test_vivarium_mkdirat_domain(void) {
     u32 perm = 0;
     const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
@@ -5308,7 +5427,6 @@ void test_vivarium_mkdirat_domain(void) {
                 "S_IFDIR|sticky (the rootfs /tmp shape) still declines");
 }
 
-void test_vivarium_unlinkat_domain(void);
 void test_vivarium_unlinkat_domain(void) {
     u32 tf = 0xdeadbeefu;
     const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
@@ -5326,7 +5444,6 @@ void test_vivarium_unlinkat_domain(void) {
                 "a real dirfd declines");
 }
 
-void test_vivarium_renameat_domain(void);
 void test_vivarium_renameat_domain(void) {
     const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
     const u64 FDCWD_ZX = 0x00000000FFFFFF9Cull;
@@ -5346,9 +5463,6 @@ void test_vivarium_renameat_domain(void) {
 // a PURE byte transform (the format row a real busybox `ls` stands on; the
 // E2E witnesses the whole shell, this pins the layout math).
 // =============================================================================
-
-extern u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
-                                   u8 *dst, u64 dst_cap, u64 *last_cookie_out);
 
 // Append one 9P2000.L dirent (qid.type/qid.path + cookie + d_type + name) at
 // *pos; qid.version is zeroed (the encode never reads it).
@@ -5373,7 +5487,6 @@ static u64 gd_rd64(const u8 *b) {
     return v;
 }
 
-void test_vivarium_dirent64_encode(void);
 void test_vivarium_dirent64_encode(void) {
     u8 src[256]; u64 sl = 0;
     // "notes" (5 chars) exercises the WORST alignment case (align8(20+5)=32,
@@ -5421,8 +5534,6 @@ void test_vivarium_dirent64_encode(void) {
 // it). Driven through the REAL arm (viv_getdents64_for_test -> viv_tier2), the
 // same shape as the getsockopt uaccess-guard test. The guard runs before the
 // fd lookup, so this needs no live directory -- the FAULT is the buffer check.
-extern s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
-void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_getdents64_guards_uaccess(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5473,10 +5584,6 @@ void test_vivarium_getdents64_guards_uaccess(void) {
 // fixup gate (fi.vaddr < UACCESS_USER_VA_TOP) is false -> extinction, so the
 // harness dies rather than returning. The EFAULT here pins the guard's presence;
 // the count==0 control isolates it (same kern_va, EBADF not EFAULT).
-extern s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
-extern s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
-
-void test_vivarium_readv_writev_guard_iovec_array(void);
 void test_vivarium_readv_writev_guard_iovec_array(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5533,7 +5640,6 @@ void test_vivarium_readv_writev_guard_iovec_array(void) {
 // Linux register and bit; ONLCR pulls OPOST (Linux translates NL only under it);
 // the c_cflag baseline + the c_cc control chars are present (a zero c_cflag reads
 // as B0/hang-up, and a zero VMIN/VINTR would break single-char input).
-void test_vivarium_ioctl_termios_map(void);
 void test_vivarium_ioctl_termios_map(void) {
     struct viv_linux_termios tio;
 
@@ -5578,7 +5684,6 @@ void test_vivarium_ioctl_termios_map(void) {
 // termios, turned into grammar, and applied back must reproduce the five flags --
 // so get->map->grammar->set composes. Plus the ONLCR-requires-OPOST gate, tested
 // by its effect on the applied mode (no string parsing).
-void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_grammar_roundtrip(void) {
     struct viv_linux_termios tio;
     char g[64];
@@ -5638,7 +5743,6 @@ void test_vivarium_ioctl_grammar_roundtrip(void) {
 // classify done before the fd lookup, the unknown request would answer ENOTTY on
 // a bad fd; EBADF must beat ENOTTY (Linux checks the fd first). The full cons
 // serve (a real cons fd) is the in-guest E2E's job.
-void test_vivarium_ioctl_dispatch_ebadf(void);
 void test_vivarium_ioctl_dispatch_ebadf(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5662,7 +5766,6 @@ void test_vivarium_ioctl_dispatch_ebadf(void) {
 // value pass through. getpgid/getsid are pure renumbers (no remap; the native
 // SYS_GETPGID/GETSID handlers + the E2E cover them). This drives the two shells
 // on an explicit Proc whose session/group state is staged to hit each contour.
-void test_vivarium_session_errno_remap(void);
 void test_vivarium_session_errno_remap(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5710,8 +5813,6 @@ void test_vivarium_session_errno_remap(void) {
 // (the global-mode flip) is gated on the caller's session OWNING the console, so
 // a non-owner-session / post-SAK proc is refused -- while reads (isatty's
 // TIOCGWINSZ) stay ungated for any cons-fd holder.
-extern hidx_t sys_console_open_for_proc(struct Proc *p);
-void test_vivarium_ioctl_cons_identity_and_gate(void);
 void test_vivarium_ioctl_cons_identity_and_gate(void) {
     // F1: spoor_is_console by device identity (spoor_is_console only reads
     // sp->dev + sp->qid.path -- a zeroed stack Spoor is a valid probe).
@@ -5767,7 +5868,6 @@ void test_vivarium_ioctl_cons_identity_and_gate(void) {
 // Design D (VIVARIUM 13.10.1): THE phenotype decision, the one function the
 // three spawn thunks and execve's commit share. The full truth table, so a
 // future 'simplification' to either input alone fails here.
-void test_vivarium_phenotype_decide(void);
 void test_vivarium_phenotype_decide(void) {
     TEST_EXPECT_EQ((u64)phenotype_decide(false, false), (u64)PHENO_NATIVE,
                    "no crossing + no declaration -> native (rule 3, the fail-safe)");
@@ -5781,7 +5881,6 @@ void test_vivarium_phenotype_decide(void) {
 
 // ARCH 8.8.3 (signal(7)'s list): the pure half of the rule. Each class is
 // asserted by name, so a row moving between classes is a visible diff here.
-void test_vivarium_intr_class(void);
 void test_vivarium_intr_class(void) {
     u64 a[VIV_NARGS] = { 0, 0, 0, 0, 0, 0 };
 
@@ -5844,9 +5943,6 @@ void test_vivarium_intr_class(void) {
 // the Dev's stat and cached on the Spoor. A stat that fails answers "not slow"
 // and is NOT cached, so a stat cut short by a group exit cannot pin a
 // fork-shared pts as uninterruptible for the Proc that survives.
-extern bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
-extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
-
 static int g_intr_stat_calls = 0;
 static int g_intr_stat_fail  = 0;
 static u32 g_intr_stat_mode  = 0;
@@ -5871,7 +5967,6 @@ static hidx_t intr_install(struct Proc *p) {
     return handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, s);
 }
 
-void test_vivarium_fd_is_slow_cached(void);
 void test_vivarium_fd_is_slow_cached(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -5928,7 +6023,7 @@ void test_vivarium_fd_is_slow_cached(void) {
     struct viv_socktab *st = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
     TEST_ASSERT(st != NULL, "kzalloc socktab");
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) st->s[i].fd = -1;
-    TEST_ASSERT(viv_socktab_claim(st, 41, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED),
+    TEST_ASSERT(viv_socktab_claim(st, 41, VIV_NET_TCP, 3, VIV_SOCK_CONNECTED, NULL),
                 "claim a socket row for fd 41");
     __atomic_store_n(&p->socktab, st, __ATOMIC_RELEASE);
     TEST_ASSERT(viv_fd_is_slow_for_test(p, 41u), "a socket (a socktab row) is slow");
@@ -5936,4 +6031,194 @@ void test_vivarium_fd_is_slow_cached(void) {
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// The close-by-number sweep (vault dec-2026-10-14-descriptor-slot-reservation):
+// every call that can fail after it knows its descriptor's number reserves the
+// number, does the failing work, and installs last. Each leg drives a failure
+// past the reservation and checks the call published nothing (the table's
+// install count), returned its number, and left no row behind.
+// ---------------------------------------------------------------------------
+
+static int viv_reserved_count(struct Proc *p) {
+    int n = 0;
+    for (hidx_t i = 0; i < PROC_HANDLE_MAX; i++)
+        if (handle_is_reserved(p, i)) n++;
+    return n;
+}
+
+static u32 viv_row_count(const struct viv_socktab *tab) {
+    u32 n = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (tab->s[i].state != VIV_SOCK_FREE) n++;
+    return n;
+}
+
+void test_vivarium_unwinds_publish_nothing(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    if (!p->socktab) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        TEST_ASSERT(false, "socktab alloc");
+    }
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
+
+    // pipe2 into an in-range, unmapped array: both numbers are reserved, the
+    // copy-out faults, and nothing was installed (the old flow installed both
+    // ends and closed them by number: two installs).
+    u64 i0     = handle_table_installs(p);
+    s64 p2     = viv_pipe2_for_test(p, 0x40000ull, 0);
+    u64 i_p2   = handle_table_installs(p) - i0;
+    int res_p2 = viv_reserved_count(p);
+
+    // dup and F_DUPFD of a source that carries a socket row but may not be
+    // duplicated (a hardware kind): the row is copied onto the reserved
+    // number, the dup refuses, and the unwind drops that row and returns the
+    // number.
+    // The control, one variable away: a duplicable source with a row dups,
+    // installs once and gains an alias row -- so the fixture's table has room
+    // and the refusals below come from the dup, not an earlier gate.
+    hidx_t ls = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    struct viv_sock le;
+    bool ls_row = ls >= 0 &&
+                  viv_socktab_claim(p->socktab, (s32)ls, VIV_NET_TCP, 301, VIV_SOCK_FRESH, NULL) &&
+                  viv_socktab_get(p->socktab, (s32)ls, &le) &&
+                  viv_socktab_set_state(p->socktab, (s32)ls, le.epoch, VIV_SOCK_LISTENING);
+    u32 rows_c0 = viv_row_count(p->socktab);
+    u64 ic      = handle_table_installs(p);
+    s64 d_ok    = viv_dup_for_test(p, (u64)ls);
+    u64 i_ok    = handle_table_installs(p) - ic;
+    u32 rows_ok = viv_row_count(p->socktab) - rows_c0;
+
+    hidx_t mm = handle_alloc(p, KOBJ_MMIO, RIGHT_READ, NULL);
+    bool   mm_row = mm >= 0 && viv_socktab_claim(p->socktab, (s32)mm, VIV_NET_TCP,
+                                                 300, VIV_SOCK_FRESH, NULL);
+    u32 rows_pre = viv_row_count(p->socktab);
+    u64 i1      = handle_table_installs(p);
+    s64 d_dup   = viv_dup_for_test(p, (u64)mm);
+    s64 d_fcntl = viv_fcntl_for_test(p, (u64)mm, VIV_F_DUPFD, 5);
+    u64 i_dup   = handle_table_installs(p) - i1;
+    int res_dup = viv_reserved_count(p);
+    u32 rows_dup = viv_row_count(p->socktab);
+
+    // accept on the listening row with no /net: the number is reserved before
+    // the block, the open fails with its own -1 (no territory; every gate
+    // before the reservation answers an errno), and the number comes back.
+    u64 i2     = handle_table_installs(p);
+    s64 acc    = viv_accept_for_test(p, (u64)ls);
+    u64 i_acc  = handle_table_installs(p) - i2;
+    int res_acc = viv_reserved_count(p);
+
+    // dup3 onto another call's reserved number: Linux's EBUSY, and the
+    // reservation untouched.
+    hidx_t rsv   = handle_reserve(p, 0);
+    s64    d3    = viv_dup3_for_test(p, (u64)ls, (u64)rsv, 0);
+    bool   rsv_k = handle_is_reserved(p, rsv);
+    if (rsv_k) handle_unreserve(p, rsv);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(p2, -(s64)T_E_FAULT, "pipe2: the copy-out faults");
+    TEST_EXPECT_EQ(i_p2, (u64)0, "pipe2: a faulted copy-out installed nothing");
+    TEST_EXPECT_EQ(res_p2, 0, "pipe2: and returned both numbers");
+    TEST_ASSERT(ls_row, "a listening row");
+    TEST_ASSERT(d_ok >= 0, "dup control: a duplicable socket source dups");
+    TEST_EXPECT_EQ(i_ok, (u64)1, "dup control: one install");
+    TEST_EXPECT_EQ(rows_ok, (u32)1, "dup control: one alias row");
+    TEST_ASSERT(mm_row, "dup: the source carries a row");
+    TEST_EXPECT_EQ(d_dup, -(s64)T_E_MFILE, "dup: a live but non-duplicable source is EMFILE");
+    TEST_EXPECT_EQ(d_fcntl, -(s64)T_E_MFILE, "F_DUPFD: the same");
+    TEST_EXPECT_EQ(i_dup, (u64)0, "dup, F_DUPFD: nothing installed");
+    TEST_EXPECT_EQ(res_dup, 0, "dup, F_DUPFD: the numbers returned");
+    TEST_EXPECT_EQ(rows_dup, rows_pre, "dup, F_DUPFD: the alias rows dropped, the source's kept");
+    TEST_EXPECT_EQ(acc, (s64)-1, "accept: past the reservation, the open's own -1");
+    TEST_EXPECT_EQ(i_acc, (u64)0, "accept: nothing installed");
+    TEST_EXPECT_EQ(res_acc, 0, "accept: the number returned");
+    TEST_EXPECT_EQ(d3, -(s64)T_E_BUSY, "dup3 onto a reserved number is EBUSY");
+    TEST_ASSERT(rsv_k, "and the reservation is untouched");
+}
+
+// close() of a reserved number, through the real dispatcher: the hook must not
+// drop the row the reserving call has claimed on it (close answers EBADF, as
+// Linux's does for a reserved fd). The control, one variable away: the same
+// number returned, the close drops the row. bind on the reserved number is
+// EBADF too, though its row is FRESH; the control is a live slot with the same
+// row, which passes the slot, the row and the state gate and reaches bind's
+// address copy (a NULL address: EFAULT, which no earlier gate answers).
+static void viv_close_reserved_child(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    u32 bad = 0;
+    self->phenotype = PHENO_LINUX;
+
+    struct viv_socktab *tab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    if (!tab) { self->phenotype = PHENO_NATIVE; exits("fail"); }
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) tab->s[i].fd = -1;
+    __atomic_store_n(&self->socktab, tab, __ATOMIC_RELEASE);
+
+    hidx_t r = handle_reserve(self, 0);
+    if (r < 0 || !viv_socktab_claim(tab, (s32)r, VIV_NET_TCP, 400, VIV_SOCK_FRESH, NULL))
+        bad |= 1u << 0;
+
+    struct exception_context c;
+    struct viv_sock e;
+
+    hidx_t live = handle_alloc(self, KOBJ_MMIO, RIGHT_READ, NULL);
+    if (live < 0 || !viv_socktab_claim(tab, (s32)live, VIV_NET_TCP, 401, VIV_SOCK_FRESH, NULL))
+        bad |= 1u << 6;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_BIND;
+    c.regs[0] = (u64)live;
+    c.regs[2] = 16;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_FAULT)           bad |= 1u << 7;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_BIND;
+    c.regs[0] = (u64)r;
+    c.regs[2] = 16;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 8;
+    if (live >= 0) {
+        viv_socktab_drop(tab, (s32)live);
+        (void)handle_close(self, live);
+    }
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_CLOSE;
+    c.regs[0] = (u64)r;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 1;
+    if (!viv_socktab_get(tab, (s32)r, &e))           bad |= 1u << 2;
+    bool still = handle_is_reserved(self, r);
+    if (!still)                                      bad |= 1u << 3;
+
+    if (still) handle_unreserve(self, r);
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_CLOSE;
+    c.regs[0] = (u64)r;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 4;
+    if (viv_socktab_get(tab, (s32)r, &e))            bad |= 1u << 5;
+
+    self->phenotype = PHENO_NATIVE;
+    if (bad) {
+        uart_puts("    viv_close_reserved_child: failed checks mask ");
+        uart_puthex64(bad);
+        uart_puts("\n");
+    }
+    exits(bad ? "fail" : "ok");
+}
+
+void test_vivarium_close_keeps_a_reserved_row(void) {
+    int pid = rfork(RFPROC, viv_close_reserved_child, NULL);
+    TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
+    TEST_EXPECT_EQ(status, 0,
+        "a reserved number: close keeps its row, bind is EBADF; a free one's close drops it");
 }

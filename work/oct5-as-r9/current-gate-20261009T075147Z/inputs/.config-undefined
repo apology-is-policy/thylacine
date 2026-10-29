@@ -1,0 +1,39 @@
+# Thylacine build config -- generated; edit via tools/configure.sh or --set.
+# See docs/BUILD-CONFIG-DESIGN.md.
+
+# [compile]
+BUILD_TYPE       = debug    # Kernel build type
+TESTS            = y        # In-kernel test suite
+BOOT_PROBES      = y        # Boot-test probe ladder
+DEV_ACCOUNTS     = y        # Bake a dev login account
+HARDENING_FULL   = n        # Full P1-H hardening
+KASLR            = n        # Kernel ASLR
+SANITIZE         = ubsan    # Kernel sanitizer
+TICKLESS         = y        # Tickless idle
+
+# [bake]
+CHUNK_GOROOT     = y        # Go runtime (/goroot)
+CHUNK_CLADE      = n        # Clade toolchain (/clade + /storm)
+CHUNK_CHASE_W2   = n        # Chase-W2 bench marker (/chase-w2)
+CHUNK_ALPINE     = n        # Alpine bundle (VIVARIUM)
+CHUNK_GITNET     = n        # Network-git bundle (VIVARIUM, https)
+CHUNK_GITWF      = n        # Git-workflow gate bundle (VIVARIUM, C1)
+CHUNK_QUAKE      = n        # Quake (tyrquake, /quake)
+CHUNK_DOSBOX     = y        # DOSBox-X (x86 PC emulator, /bin/dosbox-x)
+CHUNK_DUKE3D     = y        # Duke Nukem 3D shareware (/duke3d)
+CHUNK_TOMBRAIDER = y        # Tomb Raider 3dfx demo (/tombraider)
+DOSBOX_CPU_PRESET = pentium  # DOSBox-X default CPU speed preset
+CHUNK_WEBKIT     = n        # JavaScriptCore (Boosty B-0, /webkit/jsc)
+CHUNK_AURORA_CFG = n        # Aurora config-4 payload
+
+# [display]
+HALCYON_SESSION  = y        # Halcyon session (per-user environment)
+HALCYON_CONSOLE  = n        # Halcyon as the pre-login console renderer
+HALCYON_PROFILE  = instrument # Halcyon profile (which UI Halcyon draws)
+HALCYON_THEME    =          # Halcyon theme
+HALCYON_INTERACTION_QUALIFICATION = n        # Halcyon interaction qualification (development only)
+
+# [pool]
+DISK_SIZE        = 16M      # Scratch disk size
+MKFS_SEED        =          # mkfs RNG seed
+MKFS_PRESERVE    = n        # Preserve pool content

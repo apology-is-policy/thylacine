@@ -1,0 +1,11 @@
+{
+  "owner": "astra",
+  "state": "eight-io-faults-five-row-smoke-verified",
+  "source_base": "bdba6bc5e46add2e44e08c2e0fc0753afb3e2b83",
+  "source_diff": "504cd6018e4c4d178babdcdbb6473159550432cd84972803ef6613433f892a56",
+  "run": "work/oct5-as-r9/astra-takeover/native-faults-followup/smoke-20261010T023726Z",
+  "tests": 1857,
+  "minimum_free_mib": 9252,
+  "next": "Review/apply native-reconnect/reconnect.patch after checkpoint; verify1858. AS3 broader schedules and owned clients beforeAS4/MM0-MM4.",
+  "review": "single-agent"
+}

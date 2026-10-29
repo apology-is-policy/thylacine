@@ -135,21 +135,6 @@ static u32 peek_frame_size(struct test_pipe *p) {
 }
 
 // =============================================================================
-// Forward decls (mirrored in test.c registry).
-// =============================================================================
-
-void test_spoor_transport_init_destroy(void);
-void test_spoor_transport_init_null_rejected(void);
-void test_spoor_transport_send_routes_to_tx_dev_write(void);
-void test_spoor_transport_recv_routes_to_rx_dev_read(void);
-void test_spoor_transport_recv_empty_returns_zero(void);
-void test_spoor_transport_close_clunks_when_owned(void);
-void test_spoor_transport_close_preserves_when_unowned(void);
-void test_spoor_transport_transport_core_round_trip(void);
-void test_spoor_transport_end_to_end_handshake(void);
-void test_spoor_transport_recv_now_refuses_a_non_pipe(void);
-
-// =============================================================================
 // Tests.
 // =============================================================================
 

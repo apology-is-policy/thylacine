@@ -1,0 +1,11 @@
+--- control.c
++++ all-member-bounds.c
+@@ -955,7 +955,7 @@
+ static int provided_bounds(struct loom_pool_extent e,u32 maximum,u8 **view) {
+     struct Burrow *b=(void *)e.backing;
+     if(!b || b->type!=BURROW_TYPE_ANON || !b->pages || !maximum ||
+-       maximum>e.length || e.offset>b->size || e.length>b->size-e.offset)
++       e.offset>b->size || e.length>b->size-e.offset)
+         return -T_E_INVAL;
+     if(view)*view=(u8 *)pa_to_kva(page_to_pa(b->pages))+e.offset;
+     return 0;

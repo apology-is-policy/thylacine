@@ -76,6 +76,12 @@ retirement rules are mechanically enforced.
 the tag table — it uses NOTAG (0xFFFF, never allocated) and the dispatcher
 special-cases Rversion in state INIT, negotiating msize DOWN to
 `min(server, proposed)`.
+`outstanding[]` — it uses NOTAG (0xFFFF, outside the 0..63 index range) and
+the dispatcher special-cases Rversion in state INIT, negotiating msize DOWN
+to `min(server, proposed)`. It validates the exact supported 9P2000.L dialect
+and refuses a negotiated size smaller than a frame header before publishing
+VERSIONED; syntax alone is not protocol agreement.
+`9p_session.version_handshake` includes those refusal regressions.
 
 **Tag table (2026-10-07, ARCH 21.11, `dec-2026-10-07-tag-pool`)**: tag value
 == table index, tags 0..0xFFFE (`P9_TAG_LIMIT`). Chunk 0 (`tags0`,

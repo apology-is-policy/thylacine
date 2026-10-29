@@ -1,0 +1,38 @@
+warning: field `owner` is never read
+  --> src/lease_ledger.rs:52:5
+   |
+51 | pub(crate) struct LeaseToken {
+   |                   ---------- field in this struct
+52 |     owner: u64,
+   |     ^^^^^
+   |
+   = note: `LeaseToken` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 6 tests
+test tests::lease_ledger::bounded_members_and_lease_wrap ... ok
+test tests::lease_ledger::final_and_out_of_order_return_preserve_earlier_payload ... ok
+test tests::lease_ledger::geometry_is_checked_before_any_receipt ... ok
+test tests::lease_ledger::malformed_receipts_do_not_mutate_ownership ... ok
+test tests::lease_ledger::owner_namespace_prevents_cross_ring_token_return ... FAILED
+test tests::lease_ledger::stale_and_failed_returns_cannot_recycle ... ok
+
+failures:
+
+---- tests::lease_ledger::owner_namespace_prevents_cross_ring_token_return stdout ----
+
+thread 'tests::lease_ledger::owner_namespace_prevents_cross_ring_token_return' (30934862) panicked at src/tests/lease_ledger.rs:107:5:
+assertion failed: matches!(b.begin_return(&token), Err(LeaseError::Stale))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::lease_ledger::owner_namespace_prevents_cross_ring_token_return
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

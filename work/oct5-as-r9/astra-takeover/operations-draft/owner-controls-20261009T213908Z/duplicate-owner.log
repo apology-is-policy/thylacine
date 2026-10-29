@@ -1,0 +1,2 @@
+one physical owner
+Assertion failed: (0), function main, file duplicate-owner.c, line 209.

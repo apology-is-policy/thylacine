@@ -1,0 +1,13 @@
+PASS poll_local.cfg Invariants
+PASS poll_buggy_check_before_register.cfg NoMissedPoll
+PASS poll_buggy_clear_after_sample.cfg NoMissedPoll
+PASS poll_buggy_lazy_unregister.cfg NoStaleHook
+PASS poll_buggy_no_loop_die_check.cfg DeathTerminates
+PASS poll_buggy_no_loop_stop_check.cfg StopHonoured
+PASS poll_buggy_no_retry.cfg NoMissedPoll
+PASS poll_buggy_no_wake.cfg NoMissedPoll
+PASS poll_buggy_retry_is_timeout.cfg NoSpuriousZero
+PASS poll_buggy_return_on_wake.cfg NoSpuriousZero
+PASS poll_buggy_sweep_leaves_snapshot.cfg NoSnapshotOutlivesCall
+PASS poll_buggy_verdict_before_settle.cfg NoFalseNotReady
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/poll-models-20261009T205742Z

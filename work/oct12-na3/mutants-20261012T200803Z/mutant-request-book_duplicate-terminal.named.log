@@ -1,0 +1,57 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 7 tests
+test tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once ... FAILED
+test tests::request_book::bounded_prepublication_and_terminal_retention ... FAILED
+test tests::request_book::fixed_and_control_refuse_payload_more_and_oversize ... FAILED
+test tests::request_book::geometry_maximum_capacity_and_cookie_exhaustion ... ok
+test tests::request_book::malformed_receipts_flags_and_lengths_leave_active ... FAILED
+test tests::request_book::multishot_more_and_final_keep_payload_separate ... FAILED
+test tests::request_book::ring_local_identity_cannot_alias_other_book_cookie ... FAILED
+
+failures:
+
+---- tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once stdout ----
+
+thread 'tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once' (30949949) panicked at src/tests/request_book.rs:140:35:
+called `Result::unwrap()` on an `Err` value: State
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::request_book::bounded_prepublication_and_terminal_retention stdout ----
+
+thread 'tests::request_book::bounded_prepublication_and_terminal_retention' (30949950) panicked at src/tests/request_book.rs:74:5:
+assertion failed: b.accept(rec(c, 8, 0)).is_err()
+
+---- tests::request_book::fixed_and_control_refuse_payload_more_and_oversize stdout ----
+
+thread 'tests::request_book::fixed_and_control_refuse_payload_more_and_oversize' (30949951) panicked at src/tests/request_book.rs:160:39:
+called `Result::unwrap()` on an `Err` value: State
+
+---- tests::request_book::malformed_receipts_flags_and_lengths_leave_active stdout ----
+
+thread 'tests::request_book::malformed_receipts_flags_and_lengths_leave_active' (30949960) panicked at src/tests/request_book.rs:121:35:
+called `Result::unwrap()` on an `Err` value: State
+
+---- tests::request_book::multishot_more_and_final_keep_payload_separate stdout ----
+
+thread 'tests::request_book::multishot_more_and_final_keep_payload_separate' (30949961) panicked at src/tests/request_book.rs:96:35:
+called `Result::unwrap()` on an `Err` value: State
+
+---- tests::request_book::ring_local_identity_cannot_alias_other_book_cookie stdout ----
+
+thread 'tests::request_book::ring_local_identity_cannot_alias_other_book_cookie' (30949962) panicked at src/tests/request_book.rs:176:25:
+called `Result::unwrap()` on an `Err` value: State
+
+
+failures:
+    tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once
+    tests::request_book::bounded_prepublication_and_terminal_retention
+    tests::request_book::fixed_and_control_refuse_payload_more_and_oversize
+    tests::request_book::malformed_receipts_flags_and_lengths_leave_active
+    tests::request_book::multishot_more_and_final_keep_payload_separate
+    tests::request_book::ring_local_identity_cannot_alias_other_book_cookie
+
+test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `--lib`

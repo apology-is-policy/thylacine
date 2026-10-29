@@ -1,0 +1,11 @@
+PASS clean
+PASS early-owner-drop
+PASS early-refund
+PASS slab-allocation
+PASS omit-ref
+PASS omit-owner
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/check-operation.py", line 81, in <module>
+    assert (r.returncode==0)==(name=='clean'),(name,r.returncode)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('expiry', 0)

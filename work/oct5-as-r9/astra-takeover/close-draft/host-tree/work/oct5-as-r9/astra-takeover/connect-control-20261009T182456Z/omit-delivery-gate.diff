@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -228,7 +228,7 @@
+     struct loom_service_node *n=connect_scope(l,p->scope);
+     struct loom_service_request *r=connect_request(p);
+     if (!p->connect_bound || p->indexed || !p->locally_retired || p->driving || p->users ||
+-        !n || n->state != LOOM_SERVICE_RETIRED || !r || r->phase != LREQ_DELIVERED || r->borrows) {
++        !n || n->state != LOOM_SERVICE_RETIRED || !r || r->phase == LREQ_FREE || r->borrows) {
+         spin_unlock(&l->lock); return -T_E_BUSY;
+     }
+     if (loom_request_reap(&l->service_requests,l->service_slots,p->request) ||

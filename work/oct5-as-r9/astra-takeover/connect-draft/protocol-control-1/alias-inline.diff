@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -114,7 +114,7 @@
+     struct p9_transport_ops unused = { .send=protocol_no_send, .recv=protocol_no_recv,
+                                       .close=protocol_no_close, .ctx=NULL };
+     rc = p9_client_init_preallocated(&p->client, 0, msize, unused,
+-                                     p->recv_storage, msize, p->send_storage, msize);
++                                     p->recv_storage, msize, p->client.out_buf_inline, msize);
+     if (rc) { rc = -T_E_INVAL; goto fail; }
+     rc = p9_client_progress_bind(&p->client, &p->progress,
+              p9_srvconn_progress_ops(p->admission.conn), identity.access.principal_id, deadline);

@@ -1,0 +1,31 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 5 tests
+test tests::owned_mapping::every_region_pair_rejects_overlap ... FAILED
+test tests::owned_mapping::fresh_header_checks_and_wakeup ... ok
+test tests::owned_mapping::malformed_geometry_cleanup ... FAILED
+test tests::owned_mapping::min_max_copy_and_cleanup ... ok
+test tests::owned_mapping::post_setup_corruption_is_detected ... ok
+
+failures:
+
+---- tests::owned_mapping::every_region_pair_rejects_overlap stdout ----
+
+thread 'tests::owned_mapping::every_region_pair_rejects_overlap' (31847955) panicked at src/tests/owned_mapping.rs:188:13:
+assertion failed: matches!(OwnedMapping::new(b, p), Err(Error::Geometry))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::owned_mapping::malformed_geometry_cleanup stdout ----
+
+thread 'tests::owned_mapping::malformed_geometry_cleanup' (31847957) panicked at src/tests/owned_mapping.rs:161:9:
+case 20
+
+
+failures:
+    tests::owned_mapping::every_region_pair_rejects_overlap
+    tests::owned_mapping::malformed_geometry_cleanup
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

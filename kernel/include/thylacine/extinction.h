@@ -31,11 +31,13 @@ void extinction(const char *msg) __attribute__((noreturn));
 void extinction_with_addr(const char *msg, uintptr_t addr)
     __attribute__((noreturn));
 
+#ifdef KERNEL_TESTS
 // Has the extinction console been claimed? FALSE on a clean boot, and it must
 // STAY false: a spurious claim would silence every later extinction's banner --
 // the same fail-open the claim exists to close, arriving from the other side.
 // Guarded by the `extinction.console_unclaimed_on_clean_boot` test.
 int extinction_console_claimed(void);
+#endif // KERNEL_TESTS
 
 // For exception.c's el1_sync_runaway -- the one OTHER emitter of the ABI line.
 // Claims the console, or confirms this CPU already owns it (the runaway is
@@ -44,10 +46,42 @@ int extinction_console_claimed(void);
 // suppressed peer). Not for any other caller.
 int extinction_console_claim_or_own(void);
 
+#ifdef KERNEL_TESTS
 // The pure exactly-one-winner core, exported so a test can exercise it on its
 // OWN word. Deliberately not reachable against the live console word: a test
 // that claimed THAT would disable extinction reporting for the rest of the boot.
 int extinction_claim_word(uint32_t *word);
+#endif // KERNEL_TESTS
+
+// True on a CPU whose stage 1 translation is off (SCTLR_EL1.M clear): the boot
+// CPU before mmu_enable. Every data access is then Device memory, where an
+// exclusive need not complete, so the dying path's claim, console gate and ring
+// lock take none.
+int extinction_mmu_off(void);
+
+// The console gate every direct UART byte passes (uart_putc). Enter returns 0
+// when a PEER owns the console: the caller drops the byte and does not call exit.
+// Otherwise the byte is in flight until extinction_tx_exit, which takes enter's
+// token: HELD when IRQs were on and the thread's preempt count is held across
+// the byte, BYTE when IRQs were masked and no thread state was touched, UNGATED
+// when the MMU was off and the gate did not run (exit then does nothing).
+#define EXTINCTION_TX_BYTE    1
+#define EXTINCTION_TX_HELD    2
+#define EXTINCTION_TX_UNGATED 3
+int  extinction_tx_enter(void);
+void extinction_tx_exit(int token);
+
+#ifdef KERNEL_TESTS
+// The gate's pure cores, exported so a test can drive them on its own words (the
+// live ones cannot be claimed without silencing the rest of the boot). gate:
+// raise `busy` by one, then admit iff `word` is unclaimed or `owner`; on refusal
+// `busy` drops back. exit: drop it by one (a depth, so a nested byte's exit
+// leaves the outer byte marked). wait: wait out every busy[c], c != self, under
+// a bound; 1 iff every flag reached zero in time.
+int  extinction_tx_gate_core(volatile uint8_t *busy, const uint32_t *word, uint8_t owner);
+void extinction_tx_exit_core(volatile uint8_t *busy);
+int  extinction_tx_wait_core(const volatile uint8_t *busy, unsigned n, unsigned self);
+#endif // KERNEL_TESTS
 
 // Convenience macro for assert-style checks. The expression that fails
 // shows up in the message verbatim so a developer can grep the source.

@@ -1,0 +1,11 @@
+--- control.c
++++ single-delivery.c
+@@ -1089,7 +1089,7 @@
+         .flags=LOOM_CQE_SERVICE_BUFFER|(c->more?LOOM_CQE_MORE:0)};
+     receipts[idx]=o->receipt;
+     if(loom_pool_deliver(&l->service_pools->bank,p,&o->receipt))extinction("provided delivery changed inside Ll");
+-    if(o->pool_terminal && loom_request_deliver(&l->service_requests,o->request))extinction("provided terminal delivery lost");
++    if(false && o->pool_terminal && loom_request_deliver(&l->service_requests,o->request))extinction("provided terminal delivery lost");
+     o->pool_pending=false;l->cq_tail=tail+1u;
+     __atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);
+ done:

@@ -320,8 +320,10 @@ void spoor_clunk(struct Spoor *c) {
     (void)spoor_clunk_rc(c);
 }
 
+#ifdef KERNEL_TESTS
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }
 u64 spoor_total_freed(void)     { return g_spoor_freed; }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Namespace name retention (#66 -- the Plan 9 Chan.path; I-33).

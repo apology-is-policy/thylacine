@@ -1,0 +1,11 @@
+--- control.c
++++ return-wake.c
+@@ -1684,7 +1684,7 @@
+     // s.operation may have been freed. Only the caller's separate entry/root
+     // licenses p/l access here; no operation-derived lifetime is sufficient.
+     spin_lock(&l->lock);p->driving=false;spin_unlock(&l->lock);
+-    loom_private_close_changed(l);
++    /* lost return wake */
+     return rc==-T_E_BUSY || rc==-T_E_AGAIN?0:rc;
+ }
+ 

@@ -149,6 +149,7 @@ static void joey_thunk(void *arg) {
     // decides per perm_flags) -- I-2 untouched; CONSOLE_TRUSTED stays
     // console-attach-only so I-27 is untouched.
     proc_mark_may_post_service(p);
+    proc_mark_session_registry(p);
 
     // 2B-F3: publish this Proc as init -- the orphan-adopter (ARCH section
     // 7.9 step 6: orphans reparent to init; kproc is only the pre-init

@@ -57,7 +57,8 @@ the tid, the pool charge (`capacity_charge`, [[sub-kernel-mm-phys]]), the slot
 and the stack, undoing each on a later failure. The charge falls on a
 *payer*: the Proc itself for every constructor but
 `thread_create_kthread_for(owner, ...)`, whose thread lives in kproc and is
-charged to `owner` (the SQPOLL poller, [[sub-kernel-loom]]). kproc pays
+charged to `owner` (the SQPOLL poller and a private ring's executor,
+[[sub-kernel-loom]]). kproc pays
 nothing, since its threads are reserve memory; an exempt payer is counted and
 never refused; a non-exempt one is refused at the pool's bound and the create
 returns NULL with nothing charged. The thread keeps the count in `pool_pages`
@@ -74,7 +75,7 @@ with IRQs still masked, calls `thread_reap_dead`. That scans the dead stack's
 depth before any lock (nothing writes a dead stack) and returns the thread's
 pool charge, zeroing `pool_pages` so the free returns nothing more. The charge
 goes back before the unlink, not at the free: once `thread_count` reads 0 a
-`wait_pid` may free the Proc and return, and the pool its caller reads then
+`wait_pid_for` may free the Proc and return, and the pool its caller reads then
 must hold nothing of the child's; the memory follows a moment later, and the
 reserve covers that slack (one thread per CPU). It takes the Proc's thread
 lock once to fold `run_ns` and the depth into the Proc (so `proc_cpu_ns` and

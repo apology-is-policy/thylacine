@@ -9,11 +9,13 @@
 // the RNDR-only baseline so the same path runs on RNDR-less targets.
 //
 // Invariants:
-//   - kern_random_seeded() is the readiness signal: false until a
-//     strong entropy source has ever contributed (DTB boot seed, RNDR,
-//     or a virtio-rng pull), monotonic true thereafter. While false,
-//     kern_random_bytes returns -1 (fail closed) and SYS_GETRANDOM
-//     refuses -- the same contract the RNDR-only baseline held.
+//   - kern_random_seeded() is the readiness signal: false until an
+//     unobserved strong source has ever contributed (RNDR, or a
+//     virtio-rng pull), monotonic true thereafter. The DTB boot seed and
+//     CNTPCT are mixed in but never flip it (KASLR consumes and partly
+//     discloses the DTB seed). While false, kern_random_bytes returns -1
+//     (fail closed) and SYS_GETRANDOM refuses -- the same contract the
+//     RNDR-only baseline held.
 //   - The CSPRNG re-keys on every keystream-buffer drain (fast key
 //     erasure -> backtracking resistance) and pulls fresh entropy every
 //     ~1 MiB served (state-compromise recovery).
@@ -38,10 +40,15 @@
 // buffer + uaccess_store_u8 per byte for user-VA targets.
 long kern_random_bytes(void *out, long len);
 
-// Is the kernel CSPRNG ready to deliver bytes? Returns true iff a strong
-// entropy source has ever seeded the pool (DTB boot seed, RNDR, or a
-// virtio-rng pull); monotonic. kern_random_bytes returns -1 while false.
+// Is the kernel CSPRNG ready to deliver bytes? Returns true iff an
+// unobserved strong source has ever seeded the pool (RNDR, or a virtio-rng
+// pull); monotonic. kern_random_bytes returns -1 while false.
 bool kern_random_seeded(void);
+
+#ifdef KERNEL_TESTS
+// Does this CPU implement RNDR (FEAT_RNG)? Fixed at devrandom_init.
+bool kern_random_rndr_available(void);
+#endif // KERNEL_TESTS
 
 // Pull strong entropy from the kernel virtio-rng device and re-key the
 // CSPRNG. Called once at boot (after virtio_init, from kernel/main.c) and
@@ -49,8 +56,10 @@ bool kern_random_seeded(void);
 // (0 if no RNG device is present -- the CSPRNG keeps its prior seed).
 size_t random_seed_from_virtio(void);
 
+#ifdef KERNEL_TESTS
 // True iff a virtio-rng pull has ever contributed entropy to the pool.
 bool kern_random_virtio_contributed(void);
+#endif // KERNEL_TESTS
 
 // Diagnostic: the outcome of the most recent virtio-rng pull. Returns a
 // short reason string ("ok" / "no-device" / "negotiate-failed" /
@@ -62,11 +71,13 @@ bool kern_random_virtio_contributed(void);
 // real failure mode -- #188).
 const char *kern_random_pull_diag(u64 *spin_out);
 
+#ifdef KERNEL_TESTS
 // Convert the wall-clock virtio-rng poll budget to CNTPCT ticks for the
 // given counter frequency. freq == 0 (CNTFRQ unprogrammed) returns 0 -- the
 // poll then has no deadline and the unconditional RNG_VIRTIO_POLL_MAX
 // iteration backstop bounds it. Exposed for the unit test (#188); the live
 // pull never observes freq == 0 because timer_init() extincts on CNTFRQ == 0.
 u64 kern_random_virtio_deadline_ticks(u64 freq);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_RANDOM_H

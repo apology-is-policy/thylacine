@@ -1,0 +1,60 @@
+
+running 13 tests
+test last_generation_cannot_wrap_or_reuse ... ok
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test overlap_and_global64_members_are_rejected ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test registration_preflight_global_capacity_avoids_native_admission ... FAILED
+test registration_success_binds_actual_identity_without_late_allocation ... FAILED
+test registration_rejects_before_syscall_and_refunds_definite_error ... FAILED
+test stale_native_registration_keeps_precharged_reservation_until_close ... FAILED
+test uncertain_registration_closes_and_quarantines_with_live_payload ... FAILED
+
+failures:
+
+---- registration_preflight_global_capacity_avoids_native_admission stdout ----
+
+thread 'registration_preflight_global_capacity_avoids_native_admission' (22149911) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-missing-precharge/test_ring_payload.rs:63:118:
+assertion failed: matches!(register(&c,&[range(512)]),Err(Error::Busy))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- registration_success_binds_actual_identity_without_late_allocation stdout ----
+
+thread 'registration_success_binds_actual_identity_without_late_allocation' (22149913) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-missing-precharge/test_ring_payload.rs:54:131:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- registration_rejects_before_syscall_and_refunds_definite_error stdout ----
+
+thread 'registration_rejects_before_syscall_and_refunds_definite_error' (22149912) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-missing-precharge/ring_payload.rs:117:4:
+attempt to subtract with overflow
+
+---- stale_native_registration_keeps_precharged_reservation_until_close stdout ----
+
+thread 'stale_native_registration_keeps_precharged_reservation_until_close' (22149914) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-missing-precharge/test_ring_payload.rs:73:165:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- uncertain_registration_closes_and_quarantines_with_live_payload stdout ----
+
+thread 'uncertain_registration_closes_and_quarantines_with_live_payload' (22149915) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-missing-precharge/test_ring_payload.rs:68:109:
+assertion `left == right` failed
+  left: 1
+ right: 2
+
+
+failures:
+    registration_preflight_global_capacity_avoids_native_admission
+    registration_rejects_before_syscall_and_refunds_definite_error
+    registration_success_binds_actual_identity_without_late_allocation
+    stale_native_registration_keeps_precharged_reservation_until_close
+    uncertain_registration_closes_and_quarantines_with_live_payload
+
+test result: FAILED. 8 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

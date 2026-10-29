@@ -1,0 +1,78 @@
+{
+  "scope": "Actual internal pool owner functions and real ledgers with checked host doubles.\n\nSequential ASan/UBSan control and exact mutants. Models image/lock/Burrow and\npost-unlock table replacement; native fixture covers actual backing pins. This\nis not protocol admission, concurrent execution or guest allocator proof.\n",
+  "source_head": "93db78ecda3a85471f722366996557a7c8da5da0",
+  "loom_sha256": "0088653627a34a0afa37cb0c69595a13994c90d3c9cb844eae85a2b53aa4d08d",
+  "modules": {
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165"
+  },
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS private pool canonical ownership and rollback",
+      "generated_sha256": "12ee8ee377632938852702a167f2ddcbe3739eb5875e114199293284560fd121"
+    },
+    {
+      "case": "omit-image",
+      "rc": 11,
+      "expected": "wrong image rejected",
+      "generated_sha256": "732504c89d5a05b886e90b4a8f62149c4178bd361cc1478591a7c237740522f0"
+    },
+    {
+      "case": "omit-creator",
+      "rc": 11,
+      "expected": "wrong creator rejected",
+      "generated_sha256": "71365fee392eadc378c3827826ec58095eb7ef760876da5a8b950eaf5612ef3a"
+    },
+    {
+      "case": "allow-tail",
+      "rc": 11,
+      "expected": "unused tail rejected",
+      "generated_sha256": "4d3608704d086c15050bf0c7e2ceecfad9ebf1d44b87ce8bd6953f0d09f139aa"
+    },
+    {
+      "case": "omit-canonical-offset",
+      "rc": 11,
+      "expected": "canonical alias overlap rejected",
+      "generated_sha256": "84d4301e55842d9fa3287a257d7e1af8086c8038f8652a7d6ae52d66f882ac59"
+    },
+    {
+      "case": "allow-ring",
+      "rc": 11,
+      "expected": "ring backing rejected",
+      "generated_sha256": "08037396b59eac6b8ab2048c304b1a076148759554db147830968b0f1112897a"
+    },
+    {
+      "case": "allow-fixed-admission",
+      "rc": 11,
+      "expected": "unresolved fixed admission rejected",
+      "generated_sha256": "385e32603848b09438de23f4dada43dc8e56ae6bab9fc953344d3df0b8488cb4"
+    },
+    {
+      "case": "omit-member-pin",
+      "rc": 11,
+      "expected": "member pins acquired exactly",
+      "generated_sha256": "b72918d5ba0fc67a3c8c9d31fc68e53ec1242348a404f085cb9d3791a057d064"
+    },
+    {
+      "case": "omit-drop",
+      "rc": 11,
+      "expected": "rollback drops exactly member pins",
+      "generated_sha256": "5ec34185bbd87305405622e1b7cfa5e65dc923cd23abd7d640054c318c30e878"
+    },
+    {
+      "case": "drop-on-refusal",
+      "rc": 11,
+      "expected": "live rollback retains pins",
+      "generated_sha256": "b35b35366970f0f8cb8740cca7168347255073e68cdd123604f55ac4493b94d1"
+    },
+    {
+      "case": "omit-refund",
+      "rc": 11,
+      "expected": "after-close rollback settles final pins after concurrent table replacement",
+      "generated_sha256": "b7b316b9ffbcabee84775ba8649d235dcaed03f4c2f1887642cb72a5443d5eb9"
+    }
+  ]
+}

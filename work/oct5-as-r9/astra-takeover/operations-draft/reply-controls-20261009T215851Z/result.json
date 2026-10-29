@@ -1,0 +1,62 @@
+{
+  "source_sha256": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+  "cases": [
+    {
+      "case": "clean",
+      "rc": 0
+    },
+    {
+      "case": "read-request-bound",
+      "rc": -6
+    },
+    {
+      "case": "read-capacity",
+      "rc": -6
+    },
+    {
+      "case": "kind",
+      "rc": -6
+    },
+    {
+      "case": "source-fid",
+      "rc": -6
+    },
+    {
+      "case": "destination-fid",
+      "rc": -6
+    },
+    {
+      "case": "write-count",
+      "rc": -6
+    },
+    {
+      "case": "signed-result",
+      "rc": -6
+    },
+    {
+      "case": "walk-count",
+      "rc": -6
+    },
+    {
+      "case": "walk-binding",
+      "rc": -6
+    },
+    {
+      "case": "walk-arity",
+      "rc": -6
+    },
+    {
+      "case": "attribute-mask",
+      "rc": -6
+    },
+    {
+      "case": "copy-payload",
+      "rc": -6
+    },
+    {
+      "case": "copy-metadata",
+      "rc": -6
+    }
+  ],
+  "limits": "Pure callback capture; no RPC owner lifetime, accounting, cancellation commit, native or public activation proof."
+}

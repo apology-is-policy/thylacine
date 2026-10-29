@@ -1,0 +1,38 @@
+2026-10-14T21:28:28Z  HEAD 165ca638a779b497970b8f451e505d0b4bd8f3c0
+2026-10-14T21:28:28Z  predictions derived: each kernel message inside its registered test
+2026-10-14T21:28:28Z  expected tests (derived from test.c): 1891
+2026-10-14T21:28:28Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-14T21:28:28Z  go fork /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/go-thylacine-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+2026-10-14T21:28:29Z  anchor census: 17 mutants, each anchor once in its file
+2026-10-14T21:28:29Z  disk pre: 12101 MiB free (floor 8192)
+2026-10-14T21:29:19Z  disk post-control-build: 12100 MiB free (floor 8192)
+2026-10-14T21:30:09Z  control: test.sh exit 0
+2026-10-14T21:30:09Z  CONTROL GREEN: 1891/1891, the eight named tests PASS, argwidth-probe 72, loom-bridge-probe 70, bin 6e68e3362498db56
+2026-10-14T21:31:22Z  disk post-control-q-build: 12101 MiB free (floor 8192)
+2026-10-14T21:32:14Z  control-q: test.sh exit 0
+2026-10-14T21:32:14Z  CONTROL-Q GREEN: 1891/1891, the eight named tests PASS, loom-bridge-probe 71 (qualification path), bin 4fcf881dfa923e2a
+2026-10-14T21:32:14Z  TLC slots clean: 447 states generated, 80 distinct states found, 0 states left on queue.
+2026-10-14T21:32:14Z  TLC slots-close-by-number counterexample: Error: Invariant NoForeignClose is violated.
+2026-10-14T21:32:15Z  TLC slots-published counterexample: Error: Invariant FailedPublishesNothing is violated.
+2026-10-14T21:32:15Z  TLC slots-dup3 counterexample: Error: Invariant InstallFillsOwnReservation is violated.
+2026-10-14T22:41:10Z  TLC handles clean: 1179332587 states generated, 51744096 distinct states found, 0 states left on queue.
+2026-10-14T22:41:12Z  TLC handles-srv clean: 202033 states generated, 26784 distinct states found, 0 states left on queue.
+2026-10-14T22:41:13Z  TLC handles_buggy_caps counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:14Z  TLC handles_buggy_direct counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:15Z  TLC handles_buggy_elevate counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:15Z  TLC handles_buggy_hw_dup counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:16Z  TLC handles_buggy_hw_nocap counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:17Z  TLC handles_buggy_hw_overlap counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:18Z  TLC handles_buggy_hw counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:19Z  TLC handles_buggy_rfork_elevate counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:20Z  TLC handles_buggy_rfork_hostowner counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:21Z  TLC handles_buggy_spawn_fds_elevate counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:22Z  TLC handles_buggy_srv_walk_tx counterexample: Error: Invariant Invariants is violated.
+2026-10-14T22:41:22Z  disk pre-m1: 11169 MiB free (floor 8192)
+2026-10-14T22:42:32Z  disk post-m1-build: 11284 MiB free (floor 8192)
+2026-10-14T22:42:48Z  m1: test.sh exit 1
+2026-10-14T22:42:48Z  M1 DISCRIMINATED: exactly handles.reservation (dup3 onto it is BUSY) and vivarium.unwinds_publish_nothing (dup3 onto a reserved number is EBUSY); extinction set = the suite's own
+2026-10-14T22:42:48Z  disk pre-m2: 11284 MiB free (floor 8192)
+2026-10-14T22:44:12Z  disk post-m2-build: 11102 MiB free (floor 8192)
+2026-10-14T22:44:28Z  m2: test.sh exit 1
+2026-10-14T22:44:28Z  exit 2

@@ -1,0 +1,17 @@
+PASS control
+PASS omit-change
+PASS wrong-nearest-deadline
+PASS ignore-native-ready
+PASS wrong-direction
+PASS omit-register
+PASS omit-flag
+PASS omit-cq-drain
+PASS ignore-busy
+PASS ignore-teardown-user
+PASS drop-deadline
+PASS reset-deadline
+PASS skip-timeout
+PASS ignore-cq-room
+PASS skip-unhook
+PASS allow-second-wait
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/controls-20261009T204659Z

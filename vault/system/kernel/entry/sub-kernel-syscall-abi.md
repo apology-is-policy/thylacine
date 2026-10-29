@@ -5,20 +5,38 @@ parent: moc-kernel-entry
 title: "The syscall ABI — the number space, the argument records, and the three copies of both"
 code:
   - kernel/include/thylacine/syscall.h
+  - kernel/include/thylacine/errno.h
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libt/include/thyla/poll.h
+  - usr/lib/libt/include/thyla/loom_service.h
+  - usr/lib/libt/include/thyla/loom.h
   - usr/lib/libt/src/start.S
   - usr/lib/libthyla-rs/src/lib.rs
+  - usr/lib/libthyla-rs/src/pty_interaction.rs
 audit: hard
 guarded-by: [inv-i5, inv-i13, inv-i32]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
-abis: [abi-t-stat, abi-handle-rights, abi-errno]
+abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
 updated: 2026-10-29
 ---
+## Session registry factory ABI
+
+Native syscall 134 is SRV_REGISTRY_NEW: boot O_PATH fd, route pointer, count,
+zero flags. It was 127 until vote 13 (2026-10-19): 127..133 belong to syscalls
+other branches assigned first (main's 127/128, b3's 129..133), so the number
+no longer depends on landing order. Since corona merged main (2026-10-21) this
+tree has 127 and 128 too, and assigns nothing in 129..133. Each
+route is 40 bytes (u32 length, u32 reserved, 32 name bytes). Public spawn bit
+11 delegates the dedicated factory role. Kernel C, libt C and Rust wrappers
+agree under tools/test-srv-registry-abi.py; the native ceiling advances to
+134, and the Linux rows it newly covers (128..134) are argued per number in
+vivarium.c ([[sub-kernel-vivarium]]). No Linux-number translation row or
+Imperium capability is introduced. See [[sub-kernel-devsrv]].
+
 ## Purpose
 
 The contract half of the userspace boundary. [[sub-kernel-exception]] defines
@@ -67,6 +85,28 @@ hand). The authority to raise it, `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit
 10), is in `SPAWN_PERM_ALL` and, like bit 4, mirrored in neither library: no
 native caller confers it. What the tail does is
 [[sub-kernel-syscall-dispatch]]'s (ARCH 7.3.5).
+`SPAWN_EXT_ENV` (bit 2, 2026-10-28, [[dec-2026-10-28-spawn-env]]) announces a
+`struct sys_spawn_ext_env` after the cwd and thread tails whose bits are set,
+else at +104: `env_va` (u64; may be 0 when the length is), `env_len` (u32,
+0..`SYS_SPAWN_ENV_DATA_MAX`, 32768 bytes, past it `T_E_2BIG`) and `env_flags`
+(u32, must be 0), 16 bytes. The block is the argv packing, NUL-terminated
+`NAME=VALUE` records, and it is the child's whole environment: nothing of the
+spawner's carries over, and a length of 0 is an empty one. The bound is
+`EXEC_ENV_DATA_MAX`, asserted equal in `kernel/syscall.c`, because exec projects
+the group onto the child's stack and refuses a larger one; a tail that admitted
+more would make a child exec could not start. Mirrors: libt `T_SPAWN_EXT_ENV`,
+`T_SYS_SPAWN_ENV_DATA_MAX` + `struct t_sys_spawn_ext_env`; libthyla-rs
+`T_SPAWN_EXT_ENV`, `T_SYS_SPAWN_ENV_DATA_MAX` + `TSpawnExtEnv`, sent by
+`Command::env`, `env_remove` and `env_clear` ([[sub-libthyla-rs]]);
+`tools/check-spawn-args-mirrors.py` holds both to the kernel's layout. Both
+libraries also mirror `SPAWN_EXT_FLAGS_ALL` (`T_SPAWN_EXT_FLAGS_ALL`), and the
+same check holds their `T_SPAWN_EXT_*` members to the kernel's names and bits
+and each mask to exactly those members, proving each rule on a mutation (a
+member dropped, a mask missing one, a kernel member no mirror has). The Go
+fork and pouch do not send it yet: the fork is shared by every tree, and a
+kernel without bit 2 refuses the bit, so it waits until every tree carries
+the kernel half. What the tail does is [[sub-kernel-syscall-dispatch]]'s and
+[[sub-kernel-content]]'s (ARCH 9.7).
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
@@ -181,6 +221,26 @@ the subset rule below. The C JIT header `usr/lib/thylajit/thyla_jit.h`
 (owned by [[sub-dosbox]], consumed by JavaScriptCore too) gains
 `THYLA_SYS_ICACHE_SYNC_SPACE` and `thyla_jit_icache_sync_space`, and its
 `THYLA_JIT_REGION_MAX` follows the kernel's `JIT_REGION_MAX` to 128 MiB.
+
+**Vote 13 (2026-10-19).** `SYS_SRV_REGISTRY_NEW` = 134 (the D7 append, first
+minted at 127); `SYS__NATIVE_TOP` is 135 and `VIV_NATIVE_CEILING` 134.
+Measured on this tree, not incremented: **125** live numbers, the span runs to
+134 with holes at 26, 30, 43 and 127..133, the native switch (now
+`syscall_native_switch`) has exactly 125 arms, and both set differences are
+empty. The 127..133 hole is deliberate and pinned
+(`syscall.native_gap_unassigned`, which counts each of the seven into the
+native switch's unknown arm through `syscall_unknown_count()` rather than
+trusting the -1 many handlers also return): those numbers belong to other
+branches.
+
+**Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
+the three appends above meet: `SYS_JIT_CREATE_SEALED` = 127,
+`SYS_ICACHE_SYNC_SPACE` = 128, `SYS_SRV_REGISTRY_NEW` = 134; `SYS__NATIVE_TOP`
+is 135 and `VIV_NATIVE_CEILING` 134. Measured on the merged tree, not added up:
+**127** live numbers, the span runs to 134 with holes at 26, 30, 43 and
+129..133, `syscall_native_switch` has exactly 127 arms, and both set
+differences are empty. The deliberate hole is now 129..133 (b3's numbers), and
+`syscall.native_gap_unassigned` counts those five.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -549,7 +609,46 @@ be one 4 KiB staging buffer per round trip.
 
 - **The two return conventions are not converging.** New syscalls use errno, old
   ones use `-1`, and there is no migration underway. A caller handling both must
-  know which is which per call.
+  know which is which per call. One exception, 2026-10-13 (operator vote 6):
+  Loom's ENTER and REGISTER answer a descriptor that names no ring with
+  `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`. Since vote 7 the
+  same day every Loom refusal is an errno (LOOM.md 8.2a), as the comments on
+  libthyla-rs's raw `t_loom_*` wrappers now say.
+- **A too-wide argument is refused, never truncated (operator vote 8,
+  2026-10-13; ERRORS.md principle 6).** Loom conformed first; a sweep the same
+  day brought every native handler in `kernel/syscall.c` under the rule, and
+  `tools/check-arg-width.py`, run by `build.sh` on every ramfs bake, fails the
+  build on a cast of a raw argument to a narrower type that no full-width
+  check precedes. A handler reads an argument in one of four ways. A
+  descriptor goes through `sys_hidx_arg`: a value wider than an index becomes
+  -1, so the handler gives its own answer for a descriptor that names nothing,
+  after any check that precedes its lookup. An unsigned 32-bit word (a count,
+  a whence, a protection, wstat's fields, a signal class, rfork's flags) with
+  a high bit set answers `-T_E_INVAL`. A signed one (a pid, poll's timeout) goes through
+  `sys_s32_arg`, which accepts exactly the sign-extension an `int` binding
+  produces, so -1 still means "any child" and "wait forever". Torpor's
+  expected value goes through `sys_word32_arg`, which accepts either
+  extension: pouch passes it as `int` (musl's lock words are negative) and
+  libt as `unsigned int`, and both name the same word. Two narrowings stay on
+  purpose, each marked `// width:` where it happens: exits and exit_group
+  keep the status's low byte, as Linux does, and pci_claim's high word is the
+  ordinal. The Linux phenotype keeps Linux's truncation in the phenotype: a
+  T1 row narrows the words Linux's prototype declares 32-bit before the
+  renumber, and a T2 shell narrows its own (see [[sub-kernel-vivarium]]).
+  `/bin/argwidth-probe` (kernel test `syscall.argwidth_probe`) makes each
+  covered call twice, one bit apart, from EL0.
+  Before the vote, Loom's handlers cast `loom_fd` to `hidx_t` and `op`, `nargs`
+  and ENTER's counts and flags to `u32`, so a high word was ignored: op
+  `0x1_0000_0002` routed as op 2, and descriptor `0x1_0000_0005` named the
+  caller's own descriptor 5. The other handlers differed. Some refused a high
+  word (the PCI IRQ handle bound in `sys_pci_irq_create_handler`, the PTY
+  interaction fds in `sys_pty_register_for_proc`, the srv registry's
+  `source_fd`, the console episode op, `pci_map_range`'s protection); 37
+  descriptor reads in 32 functions and nineteen other words cast it away. A
+  postnote to pid `2^32 + self` posted to the caller itself. No authority
+  crossed a Proc through a cast (each alias was in the caller's own table or the
+  caller itself), but a caller that built an argument wrongly got a different,
+  successful request instead of a refusal.
 - **The `svc` immediate is unused.** Reserved as a class selector; nothing reads
   it.
 - **Environment pass-through at spawn was reserved and never built.** The
@@ -609,9 +708,21 @@ be one 4 KiB staging buffer per round trip.
   correctly. The stale copies are in the kernel header's own prose, describing
   the calls the bound applies to.
 
+## Internal ownership prerequisite (AS-2a)
+
+Spawn's existing budget stamp now distinguishes process owners from kernel
+AddrSpace pins. This changes no syscall number, argument record, errno, grant
+or cap: the internal AddrSpace grows from72 to80 bytes with existing offsets
+preserved. The private Loom encodings remain reserved and setup remains refused;
+[[abi-loom-service]] is still the boundary contract for their later activation.
+
 ## Provenance
 
 [[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
+
+2026-10-28 (vote 28): `SPAWN_EXT_ENV` (bit 2) + `sys_spawn_ext_env` +
+`SYS_SPAWN_ENV_DATA_MAX`, and `T_E_2BIG`'s emitter list in `errno.h` names the
+tail. No number changed; the record stays 104 bytes.
 
 2026-10-29 (thread-model C7): `SYS_THREAD_SPAWN` starts a thread with its
 creator's note mask (operator vote; a semantics change with no number or record
@@ -815,6 +926,35 @@ No number changed and no record grew; the operator voted the additive shape
   checks repeat the handlers', so the syscall's answers and precedence are
   unchanged ([[sub-kernel-syscall-dispatch]]).
 
+## Terminal interaction operations and errno
+
+SYS_PTY_REGISTER implements suboperations 16..21 without moving any syscall
+number or ceiling. [[abi-pty-interaction]] pins all three mirrors, the 80-byte
+state, 24-byte input, offsets, alignments and signed-ID ceiling. The independent
+200-byte compiled oracle checks layout; [[sub-kernel-pts]] owns the implemented
+role, epoch and watch contract. No live clipboard is supplied by the kernel ABI.
+
+`kernel/include/thylacine/errno.h` is also owned here: each value is pinned by a
+static assertion and uses its POSIX number. [[abi-errno]] owns the full registry
+and mirror obligations. ENOSPC=28 distinguishes bounded interaction-capacity
+exhaustion from allocator failure; libthyla-rs maps it to `Error::NoSpace`.
+The explicit error range passes unchanged through pouch and libt.
+
+The boot suite's native-marshaller wrapper and counter-boundary injection are
+KERNEL_TESTS-only kernel symbols, not added operations or exported user ABI.
+The native operation range, record sizes and mirrors remain unchanged. Faulting
+STATE/ACK/CHECK pointers and malformed lengths are covered through the actual
+marshaller; positive EL0 record transfer remains a distinct qualification step.
+
+The native Rust `pty_observer` adapter consumes these existing records and subops
+without reserving new ABI. [[sub-libthyla-rs]] describes locator validation,
+explicit revocation and RAII watcher ownership. Runtime application integration
+is distinct from compiling that adapter.
+
+The native Rust library now supplies T_SYS_DUP=12 and t_dup, matching the existing
+kernel and C ABI. File::try_clone requests its existing rights; the kernel's
+subset check remains authoritative. This adds a client wrapper, not a new syscall.
+
 ## B-1d: SYS_BURROW_MAP_FILE 126 (2026-09-24)
 
 `SYS_BURROW_MAP_FILE(fd x0, offset x1, length x2, prot x3, flags x4, addr x5)
@@ -965,3 +1105,72 @@ old kernel fails loud instead of reading a raw word as packed. Mirrors: libt
 `<thyla/syscall.h>` (`WAIT_PACKED`, `WAIT_IF_SIGNALED`, `WAIT_TERMSIG`),
 `libthyla_rs` (`T_WAIT_PACKED`, `t_wait_if_signaled`, `t_wait_termsig`), and
 Pouch's `POUCH_WAIT_PACKED` in 0026 ([[sub-pouch-process]]).
+## Native C private Loom records
+
+Owns the libt loom_service.h mirror, previously indexed only by the ABI pin.
+It declares the same30 constants/10 records as kernel C and Rust, including
+provided-buffer create/receipt/return/query layouts. Every field offset and size
+is asserted; new pool records also assert eight-byte alignment. No wrappers or
+syscall numbers are added, and no private mode is enabled. See [[abi-loom-service]]
+and [[sub-kernel-loom]]; tools/check-loom-service-abi.py checks independent bytes.
+
+## Native C Loom ring stubs and burrow stubs (NA-2a, 2026-10-12)
+
+`thyla/loom.h` adds the native C mirror of the ring records in
+[[abi-loom-ring]] (params 88, SQE 64, CQE 16, header 64, buffer registration
+16). It asserts every field offset, not just the two the kernel pins. It also
+adds the three Loom stubs, SETUP 66, REGISTER 67 and ENTER 68, with their
+return contracts:
+- On the legacy route, setup answers fd or -1.
+- On the private route, it answers fd or -errno.
+- A params block the kernel cannot read answers -1 before any route is chosen.
+
+libt's `syscall.h` gains stubs for burrow ATTACH 37, DETACH 38, RESERVE 124 and
+PROTECT 125. ATTACH answers a vaddr, -1 (a bad length, no free gap, a failed map)
+or -ENOMEM (the page cap or the pool); DETACH answers 0 or -errno; RESERVE answers
+a vaddr or -errno; PROTECT answers 0 or -errno. It also gains
+the prot bits that mirror `BURROW_PROT_*`. Before this, native C reached none of
+them. These declarations route nothing and enable nothing: the private routes
+stay behind the kernel's qualification lever ([[sub-kernel-loom-bridge]]).
+`loom-bridge-probe` is the first consumer, and the only check on these mirrors
+against the kernel's own writes. `thyla/loom.h` also mirrors the full opcode list
+(NOP 0 .. STATFS 18), which `tools/check-loom-service-abi.py` compares with the
+kernel's.
+
+**Width audit round 1 append (2026-10-14).** chroot, pivot_root, unlink and
+rename now refuse a descriptor wider than an index like every other
+descriptor argument (they had cast it down). A Linux guest's syscall number is
+read by its low 32 bits, and a renumbered call returns its registers as Linux
+does: only x0 changes.
+
+**Width audit round 2 append (2026-10-14).** The fcntl arm and `viv_sock_row`
+convert the descriptor through `(u32)` before `hidx_t`, so a high half above a
+bounded low half is dropped by a defined conversion.
+
+## Descriptor numbers in a failed call (2026-10-14, vote 10)
+
+No answer a native caller sees changed. A failed pipe never installs a
+descriptor, and SYS_PIPE answers -1 exactly as before. For the Linux
+phenotype, four answers follow Linux more closely:
+- dup3 onto a number another thread's call holds reserved answers EBUSY
+  (Linux's own dup2/dup3 errno for that race).
+- socket and accept take their number before anything else that can fail,
+  so a full table answers EMFILE: before the /net open, and before accept
+  blocks. accept used to fail that way only after a peer had connected, and
+  socket answered a bare -1.
+- fchmodat and mkdirat no longer take a descriptor, so a full table does not
+  refuse them.
+- close of a reserved number answers EBADF, as it does on Linux.
+- connect whose socket a peer thread closed during the handshake, putting
+  its own file at the number, answers EIO and leaves that file in place.
+  Before, the swap released the peer's file and connect answered 0. If the
+  number names nothing a write can reach when the dial is about to be
+  written, connect now answers EBADF (it was ECONNREFUSED, from the failed
+  write by number).
+- bind, listen, accept, connect, getsockopt, sendto, recvfrom and recvmsg on a
+  number another call holds reserved answer EBADF. socket() and accept() claim
+  their row before they install, so these used to find the row and answer as
+  if the socket were there.
+
+The rationale is in [[dec-2026-10-14-descriptor-slot-reservation]].
+

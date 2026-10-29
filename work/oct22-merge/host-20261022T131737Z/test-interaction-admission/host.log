@@ -1,0 +1,18 @@
+
+running 1 test
+test only_declared_exact_surface_and_real_host ... FAILED
+
+failures:
+
+---- only_declared_exact_surface_and_real_host stdout ----
+
+thread 'only_declared_exact_surface_and_real_host' (68293330) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T131737Z/test-interaction-admission/host.rs:301:5:
+assertion failed: c.interaction_request(3, Request { binder_pid: 99, ..r }).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    only_declared_exact_surface_and_real_host
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+

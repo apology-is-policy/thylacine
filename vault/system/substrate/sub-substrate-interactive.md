@@ -5,11 +5,20 @@ parent: moc-substrate
 title: "LS-CI — the only harness that can type, and its fault taxonomy"
 code:
   - tools/test-interactive.sh
+  - tools/lib/ci-pool.sh
+  - tools/test-ci-pool.sh
+  - tools/interactive/readiness.exp
+  - tools/interactive/readiness-qualification.exp
+  - tools/interactive/service-readiness-failure.exp
+  - tools/interactive/service-wire.exp
+  - tools/interactive/service-capacity.exp
+  - tools/interactive/ls-halcyon-clipboard-pty-capacity.exp
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
   - tools/interactive/serial-listen.py
   - tools/interactive/test-serial-bridge.py
   - tools/interactive/ls-halcyon-session-instrument.exp
+  - tools/interactive/ls-halcyon-clipboard.exp
   - tools/interactive/ls-halcyon-session-media.exp
   - tools/interactive/ls-halcyon-session-dosbox.exp
   - tools/interactive/pci-net-load.exp
@@ -57,6 +66,49 @@ closes the chardev — so no keystroke is ever delivered, and two interactive
 regressions shipped silently through a fully green suite: LS-1 (the UART was
 never master-enabled for RX) and LS-2 (external command stdout/stderr were
 dropped). This is the only harness that can catch that class.
+
+## Native service backpressure fixture
+
+`service-wire` requires the CI Imperium clearance and key, checks the eligibility
+list before SAK, and explicitly enables serial recovery for that test VM. Lean
+production login provisioning alone is insufficient. The native probe posts
+its own temporary byte service only after POST_SERVICE is conferred, uses real
+SrvConn rings, stalls one reply reader, verifies another peer progresses and
+checks resumed replies byte-for-byte. It does not exercise the graphical UI.
+
+The service probe also posts a real 9P server that withholds an ordered WRITE
+reply until the production 30-second deadline retires its ring. An original
+Rwrite sent before Rflush is isolated from a fresh ring on the retained client
+session. This tests joined local callback retirement, not remote rollback.
+The scenario permits 75 seconds for this probe including its existing checks.
+
+`ls-halcyon-clipboard` requires the explicit interaction qualification option;
+it skips without it. With a matching image it verifies 20,000 bytes across two
+processes, enters physical Ctrl+Alt+F10 with a retained read snapshot, requires
+the old application connection to fail afterward, then rebinds and checks that
+the session value survived. It captures the trusted scene and restored workspace.
+This is not the pending/partial-output SAK or multi-session capacity witness.
+
+## Full native service capacity witness
+
+`service-capacity` uses the existing CI POST_SERVICE fixture to post the actual
+native pane adapter. Two promoted media clients stay connected while a separate
+child attempts a third kernel 9P attach. It must fail within 1.5 seconds without
+closing either admitted peer; afterward their limit reads must still work and a
+freed slot must admit a replacement. Three waves check reclamation. Before the
+listener repair the child remained blocked. This is the default two-media-slot
+witness, not a substitute for the full graphical controller/session workload.
+
+## Existing PTY-envelope clipboard witness
+
+`ls-halcyon-clipboard-pty-capacity` requires the nondefault interaction build.
+It retains fourteen real foreground controller processes in half-width tabs,
+beside two other shells, filling the existing sixteen-PTY envelope. Physical
+Ctrl+Alt+F10 runs a no-pending-request trusted episode. Each controller is then
+focused and must observe its old connection closed before reconnecting through
+fresh Hello/Bind/Get/Cancel/Unbind. No synthetic peer identity is supplied.
+This witness does not replace the failed larger/full-size pressure run or
+qualify a thirty-two-controller/multiple-session allocation guarantee.
 
 ## Contract
 
@@ -531,6 +583,39 @@ The fixture must use the explicit CI image (`HALCYON_SESSION=n`): automatic
 Halcyon login consumes the serial session and invalidates these serial-driving
 scenarios. The updated harness comment removes the obsolete Linux-only server
 restriction. Native Haul tests also pass 53/53 including live server interop.
+
+## Per-attempt pool fallback and readiness witness
+
+The sourced tools/lib/ci-pool.sh always populates the per-scenario destination
+before boot. A key-coherent snapshot supplies pristine state; otherwise each
+attempt copies the current base into its isolated slot and does not claim a
+pristine snapshot. LS_CI_POOL_RESTORE=0 seeds a missing slot from the base, then
+retains that scenario's mutations across retries for deliberate contamination
+reproduction. Missing sources and partial/failed copies refuse boot.
+
+The previous early returns for missing snapshots or opted-out restore left the
+slot absent even though run_attempt exported its path. QEMU then omitted the
+pool device and joey failed with ENODEV. The unchanged-image control reproduced
+this. tools/test-ci-pool.sh covers absent/coherent/stale snapshots, retry
+isolation, opt-out seeding/retention and failed-copy/missing-source refusal on
+Linux and macOS. The diagnostic no longer calls absent-snapshot runs shared.
+
+The readiness scenario runs the native worker probe and requires a live shell
+pipeline afterward. Its failure matcher waits for a complete diagnostic line;
+matching only the prefix previously stopped QEMU before a negative control's
+reason reached the log. No automatic retry is used for qualification. The gate
+honors the requested accelerator, so the same scenario can run under KVM/HVF.
+
+## Controlled native readiness fixture
+
+readiness-qualification and service-readiness-failure require a probe built with
+`--features readiness-qualification` and THYLACINE_READINESS_QUALIFICATION=1.
+Absent the explicit fixture flag they exit 77 (SKIP, not PASS) before boot.
+The first controls before/after-poll schedules and acquisition rollback; the
+second uses the same CI Imperium enrollment as service-wire and checks registry
+recovery after a failing poster exits. Both require a live shell pipeline after
+the exact probe PASS line. Wrong feature/image builds fail, not silently skip.
+The failure probe is not a graphical compositor/Warden recovery test.
 
 LR-1 (2026-09-28) added a remote-realm leg to each Haul gate and a local one to
 `ergo-1`, every typed line piped through `tr a-z A-Z` so its echo cannot

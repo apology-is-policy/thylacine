@@ -1,0 +1,2195 @@
+
+638 hunks checked: 0 error(s), 0 warning(s)
+spawn-args mirror check: kernel 104 B / 20 fields, every u64 classified; 3 in-tree mirrors ok (libt, libthyla-rs, pouch); go fork ok (offsets, sizes, pointer-typed addresses; /Users/northkillpd/projects/go-thylacine/src/syscall/exec_thylacine.go)
+==> Building kernel (build_type=Debug, hardening=OFF, kaslr=OFF, sanitize='', tests=ON, dir=/Users/northkillpd/projects/thylacine-corona/build/kernel)
+-- Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/kernel
+[  0%] Building C object kernel/CMakeFiles/thylacine.elf.dir/main.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/proc.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:3050:14: warning: no previous prototype for function 'proc_test_console_owner' [-Wmissing-prototypes]
+ 3050 | struct Proc *proc_test_console_owner(void) {
+      |              ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:3050:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3050 | struct Proc *proc_test_console_owner(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6224:6: warning: no previous prototype for function 'proc_test_link' [-Wmissing-prototypes]
+ 6224 | void proc_test_link(struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6224:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6224 | void proc_test_link(struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6239:6: warning: no previous prototype for function 'proc_test_link_child' [-Wmissing-prototypes]
+ 6239 | void proc_test_link_child(struct Proc *parent, struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6239:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6239 | void proc_test_link_child(struct Proc *parent, struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6250:6: warning: no previous prototype for function 'proc_test_orphan_rule' [-Wmissing-prototypes]
+ 6250 | void proc_test_orphan_rule(struct Proc *dying) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6250:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6250 | void proc_test_orphan_rule(struct Proc *dying) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6260:6: warning: no previous prototype for function 'proc_test_set_init' [-Wmissing-prototypes]
+ 6260 | void proc_test_set_init(struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6260:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6260 | void proc_test_set_init(struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6270:6: warning: no previous prototype for function 'proc_test_unlink' [-Wmissing-prototypes]
+ 6270 | void proc_test_unlink(struct Proc *p) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6270:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6270 | void proc_test_unlink(struct Proc *p) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6295:6: warning: no previous prototype for function 'proc_test_legate_teardown' [-Wmissing-prototypes]
+ 6295 | void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/proc.c:6295:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6295 | void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
+      | ^
+      | static 
+7 warnings generated.
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/perm.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/vivarium.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  3%] Building C object kernel/CMakeFiles/thylacine.elf.dir/allowance.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  3%] Building C object kernel/CMakeFiles/thylacine.elf.dir/handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/burrow.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/syscall.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:800:5: warning: no previous prototype for function 'hostmem_refcount_query' [-Wmissing-prototypes]
+  800 | s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:800:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  800 | s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1008:5: warning: no previous prototype for function 'sys_dma_segments_handler' [-Wmissing-prototypes]
+ 1008 | s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1008:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1008 | s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1076:5: warning: no previous prototype for function 'sys_pci_claim_handler' [-Wmissing-prototypes]
+ 1076 | s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1076:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1076 | s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1219:5: warning: no previous prototype for function 'sys_pci_map_bar_handler' [-Wmissing-prototypes]
+ 1219 | s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1219:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1219 | s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1261:5: warning: no previous prototype for function 'sys_pci_info_handler' [-Wmissing-prototypes]
+ 1261 | s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1261:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1261 | s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1417:5: warning: no previous prototype for function 'sys_pipe_for_proc' [-Wmissing-prototypes]
+ 1417 | int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1417:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1417 | int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1647:5: warning: no previous prototype for function 'sys_write_for_proc' [-Wmissing-prototypes]
+ 1647 | s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1647:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1647 | s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1653:5: warning: no previous prototype for function 'sys_pwrite_for_proc' [-Wmissing-prototypes]
+ 1653 | s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1653:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1653 | s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1709:5: warning: no previous prototype for function 'sys_read_for_proc' [-Wmissing-prototypes]
+ 1709 | s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1709:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1709 | s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1715:5: warning: no previous prototype for function 'sys_pread_for_proc' [-Wmissing-prototypes]
+ 1715 | s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:1715:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1715 | s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2255:5: warning: no previous prototype for function 'sys_stat_for_proc' [-Wmissing-prototypes]
+ 2255 | s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2255:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2255 | s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2698:5: warning: no previous prototype for function 'sys_srv_registry_new_for_proc' [-Wmissing-prototypes]
+ 2698 | s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:2698:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2698 | s64 sys_srv_registry_new_for_proc(struct Proc *p, u64 source_fd,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3483:5: warning: no previous prototype for function 'spoor_devclass' [-Wmissing-prototypes]
+ 3483 | int spoor_devclass(struct Spoor *c) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3483:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3483 | int spoor_devclass(struct Spoor *c) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3516:5: warning: no previous prototype for function 'sys_getpid_handler' [-Wmissing-prototypes]
+ 3516 | s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3516:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3516 | s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3523:5: warning: no previous prototype for function 'sys_getuid_handler' [-Wmissing-prototypes]
+ 3523 | s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3523:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3523 | s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3530:5: warning: no previous prototype for function 'sys_getgid_handler' [-Wmissing-prototypes]
+ 3530 | s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3530:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3530 | s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3546:5: warning: no previous prototype for function 'sys_setsid_handler' [-Wmissing-prototypes]
+ 3546 | s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3546:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3546 | s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3553:5: warning: no previous prototype for function 'sys_setpgid_handler' [-Wmissing-prototypes]
+ 3553 | s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3553:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3553 | s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3560:5: warning: no previous prototype for function 'sys_getpgid_handler' [-Wmissing-prototypes]
+ 3560 | s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3560:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3560 | s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3567:5: warning: no previous prototype for function 'sys_getsid_handler' [-Wmissing-prototypes]
+ 3567 | s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3567:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3567 | s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3588:5: warning: no previous prototype for function 'sys_pty_register_for_proc' [-Wmissing-prototypes]
+ 3588 | s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3588:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3588 | s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3703:5: warning: no previous prototype for function 'sys_tty_signal_for_proc' [-Wmissing-prototypes]
+ 3703 | s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3703:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3703 | s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3708:5: warning: no previous prototype for function 'sys_tty_fd_op_for_proc' [-Wmissing-prototypes]
+ 3708 | s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3708:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3708 | s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3773:5: warning: no previous prototype for function 'sys_clock_gettime_handler' [-Wmissing-prototypes]
+ 3773 | s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3773:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3773 | s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3812:5: warning: no previous prototype for function 'sys_clock_settime_handler' [-Wmissing-prototypes]
+ 3812 | s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:3812:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3812 | s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4465:5: warning: no previous prototype for function 'sys_open_create_kpath_for_proc' [-Wmissing-prototypes]
+ 4465 | s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4465:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4465 | s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4661:5: warning: no previous prototype for function 'union_readdir_run' [-Wmissing-prototypes]
+ 4661 | s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:4661:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4661 | s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:5126:5: warning: no previous prototype for function 'sys_wstat_for_proc' [-Wmissing-prototypes]
+ 5126 | s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:5126:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 5126 | s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6063:5: warning: no previous prototype for function 'sys_burrow_attach_for_proc' [-Wmissing-prototypes]
+ 6063 | s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6063:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6063 | s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6229:5: warning: no previous prototype for function 'sys_burrow_detach_for_proc' [-Wmissing-prototypes]
+ 6229 | s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6229:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6229 | s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6253:5: warning: no previous prototype for function 'sys_munmap_range_for_proc' [-Wmissing-prototypes]
+ 6253 | s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6253:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6253 | s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6289:5: warning: no previous prototype for function 'sys_burrow_attach_lazy_for_proc' [-Wmissing-prototypes]
+ 6289 | s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6289:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6289 | s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6398:5: warning: no previous prototype for function 'sys_mmap_file_for_proc' [-Wmissing-prototypes]
+ 6398 | s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6398:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6398 | s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6650:5: warning: no previous prototype for function 'sys_mmap_fixed_file_for_proc' [-Wmissing-prototypes]
+ 6650 | s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6650:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6650 | s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6745:5: warning: no previous prototype for function 'sys_mmap_fixed_anon_for_proc' [-Wmissing-prototypes]
+ 6745 | s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6745:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6745 | s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6783:5: warning: no previous prototype for function 'burrow_lazy_len_from_args' [-Wmissing-prototypes]
+ 6783 | u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6783:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6783 | u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6812:5: warning: no previous prototype for function 'sys_burrow_decommit_core' [-Wmissing-prototypes]
+ 6812 | s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6812:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6812 | s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6836:5: warning: no previous prototype for function 'sys_burrow_decommit_for_proc' [-Wmissing-prototypes]
+ 6836 | s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6836:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6836 | s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6872:5: warning: no previous prototype for function 'sys_burrow_reserve_for_proc' [-Wmissing-prototypes]
+ 6872 | s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6872:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6872 | s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6920:5: warning: no previous prototype for function 'sys_burrow_protect_for_proc' [-Wmissing-prototypes]
+ 6920 | s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6920:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6920 | s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6958:5: warning: no previous prototype for function 'sys_burrow_map_file_for_proc' [-Wmissing-prototypes]
+ 6958 | s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:6958:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 6958 | s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7084:5: warning: no previous prototype for function 'sys_jit_create_region' [-Wmissing-prototypes]
+ 7084 | s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7084:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7084 | s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7207:5: warning: no previous prototype for function 'sys_jit_create_for_proc' [-Wmissing-prototypes]
+ 7207 | s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7207:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7207 | s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7376:5: warning: no previous prototype for function 'sys_icache_sync_for_proc' [-Wmissing-prototypes]
+ 7376 | s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7376:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7376 | s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7458:5: warning: no previous prototype for function 'sys_weft_share_for_proc' [-Wmissing-prototypes]
+ 7458 | s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7458:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7458 | s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7636:5: warning: no previous prototype for function 'sys_weft_map_for_proc' [-Wmissing-prototypes]
+ 7636 | s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7636:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7636 | s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7674:5: warning: no previous prototype for function 'sys_weft_unshare_for_proc' [-Wmissing-prototypes]
+ 7674 | s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:7674:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 7674 | s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8106:5: warning: no previous prototype for function 'sys_mount_for_proc' [-Wmissing-prototypes]
+ 8106 | int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8106:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8106 | int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8154:5: warning: no previous prototype for function 'sys_unmount_for_proc' [-Wmissing-prototypes]
+ 8154 | int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8154:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8154 | int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8244:5: warning: no previous prototype for function 'sys_mlockall_for_proc' [-Wmissing-prototypes]
+ 8244 | int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8244:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8244 | int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8268:5: warning: no previous prototype for function 'sys_set_dumpable_for_proc' [-Wmissing-prototypes]
+ 8268 | int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8268:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8268 | int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8294:5: warning: no previous prototype for function 'sys_set_traceable_for_proc' [-Wmissing-prototypes]
+ 8294 | int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8294:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8294 | int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8596:5: warning: no previous prototype for function 'sys_spawn_for_proc' [-Wmissing-prototypes]
+ 8596 | int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8596:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8596 | int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8780:5: warning: no previous prototype for function 'sys_spawn_with_fds_for_proc' [-Wmissing-prototypes]
+ 8780 | int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8780:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8780 | int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8850:5: warning: no previous prototype for function 'sys_spawn_with_caps_for_proc' [-Wmissing-prototypes]
+ 8850 | int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:8850:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 8850 | int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9000:5: warning: no previous prototype for function 'sys_spawn_full_for_proc' [-Wmissing-prototypes]
+ 9000 | int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9000:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9000 | int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9024:5: warning: no previous prototype for function 'spawn_perm_grant_check' [-Wmissing-prototypes]
+ 9024 | int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9024:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9024 | int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9133:5: warning: no previous prototype for function 'sys_spawn_with_perms_for_proc' [-Wmissing-prototypes]
+ 9133 | int sys_spawn_with_perms_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9133:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9133 | int sys_spawn_with_perms_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9736:5: warning: no previous prototype for function 'sys_spawn_full_argv_debug_for_proc' [-Wmissing-prototypes]
+ 9736 | int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9736:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9736 | int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9811:5: warning: no previous prototype for function 'sys_spawn_full_argv_budget_for_proc' [-Wmissing-prototypes]
+ 9811 | int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9811:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9811 | int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9833:5: warning: no previous prototype for function 'sys_spawn_full_argv_identity_for_proc' [-Wmissing-prototypes]
+ 9833 | int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9833:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9833 | int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9854:5: warning: no previous prototype for function 'sys_spawn_full_argv_for_proc' [-Wmissing-prototypes]
+ 9854 | int sys_spawn_full_argv_for_proc(struct Proc *p,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9854:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9854 | int sys_spawn_full_argv_for_proc(struct Proc *p,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9896:5: warning: no previous prototype for function 'sys_spawn_full_argv_validate_req' [-Wmissing-prototypes]
+ 9896 | int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:9896:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 9896 | int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10578:5: warning: no previous prototype for function 'sys_rfork_handler' [-Wmissing-prototypes]
+ 10578 | s64 sys_rfork_handler(struct exception_context *ctx) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10578:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10578 | s64 sys_rfork_handler(struct exception_context *ctx) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10673:5: warning: no previous prototype for function 'sys_srv_accept_for_proc' [-Wmissing-prototypes]
+ 10673 | int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10673:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10673 | int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10755:5: warning: no previous prototype for function 'sys_srv_peer_for_proc' [-Wmissing-prototypes]
+ 10755 | int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:10755:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 10755 | int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11133:8: warning: no previous prototype for function 'sys_console_open_for_proc' [-Wmissing-prototypes]
+ 11133 | hidx_t sys_console_open_for_proc(struct Proc *p) {
+       |        ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:11133:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 11133 | hidx_t sys_console_open_for_proc(struct Proc *p) {
+       | ^
+       | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:13340:5: warning: no previous prototype for function 'viv_dirent64_encode_run' [-Wmissing-prototypes]
+ 13340 | u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+       |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/syscall.c:13340:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 13340 | u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+       | ^
+       | static 
+68 warnings generated.
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/stalk.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/devsrv.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/devsrv.c:702:6: warning: no previous prototype for function 'srv_registry_reset' [-Wmissing-prototypes]
+  702 | void srv_registry_reset(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/devsrv.c:702:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  702 | void srv_registry_reset(void) {
+      | ^
+      | static 
+1 warning generated.
+[  4%] Building C object kernel/CMakeFiles/thylacine.elf.dir/poll.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  5%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  5%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_exec_namespace.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  5%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:403:5: warning: comparison of integers of different signs: 'int' and 'u64' (aka 'unsigned long') [-Wsign-compare]
+  403 |     TEST_EXPECT_EQ(handle_table_count(p->handles), count_before,
+      |     ^              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  ~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test.h:86:51: note: expanded from macro 'TEST_EXPECT_EQ'
+   86 | #define TEST_EXPECT_EQ(a, b, msg) TEST_ASSERT((a) == (b), msg)
+      |                                                ~  ^   ~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test.h:80:15: note: expanded from macro 'TEST_ASSERT'
+   80 |         if (!(cond)) {                                          \
+      |               ^~~~
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:475:6: warning: no previous prototype for function 'test_handles_cloexec_lifecycle' [-Wmissing-prototypes]
+  475 | void test_handles_cloexec_lifecycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:475:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  475 | void test_handles_cloexec_lifecycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:522:6: warning: no previous prototype for function 'test_handles_cloexec_exec_sweep' [-Wmissing-prototypes]
+  522 | void test_handles_cloexec_exec_sweep(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:522:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  522 | void test_handles_cloexec_exec_sweep(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:566:6: warning: no previous prototype for function 'test_handles_cloexec_fork_preserves' [-Wmissing-prototypes]
+  566 | void test_handles_cloexec_fork_preserves(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:566:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  566 | void test_handles_cloexec_fork_preserves(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:598:6: warning: no previous prototype for function 'test_handles_dup_posix' [-Wmissing-prototypes]
+  598 | void test_handles_dup_posix(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:598:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  598 | void test_handles_dup_posix(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:649:6: warning: no previous prototype for function 'test_handles_dup_to' [-Wmissing-prototypes]
+  649 | void test_handles_dup_to(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_handle.c:649:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  649 | void test_handles_dup_to(void) {
+      | ^
+      | static 
+6 warnings generated.
+[  6%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_burrow.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:572:6: warning: no previous prototype for function 'test_burrow_backing_pages_matches_alloc' [-Wmissing-prototypes]
+  572 | void test_burrow_backing_pages_matches_alloc(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:572:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  572 | void test_burrow_backing_pages_matches_alloc(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:628:6: warning: no previous prototype for function 'test_burrow_settled_drop_retains_nonfinal_charge' [-Wmissing-prototypes]
+  628 | void test_burrow_settled_drop_retains_nonfinal_charge(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:628:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  628 | void test_burrow_settled_drop_retains_nonfinal_charge(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:660:6: warning: no previous prototype for function 'test_burrow_settled_drop_exact_payer' [-Wmissing-prototypes]
+  660 | void test_burrow_settled_drop_exact_payer(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:660:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  660 | void test_burrow_settled_drop_exact_payer(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:706:6: warning: no previous prototype for function 'test_burrow_settled_mapping_drop_defers_free' [-Wmissing-prototypes]
+  706 | void test_burrow_settled_mapping_drop_defers_free(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:706:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  706 | void test_burrow_settled_mapping_drop_defers_free(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:748:6: warning: no previous prototype for function 'test_burrow_unmap_failure_leaves_mapping_attached' [-Wmissing-prototypes]
+  748 | void test_burrow_unmap_failure_leaves_mapping_attached(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:748:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  748 | void test_burrow_unmap_failure_leaves_mapping_attached(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:834:6: warning: no previous prototype for function 'test_burrow_unmap_interior_start_refused' [-Wmissing-prototypes]
+  834 | void test_burrow_unmap_interior_start_refused(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_burrow.c:834:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  834 | void test_burrow_unmap_interior_start_refused(void) {
+      | ^
+      | static 
+6 warnings generated.
+[  7%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_vivarium.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:259:6: warning: no previous prototype for function 'test_vivarium_git_chunk_rows' [-Wmissing-prototypes]
+  259 | void test_vivarium_git_chunk_rows(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:259:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  259 | void test_vivarium_git_chunk_rows(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:298:6: warning: no previous prototype for function 'test_vivarium_faccessat_gate' [-Wmissing-prototypes]
+  298 | void test_vivarium_faccessat_gate(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:298:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  298 | void test_vivarium_faccessat_gate(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:873:6: warning: no previous prototype for function 'test_vivarium_mmap_file_domain' [-Wmissing-prototypes]
+  873 | void test_vivarium_mmap_file_domain(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:873:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  873 | void test_vivarium_mmap_file_domain(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:958:6: warning: no previous prototype for function 'test_vivarium_mmap_fixed_domain' [-Wmissing-prototypes]
+  958 | void test_vivarium_mmap_fixed_domain(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:958:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  958 | void test_vivarium_mmap_fixed_domain(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1058:6: warning: no previous prototype for function 'test_vivarium_mmap_arms_disjoint' [-Wmissing-prototypes]
+ 1058 | void test_vivarium_mmap_arms_disjoint(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1058:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1058 | void test_vivarium_mmap_arms_disjoint(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1311:6: warning: no previous prototype for function 'test_vivarium_futex_decide' [-Wmissing-prototypes]
+ 1311 | void test_vivarium_futex_decide(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1311:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1311 | void test_vivarium_futex_decide(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1510:6: warning: no previous prototype for function 'test_vivarium_signal_map' [-Wmissing-prototypes]
+ 1510 | void test_vivarium_signal_map(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1510:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1510 | void test_vivarium_signal_map(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1563:6: warning: no previous prototype for function 'test_vivarium_sigaction_domain' [-Wmissing-prototypes]
+ 1563 | void test_vivarium_sigaction_domain(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1563:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1563 | void test_vivarium_sigaction_domain(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1645:6: warning: no previous prototype for function 'test_vivarium_sigset_to_notemask' [-Wmissing-prototypes]
+ 1645 | void test_vivarium_sigset_to_notemask(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1645:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1645 | void test_vivarium_sigset_to_notemask(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1715:6: warning: no previous prototype for function 'test_vivarium_handler_mask' [-Wmissing-prototypes]
+ 1715 | void test_vivarium_handler_mask(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1715:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1715 | void test_vivarium_handler_mask(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1767:6: warning: no previous prototype for function 'test_vivarium_signal_exclusivity' [-Wmissing-prototypes]
+ 1767 | void test_vivarium_signal_exclusivity(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1767:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1767 | void test_vivarium_signal_exclusivity(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1808:6: warning: no previous prototype for function 'test_vivarium_signote_deliverable' [-Wmissing-prototypes]
+ 1808 | void test_vivarium_signote_deliverable(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1808:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1808 | void test_vivarium_signote_deliverable(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1831:6: warning: no previous prototype for function 'test_vivarium_sigtab' [-Wmissing-prototypes]
+ 1831 | void test_vivarium_sigtab(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1831:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1831 | void test_vivarium_sigtab(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1956:6: warning: no previous prototype for function 'test_vivarium_notemask_to_sigset' [-Wmissing-prototypes]
+ 1956 | void test_vivarium_notemask_to_sigset(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_vivarium.c:1956:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1956 | void test_vivarium_notemask_to_sigset(void) {
+      | ^
+      | static 
+14 warnings generated.
+[  7%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_viv_sock.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  8%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_fork.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  8%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_syscall.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  8%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_cons.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:439:6: warning: no previous prototype for function 'test_cons_mgr_hold_defers_consumption' [-Wmissing-prototypes]
+  439 | void test_cons_mgr_hold_defers_consumption(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:439:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  439 | void test_cons_mgr_hold_defers_consumption(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:767:6: warning: no previous prototype for function 'test_cons_rx_drop_counters' [-Wmissing-prototypes]
+  767 | void test_cons_rx_drop_counters(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:767:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  767 | void test_cons_rx_drop_counters(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1698:6: warning: no previous prototype for function 'test_cons_winsize_roundtrip' [-Wmissing-prototypes]
+ 1698 | void test_cons_winsize_roundtrip(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1698:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1698 | void test_cons_winsize_roundtrip(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1753:6: warning: no previous prototype for function 'test_cons_beacon_roundtrip' [-Wmissing-prototypes]
+ 1753 | void test_cons_beacon_roundtrip(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1753:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1753 | void test_cons_beacon_roundtrip(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1812:6: warning: no previous prototype for function 'test_cons_winsize_winch_iff_changed' [-Wmissing-prototypes]
+ 1812 | void test_cons_winsize_winch_iff_changed(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1812:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1812 | void test_cons_winsize_winch_iff_changed(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1835:6: warning: no previous prototype for function 'test_cons_stat_native_qid_contract' [-Wmissing-prototypes]
+ 1835 | void test_cons_stat_native_qid_contract(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:1835:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1835 | void test_cons_stat_native_qid_contract(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2146:6: warning: no previous prototype for function 'test_cons_drain_tap_mirrors_output' [-Wmissing-prototypes]
+ 2146 | void test_cons_drain_tap_mirrors_output(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2146:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2146 | void test_cons_drain_tap_mirrors_output(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2180:6: warning: no previous prototype for function 'test_cons_drain_feed_runs_discipline' [-Wmissing-prototypes]
+ 2180 | void test_cons_drain_feed_runs_discipline(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2180:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2180 | void test_cons_drain_feed_runs_discipline(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2223:6: warning: no previous prototype for function 'test_cons_drain_overflow_drops_oldest' [-Wmissing-prototypes]
+ 2223 | void test_cons_drain_overflow_drops_oldest(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2223:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2223 | void test_cons_drain_overflow_drops_oldest(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2259:6: warning: no previous prototype for function 'test_cons_drain_close_and_reopen_epoch' [-Wmissing-prototypes]
+ 2259 | void test_cons_drain_close_and_reopen_epoch(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2259:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2259 | void test_cons_drain_close_and_reopen_epoch(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2305:6: warning: no previous prototype for function 'test_cons_drain_poll_deferred_wake' [-Wmissing-prototypes]
+ 2305 | void test_cons_drain_poll_deferred_wake(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2305:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2305 | void test_cons_drain_poll_deferred_wake(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2687:6: warning: no previous prototype for function 'test_cons_sys_puts_uses_shared_console_path' [-Wmissing-prototypes]
+ 2687 | void test_cons_sys_puts_uses_shared_console_path(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2687:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2687 | void test_cons_sys_puts_uses_shared_console_path(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2800:6: warning: no previous prototype for function 'test_cons_tx_unit_diag_line_atomic' [-Wmissing-prototypes]
+ 2800 | void test_cons_tx_unit_diag_line_atomic(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2800:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2800 | void test_cons_tx_unit_diag_line_atomic(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2879:6: warning: no previous prototype for function 'test_cons_tx_unit_echo_atomic' [-Wmissing-prototypes]
+ 2879 | void test_cons_tx_unit_echo_atomic(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:2879:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2879 | void test_cons_tx_unit_echo_atomic(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:3003:6: warning: no previous prototype for function 'test_cons_tx_unit_smp_no_tear' [-Wmissing-prototypes]
+ 3003 | void test_cons_tx_unit_smp_no_tear(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_cons.c:3003:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3003 | void test_cons_tx_unit_smp_no_tear(void) {
+      | ^
+      | static 
+15 warnings generated.
+[  8%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_allowance.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  9%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_devsrv.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:324:6: warning: no previous prototype for function 'test_devsrv_registry_full_tombstone_rebinds' [-Wmissing-prototypes]
+  324 | void test_devsrv_registry_full_tombstone_rebinds(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_devsrv.c:324:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  324 | void test_devsrv_registry_full_tombstone_rebinds(void) {
+      | ^
+      | static 
+1 warning generated.
+[  9%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_virtio.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 10%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_dma_handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:291:6: warning: no previous prototype for function 'test_skein_blocks_tile_the_buffer' [-Wmissing-prototypes]
+  291 | void test_skein_blocks_tile_the_buffer(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:291:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  291 | void test_skein_blocks_tile_the_buffer(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:333:6: warning: no previous prototype for function 'test_skein_offset_resolution' [-Wmissing-prototypes]
+  333 | void test_skein_offset_resolution(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:333:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  333 | void test_skein_offset_resolution(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:370:6: warning: no previous prototype for function 'test_skein_small_weave_stays_one_block' [-Wmissing-prototypes]
+  370 | void test_skein_small_weave_stays_one_block(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:370:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  370 | void test_skein_small_weave_stays_one_block(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:401:6: warning: no previous prototype for function 'test_skein_scope_plain_never_scatters' [-Wmissing-prototypes]
+  401 | void test_skein_scope_plain_never_scatters(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:401:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  401 | void test_skein_scope_plain_never_scatters(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:416:6: warning: no previous prototype for function 'test_skein_gpu_bo_scatters' [-Wmissing-prototypes]
+  416 | void test_skein_gpu_bo_scatters(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:416:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  416 | void test_skein_gpu_bo_scatters(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:447:6: warning: no previous prototype for function 'test_skein_full_envelope_weave' [-Wmissing-prototypes]
+  447 | void test_skein_full_envelope_weave(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:447:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  447 | void test_skein_full_envelope_weave(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:469:6: warning: no previous prototype for function 'test_skein_zero_init_across_blocks' [-Wmissing-prototypes]
+  469 | void test_skein_zero_init_across_blocks(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:469:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  469 | void test_skein_zero_init_across_blocks(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:531:6: warning: no previous prototype for function 'test_skein_stride_is_the_objects_not_the_constant' [-Wmissing-prototypes]
+  531 | void test_skein_stride_is_the_objects_not_the_constant(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:531:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  531 | void test_skein_stride_is_the_objects_not_the_constant(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:575:6: warning: no previous prototype for function 'test_skein_one_block_resolves_throughout' [-Wmissing-prototypes]
+  575 | void test_skein_one_block_resolves_throughout(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:575:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  575 | void test_skein_one_block_resolves_throughout(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:612:6: warning: no previous prototype for function 'test_dma_segments_refuses_rather_than_truncates' [-Wmissing-prototypes]
+  612 | void test_dma_segments_refuses_rather_than_truncates(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dma_handle.c:612:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  612 | void test_dma_segments_refuses_rather_than_truncates(void) {
+      | ^
+      | static 
+10 warnings generated.
+[ 11%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_pci_handle.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 11%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_handle_hw.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 12%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_9p_client.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:104:5: warning: no previous prototype for function 'canonical_responder' [-Wmissing-prototypes]
+  104 | int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+      |     ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:104:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  104 | int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:462:6: warning: no previous prototype for function 'test_9p_client_walkgetattr' [-Wmissing-prototypes]
+  462 | void test_9p_client_walkgetattr(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:462:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  462 | void test_9p_client_walkgetattr(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:558:6: warning: no previous prototype for function 'test_9p_client_bulk_write_clamps_short' [-Wmissing-prototypes]
+  558 | void test_9p_client_bulk_write_clamps_short(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:558:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  558 | void test_9p_client_bulk_write_clamps_short(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1602:6: warning: no previous prototype for function 'test_9p_client_loom_link_cancel_cascade' [-Wmissing-prototypes]
+ 1602 | void test_9p_client_loom_link_cancel_cascade(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1602:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1602 | void test_9p_client_loom_link_cancel_cascade(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1640:6: warning: no previous prototype for function 'test_9p_client_loom_link_success_ordering' [-Wmissing-prototypes]
+ 1640 | void test_9p_client_loom_link_success_ordering(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1640:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1640 | void test_9p_client_loom_link_success_ordering(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1682:6: warning: no previous prototype for function 'test_9p_client_loom_drain_barrier' [-Wmissing-prototypes]
+ 1682 | void test_9p_client_loom_drain_barrier(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1682:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1682 | void test_9p_client_loom_drain_barrier(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1723:6: warning: no previous prototype for function 'test_9p_client_loom_independent_past_held' [-Wmissing-prototypes]
+ 1723 | void test_9p_client_loom_independent_past_held(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1723:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1723 | void test_9p_client_loom_independent_past_held(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1765:6: warning: no previous prototype for function 'test_9p_client_loom_drain_waits_for_rearm_pending' [-Wmissing-prototypes]
+ 1765 | void test_9p_client_loom_drain_waits_for_rearm_pending(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:1765:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1765 | void test_9p_client_loom_drain_waits_for_rearm_pending(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2054:6: warning: no previous prototype for function 'test_9p_client_loom_weft_read_e2e' [-Wmissing-prototypes]
+ 2054 | void test_9p_client_loom_weft_read_e2e(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2054:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2054 | void test_9p_client_loom_weft_read_e2e(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2107:6: warning: no previous prototype for function 'test_9p_client_loom_weft_write_e2e' [-Wmissing-prototypes]
+ 2107 | void test_9p_client_loom_weft_write_e2e(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2107:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2107 | void test_9p_client_loom_weft_write_e2e(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2157:6: warning: no previous prototype for function 'test_9p_client_loom_weft_hybrid_fallback' [-Wmissing-prototypes]
+ 2157 | void test_9p_client_loom_weft_hybrid_fallback(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2157:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2157 | void test_9p_client_loom_weft_hybrid_fallback(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2203:6: warning: no previous prototype for function 'test_9p_client_loom_weft_oob_rejected' [-Wmissing-prototypes]
+ 2203 | void test_9p_client_loom_weft_oob_rejected(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:2203:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2203 | void test_9p_client_loom_weft_oob_rejected(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3492:6: warning: no previous prototype for function 'test_9p_client_loom_multi_inflight_e2e' [-Wmissing-prototypes]
+ 3492 | void test_9p_client_loom_multi_inflight_e2e(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3492:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3492 | void test_9p_client_loom_multi_inflight_e2e(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3554:6: warning: no previous prototype for function 'test_9p_client_loom_multi_inflight_read_e2e' [-Wmissing-prototypes]
+ 3554 | void test_9p_client_loom_multi_inflight_read_e2e(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3554:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3554 | void test_9p_client_loom_multi_inflight_read_e2e(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3622:6: warning: no previous prototype for function 'test_9p_client_async_clunk_burst_no_fid_leak' [-Wmissing-prototypes]
+ 3622 | void test_9p_client_async_clunk_burst_no_fid_leak(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3622:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3622 | void test_9p_client_async_clunk_burst_no_fid_leak(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3681:6: warning: no previous prototype for function 'test_9p_client_send_backpressure_self_pump' [-Wmissing-prototypes]
+ 3681 | void test_9p_client_send_backpressure_self_pump(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3681:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3681 | void test_9p_client_send_backpressure_self_pump(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3750:6: warning: no previous prototype for function 'test_9p_client_send_backpressure_multi_waiter' [-Wmissing-prototypes]
+ 3750 | void test_9p_client_send_backpressure_multi_waiter(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3750:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3750 | void test_9p_client_send_backpressure_multi_waiter(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3811:6: warning: no previous prototype for function 'test_9p_client_send_backpressure_spill_survives_outbuf_reuse' [-Wmissing-prototypes]
+ 3811 | void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3811:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3811 | void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3872:6: warning: no previous prototype for function 'test_9p_client_abandon_async_eagain_keeps_session_alive' [-Wmissing-prototypes]
+ 3872 | void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3872:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3872 | void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3936:6: warning: no previous prototype for function 'test_9p_client_async_send_eagain_keeps_session_alive' [-Wmissing-prototypes]
+ 3936 | void test_9p_client_async_send_eagain_keeps_session_alive(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:3936:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3936 | void test_9p_client_async_send_eagain_keeps_session_alive(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:4006:6: warning: no previous prototype for function 'test_9p_client_async_full_tag_pool_is_eagain' [-Wmissing-prototypes]
+ 4006 | void test_9p_client_async_full_tag_pool_is_eagain(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_9p_client.c:4006:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 4006 | void test_9p_client_async_full_tag_pool_is_eagain(void) {
+      | ^
+      | static 
+21 warnings generated.
+[ 13%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_dev9p.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:735:6: warning: no previous prototype for function 'test_dev9p_open_errno' [-Wmissing-prototypes]
+  735 | void test_dev9p_open_errno(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:735:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  735 | void test_dev9p_open_errno(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:823:6: warning: no previous prototype for function 'test_dev9p_write_read_propagate_errno' [-Wmissing-prototypes]
+  823 | void test_dev9p_write_read_propagate_errno(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:823:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  823 | void test_dev9p_write_read_propagate_errno(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:985:6: warning: no previous prototype for function 'test_dev9p_create_invalidates_reused_child' [-Wmissing-prototypes]
+  985 | void test_dev9p_create_invalidates_reused_child(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:985:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  985 | void test_dev9p_create_invalidates_reused_child(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1025:6: warning: no previous prototype for function 'test_dev9p_create_invalidates_reused_child_pages' [-Wmissing-prototypes]
+ 1025 | void test_dev9p_create_invalidates_reused_child_pages(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1025:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1025 | void test_dev9p_create_invalidates_reused_child_pages(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1062:6: warning: no previous prototype for function 'test_dev9p_create_downgrades_parent_attr' [-Wmissing-prototypes]
+ 1062 | void test_dev9p_create_downgrades_parent_attr(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1062:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1062 | void test_dev9p_create_downgrades_parent_attr(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1123:6: warning: no previous prototype for function 'test_dev9p_dirfid_consume_and_recycle' [-Wmissing-prototypes]
+ 1123 | void test_dev9p_dirfid_consume_and_recycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1123:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1123 | void test_dev9p_dirfid_consume_and_recycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1169:6: warning: no previous prototype for function 'test_dev9p_dirfid_perm_only_leaf_consume' [-Wmissing-prototypes]
+ 1169 | void test_dev9p_dirfid_perm_only_leaf_consume(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1169:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1169 | void test_dev9p_dirfid_perm_only_leaf_consume(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1205:6: warning: no previous prototype for function 'test_dev9p_dirfid_create_reuse_drop' [-Wmissing-prototypes]
+ 1205 | void test_dev9p_dirfid_create_reuse_drop(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1205:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1205 | void test_dev9p_dirfid_create_reuse_drop(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1248:6: warning: no previous prototype for function 'test_dev9p_dirfid_rmdir_drop_and_no_stale_repark' [-Wmissing-prototypes]
+ 1248 | void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1248:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1248 | void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1301:6: warning: no previous prototype for function 'test_dev9p_dirfid_suspect_not_reparked' [-Wmissing-prototypes]
+ 1301 | void test_dev9p_dirfid_suspect_not_reparked(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1301:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1301 | void test_dev9p_dirfid_suspect_not_reparked(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1337:6: warning: no previous prototype for function 'test_dev9p_create_invalidates_negative_dentry' [-Wmissing-prototypes]
+ 1337 | void test_dev9p_create_invalidates_negative_dentry(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1337:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1337 | void test_dev9p_create_invalidates_negative_dentry(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1424:6: warning: no previous prototype for function 'test_dev9p_readdir_cookie_high_bit' [-Wmissing-prototypes]
+ 1424 | void test_dev9p_readdir_cookie_high_bit(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1424:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1424 | void test_dev9p_readdir_cookie_high_bit(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1443:6: warning: no previous prototype for function 'test_dev9p_rename' [-Wmissing-prototypes]
+ 1443 | void test_dev9p_rename(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1443:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1443 | void test_dev9p_rename(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1455:6: warning: no previous prototype for function 'test_dev9p_unlink' [-Wmissing-prototypes]
+ 1455 | void test_dev9p_unlink(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1455:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1455 | void test_dev9p_unlink(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1480:6: warning: no previous prototype for function 'test_dev9p_unlink_rename_errno_propagates' [-Wmissing-prototypes]
+ 1480 | void test_dev9p_unlink_rename_errno_propagates(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1480:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1480 | void test_dev9p_unlink_rename_errno_propagates(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1526:6: warning: no previous prototype for function 'test_dev9p_stat_native_maps_getattr' [-Wmissing-prototypes]
+ 1526 | void test_dev9p_stat_native_maps_getattr(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1526:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1526 | void test_dev9p_stat_native_maps_getattr(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1543:6: warning: no previous prototype for function 'test_dev9p_wstat_native_drives_setattr' [-Wmissing-prototypes]
+ 1543 | void test_dev9p_wstat_native_drives_setattr(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1543:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1543 | void test_dev9p_wstat_native_drives_setattr(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1574:6: warning: no previous prototype for function 'test_dev9p_perm_enforced_deny_allow' [-Wmissing-prototypes]
+ 1574 | void test_dev9p_perm_enforced_deny_allow(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:1574:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1574 | void test_dev9p_perm_enforced_deny_allow(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2629:6: warning: no previous prototype for function 'test_dev9p_read_align_heals_partial' [-Wmissing-prototypes]
+ 2629 | void test_dev9p_read_align_heals_partial(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2629:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2629 | void test_dev9p_read_align_heals_partial(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2699:6: warning: no previous prototype for function 'test_dev9p_read_align_short_not_eof' [-Wmissing-prototypes]
+ 2699 | void test_dev9p_read_align_short_not_eof(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2699:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2699 | void test_dev9p_read_align_short_not_eof(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2750:6: warning: no previous prototype for function 'test_dev9p_open_trunc_invalidates' [-Wmissing-prototypes]
+ 2750 | void test_dev9p_open_trunc_invalidates(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2750:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2750 | void test_dev9p_open_trunc_invalidates(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2792:6: warning: no previous prototype for function 'test_dev9p_read_eof_attr_served' [-Wmissing-prototypes]
+ 2792 | void test_dev9p_read_eof_attr_served(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:2792:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 2792 | void test_dev9p_read_eof_attr_served(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3627:6: warning: no previous prototype for function 'test_dev9p_stalk_open_errno' [-Wmissing-prototypes]
+ 3627 | void test_dev9p_stalk_open_errno(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3627:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3627 | void test_dev9p_stalk_open_errno(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3649:6: warning: no previous prototype for function 'test_dev9p_open_create_noent_then_create' [-Wmissing-prototypes]
+ 3649 | void test_dev9p_open_create_noent_then_create(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3649:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3649 | void test_dev9p_open_create_noent_then_create(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3689:6: warning: no previous prototype for function 'test_dev9p_open_create_exists_race_retries_open' [-Wmissing-prototypes]
+ 3689 | void test_dev9p_open_create_exists_race_retries_open(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3689:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3689 | void test_dev9p_open_create_exists_race_retries_open(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3721:6: warning: no previous prototype for function 'test_dev9p_open_create_excl_eexist_exact' [-Wmissing-prototypes]
+ 3721 | void test_dev9p_open_create_excl_eexist_exact(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_dev9p.c:3721:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3721 | void test_dev9p_open_create_excl_eexist_exact(void) {
+      | ^
+      | static 
+26 warnings generated.
+[ 13%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_perm.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 14%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_stalk.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_stalk.c:814:6: warning: no previous prototype for function 'test_stalk_err_codes' [-Wmissing-prototypes]
+  814 | void test_stalk_err_codes(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_stalk.c:814:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  814 | void test_stalk_err_codes(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_stalk.c:3225:6: warning: no previous prototype for function 'test_stalk_long_component_bound' [-Wmissing-prototypes]
+ 3225 | void test_stalk_long_component_bound(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_stalk.c:3225:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 3225 | void test_stalk_long_component_bound(void) {
+      | ^
+      | static 
+2 warnings generated.
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_9p_srvconn_transport.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_poll.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_poll.c:336:6: warning: no previous prototype for function 'test_poll_cons_deferred_block_then_wake' [-Wmissing-prototypes]
+  336 | void test_poll_cons_deferred_block_then_wake(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_poll.c:336:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  336 | void test_poll_cons_deferred_block_then_wake(void) {
+      | ^
+      | static 
+1 warning generated.
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_pts.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 15%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_devsrv_conn.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 16%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_srv_client.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 16%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_sys_pipe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_sys_pipe.c:259:6: warning: no previous prototype for function 'test_sys_pipe_dup_spoor_handle_acquires_ref' [-Wmissing-prototypes]
+  259 | void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_sys_pipe.c:259:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  259 | void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_sys_pipe.c:658:6: warning: no previous prototype for function 'test_sys_pipe_fstat_reports_fifo' [-Wmissing-prototypes]
+  658 | void test_sys_pipe_fstat_reports_fifo(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_sys_pipe.c:658:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  658 | void test_sys_pipe_fstat_reports_fifo(void) {
+      | ^
+      | static 
+2 warnings generated.
+[ 17%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_sys_mount.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 17%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_sys_spawn_with_fds.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 18%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_sys_spawn_full.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 19%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_loom.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:90:6: warning: no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]
+   90 | void test_loom_private_owner_lifecycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:90:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+   90 | void test_loom_private_owner_lifecycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1068:6: warning: no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]
+ 1068 | void test_loom_sqpoll_charges_thread_budget(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1068:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1068 | void test_loom_sqpoll_charges_thread_budget(void) {
+      | ^
+      | static 
+2 warnings generated.
+[ 19%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_attach_probe.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 20%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_stratumd_stub.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 21%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  2848480 Oct  7 10:47 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  9523392 Oct  7 10:47 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+-105553110730296 0000000000041864 b g_reap_fake_client
+-105553111128864 0000000000041864 b g_sc_client
+-105553111663496 0000000000047456 b pc
+-105553113064536 0000000000058784 D g_tests
+-105553112252048 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110911459 0000000000065792 b g_pe_payload
+-105553110832896 0000000000083728 b pti_front_clients
+-105553111010799 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553113224588 0000000000118968 R halls_symtab_names
+-105553112862720 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf
+==> HX-2: regenerated in-kernel symbol table (pass 1) -- re-linking
+[  0%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/generated/halls_symtab.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  1%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  2848480 Oct  7 10:47 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  9523392 Oct  7 10:47 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+-105553110730296 0000000000041864 b g_reap_fake_client
+-105553111128864 0000000000041864 b g_sc_client
+-105553111663496 0000000000047456 b pc
+-105553113064536 0000000000058784 D g_tests
+-105553112252048 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110911459 0000000000065792 b g_pe_payload
+-105553110832896 0000000000083728 b pti_front_clients
+-105553111010799 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553113224484 0000000000119244 R halls_symtab_names
+-105553112862720 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf
+==> HX-2: symbol table stable (converged after 1 re-link)
+==> Kernel built: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+==> [build.sh] kernel ELF: BUILT (Debug, hardening=OFF, kaslr=OFF, sanitize='none', tests=ON)
+-rwxr-xr-x@ 1 northkillpd  staff  9523392 Oct  7 10:47 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+==> Generating system recovery phrase header (corvus-mint emit-phrase)
+    Finished `release` profile [optimized] target(s) in 0.13s
+corvus-mint: emitted system recovery phrase header -> /Users/northkillpd/projects/thylacine-corona/build/generated/corvus_system_recovery_phrase.h
+==> [build.sh] system recovery phrase header: GENERATED (/Users/northkillpd/projects/thylacine-corona/build/generated/corvus_system_recovery_phrase.h; seed=corvus-mint default)
+==> Building userspace C (dir=/Users/northkillpd/projects/thylacine-corona/build/usr, boot_probes=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/usr
+[  9%] Built target t
+[ 18%] Built target hello
+[ 22%] Building C object joey/CMakeFiles/joey.dir/joey.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 27%] Linking C executable joey
+[ 27%] Built target joey
+[ 36%] Built target pipe-probe
+[ 45%] Built target attach-probe
+[ 54%] Built target stratumd-stub
+[ 63%] Built target stub-driver
+[ 72%] Built target stub-fs-probe
+[ 81%] Built target stub-walk-probe
+[ 90%] Built target thread-probe
+[100%] Built target thread-fault-probe
+==> Userspace C built under /Users/northkillpd/projects/thylacine-corona/build/usr
+==> [build.sh] userspace: BUILT (native libt C binaries + the Rust workspace below; boot_probes=ON)
+-rwxr-xr-x@ 1 northkillpd  staff  14496 Oct  7 07:15 /Users/northkillpd/projects/thylacine-corona/build/usr/hello/hello
+==> Building userspace Rust (target=aarch64-unknown-none, dir=/Users/northkillpd/projects/thylacine-corona/build/usr-rs)
+warning: unstable feature specified for `-Ctarget-feature`: `outline-atomics`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: `ninep` (lib) generated 1 warning
+warning: `beacon` (lib) generated 1 warning (1 duplicate)
+warning: `vt` (lib) generated 1 warning (1 duplicate)
+warning: constant `DAYLIGHT` is never used
+   --> lib/libhalcyon/src/theme.rs:404:18
+    |
+404 | pub(crate) const DAYLIGHT: Theme = DAYLIGHT_THEME;
+    |                  ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `thyla-heap` (lib) generated 1 warning (1 duplicate)
+warning: `libhalcyon` (lib) generated 2 warnings (1 duplicate)
+warning: unnecessary `unsafe` block
+   --> lib/libthyla-rs/src/hardware.rs:453:22
+    |
+453 |         let handle = unsafe { Handle::from_raw(raw as i32, Rights::READ | Rights::WRITE | Rights::SIGNAL) };
+    |                      ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `libthyla-rs` (lib) generated 2 warnings (1 duplicate)
+warning: `coreutils` (lib) generated 1 warning (1 duplicate)
+warning: `libdriver` (lib) generated 1 warning (1 duplicate)
+warning: `fasces` (lib) generated 1 warning (1 duplicate)
+warning: `kaua` (lib) generated 1 warning (1 duplicate)
+warning: `libutopia` (lib) generated 1 warning (1 duplicate)
+warning: `libtapestry` (lib) generated 1 warning (1 duplicate)
+warning: `cornucopia` (lib) generated 1 warning (1 duplicate)
+warning: `inlinewire` (lib) generated 1 warning (1 duplicate)
+warning: `ptyhold` (lib) generated 1 warning (1 duplicate)
+warning: constant `ISR_QUEUE` is never used
+  --> lictor/src/backend/gpu.rs:70:7
+   |
+70 | const ISR_QUEUE: u8 = 1 << 0;
+   |       ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lictor` (lib) generated 2 warnings (1 duplicate)
+warning: `parley` (lib) generated 1 warning (1 duplicate)
+warning: `tls` (lib) generated 1 warning (1 duplicate)
+warning: `kaua-term` (lib) generated 1 warning (1 duplicate)
+warning: `cartoon` (lib) generated 1 warning (1 duplicate)
+warning: `view` (lib) generated 1 warning (1 duplicate)
+warning: `manual` (lib) generated 1 warning (1 duplicate)
+warning: `curl` (lib) generated 1 warning (1 duplicate)
+warning: `netdev` (lib) generated 1 warning (1 duplicate)
+warning: `lantern` (lib) generated 1 warning (1 duplicate)
+warning: `tapestryd` (lib) generated 1 warning (1 duplicate)
+warning: `gallery` (lib) generated 1 warning (1 duplicate)
+warning: `corvus-crypto` (lib) generated 1 warning (1 duplicate)
+warning: `halcyond` (lib) generated 1 warning (1 duplicate)
+warning: `nora` (lib) generated 1 warning (1 duplicate)
+warning: `aurora` (lib) generated 1 warning (1 duplicate)
+warning: `haul` (lib) generated 1 warning (1 duplicate)
+warning: `halcyon` (lib) generated 1 warning (1 duplicate)
+warning: method `dispatch` is never used
+   --> halcyond/src/paneplace.rs:451:8
+    |
+399 | impl Protocol {
+    | ------------- method in this implementation
+...
+451 |     fn dispatch(
+    |        ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `post` is never used
+   --> halcyond/src/paneplace.rs:998:12
+    |
+996 | impl PanePlaceServer {
+    | -------------------- associated function in this implementation
+997 |     /// Media-only native fixtures do not register clipboard authority.
+998 |     pub fn post(user: &str) -> Result<Self, PostError> {
+    |            ^^^^
+
+warning: constant `FIXED_BYTES` is never used
+  --> halcyond/src/session_seat.rs:53:11
+   |
+53 | pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
+   |           ^^^^^^^^^^^
+
+warning: unused variable: `nsegs`
+    --> tapestryd/src/server.rs:4376:18
+     |
+4376 |         let (va, nsegs) = match self.map_in_window(fd, size, "conv probe", &mut segs) {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_nsegs`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `nsegs`
+    --> tapestryd/src/server.rs:5660:18
+     |
+5660 |         let (va, nsegs) = match self.map_in_window(handle, size, "screen", &mut segs) {
+     |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_nsegs`
+
+warning: unused variable: `nsegs`
+     --> tapestryd/src/server.rs:11226:18
+      |
+11226 |         let (va, nsegs) = match self.map_in_window(fd, size, "warp probe", &mut segs) {
+      |                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_nsegs`
+
+warning: unused variable: `pa`
+     --> tapestryd/src/server.rs:12531:13
+      |
+12531 |         let pa = segs[0].pa as i64;
+      |             ^^ help: if this is intentional, prefix it with an underscore: `_pa`
+
+warning: value assigned to `gcrit_end` is never read
+     --> tapestryd/src/server.rs:16821:33
+      |
+16821 |             let mut gcrit_end = s.len();
+      |                                 ^^^^^^^ this value is reassigned later and never used
+...
+16963 |                 gcrit_end = s.len();
+      |                 ------------------- `gcrit_end` is overwritten here before the previous value is read
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `crit_end` is never read
+     --> tapestryd/src/server.rs:17046:40
+      |
+17046 |                     let mut crit_end = 0usize;
+      |                                        ^^^^^^ this value is reassigned later and never used
+...
+17115 |                         crit_end = s.len();
+      |                         ------------------ `crit_end` is overwritten here before the previous value is read
+
+warning: `halcyon` (bin "halcyon") generated 1 warning (1 duplicate)
+warning: `haul` (bin "haul") generated 1 warning (1 duplicate)
+warning: `halcyond` (bin "halcyond") generated 4 warnings (1 duplicate)
+warning: `netd` (bin "netd") generated 1 warning (1 duplicate)
+warning: `nora` (bin "nora") generated 1 warning (1 duplicate)
+warning: `corvus` (bin "corvus") generated 1 warning (1 duplicate)
+warning: `aurora` (bin "aurora") generated 1 warning (1 duplicate)
+warning: `tapestryd` (bin "tapestryd") generated 7 warnings (1 duplicate) (run `cargo fix --bin "tapestryd" -p tapestryd` to apply 4 suggestions)
+warning: `gallery` (bin "gallery") generated 1 warning (1 duplicate)
+warning: `lantern` (bin "lantern") generated 1 warning (1 duplicate)
+warning: `curl` (bin "wget") generated 1 warning (1 duplicate)
+warning: `curl` (bin "curl") generated 1 warning (1 duplicate)
+warning: `netdev-driver` (bin "netdev-driver") generated 1 warning (1 duplicate)
+warning: `manual` (bin "manual") generated 1 warning (1 duplicate)
+warning: `view` (bin "view") generated 1 warning (1 duplicate)
+warning: `net-echo` (bin "net-echo") generated 1 warning (1 duplicate)
+warning: unused macro definition: `say`
+  --> kaua-term-probe/src/main.rs:50:14
+   |
+50 | macro_rules! say {
+   |              ^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:975:11
+    |
+975 |     #[cfg(feature="test-mode")]
+    |           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:993:11
+    |
+993 |     #[cfg(feature="test-mode")]
+    |           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1029:23
+     |
+1029 |                 #[cfg(feature="test-mode")]
+     |                       ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1039:46
+     |
+1039 |             .map(|owner| Self { owner, #[cfg(feature="test-mode")] seen_bindings: 0 })
+     |                                              ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1139:15
+     |
+1139 |         #[cfg(feature="test-mode")]
+     |               ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+    --> kaua-term-probe/src/../../halcyond/src/paneplace.rs:1266:19
+     |
+1266 |             #[cfg(feature="test-mode")]
+     |                   ^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+     = help: consider adding `test-mode` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+  --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:37:11
+   |
+37 |     #[cfg(feature="test-mode")]
+   |           ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+   = help: consider adding `test-mode` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:109:11
+    |
+109 |     #[cfg(feature="test-mode")]
+    |           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+  --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:63:19
+   |
+63 |             #[cfg(feature="test-mode")]
+   |                   ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+   = help: consider adding `test-mode` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `test-mode`
+   --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:177:27
+    |
+177 |                     #[cfg(feature="test-mode")]
+    |                           ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `interaction-qualification` and `readiness-qualification`
+    = help: consider adding `test-mode` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: method `output_reserved` is never used
+  --> kaua-term-probe/src/../../halcyond/src/application.rs:76:12
+   |
+47 | impl Application {
+   | ---------------- method in this implementation
+...
+76 |     pub fn output_reserved(&self) -> usize { 0 } // all reply metadata is inline
+   |            ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `incarnation` is never used
+  --> kaua-term-probe/src/../../halcyond/src/apprecord.rs:21:12
+   |
+20 | impl Ticket {
+   | ----------- method in this implementation
+21 |     pub fn incarnation(self) -> u64 { self.incarnation }
+   |            ^^^^^^^^^^^
+
+warning: method `output_reserved` is never used
+  --> kaua-term-probe/src/../../halcyond/src/apprecord.rs:54:12
+   |
+46 | impl<R: CachedReply> Record<R> {
+   | ------------------------------ method in this implementation
+...
+54 |     pub fn output_reserved(&self) -> usize { self.reply.as_ref().map_or(0, CachedReply::reserved_bytes) }
+   |            ^^^^^^^^^^^^^^^
+
+warning: constant `METADATA_RESERVE` is never used
+  --> kaua-term-probe/src/../../halcyond/src/servicepool.rs:18:11
+   |
+18 | pub const METADATA_RESERVE: usize = 512 * 1024;
+   |           ^^^^^^^^^^^^^^^^
+
+warning: constant `WORKING_RESERVE` is never used
+  --> kaua-term-probe/src/../../halcyond/src/servicepool.rs:19:11
+   |
+19 | pub const WORKING_RESERVE: usize = PAYLOAD_CEILING + METADATA_RESERVE;
+   |           ^^^^^^^^^^^^^^^
+
+warning: method `payload_reservation` is never used
+   --> kaua-term-probe/src/../../halcyond/src/clipboard.rs:122:12
+    |
+ 87 | impl Clipboard {
+    | -------------- method in this implementation
+...
+122 |     pub fn payload_reservation(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `payload_reservation` is never used
+  --> kaua-term-probe/src/../../halcyond/src/clipbroker.rs:84:12
+   |
+71 | impl Broker {
+   | ----------- method in this implementation
+...
+84 |     pub fn payload_reservation(&self) -> usize {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `label` is never used
+  --> kaua-term-probe/src/../../halcyond/src/controllers.rs:49:12
+   |
+48 | impl ModeReport {
+   | --------------- method in this implementation
+49 |     pub fn label(&self) -> &str {
+   |            ^^^^^
+
+warning: method `mode` is never used
+   --> kaua-term-probe/src/../../halcyond/src/controllers.rs:245:12
+    |
+ 72 | impl Controllers {
+    | ---------------- method in this implementation
+...
+245 |     pub fn mode(&self, focused: RouteKey) -> Option<ModeReport> {
+    |            ^^^^
+
+warning: methods `mode`, `generation`, and `payload_reservation` are never used
+   --> kaua-term-probe/src/../../halcyond/src/interaction.rs:334:12
+    |
+ 56 | impl Interaction {
+    | ---------------- methods in this implementation
+...
+334 |     pub fn mode(&self, route: RouteKey) -> Option<ModeReport> {
+    |            ^^^^
+...
+410 |     pub fn generation(&self) -> u64 {
+    |            ^^^^^^^^^^
+...
+413 |     pub fn payload_reservation(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `request` is never used
+   --> kaua-term-probe/src/../../halcyond/src/hostbindings.rs:125:12
+    |
+ 62 | impl Bindings {
+    | ------------- method in this implementation
+...
+125 |     pub fn request(&self) -> Option<Request> { self.flight.map(|f| f.request) }
+    |            ^^^^^^^
+
+warning: constant `FIXED_BYTES` is never used
+  --> kaua-term-probe/src/../../halcyond/src/session_seat.rs:53:11
+   |
+53 | pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
+   |           ^^^^^^^^^^^
+
+warning: method `input_reserved` is never used
+  --> kaua-term-probe/src/../../halcyond/src/servicewire.rs:98:12
+   |
+71 | impl Stream {
+   | ----------- method in this implementation
+...
+98 |     pub fn input_reserved(&self) -> usize { self.input.capacity() }
+   |            ^^^^^^^^^^^^^^
+
+warning: `https` (bin "https") generated 1 warning (1 duplicate)
+warning: `kaua-term-probe` (bin "kaua-term-probe") generated 25 warnings (1 duplicate)
+warning: `tls-smoke` (bin "tls-smoke") generated 1 warning (1 duplicate)
+warning: `tlsperf` (bin "tlsperf") generated 1 warning (1 duplicate)
+warning: `kaua-term` (bin "kaua-term") generated 1 warning (1 duplicate)
+warning: `caps-probe` (bin "caps-probe") generated 1 warning (1 duplicate)
+warning: `lictor` (bin "lictor") generated 1 warning (1 duplicate)
+warning: `lsp-probe` (bin "lsp-probe") generated 1 warning (1 duplicate)
+warning: `dap-probe` (bin "dap-probe") generated 1 warning (1 duplicate)
+warning: `parley-probe` (bin "parley-probe") generated 1 warning (1 duplicate)
+warning: `ptyhost` (bin "ptyhost") generated 1 warning (1 duplicate)
+warning: `tapestry-battery` (bin "tapestry-battery") generated 1 warning (1 duplicate)
+warning: `warp-prove` (bin "warp-prove") generated 1 warning (1 duplicate)
+warning: `tapestry-demo` (bin "tapestry-demo") generated 1 warning (1 duplicate)
+warning: `u-redir-test` (bin "u-redir-test") generated 1 warning (1 duplicate)
+warning: `u-subst-test` (bin "u-subst-test") generated 1 warning (1 duplicate)
+warning: `u-repl-test` (bin "u-repl-test") generated 1 warning (1 duplicate)
+warning: `u-builtin-test` (bin "u-builtin-test") generated 1 warning (1 duplicate)
+warning: `u-6-test` (bin "u-6-test") generated 1 warning (1 duplicate)
+warning: `u-test` (bin "u-test") generated 1 warning (1 duplicate)
+warning: `utopia-shell` (bin "ut") generated 1 warning (1 duplicate)
+warning: `u-job-test` (bin "u-job-test") generated 1 warning (1 duplicate)
+warning: `u-glob-test` (bin "u-glob-test") generated 1 warning (1 duplicate)
+warning: `u-7-test` (bin "u-7-test") generated 1 warning (1 duplicate)
+warning: `quarry` (bin "quarry") generated 1 warning (1 duplicate)
+warning: `prowl` (bin "prowl") generated 1 warning (1 duplicate)
+warning: `imperium` (bin "imperium") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "pelt") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "sleep") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "realm") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "date") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "seq") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "ls") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "con") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "nslookup") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "netstat") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "ns") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "yes") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "cp") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "echo") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "chmod") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "realpath") generated 1 warning (1 duplicate)
+warning: `httpd` (bin "httpd") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "which") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "tcpproxy") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "aurora-push") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "dirname") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "rmdir") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "cut") generated 1 warning (1 duplicate)
+warning: `menagerie-probe` (bin "menagerie-probe") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "head") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "uniq") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "nc") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "uname") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "sort") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "cmp") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "env") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "mkdir") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "wc") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "qid") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "cat") generated 1 warning (1 duplicate)
+warning: `warden` (bin "warden") generated 1 warning (1 duplicate)
+warning: `virtio-mmio-source` (bin "virtio-mmio-source") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "ipconfig") generated 1 warning (1 duplicate)
+warning: `nocturned` (bin "nocturned") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "mv") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "ps") generated 1 warning (1 duplicate)
+warning: `crash-probe` (bin "crash-probe") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "id") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "stat") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "false") generated 1 warning (1 duplicate)
+warning: `weft-bench` (bin "weft-bench") generated 1 warning (1 duplicate)
+warning: `nettest` (bin "nettest") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "grep") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "touch") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "basename") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "pwd") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "hexdump") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "tee") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "true") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "tail") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "ping") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "whoami") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "rm") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "tr") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "clear") generated 1 warning (1 duplicate)
+warning: `coreutils` (bin "dial") generated 1 warning (1 duplicate)
+warning: `loom-smoke` (bin "loom-smoke") generated 1 warning (1 duplicate)
+warning: creating a shared reference to mutable static
+   --> fsbench/src/main.rs:128:43
+    |
+128 |     unsafe { format!("stage={} errno={}", G_WSTAGE, G_WERR) }
+    |                                           ^^^^^^^^ shared reference to mutable static
+    |
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a shared reference to mutable static
+   --> fsbench/src/main.rs:128:53
+    |
+128 |     unsafe { format!("stage={} errno={}", G_WSTAGE, G_WERR) }
+    |                                                     ^^^^^^ shared reference to mutable static
+    |
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: `bus-probe-child` (bin "bus-probe-child") generated 1 warning (1 duplicate)
+warning: `imperium-probe` (bin "imperium-probe") generated 1 warning (1 duplicate)
+warning: `alloc-smoke` (bin "alloc-smoke") generated 1 warning (1 duplicate)
+warning: `sntp` (bin "sntp") generated 1 warning (1 duplicate)
+warning: `argv-smoke` (bin "argv-smoke") generated 1 warning (1 duplicate)
+warning: `irq-bench` (bin "irq-bench") generated 1 warning (1 duplicate)
+warning: `virtio-net-loop` (bin "virtio-net-loop") generated 1 warning (1 duplicate)
+warning: `fsbench` (bin "fsbench") generated 3 warnings (1 duplicate)
+warning: `cpubench` (bin "cpubench") generated 1 warning (1 duplicate)
+warning: `legate-prover` (bin "legate-prover") generated 1 warning (1 duplicate)
+warning: `coreutil-smoke` (bin "coreutil-smoke") generated 1 warning (1 duplicate)
+warning: `protect-probe` (bin "protect-probe") generated 1 warning (1 duplicate)
+warning: `mmio-probe` (bin "mmio-probe") generated 1 warning (1 duplicate)
+warning: `loom-bench` (bin "loom-bench") generated 1 warning (1 duplicate)
+warning: `pty-probe` (bin "pty-probe") generated 1 warning (1 duplicate)
+warning: `ambush-probe` (bin "ambush-probe") generated 1 warning (1 duplicate)
+warning: unnecessary `unsafe` block
+   --> fork-probe/src/main.rs:437:25
+    |
+437 |     EXEC_ARGV_PTR.store(unsafe { core::ptr::addr_of!(EXEC_ARGV_BUF) } as u64, Ordering::Release);
+    |                         ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a shared reference to mutable static
+   --> fork-probe/src/main.rs:642:24
+    |
+642 |                 if n < EXEC_ARGV_BUF.len() {
+    |                        ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: creating a shared reference to mutable static
+   --> fork-probe/src/main.rs:671:21
+    |
+671 |     if n > unsafe { EXEC_ARGV_BUF.len() } { unsafe { EXEC_ARGV_BUF.len() } } else { n }
+    |                     ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: creating a shared reference to mutable static
+   --> fork-probe/src/main.rs:671:54
+    |
+671 |     if n > unsafe { EXEC_ARGV_BUF.len() } { unsafe { EXEC_ARGV_BUF.len() } } else { n }
+    |                                                      ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+
+warning: value assigned to `rdset` is never read
+    --> viv-pheno-probe/src/main.rs:2640:5
+     |
+2640 |     rdset = [0; 16];
+     |     ^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2668 |     rdset = [0; 16];
+     |     --------------- `rdset` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `wrset` is never read
+    --> viv-pheno-probe/src/main.rs:2539:5
+     |
+2539 |     wrset = [0; 16];
+     |     ^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2641 |     wrset = [0; 16];
+     |     --------------- `wrset` is overwritten here before the previous value is read
+
+warning: value assigned to `exset` is never read
+    --> viv-pheno-probe/src/main.rs:2500:32
+     |
+2500 |     let mut exset: [u64; 16] = [0; 16];
+     |                                ^^^^^^^ this value is reassigned later and never used
+...
+2540 |     exset = [0; 16];
+     |     --------------- `exset` is overwritten here before the previous value is read
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:312:53
+    |
+312 | fn fork_handler_addr() -> u64 { viv_fork_in_handler as usize as u64 }
+    |                                                     ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+312 | fn fork_handler_addr() -> u64 { viv_fork_in_handler as *const () as usize as u64 }
+    |                                                     ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:361:50
+    |
+361 | fn mask_handler_addr() -> u64 { viv_mask_handler as usize as u64 }
+    |                                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+361 | fn mask_handler_addr() -> u64 { viv_mask_handler as *const () as usize as u64 }
+    |                                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:466:51
+    |
+466 | fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
+    |                                                   ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+466 | fn esc_handler_addr() -> u64 { viv_escape_handler as *const () as usize as u64 }
+    |                                                   ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:474:44
+    |
+474 | fn handler_addr() -> u64 { viv_sig_handler as usize as u64 }
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+474 | fn handler_addr() -> u64 { viv_sig_handler as *const () as usize as u64 }
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> viv-pheno-probe/src/main.rs:475:44
+    |
+475 | fn restorer_addr() -> u64 { viv_restore_rt as usize as u64 }
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+475 | fn restorer_addr() -> u64 { viv_restore_rt as *const () as usize as u64 }
+    |                                            ++++++++++++
+
+warning: `fork-probe` (bin "fork-probe") generated 5 warnings (1 duplicate)
+warning: `debug-child` (bin "debug-child") generated 1 warning (1 duplicate)
+warning: `pipe-sink` (bin "pipe-sink") generated 1 warning (1 duplicate)
+warning: `diorama-probe` (bin "diorama-probe") generated 1 warning (1 duplicate)
+warning: `viv-pheno-probe` (bin "viv-pheno-probe") generated 9 warnings (1 duplicate) (run `cargo fix --bin "viv-pheno-probe" -p viv-pheno-probe` to apply 5 suggestions)
+warning: `virtio-gpu` (bin "virtio-gpu") generated 1 warning (1 duplicate)
+warning: `virtio-blk-rw` (bin "virtio-blk-rw") generated 1 warning (1 duplicate)
+warning: `diorama` (bin "diorama") generated 1 warning (1 duplicate)
+warning: `susp-mask-child` (bin "susp-mask-child") generated 1 warning (1 duplicate)
+warning: `nocturne-vol-probe` (bin "nocturne-vol-probe") generated 1 warning (1 duplicate)
+warning: `debug-probe` (bin "debug-probe") generated 1 warning (1 duplicate)
+warning: `capacity-probe` (bin "capacity-probe") generated 1 warning (1 duplicate)
+warning: `irq-probe` (bin "irq-probe") generated 1 warning (1 duplicate)
+warning: `exec-probe` (bin "exec-probe") generated 1 warning (1 duplicate)
+warning: `hwbp-verify` (bin "hwbp-verify") generated 1 warning (1 duplicate)
+warning: `pipe-src` (bin "pipe-src") generated 1 warning (1 duplicate)
+warning: `fs-mut-smoke` (bin "fs-mut-smoke") generated 1 warning (1 duplicate)
+warning: `ptyfs` (bin "ptyfs") generated 1 warning (1 duplicate)
+warning: `nocturne-tap-probe` (bin "nocturne-tap-probe") generated 1 warning (1 duplicate)
+warning: `viv` (bin "viv") generated 1 warning (1 duplicate)
+warning: `nocturne-probe` (bin "nocturne-probe") generated 1 warning (1 duplicate)
+warning: `protect-guard-child` (bin "protect-guard-child") generated 1 warning (1 duplicate)
+warning: `nocturne-capture-probe` (bin "nocturne-capture-probe") generated 1 warning (1 duplicate)
+warning: `virtio-net-arp` (bin "virtio-net-arp") generated 1 warning (1 duplicate)
+warning: `loom-stress` (bin "loom-stress") generated 1 warning (1 duplicate)
+warning: `login` (bin "login") generated 1 warning (1 duplicate)
+warning: `stack-probe` (bin "stack-probe") generated 1 warning (1 duplicate)
+warning: `parley-echo` (bin "parley-echo") generated 1 warning (1 duplicate)
+warning: `netperf` (bin "netperf") generated 1 warning (1 duplicate)
+warning: `jit-prover` (bin "jit-prover") generated 1 warning (1 duplicate)
+warning: `virtio-input` (bin "virtio-input") generated 1 warning (1 duplicate)
+warning: `virtio-net-probe` (bin "virtio-net-probe") generated 1 warning (1 duplicate)
+warning: direct cast of function item into an integer
+   --> burrow-torture/src/main.rs:406:39
+    |
+406 |         if thread::spawn_raw(mt_entry as usize as u64, sp, j as u64, 0).is_err() {
+    |                                       ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+406 |         if thread::spawn_raw(mt_entry as *const () as usize as u64, sp, j as u64, 0).is_err() {
+    |                                       ++++++++++++
+
+warning: `heap-probe` (bin "heap-probe") generated 1 warning (1 duplicate)
+warning: `nocturne-vol` (bin "nocturne-vol") generated 1 warning (1 duplicate)
+warning: `symlink-probe` (bin "symlink-probe") generated 1 warning (1 duplicate)
+warning: `ring-voice-probe` (bin "ring-voice-probe") generated 1 warning (1 duplicate)
+warning: `stack-child` (bin "stack-child") generated 1 warning (1 duplicate)
+warning: `burrow-torture` (bin "burrow-torture") generated 2 warnings (1 duplicate) (run `cargo fix --bin "burrow-torture" -p burrow-torture` to apply 1 suggestion)
+warning: `virtio-blk-probe` (bin "virtio-blk-probe") generated 1 warning (1 duplicate)
+warning: `u-readdir-test` (bin "u-readdir-test") generated 1 warning (1 duplicate)
+warning: `hello-rs` (bin "hello-rs") generated 1 warning (1 duplicate)
+warning: `viv-probe` (bin "viv-probe") generated 1 warning (1 duplicate)
+warning: `jc-probe` (bin "jc-probe") generated 1 warning (1 duplicate)
+warning: `corvus-authority` (lib) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 0.31s
+==> Userspace Rust built under /Users/northkillpd/projects/thylacine-corona/build/usr-rs
+-rwxr-xr-x@ 1 northkillpd  staff  12344 Oct  6 12:15 /Users/northkillpd/projects/thylacine-corona/build/usr-rs/aarch64-unknown-none/release/hello-rs
+==> [build.sh] sysroot: REUSED (cached + up-to-date; force with 'tools/build.sh sysroot', or 'tools/build.sh clean' for a full nuke)
+==> pouch prog: pouch-hello
+    pouch-hello: 46744 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-stdio
+    pouch-hello-stdio: 52632 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-printf
+    pouch-hello-printf: 77416 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-malloc
+    pouch-hello-malloc: 117400 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-mallocng-torture
+    pouch-hello-mallocng-torture: 90912 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-threads
+    pouch-hello-threads: 114536 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-exitgroup
+    pouch-hello-exitgroup: 67944 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-poll
+    pouch-hello-poll: 92552 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-getrandom
+    pouch-hello-getrandom: 77480 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-sockets
+    pouch-hello-sockets: 127784 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-net
+    pouch-hello-net: 88640 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-signals
+    pouch-hello-signals: 83352 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-sodium
+    pouch-hello-sodium: 305936 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-argv
+    pouch-hello-argv: 77080 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-fault
+    pouch-hello-fault: 40296 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-pty
+    pouch-hello-pty: 94832 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-fopen
+    pouch-hello-fopen: 114504 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-fs
+    pouch-hello-fs: 88536 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-env
+    pouch-hello-env: 77040 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-spawn
+    pouch-hello-spawn: 78656 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-susp
+    pouch-hello-susp: 77584 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-reentry
+    pouch-hello-reentry: 59024 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-identity
+    pouch-hello-identity: 78008 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-mem
+    pouch-hello-mem: 116424 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-guard
+    pouch-hello-guard: 81688 bytes (ET_EXEC, static)
+==> pouch prog: pouch-hello-dlopen + libdlprobe.so (B-1d)
+    pouch-hello-dlopen: 15976 bytes (ET_DYN, against libc.so)
+    libdlprobe.so: 15128 bytes (ET_DYN, against libc.so)
+==> pouch progs built under /Users/northkillpd/projects/thylacine-corona/build/pouch/progs
+==> [build.sh] libSDL2.a: REUSED (cached + up-to-date, gl)
+==> [build.sh] tyr-quake + tyr-glquake: REUSED (cached + up-to-date)
+==> [build.sh] dosbox-x: REUSED (cached + up-to-date)
+==> [build.sh] dosbox-x: system config rendered (preset pentium -> cycles=fixed 60000)
+    vkquake: no venus link set at /Users/northkillpd/projects/thylacine-corona/build/clade/venus -- skipping (W-4;
+             fetch it per usr/ports/mesa/README.md 'The venus link set')
+==> [build.sh] make (GNU make 4.4.1): REUSED (cached + up-to-date)
+==> [build.sh] libcxx (libunwind+libc++abi+libc++): REUSED (cached + up-to-date)
+==> pouch prog (C++): pouch-hello-cxx
+    pouch-hello-cxx: 1573984 bytes (ET_EXEC, static)
+==> [build.sh] rust progs: r1hello REUSED (cached + up-to-date; force by touching a rust source, or 'tools/build.sh clean')
+==> building stratumd (aarch64-thylacine) from /Users/northkillpd/projects/stratum/v2
+CMake Error: The source "/Users/northkillpd/projects/stratum/v2/CMakeLists.txt" does not match the source "/Users/northkillpd/projects/stratum-astra/v2/CMakeLists.txt" used to generate cache.  Re-run cmake with a different source directory.

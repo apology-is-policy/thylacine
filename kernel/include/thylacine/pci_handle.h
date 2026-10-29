@@ -252,6 +252,7 @@ void kobj_pci_unref(struct KObj_PCI *k);
 // the owning KObj_PCI alive (via handle_get) for the call's duration.
 struct KObj_MMIO *kobj_pci_bar_mmio(struct KObj_PCI *k, u32 bar_index);
 
+#ifdef KERNEL_TESTS
 // Decode a memory BAR's size from the all-ones-probe readback (low-dword mask
 // with attribute bits cleared + high-dword readback + the 64-bit flag). Exposed
 // for a deterministic unit test that pins the width-correct inversion (a 32-bit
@@ -265,6 +266,7 @@ u64 pci_bar_decode_size(u32 lo_mask, u32 hi_rb, bool is64);
 // loop / out-of-range BAR / unassigned BAR / region past the BAR size). Exposed
 // for a deterministic hostile-cap-layout unit test over a synthetic config.
 int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d);
+#endif // KERNEL_TESTS
 
 // Page-granular user mapping policy, including the rounded last BAR page.
 // No allocation or mutable state. Every mapping path must use this policy.
@@ -272,8 +274,14 @@ bool kobj_pci_user_range(const struct KObj_PCI *k, u32 bar, u64 offset, u64 leng
 u32 kobj_pci_map_windows(const struct KObj_PCI *k,
                          struct pci_map_window out[PCI_MAP_WINDOW_MAX]);
 
-// Diagnostics — cumulative claim counter + currently-live count.
-u64 kobj_pci_total_created(void);
+#ifdef KERNEL_TESTS
+// Diagnostic: currently-live count.
 u64 kobj_pci_live_count(void);
+
+// The in-kernel tests' reach into pci_handle.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+void pci_test_msix_fail(struct KObj_PCI *k, u32 stages);
+#endif // KERNEL_TESTS
 
 #endif  // THYLACINE_PCI_HANDLE_H

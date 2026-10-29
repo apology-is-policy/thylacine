@@ -1,0 +1,11 @@
+--- kernel/loom_service_nodes.c
++++ quota-parent-leak.c
+@@ -58,7 +58,7 @@
+         rc = -T_E_BUSY;
+     }
+     if (rc) {
+-        if (kind == LOOM_SERVICE_FID) (void)loom_slot_unpin(t, parent);
++        if (kind == LOOM_SERVICE_FID && false) (void)loom_slot_unpin(t, parent);
+         return rc;
+     }
+     nodes->nodes[ref.slot] = (struct loom_service_node){

@@ -1435,7 +1435,7 @@ gate; the formal focused audit lands at Loom-6c over the whole 6a+6b surface.
 
 ## loom_sq.tla — SQ-1 (the SQ slot handoff; spec-first, 2026-10-12)
 
-Status: **TLC-green** (run on corona/async-memory 46f07edc2, `work/oct12-sq1/tlc-20261012T072500Z` there; the spec files are identical here).
+Status: **TLC-green** (run `work/oct12-sq1/tlc-20261012T072500Z`, HEAD 46f07edc2).
 A focused module: `loom.tla` gives every op its own slot and copies atomically at
 `Consume`, so it cannot reach a position handed back to the producer and refilled
 between the head publication and the copy. That window was live in
@@ -1455,10 +1455,18 @@ changes the consume ORDER, which `loom.tla` abstracts): clean 2429, liveness
 | `loom_sq_buggy_unlocked_claim.cfg` | `BUGGY_UNLOCKED_CLAIM` | `FifoFidelity` | violation | 104 |
 | `loom_sq_buggy_unlocked_claim_exclusive.cfg` | `BUGGY_UNLOCKED_CLAIM` | `ClaimExclusive` | violation | 11 |
 
+A violating run stops at the first counterexample it finds. How many distinct
+states it has explored by then depends on how many TLC workers raced to it, but
+the verdict does not. Main's re-run of `loom_sq_buggy_unlocked_claim.cfg` in its
+own tree (2026-10-12, landing cc422b913) stopped at 110 states with 4 workers
+and 51 with 1, against 104 here. Read the Distinct column on a violation row as
+"this run", not as a value to reproduce. Clean rows explore the whole space and
+do not vary.
+
 | Spec action | Source location | Notes |
 |---|---|---|
 | `Produce` | `usr/lib/libthyla-rs/src/loom.rs::Ring::try_submit` | acquire `sq_head`, refuse when `tail - head >= entries`, write the SQE and its 1:1 index, release `sq_tail`. The only SQ producer in the tree. |
-| `Claim` | `kernel/loom.c::loom_drain_sq` under `l->lock` | CORRECT: read the index and copy the SQE (or count it dropped) while still holding the head. |
+| `Claim` | `kernel/loom.c::loom_drain_sq` (and `kernel/loom_service_frontend.c::loom_private_submit`) under `l->lock` | CORRECT: read the index and copy the SQE (or count it dropped) while still holding the head. |
 | `Finish` | `kernel/loom.c::loom_sq_release` | advance the private head and release-store the published mirror, still under `l->lock`; the ONLY writer of either (the runner's derived guard checks it). Its KERNEL_TESTS hook is the runtime `Produce` at the permission itself: `loom.sq_release_after_copy` / `_after_index` / `_after_copy_chain`. |
 | `Terminated` | -- | stutter so TLC's deadlock check stays on everywhere else. |
 
@@ -3569,3 +3577,112 @@ those six is not a bug but a CONTROL -- `syscall_irqs_kthread` -- whose
 violation is the pass, and the gate's header says why at length, because
 reading that row as a defect and "fixing" it would delete the only evidence
 that the clean rows mean anything.
+
+## tapestry_storage.tla — cooperative hidden pixels (October 4)
+
+Scope approved in cfa478824, TAPESTRY-STORAGE.md. Companion to the existing
+present/slot model; it preserves that model's DMA, composition and retirement
+obligations. Model first: no production implementation in this checkpoint.
+
+Two never-reused generations and three visibility epochs explore 287 states,
+depth 20. Client, server, backend and scanout holders are distinct. All seven
+mutants fail their named safety invariant: stale offers (OfferFresh), old fids
+(FidFresh), resume after destroy (NoResurrection), release under a mapping
+(ClientBacked), release under backend work (DeviceBacked), suspension while
+bound (SuspendedUnbound), and publishing before full paint (FirstFrameComplete).
+`specs/check-tapestry-storage.py` verifies exact verdicts and the clean fingerprint.
+No fairness or eventual-resume claim: unavailable memory/device can refuse reveal.
+
+The client drain is structural in this companion, discharged by tapestry_present's
+existing RecycleGate and completion proof. Allocation refusal is stuttering;
+Abort models partial resume setup. Visibility actions invalidate older offers.
+The finite counters stop; they never wrap. Geometry, 9P encoding, SAK control
+progress and exact native mapping accounting remain implementation/runtime tests.
+
+## loom_service.tla — private service lifecycle (AS-0, October 4)
+
+Approved ASYNC-SERVICE-LIFECYCLE.md, scripture4722f34e8. Model-before-runtime:
+no action is claimed to bind to a live private handler yet. AS-1/2 must add the
+actual source binding for Admit, completion commit, Abort, Finish, Retire and
+reuse. Existing legacy Loom specs remain binding for their paths.
+
+One slot/two incarnations, a one-entry CQ and independently retained peer refs:
+5,828 states, depth28, seven named safety/temporal counterexamples. Run
+`specs/check-loom-service.py`. No peer fairness; local execution/CQ draining are
+weakly fair. Terminal result commit is distinct from later CQ delivery. See
+vault/specs/spec-loom-service.md for blind spots; byte encoding is checked by
+`tools/check-loom-service-abi.py`, not this model.
+
+## loom_service_buffers.tla — explicit payload leases (October 4)
+
+Scripture30695b43e, ABI3eb14ae73. Claim reserves a member; Reply commits bytes
+and a pending MORE; Deliver publishes CQE+receipt; Ack releases only CQ capacity;
+Return releases the exact payload; Stop/Finalize/Retire terminate scope work
+without consumer/peer progress. Reuse represents fully released pool replacement.
+These actions are design obligations, not claims of current handler coverage.
+AS-2 must add actual-source bindings as each runtime transition is introduced.
+
+Two clean configurations:464 and6416 states; eleven named mutant failures.
+Run specs/check-loom-service-buffers.py. No fairness on reply, delivery, CQ ack,
+payload return or peer close. Only local cleanup is weakly fair. One stream,
+no physical alias/weak-memory proof; see spec-loom-service-buffers for bounds.
+
+The pool core now binds Claim to loom_pool_claim, Reply's metadata commit to
+loom_pool_commit, Deliver's metadata transition to loom_pool_deliver, Return
+to loom_pool_return and Stop's member release to loom_pool_release_busy in
+kernel/loom_service_pool.c. Actual payload copy, paired shared-CQ publication,
+cancellation locking and scope Finalize/Retire remain owner integration gates.
+No new core helper reads CQ head.
+
+## loom_service_index.tla -- indexed CONNECT lifetime (October 9)
+
+The companion to loom_service.tla refines its atomic Connect/Retire transitions
+into prepared storage, index installation, native publication, accept wake,
+entry pins, local abort, terminal delivery and unlink/final release. Two
+incarnations, up to two pins and one owner yield89 reachable clean states; six
+named counterexamples detect missing installer root, exposed installing state,
+publication after abort, collection under a live entry, collection before a
+terminal is delivered and stale incarnation lookup. The existing lifecycle
+model separately checks5828 states and peer-independent retirement liveness.
+
+Prepare binds to loom_private_connect_prepare; Install/Publish/WakeDone to
+loom_engine_adopt and loom_private_connect_publish across Ll/unlocked accept
+wake; Get/Put to loom_engine_get/put; Abort to loom_engine_abort; LocalAbort to
+loom_private_connect_step after actual cursor abort; Deliver to
+loom_private_post_terminal (or detached discard); Collect/Free to
+loom_engine_collect + loom_private_connect_release; Reap to
+loom_private_connect_reap. Metadata and request pins are separately checked by
+actual-C fixtures. Run tools/check-loom-service-index.py --logs <fresh-dir>.
+No claim of C weak-memory correctness, allocator behavior, wire/parser safety,
+whole-ring close queue progress or multi-scope fairness from this finite model.
+Those require separate source review, native witnesses and runtime gates.
+
+## handle_slots.tla -- descriptor numbers under a call that can fail after it knows its number (2026-10-14, vote 10)
+
+| Spec | Code | Notes |
+|---|---|---|
+| `CTake` (correct arm) | `kernel/handle.c::handle_reserve` | the lowest free number becomes RESERVED |
+| `CInstall` | `handle_install_reserved`, `handle_dup_into_reserved` | fills only this call's reservation |
+| `CUnreserve` | `handle_unreserve` | a failed call returns its number |
+| `PClose` | `handle_close` | a reserved number is not live: EBADF |
+| `PAlloc` | `handle_install_locked`'s scan, `handle_reserve` | both want magic 0 |
+| `PDup3` | `handle_dup_to` | a reserved target answers `HANDLE_DUP_TO_BUSY` (the phenotype's EBUSY) |
+| `CTake` + `CFailByNumber` (BUGGY_CLOSE_BY_NUMBER) | the twelve pre-sweep sites | `handle_slots_buggy_close_by_number.cfg` (NoForeignClose) and `handle_slots_buggy_published.cfg` (FailedPublishesNothing) |
+| `PDup3` without the refusal (BUGGY_DUP3_TAKES_RESERVED) | -- | `handle_slots_buggy_dup3.cfg` (InstallFillsOwnReservation) |
+
+The model has one failing call and one peer thread; the sites, the finish
+policy and the vivarium shells are in the sub-kernel-handle /
+sub-kernel-syscall-dispatch / sub-kernel-vivarium dossiers.
+
+What the clean cfg does NOT show. It holds NoForeignClose and
+FailedPublishesNothing by construction: with the buggy arm off, no action
+writes a number the call does not own, so those two invariants are guards
+against the buggy arms, not evidence about the clean one (InstallFillsOwnReservation
+and the dup3 refusal are the clean cfg's real content). The peer never
+reserves, so two reserving calls racing for one number are argued (each
+reservation is taken under the table lock) rather than modelled. The vivarium
+socket table's rows and the lock order between its lock and the handle table's
+are outside the model entirely: the order is held by the leaf guard
+(`spin_leaf_refuse` in every handle-table acquire, `socktab_lock` marking the
+socket table's holds), which extincts on the first inverted acquire.
+

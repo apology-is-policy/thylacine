@@ -1,0 +1,13 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:10:56
+@@ -11849,9 +11849,9 @@
+ // 0 with *out filled, or the negative errno.
+ static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
+                         struct viv_sock *out) {
++    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0; // MUTANT M17: the row before the slot
+     if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0)
+         return -(s64)T_E_BADF;
+-    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
+     return -(s64)T_E_NOTSOCK;
+ }
+ 

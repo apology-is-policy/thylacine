@@ -95,6 +95,40 @@ extern s64 uaccess_copy_in(void *dst, u64 user_va, u64 len);
 // kernel-mode uaccess primitive — single-digit at v1.0).
 u64 uaccess_fixup_lookup(u64 fault_pc);
 
+// Each fixup table entry. Two s32 PC-relative offsets emitted by
+// uaccess.S; the absolute PC is recovered as `(u64)&field + (s64)field`.
+// Linux's __ex_table uses the same encoding for the same reasons:
+// PIE-friendly (no runtime relocations), compact (8 bytes per entry).
+struct uaccess_fixup_entry {
+    s32 op_rel;       // op_pc    = (u64)&op_rel    + (s64)op_rel
+    s32 fixup_rel;    // fixup_pc = (u64)&fixup_rel + (s64)fixup_rel
+};
+
+_Static_assert(sizeof(struct uaccess_fixup_entry) == 8,
+    "uaccess_fixup_entry must be exactly two s32 fields");
+
+// Linker-defined bounds of the .uaccess_fixup region inside .rodata
+// (kernel.ld). The pointer arithmetic uses the entry type so the
+// (p < end) comparison advances by full entries.
+extern const struct uaccess_fixup_entry _uaccess_fixup_start[];
+extern const struct uaccess_fixup_entry _uaccess_fixup_end[];
+
+#ifdef KERNEL_TESTS
+// uaccess.S's faulting-access and fault-recovery labels, exported for the
+// tests' cross-check of uaccess_fixup_lookup against the primitives: the
+// load's, and the head / body / tail access of each bulk copy.
+extern char uaccess_load_u8_op[];
+extern char uaccess_load_u8_fault[];
+extern char uaccess_copy_out_op_head[];
+extern char uaccess_copy_out_op_body[];
+extern char uaccess_copy_out_op_tail[];
+extern char uaccess_copy_out_fault[];
+extern char uaccess_copy_in_op_head[];
+extern char uaccess_copy_in_op_body[];
+extern char uaccess_copy_in_op_tail[];
+extern char uaccess_copy_in_fault[];
+#endif // KERNEL_TESTS
+
 // User-half VA bound shared with arch/arm64/mmu.h (USER_VA_TOP). The
 // dispatcher uses this to recognize "this kernel-mode fault is on a
 // user VA" before consulting the fixup table.

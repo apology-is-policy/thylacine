@@ -1,0 +1,8 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211352Z/control.c:65:5: error: unknown type name 'spin_lock_t'; did you mean 'spinlock_t'?
+   65 |     spin_lock_t    lock;
+      |     ^~~~~~~~~~~
+      |     spinlock_t
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/final-reclaim-20261008T211352Z/control.c:11:30: note: 'spinlock_t' declared here
+   11 | typedef struct { int held; } spinlock_t;
+      |                              ^
+1 error generated.

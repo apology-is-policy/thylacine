@@ -37,7 +37,6 @@ void test_timer_tick_increments(void) {
 // The ns -> counter conversion is exact while the counter value fits, and
 // saturates past it: a counter above 1 GHz (CNTFRQ is 32 bits) must not wrap a
 // far deadline to a near one.
-void test_timer_ns_to_counter_saturates(void);
 void test_timer_ns_to_counter_saturates(void) {
     const u64 max = ~0ull;
     TEST_EXPECT_EQ(timer_ns_to_counter_at(1000000000ull, 62500000ull), 62500000ull,

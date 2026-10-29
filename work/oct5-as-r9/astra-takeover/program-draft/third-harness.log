@@ -1,0 +1,20 @@
+PASS control PASS wire adapter: 156 checks
+PASS staged program: 18711 total checks
+PASS stat-before-open open starts with stat
+PASS identity-copy admission snapshot detached
+PASS remote-again remote shortage terminal no replay
+PASS malformed malformed capture poisons scope
+PASS mask missing stat field poisons scope
+PASS symlink symlink open refused before DAC
+PASS directory directory type before search
+PASS search search permits walk stage
+PASS deny-open denied open sends no effect
+PASS effect-type authorized stat advances open
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/run-controls.py", line 48, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/run-controls.py", line 44, in main
+    assert (run.returncode==1 and run.stderr==f'FAIL {want}\n'.encode()) if want else (run.returncode==0 and not run.stderr),(name,run.returncode,run.stdout,run.stderr)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('built', 0, b'PASS wire adapter: 156 checks\nPASS staged program: 18711 total checks\n', b'')

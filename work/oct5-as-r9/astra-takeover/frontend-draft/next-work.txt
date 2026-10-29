@@ -1,0 +1,19 @@
+Continue autonomously as Astra. Do not rerun historical installers or gates.
+Overlay frontend-draft module/header and engine/header first, return-draft control
+module/header second, then drain-draft/next-work exact working source order.
+All these remain uninstalled; canonical kernel is97d495.
+
+Next qualify actual successful CONNECT construction/adoption and constructor
+rollback with the immutable frontend, then install one coherent current overlay.
+Review actual private creator entry/control integration without enabling unfinished
+public dispatch. Native worker never consumes SQEs or borrows creator Proc.
+Qualify actual transport/driver/demux, normal/bulk and multiple scopes, creator
+exec/close, retained refusal/fullCQ/wake and operation storage with fresh matched
+ARM64 full link/native probes. Then run required full Mac gates on that exact
+source; prior50/50 applies only f719ee4a. Preserve distinct fixture limitations.
+AS3/4 and MM0-MM4 follow async lifecycle qualification, in that order.
+
+Keep8192MiB floor, clean Stratum61dde37, Astra6pending/4protected hashes and all
+source-matched raw evidence. No Main/private async/clipboard activation or128MiB
+removal. Single-agent self-review only. Mac released after current compute; no
+running qualification remains. Check actual resource/jobs before next compute.

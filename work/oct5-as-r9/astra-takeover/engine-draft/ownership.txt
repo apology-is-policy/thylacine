@@ -1,0 +1,60 @@
+Astra next checkpoint after b2b263e3f (implemented draft; NOT installed or native-qualified).
+
+Per-ring entry ownership precedes executor wiring. Existing raw CONNECT pointers
+have a deliberately explicit caller-lifetime contract; syscall/control paths
+must not retain those pointers without a lifetime root. Use a precharged bounded
+index of 64 protocol owners, sharing the slot namespace and Ll. Each indexed
+owner retains its already-existing Loom reference. An entry pin prevents index
+removal; it is separate from CONNECT's short teardown users and parser borrow.
+No extra per-scope thread, unbounded map, late-close allocation or fake peer ack.
+
+Index before native publication, with an installing flag that excludes normal
+lookup/progress until publish and its accept wake finish. Closing admission
+still linearizes through existing locked CONNECT publisher. If close wins,
+retain the indexed unpublished owner, drive actual cursor abort, then deliver
+its negative PREPARED terminal before collection. If publish wins then close races the
+accept wake, indexed installing ownership keeps it discoverable and retained;
+clear installing and wake the existing close/progress owner after publication.
+Cancellation/lookup never sees a half-published owner. User-facing abort during
+installation must latch pending cancellation under Ll, not falsely report
+Stale: installation is already represented by an exact RESERVED scope.
+
+No extra pointer lookup gap: lookup + exact incarnation + entry increment share
+Ll. Remove only with zero entries, local retirement and delivered/discarded
+terminal; clear index under Ll before releasing outside it. Drop last Loom ref
+only after native/protocol storage and image refund. A successful CONNECT's
+request remains owned until protocol retirement; CQ consumer must not reap it.
+New general RPC/fid/user-buffer borrows need a stronger retirement proof before
+wiring those opcodes. Scope metadata can outlive protocol storage until REAP.
+
+Close queue is distinct from the existing zero-reference free queue: protocol
+owners retain Loom, so waiting for refcount zero before abort would deadlock.
+Its queue link and queued flag must be inside the charged Loom from creation.
+Queue membership owns an extra Loom ref, taken before enqueue; queue lock never
+nests cleanup. Existing global retirer may service bounded pending-close work
+then zero-ref destruction, no stack allocated on close. Last-handle/exec close
+latches under Ll and enqueues existing storage, then returns without peer wait.
+Pending installs/entry pins wake the queue on their final put. Avoid spinning on
+an unrelated externally held pin: registration-before-recheck wake predicate.
+
+Progress quantum: one scope visit per selection, round-robin index cursor under
+Ll; each visit invokes at most one existing bounded client step and one CQ post.
+Abort/deadline remain callable with full CQ. READY idle owners must not repeatedly
+call p9 progress with no request, nor retain obsolete CONNECT deadline. Before
+sleep, register native poll hooks while their entry roots are held, then resample
+all readiness/deadline/close predicates. New callbacks never acquire Ll while
+holding a registry, client, transport or poll-list lock. No blocking legacy pump.
+
+Detach/discard: only whole-ring close detaches consumer, after all local protocol
+and registered-buffer borrows end. Request count alone is not proof of parser
+quiescence. Fixed reservations and pool writers also participate before future
+activation. Cancel incomplete handshakes with actual driver cursor abort; keep
+prior committed successes immutable until safe discard. Preserve native credit
+accounting for a server retaining a torn endpoint.
+
+Required witnesses: install vs close vs abort (before/after native publish and
+accept wake), lookup vs remove/reuse, pinned entry prevents free, queue root
+breaks owner cycle without final-drop-under-lock, no-per-peer-wait full-CQ close,
+round-robin independent peer with stalled first peer, register/recheck wake race,
+zero-deadline parking and earliest deadline, exact physical metadata charging,
+source-matched native+sanitizer gate. Old private APIs remain disabled throughout.

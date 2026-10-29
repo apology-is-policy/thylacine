@@ -1,0 +1,27 @@
+Continue coherent RPC engine integration; this adapter remains UNINSTALLED.
+Use rpc-draft/next-work.txt for the complete mandatory integration set.
+
+Unify wire.expect/component/payload with the retained operation's existing
+fields when integrating. Do not retain two inconsistent expectation copies:
+the callback must capture using the exact expectation produced by its builder.
+The one-page operation charge remains mandatory; recheck actual ARM64 layout.
+
+Implement operation-specific creator/FID/fixed/provided-buffer admission and
+staged GETATTR -> ordinary search/open DAC -> WALK/LOPEN program. The adapter's
+wire kind is internal, never direct authority from an unchecked SQE. Resolve
+source scope/full incarnation; retain WALK destination, exclusive LOPEN/CLUNK
+claims, payload backing and creator through all unlocked work.
+
+Wire submit after RPC begin arms the callback, outside Ll with sole p->driving.
+If client validation refused without capture, settle local failure explicitly;
+accepted callbacks may be synchronous or later. Read local_again only after
+submit returns; retry only through wire_retry after callback/sending quiescence
+and abort/deadline recheck. Remote Rlerror(EAGAIN) is terminal. Do not replay
+uncertain writes. GETATTR success advances only after DAC and deadline checks.
+
+Extend actual READY executor fairness/readiness, earliest active deadline, CQ
+backpressure and queued/inflight settlement together with physical destruction.
+Close must abort/settle callbacks and queued owners before the old zero-entry-pin
+collection gate; freeing actual operation/refunding precedes request owner drop.
+Run actual normal/bulk peer cases and native close/exec/buffer/DAC/pool controls.
+Then qualify required source-matched gates and proceed AS3/4 -> MM0-MM4.

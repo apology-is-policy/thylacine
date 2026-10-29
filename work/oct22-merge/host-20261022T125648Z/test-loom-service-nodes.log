@@ -1,0 +1,12 @@
+PASS control PASS scope/fid reservations: 4096 bytes
+PASS parent-zero scope parent must be zero
+PASS parent-ready unused scope cannot authorize child
+PASS omit-parent-pin provisional child retains parent
+PASS early-visible provisional scope cannot be borrowed
+PASS quota-parent-leak quota refusal restores parent and output
+PASS omit-parent-drop child rollback releases parent and both ledgers
+PASS stale-remove stale child cannot release replacement parent
+PASS allow-borrow-reap borrowed unused child cannot be reaped
+PASS allow-ready-reap ready scope cannot use unused reap
+PASS abort-publish parent abort wins child publication without losing pins
+PASS omit-slot-reap closed unused child cleanup releases parent

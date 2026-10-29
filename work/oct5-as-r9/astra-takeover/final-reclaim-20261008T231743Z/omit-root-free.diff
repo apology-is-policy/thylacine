@@ -1,0 +1,11 @@
+--- control
++++ omit-root-free
+@@ -230,7 +230,7 @@
+     // walkers — the bytes are PAs of L1 sub-tables we've just freed;
+     // letting them leak through a buddy hand-off is a Spectre-class
+     // info-leak vector.
+-    clear_page_then_free(root);
++
+ }
+ struct AddrSpace *addrspace_alloc(u32 page_budget) {
+     // I-32 (A): an address space with no cap is the DoS hole the invariant

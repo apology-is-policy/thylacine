@@ -1,0 +1,2 @@
+wrong source fid: invalid capture mutated output/payload or succeeded (0)
+Assertion failed: (0), function bad, file source-fid.c, line 64.

@@ -1,0 +1,85 @@
+2026-10-13T14:56:16Z  HEAD f23dbe047ca73562f3c3d2edb7aa519a00c1230d
+2026-10-13T14:56:16Z  predictions derived: each kernel message reached from its registered test; nine probe checks present
+2026-10-13T14:56:16Z  expected tests (derived from test.c): 1873
+2026-10-13T14:56:16Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-13T14:56:16Z  anchor census: 17 mutants, each anchor once in its file
+2026-10-13T14:56:16Z  disk pre: 16323 MiB free (floor 8192)
+2026-10-13T14:58:09Z  disk post-control-build: 16266 MiB free (floor 8192)
+2026-10-13T14:59:00Z  control: test.sh exit 0
+2026-10-13T14:59:00Z  CONTROL GREEN: 1873/1873, the ten named tests PASS, probe status 70, bin 3a5d49d48dc0ee02
+2026-10-13T14:59:51Z  disk post-control-q-build: 16164 MiB free (floor 8192)
+2026-10-13T15:00:43Z  control-q: test.sh exit 0
+2026-10-13T15:00:43Z  CONTROL-Q GREEN: 1873/1873, the ten named tests PASS, probe status 71 (qualification path), bin 778022f4349aa4f7
+2026-10-13T15:00:43Z  disk pre-m1: 16000 MiB free (floor 8192)
+2026-10-13T15:01:31Z  disk post-m1-build: 16054 MiB free (floor 8192)
+2026-10-13T15:01:45Z  m1: test.sh exit 1
+2026-10-13T15:01:46Z  M1 DISCRIMINATED: exactly loom.setup_rejects at 'entries 0 answers -EINVAL'; extinction set = the suite's own
+2026-10-13T15:01:46Z  disk pre-m2: 16027 MiB free (floor 8192)
+2026-10-13T15:02:34Z  disk post-m2-build: 15987 MiB free (floor 8192)
+2026-10-13T15:02:48Z  m2: test.sh exit 1
+2026-10-13T15:02:48Z  M2 DISCRIMINATED: exactly loom.setup_resource_refusals at 'the page cap answers -ENOMEM'; extinction set = the suite's own
+2026-10-13T15:02:48Z  disk pre-m3: 15947 MiB free (floor 8192)
+2026-10-13T15:03:37Z  disk post-m3-build: 15899 MiB free (floor 8192)
+2026-10-13T15:03:51Z  m3: test.sh exit 1
+2026-10-13T15:03:51Z  M3 DISCRIMINATED: exactly loom.setup_resource_refusals at 'a full handle table answers -EMFILE'; extinction set = the suite's own
+2026-10-13T15:03:51Z  disk pre-m4: 15851 MiB free (floor 8192)
+2026-10-13T15:04:38Z  disk post-m4-build: 15844 MiB free (floor 8192)
+2026-10-13T15:04:51Z  m4: test.sh exit 1
+2026-10-13T15:04:52Z  M4 DISCRIMINATED: exactly loom.sqpoll_charges_thread_budget at 'SQPOLL setup at the thread cap answers -EAGAIN'; extinction set = the suite's own
+2026-10-13T15:04:52Z  disk pre-m5: 15821 MiB free (floor 8192)
+2026-10-13T15:05:41Z  disk post-m5-build: 15822 MiB free (floor 8192)
+2026-10-13T15:05:55Z  m5: test.sh exit 1
+2026-10-13T15:05:55Z  M5 DISCRIMINATED: exactly loom.register_rejects at 'a listed non-Spoor answers -EBADF' and loom.bridge_probe, the probe at 'HANDLES: a listed fd naming nothing: -EBADF'; extinction set = the suite's own
+2026-10-13T15:05:55Z  disk pre-m6: 15820 MiB free (floor 8192)
+2026-10-13T15:06:43Z  disk post-m6-build: 15795 MiB free (floor 8192)
+2026-10-13T15:06:56Z  m6: test.sh exit 1
+2026-10-13T15:06:57Z  M6 DISCRIMINATED: exactly loom.register_buffers_rejects at 'len 0 answers -EINVAL' and loom.bridge_probe, the probe at 'BUFFERS: a zero-length buffer: -EINVAL'; extinction set = the suite's own
+2026-10-13T15:06:57Z  disk pre-m7: 15777 MiB free (floor 8192)
+2026-10-13T15:07:43Z  disk post-m7-build: 15773 MiB free (floor 8192)
+2026-10-13T15:07:57Z  m7: test.sh exit 1
+2026-10-13T15:07:58Z  M7 DISCRIMINATED: exactly loom.register_rejects at 'ENTER with an unknown flag bit answers -EINVAL' and loom.bridge_probe, the probe at 'ordinary ENTER: an unknown flag: -EINVAL'; extinction set = the suite's own
+2026-10-13T15:07:58Z  disk pre-m8: 15764 MiB free (floor 8192)
+2026-10-13T15:08:46Z  disk post-m8-build: 15746 MiB free (floor 8192)
+2026-10-13T15:09:00Z  m8: test.sh exit 1
+2026-10-13T15:09:00Z  M8 DISCRIMINATED: exactly loom.bridge_probe, the probe at 'params at a kernel address: -EFAULT'; extinction set = the suite's own
+2026-10-13T15:09:00Z  disk pre-m9: 15724 MiB free (floor 8192)
+2026-10-13T15:09:48Z  disk post-m9-build: 15692 MiB free (floor 8192)
+2026-10-13T15:10:02Z  m9: test.sh exit 1
+2026-10-13T15:10:02Z  M9 DISCRIMINATED: exactly loom.bridge_probe, the probe at 'setup entries above 32 bits: -EINVAL' (a ring handed out); extinction set = the suite's own
+2026-10-13T15:10:02Z  disk pre-m10: 15664 MiB free (floor 8192)
+2026-10-13T15:10:50Z  disk post-m10-build: 15597 MiB free (floor 8192)
+2026-10-13T15:11:04Z  m10: test.sh exit 1
+2026-10-13T15:11:04Z  M10 DISCRIMINATED: exactly loom.bridge_probe, the probe at 'REGISTER fd above 32 bits: -EBADF' (got 0); extinction set = the suite's own
+2026-10-13T15:11:04Z  disk pre-m10q: 15547 MiB free (floor 8192)
+2026-10-13T15:11:53Z  disk post-m10q-build: 15553 MiB free (floor 8192)
+2026-10-13T15:12:07Z  m10q: test.sh exit 1
+2026-10-13T15:12:07Z  M10Q DISCRIMINATED: in the qualification image, exactly loom.bridge_probe, the probe at 'REGISTER fd above 32 bits: -EBADF' (got 0); extinction set = the suite's own
+2026-10-13T15:12:07Z  disk pre-m11: 15530 MiB free (floor 8192)
+2026-10-13T15:12:59Z  disk post-m11-build: 15469 MiB free (floor 8192)
+2026-10-13T15:13:13Z  m11: test.sh exit 1
+2026-10-13T15:13:14Z  M11 DISCRIMINATED: exactly loom.bridge_probe, the probe at 'REGISTER op above 32 bits: -EINVAL' (got 0); extinction set = the suite's own
+2026-10-13T15:13:14Z  disk pre-m12: 15433 MiB free (floor 8192)
+2026-10-13T15:14:02Z  disk post-m12-build: 15372 MiB free (floor 8192)
+2026-10-13T15:14:16Z  m12: test.sh exit 1
+2026-10-13T15:14:16Z  M12 DISCRIMINATED: exactly loom.bridge_probe, the probe at 'ENTER to_submit above 32 bits: -EINVAL' (got 0); extinction set = the suite's own
+2026-10-13T15:14:16Z  disk pre-m13: 15302 MiB free (floor 8192)
+2026-10-13T15:15:04Z  disk post-m13-build: 15270 MiB free (floor 8192)
+2026-10-13T15:15:18Z  m13: test.sh exit 1
+2026-10-13T15:15:18Z  M13 DISCRIMINATED: exactly loom.bridge_probe, the probe at 'ordinary setup, read-only params: the copyout faults'; extinction set = the suite's own
+2026-10-13T15:15:18Z  disk pre-m14: 15217 MiB free (floor 8192)
+2026-10-13T15:16:07Z  disk post-m14-build: 15179 MiB free (floor 8192)
+2026-10-13T15:16:21Z  m14: test.sh exit 1
+2026-10-13T15:16:21Z  M14 DISCRIMINATED: exactly loom.private_native_operations and loom.private_native_isolation at 'native REAP of a FID whose CLUNK is in flight answers -EBUSY'; loom.service_fid_reap PASS; extinction set = the suite's own
+2026-10-13T15:16:21Z  disk pre-m15: 15134 MiB free (floor 8192)
+2026-10-13T15:17:09Z  disk post-m15-build: 15076 MiB free (floor 8192)
+2026-10-13T15:17:23Z  m15: test.sh exit 1
+2026-10-13T15:17:23Z  M15 DISCRIMINATED: exactly loom.private_native_operations and loom.private_native_isolation at 'native QUERY of a FID whose CLUNK is in flight answers -ENOENT'; loom.service_fid_reap PASS; extinction set = the suite's own
+2026-10-13T15:17:23Z  disk pre-m16: 15037 MiB free (floor 8192)
+2026-10-13T15:18:12Z  disk post-m16-build: 14997 MiB free (floor 8192)
+2026-10-13T15:18:26Z  m16: test.sh exit 1
+2026-10-13T15:18:27Z  M16 DISCRIMINATED: exactly 9p_client.loom_sqpoll_refuses_undeadlined at 'an SQPOLL ring refuses a 9P handle without a recv deadline: -EOPNOTSUPP'; extinction set = the suite's own
+2026-10-13T15:19:15Z  rebuild byte-identical to the control kernel
+2026-10-13T15:20:04Z  rebuild-q byte-identical to CONTROL-Q
+2026-10-13T15:20:04Z  disk pre-shape: 14830 MiB free (floor 8192)
+2026-10-13T15:21:22Z  SHAPE: tools/check-production.sh --all exit 0
+2026-10-13T15:21:22Z  exit 0

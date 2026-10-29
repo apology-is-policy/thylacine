@@ -1,0 +1,161 @@
+Change Dir: '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+
+Run Build Command(s): /opt/homebrew/bin/cmake -E env VERBOSE=1 /opt/homebrew/bin/gmake -f Makefile t loom-bridge-probe
+/opt/homebrew/bin/cmake -S/Users/northkillpd/projects/thylacine-corona/usr -B/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/gmake  -f CMakeFiles/Makefile2 t
+gmake[1]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/cmake -S/Users/northkillpd/projects/thylacine-corona/usr -B/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/cmake -E cmake_progress_start /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/CMakeFiles 10
+/opt/homebrew/bin/gmake  -f CMakeFiles/Makefile2 lib/libt/CMakeFiles/t.dir/all
+gmake[2]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/gmake  -f lib/libt/CMakeFiles/t.dir/build.make lib/libt/CMakeFiles/t.dir/depend
+gmake[3]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /Users/northkillpd/projects/thylacine-corona/usr /Users/northkillpd/projects/thylacine-corona/usr/lib/libt /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/DependInfo.cmake "--color="
+Dependee "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/DependInfo.cmake" is newer than depender "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/depend.internal".
+Dependee "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/depend.internal".
+Scanning dependencies of target t
+gmake[3]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/gmake  -f lib/libt/CMakeFiles/t.dir/build.make lib/libt/CMakeFiles/t.dir/build
+gmake[3]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+[ 10%] Building ASM object lib/libt/CMakeFiles/t.dir/src/start.S.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -o CMakeFiles/t.dir/src/start.S.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/start.S
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 20%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/fatal.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/fatal.c.obj -MF CMakeFiles/t.dir/src/loom_client/fatal.c.obj.d -o CMakeFiles/t.dir/src/loom_client/fatal.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/fatal.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 30%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/fixed_requests.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/fixed_requests.c.obj -MF CMakeFiles/t.dir/src/loom_client/fixed_requests.c.obj.d -o CMakeFiles/t.dir/src/loom_client/fixed_requests.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/fixed_requests.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 40%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/lease_ledger.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/lease_ledger.c.obj -MF CMakeFiles/t.dir/src/loom_client/lease_ledger.c.obj.d -o CMakeFiles/t.dir/src/loom_client/lease_ledger.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/lease_ledger.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 50%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/owned_mapping.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/owned_mapping.c.obj -MF CMakeFiles/t.dir/src/loom_client/owned_mapping.c.obj.d -o CMakeFiles/t.dir/src/loom_client/owned_mapping.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/owned_mapping.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 60%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/paired_cq.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/paired_cq.c.obj -MF CMakeFiles/t.dir/src/loom_client/paired_cq.c.obj.d -o CMakeFiles/t.dir/src/loom_client/paired_cq.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/paired_cq.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 70%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/request_book.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/request_book.c.obj -MF CMakeFiles/t.dir/src/loom_client/request_book.c.obj.d -o CMakeFiles/t.dir/src/loom_client/request_book.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/request_book.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 80%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/retirement_executor.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/retirement_executor.c.obj -MF CMakeFiles/t.dir/src/loom_client/retirement_executor.c.obj.d -o CMakeFiles/t.dir/src/loom_client/retirement_executor.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/retirement_executor.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[ 90%] Building C object lib/libt/CMakeFiles/t.dir/src/loom_client/ring_payload.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT lib/libt/CMakeFiles/t.dir/src/loom_client/ring_payload.c.obj -MF CMakeFiles/t.dir/src/loom_client/ring_payload.c.obj.d -o CMakeFiles/t.dir/src/loom_client/ring_payload.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/ring_payload.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[100%] Linking C static library ../libt.a
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/bin/cmake -P CMakeFiles/t.dir/cmake_clean_target.cmake
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt && /opt/homebrew/bin/cmake -E cmake_link_script CMakeFiles/t.dir/link.txt --verbose=1
+/opt/homebrew/opt/llvm/bin/llvm-ar qc ../libt.a CMakeFiles/t.dir/src/start.S.obj CMakeFiles/t.dir/src/loom_client/fatal.c.obj CMakeFiles/t.dir/src/loom_client/fixed_requests.c.obj CMakeFiles/t.dir/src/loom_client/lease_ledger.c.obj CMakeFiles/t.dir/src/loom_client/owned_mapping.c.obj CMakeFiles/t.dir/src/loom_client/paired_cq.c.obj CMakeFiles/t.dir/src/loom_client/request_book.c.obj CMakeFiles/t.dir/src/loom_client/retirement_executor.c.obj CMakeFiles/t.dir/src/loom_client/ring_payload.c.obj
+/opt/homebrew/opt/llvm/bin/llvm-ranlib ../libt.a
+gmake[3]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+[100%] Built target t
+gmake[2]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/cmake -E cmake_progress_start /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/CMakeFiles 0
+gmake[1]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/gmake  -f CMakeFiles/Makefile2 loom-bridge-probe
+gmake[1]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/cmake -S/Users/northkillpd/projects/thylacine-corona/usr -B/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/cmake -E cmake_progress_start /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/CMakeFiles 12
+/opt/homebrew/bin/gmake  -f CMakeFiles/Makefile2 loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/all
+gmake[2]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/gmake  -f lib/libt/CMakeFiles/t.dir/build.make lib/libt/CMakeFiles/t.dir/depend
+gmake[3]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /Users/northkillpd/projects/thylacine-corona/usr /Users/northkillpd/projects/thylacine-corona/usr/lib/libt /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/DependInfo.cmake "--color="
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/fatal.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/fixed_requests.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/lease_ledger.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/owned_mapping.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/paired_cq.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/request_book.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/retirement_executor.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Dependencies file "lib/libt/CMakeFiles/t.dir/src/loom_client/ring_payload.c.obj.d" is newer than depends file "/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/lib/libt/CMakeFiles/t.dir/compiler_depend.internal".
+Consolidate compiler generated dependencies of target t
+gmake[3]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/gmake  -f lib/libt/CMakeFiles/t.dir/build.make lib/libt/CMakeFiles/t.dir/build
+gmake[3]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+gmake[3]: Nothing to be done for 'lib/libt/CMakeFiles/t.dir/build'.
+gmake[3]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+[ 83%] Built target t
+/opt/homebrew/bin/gmake  -f loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/build.make loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/depend
+gmake[3]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /Users/northkillpd/projects/thylacine-corona/usr /Users/northkillpd/projects/thylacine-corona/usr/loom-bridge-probe /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/loom-bridge-probe /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/DependInfo.cmake "--color="
+gmake[3]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/gmake  -f loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/build.make loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/build
+gmake[3]: Entering directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+[ 91%] Building C object loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/loom-bridge-probe.c.obj
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/loom-bridge-probe && /opt/homebrew/opt/llvm/bin/clang  -I/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include -g --target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fno-common -fno-omit-frame-pointer -fstack-protector-strong -fstack-clash-protection -mbranch-protection=pac-ret+bti -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter -std=c99 -O2 -g -MD -MT loom-bridge-probe/CMakeFiles/loom-bridge-probe.dir/loom-bridge-probe.c.obj -MF CMakeFiles/loom-bridge-probe.dir/loom-bridge-probe.c.obj.d -o CMakeFiles/loom-bridge-probe.dir/loom-bridge-probe.c.obj -c /Users/northkillpd/projects/thylacine-corona/usr/loom-bridge-probe/loom-bridge-probe.c
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[100%] Linking C executable loom-bridge-probe
+cd /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/loom-bridge-probe && /opt/homebrew/bin/cmake -E cmake_link_script CMakeFiles/loom-bridge-probe.dir/link.txt --verbose=1
+/opt/homebrew/opt/llvm/bin/clang -g --target=aarch64-none-elf -fuse-ld=lld --ld-path=/opt/homebrew/opt/lld/bin/ld.lld -nostdlib -nostartfiles -static -Wl,-z,text -Wl,-z,noexecstack -Wl,-z,max-page-size=4096 -Wl,--no-dynamic-linker -Wl,--build-id=none -Wl,--no-undefined -T/Users/northkillpd/projects/thylacine-corona/usr/scripts/aarch64-userspace.ld "CMakeFiles/loom-bridge-probe.dir/loom-bridge-probe.c.obj" -o loom-bridge-probe  ../lib/libt.a
+gmake[3]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+[100%] Built target loom-bridge-probe
+gmake[2]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+/opt/homebrew/bin/cmake -E cmake_progress_start /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build/CMakeFiles 0
+gmake[1]: Leaving directory '/private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/usr-libt-build'
+
+build-exit=0
+
+== libt.a members (llvm-ar t)
+start.S.obj
+fatal.c.obj
+fixed_requests.c.obj
+lease_ledger.c.obj
+owned_mapping.c.obj
+paired_cq.c.obj
+request_book.c.obj
+retirement_executor.c.obj
+ring_payload.c.obj
+== undefined symbols across libt.a (llvm-nm -u, sorted unique)
+__stack_chk_fail
+__stack_chk_guard
+main
+t_fixed_begin_retire
+t_fixed_close
+t_fixed_driver_drop
+t_fixed_expire
+t_fixed_next_deadline
+t_fixed_progress
+t_fixed_read
+t_fixed_receive
+t_fixed_write
+t_lease_accept_read
+t_lease_begin_return
+t_lease_bind
+t_lease_cell
+t_lease_finish_return
+t_lease_prepare
+t_lease_release
+t_loom_client_fatal
+t_paired_init
+t_paired_reap
+t_request_abandon
+t_request_accept
+t_request_cancel_unpublished
+t_request_clear_retired
+t_request_create
+t_request_destroy
+t_request_occupied
+t_request_publish
+t_request_reserve
+t_request_take_terminal
+t_ring_client_drop
+t_ring_close
+t_ring_create
+t_ring_expire
+t_ring_fixed_bytes
+t_ring_fixed_cancel
+t_ring_fixed_deadline
+t_ring_fixed_drop
+t_ring_fixed_finish
+t_ring_fixed_publish
+t_ring_fixed_reserve
+t_ring_fixed_write
+t_ring_idle
+t_ring_next_deadline
+t_ring_owner_drop
+t_ring_progress
+== mem* among them: 0
+== loom-bridge-probe undefined symbols: 0

@@ -1,0 +1,42 @@
+Astra single-agent self-review: simulated local wait coordinator, October10.
+Uninstalled Rust-only draft. No independent audit or native sleeping-thread proof.
+
+This step composes the existing creator-local retirement pulse with a bounded
+wait decision; it is not a complete task executor. turn performs at most one
+bounded retirement sweep and one wait. It checks an absolute deadline before
+work, respects remaining pulse work, arms interest, rechecks external readiness
+and time, then checks local ownership pulses last. Nonblocking readiness/time
+callbacks can drop local owners without losing that pulse. No queue RefCell borrow
+survives into event-source methods. A guard disarms on all paths after a successful
+arm, including early readiness/deadline, wait error and ordinary/spurious wake.
+Failed arm has no subscription to disarm. Caller handles reported errors; no
+retry loop or assumed success. Existing drivers and C code are unchanged.
+
+WaitSource is an adapter contract, not an implemented native primitive. Its
+subscription ticket must detect an event after the readiness sample; checking
+that ticket and parking must be atomic at the actual event source. Events must
+remain pending until serviced, including across disarm; readiness observation is
+not service completion. wait may not run local owner-drop callbacks between the
+final pulse sample and parking. Creator-thread ownership excludes local drops
+while that creator is blocked. A real adapter must separately prove those facts,
+registration cleanup and event persistence. The deterministic host source tests
+the caller protocol but cannot prove an OS atomic wait implementation.
+
+The deadline is an unchanged absolute monotonic value; None means no deadline.
+Spurious wake, changed generation and ordinary wake notify bounded progress and
+return control to the caller. Deadline outcome only reports scheduling expiry;
+it never fabricates completion, cancels ownership or releases active storage.
+Per-request deadline registration and scope-wide cancellation policy are next.
+This also needs a runnable-task predicate: the eventual adapter must include
+pending runnable/CQ/backend work, not just a transport-ready flag. No private
+syscall integration, event source, timer heap or full executor is installed.
+
+local-wait091938Z passes nine cases at opt0/2, two compile-fail controls plus a
+positive control and six rejected mutants. Eleven source hashes, twenty-one raw
+command logs, source snapshots and HEAD/diff verified before documentation.
+Cases cover owner release during arm/readiness, external readiness and an event
+between recheck/wait, deadlines before/after arm, zero/partial work budgets,
+spurious wake retaining the original deadline, arm/wait error cleanup, timeout
+without storage proof and allocation-free observed turn. No new failure found.
+Protected10, cleanexternal61dde37 and parked kernel source/base remain intact.
+Native SQ remains parked/unapplied. AS3/AS4/MM0-MM4 and activation gates remain.

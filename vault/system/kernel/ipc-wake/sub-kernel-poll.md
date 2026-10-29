@@ -231,10 +231,12 @@ the sweep release all of them after unregistering, and each re-register
 scan takes them afresh. The retain is transitively
 sufficient for both real registering paths (pipe ring and devsrv
 connection — each frees its embedded list only at the Spoor's last
-clunk). The **listener** retain is INERT ([[fnd-rw2-r2poll-f1]],
-[[seam-poll-srv-registry-retain]]): `handle_acquire_obj` is a no-op
-for `KObj_Srv`, so listener-poll lifetime rests solely on the boot
-registry being immortal. A REMOTE fd's ref is retained too
+clunk). The **listener** snapshot now takes a covering registry ref through
+`handle_acquire_obj`, released by `handle_put` after the unregister sweep
+([[seam-poll-srv-registry-retain]]). Namespace removal and peer handle-close
+therefore cannot free its embedded poll list mid-wait. The mortal registry
+fixture in `devsrv.registry_lifecycle` covers this precise order. A REMOTE
+fd's ref is retained too
 (`snap->remote`): its snapshot is resent and released through the Spoor,
 its arm hooks onto the Spoor's list later in the pass, and the release must
 come before the Spoor's close can clunk the fid.
@@ -281,7 +283,7 @@ lock; the reap cancels). `struct poll_deferred` / `poll_defer_chain` /
 `chain` under the LIST's lock, `next` the owning thread's, optional `ops`
 {tryget, put} with an `owner` argument (a REF owner), NULL for a WAIT owner;
 chained on `Thread.lock_owed`, counted by `Thread.defer_depth`. `struct pollfd` — the 8-byte pinned ABI.
-Diagnostics: `poll_total_calls` / `poll_total_slept` — the latter
+Diagnostics, compiled only with the tests: `poll_total_slept`
 counts "committed to the slow path", not "actually parked" (a
 producer racing register-to-tsleep still increments it) —
 and `poll_total_resleeps`: wakes whose re-sample found nothing asked

@@ -1,0 +1,38 @@
+warning: unused import: `service_abi`
+  --> /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-rust-ownership-m3336370/loom.rs:16:31
+   |
+16 | pub use loom_client::{native, service_abi};
+   |                               ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ENTER_NONBLOCK`, `HANDLE_RAW`, `MAX_ENTRIES`, `SETUP_SQPOLL`, and `sqe_flag`
+  --> /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-rust-ownership-m3336370/loom.rs:21:9
+   |
+21 |     op, sqe_flag, BufReg, Cqe, Sqe, CQE_MORE, ENTER_GETEVENTS, ENTER_NONBLOCK, HANDLE_RAW,
+   |         ^^^^^^^^                                               ^^^^^^^^^^^^^^  ^^^^^^^^^^
+22 |     MAX_ENTRIES, MAX_REG_BUFFERS, MAX_REG_HANDLES, RING_SQ_NEED_WAKEUP, SETUP_SQPOLL,
+   |     ^^^^^^^^^^^                                                         ^^^^^^^^^^^^
+
+error[E0505]: cannot move out of `b` because it is borrowed
+  --> /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-rust-ownership-m3336370/range-drop.rs:27:80
+   |
+27 | fn bad(b:loom::RegisteredBuffer) { let r=b.as_slice_range(0..1).unwrap(); drop(b); std::hint::black_box(r); }
+   |        -                                 -                                     ^                        - borrow later used here
+   |        |                                 |                                     |
+   |        binding `b` declared here         borrow of `b` occurs here             move out of `b` occurs here
+   |
+note: if `RegisteredBuffer` implemented `Clone`, you could clone the value
+  --> /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-rust-ownership-m3336370/loom.rs:44:1
+   |
+44 | pub struct RegisteredBuffer {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+   |
+  ::: /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-rust-ownership-m3336370/range-drop.rs:27:42
+   |
+27 | fn bad(b:loom::RegisteredBuffer) { let r=b.as_slice_range(0..1).unwrap(); drop(b); std::hint::black_box(r); }
+   |                                          - you could clone this value
+
+error: aborting due to 1 previous error; 2 warnings emitted
+
+For more information about this error, try `rustc --explain E0505`.

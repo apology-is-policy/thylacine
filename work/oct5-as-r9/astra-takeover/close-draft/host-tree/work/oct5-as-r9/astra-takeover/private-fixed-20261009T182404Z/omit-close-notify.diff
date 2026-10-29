@@ -1,0 +1,11 @@
+--- control
++++ omit-close-notify
+@@ -145,7 +145,7 @@
+     spin_lock(&l->lock);
+     --l->service_fixed_settling;
+     spin_unlock(&l->lock);
+-    loom_private_close_changed(l);
++    if(false) loom_private_close_changed(l);
+     loom_unref(l);
+     return 0;
+ }

@@ -1,0 +1,50 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Warning: Please run the Java VM, which executes TLC with a throughput optimized garbage collector, by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 124 and seed -9129036504321010697 with 8 workers on 8 cores with 2048MB heap and 64MB offheap memory [pid: 86895] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/burrow.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/_TLCTrace.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/TLCExt.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9233693652792021242/Integers.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module burrow
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module burrow
+Starting... (2026-10-07 08:47:01)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-07 08:47:01.
+Error: Invariant Invariants is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ mapping_count = (v1 :> 0 @@ v2 :> 0)
+/\ pages_alive = {}
+/\ handle_count = (v1 :> 0 @@ v2 :> 0)
+/\ vmos = {}
+
+State 2: <VmoCreate(v2) line 130, col 5 to line 134, col 42 of module burrow>
+/\ mapping_count = (v1 :> 0 @@ v2 :> 0)
+/\ pages_alive = {v2}
+/\ handle_count = (v1 :> 0 @@ v2 :> 1)
+/\ vmos = {v2}
+
+State 3: <BuggyNoFreeHandleClose(v2) line 251, col 5 to line 255, col 40 of module burrow>
+/\ mapping_count = (v1 :> 0 @@ v2 :> 0)
+/\ pages_alive = {v2}
+/\ handle_count = (v1 :> 0 @@ v2 :> 0)
+/\ vmos = {v2}
+
+113 states generated, 51 distinct states found, 21 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 00s at (2026-10-07 08:47:01)
+Trace exploration spec path: ./burrow_TTrace_1791359221.tla

@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production everything sysroot userspace disk pool clean test test-rust test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict test-haul-kat run run-tcg gdb specs help
+.PHONY: all kernel production everything sysroot userspace disk pool clean test test-rust test-loom-client test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict test-haul-kat run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -122,6 +122,13 @@ test-fault:
 # `backend` feature before its tests mean anything. No boot; seconds.
 test-rust:
 	@tools/test-rust.sh
+
+# The native Loom client cores: the C cores in libt (thyla/loom_client/) under
+# ASan+UBSan and at -O2, a freestanding aarch64 build and a link of every public
+# function under libt's own flags, then the Rust twins (usr/lib/loom-client) with
+# cargo in the dev and release profiles. No boot; a few minutes.
+test-loom-client:
+	@tools/test-loom-client.sh
 
 # #245: ROADMAP section 4.2's exit criterion for I-16 -- the kernel base must
 # differ across boots -- and this is that invariant's only runtime witness. It
@@ -262,6 +269,9 @@ help:
 	@echo "               which NOTHING in the tree ran before 2026-09-22. Also names"
 	@echo "               the crates that cannot host-test at all (unconditional"
 	@echo "               libthyla-rs), whose cfg(test) tests run nowhere. No boot."
+	@echo "  test-loom-client — the native Loom client cores' HOST tests: C (ASan+UBSan,"
+	@echo "               -O2, freestanding link under libt's flags) and the Rust twins"
+	@echo "               (cargo, dev and release profiles). No boot."
 	@echo "  verify-kaslr — #245: I-16's only runtime witness -- the slide must vary"
 	@echo "               across N=10 boots; a single boot cannot see a fixed slide."
 	@echo "  test-venus-verdict — Warp-6 V-0: the venus gate discriminates (no boot)."

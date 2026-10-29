@@ -1,0 +1,70 @@
+{
+  "results": [
+    {
+      "case": "clean-one",
+      "expected": null,
+      "states": 464
+    },
+    {
+      "case": "clean-two",
+      "expected": null,
+      "states": 6416
+    },
+    {
+      "case": "ackfree",
+      "expected": "PayloadIntact",
+      "states": 44
+    },
+    {
+      "case": "stale",
+      "expected": "ExactReturn",
+      "states": 322
+    },
+    {
+      "case": "pair",
+      "expected": "PairedPublication",
+      "states": 23
+    },
+    {
+      "case": "cqfull",
+      "expected": "CqBounded",
+      "states": 114
+    },
+    {
+      "case": "late",
+      "expected": "NoLateSuccess",
+      "states": 28
+    },
+    {
+      "case": "recycle",
+      "expected": "PayloadIntact",
+      "states": 73
+    },
+    {
+      "case": "order",
+      "expected": "MoreBeforeFinal",
+      "states": 183
+    },
+    {
+      "case": "double",
+      "expected": "NoDuplicate",
+      "states": 108
+    },
+    {
+      "case": "peerwait",
+      "expected": "RetirementProgress",
+      "states": 5844
+    },
+    {
+      "case": "returnwait",
+      "expected": "RetirementProgress",
+      "states": 6328
+    },
+    {
+      "case": "cqwait",
+      "expected": "RetirementProgress",
+      "states": 5432
+    }
+  ],
+  "model_sha256": "ed841ce2ff2b63cf1ea9caad1563526e6380a0373242a638bd0bb302425c3013"
+}

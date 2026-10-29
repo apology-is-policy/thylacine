@@ -1,0 +1,11 @@
+--- work/oct13-rollback/kernel-20261013T162123Z/pristine/handle.c	2026-10-13 18:21:23
++++ kernel/handle.c	2026-10-13 18:25:22
+@@ -532,7 +532,7 @@
+ 
+ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj) {
+     if (!obj) return -1;
+-    return handle_close_matching(p, h, kind, obj);
++    return handle_close_matching(p, h, KOBJ_INVALID, NULL); // MUTANT M1: no identity
+ }
+ 
+ // VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in

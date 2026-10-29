@@ -1,0 +1,27 @@
+recovery harness: control + three one-variable mutants
+stamp   : 20261007T165152Z
+runner  : work/oct5-as-r9/reap-leg-run.sh  sha256 ce68a185b49f2594de61d2a0b7b8380092f2d77263b9d450e7047bb8465a44e3
+harness : work/oct5-as-r9/reap-leg-recovery-test.sh sha256 690f85e0a606f6fa2373526f541bea4c85f14ce1c7631cb335ce4b3b285031d3
+HEAD    : 3ca0dd45fba90f77d4efa2a1f516bc43095cdce4
+
+== control
+   RESULT: 24 pass, 0 wrong (harness rc 0)
+   evidence: work/oct5-as-r9/recovery-test-20261007T165152Z/control
+
+== m1
+   RESULT: 23 pass, 1 wrong (harness rc 1)
+   UNEXPECTED RED (the harness is not discriminating as claimed): R3 exits 9 although the run itself exited 0 -- expected [9] got [0]
+   evidence: work/oct5-as-r9/recovery-test-20261007T165152Z/m1
+
+== m2
+   RESULT: 22 pass, 2 wrong (harness rc 1)
+   expected red: R4 rebuilt under the floor
+   expected red: R4 left an image in build/ without rebuilding
+   evidence: work/oct5-as-r9/recovery-test-20261007T165152Z/m2
+
+== m3
+   RESULT: 23 pass, 1 wrong (harness rc 1)
+   expected red: R7 exits 9 on a restore whose hash does not verify -- expected [9] got [0]
+   evidence: work/oct5-as-r9/recovery-test-20261007T165152Z/m3
+
+VERDICT: FAILED -- read the mismatches above before trusting the harness.

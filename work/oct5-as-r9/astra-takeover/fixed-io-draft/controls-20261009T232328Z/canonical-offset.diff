@@ -1,0 +1,11 @@
+--- control.c
++++ canonical-offset.c
+@@ -610,7 +610,7 @@
+     struct Burrow *b=(struct Burrow *)e.backing;
+     if(o->fixed.owner!=o->owner || !b || b->type!=BURROW_TYPE_ANON || !b->pages ||
+        !e.length || e.offset>b->size || e.length>b->size-e.offset)return -T_E_IO;
+-    *out=(u8 *)pa_to_kva(page_to_pa(b->pages))+e.offset;
++    *out=(u8 *)pa_to_kva(page_to_pa(b->pages));
+     return 0;
+ }
+ int loom_private_io_drop_fixed(struct loom_service_operation *o) {

@@ -1,0 +1,2 @@
+t_ring_create: no fatal there (status 0)
+Assertion failed: (0), function expect_fatal, file test_fatal.c, line 14.

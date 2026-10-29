@@ -1,0 +1,11 @@
+--- kernel/loom_service_slots.c
++++ live-reap.c
+@@ -80,7 +80,7 @@
+ int loom_slot_reap(struct loom_slot_table *t, struct loom_service_ref ref) {
+     struct loom_service_slot *s = slot_exact(t, ref);
+     if (!s) return -T_E_NOENT;
+-    if (s->phase != LSLOT_RETIRING || s->pins) return -T_E_BUSY;
++    if (s->pins) return -T_E_BUSY;
+     *s = (struct loom_service_slot){0};
+     return 0;
+ }

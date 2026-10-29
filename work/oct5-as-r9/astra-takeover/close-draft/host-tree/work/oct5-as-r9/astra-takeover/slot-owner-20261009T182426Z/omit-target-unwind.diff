@@ -1,0 +1,11 @@
+--- control
++++ omit-target-unwind
+@@ -170,7 +170,7 @@
+         kfree(engine);
+         kfree(requests);
+         kfree(nodes);
+-        kfree(targets);
++
+         kfree(pools);
+         kfree(slots);
+         spin_lock(&as->lock);

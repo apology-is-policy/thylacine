@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:39:53.614467+00:00",
+  "source_count": 10,
+  "command_count": 21,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "d1dc8cbf816b13aa8289daba3d35e8512daefe8671f34b756cca3078f9decbb4",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "8c8fa66843ebce30aa305f86d2cf2dea7481b2cb90d236860454a1e921d3cb47",
+    "no-clone-client-build": "21ad2c57a57e5cf2ef229cd380b3d12abc81bfc027bae5ff1dbd9850cdb18be8",
+    "no-send-executor-build": "89eca022a72c90056438b854786998393521e92d0657c168ab4f9be3a0f77139",
+    "valid-client-build": "145cb85a60ea5108a3a301150849aa9b92ac48bc97f7c236c469fda66b754321",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "wake-under-receive-borrow-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "wake-under-receive-borrow-run": "defb9edd772bbb9ae3450ac54c68e2bdc4e03c626a5f1d1e56cccc6845035a98",
+    "wake-under-drop-borrow-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "wake-under-drop-borrow-run": "a79a760fb733863a94c7e15779a92dceda86219c737de123e175a205bc3bb9a5",
+    "wake-under-shutdown-borrow-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "wake-under-shutdown-borrow-run": "f540f4e9fac440bf2a9c3ef6810a5514120a94d032cfcff4796210a3c106834f",
+    "skip-retire-notification-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-retire-notification-run": "1012818f8b44413e1a57be15c4bbdd2c6adfdd01dc6652de30d8dafb647d552c",
+    "early-reclaim-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "early-reclaim-run": "dd1725b5b67d386f7419dbcef7171acd226b0b71087f9a92c729a32411e5ef19",
+    "close-instead-of-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "close-instead-of-retire-run": "46ddf3c83ebe0c6582dde3aab2d7c40a6d758a91d0942487fbe11096d4e52b82"
+  }
+}

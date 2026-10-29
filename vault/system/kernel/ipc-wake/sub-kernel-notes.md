@@ -610,8 +610,9 @@ analysis handled only the terminate class, so a STOP-class note fell through eve
 arm and was left queued with a comment claiming it awaited an "fd-read path" that
 does not exist for a non-self-managing Proc and *cannot* exist for a phenotyped one
 (a Linux guest has no notes fd). The `^Z` was silently lost, and one of the
-sixteen queue slots went with it. `notes_stop_note_name_locked` is the STOP-class
-twin of the terminate scanner: the tail consults it after the terminate check
+sixteen queue slots went with it. `notes_stop_dequeue_locked` is the STOP-class
+twin of the terminate scanner (`notes_stop_note_name_locked` is its yes/no form
+for the tests): the tail consults it after the terminate check
 misses, and on a hit applies the stop through `proc_job_stop_self` — the same
 primitive `SYS_NOTED(NDFLT)` uses, so the #240 freshness (`susp_stop_armed`) and
 orphan-rule guards both apply without restating.

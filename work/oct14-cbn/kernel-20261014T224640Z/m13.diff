@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/handle.c	2026-10-15 00:46:40
++++ kernel/handle.c	2026-10-15 01:06:28
+@@ -666,7 +666,7 @@
+         spin_unlock(&t->lock);
+         return -1;
+     }
+-    if (slot->obj != expect) {
++    if (0 && slot->obj != expect) { // MUTANT M13: the swap ignores the object the caller expects
+         // The caller's object is no longer at this number: a peer thread closed
+         // it and put its own file there while the caller slept.
+         spin_unlock(&t->lock);

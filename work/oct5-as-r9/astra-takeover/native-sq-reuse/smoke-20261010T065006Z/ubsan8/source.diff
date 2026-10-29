@@ -1,0 +1,126 @@
+diff --git a/kernel/include/thylacine/loom.h b/kernel/include/thylacine/loom.h
+index 4cf367ee4..1371dbd90 100644
+--- a/kernel/include/thylacine/loom.h
++++ b/kernel/include/thylacine/loom.h
+@@ -655,6 +655,8 @@ void loom_handle_closed(struct Loom *l);
+ // Call only AFTER ending the physical borrow; internal close puts are quiet.
+ void loom_private_close_changed(struct Loom *l);
+ #ifdef KERNEL_TESTS
++// Test hook under the SQ consume lock; shared-memory producer operations only.
++void loom_sq_reuse_hook_for_test(void (*hook)(struct Loom *));
+ // Deterministic unlocked owner-boundary interleavings, test builds only.
+ void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32));
+ void loom_private_close_boundary_for_test(struct Loom *, u32);
+diff --git a/kernel/loom.c b/kernel/loom.c
+index 10d5226ec..d3ba139c0 100644
+--- a/kernel/loom.c
++++ b/kernel/loom.c
+@@ -3369,6 +3369,14 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
+ // exactly as Loom-3. A drain-blocked chain is bounded at cq_entries entries so a
+ // flood cannot grow it without bound (held ops don't count in async_inflight, so
+ // the CQ admission alone would not bound them).
++#ifdef KERNEL_TESTS
++// Test-only producer interleaving immediately after the reuse permission. Hook
++// runs under l->lock: it may only touch shared SQ memory, never call Loom APIs.
++static void (*sq_reuse_test_hook)(struct Loom *);
++void loom_sq_reuse_hook_for_test(void (*hook)(struct Loom *)) {
++    __atomic_store_n(&sq_reuse_test_hook, hook, __ATOMIC_RELEASE);
++}
++#endif
+ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
+     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+     u32 *sq_array         = (u32 *)(l->ring_kva + l->sq_array_off);
+@@ -3410,12 +3418,19 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
+             break;
+         }
+         u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
+-        l->sq_head++;
+-        __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);   // publish (user-readable mirror)
+         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
+         have = (sqe_idx < l->sq_entries);
+         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
+         else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
++        // sq_head is permission for the producer to reuse BOTH the SQ index
++        // and its 1:1 SQE slot. Copy (or reject) first, then release that slot.
++        // l->lock excludes other consumers, but does not lock out userspace.
++        l->sq_head++;
++        __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);
++#ifdef KERNEL_TESTS
++        void (*reuse_hook)(struct Loom *) = __atomic_load_n(&sq_reuse_test_hook, __ATOMIC_ACQUIRE);
++        if (reuse_hook) reuse_hook(l);
++#endif
+         // Route under the SAME lock so the chain-non-empty test is consistent with
+         // the snapshot we just took (the chain only grows during this call).
+         to_chain = have && ((ksqe.flags & (LOOM_SQE_LINK | LOOM_SQE_DRAIN)) != 0 ||
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index 849458f98..c48d5ca06 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -708,6 +708,7 @@ void test_loom_post_cqe_back_pressure(void);
+ void test_loom_post_cqe_ignores_hostile_header(void);
+ void test_loom_dup_rejected(void);
+ void test_loom_enter_nop(void);
++void test_loom_sq_reuse_after_copy(void);
+ void test_loom_enter_submit_rejects(void);
+ void test_loom_enter_flags_and_bad_index(void);
+ void test_loom_enter_cq_admission_backpressure(void);
+@@ -2806,6 +2807,7 @@ struct test_case g_tests[] = {
+     { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
+     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
+     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
++    { "loom.sq_reuse_after_copy",        test_loom_sq_reuse_after_copy,         false, NULL },
+     { "loom.enter_nop",                  test_loom_enter_nop,                  false, NULL },
+     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
+     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index a35fcd9c0..334b3db3c 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -1164,6 +1164,47 @@ void test_loom_enter_nop(void) {
+     loom_unref(l);
+ }
+ 
++// At head publication, simulate the permitted producer immediately reusing
++// a one-entry SQ. This deterministic boundary detects copying AFTER release;
++// it does not pretend to exercise userspace scheduling or private ENTER.
++static struct Loom *sq_reuse_target;
++static u32 sq_reuse_visits;
++static void sq_reuse_producer(struct Loom *l) {
++    if (l != sq_reuse_target || sq_reuse_visits++) return;
++    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
++    loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x222ULL);
++    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
++}
++void test_loom_sq_reuse_after_copy(void);
++void test_loom_sq_reuse_after_copy(void) {
++    for (u32 bad_index = 0; bad_index < 2; ++bad_index) {
++        struct Loom *l = loom_create(1, 2, false);
++        TEST_ASSERT(l != NULL, "one-entry SQ");
++        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
++        struct loom_cqe *cq = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
++        u32 *indices = (u32 *)(l->ring_kva + l->sq_array_off);
++        loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x111ULL);
++        if (bad_index) indices[0] = 7;
++        __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
++        sq_reuse_target = l; sq_reuse_visits = 0;
++        loom_sq_reuse_hook_for_test(sq_reuse_producer);
++        int n = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
++        loom_sq_reuse_hook_for_test(NULL); sq_reuse_target = NULL;
++        TEST_EXPECT_EQ(sq_reuse_visits, 1u, "producer runs exactly at head release");
++        TEST_EXPECT_EQ(n, bad_index ? 0 : 1, "invalid index cannot be repaired retroactively");
++        TEST_EXPECT_EQ(h->dropped, bad_index, "rejected original index counted");
++        TEST_EXPECT_EQ(l->cq_tail, bad_index ? 0u : 1u, "only valid original completes");
++        if (!bad_index) {
++            TEST_EXPECT_EQ(cq[0].user_data, 0x111ULL, "original SQE copied before reuse");
++            TEST_EXPECT_EQ(cq[0].result, 0, "original NOP result");
++        }
++        TEST_EXPECT_EQ(loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK), 1, "replacement consumed separately");
++        TEST_EXPECT_EQ(cq[bad_index ? 0 : 1].user_data, 0x222ULL, "replacement cookie preserved");
++        TEST_EXPECT_EQ(h->sq_head, 2u, "both slots acknowledged exactly once");
++        loom_unref(l);
++    }
++}
++
+ // The submit-time reject paths each post an error CQE (the SQE is still consumed
+ // -- io_uring semantics), never a dropped/lost SQE: a bad handle_idx (-EINVAL),
+ // an empty registered slot (-EBADF), a still-unimplemented-but-in-range opcode

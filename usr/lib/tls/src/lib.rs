@@ -460,12 +460,15 @@ macro_rules! tlsconn_role {
                     // panic, and panic=abort turns that into a self-DoS on a
                     // path that talks to hostile servers.
                     incoming.drain(..core::cmp::min(discard, incoming.len()));
+                    // Completion is rustls's authenticated protocol state,
+                    // not the idle WriteTraffic notification. Finished and
+                    // close_notify can share one read, yielding PeerClosed
+                    // before WriteTraffic is ever surfaced. Latch completion
+                    // after every successful step; never infer it from close.
+                    *established |= !conn.is_handshaking();
                     match action {
                         Action::Progressed => continue,
-                        Action::Established => {
-                            *established = true;
-                            return Ok(());
-                        }
+                        Action::Established => return Ok(()),
                         Action::WantRead => return Ok(()),
                         Action::PeerClosed => {
                             *peer_closed = true;
@@ -572,7 +575,7 @@ where
             if self.inner.established {
                 return Ok(());
             }
-            if self.inner.closed {
+            if self.inner.peer_closed || self.inner.closed {
                 return Err(TlsError::Handshake);
             }
             self.fill_in()?;
@@ -792,4 +795,104 @@ pub fn loopback_roundtrip(
         }
     }
     Err(TlsError::Handshake)
+}
+
+/// Deterministic regression for a client that closes immediately after its
+/// Finished. TCP may coalesce Finished + close_notify into a single read. The
+/// server must observe an authenticated completed handshake and clean EOF,
+/// independent of that segmentation; an early close must still be rejected.
+/// Used by tls-smoke, alongside the certificate rejection control.
+pub fn loopback_close_regression(
+    client_cfg: Arc<ClientConfig>,
+    server_cfg: Arc<ServerConfig>,
+    host: &str,
+) -> Result<(), TlsError> {
+    struct ClosingClient {
+        client: TlsConn<UnbufferedClientConnection>,
+        pending: Vec<u8>,
+        closed: bool,
+        max_read: usize,
+    }
+    impl Read for ClosingClient {
+        fn read(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
+            if self.pending.is_empty() {
+                self.client
+                    .pump()
+                    .map_err(|_| libthyla_rs::err::Error::Io)?;
+                if self.client.established && !self.closed {
+                    self.client
+                        .queue_close()
+                        .map_err(|_| libthyla_rs::err::Error::Io)?;
+                    self.closed = true;
+                }
+                self.pending = self.client.take_outgoing();
+            }
+            let n = buf.len().min(self.pending.len()).min(self.max_read);
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            Ok(n)
+        }
+    }
+    impl Write for ClosingClient {
+        fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+            self.client.feed(buf);
+            self.client
+                .pump()
+                .map_err(|_| libthyla_rs::err::Error::Io)?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> libthyla_rs::err::Result<()> {
+            Ok(())
+        }
+    }
+    for max_read in [usize::MAX, 1] {
+        let peer = ClosingClient {
+            client: TlsConn::new_client(client_cfg.clone(), host)?,
+            pending: Vec::new(),
+            closed: false,
+            max_read,
+        };
+        let inner = TlsConn::new_server(server_cfg.clone())?;
+        let mut server = TlsTransport { inner, sock: peer };
+        server.handshake()?;
+        let mut byte = [0u8; 1];
+        if server.read_plaintext(&mut byte).map_err(|_| TlsError::Io)? != 0
+            || !server.inner.established
+            || !server.inner.peer_closed
+            || !server.sock.closed
+        {
+            return Err(TlsError::Protocol);
+        }
+    }
+    // A plaintext close_notify before ClientHello cannot establish TLS.
+    struct EarlyClose {
+        sent: bool,
+    }
+    impl Read for EarlyClose {
+        fn read(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
+            if self.sent {
+                return Ok(0);
+            }
+            let alert = [21, 3, 3, 0, 2, 1, 0];
+            buf[..alert.len()].copy_from_slice(&alert);
+            self.sent = true;
+            Ok(alert.len())
+        }
+    }
+    impl Write for EarlyClose {
+        fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> libthyla_rs::err::Result<()> {
+            Ok(())
+        }
+    }
+    let mut early = TlsTransport {
+        inner: TlsConn::new_server(server_cfg)?,
+        sock: EarlyClose { sent: false },
+    };
+    if early.handshake().is_ok() || early.inner.established {
+        return Err(TlsError::Protocol);
+    }
+    Ok(())
 }

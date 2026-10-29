@@ -1,0 +1,4 @@
+PASS clean actual range accesses
+PASS raw-safe E0133
+PASS range-alias E0502
+PASS range-drop E0505

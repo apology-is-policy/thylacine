@@ -1,0 +1,12 @@
+diff --git a/kernel/loom_service_provided.c b/kernel/loom_service_provided.c
+index efad072b9..fda6c30c5 100644
+--- a/kernel/loom_service_provided.c
++++ b/kernel/loom_service_provided.c
+@@ -151,7 +151,6 @@ int loom_provided_deliver(struct loom_service_operation *o) {
+     struct loom_pool_cell *c=provided_cell(o);
+     if(!o->pool_stream || !o->pool_pending || !p || !c ||
+        c->phase!=LMEMBER_PENDING){rc=-T_E_NOENT;goto done;}
+-    if(l->service_requests.detached){rc=-T_E_CANCELED;goto done;}
+     // Single-shot terminal and payload delivery share one CQ entry. No second
+     // non-leased terminal can be posted, even after source abort/retirement.
+     if(o->pool_terminal) {

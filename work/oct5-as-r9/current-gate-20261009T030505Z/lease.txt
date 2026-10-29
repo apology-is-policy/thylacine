@@ -1,0 +1,4 @@
+mac   HELD by you for 7m, 1.9h left
+        why: Astra target owner implementation: native and host lifetime validation then exact-source matrix
+pi    FREE
+disk: 9.0 GiB available at /Users/northkillpd/projects/thylacine-astra

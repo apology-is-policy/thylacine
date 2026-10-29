@@ -1,0 +1,138 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 21,
+  "profiles": [
+    "asan+ubsan",
+    "optimized-ndebug-core"
+  ],
+  "mutants_rejected": 8,
+  "records": [
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-ring_payload.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-ring_payload.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "early-fixed-view-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "early-fixed-view-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "abandon-refund-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "abandon-refund-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "missing-abort-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "missing-abort-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "fixed-pool-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "fixed-pool-overlap-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "pool-fixed-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "pool-fixed-overlap-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "early-retired-refund-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "early-retired-refund-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "oversized-fixed-result-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "oversized-fixed-result-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "late-write-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "late-write-run",
+      "rc": -6,
+      "expected_failure": true
+    }
+  ],
+  "limits": "C fixed-I/O extends shared backing owner; simulated terminal/abort/retirement. Request integration and executor pending; SQ reuse parked."
+}

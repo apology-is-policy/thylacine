@@ -1,0 +1,103 @@
+{
+  "source_sha256": "d8978b61079b08356b6dd2a3cffad8c2b405ffeef8bdedbae6ac16cebed02d47",
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/check-operation.py": "6e753ecf127ba373f853f7e0a5bd6524b38c8b2686a17a1f9de018ace0ce6078",
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/loom_service_operation.c": "d8978b61079b08356b6dd2a3cffad8c2b405ffeef8bdedbae6ac16cebed02d47",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70"
+  },
+  "cases": [
+    {
+      "case": "clean",
+      "rc": 0,
+      "source_sha256": "8d21fbadc9b67d6068c717e7e69785e5ae45fd5482b6906bdcc3ba7b74b4f6f2",
+      "binary_sha256": "f3ea4e85b5fd526f4cc7fcf7e5ae619184dcd49232bd46bbee7d4cd5a4be228e"
+    },
+    {
+      "case": "identity",
+      "rc": 11,
+      "source_sha256": "3fc4c0ffdbaa282c8274e8ca96e39dd58b702094e5638c1e1192cea74ceedeb3",
+      "binary_sha256": "3fdc496ad251375c348f400e290fa9454a93a3077de7fb1a1b4a73ef41514d0d"
+    },
+    {
+      "case": "phase",
+      "rc": 11,
+      "source_sha256": "27fddf637c2df60df49a6ec8496d47a44bae16c875bc2aac0a4c7f867869afb7",
+      "binary_sha256": "697eca88b3f8c51a63cd64c210bef3ffdc7a123ed4ebe87ffb9c6db3364f6dd8"
+    },
+    {
+      "case": "linked",
+      "rc": 11,
+      "source_sha256": "321840ae8f5e788f1d33b069491aa91bfeacab686a6793aff055d678fe3c214b",
+      "binary_sha256": "3dec32e1969a693b71b4b90828d9e88a7a8a6b9790b49b77c72450471f2f03f2"
+    },
+    {
+      "case": "submitted",
+      "rc": 11,
+      "source_sha256": "5249dd51501cae714cd5a89e9ab2d1a04b18681d2160f3289a8555a9ea77905b",
+      "binary_sha256": "7ed06e47da6d44f13e0a97c61b352da9371487307962408f2ab7c75852c012e5"
+    },
+    {
+      "case": "early-owner-drop",
+      "rc": 11,
+      "source_sha256": "17d44854a9eb3e2a94de31a91c66434c910e22866bbfbc59872daf94314594b9",
+      "binary_sha256": "bf607ff0bfab35882dac2f2db79aa568080410ba9c4826e970a2ea4775f87855"
+    },
+    {
+      "case": "early-refund",
+      "rc": 11,
+      "source_sha256": "f3e524cbb469ba7438f73906fe7544083fb410d0a2b754bf289c9075cf31e469",
+      "binary_sha256": "01af43ad8760547230a82b5b4c5c9d337fdc3ffd5dba8b96b92d96c448560cc9"
+    },
+    {
+      "case": "slab-allocation",
+      "rc": 11,
+      "source_sha256": "3684193a442bb73baf6c9527c81b39bf3ccb65c67cc59ba0046df201dc653b75",
+      "binary_sha256": "da4fcba7857131344c94b51e9756866cc7c5a945ba162cd507dfa70f9710eda9"
+    },
+    {
+      "case": "omit-ref",
+      "rc": 11,
+      "source_sha256": "19c36e3ed07dfc66e1bf0b22532b1ad7994b51a2d4fad96a28146421443d77b3",
+      "binary_sha256": "5c96b840052f4dd7ece6190a1b6165999cc151c445814b387c379146f5aaf999"
+    },
+    {
+      "case": "omit-owner",
+      "rc": 11,
+      "source_sha256": "6c03f75b65b427c7bf8b1da84d1ca4b25dd61cbc8647b5938da1423b1a40b461",
+      "binary_sha256": "2d492de96256de888e9310046369e75108befef38f4f957424fe0e7ddcb736b8"
+    },
+    {
+      "case": "expiry",
+      "rc": 11,
+      "source_sha256": "ca78f620dd299da5d49dac0fab0c7f670a3ff89cdfde323852d2c3d93bbd58e9",
+      "binary_sha256": "4f95570b65e3e937503b0e174f77a088f1108450894639a7081d4802b566eeea"
+    },
+    {
+      "case": "no-postcheck",
+      "rc": 11,
+      "source_sha256": "f16f0073642a588117b87f87477e5dfe16320862244fde7a48cbf5d5a57b4e3e",
+      "binary_sha256": "6f8065098a053aa10618e12d73a63c073921166dad327e6ad5ca0f21af5c08ab"
+    },
+    {
+      "case": "active-release",
+      "rc": 11,
+      "source_sha256": "d9823005000cdbe5ebabd49fd929bab2ccfca3fb74d87761149f9516a9b2a7a8",
+      "binary_sha256": "d0db23b98b912b23c181cd75827a9a4efc6bc7134367cc3255f554aded55dc66"
+    },
+    {
+      "case": "callback-release",
+      "rc": 11,
+      "source_sha256": "5394de499501492bf54b0595b823281160e67bce08dfe213346f09a4c2241606",
+      "binary_sha256": "fa771071f98d5e21b24e61726451bd9a89bde1303e1db32c197bf91c98e7a859"
+    },
+    {
+      "case": "stale-release",
+      "rc": 11,
+      "source_sha256": "dd2e94394078b6ceef677241fc5a47a58015af746457715434e15b63f2cb3719",
+      "binary_sha256": "fe4c85fc38804b0989ecff18ebd9855c95511c63b4a378b9c6e57766c719c6b5"
+    }
+  ],
+  "limits": "Actual constructor+ledger code with explicit host allocator/image/engine/layout doubles; no native physical accounting, scheduler or RPC integration proof."
+}

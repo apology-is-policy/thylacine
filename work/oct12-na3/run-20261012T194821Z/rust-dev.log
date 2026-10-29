@@ -1,0 +1,666 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+error: cannot find macro `thread_local` in this scope
+   --> lib/loom-client/src/tests/ring.rs:356:1
+    |
+356 | thread_local! {static WATCH_ALLOCS:Cell<bool>=const{Cell::new(false)};static LATE_ALLOCS:Cell<usize>=const{Cell::new(0)};}
+    | ^^^^^^^^^^^^
+    |
+    = note: `thread_local` is in scope, but it is an attribute: `#[thread_local]`
+help: consider importing this macro
+    |
+  2 + use std::thread_local;
+    |
+
+error: cannot find macro `thread_local` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1070:1
+     |
+1070 | thread_local! {static HOOK:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};static HOOK_KIND:Cel...
+     | ^^^^^^^^^^^^
+     |
+     = note: `thread_local` is in scope, but it is an attribute: `#[thread_local]`
+help: consider importing this macro
+     |
+   2 + use std::thread_local;
+     |
+
+error[E0433]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/lease_ledger.rs:168:22
+    |
+168 |     let mut tokens = Vec::new();
+    |                      ^^^ use of undeclared type `Vec`
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0433]: cannot find type `Vec` in this scope
+  --> lib/loom-client/src/tests/paired_cq.rs:84:23
+   |
+84 |     let mut records = Vec::new();
+   |                       ^^^ use of undeclared type `Vec`
+   |
+help: consider importing this struct
+   |
+ 2 + use std::vec::Vec;
+   |
+
+error[E0425]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/request_book.rs:198:14
+    |
+198 |     let ids: Vec<_> = (0..8192)
+    |              ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find type `Box` in this scope
+  --> lib/loom-client/src/tests/ring.rs:49:12
+   |
+49 |     bytes: Box<UnsafeCell<[u8; 1024]>>,
+   |            ^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+ 2 + use std::boxed::Box;
+   |
+
+error[E0433]: cannot find type `Box` in this scope
+  --> lib/loom-client/src/tests/ring.rs:59:20
+   |
+59 |             bytes: Box::new(UnsafeCell::new(bytes)),
+   |                    ^^^ use of undeclared type `Box`
+   |
+help: consider importing this struct
+   |
+ 2 + use std::boxed::Box;
+   |
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+  --> lib/loom-client/src/tests/ring.rs:70:9
+   |
+70 |         WATCH_ALLOCS.with(|x| x.set(true));
+   |         ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/ring.rs:188:13
+    |
+188 |     let aa: Vec<_> = (0..32).map(|i| range(i * 8)).collect();
+    |             ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/ring.rs:189:13
+    |
+189 |     let bb: Vec<_> = (32..64).map(|i| range(i * 8)).collect();
+    |             ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/ring.rs:248:13
+    |
+248 |     let aa: Vec<_> = (0..32).map(|i| range(i * 8)).collect();
+    |             ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/ring.rs:249:13
+    |
+249 |     let bb: Vec<_> = (32..64).map(|i| range(i * 8)).collect();
+    |             ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:360:12
+    |
+360 |         if WATCH_ALLOCS.try_with(|x| x.get()).unwrap_or(false) {
+    |            ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:361:21
+    |
+361 |             let _ = LATE_ALLOCS.try_with(|x| x.set(x.get() + 1));
+    |                     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:369:12
+    |
+369 |         if WATCH_ALLOCS.try_with(|x| x.get()).unwrap_or(false) {
+    |            ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:370:21
+    |
+370 |             let _ = LATE_ALLOCS.try_with(|x| x.set(x.get() + 1));
+    |                     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:378:5
+    |
+378 |     LATE_ALLOCS.with(|x| x.set(0));
+    |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:380:5
+    |
+380 |     WATCH_ALLOCS.with(|x| x.set(false));
+    |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring.rs:382:9
+    |
+382 |         LATE_ALLOCS.with(|x| x.get()),
+    |         ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/ring.rs:438:17
+    |
+438 |     let ranges: Vec<_> = (0..64).map(|i| range(i * 8)).collect();
+    |                 ^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  2 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find value `HOOK_KIND` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1072:8
+     |
+1072 |     if HOOK_KIND.with(|k| k.get()) == kind {
+     |        ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `HOOK` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1073:17
+     |
+1073 |         let f = HOOK.with(|h| h.borrow_mut().take());
+     |                 ^^^^ not found in this scope
+
+error[E0425]: cannot find value `HOOK_KIND` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1107:5
+     |
+1107 |     HOOK_KIND.with(|k| k.set(kind));
+     |     ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `HOOK` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1108:5
+     |
+1071 | fn hook(kind: u8) {
+     | ----------------- similarly named function `hook` defined here
+...
+1108 |     HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+     |     ^^^^
+     |
+help: a function with a similar name exists
+     |
+1108 -     HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+1108 +     hook.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1108:42
+     |
+1108 |     HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+     |                                          ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1172:5
+     |
+1172 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1173:5
+     |
+1173 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1179:5
+     |
+1179 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1180:16
+     |
+1180 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1184:15
+     |
+1184 |     buffers: [Box<UnsafeCell<[u8; 8]>>; 64],
+     |               ^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1230:42
+     |
+1230 |         buffers: std::array::from_fn(|_| Box::new(UnsafeCell::new([0; 8]))),
+     |                                          ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0433]: cannot find type `Vec` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1235:23
+     |
+1235 |     let mut futures = Vec::new();
+     |                       ^^^ use of undeclared type `Vec`
+     |
+help: consider importing this struct
+     |
+   2 + use std::vec::Vec;
+     |
+
+error[E0433]: cannot find type `Vec` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1236:23
+     |
+1236 |     let mut cookies = Vec::new();
+     |                       ^^^ use of undeclared type `Vec`
+     |
+help: consider importing this struct
+     |
+   2 + use std::vec::Vec;
+     |
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1429:5
+     |
+1429 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1430:5
+     |
+1430 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1439:5
+     |
+1439 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1440:16
+     |
+1440 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1584:5
+     |
+1584 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1585:5
+     |
+1585 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1589:5
+     |
+1589 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1590:16
+     |
+1590 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1609:20
+     |
+1609 |     on_arm: Option<Box<dyn FnOnce()>>,
+     |                    ^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0425]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1610:22
+     |
+1610 |     on_ready: Option<Box<dyn FnOnce()>>,
+     |                      ^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1699:21
+     |
+1699 |     w.on_arm = Some(Box::new(move || drop(f)));
+     |                     ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1714:23
+     |
+1714 |     w.on_ready = Some(Box::new(move || drop(f)));
+     |                       ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1854:5
+     |
+1854 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1855:5
+     |
+1855 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1857:5
+     |
+1857 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1858:16
+     |
+1858 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `Vec` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1909:23
+     |
+1909 |     let mut clients = Vec::new();
+     |                       ^^^ use of undeclared type `Vec`
+     |
+help: consider importing this struct
+     |
+   2 + use std::vec::Vec;
+     |
+
+error[E0433]: cannot find type `Vec` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1910:23
+     |
+1910 |     let mut futures = Vec::new();
+     |                       ^^^ use of undeclared type `Vec`
+     |
+help: consider importing this struct
+     |
+   2 + use std::vec::Vec;
+     |
+
+error[E0433]: cannot find type `Vec` in this scope
+    --> lib/loom-client/src/tests/ring.rs:1911:22
+     |
+1911 |     let mut probes = Vec::new();
+     |                      ^^^ use of undeclared type `Vec`
+     |
+help: consider importing this struct
+     |
+   2 + use std::vec::Vec;
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2034:21
+     |
+2034 |     w.on_arm = Some(Box::new(move || unsafe {
+     |                     ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2056:5
+     |
+2056 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2057:5
+     |
+2057 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2059:5
+     |
+2059 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2060:16
+     |
+2060 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2253:5
+     |
+2253 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2254:5
+     |
+2254 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2258:5
+     |
+2258 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2259:16
+     |
+2259 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2347:21
+     |
+2347 |     w.on_arm = Some(Box::new(move || {
+     |                     ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2369:23
+     |
+2369 |     w.on_ready = Some(Box::new(move || {
+     |                       ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0425]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2384:26
+     |
+2384 |     armed_sample: Option<Box<dyn FnOnce()>>,
+     |                          ^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0433]: cannot find type `Box` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2417:28
+     |
+2417 |         armed_sample: Some(Box::new(move || {
+     |                            ^^^ use of undeclared type `Box`
+     |
+help: consider importing this struct
+     |
+   2 + use std::boxed::Box;
+     |
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2569:5
+     |
+2569 |     LATE_ALLOCS.with(|x| x.set(0));
+     |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2570:5
+     |
+2570 |     WATCH_ALLOCS.with(|x| x.set(true));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2572:5
+     |
+2572 |     WATCH_ALLOCS.with(|x| x.set(false));
+     |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+    --> lib/loom-client/src/tests/ring.rs:2573:16
+     |
+2573 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+     |                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `Box` in this scope
+ --> lib/loom-client/src/tests/ring/composed.rs:3:13
+  |
+3 |     memory: Box<UnsafeCell<[u64; 24]>>,
+  |             ^^^ not found in this scope
+  |
+help: consider importing this struct
+  |
+1 + use std::boxed::Box;
+  |
+
+error[E0433]: cannot find type `Box` in this scope
+ --> lib/loom-client/src/tests/ring/composed.rs:9:22
+  |
+9 |         let memory = Box::new(UnsafeCell::new([0u64; 24]));
+  |                      ^^^ use of undeclared type `Box`
+  |
+help: consider importing this struct
+  |
+1 + use std::boxed::Box;
+  |
+
+error[E0433]: cannot find type `Box` in this scope
+   --> lib/loom-client/src/tests/ring/deadlines.rs:109:42
+    |
+109 |         buffers: std::array::from_fn(|_| Box::new(UnsafeCell::new([0; 8]))),
+    |                                          ^^^ use of undeclared type `Box`
+    |
+help: consider importing this struct
+    |
+  1 + use std::boxed::Box;
+    |
+
+error[E0433]: cannot find type `Vec` in this scope
+   --> lib/loom-client/src/tests/ring/deadlines.rs:113:24
+    |
+113 |     let mut requests = Vec::new();
+    |                        ^^^ use of undeclared type `Vec`
+    |
+help: consider importing this struct
+    |
+  1 + use std::vec::Vec;
+    |
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/deadlines.rs:165:5
+    |
+165 |     LATE_ALLOCS.with(|x| x.set(0));
+    |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/deadlines.rs:166:5
+    |
+166 |     WATCH_ALLOCS.with(|x| x.set(true));
+    |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/deadlines.rs:169:5
+    |
+169 |     WATCH_ALLOCS.with(|x| x.set(false));
+    |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/deadlines.rs:172:16
+    |
+172 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+    |                ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/executor.rs:164:5
+    |
+164 |     LATE_ALLOCS.with(|x| x.set(0));
+    |     ^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/executor.rs:165:5
+    |
+165 |     WATCH_ALLOCS.with(|x| x.set(true));
+    |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `WATCH_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/executor.rs:170:5
+    |
+170 |     WATCH_ALLOCS.with(|x| x.set(false));
+    |     ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `LATE_ALLOCS` in this scope
+   --> lib/loom-client/src/tests/ring/executor.rs:171:16
+    |
+171 |     assert_eq!(LATE_ALLOCS.with(|x| x.get()), 0);
+    |                ^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `loom-client` (lib test) due to 81 previous errors

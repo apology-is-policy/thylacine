@@ -1,0 +1,9 @@
+                 U __stack_chk_fail
+                 U __stack_chk_guard
+                 U p9_client_submit_async
+                 U p9_session_send_clunk
+                 U p9_session_send_getattr
+                 U p9_session_send_lopen
+                 U p9_session_send_read
+                 U p9_session_send_walk
+                 U p9_session_send_write

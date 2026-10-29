@@ -1,0 +1,21 @@
+==> HX-2: regenerated in-kernel symbol table (pass 1) -- re-linking
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/__/generated/halls_symtab.c.obj
+clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  2922952 Oct  9 19:07 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  9788832 Oct  9 19:07 /Users/northkillpd/projects/thylacine-corona/build/kernel/thylacine.elf
+-105553110628656 0000000000041864 b g_reap_fake_client
+-105553111055072 0000000000041864 b g_sc_client
+-105553111589704 0000000000047456 b pc
+-105553112990760 0000000000059200 D g_tests
+-105553112178256 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110837667 0000000000065792 b g_pe_payload
+-105553110759104 0000000000083728 b pti_front_clients
+-105553110937007 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553113154164 0000000000122471 R halls_symtab_names
+-105553112788992 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf
+==> HX-2: symbol table stable (converged after 1 re-link)

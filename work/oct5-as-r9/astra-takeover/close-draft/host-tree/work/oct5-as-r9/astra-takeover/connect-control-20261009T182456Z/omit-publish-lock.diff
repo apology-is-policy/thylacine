@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -101,7 +101,7 @@
+         !n || n->state != LOOM_SERVICE_RESERVED ? -T_E_NOENT : 0;
+     if (!rc) rc = loom_request_check_admit(&l->service_requests,l->service_slots,
+                                            l->service_nodes,p->request,now);
+-    if (!rc) rc = devsrv_connect_publish(&p->admission);
++    if (!rc) { spin_unlock(&l->lock); rc = devsrv_connect_publish(&p->admission); spin_lock(&l->lock); }
+     if (!rc) {
+         // No request/node predicate changed under Ll. Native publication does
+         // not call back into Loom, allocate or wait. Admission is infallible.

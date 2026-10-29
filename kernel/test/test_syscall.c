@@ -38,18 +38,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
-
-void test_syscall_dispatch_unknown(void);
-void test_syscall_dispatch_puts_smoke(void);
-void test_syscall_dispatch_exits_ok(void);
-void test_syscall_dispatch_exits_fail(void);
-void test_syscall_dispatch_exit_group_code(void);
-void test_syscall_dispatch_args_in_x0_to_x5(void);
-void test_syscall_dispatch_set_tid_address(void);
-void test_syscall_opath_walkonly_no_byte_io(void);
-
 void test_syscall_dispatch_unknown(void) {
     struct exception_context ctx;
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
@@ -58,6 +46,45 @@ void test_syscall_dispatch_unknown(void) {
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "unknown syscall must return -1 (ENOSYS-equivalent)");
+}
+
+// 129..133 hold no native syscall on this tree: they belong to numbers b3
+// assigned first, and SYS_SRV_REGISTRY_NEW sits above them at 134 (vote 13;
+// 127 and 128 are JIT_CREATE_SEALED and ICACHE_SYNC_SPACE). vivarium.c's
+// collision argument for the Linux signal rows at 129..133 rests on that gap
+// being EMPTY, so the gap is pinned here -- by the
+// unknown arm's own counter, not by the -1 it answers: many native handlers
+// refuse zeroed arguments with that same -1, so a handler landing in the gap
+// could pass a value check. A native number assigned in it fails this test;
+// the fix is a per-number collision assert for each vivarium row at that
+// number, and then this pin moves. The suite runs before init, so the only
+// unknown calls in flight are the ones tests make.
+void test_syscall_native_gap_unassigned(void) {
+    for (u64 nr = 129; nr <= 133; nr++) {
+        struct exception_context ctx;
+        for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+        ctx.regs[8] = nr;
+        u64 before = syscall_unknown_count();
+        TEST_SYSCALL_DISPATCH(&ctx);
+        TEST_EXPECT_EQ(syscall_unknown_count() - before, 1ull,
+            "a native number in 129..133 must reach the unknown arm on this tree");
+        TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
+            "and answer the unknown arm's -1");
+    }
+
+    // The control one variable away: 134 IS assigned, and from this kernel
+    // thread it stops at the factory-role gate without touching the unknown
+    // arm. Without it the loop above is satisfied by a dispatcher that counts
+    // every call as unknown.
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_SRV_REGISTRY_NEW;
+    u64 before = syscall_unknown_count();
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ(syscall_unknown_count() - before, 0ull,
+        "134 is SYS_SRV_REGISTRY_NEW: it never reaches the unknown arm");
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_ACCES,
+        "134 is SYS_SRV_REGISTRY_NEW: its role gate answers, not the unknown arm");
 }
 
 void test_syscall_dispatch_puts_smoke(void) {

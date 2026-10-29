@@ -1,0 +1,7 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T041455Z/request_book.c:30:3: error: misleading indentation; statement is not part of the previous 'for' [-Werror,-Wmisleading-indentation]
+   30 |  }return T_REQ_FULL;
+      |   ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T041455Z/request_book.c:27:2: note: previous statement is here
+   27 |  for(size_t i=0;i<b->count;++i)if(b->entries[i].phase==FREE){
+      |  ^
+1 error generated.

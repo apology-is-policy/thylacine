@@ -12,27 +12,12 @@
 #include "alternatives.h"
 #include <thylacine/types.h>
 #include <thylacine/extinction.h>
+#include <thylacine/visibility.h>
 #include "hwfeat.h"
 #include "mmu.h"                   // mmu_patch_text
 
-// One .altinstructions entry. Both offsets are PC-relative to their own
-// field (built by the ALTERNATIVE macro's `.word X - .`), keeping the table
-// reloc-free and KASLR-independent. 12 bytes, pinned.
-struct alt_instr {
-    s32 site_off;     // .word 661b - . : LL/SC site in .text
-    s32 repl_off;     // .word 663f - . : LSE replacement in .altinstr_replacement
-    u16 feature;      // ALT_FEAT_*
-    u8  orig_len;     // bytes at the site (the LL/SC sequence)
-    u8  alt_len;      // bytes of replacement (a single LSE instruction = 4)
-} __attribute__((packed));
-_Static_assert(sizeof(struct alt_instr) == 12, "alt_instr wire layout");
-
-// Linker-provided bounds of the table (kernel.ld, inside .rodata).
-extern const struct alt_instr _alt_instructions_start[];
-extern const struct alt_instr _alt_instructions_end[];
-
-u32 g_alt_total;
-u32 g_alt_applied;
+VISIBLE_IF_KERNEL_TESTS u32 g_alt_total;
+VISIBLE_IF_KERNEL_TESTS u32 g_alt_applied;
 
 #define A64_NOP   0xD503201Fu   // `nop` (little-endian word)
 

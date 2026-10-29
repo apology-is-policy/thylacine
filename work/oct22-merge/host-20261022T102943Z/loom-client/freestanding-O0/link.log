@@ -1,0 +1,18 @@
+ld.lld: error: undefined symbol: memcpy
+>>> referenced by owned_mapping.c:19 (usr/lib/libt/src/loom_client/owned_mapping.c:19)
+>>>               work/oct22-merge/host-20261022T102943Z/loom-client/freestanding-O0/owned_mapping.o:(t_mapping_create)
+>>> referenced by request_book.c:26 (usr/lib/libt/src/loom_client/request_book.c:26)
+>>>               work/oct22-merge/host-20261022T102943Z/loom-client/freestanding-O0/request_book.o:(t_request_reserve)
+>>> referenced by request_book.c:26 (usr/lib/libt/src/loom_client/request_book.c:26)
+>>>               work/oct22-merge/host-20261022T102943Z/loom-client/freestanding-O0/request_book.o:(t_request_reserve)
+>>> referenced 36 more times
+
+ld.lld: error: undefined symbol: memset
+>>> referenced by lease_ledger.c:112 (usr/lib/libt/src/loom_client/lease_ledger.c:112)
+>>>               work/oct22-merge/host-20261022T102943Z/loom-client/freestanding-O0/lease_ledger.o:(t_lease_release)
+>>> referenced by fixed_requests.c:24 (usr/lib/libt/src/loom_client/fixed_requests.c:24)
+>>>               work/oct22-merge/host-20261022T102943Z/loom-client/freestanding-O0/fixed_requests.o:(prepare)
+>>> referenced by ring_payload.c:10 (usr/lib/libt/src/loom_client/ring_payload.c:10)
+>>>               work/oct22-merge/host-20261022T102943Z/loom-client/freestanding-O0/ring_payload.o:(release_pool)
+>>> referenced 7 more times
+clang: error: linker command failed with exit code 1 (use -v to see invocation)

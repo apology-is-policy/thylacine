@@ -1,0 +1,19 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rollback-draft/before/control.c:153:13: error: redefinition of 'loom_private_close_changed'
+  153 | static void loom_private_close_changed(struct Loom *l) {(void)l;CHECK(!held,"close notification outside Ll");close_kicks++;}
+      |             ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rollback-draft/before/control.c:136:13: note: previous definition is here
+  136 | static void loom_private_close_changed(struct Loom *l){(void)l;CHECK(!held,"close notification outside Ll");}
+      |             ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rollback-draft/before/control.c:154:13: error: redefinition of 'loom_ref'
+  154 | static void loom_ref(struct Loom *l) {(void)l;temporary_roots++;}
+      |             ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rollback-draft/before/control.c:137:13: note: previous definition is here
+  137 | static void loom_ref(struct Loom *l){(void)l;}
+      |             ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rollback-draft/before/control.c:155:13: error: redefinition of 'loom_unref'
+  155 | static void loom_unref(struct Loom *l) {(void)l;CHECK(temporary_roots>0,"temporary root balanced");temporary_roots--;}
+      |             ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rollback-draft/before/control.c:138:13: note: previous definition is here
+  138 | static void loom_unref(struct Loom *l){(void)l;}
+      |             ^
+3 errors generated.

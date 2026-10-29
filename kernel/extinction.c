@@ -10,11 +10,14 @@
 #include <thylacine/cons.h>
 #include <thylacine/extinction.h>
 #include <thylacine/smp.h>
+#include <thylacine/sched.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/halls.h"
+#include "../arch/arm64/timer.h"
+#include "../arch/arm64/exception.h"   // _torpor
 #include "../arch/arm64/uart.h"
-
-extern void _torpor(void) __attribute__((noreturn));
 
 // #214: extinction re-entrancy guard. If the dump path itself faults
 // (halls_dump dereferencing state the crash already destroyed), the fault
@@ -55,11 +58,11 @@ static volatile u8 g_extinction_depth[DTB_MAX_CPUS];
 // primitive, different shape, on purpose: THIS word's holder is a dying peer
 // that never releases (try-once is right); the ring's holder is a healthy peer
 // mid-push that will release in microseconds (a bounded spin is right, and a
-// try-once would fail in exactly the case it exists for). Still owed: IPI_HALT,
-// so the winner STOPS its peers rather than out-racing them -- a commented-out
-// reservation in smp.h; it would also cover the residual this leaves, the few
-// kernel diagnostics that still write the UART directly instead of through the
-// ring (they are outside the ring lock's reach).
+// try-once would fail in exactly the case it exists for). The THIRD source --
+// a peer's direct uart_putc, which is most kernel output, the test runner's
+// included -- is closed by the per-byte gate below. Peers keep running after
+// the claim, their bytes dropped; stopping them outright is IPI_HALT, still a
+// commented-out reservation in smp.h.
 static uint32_t g_extinction_console;
 
 // Best-effort count of peers whose banner we suppressed, printed by the winner
@@ -77,21 +80,145 @@ static u8 g_extinction_owner[DTB_MAX_CPUS];
 
 // The pure core (see extinction.h). Split out so a test can exercise the
 // exactly-one-winner property WITHOUT touching the live console word.
+VISIBLE_IF_KERNEL_TESTS
 int extinction_claim_word(uint32_t *word) {
     return __atomic_exchange_n(word, 1u, __ATOMIC_ACQ_REL) == 0u;
 }
 
+#ifdef KERNEL_TESTS
 int extinction_console_claimed(void) {
     return __atomic_load_n(&g_extinction_console, __ATOMIC_RELAXED) != 0u;
 }
+#endif // KERNEL_TESTS
 
-// TRUE for exactly one CPU per boot.
-static int extinction_claim_console(void) {
-    if (!extinction_claim_word(&g_extinction_console))
-        return 0;
+// The THIRD tearing source: a peer's DIRECT write (uart_putc -- the kernel test
+// runner, the boot diagnostics, every uart_puts), which never touches the TX ring
+// and so is outside cons_tx_claim_for_dump's reach. Each byte uart_putc emits is
+// bracketed by extinction_tx_enter/exit. Once a CPU owns the console, a peer's
+// byte is dropped; a byte a peer had already committed to is waited out by the
+// winner before its banner. Dekker order: the peer publishes its flag and then
+// reads the claim, the winner publishes the claim and then reads every flag,
+// each with a full barrier between -- so at least one side sees the other.
+// The flag is a depth, not a boolean: an exception taken inside uart_putc may
+// print through it again, and its exit must not clear the outer byte's mark.
+static volatile u8 g_extinction_tx_busy[DTB_MAX_CPUS];
+
+// A peer's committed byte can sit in uart_putc's bounded TXFF wait (20 ms); past
+// this the winner prints anyway, as cons_tx_claim_for_dump does. One bound for
+// the whole wait, however many peers are mid-byte.
+#define EXTINCTION_TX_WAIT_MAX_NS    (50ull * 1000ull * 1000ull)
+#define EXTINCTION_TX_WAIT_MAX_ITERS (1u << 24)
+
+VISIBLE_IF_KERNEL_TESTS
+void extinction_tx_exit_core(volatile u8 *busy);
+
+VISIBLE_IF_KERNEL_TESTS
+int extinction_tx_gate_core(volatile u8 *busy, const uint32_t *word, u8 owner) {
+    (void)__atomic_fetch_add(busy, 1u, __ATOMIC_SEQ_CST);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(word, __ATOMIC_SEQ_CST) == 0u || owner) return 1;
+    extinction_tx_exit_core(busy);
+    return 0;
+}
+
+VISIBLE_IF_KERNEL_TESTS
+void extinction_tx_exit_core(volatile u8 *busy) {
+    (void)__atomic_fetch_sub(busy, 1u, __ATOMIC_RELEASE);
+}
+
+VISIBLE_IF_KERNEL_TESTS
+int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) {
+    u32 iters = 0;
+    u64 t0 = 0;
+    for (unsigned c = 0; c < n; c++) {
+        if (c == self) continue;
+        while (__atomic_load_n(&busy[c], __ATOMIC_SEQ_CST) != 0u) {
+            if (++iters >= EXTINCTION_TX_WAIT_MAX_ITERS) return 0;
+            u64 now = timer_now_ns();                      // 0 before timer_init
+            if (t0 == 0) t0 = now;
+            else if (now - t0 >= EXTINCTION_TX_WAIT_MAX_NS) return 0;
+            __asm__ __volatile__("yield" ::: "memory");
+        }
+    }
+    return 1;
+}
+
+// With stage 1 off -- the boot CPU before mmu_enable -- every data access is
+// Device-nGnRnE, and an exclusive pair to Device memory is IMPLEMENTATION
+// DEFINED: QEMU completes it, but a memory system with no global monitor can
+// fail the store forever, and the claim and the per-byte gate would spin with
+// nothing printed. Only the boot CPU runs C then (a secondary's MMU-off window
+// is start.S and the frameless mmu_program_this_cpu), so there is no peer to
+// claim against: with the MMU off the dying path takes no claim, no gate and no
+// ring lock (cons_tx_claim_for_dump asks this too, which covers the runaway's
+// banner), and executes no exclusive. SCTLR_EL1 is this CPU's own fact; a flag
+// in memory would be written uncached and read back through the cache.
+int extinction_mmu_off(void) {
+    u64 sctlr;
+    __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
+    return !(sctlr & 1ull);
+}
+
+// The mark is per CPU, so the byte's thread must not leave the CPU between
+// enter and exit: a switch would let another thread's exit clear the mark,
+// and a migration would drop it on a CPU that never raised it. With IRQs on,
+// the thread's preempt count is held across the byte (IRQs themselves stay on
+// through the TXFF wait, #67) and a preempt deferred meanwhile is taken at
+// exit. With IRQs masked nothing can switch the thread, and no thread state is
+// read: that is every exception path and the whole of extinction(), where
+// TPIDR_EL1 may be wild (#806) and a fault on the banner's first byte would
+// park the CPU with nothing printed.
+int extinction_tx_enter(void) {
+    if (extinction_mmu_off()) return EXTINCTION_TX_UNGATED;
+    u64 daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    int held = !(daif & (1ull << 7));
+    if (held) spin_preempt_inc();
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                g_extinction_owner[cpu]))
+        return held ? EXTINCTION_TX_HELD : EXTINCTION_TX_BYTE;
+    if (held) spin_preempt_dec();
+    return 0;
+}
+
+void extinction_tx_exit(int token) {
+    if (token == EXTINCTION_TX_UNGATED) return;
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+    if (token == EXTINCTION_TX_HELD) {
+        spin_preempt_dec();
+        sched_take_deferred_preempt();
+    }
+}
+
+// Set if the claim ran with IRQs on: the claiming thread could then be switched
+// out mid-wait and resume on a CPU the gate does not admit, every byte of its
+// banner dropped. Both extinction entries mask IRQs first, so this reports only
+// a path that forgot to (test-fault.sh forbids the line).
+static u8 g_extinction_claim_irqs_on;
+
+// TRUE for exactly one CPU per boot. The winner returns only once no peer has a
+// byte in flight (or the wait's bound has passed), so the banner it prints next
+// starts a line no peer can split.
+static int extinction_claim_console(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (extinction_mmu_off()) {
+        __atomic_store_n(&g_extinction_console, 1u, __ATOMIC_RELAXED);
+        g_extinction_owner[cpu] = 1u;
+        return 1;
+    }
+    if (!extinction_claim_word(&g_extinction_console))
+        return 0;
+    u64 daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    if (!(daif & (1ull << 7))) g_extinction_claim_irqs_on = 1u;
     g_extinction_owner[cpu] = 1u;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    (void)extinction_tx_wait_core(g_extinction_tx_busy, DTB_MAX_CPUS, cpu);
     return 1;
 }
 
@@ -167,7 +294,15 @@ static void extinction_claim_ring(void) {
 
 // Printed by the winner AFTER halls_dump (the ABI line stays first). Same
 // wording rules as the peer report: no "EXTINCTION" token, nothing at column 0.
+static void extinction_report_claim(void) {
+    if (extinction_mmu_off())
+        uart_puts("  console-claim: skipped with the MMU off (one cpu runs; an exclusive to Device memory may never complete)\n");
+    if (g_extinction_claim_irqs_on)
+        uart_puts("  console-claim: taken with irqs on (the claiming thread could leave the owning cpu)\n");
+}
+
 static void extinction_report_ring(void) {
+    if (extinction_mmu_off()) return;
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     if (g_extinction_ring_held[cpu]) {
@@ -178,6 +313,10 @@ static void extinction_report_ring(void) {
 }
 
 void extinction(const char *msg) {
+    // First: every per-CPU fact below (depth, owner, the gate's admission) is
+    // this CPU's only while the dying thread cannot be switched out. Never
+    // restored: every path from here parks.
+    irq_mask_local();
     extinction_reentry_guard(msg);
     if (!extinction_claim_console()) extinction_park_suppressed();
     extinction_claim_ring();
@@ -192,10 +331,12 @@ void extinction(const char *msg) {
     halls_dump((void *)0);
     extinction_report_suppressed();
     extinction_report_ring();
+    extinction_report_claim();
     _torpor();
 }
 
 void extinction_with_addr(const char *msg, uintptr_t addr) {
+    irq_mask_local();                       // first, as in extinction()
     extinction_reentry_guard(msg);
     if (!extinction_claim_console()) extinction_park_suppressed();
     extinction_claim_ring();
@@ -225,5 +366,6 @@ void extinction_with_addr(const char *msg, uintptr_t addr) {
     halls_dump((void *)0);
     extinction_report_suppressed();
     extinction_report_ring();
+    extinction_report_claim();
     _torpor();
 }

@@ -1,0 +1,66 @@
+Astra single-agent self-review, October10 Prague. No independent audit.
+Isolated UNINSTALLED RPC owner transitions based on97d495fcb; no canonical
+kernel/build change or running native job. This is not a dispatch implementation.
+
+Operation storage embeds next/prev, phase and callback capture fields. Protocol
+storage embeds head/tail/count. The request's exact identity, scope and physical
+owner flag must match the operation and protocol before a transition. Enqueue
+requires actual READY, indexed/bound protocol, fresh PREPARED request and queue
+capacity, then admits and takes one continuous request borrow under Ll before
+linking. Future caller must already own creator authority and exact FID/payload
+resources; generic list admission does not grant those rights.
+
+The same precharged request protects queued, submitted and settlement work.
+Begin requires the sole protocol driver, checks admission/absolute expiry again,
+then arms callback before actual submit_async can synchronously complete. The
+callback computes its retained container with real offsetof, copies data while
+parser aliases remain valid, and writes only its own capture state: no Ll, CQ,
+allocation, I/O, client reentry or destruction. The driver must return from the
+actual client call before requeue/settle; the flag alone cannot prove this.
+Other threads must honor p->driving and never inspect capture fields mid-call.
+
+Requeue preserves the one request and borrow, for an authorized next stat/open
+stage or a proved no-wire retry. It is not permission to replay arbitrary writes
+or uncertain effects. Settling prevents another send while actual physical
+buffer/FID cleanup runs unlocked. Successful finish rechecks captured success,
+READY/close/abort and absolute deadline; the same Ll hold must cover any FID
+publication and terminal commit. Failed checks preserve the obligation/borrow.
+Queued work cannot invent a successful completion. Negative cancellation can
+settle after actual local users end. Earlier terminal successes stay immutable.
+
+RPC-R1 from self-review: malformed/duplicate callback capture must abort the
+scope, not be demoted to an isolated operation error. Added a negative-finish
+guard requiring latched protocol abort when capture_error is set. The actual
+engine still must call client abort and establish callback quiescence. Fixture
+verifies refusal before latch and completion afterward; targeted mutant kills.
+
+A terminal remains on the protocol list through CQ backpressure. Unlink requires
+DELIVERED (including explicit closed-consumer discard), no request borrows and
+exact neighbors, and empties both endpoints/count. Unlink retains the physical
+request-owner flag; actual free/refund must precede owner drop/reap and return of
+protocol/Loom roots. No allocator or physical destructor is implemented here.
+
+controls-20261009T223222Z:50clean checks and21 targeted mutants, actual owner C
+with real request/node/slot/reply modules under LLVM22 ASan/UBSan. Host Loom,
+protocol and p9_rpc declarations are explicit simplified boundary doubles; no
+real client, wire, DAC, allocator or concurrent-lock proof. Generated sources,
+binaries and input hashes rechecked from raw result. Actual ARM64 object compiles
+with real headers and no libc dependency. Actual target layout: operation640B
+(still one charged4096B page), protocol42288B; integration must retain existing
+rounded buddy accounting. arm64-result.json and layout.ll preserve exact inputs.
+
+Development evidence retained: first harness failed before compile on a stale
+header-comment extraction marker; repaired to current header. Second run's
+request-identity mutant survived because the real request ledger refused it
+later; added a direct owner-record boundary check. The third run49checks/20
+mutants passed before RPC-R1; final run covers the stronger guard. No incomplete
+or earlier run is substituted for the current source verification.
+
+Do not install this partial queue into a live engine. next-work.txt records
+remaining integration: actual operation-specific admission and frame program,
+client submission/callback return handling, driver fairness and readiness, and
+close disposal of non-CONNECT requests before the old zero-entry-pin gate.
+Current constructor/root native1854 and prior full Mac gates remain scoped to
+their sources. No Main/private user async/clipboard/128MiB activation.
+Mac released immediately after checks; exact Stratum61dde37 and all ten Astra
+pending/protected hashes unchanged. Disk remains above8192MiB.

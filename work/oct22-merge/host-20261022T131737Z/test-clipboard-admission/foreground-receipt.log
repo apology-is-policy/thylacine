@@ -1,0 +1,20 @@
+
+running 1 test
+test clipbroker::tests::receipt_must_match_operation_foreground_and_seat ... FAILED
+
+failures:
+
+---- clipbroker::tests::receipt_must_match_operation_foreground_and_seat stdout ----
+
+thread 'clipbroker::tests::receipt_must_match_operation_foreground_and_seat' (68290130) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T131737Z/test-clipboard-admission/foreground-receipt-body.rs:539:13:
+assertion `left == right` failed
+  left: Ok(Clipboard(Snapshot { transfer: 1, generation: 0, length: 0 }))
+ right: Err(Gone)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    clipbroker::tests::receipt_must_match_operation_foreground_and_seat
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+

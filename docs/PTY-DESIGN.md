@@ -473,6 +473,14 @@ action map is as-built in `specs/SPEC-TO-CODE.md`.
   + a per-pts `termios` word, `CONS_ICANON`-default), its winsize, and return the
   MASTER endpoint (the opened fid rebinds onto the master, qid-encoding N). The
   slave appears at `/dev/pts/<n>`.
+- **Implementation admission bounds (October 4 correction):** ptyfs retains
+  the existing sixteen-pair limit. Its shared-mount connection budgets seven
+  fids per pts as the code opens them (master, three stdio slaves, the shell's
+  control and readiness, the readiness file of the kaua program it runs), plus
+  sixteen root/transient entries: 128 fids. The old four-per-pair assumption
+  exhausted the 80-entry table at thirteen terminals.
+  This repairs bookkeeping capacity, without expanding terminal authority or
+  the pair limit. Independent additional opens remain bounded by the table.
 - **The master/slave data path** (two rings; I-20):
   - master write → the **input ldisc** cooks (ICANON line-assembly, ICRNL, ISIG
     → a `SYS_TTY_SIGNAL` + NO byte when ISIG set, ECHO → write the echo into

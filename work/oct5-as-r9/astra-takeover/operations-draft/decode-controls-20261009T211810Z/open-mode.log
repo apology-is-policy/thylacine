@@ -1,0 +1,2 @@
+unallocated open mode: got0 want-22
+Assertion failed: (0), function check, file open-mode.c, line 73.

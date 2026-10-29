@@ -1,0 +1,2 @@
+HIN1 C constants and Hello fixture: PASS (Rust encoder fixture is a separate host test)
+HIN1 C bodies: PASS (20 frozen request/response vectors shared with Rust)

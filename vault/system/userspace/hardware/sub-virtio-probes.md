@@ -63,15 +63,18 @@ uniform and is the whole interface:
 
 | Status | Meaning |
 |---|---|
-| 0 | the proof ran and passed, **or** the device is absent and the program skipped |
-| non-zero | the device was present and something did not hold |
+| 0 | the proof ran and passed (`virtio-input` also: the injected key never arrived within its poll budget, a `SKIP` line) |
+| non-zero | something did not hold -- including a scan that found no slot for the device |
 
-The collapse of PASS and SKIP into one value is deliberate. A machine without a
-GPU, or booted without a network backend, must not fail the suite — so each
-program probes for its device first and exits 0 with a `SKIP` line if it is not
-there. The distinction survives only in the console text, which is why the
-harness greps for specific strings rather than trusting the status alone:
-[[sub-substrate-gates]] keys on `virtio-input: SKIP` for exactly this reason.
+Whether the device is attached is decided before the program runs, not by it.
+The kernel test spawns a program only after `test_virtio_device` finds the
+device's virtio-mmio slot; a device the launcher did not declare is a counted
+skip there, and one it declared but no slot carries is a FAIL there
+([[sub-substrate-kernel-suite]]). So a program whose own scan then misses the
+device has found a probe or transport defect, and it exits 1 with a `FAIL`
+line. The one status-0 skip left is `virtio-input`'s poll exhaustion, a key
+that never arrived, which [[sub-substrate-gates]] keys on as
+`virtio-input: SKIP`.
 
 Diagnostics go to the console directly rather than to stdout. These programs are
 spawned without file descriptors, so a write to fd 1 would go nowhere; the
@@ -87,7 +90,8 @@ prove:
    bank base is a hardcoded constant, not a DTB lookup.
 2. **Scan for the device.** Walk the thirty-two transport slots, read each
    slot's magic and DeviceID register, and take the first slot matching the
-   class this program drives. Absent means SKIP.
+   class this program drives. Absent means FAIL: the kernel test found the
+   device before spawning the program.
 3. **Run the VIRTIO 1.2 initialization handshake.** RESET, ACKNOWLEDGE, DRIVER,
    feature negotiation with a `VIRTIO_F_VERSION_1` requirement, FEATURES_OK with
    a readback check, queue configuration, then DRIVER_OK last — so DRIVER_OK
@@ -166,8 +170,8 @@ illustration of what [[inv-i34]] added.
 Every failure is a console line plus a non-zero exit, and the console line is
 the diagnosis — there is no other channel. The classification is consistent:
 
-- **Device absent** → `SKIP` and exit 0. Checked before anything is written to
-  hardware.
+- **Device absent** → `FAIL` and exit 1, since the kernel test found it before
+  the spawn. Checked before anything is written to hardware.
 - **Substrate refused** (a capability create or map returning an error) → a line
   naming which call and which page or region, then exit 1.
 - **Device disagreed** (features rejected, a queue too small, a legacy version,

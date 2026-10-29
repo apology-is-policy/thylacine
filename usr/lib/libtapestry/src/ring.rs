@@ -120,7 +120,10 @@ pub(crate) fn any_armed(slots: &[Slot]) -> bool {
 /// left, whose events are dropped: the compositor fans a session's
 /// structural notice to ONE of its surfaces, whichever it picks, so the
 /// ring is where the session learns of it, not the surface.
-pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: i32) -> bool {
+pub(crate) fn route_completion<'a>(
+    slots: &mut [Slot], user_data: u64, result: i32,
+    completed_bytes: impl FnOnce(core::ops::Range<usize>) -> Option<&'a [u8]>,
+) -> bool {
     if user_data & 0xff != UD_EVENT {
         return false;
     }
@@ -140,11 +143,17 @@ pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: 
     } else {
         0
     };
-    let end = region + n;
-    let d = staging;
+    // Only this matching completion's range is borrowed. Other surface reads
+    // may still be in flight in the same backing allocation (SQPOLL).
+    let d = if n == 0 { &[][..] } else {
+        let Some(bytes) = completed_bytes(region..region+n) else { return false };
+        if bytes.len() != n { return false; }
+        bytes
+    };
+    let end = n;
     let g16 = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
     let layout = end <= d.len()
-        && (region..end)
+        && (0..end)
             .step_by(TEVENT_LEN)
             .any(|o| o + TEVENT_LEN <= end && g16(o) == TEV_LAYOUT);
     if s.retiring {
@@ -161,7 +170,7 @@ pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: 
     if end > d.len() {
         return false;
     }
-    let mut off = region;
+    let mut off = 0;
     while off + TEVENT_LEN <= end {
         let g32 = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
         let g64 = |o: usize| {
@@ -181,6 +190,13 @@ pub(crate) fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: 
         off += TEVENT_LEN;
     }
     layout
+}
+
+// Host fixtures own their entire synthetic staging buffer. The production
+// path must use the lazy range callback above, never a whole-buffer reference.
+#[cfg(test)]
+fn route(slots: &mut [Slot], staging: &[u8], user_data: u64, result: i32) -> bool {
+    route_completion(slots, user_data, result, |range| staging.get(range))
 }
 
 /// The next queued event for `slot`; `Err(Closed)` once its stream has
@@ -446,5 +462,23 @@ mod tests {
             assert_eq!(join(&mut s, k as i32).unwrap() as usize, k);
         }
         assert!(matches!(join(&mut s, 99), Err(TapError::Full)));
+    }
+
+    #[test]
+    fn completion_borrows_only_its_region_after_identity_check() {
+        let mut slots=new_slots();
+        let a=join(&mut slots, 11).unwrap() as usize;
+        let b=join(&mut slots, 12).unwrap() as usize;
+        arm(&mut slots,a); arm(&mut slots,b);
+        let tag=ud(b,slots[b].gen);
+        assert!(!route_completion(&mut slots,tag+256,24, |_| panic!("stale borrowed bytes")));
+        let bytes=[0u8;24];
+        let mut called=false;
+        route_completion(&mut slots,tag,24,|range| {
+            assert_eq!(range,b*EV_REGION as usize..b*EV_REGION as usize+24);
+            called=true; Some(&bytes)
+        });
+        assert!(called); assert!(slots[a].armed); assert!(!slots[b].armed);
+        route_completion(&mut slots,ud(a,1),-1,|_| panic!("error borrowed bytes"));
     }
 }

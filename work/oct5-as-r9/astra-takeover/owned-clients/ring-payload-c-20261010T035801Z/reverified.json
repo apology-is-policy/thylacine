@@ -1,0 +1,29 @@
+{
+  "owner": "astra",
+  "source_files": 7,
+  "command_records": 21,
+  "logs": {
+    "clang-version": "317c2c7c562ce9acb2c712c2fbcaaf7da6f4502b839213e835fe114f158f790e",
+    "sanitized-ring_payload.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanitized-lease_ledger.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanitized-link": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanitized-run": "c590049fb6dfb23779f1b04a6a71560746a98ca595869c1a387884791513b82a",
+    "ndebug-ring_payload.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ndebug-lease_ledger.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ndebug-link": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ndebug-run": "c590049fb6dfb23779f1b04a6a71560746a98ca595869c1a387884791513b82a",
+    "live-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-run": "0d8b2a97539b5366064cf1433270de28b1d404a9f1236311c31fdc89a517b92a",
+    "pool-closes-ring-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "pool-closes-ring-run": "df3aad87c9d7d0a33208263a2a33666b8c8c2e17c01fe111107ead990327ef47",
+    "global-cap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "global-cap-run": "cb2a78977cdf4f75e2b4262dc45af9a5080125c735e896ac53ea4a60dc2102f4",
+    "cross-pool-overlap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cross-pool-overlap-run": "0e137703d7cf4c8c6edb1e3d36d7c4a24fc3555077fb69ab813b6bf08394965f",
+    "failed-destroy-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-destroy-run": "204eceea457cc8f4c052717ab75a4af824bc8974b3ed6a77975bec55f3b3df08",
+    "stale-pool-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stale-pool-run": "a7baae96ca1a0e3c11b3bac97f26631f3e9269978640f1a7300b91701715a5ff"
+  },
+  "limits": "Uninstalled full-ring C payload core; simulated backend, native registration/CQ/futures/executor integration pending"
+}

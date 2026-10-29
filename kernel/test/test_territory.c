@@ -26,10 +26,6 @@
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
-void test_namespace_bind_smoke(void);
-void test_namespace_cycle_rejected(void);
-void test_namespace_fork_isolated(void);
-
 void test_namespace_bind_smoke(void) {
     struct Territory *p = territory_alloc();
     TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
@@ -157,7 +153,6 @@ void test_namespace_fork_isolated(void) {
 // Paired with the undeclared control (a clone of nothing declares nothing) and
 // the post-clone independence check (a later parent declaration stays the
 // parent's), so "the clone always reports true" cannot pass.
-void test_territory_clone_copies_root_pheno(void);
 void test_territory_clone_copies_root_pheno(void) {
     struct Territory *undecl = territory_alloc();
     struct Territory *decl   = territory_alloc();
@@ -213,7 +208,6 @@ static bool ns_has(const char *buf, u64 len, const char *needle) {
     return false;
 }
 
-void test_territory_render_root_pheno(void);
 void test_territory_render_root_pheno(void) {
     struct Territory *t = territory_alloc();
     TEST_ASSERT(t != NULL, "territory_alloc");
@@ -244,9 +238,6 @@ static int cwd_streq(const char *a, const char *b) {
     while (a[i] != '\0' && b[i] != '\0') { if (a[i] != b[i]) return 0; i++; }
     return a[i] == b[i];
 }
-
-void test_territory_cwd_dot(void);
-void test_territory_cwd_join(void);
 
 // territory.cwd_join -- the RESOLUTION join (#83). The property under test is
 // what it does NOT do: it must not resolve "." / ".." and must not drop a

@@ -1,0 +1,9 @@
+mac   HELD by you for 5m, 4.9h left
+        why: corona: vote-8 width harness work/oct13-width/kernel-run.sh -- 2 controls + 22 kernel mutants + B1-B5 test-fault bakes + rebuilds + check-production SHAPE; all cores, serial legs; duration uncertain (many bakes)
+        phase: width harness kernel-20261014T135457Z: preconditions -> CONTROL, CONTROL-Q, M1-M22, B1-B5, rebuild, SHAPE
+        runner: Mac pid 49316 alive (start Wed Oct 14 15:54:57 2026)
+        pids: [49316] (their registered work -- not a kill list)
+        queue 1: astra (2.2h waiting)
+        queue 2: main (3m waiting)
+pi    FREE
+disk: 13.8 GiB available at /Users/northkillpd/projects/thylacine-corona

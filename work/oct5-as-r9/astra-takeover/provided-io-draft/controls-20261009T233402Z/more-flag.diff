@@ -1,0 +1,11 @@
+--- control.c
++++ more-flag.c
+@@ -1087,7 +1087,7 @@
+     struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+     struct loom_service_buffer_receipt *receipts=(void *)(l->ring_kva+l->receipt_off);
+     cq[idx]=(struct loom_cqe){.user_data=c->user_data,.result=(s32)c->result,
+-        .flags=LOOM_CQE_SERVICE_BUFFER|(c->more?LOOM_CQE_MORE:0)};
++        .flags=LOOM_CQE_SERVICE_BUFFER|(c->more?0:0)};
+     receipts[idx]=o->receipt;
+     if(loom_pool_deliver(&l->service_pools->bank,p,&o->receipt))extinction("provided delivery changed inside Ll");
+     if(o->pool_terminal && loom_request_deliver(&l->service_requests,o->request))extinction("provided terminal delivery lost");

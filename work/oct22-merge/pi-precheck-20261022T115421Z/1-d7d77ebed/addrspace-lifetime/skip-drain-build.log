@@ -1,0 +1,4 @@
+/tmp/addrspace-lifetime-yrqwyezo/skip-drain.c:165:13: error: ‘vma_drain_in’ defined but not used [-Werror=unused-function]
+  165 | static void vma_drain_in(struct AddrSpace *as) {
+      |             ^~~~~~~~~~~~
+cc1: all warnings being treated as errors

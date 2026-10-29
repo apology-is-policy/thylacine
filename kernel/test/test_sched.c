@@ -237,7 +237,6 @@ void test_sched_runnable_count(void) {
 // The runnable counts read per-band counts kept under each CPU's lock, not a
 // walk of trees whose threads a peer may be freeing. Each count must equal its
 // tree, compared under the lock, with a thread queued and after it leaves.
-bool sched_run_counts_match_trees_for_test(void);
 void test_sched_run_counts_match_trees(void);
 void test_sched_run_counts_match_trees(void) {
     bool entry = sched_run_counts_match_trees_for_test();
@@ -333,9 +332,8 @@ void test_sched_idle_in_wfi_observability(void) {
 
     // If running multi-CPU, secondaries should be in WFI by now.
     // Allow brief settle window for any in-flight ipi handling.
-    if (smp_cpu_count() < 2) {
-        return;     // UP — nothing to assert.
-    }
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
     timer_busy_wait_ticks(2);
 
     bool any_in_wfi = false;
@@ -388,9 +386,8 @@ static void notify_test_thread(void) {
 // Closes the load-bearing piece of R5-H F78. Without sched_set_notify_
 // enabled(true), ready() doesn't IPI; with it, ready() does.
 void test_sched_notify_idle_peer_smoke(void) {
-    if (smp_cpu_count() < 2) {
-        return;     // UP — no peer to notify.
-    }
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
+        return;
 
     // Settle: WAIT UNTIL a secondary is observably parked, don't just hope.
     //
@@ -532,9 +529,8 @@ void test_sched_notify_idle_peer_smoke(void) {
 // during in-kernel tests), ready() does NOT send IPI to peers. Tests
 // that assume UP-like consumer-runs-on-readier semantics keep working.
 void test_sched_notify_disabled_no_ipi(void) {
-    if (smp_cpu_count() < 2) {
+    if (!test_requires(smp_cpu_count() >= 2, "thylacine.smp", 0, true, "one CPU is online"))
         return;
-    }
 
     // Ensure disabled (the default state during tests).
     sched_set_notify_enabled(false);

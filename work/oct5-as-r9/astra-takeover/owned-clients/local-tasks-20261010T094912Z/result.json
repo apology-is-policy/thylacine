@@ -1,0 +1,138 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 10,
+  "profiles": 2,
+  "compile_fail": 2,
+  "positive_compile_control": 1,
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "10 passed; 0 failed"
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "10 passed; 0 failed"
+    },
+    {
+      "name": "no-clone-tasks-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "no-send-tasks-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0277"
+    },
+    {
+      "name": "valid-task-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "valid-task-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-self-wake-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-self-wake-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "poll-quiet-tasks-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "poll-quiet-tasks-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "ignore-budget-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "ignore-budget-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "stale-cancel-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "stale-cancel-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "drop-pending-task-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "drop-pending-task-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "lost-wake-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-wake-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    }
+  ],
+  "limits": "Bounded creator-thread task dispatch and fixed-Future ownership on simulated backends; no native event wake or wait/readiness composition qualification."
+}

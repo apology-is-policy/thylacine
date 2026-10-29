@@ -1,0 +1,7 @@
+{
+  "runs": {
+    "private-targets-20261009T025911Z": "Control passed; omit-image mutant hit checked fake handle precondition before the authority assertion. Removed image restriction from fake handle; production unchanged.",
+    "private-targets-20261009T025943Z": "Control and first five mutants passed; omit-stale mutant survived borrow assertion because real slot_pin redundantly checks incarnation. Added stale reap assertion to test the independent target payload removal guard. Production unchanged.",
+    "private-targets-20261009T030105Z": "Control plus all twelve exact mutants passed; ASan/UBSan, sequential checked doubles only."
+  }
+}

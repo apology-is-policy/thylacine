@@ -1,0 +1,20 @@
+--- 
++++ 
+@@ -150,7 +150,7 @@
+     }
+     if (p->driving) { spin_unlock(&l->lock); return -T_E_BUSY; }
+     if (p->locally_retired) { s32 why=p->abort_reason; spin_unlock(&l->lock); return why; }
+-    if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);
++    /* ignore close */
+     // CONNECT deadline ends once its success is committed; READY is not a
+     // permanent lease with the old handshake deadline attached to it.
+     if (r->phase == LREQ_ACTIVE && p->connect_deadline && p->connect_deadline <= now)
+@@ -172,7 +172,7 @@
+     spin_lock(&l->lock);
+     if (borrowed && loom_request_put(&l->service_requests,p->request))
+         extinction("CONNECT lost parser borrow");
+-    if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);
++    /* ignore close */
+     if (rc < 0) {
+         p->failure_phase=attempted_phase;
+         connect_latch(p,n,rc == -T_E_TIMEDOUT ? rc : -T_E_IO);

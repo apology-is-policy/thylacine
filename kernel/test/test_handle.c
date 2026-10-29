@@ -53,13 +53,6 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 
-void test_handles_alloc_close_smoke(void);
-void test_handles_rights_monotonic(void);
-void test_handles_dup_lifecycle(void);
-void test_handles_full_table_oom(void);
-void test_handles_kind_classifiers(void);
-void test_handles_srv_kind(void);
-
 // Shared test helper: allocate a Proc, exercise it, then transition to
 // ZOMBIE + free. proc_alloc has already allocated a fresh empty handle
 // table; proc_free will release it (closing any straggler handles).
@@ -384,7 +377,6 @@ void test_handles_srv_kind(void) {
 // caller rather than the outgoing slot, and every kind but KOBJ_SPOOR is
 // refused on BOTH sides.
 // =============================================================================
-void test_handles_replace(void);
 void test_handles_replace(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
@@ -394,11 +386,11 @@ void test_handles_replace(void) {
     // the slot mechanics without needing a live Dev.
     hidx_t h = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
     TEST_ASSERT(h >= 0, "handle_alloc(SPOOR) returned -1");
-    u64 count_before = handle_table_count(p->handles);
+    int count_before = handle_table_count(p->handles);
 
     // THE INDEX IS PRESERVED. That is the entire reason the primitive exists --
     // the guest is holding this number across connect().
-    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, NULL) == 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, NULL) == 0,
                 "replace of a live Spoor slot succeeds");
     TEST_EXPECT_EQ(handle_table_count(p->handles), count_before,
         "replace does not change the number of live handles");
@@ -412,7 +404,7 @@ void test_handles_replace(void) {
         "rights are the caller's, exactly");
     handle_put(&got);
 
-    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_READ, NULL) == 0, "narrowing replace");
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) == 0, "narrowing replace");
     TEST_ASSERT(handle_get(p, h, &got) == 0, "handle_get after narrowing");
     TEST_EXPECT_EQ(got.rights, (u64)RIGHT_READ,
         "rights NARROWED -- the outgoing R|W was discarded, never inherited or "
@@ -421,13 +413,23 @@ void test_handles_replace(void) {
 
     // THE INCOMING KIND IS GATED. Every non-Spoor kind is refused, so no path
     // here can make a hardware handle appear at an arbitrary fd (I-5).
-    TEST_ASSERT(handle_replace(p, h, KOBJ_MMIO, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_MMIO, RIGHT_READ, NULL) < 0,
                 "incoming KOBJ_MMIO refused (I-5)");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_BURROW, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_BURROW, RIGHT_READ, NULL) < 0,
                 "incoming KOBJ_BURROW refused");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_PROCESS, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_PROCESS, RIGHT_READ, NULL) < 0,
                 "incoming KOBJ_PROCESS refused -- the gate is an ALLOW-list of "
                 "one kind, not a deny-list of hardware");
+
+    // THE SWAP IS KEYED ON THE CALLER'S OBJECT. connect() sleeps between taking
+    // the socket and the swap; a number a peer thread closed and reused in that
+    // time names another object, and replacing it would release that thread's
+    // file. The successful replaces above, expecting the slot's own object, are
+    // the control one variable away.
+    static int s_peer_file;
+    TEST_ASSERT(handle_replace(p, h, &s_peer_file, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
+                               NULL) < 0,
+                "a slot that no longer names the caller's object is refused");
 
     // The refusals left the slot exactly as it was.
     TEST_ASSERT(handle_get(p, h, &got) == 0, "slot survives a refused replace");
@@ -440,26 +442,26 @@ void test_handles_replace(void) {
     // I-5 gives no path for.
     hidx_t hp = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, p);
     TEST_ASSERT(hp >= 0, "handle_alloc(PROCESS) returned -1");
-    TEST_ASSERT(handle_replace(p, hp, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, hp, p, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
                 "outgoing KOBJ_PROCESS refused");
     TEST_ASSERT(handle_get(p, hp, &got) == 0, "the PROCESS slot survives");
     TEST_EXPECT_EQ(got.kind, KOBJ_PROCESS, "outgoing kind unchanged");
     handle_put(&got);
 
     // Argument validation, all fail-closed.
-    TEST_ASSERT(handle_replace(p, -1, KOBJ_SPOOR, RIGHT_READ, NULL) < 0, "negative fd");
-    TEST_ASSERT(handle_replace(p, PROC_HANDLE_MAX, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, -1, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) < 0, "negative fd");
+    TEST_ASSERT(handle_replace(p, PROC_HANDLE_MAX, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
                 "out-of-range fd");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_NONE, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_SPOOR, RIGHT_NONE, NULL) < 0,
                 "RIGHT_NONE refused (valid_alloc_args)");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_INVALID, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_INVALID, RIGHT_READ, NULL) < 0,
                 "KOBJ_INVALID refused");
 
     // An empty slot is not replaceable -- replace is not a back-door alloc.
     hidx_t hfree = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
     TEST_ASSERT(hfree >= 0, "third alloc");
     TEST_ASSERT(handle_close(p, hfree) == 0, "close it");
-    TEST_ASSERT(handle_replace(p, hfree, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, hfree, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
                 "replacing a CLOSED slot is refused -- replace never creates");
 
     test_proc_drop(p);
@@ -727,4 +729,127 @@ void test_handles_dup_to(void) {
                 "and the refusal left the target slot alone");
 
     test_proc_drop(p);
+}
+
+// The reserved slot (vault dec-2026-10-14-descriptor-slot-reservation): not
+// free, not live, and only its own call fills or returns it. Every operation
+// that could otherwise reach the number is driven against it.
+void test_handles_reservation(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+    struct Proc *child = test_proc_make();
+    if (!child) { test_proc_drop(p); TEST_ASSERT(false, "child proc"); }
+
+    hidx_t src = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    u64    i0  = handle_table_installs(p);
+    int    n0  = handle_table_count(p->handles);
+
+    // (1) A reservation takes the lowest free number and publishes nothing.
+    hidx_t r = handle_reserve(p, 0);
+    bool   r_is   = handle_is_reserved(p, r);
+    u64    i_res  = handle_table_installs(p) - i0;
+    int    n_res  = handle_table_count(p->handles) - n0;
+    struct Handle got;
+    int    get_rc   = handle_get(p, r, &got);
+    int    close_rc = handle_close(p, r);
+    int    setcx_rc = handle_set_cloexec(p, r, true);
+    int    getcx_rc = handle_get_cloexec(p, r);
+    int    setnb_rc = handle_set_nonblock(p, r, true);
+    bool   still_after_ops = handle_is_reserved(p, r);
+
+    // (2) Nothing that looks for a free slot takes it.
+    hidx_t a      = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t r2     = handle_reserve(p, r);
+    hidx_t dpos   = handle_dup_posix(p, src, r, false);
+    hidx_t dto    = handle_dup_to(p, src, r, false);
+    bool   still_after_scans = handle_is_reserved(p, r);
+
+    // (3) The fork copy and close-on-exec pass it by. A live slot carries the
+    // bit, so the sweep closes something and its passing the reservation by
+    // is a choice, not an empty table.
+    int  copy_rc  = handle_table_copy_into(child, p);
+    bool child_r  = handle_is_reserved(child, r);
+    int  child_get = handle_get(child, r, &got);
+    if (child_get == 0) handle_put(&got);
+    int  dpos_cx  = handle_set_cloexec(p, dpos, true);
+    int  coe_rc   = handle_close_on_exec(p);
+    int  dpos_get = handle_get(p, dpos, &got);
+    if (dpos_get == 0) handle_put(&got);
+    bool still_after_coe = handle_is_reserved(p, r);
+
+    // (4) The reserving call fills it: live, its kind, close-on-exec from the
+    // argument, and the install counted once. Each fill and return below is
+    // asked first whether the slot is still reserved: on a slot an earlier step
+    // disturbed they extinct (by design), and the assertions then report which
+    // step it was instead.
+    u64 i_pre = handle_table_installs(p);
+    if (handle_is_reserved(p, r))
+        handle_install_reserved(p, r, KOBJ_THREAD, RIGHT_READ, NULL, /*cloexec=*/true);
+    int  fill_get = handle_get(p, r, &got);
+    int  fill_kind = fill_get == 0 ? (int)got.kind : -1;
+    if (fill_get == 0) handle_put(&got);
+    int  fill_cx  = handle_get_cloexec(p, r);
+    u64  i_fill   = handle_table_installs(p) - i_pre;
+    bool fill_res = handle_is_reserved(p, r);
+
+    // (5) A returned reservation is free again, and returning it publishes nothing.
+    u64  i_pre2 = handle_table_installs(p);
+    if (handle_is_reserved(p, r2)) handle_unreserve(p, r2);
+    bool r2_res = handle_is_reserved(p, r2);
+    hidx_t back = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    u64  i_unres = handle_table_installs(p) - i_pre2;   // the alloc's one
+
+    // (6) A dup fills a reservation; a refused dup keeps it.
+    hidx_t d = handle_reserve(p, 0);
+    int  dup_rc  = handle_dup_into_reserved(p, src, d, /*cloexec=*/true);
+    int  dup_get = handle_get(p, d, &got);
+    int  dup_kind = dup_get == 0 ? (int)got.kind : -1;
+    rights_t dup_rights = dup_get == 0 ? got.rights : RIGHT_NONE;
+    if (dup_get == 0) handle_put(&got);
+    int  dup_cx = handle_get_cloexec(p, d);
+    hidx_t e = handle_reserve(p, 0);
+    int  bad_rc  = handle_dup_into_reserved(p, 60, e, false);   // 60: never opened
+    bool e_kept  = handle_is_reserved(p, e);
+    if (e_kept) handle_unreserve(p, e);
+
+    test_proc_drop(child);
+    test_proc_drop(p);
+
+    TEST_EXPECT_EQ((int)r, 1, "the reservation takes the lowest free number");
+    TEST_ASSERT(r_is, "and the slot reads reserved");
+    TEST_EXPECT_EQ(i_res, (u64)0, "a reservation is not an install");
+    TEST_EXPECT_EQ(n_res, 0, "nor a live handle");
+    TEST_EXPECT_EQ(get_rc, -1, "get refuses a reserved number");
+    TEST_EXPECT_EQ(close_rc, -1, "close refuses it (Linux: EBADF)");
+    TEST_EXPECT_EQ(setcx_rc, -1, "the cloexec setter refuses it");
+    TEST_EXPECT_EQ(getcx_rc, -1, "the cloexec getter refuses it");
+    TEST_EXPECT_EQ(setnb_rc, -1, "the nonblock setter refuses it");
+    TEST_ASSERT(still_after_ops, "and none of them disturbed it");
+    TEST_EXPECT_EQ((int)a, 2, "an alloc skips the reserved number");
+    TEST_EXPECT_EQ((int)r2, 3, "a second reservation skips it");
+    TEST_EXPECT_EQ((int)dpos, 4, "a dup from min skips it");
+    TEST_EXPECT_EQ((int)dto, (int)HANDLE_DUP_TO_BUSY, "dup3 onto it is BUSY");
+    TEST_ASSERT(still_after_scans, "and it is still reserved");
+    TEST_ASSERT(copy_rc >= 0, "the fork copy ran");
+    TEST_ASSERT(!child_r, "the fork copy does not carry a reservation");
+    TEST_EXPECT_EQ(child_get, -1, "the child has nothing at that number");
+    TEST_EXPECT_EQ(dpos_cx, 0, "close-on-exec set on a live slot");
+    TEST_EXPECT_EQ(coe_rc, 1, "close-on-exec closed that one slot");
+    TEST_EXPECT_EQ(dpos_get, -1, "and it is gone");
+    TEST_ASSERT(still_after_coe, "close-on-exec passed the reservation by");
+    TEST_EXPECT_EQ(fill_get, 0, "the filled reservation is live");
+    TEST_EXPECT_EQ(fill_kind, (int)KOBJ_THREAD, "with the kind installed");
+    TEST_EXPECT_EQ(fill_cx, 1, "and close-on-exec set in the install");
+    TEST_EXPECT_EQ(i_fill, (u64)1, "the fill is one install");
+    TEST_ASSERT(!fill_res, "and the slot is no longer reserved");
+    TEST_ASSERT(!r2_res, "a returned reservation is free");
+    TEST_EXPECT_EQ((int)back, 3, "and the next alloc takes it");
+    TEST_EXPECT_EQ(i_unres, (u64)1, "returning it published nothing");
+    TEST_EXPECT_EQ(dup_rc, 0, "a dup fills a reservation");
+    TEST_EXPECT_EQ(dup_kind, (int)KOBJ_PROCESS, "with the source's object");
+    TEST_EXPECT_EQ((u64)dup_rights, (u64)(RIGHT_READ | RIGHT_TRANSFER),
+                   "rights verbatim (I-6)");
+    TEST_EXPECT_EQ(dup_cx, 1, "close-on-exec from the argument");
+    TEST_EXPECT_EQ(bad_rc, -1, "a dup of a closed number is refused");
+    TEST_ASSERT(e_kept, "and the reservation is kept for its caller to return");
 }

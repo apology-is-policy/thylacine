@@ -5,6 +5,7 @@ parent: moc-kernel-introspection
 title: "/proc — per-process state and the debug control surface"
 code:
   - kernel/devproc.c
+  - kernel/include/thylacine/devproc.h
   - kernel/test/test_devproc.c
   - kernel/test/test_devproc_thread.c
 audit: hard
@@ -92,7 +93,7 @@ owner axis stays unconditional, since killing a more-capable target destroys it 
 never USES its authority, while debugging one does. (2) **Nothing regresses for
 shell-spawned debugging**: fork-grantable caps only shrink ([[inv-i2]]), so a
 spawner's set always covers its children's. Both caps words are now ACQUIRE-loaded
-(`proc_become_legate` is a cross-thread writer of a running Proc's caps -- the RW-5
+(`proc_become_legate_locked` is a cross-thread writer of a running Proc's caps -- the RW-5
 F2 rule, which now applies to the TARGET's set too), sitting between the
 `principal_id` load and the seam load so the order above is preserved. Guards:
 `devproc.debug_cap_cover_predicate` (equal / superset / exact / one-cap-short /
@@ -103,7 +104,7 @@ verb, a SEPARATE test so a predicate regression cannot hide the real path's).
 **A self-read short-circuits BEFORE cover (audit F7).** `caller == target` sets
 the axis by construction rather than computing cover, because for a self-read the
 two sides are two separate ACQUIRE loads of the SAME word: a peer thread's
-`proc_become_legate` landing between them could refuse a Proc access to ITSELF,
+`proc_become_legate_locked` landing between them could refuse a Proc access to ITSELF,
 which is reachable since `kstack` and `wait` carry no stopped-only requirement.
 It cannot widen anything. The cross-Proc torn pair is sound in the other
 direction and deliberately so -- the caller is read first and caps on a live Proc
@@ -236,6 +237,13 @@ Dev keeps no per-Spoor state except the debug-attach flag.
 refuse. `.seekable = true`, because `mem` is VA-addressed and the register files
 are struct-offset-addressed; without it the positioned-I/O gate rejects them
 before the Dev is reached.
+
+**The header.** `devproc.h` declares the two visibility predicates `/ctl/procs`
+shares with `/proc`: `devproc_none_walled` (Plan 9's `nonone()`) and
+`devproc_owner_or_hostowner` (the caller holds `g_proc_table_lock`). Everything
+else it declares sits under `#ifdef KERNEL_TESTS` -- the tests' reach into
+devproc.c ([[sub-kernel-declarations]]). The Dev itself is declared with the
+others in `dev.h`.
 
 ## Mechanism
 
@@ -608,7 +616,14 @@ Its output then splits on capability: raw slid kernel addresses reveal the KASLR
 slide (an I-16 secret gated elsewhere behind `CAP_HOSTOWNER`), so the raw
 columns go only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier. The owner axis gets the
 symbolic `name+offset` form, which is link-relative and therefore
-slide-independent — and which *is* the "why is it hung" diagnostic. `kregs` splits the
+slide-independent — and which *is* the "why is it hung" diagnostic. Frame 0 is the
+thread's resume PC and is named at itself (a thread that has never run resumes at
+its trampoline's first instruction); every later frame is a saved return address and
+is named at its call, the instruction before it, with the return address's own
+offset, so `name+off` equals the link column the debugger tier sees and a frame whose
+call ends its function (a noreturn callee) is not named after the next one
+([[sub-kernel-halls]]; `devproc.debug_kstack_names_returns_at_call`, 2026-10-28).
+`kregs` splits the
 same way: its kernel half (`x19`–`x28`, `fp`, `lr`, `sp`) is filled only for that tier,
 because a parked thread's `lr` is the return into `sched` and gives away the slide as
 surely as a raw frame; the owner axis reads those fields as zero and keeps `tpidr_el0`

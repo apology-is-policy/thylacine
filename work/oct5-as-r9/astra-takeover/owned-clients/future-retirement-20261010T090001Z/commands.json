@@ -1,0 +1,80 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "6 passed; 0 failed"
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "6 passed; 0 failed"
+  },
+  {
+    "name": "no-clone-client-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0599"
+  },
+  {
+    "name": "no-send-executor-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0277"
+  },
+  {
+    "name": "valid-client-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "valid-client-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "wake-under-receive-borrow-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "wake-under-receive-borrow-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "wake-under-drop-borrow-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "wake-under-drop-borrow-run",
+    "rc": -6,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  }
+]

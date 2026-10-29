@@ -1,0 +1,127 @@
+# Checkpoint 1 coverage map -- private owner construction, admission, bounded tables, metadata charges
+
+Handoff section 2, checkpoint 1: "cover all refusal/unwind edges before
+publication". This map exists so geometry is not mistaken for the whole
+checkpoint (astra, yip 0161 t67). Four states, never merged:
+
+- **DRIVEN**: a guest test executes the edge and asserts its outcome.
+- **STRUCTURAL**: the code is present and read; no runtime witness. A runtime
+  obligation stays OPEN, and this is NOT closure or a pre-activation waiver.
+- **NOT YET REACHABLE**: the owning mechanism is not implemented on this branch.
+  The obligation travels with that implementation.
+- **UNRUN**: authored, compiled, no guest result yet.
+
+Cited by symbol. Fixture = `kernel/test/loom_private_fixture.h`
+(`loom.private_owner_lifecycle`).
+
+## Construction and admission (`loom_create_private`)
+
+| Edge | Unwind on refusal | State |
+| --- | --- | --- |
+| invalid geometry (`loom_measure`) | none needed; refused before guard and charge | DRIVEN: "bad geometry has no guard or charge" |
+| image not exclusively owned (`addrspace_private_begin`, owners != 1) | none needed; the guard is not taken | DRIVEN: "shared image refuses private owner" |
+| charge refused (`addrspace_charge_pages` over the space's cap) | `addrspace_private_end` releases BOTH the ring count and the lifetime reference | DRIVEN, with RED witnessed (2026-10-08, run `refusal-leg-20261008T083538Z`): control 1836/1836 with the leg PASS in its own block; the one-site mutant FAILs that leg at "refused charge leaves no guard, reference or charge" and nowhere else. Mac axis, one boot each |
+| ring layout allocation fails (`loom_create_layout` returns NULL after the charge) | uncharge `metadata + backing`, then `addrspace_private_end` | DRIVEN, RED witnessed for BOTH halves (2026-10-08, run `layout-leg-20261008T115213Z`): control 1836/1836 with the leg PASS; M1 (uncharge deleted) FAILs it at "layout failure returns the charge", M2 (private_end deleted) at "layout failure releases the guard, reference and owner", each the only FAIL; KERNEL_TESTS-off shape: no seam symbol, loom_create_private identical incl. all 13 relocations. Mac axis, one boot each. Built with a `KERNEL_TESTS` one-shot seam (arm/disarm/armed, taken on entry to `loom_create_private`; scope approved by astra t71) and a leg with SEPARATE charge and guard assertions, RED by two independent mutants (`layout-leg-run.sh`); arms 21/21 off-lease. Isolation precondition: the fixture is the only caller of `loom_create_private` -- rescope the seam before any concurrent or engine caller. `loom_create_layout`'s OWN internal failure path is a SEPARATE obligation: the next two rows. |
+| ring Burrow refused INSIDE `loom_create_layout`, after the Loom metadata was allocated | `kfree(l)` in the layout itself, THEN the caller's uncharge + `addrspace_private_end` | DRIVEN, all three REDs witnessed in `inner-leg-20261008T195301Z` (2bf48f7ad): control 1836/1836, independent M1/M2/M3 each sole expected FAIL 1835/1836, shape five functions identical including relocations, clean artifacts restored. Mac default one boot per side; no SMP claim. Boundary accepted by astra t79 after her t77 corrections. A `KERNEL_TESTS` one-shot KEYED TO THE ARMING THREAD, with a non-NULL CAS taken after the metadata allocation, plus a single-slot `KERNEL_TESTS` watch on `kfree`'s validated LARGE branch (the Loom is over 2048 bytes; the watch records ENTRY to the free site, not the buddy outcome). The leg runs a same-class self-check first, then asserts the refusal, the spent shot, the watched metadata, the charge and the guard/ref/owner, with the ORACLE "the inner ring failure frees the unpublished Loom" LAST in the leg. Runner `inner-leg-run.sh`: M1 deletes `kfree(l)` and must fail ONLY the oracle; it leaks one large kmalloc, intended and NEVER reclaimed (unobserved is not owned). M2 blinds the watch and must fail ONLY the self-check, so the inner leg does not run there. The watch's notifier is ALSO keyed to the arming thread (astra t81 found a stale-notifier interleaving: a reused address freed on another CPU, stalled between load and store, could fire a LATER arming and let M1 pass). A cross-thread control (a helper kthread frees a watched object; the watch must stay quiet) precedes the arm, and M3 (thread check deleted) must fail ONLY that control. Shape: `kfree` + every emitted Loom constructor compared with relocations. Oracle arms 26/26 including masked helper timeout; actual-source host cases 7/7 with old-code RED control. |
+| Loom metadata `kmalloc` refused inside `loom_create_layout` | none inside the layout (nothing allocated yet); the caller's unwind is the same NULL at the same call site | STRUCTURAL, by bounded statement (astra t77/t79): no locally acquired Loom to release, and the caller-side NULL unwind is the one the layout-failure row above DISCRIMINATED. This is NOT runtime closure of every allocation failure. |
+| retirer not ready (`service_retire_ready`) | none needed; refused first | STRUCTURAL: boot-order guard, unreachable after boot |
+| private-ring count saturation (`private_rings == ~0`) | none needed; the guard is not taken | STRUCTURAL: needs 2^32 - 1 live rings on one image |
+
+## Metadata and backing charges
+
+| Item | State |
+| --- | --- |
+| ring backing + one descriptor page + Loom metadata charged BEFORE publication | DRIVEN: "ring and metadata charged before publication", against `burrow_backing_pages` |
+| exact image and creator captured, no Proc pointer kept | DRIVEN: "exact image and permanent creator captured" |
+| refund at retirement from the settled drop (final and nonfinal) | DRIVEN, plus the off-lease 5-row double (`private-retire-matrix.log`) |
+
+## Bounded tables
+
+| Table | Source of the bound | State |
+| --- | --- | --- |
+| SQ/CQ/receipt geometry | `loom_measure` | DRIVEN (invalid geometry refused) |
+| legacy setup on a private owner (registered handles, buffers, SQPOLL, enter) | refused outright | DRIVEN: "private owner refuses legacy execution" |
+| destination slot reservation before a fid-creating op | ASYNC-SERVICE-LIFECYCLE.md, operations table | NOT YET REACHABLE: no private scope engine |
+| fid/scope/target slots sharing the 64-entry registered-handle envelope | ASYNC-SERVICE-LIFECYCLE.md, same section | NOT YET REACHABLE |
+| bounded request/completion storage (preallocated protocol storage, worker tickets) | committed foundation | NOT YET REACHABLE from a private owner: the admission/rollback ownership arrives with the engine |
+| provided-buffer pool memberships (`loom_pool_prepare` / `_publish` / `_rollback`) | committed transactional core | NOT YET REACHABLE from a private owner; the same |
+
+## Kept separate, on purpose
+
+- Retirement lifetime decrement is DRIVEN with omitted-put-only RED in
+  release-leg-20261008T200530Z (2a4e501c7), control 1836/1836, mutant sole
+  expected failure 1835/1836. Original creator owner remains alive. FINAL
+  descriptor/page-table reclamation remains OPEN; no magazine-drain claim.
+- Engine-dependent checkpoint 2 obligations (terminal publication, pool/payload
+  reuse, `loom_post_pool_cqe`'s missing `service_closing` check) stay with the
+  engine.
+- The settled-drop conversion at `loom_private_destroy` is done and stays closed.
+
+## October 8 takeover verification update
+
+Astra now owns this branch by explicit operator transfer. The inner unwind row
+remains UNRUN. T83's helper-timeout handling is corrected in source, and the
+checker has 26 passing constructed-log arms including a timeout masked by a
+later expected verdict. The same new arm fails against the original runner,
+which wrongly accepts the masked timeout. Evidence: astra-takeover/inner-arms.txt
+and astra-takeover/inner-arms-before.txt. Actual-source host execution subsequently passed all seven repaired cases
+with an expected failing old-block control (572f434b3). Guest control/M1/M2/M3
+remain pending; see astra-takeover.md. No coverage
+state is promoted by this source/checker checkpoint.
+
+
+October 8, 18:50: actual guest CONTROL passed 1836/1836 with normal fallthrough
+on a89f55240 (inner-leg-20261008T185135Z). M1 built but never booted because
+the 8 GiB disk floor stopped the run. All mutant discrimination and shape
+qualification remain UNRUN. Sources restored; images quarantined. See the
+takeover result JSON for exact provenance; no full-gate or UBSan promotion.
+
+
+Release decrement witness authored October 8: first isolated private retirement,
+creator still owns its image, exact ref count after retirement publication.
+Omitted-put-only mutant scoped to loom_private_destroy; guest UNRUN. This can
+close release decrement sensitivity only, not final image destruction.
+
+
+October 8, 21:00: the current fixture on 98c50e844 passed the real full Mac
+default/UBSan matrix: 50/50 clean, private-owner normal fallthrough and
+1836/1836 in every boot. D7 overlap plus twenty distinct user cycles passed
+in all fifty. Exact ten input hashes and 100 raw logs are preserved under
+current-gate-20261008T201816Z; result JSON is in astra-takeover. This adds
+SMP/sanitizer CONTROL coverage; it does not rerun or widen the older mutant
+legs, close final image reclamation, or close the engine-owned rows.
+
+
+October 8, 21:14: final destruction is now witnessed at the HOST boundary by
+extracted Loom/AddrSpace/MMU code: both owner-drop orders pass ASan/UBSan, and
+four omissions fail distinct descriptor/table reclamation assertions. This is
+actual destructor code with allocator/lock/VMA/ring doubles, not a guest
+buddy/SLUB gauge. Guest reclamation remains OPEN. Evidence and limitations:
+astra-takeover/final-reclaim-20261008T211401Z/result.json.
+
+
+October 8 slot-ledger clarification: new dormant identity/borrow ledger has host
+ASan/UBSan control and 13 named negative controls; native qualification pending.
+This does not close engine-owned rows. In particular, the earlier phrase
+"loom_post_pool_cqe's missing service_closing check" is not a prescribed fix:
+that helper delivers an already committed result, and pre-abort commits may be
+delivered afterward. Owner integration must distinguish commitment from delivery
+and require consumer detachment/local retirement before whole-ring discard.
+See the current pickup and Loom dossier for ledger scope and retained evidence.
+
+
+October8 22:14UTC: the dormant slot-ledger fixture on ceac7f380 passed the full
+Mac matrix,50/50 clean (default smp1/4/8, UBSan smp4/8), each1837/1837 with
+separate ledger and private-owner verdicts and complete D7 evidence. Ten captured
+input hashes and100 logs verified; minimum recorded admission10757MiB. Detailed
+provenance and remaining caller/engine/guest-allocator obligations are in the
+latest pickup and astra-takeover/current-gate-20261008T213148Z-result.json.
+No activation or Main landing; retain128MiB protection. Self-review only.
+
+
+October8 23:06UTC: charged slot-owner integration on7c184b3ef completed50/50
+clean Mac boots,1838/1838 plus both slot tests, private-owner and complete D7
+checks in each. Ten captured inputs and100 log hashes verified; minimum admission
+10930MiB. See latest pickup and astra-takeover/current-gate-20261008T222442Z-result.json.
+Future pool/protocol ownership and guest final-allocator/Pi gaps remain open.
+Self-review only; no public activation, Main landing or128MiB removal.

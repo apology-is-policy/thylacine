@@ -1,0 +1,95 @@
+control: 11 tests PASS
+abi-pristine: rc=0
+abi-sabotage: rc=1
+header ring_payload.h: sabotage refused by its static assert
+header fixed_requests.h: sabotage refused by its static assert
+header retirement_executor.h: sabotage refused by its static assert
+astra:composed-ring:wrong-receipt                          rc=-6 Assertion failed: (!t_request_accept(book,&r,&d)), function reap, file test_composed_ring.c, line 13.
+astra:composed-ring:wrong-pool                             rc=-6 Assertion failed: (t_request_accept(book,&bad,&d)<0&&t_request_occupied(book)==1), function main, file test_co
+astra:composed-ring:untracked-lease                        rc=-6 Assertion failed: (!t_ring_return(b)&&t_ring_live(root)==1), function main, file test_composed_ring.c, line 19
+astra:deadlines-c:repeat-abort                             rc=-6 Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_de
+astra:deadlines-c:early-expiry                             rc=-6 Assertion failed: (!t_fixed_expire(d,99,64)), function deadline_cases, file test_deadlines.c, line 32.
+astra:deadlines-c:no-cursor                                rc=-6 Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, 
+astra:deadlines-c:ignore-budget                            rc=-6 Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, 
+astra:deadlines-c:cancel-releases-storage                  rc=-6 Assertion failed: (!t_fixed_receive(d,&cq)), function deadline_cases, file test_deadlines.c, line 19.
+astra:deadlines-c:cancelled-deadline-remains               rc=-6 Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_de
+astra:fixed-io-c:early-fixed-view                          rc=-6 Assertion failed: (t_ring_fixed_bytes(f,&bytes,&n)<0&&!bytes&&!n), function fixed_tests, file test_ring_payloa
+astra:fixed-io-c:abandon-refund                            rc=-6 Assertion failed: (p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1), 
+astra:fixed-io-c:missing-abort                             rc=-6 Assertion failed: (p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1), 
+astra:fixed-io-c:fixed-pool-overlap                        rc=-6 Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), funct
+astra:fixed-io-c:pool-fixed-overlap                        rc=-6 Assertion failed: (t_ring_fixed_reserve(c,301,id(0,1),range(8),0,&f)<0), function fixed_tests, file test_ring_
+astra:fixed-io-c:early-retired-refund                      rc=-6 Assertion failed: (!t_ring_progress(r)&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payloa
+astra:fixed-io-c:oversized-fixed-result                    rc=-6 Assertion failed: (t_ring_fixed_finish(r,101,9)<0), function fixed_tests, file test_ring_payload.c, line 64.
+astra:fixed-io-c:late-write                                rc=-6 Assertion failed: (t_ring_fixed_write(f,input,8)<0), function fixed_tests, file test_ring_payload.c, line 67.
+astra:fixed-requests-c:unpublished-leak                    rc=-6 Assertion failed: (!t_fixed_occupied(d)), function main, file test_fixed_requests.c, line 4.
+astra:fixed-requests-c:lost-abandoned-terminal             rc=-6 Assertion failed: (!t_fixed_receive(d,&cq)&&!t_fixed_occupied(d)), function main, file test_fixed_requests.c, 
+astra:fixed-requests-c:retirement-without-proof            rc=-6 Assertion failed: (!t_fixed_progress(d)), function main, file test_fixed_requests.c, line 7.
+astra:fixed-requests-c:retired-metadata-leak               rc=-6 Assertion failed: (t_fixed_progress(d)&&!t_fixed_occupied(d)&&!p.aborts), function main, file test_fixed_reque
+astra:fixed-requests-c:missing-storage-terminal            rc=-6 Assertion failed: (!t_fixed_read_bytes(done,&bytes,&n)&&n==3&&bytes[0]==1), function main, file test_fixed_req
+astra:fixed-requests-c:corrupt-keeps-open                  rc=-6 Assertion failed: (t_fixed_receive(d,&cq)<0&&p.closes==1&&t_fixed_occupied(d)==1), function main, file test_fi
+astra:ledger:owner                                         rc=-6 Assertion failed: (t_lease_begin_return(&y,&xt)==T_LEASE_STALE), function main, file test_lease_ledger.c, line
+astra:ledger:stale                                         rc=-6 Assertion failed: (t_lease_accept_read(&b,4,4,receipt(0,11),&ignored)==T_LEASE_STALE), function main, file tes
+astra:ledger:failed-return                                 rc=-6 Assertion failed: (b.outstanding==1), function main, file test_lease_ledger.c, line 17.
+astra:ledger:busy                                          rc=-6 Assertion failed: (t_lease_accept_read(&b,1,4,receipt(0,12),&ignored)==T_LEASE_BUSY), function main, file test
+astra:ledger:final-release                                 rc=-6 Assertion failed: (b.outstanding==2), function main, file test_lease_ledger.c, line 13.
+astra:ledger:overlap                                       rc=-6 loom-client fatal: t_lease_init:26
+astra:owned-mapping:sq-overlap                             rc=-6 Assertion failed: (t_mapping_create(b,p,m)==T_MAP_GEOMETRY&&!m->live&&q.closed==1&&q.freed==1), function main,
+astra:owned-mapping:receipt-stride                         rc=-6 Assertion failed: (t_mapping_create(b,p,m)==T_MAP_GEOMETRY&&!m->live&&q.closed==1&&q.freed==1), function main,
+astra:owned-mapping:failed-close                           rc=-6 Assertion failed: (b->p->closed==1), function destroy, file test_owned_mapping.c, line 9.
+astra:owned-mapping:after-close                            rc=-6 Assertion failed: (t_mapping_reap(m,&r)==T_MAP_CLOSED&&q.closed==1&&!q.freed), function main, file test_owned_
+astra:owned-mapping:fresh-header                           rc=-6 Assertion failed: (t_mapping_create(b,p,m)==T_MAP_HEADER&&!m->live&&q.freed==1), function main, file test_owne
+astra:paired:receipt-index                                 rc=-6 Assertion failed: (kept[i].receipt.lease==i+1), function main, file test_paired_cq.c, line 14.
+astra:paired:double-ack                                    rc=-6 Assertion failed: (t_paired_reap(&q,&kept[i])==1), function main, file test_paired_cq.c, line 13.
+astra:paired:overlap                                       rc=-6 Assertion failed: (t_paired_init(&q,&m,cases[i][0],cases[i][1],cases[i][2],cases[i][3],(uint32_t)cases[i][4])=
+astra:registration-c:live-retire                           rc=-6 Assertion failed: (!t_ring_progress(r)), function registration_tests, file test_ring_payload.c, line 40.
+astra:registration-c:pool-closes-ring                      rc=-6 Assertion failed: (!t_ring_attach(c,id(slot,1),&m,1,&p)), function attach, file test_ring_payload.c, line 27.
+astra:registration-c:global-cap                            rc=-6 loom-client fatal: prepare:28
+astra:registration-c:cross-pool-overlap                    rc=-6 Assertion failed: (p.registrations==1), function registration_tests, file test_ring_payload.c, line 37.
+astra:registration-c:failed-destroy                        rc=-6 Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55.
+astra:registration-c:stale-pool                            rc=-6 Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, fil
+astra:registration-c:missing-precharge                     rc=-6 Assertion failed: (!register_checked(c,&m,1,&a,&rc)&&!rc&&p.registrations==1&&t_ring_members(r)==1), function 
+astra:registration-c:uncertain-no-close                    rc=-6 Assertion failed: (p.closes==1&&t_ring_members(r)==2), function registration_tests, file test_ring_payload.c, 
+astra:registration-c:rollback-no-refund                    rc=-6 Assertion failed: (t_ring_members(r)==1&&!p.closes), function registration_tests, file test_ring_payload.c, li
+astra:registration-c:accept-nonzero-output                 rc=-6 Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&rc==results[i]&&!out), function regist
+astra:request-book:reused-cookie                           rc=-6 Assertion failed: (!t_request_reserve(b,id(1,1),spec(T_REQ_FIXED_WRITE,0),&c)&&a!=c), function main, file test
+astra:request-book:more-final                              rc=-6 Assertion failed: (!accept(b,payload(a,5),&first)&&!first.terminal&&!first.abandoned&&first.record.receipt.lea
+astra:request-book:duplicate-terminal                      rc=-6 Assertion failed: (accept(b,rec(c,8,0),&d)<0), function main, file test_request_book.c, line 11.
+astra:request-book:wrong-pool                              rc=-6 Assertion failed: (accept(b,r,&d)<0&&t_request_occupied(b)==1), function main, file test_request_book.c, line 
+astra:request-book:oversized-fixed                         rc=-6 Assertion failed: (accept(b,rec(c,9,0),&d)<0), function main, file test_request_book.c, line 11.
+astra:request-book:repeated-abort                          rc=-6 Assertion failed: (!t_request_abandon(b,a,&scope)&&t_request_occupied(b)==2), function main, file test_request
+astra:retirement-executor-c:early-reclaim                  rc=-6 Assertion failed: (!t_retirement_progress(e,64).reclaimed), function main, file test_retirement_executor.c, li
+astra:retirement-executor-c:missing-retire                 rc=-6 Assertion failed: (p.retires==1), function main, file test_retirement_executor.c, line 10.
+astra:retirement-executor-c:frozen-cursor                  rc=-6 Assertion failed: (t_retirement_progress(e,1).reclaimed==1&&q.freed==1), function main, file test_retirement_e
+astra:retirement-executor-c:excess-budget                  rc=-6 Assertion failed: (!t_retirement_progress(e,0).visited), function main, file test_retirement_executor.c, line 
+astra:retirement-executor-c:no-shutdown-close              rc=-6 Assertion failed: (p.closes==1&&t_managed_read(c,id(0,1),range(0),&r)==T_FIXED_CLOSING&&!r), function main, fi
+astra:retirement-executor-c:premature-admission            rc=-6 Assertion failed: (t_retirement_admit(e,make_driver,&f,&extra)==T_RETIREMENT_FULL&&!extra&&f.calls==1), functi
+astra:retirement-timers-c:skip-retiring                    rc=-6 Assertion failed: (t_retirement_expire(e,5,1,1)==1&&q.aborts==1), function main, file test_retirement_timers.c
+astra:retirement-timers-c:skip-attached                    rc=-6 Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retireme
+astra:retirement-timers-c:ignore-inner-budget              rc=-6 Assertion failed: (!t_retirement_expire(e,5,3,0)&&!p.aborts&&!q.aborts), function main, file test_retirement_t
+astra:retirement-timers-c:ignore-outer-budget              rc=-6 Assertion failed: (!t_retirement_expire(e,5,0,64)&&!p.aborts&&!q.aborts), function main, file test_retirement_
+astra:retirement-timers-c:shared-cursor                    rc=-6 Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retireme
+astra:retirement-timers-c:wrong-earliest                   rc=-6 Assertion failed: (t_retirement_next_deadline(e,&when)&&when==0), function main, file test_retirement_timers.c
+astra:ring-payload-c:live-retire                           rc=-6 Assertion failed: (!t_ring_progress(r)), function registration_tests, file test_ring_payload.c, line 40.
+astra:ring-payload-c:pool-closes-ring                      rc=-6 Assertion failed: (!t_ring_attach(c,id(slot,1),&m,1,&p)), function attach, file test_ring_payload.c, line 27.
+astra:ring-payload-c:global-cap                            rc=-6 loom-client fatal: prepare:28
+astra:ring-payload-c:cross-pool-overlap                    rc=-6 Assertion failed: (p.registrations==1), function registration_tests, file test_ring_payload.c, line 37.
+astra:ring-payload-c:failed-destroy                        rc=-6 Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55.
+astra:ring-payload-c:stale-pool                            rc=-6 Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, fil
+na2b:claim-after-register                                  rc=-6 Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:be
+na2b:refusal-keeps-claims                                  rc=-6 Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:be
+na2b:pool-overlap-keeps-claims                             rc=-6 Assertion failed: (!*rc&&claimed(core)==before), function register_checked, file test_ring_payload.c, line 32.
+na2b:fixed-overlap-keeps-claims                            rc=-6 Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), funct
+na2b:bank-cells-leak                                       rc=-6 Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), funct
+na2b:final-release-keeps-core                              rc=-6 Assertion failed: (t_ring_idle(cores[i])), function cores_idle, file test_ring_payload.c, line 19.
+na2b:ring-create-on-live                                   rc=-6 t_ring_create: no fatal there (status 0)
+na2b:fixed-create-on-live                                  rc=-6 t_fixed_create: no fatal there (status 25344)
+na2b:mapping-create-on-live                                rc=-6 t_mapping_create: no fatal there (status 0)
+na2b:executor-create-on-live                               rc=-6 t_retirement_create: no fatal there (status 0)
+na2b:fixed-write-drops-bytes                               rc=-6 Assertion failed: (p[i]==byte), function view, file test_ring_payload.c, line 29.
+na2b:request-claimed-before-book                           rc=-6 Assertion failed: (p.freed==1&&t_fixed_storage_idle(storage)), function main, file test_fixed_requests.c, line
+na2b:read-drop-keeps-cell                                  rc=-6 Assertion failed: (p.freed==1&&t_fixed_storage_idle(storage)), function main, file test_fixed_requests.c, line
+na2b:ledger-init-on-live                                   rc=-6 t_lease_init: no fatal there (status 0)
+na2b:executor-release-without-zero                         rc=-6 Assertion failed: (!es.refs&&!es.capacity&&!es.cells[0].driver), function main, file test_retirement_executor.
+na2b:ledger-release-keeps-count                            rc=-6 loom-client fatal: t_lease_init:26
+na2b-mutants: PASS -- 87 mutants rejected, each by a named check
+exit=0

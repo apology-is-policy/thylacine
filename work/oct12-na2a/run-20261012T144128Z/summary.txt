@@ -1,0 +1,84 @@
+NA-2a guest legs on caf3e2b19 (audit close dc7feeb0f + runner guard fix), mac lease corona 14:28-14:55Z.
+Extracted from the gitignored boot logs of this dir; every line below is copied, not typed.
+== control-d (boot log last written 2026-10-12T14:43:21Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: default image refuses every private route
+        loom-bridge-probe status=70 expected=70
+        loom-bridge-probe rings made=0 retired=0 expected=0
+      tests: 1870/1870 PASS
+== control-q (boot log last written 2026-10-12T14:45:04Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: qualification image routes every private syscall from EL0
+        loom-bridge-probe status=71 expected=71
+        loom-bridge-probe rings made=4 retired=4 expected=4
+      tests: 1870/1870 PASS
+== m10 (boot log last written 2026-10-12T14:46:08Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: FAIL line 156: params echo the granted flags (got 0)
+        loom-bridge-probe status=1 expected=70
+        loom-bridge-probe rings made=0 retired=0 expected=0
+    FAIL: loom-bridge-probe's verdict matches this kernel's qualification lever
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m14 (boot log last written 2026-10-12T14:47:15Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: FAIL line 165: reserved params are zero (got 2779096485)
+        loom-bridge-probe status=1 expected=70
+        loom-bridge-probe rings made=0 retired=0 expected=0
+    FAIL: loom-bridge-probe's verdict matches this kernel's qualification lever
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m12 (boot log last written 2026-10-12T14:48:21Z)
+    FAIL: an image that carries userspace carries /bin/loom-bridge-probe
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m8 (boot log last written 2026-10-12T14:49:25Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: FAIL line 476: both rollbacks closed the handle and unmapped the ring (got 2)
+        loom-bridge-probe status=1 expected=71
+        loom-bridge-probe rings made=4 retired=4 expected=4
+    FAIL: loom-bridge-probe's verdict matches this kernel's qualification lever
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m9 (boot log last written 2026-10-12T14:50:28Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: FAIL line 345: a read-only record's result copyout faults (got 0)
+        loom-bridge-probe status=1 expected=71
+        loom-bridge-probe rings made=4 retired=4 expected=4
+    FAIL: loom-bridge-probe's verdict matches this kernel's qualification lever
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m15 (boot log last written 2026-10-12T14:51:32Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: FAIL line 430: a read-only POOL QUERY record faults on its copyout (got 0)
+        loom-bridge-probe status=1 expected=71
+        loom-bridge-probe rings made=4 retired=4 expected=4
+    FAIL: loom-bridge-probe's verdict matches this kernel's qualification lever
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m13 (boot log last written 2026-10-12T14:52:36Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: qualification image routes every private syscall from EL0
+        loom-bridge-probe status=71 expected=71
+        loom-bridge-probe rings made=5 retired=5 expected=4
+    FAIL: the probe made exactly its private rings
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== m11 (boot log last written 2026-10-12T14:53:41Z)
+        [test] loom.bridge_probe ... loom-bridge-probe: qualification image routes every private syscall from EL0
+        loom-bridge-probe status=71 expected=70
+        loom-bridge-probe rings made=4 retired=4 expected=0
+    FAIL: loom-bridge-probe's verdict matches this kernel's qualification lever
+      tests: 1869/1870 FAIL
+    EXTINCTION: kernel test suite failed
+== probes baked per leg (sha256)
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  control-d-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  control-q-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m10-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m11-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m12-probe
+    76350672a445e880e18ce28b8dfde02152b200c22b7b890800989e4ffbba25a5  m13-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m14-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m15-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m8-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  m9-probe
+    79c52ea2cb373cac13fc7b0db821b668eb76d7d9c8593aa5965107d55328eb15  rebuild-probe
+== kernels per leg: see <leg>-inputs.sha256
+== why ramfs.cpio has a different sha256 in every leg (see <leg>-inputs.sha256)
+    Each `tools/build.sh kernel` mints a fresh libsodium-randomized pool key
+    (build_stratum_pool_fixture) and copies it into the ramfs at bin/system.key;
+    mkcpio zeroes mtimes, so the key is the varying member. The probe itself is
+    proven per leg by extraction: every non-probe leg's baked probe is
+    byte-identical to the controls' (same_probe), and M13's differs.

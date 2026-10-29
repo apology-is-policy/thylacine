@@ -1,0 +1,164 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_admission.c": "c957d544be156ad84ca3b6beafbe0b7c3a972d486d4dcc1574e897a1535ec7d2",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_requests.c": "f72d55aa0370092ecce32f93065f972f5783853f8d2c0db4e13c2768b61e605e",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_operation.c": "03f2953a13484e0b2c9f535a3dec1f799b3d0293fde6e2a852a562ece8d618a6",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_rpc.c": "9d26e0371fc7abab936710ca193517f001aef48ca763da6e450e3cd7b2156ed7",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom.c": "424aa6f8b740a5d066885158074784633ecfe12dfb7f10d709f507410331f055",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/9p_client.c": "4df62993f945b9a62ea9edefa1082c79cc5ffd791b3ee8a0ad578525b70a1cfe",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_retirement.c": "484871b74723bd1a08f6fef8d666adfd8988da75acd5b91cf4d3dedfd1a46a96",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_provided.c": "b68f993a544a334bf57c791f4480c98a8a74c999b3770a866b57d939312c946c",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_io.c": "bc30a868c29f1ede1988da4ffff2883a442afed82d69f07ec62ef4389bab63ba",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_rpc.h": "ac57d3c6651e7579f8adc823614314e9ac94a42320112cf63cd2b64bae9a3e0d",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_operation.h": "8d47a0168f24e8f3cf9f245b67915c65fc5fe0cfaf3539292245b64d330b86a5",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_retirement.h": "bbe47924c85c9fd915bca78f1091c22adb5caf83e14ff4aa75f50a8991267370",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_provided.h": "59ce9999162599c6a8e42e8afc877d7792c188789175710c42d34231fa3b48f8",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_protocol.h": "baffbf92ba331d0dec270f48d3cacb3025fe9431244af398caafb1e95e7f5f49",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_requests.h": "30dd3c98627837daf3106a706c2e5d958e47dc8ec237c11bb6d5c551ad140dc2",
+    "work/oct5-as-r9/astra-takeover/ready-draft/kernel/loom_service_ready.c": "2987e9575c6eedf25d02171254bcba34e768ba2e659f1dc9b00b041e044bfb6c",
+    "work/oct5-as-r9/astra-takeover/ready-draft/kernel/include/thylacine/loom_service_ready.h": "46069d6587dffa141be421fc735a9aa1409273087fe2f38b0926c29d87d45ac5",
+    "kernel/loom_service_connect.c": "ac84691c02c756edd4a53f2e52fac1e593a9e94fe627e5cbbac3eecd1d3ed69f",
+    "work/oct5-as-r9/astra-takeover/action-draft/kernel/loom_service_action.c": "05a986b608507becbd502ff7950552649f6d589b0b83d846af4673e1455eb4c2",
+    "work/oct5-as-r9/astra-takeover/action-draft/kernel/loom_service_ready.c": "52b88ead113aa3ac67d66fe0a0444e5ac04f9c01836157fe979d1a39a0bcb65a",
+    "work/oct5-as-r9/astra-takeover/action-draft/kernel/include/thylacine/loom_service_action.h": "3fbfffc3543cf3d4eca197b0fe25264291f729c3c2ccc07bd54668adace7cc0d",
+    "work/oct5-as-r9/astra-takeover/action-draft/fixture.c": "330d59e3fe1358d4e3f36da3f98343040534e7c3e8a5daf4f32fb695fb088df0",
+    "work/oct5-as-r9/astra-takeover/action-draft/run-controls.py": "a61705b0390320811d9cee8fb0253757a68690a4cde09659cbe7c7f3d3eae57a",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/loom_service_engine.c": "d955fd9b2a17035621dc84e02a578e29b858b73137e63d4aeeff628e8c15277e",
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom.c": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+    "kernel/loom_service_decode.c": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "64f7630fc10e67ffacca39259562324ee2e63fec762a2a7630350dbc27546df2",
+      "binary_sha256": "eb5cb8a6edc23268c4b7cc7241ccfd3dd817face3a64f9c28e21854d7d9c2d30"
+    },
+    {
+      "case": "full-cq",
+      "expected": "full CQ blocks fresh submission",
+      "rc": 1,
+      "source_sha256": "dd7d183fbc62166c52076925fa3ea77b2ff29fff96f6ef443d0e49ade256e229",
+      "binary_sha256": "28a83a107c4df211d17fd8c897dc91e0f27590b48fa2e992d5f1cc59edd785fd"
+    },
+    {
+      "case": "fresh-begin",
+      "expected": "fresh begin deadline refuses wire",
+      "rc": 1,
+      "source_sha256": "4fb60d0e9e3eec3b0c86b24e3032a1d3e723d44953ba18aebb3825041878cdd8",
+      "binary_sha256": "4f692c1f9d0ffa50540297c0ce0cf448cecd70a1dc0a0c2a996310fcb57ba034"
+    },
+    {
+      "case": "fresh-commit",
+      "expected": "fresh commit deadline after physical drop",
+      "rc": 1,
+      "source_sha256": "14c5df74fba5c325b4a73b566626c66cd9df6e9eb2941bd1c49b21c819c51337",
+      "binary_sha256": "60a2b5bebe9086fe9787b335cd5329936d7b744ba802041d0002eb28ddbb6e0d"
+    },
+    {
+      "case": "fresh-rearm",
+      "expected": "fresh rearm deadline bars new shot",
+      "rc": 1,
+      "source_sha256": "9632e30ab4f9bec9b729fe8a5bcabe5e854231b251a19b442412731e7ae6c6da",
+      "binary_sha256": "eb6d19182fabc726b16300e45c3034fc0d6bfdfd6a32adf9d5fb24ea30775a2b"
+    },
+    {
+      "case": "consumed-requeue",
+      "expected": "failed fresh requeue settles consumed attempt",
+      "rc": 1,
+      "source_sha256": "ea087fe811a8d966ea14a483381b95d3babaaab3165003aa0f95a9e61735442f",
+      "binary_sha256": "e2c04ac5a6bb8922e1e08e6ae042a1ebdf27826fd78a5603bf098a408788cc2f"
+    },
+    {
+      "case": "quiescence",
+      "expected": "executor actually quiesces",
+      "rc": 1,
+      "source_sha256": "13eb61e3da2c656eec2bc54d1617073d46ff564b6672bbca6b4620d0780405b2",
+      "binary_sha256": "99dcf5ab80384960d3239f94d701c80602aad1e22d2f9fb4aed02f7bff17ca2a"
+    },
+    {
+      "case": "commit-fixed-drop",
+      "expected": "executor commit follows physical fixed drop",
+      "rc": 1,
+      "source_sha256": "a715c6ba035d7560e11b4964b176b4b7ba41db59cd04c343c6902f92789e5749",
+      "binary_sha256": "81ac4b24b2b2d6262f53823e97a6007ffb669db99f669fb6f5cfde7722a016e2"
+    },
+    {
+      "case": "cancel-busy",
+      "expected": "remote AGAIN isolated terminal",
+      "rc": 1,
+      "source_sha256": "f2c96de9bf32188d043b8ee293d3a68f20a666dfd0ab10c72c3033995a8a1c9a",
+      "binary_sha256": "de3abd85f209a93b9f4393f8bb847989ee9305169d94059ff6e0cb805240d47e"
+    },
+    {
+      "case": "submit",
+      "expected": "executor submits actual frame",
+      "rc": 1,
+      "source_sha256": "24541d11c0c536ba25f9caa65dcc29bdbd52e21f7c202544f193e7f9f825b415",
+      "binary_sha256": "d9e29c53b4f60b1c490209ca266444cf5e5e49967fd21352b84df66e619ddb99"
+    },
+    {
+      "case": "driver-release",
+      "expected": "executor submits actual frame",
+      "rc": 1,
+      "source_sha256": "794de1e969b37c8cc17852406ccc332fb966d77333e348c85a29d5a47f2f94fd",
+      "binary_sha256": "63f666160e6b958caf7a10050f9a07be474e62b7eb6dabbbeac7a3371a9860fb"
+    },
+    {
+      "case": "return-wake",
+      "expected": "transition return wakes executor",
+      "rc": 1,
+      "source_sha256": "51984fd180f78e469c2be301805c762874362ccb878f8c10a9653f033a206012",
+      "binary_sha256": "b8c44618f97a10ed3d43f210743e5421c000255f0cc32b3a2499d541d6f3facb"
+    },
+    {
+      "case": "clunk-quiescence",
+      "expected": "CLUNK failure cannot retire before scope quiescence",
+      "rc": 1,
+      "source_sha256": "fdcd5ce92dd4a9c4aeb3c6b24c214b2593ae9cc1b1b810cdb1efece77f26b6a5",
+      "binary_sha256": "ae552cf08c9827e2ff77af00b4aed72a044fe5b026568ca28557c421aed84cde"
+    },
+    {
+      "case": "more-order",
+      "expected": "executor MORE delivered before negative terminal",
+      "rc": 1,
+      "source_sha256": "5965718ae3db2d29c8b995b8149260f3eff4761f176c0c285a636b0cb2f20a25",
+      "binary_sha256": "f280823b2614a2aa46706a2255c78816f5c7d5dc32a1e6debd3a5e159e2e61bb"
+    },
+    {
+      "case": "malformed-scope",
+      "expected": "malformed reply settles and aborts scope",
+      "rc": 1,
+      "source_sha256": "dc4b9aa4e0707d0bcedc3904271e24c3153bf13f5fb29dd5fc791bee2d85ed68",
+      "binary_sha256": "3931438c474744eb59a8e01ff26c00cfe1c280c2819c7dc1cb75d044ecbfdc01"
+    },
+    {
+      "case": "io-abort",
+      "expected": "IO failure latches scope before writer proof",
+      "rc": 1,
+      "source_sha256": "6ccdc93ba193eead797c370804c081899c144cb5f6fe0031e391b7d91e57cab2",
+      "binary_sha256": "a4fc7ef45fc66ff969bd6a6d24a0f1d46a81bcdf8406e9d73f7375fea859ffbb"
+    }
+  ],
+  "limits": "Action executor uses actual submit, scope abort, owner/program/admission/retirement/selector. Progress step and successful parsed responses remain explicit controlled boundaries in new action cases. Separate external driver pin/root is modeled and asserted. Actual client-mark-dead/progress-abort, transport/session/codec abort, per-owner close and physical operation destructor, final pool-destruction helper, request/FID/pool/CQ transitions. Parsed successful replies remain synthetic; prior preparation regressions never submit. Host native teardown, translation, allocator, image snapshot, ref/engine/wake and physical backing drop boundaries. Earlier preparation/provided cases retain manual fixture destruction; new retirement cases use actual destructor. Final pool helper is called at simulated zero Loom references, not actual retirer. No native READY/frontend/close/concurrency qualification."
+}

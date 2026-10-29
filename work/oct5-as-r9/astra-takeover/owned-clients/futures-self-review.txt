@@ -1,0 +1,46 @@
+Astra single-agent self-review: fixed Rust Futures, October10.
+Uninstalled simulated-backend adapter; not an independent audit or native pass.
+
+Read/Write Future owns the existing typed request; no borrowed pending buffer or
+second backend close owner. Hub reserves one of64cells before request preparation,
+rolling back failure. This matches the conservative existing fixed-buffer bound.
+Completion or Future drop detaches its registration exactly once. Request drop
+still preserves active storage and requests scope abort; unregistering a Waker
+never grants reuse. Completed READ results keep their own backing. WRITE returns
+actual terminal result; Closing never proves remote rollback or no bytes sent.
+Root shutdown closes the existing driver, detaches future delivery, wakes pending
+tasks and retains live storage through the already-tested request owners.
+
+Single-creator Rc prevents Send/Sync. Wakers may schedule tasks from another thread;
+all actual driver/request operations remain creator-thread only. Completion wakes
+a bounded snapshot of at most64 registered tasks; spurious wakes/coalescing are
+intentional, and readiness is always rechecked by polling. Wakers are taken from
+slots before invocation. Clone occurs BEFORE readiness check so a clone callback
+that delivers completion cannot produce stale Pending. Replacement is published
+before old Waker drop; replacement/drop/wake callbacks execute outside Hub and
+FixedDriver RefCell borrows. Safe Waker callbacks are external code and may
+allocate: the no-allocation assertion covers this adapter with ordinary Arc
+Wakers, not arbitrary user vtables. No blocking/waiting or native SQ occurs.
+
+FUTURE-REVIEW-R1: callback ordering is invariant-bearing, including clone/drop,
+not merely wake. Tests use valid Arc-backed RawWaker ownership and thread-local
+one-shot callbacks to deliver CQ during clone and replacement-drop, and to poll
+inside wake. Callback-under-borrow and clone-after-check mutants must fail.
+Other mutants cover missing notification, stale waker, missing unregister and
+preparation leak. Full64cell test bounds broadcast count and confirms dropping an
+old completed Future cannot detach a newly reused cell.
+
+fixed-futures085203Z:12 scenarios opt0/2,2compile-fail ownership checks plus
+positive control,6runtime mutants;9source hashes/snapshots and21rawcommands
+reverified before docs. Initial085056Z eleven-case pass retained and verified
+before adding the full64cell regression. No failed run in this checkpoint.
+Protected10hashes, cleanexternal61dde37 and parked kernel base checked.
+
+Next integration must carry these deferred Waker batches past ALL enclosing
+retirement-manager borrows, not just Hub. Do NOT naively store FutureDriver in a
+RefCell retirement entry whose Drop/close would invoke Wakers under that borrow.
+Current RetirementExecutor intentionally accepts only FixedDriver, so these two
+host-verified components are not yet composed. Native event registration, lost-
+sleep handshake, deadlines and future/retirement integration remain pending.
+C has typed polling and bounded retirement owners; no new C callback API is
+claimed here. Native SQ fix remains parked, no gates rerun, AS3/AS4/MM0-MM4 pending.

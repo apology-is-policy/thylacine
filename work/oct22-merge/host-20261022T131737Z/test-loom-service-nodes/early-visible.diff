@@ -1,0 +1,10 @@
+--- kernel/loom_service_nodes.c
++++ early-visible.c
+@@ -63,6 +63,7 @@
+     }
+     nodes->nodes[ref.slot] = (struct loom_service_node){
+         .parent = parent, .state = LOOM_SERVICE_RESERVED };
++    (void)loom_slot_publish(t, ref);
+     *out = ref;
+     return 0;
+ }

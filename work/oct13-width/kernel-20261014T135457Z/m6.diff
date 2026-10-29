@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:04:19
+@@ -14886,7 +14886,7 @@
+         // bufsiz is an int: Linux refuses one that is not positive before it
+         // reads the path, and never copies more than the low half asks for.
+         s32 bufsiz = (s32)(u32)args[3];
+-        if (bufsiz <= 0)                               return -(s64)T_E_INVAL;
++        (void)0; // MUTANT M6: no bufsiz check
+         u32 path_len = 0;
+         s64 mrc = viv_measure_user_path(args[1], &path_len);
+         if (mrc != 0)                                return mrc;

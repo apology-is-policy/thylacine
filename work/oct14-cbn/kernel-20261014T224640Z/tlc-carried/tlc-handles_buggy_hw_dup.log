@@ -1,0 +1,55 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 43 and seed 4539788899201328099 with 8 workers on 8 cores with 1820MB heap and 64MB offheap memory [pid: 4576] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/handles.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9252924818879765815/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9252924818879765815/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9252924818879765815/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module handles
+Linting of module handles
+Starting... (2026-10-15 00:41:15)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-15 00:41:15.
+Error: Invariant Invariants is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ origin_rights = (kx :> {} @@ kh :> {})
+/\ handles = (p1 :> {} @@ p2 :> {})
+/\ kobjs_alive = {}
+/\ proc_caps = (p1 :> {HW} @@ p2 :> {})
+/\ sessions = {}
+/\ spawn_inherits = {}
+/\ proc_ceiling = (p1 :> {HW} @@ p2 :> {})
+
+State 2: <HandleAlloc(p1,kx,{R}) line 334, col 5 to line 350, col 70 of module handles>
+/\ origin_rights = (kx :> {R} @@ kh :> {})
+/\ handles = (p1 :> {[kobj |-> kx, rights |-> {R}, origin_proc |-> p1, via |-> "orig"]} @@ p2 :> {})
+/\ kobjs_alive = {kx}
+/\ proc_caps = (p1 :> {HW} @@ p2 :> {})
+/\ sessions = {}
+/\ spawn_inherits = {}
+/\ proc_ceiling = (p1 :> {HW} @@ p2 :> {})
+
+State 3: <HandleAlloc(p1,kh,{T}) line 334, col 5 to line 350, col 70 of module handles>
+/\ origin_rights = (kx :> {R} @@ kh :> {T})
+/\ handles = (p1 :> {[kobj |-> kx, rights |-> {R}, origin_proc |-> p1, via |-> "orig"], [kobj |-> kh, rights |-> {T}, origin_proc |-> p1, via |-> "orig"]} @@ p2 :> {})
+/\ kobjs_alive = {kx, kh}
+/\ proc_caps = (p1 :> {HW} @@ p2 :> {})
+/\ sessions = {}
+/\ spawn_inherits = {}
+/\ proc_ceiling = (p1 :> {HW} @@ p2 :> {})
+
+State 4: <Next line 938, col 25 to line 938, col 92 of module handles>
+/\ origin_rights = (kx :> {R} @@ kh :> {T})
+/\ handles = (p1 :> {[kobj |-> kx, rights |-> {R}, origin_proc |-> p1, via |-> "orig"], [kobj |-> kh, rights |-> {T}, origin_proc |-> p1, via |-> "orig"], [kobj |-> kh, rights |-> {T}, origin_proc |-> p1, via |-> "dup"]} @@ p2 :> {})
+/\ kobjs_alive = {kx, kh}
+/\ proc_caps = (p1 :> {HW} @@ p2 :> {})
+/\ sessions = {}
+/\ spawn_inherits = {}
+/\ proc_ceiling = (p1 :> {HW} @@ p2 :> {})
+
+116 states generated, 98 distinct states found, 83 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 00s at (2026-10-15 00:41:15)

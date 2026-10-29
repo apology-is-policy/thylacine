@@ -1,0 +1,54 @@
+
+running 7 tests
+test bounded_prepublication_and_terminal_retention ... FAILED
+test fixed_and_control_refuse_payload_more_and_oversize ... FAILED
+test malformed_receipts_flags_and_lengths_leave_active ... FAILED
+test abandoned_future_retains_until_terminal_and_scope_abort_once ... FAILED
+test multishot_more_and_final_keep_payload_separate ... FAILED
+test ring_local_identity_cannot_alias_other_book_cookie ... FAILED
+test geometry_maximum_capacity_and_cookie_exhaustion ... ok
+
+failures:
+
+---- bounded_prepublication_and_terminal_retention stdout ----
+
+thread 'bounded_prepublication_and_terminal_retention' (22270498) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-duplicate-terminal/test_request_book.rs:13:220:
+assertion failed: b.accept(rec(c, 8, 0)).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- fixed_and_control_refuse_payload_more_and_oversize stdout ----
+
+thread 'fixed_and_control_refuse_payload_more_and_oversize' (22270499) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-duplicate-terminal/test_request_book.rs:30:437:
+called `Result::unwrap()` on an `Err` value: State
+
+---- malformed_receipts_flags_and_lengths_leave_active stdout ----
+
+thread 'malformed_receipts_flags_and_lengths_leave_active' (22270501) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-duplicate-terminal/test_request_book.rs:22:82:
+called `Result::unwrap()` on an `Err` value: State
+
+---- abandoned_future_retains_until_terminal_and_scope_abort_once stdout ----
+
+thread 'abandoned_future_retains_until_terminal_and_scope_abort_once' (22270497) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-duplicate-terminal/test_request_book.rs:26:269:
+called `Result::unwrap()` on an `Err` value: State
+
+---- multishot_more_and_final_keep_payload_separate stdout ----
+
+thread 'multishot_more_and_final_keep_payload_separate' (22270502) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-duplicate-terminal/test_request_book.rs:17:267:
+called `Result::unwrap()` on an `Err` value: State
+
+---- ring_local_identity_cannot_alias_other_book_cookie stdout ----
+
+thread 'ring_local_identity_cannot_alias_other_book_cookie' (22270503) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-duplicate-terminal/test_request_book.rs:33:404:
+called `Result::unwrap()` on an `Err` value: State
+
+
+failures:
+    abandoned_future_retains_until_terminal_and_scope_abort_once
+    bounded_prepublication_and_terminal_retention
+    fixed_and_control_refuse_payload_more_and_oversize
+    malformed_receipts_flags_and_lengths_leave_active
+    multishot_more_and_final_keep_payload_separate
+    ring_local_identity_cannot_alias_other_book_cookie
+
+test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+

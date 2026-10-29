@@ -1,0 +1,89 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 66 and seed 2719185344854089740 with 1 worker on 8 cores with 455MB heap and 64MB offheap memory [pid: 7780] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/poll.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-14116717176443623687/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-14116717176443623687/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-14116717176443623687/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module poll
+Linting of module poll
+Starting... (2026-10-09 22:57:46)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 22:57:46.
+Error: Invariant NoFalseNotReady is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ ready = (f1 :> FALSE @@ f2 :> FALSE)
+/\ pc = "start"
+/\ flagged = (f1 :> FALSE @@ f2 :> FALSE)
+/\ deadline_passed = FALSE
+/\ dying = FALSE
+/\ stop_used = FALSE
+/\ pass_notready = (f1 :> FALSE @@ f2 :> FALSE)
+/\ snapping = (f1 :> FALSE @@ f2 :> FALSE)
+/\ registered = (f1 :> FALSE @@ f2 :> FALSE)
+/\ retry = FALSE
+/\ stop_req = FALSE
+/\ seen = (f1 :> FALSE @@ f2 :> FALSE)
+
+State 2: <MakeReady(f1) line 521, col 5 to line 526, col 51 of module poll>
+/\ ready = (f1 :> TRUE @@ f2 :> FALSE)
+/\ pc = "start"
+/\ flagged = (f1 :> FALSE @@ f2 :> FALSE)
+/\ deadline_passed = FALSE
+/\ dying = FALSE
+/\ stop_used = FALSE
+/\ pass_notready = (f1 :> FALSE @@ f2 :> FALSE)
+/\ snapping = (f1 :> FALSE @@ f2 :> FALSE)
+/\ registered = (f1 :> FALSE @@ f2 :> FALSE)
+/\ retry = FALSE
+/\ stop_req = FALSE
+/\ seen = (f1 :> FALSE @@ f2 :> FALSE)
+
+State 3: <MakeReady(f2) line 521, col 5 to line 526, col 51 of module poll>
+/\ ready = (f1 :> TRUE @@ f2 :> TRUE)
+/\ pc = "start"
+/\ flagged = (f1 :> FALSE @@ f2 :> FALSE)
+/\ deadline_passed = FALSE
+/\ dying = FALSE
+/\ stop_used = FALSE
+/\ pass_notready = (f1 :> FALSE @@ f2 :> FALSE)
+/\ snapping = (f1 :> FALSE @@ f2 :> FALSE)
+/\ registered = (f1 :> FALSE @@ f2 :> FALSE)
+/\ retry = FALSE
+/\ stop_req = FALSE
+/\ seen = (f1 :> FALSE @@ f2 :> FALSE)
+
+State 4: <Register line 630, col 5 to line 637, col 87 of module poll>
+/\ ready = (f1 :> TRUE @@ f2 :> TRUE)
+/\ pc = "scanned"
+/\ flagged = (f1 :> FALSE @@ f2 :> FALSE)
+/\ deadline_passed = FALSE
+/\ dying = FALSE
+/\ stop_used = FALSE
+/\ pass_notready = (f1 :> FALSE @@ f2 :> FALSE)
+/\ snapping = (f1 :> FALSE @@ f2 :> TRUE)
+/\ registered = (f1 :> TRUE @@ f2 :> FALSE)
+/\ retry = FALSE
+/\ stop_req = FALSE
+/\ seen = (f1 :> TRUE @@ f2 :> FALSE)
+
+State 5: <EvaluateFirst line 704, col 5 to line 718, col 35 of module poll>
+/\ ready = (f1 :> TRUE @@ f2 :> TRUE)
+/\ pc = "done_ready"
+/\ flagged = (f1 :> FALSE @@ f2 :> FALSE)
+/\ deadline_passed = FALSE
+/\ dying = FALSE
+/\ stop_used = FALSE
+/\ pass_notready = (f1 :> FALSE @@ f2 :> FALSE)
+/\ snapping = (f1 :> FALSE @@ f2 :> FALSE)
+/\ registered = (f1 :> FALSE @@ f2 :> FALSE)
+/\ retry = FALSE
+/\ stop_req = FALSE
+/\ seen = (f1 :> TRUE @@ f2 :> FALSE)
+
+444 states generated, 175 distinct states found, 113 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 00s at (2026-10-09 22:57:46)

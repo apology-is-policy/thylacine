@@ -1,0 +1,2 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sqpoll-ticket-e4vvnudh/overflow.c:50:29: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sqpoll-ticket-e4vvnudh/overflow.c:50:29 

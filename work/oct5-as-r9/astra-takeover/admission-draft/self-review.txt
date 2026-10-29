@@ -1,0 +1,63 @@
+Astra single-agent self-review, October10. Not an independent audit.
+
+This is an uninstalled internal FID admission/publication layer on the combined
+owner. It supersedes owner-program-draft working source/header copies; retains
+exact program-draft/wire-draft dependencies and canonical FID/request/slot/node C.
+No production queue or user frontend was installed. Canonical remains97d495fcb.
+
+ADMIT-R1: CLUNK local retirement cannot precede a fallible queue admission. Split
+out a pure RPC enqueue check, use it before any FID mutation, and retain Ll through
+source/claim acquisition and actual enqueue. The repeated enqueue check cannot
+change under the same lock: child CLUNK retirement does not change its parent
+scope's request predicates. Any impossible discrepancy is an invariant failure,
+not silent rollback of a retired source. Expiry/full queue/stale source failures
+leave no irreversible retirement. WALK claim failure puts its source borrow.
+
+Source resolution checks full incarnation, published SCOPE/FID kind and exact
+parent READY scope. Actual fid_borrow supplies committed mapping and READ/WRITE
+open rights. OPEN uses the exclusive claim instead of an ordinary borrow; WALK
+retains source plus exact reserved destination claim. Source identity, destination
+and claim type are retained in the charged operation. Unused release now refuses
+any outstanding FID claim/borrow. No naked protocol number supplied by a caller
+confers FID authority. The future frontend MUST allocate WALK new_fid using the
+actual monotone client allocator outside Ll; this module does not implement it.
+
+CLUNK retires its derived source in the admission lock interval. Its begin path
+checks actual earlier fid_borrows have ended before arming submission. Root CLUNK
+refuses. Positive commit follows owner final abort/deadline/program checks, then
+FID/open publication or CLUNK retirement, claim/borrow return and request finish
+in one Ll interval. WALK result is the exact destination slot; data uses the
+program's byte count. Failed publication retains ownership for scope abort.
+
+Negative cleanup only runs SETTLING after actual parser/payload users stop. The
+CLUNK error path requires BOTH scope abort latch and external completed-abort
+proof, and still refuses while earlier source borrowers remain. The proof bool
+is not a new quiescence mechanism: the future real engine must supply it only
+following its actual abort callbacks. Neither client.dead nor a CQ terminal is
+such proof. No real driver exists here to make that runtime claim.
+
+Host controls link actual FID/node/slot/request code and the prior actual-client
+submit/wire/program controls. New transaction fixtures deliberately synthesize
+successful program outcomes to isolate FID/publication behavior; they do not prove
+real remote WALK/open/CLUNK plus admission or concurrent close. Canonical fixed
+and provided-buffer ownership, immutable SQE/creator-image frontend, monotone FID
+allocation, READY scheduling and physical destruction remain outstanding.
+
+Test-witness repair: the first quiescence mutant survived because abort_reason=0
+independently blocked cleanup; the revised case sets a real abort latch while
+withholding quiescence, then separately tests proof-without-latch. Earlier raw
+run is retained and not counted as a fully passing mutant suite. Initial combined
+runner also needed an exact RPC mutation anchor because the new CLUNK check used
+the same text. No production failure is inferred from either harness defect.
+
+Real ARM64 owner816B remains within its4096-page charge; protocol42288B unchanged.
+The constructor uses explicit identity copying and actual free/refund/owner/pin
+order. No new allocator/client lock nests Ll. No callbacks, usercopy, allocator
+or final Loom drops occur in these FID transactions. Native gates remain pending;
+prior50boot evidence qualifies only its recorded source. Preserve8192MiB floor,
+Stratum61dde37, Astra pending/protected work, no Main/private activation/128MiB change.
+
+Final verified controls:257 cumulative assertions (160 prior combined-owner and97
+admission/setup assertions),26 mutants; constructor clean fault/cleanup schedules
+and16 mutants. Raw31 inputs/27 source-binary pairs,17 constructor pairs and4 ARM
+objects verified unchanged. New FID successes remain explicitly synthesized.

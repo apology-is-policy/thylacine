@@ -1,0 +1,31 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T10:29:27.866643+00:00",
+  "source_hashes": 10,
+  "commands": 21,
+  "current_source_and_snapshot_match": true,
+  "head_diff_match": true,
+  "raw_logs": {
+    "rust-version.log": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0.log": "647a266a47f3621ce4fe5a727ebaa614a37cbff8a778faffaf1bb213e410cbc0",
+    "rust-build-2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2.log": "36c9ca254b9c17879ad43e52cc180dd5fb450d491a755b85dc60197724f4fd01",
+    "no-clone-client-build.log": "0bb14873e29dd1892d382df00b4d0583a022b1330dd72eb39002fcbb2215f183",
+    "no-send-executor-build.log": "78104f1004d96be60863b9260e529feb41a12279844915c327d1e63217ad5c4f",
+    "valid-client-build.log": "7961cb5c0edcc1d6671b2ab627c1eef59314b557d5d58a5dad790480c0c1ca95",
+    "valid-client-run.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ignore-deadline-build.log": "a4199c837d7ecc367bb8d53c88a263953aab500253cf4da7c154819373ab792f",
+    "ignore-deadline-run.log": "a4b44197605222b074f8953a8b18a2fb61e8e1e4726074000cf4cc3fda33a58c",
+    "late-deadline-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "late-deadline-run.log": "18ffc4c87c73f4af17892bb34eb9b8345865458c0e5c5125b99c8be048c2eaf0",
+    "repeat-cancel-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "repeat-cancel-run.log": "27bcba8ac3f9acb560cba5c46fc8bdd1170f66b88057402ee9b3837dce43e4b4",
+    "drop-double-abort-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "drop-double-abort-run.log": "df1834be74848e0cd0dc0f27495384c4360da62c251c42e2c35216656cc63e6b",
+    "unbounded-scan-build.log": "13489caa4cdab136d4417db6939620e8e0ac83c4e9171647943c21aceb708e20",
+    "unbounded-scan-run.log": "4253bc1703bbad659dade11ddafd7b71d59d898b4e5ab6e48118793885ac519a",
+    "mutable-active-deadline-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "mutable-active-deadline-run.log": "1a60b7f65ce773289306cfc43572abf3e3fb6223326860854b4917b788ebb657"
+  }
+}

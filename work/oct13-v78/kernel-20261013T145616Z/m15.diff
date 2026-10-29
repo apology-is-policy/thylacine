@@ -1,0 +1,10 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/loom_service_control.c	2026-10-13 16:56:16
++++ kernel/loom_service_control.c	2026-10-13 17:16:22
+@@ -49,6 +49,7 @@
+     struct loom_service_snapshot result={.size=sizeof(result),.version=LOOM_SERVICE_ABI_VERSION,.object=in->object};
+     spin_lock(&l->lock);
+     struct loom_service_slot *s=control_exact(l,in->object);
++    if(!s)s=control_retiring_fid(l,in->object); // MUTANT M15: QUERY sees a RETIRING FID
+     if(!s)rc=-T_E_NOENT;
+     else if(s->kind==LOOM_SERVICE_TARGET) {result.kind=s->kind;result.state=LOOM_SERVICE_READY;}
+     else if(s->kind==LOOM_SERVICE_SCOPE || s->kind==LOOM_SERVICE_FID) {

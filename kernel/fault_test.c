@@ -12,11 +12,13 @@
 // Per ARCHITECTURE.md §24 (hardening) + ROADMAP §4.2 exit criteria
 // (deliberate-fault verification of canaries / W^X / BTI).
 
+#include "../arch/arm64/mmu.h"
 #include "../arch/arm64/uart.h"
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/fault_test.h>
 
 // ---------------------------------------------------------------------------
 // canary_smash — write past stack-array bounds; canary check fires.
@@ -65,7 +67,7 @@ static char provoke_canary_smash(void) {
 // ---------------------------------------------------------------------------
 
 #ifdef THYLACINE_FAULT_TEST_wxe_violation
-extern char _kernel_start[];
+#include "../arch/arm64/sections.h"
 
 __attribute__((noinline))
 __attribute__((no_stack_protector))
@@ -74,6 +76,16 @@ static void provoke_wxe_violation(void) {
     *target = (char)0xCC;
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// wxe_install_{kernel,block,gib,user} — W^X at the leaf encoders, one variant
+// per encoder (L3 kernel page, L2 block, L1 block, L3 user page). The provoker
+// has mmu.c encode a writable + executable leaf; the encoder's check
+// (pte_wxe_checked) extincts before the value can reach a table, with
+// "PTE violates W^X at install (kernel page)", "(kernel L2 block)",
+// "(kernel L1 block)" or "(user page)". Without the check the encode returns,
+// the FAIL line prints and the boot goes on.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // bti_fault — indirect branch to a target without a `bti` landing pad.
@@ -142,8 +154,10 @@ static void recurse_into_guard(unsigned depth) {
     volatile char buf[1024];
     buf[0] = (char)depth;
     buf[1023] = (char)~depth;
-    // Tail-call avoidance: use the local after the recursive call.
-    recurse_into_guard(depth + 1);
+    // Tail-call avoidance: use the local after the recursive call. The guard
+    // ends the descent near depth 16; the bound only gives the function a path
+    // that returns, without which -Winfinite-recursion proves it never does.
+    if (depth < (1u << 20)) recurse_into_guard(depth + 1);
     buf[0] ^= buf[1023];
     (void)buf[0];
 }
@@ -288,12 +302,105 @@ static void provoke_el1_sync_runaway(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// extinction_peer_chatter -- every peer CPU writes the console directly
+// (uart_puts, the path the kernel test runner takes) in a tight loop, and cpu0
+// extincts mid-chatter. The banner must still start its own line and end it:
+// test-fault.sh matches the WHOLE line. Without the per-byte console gate
+// (extinction_tx_enter) the peers' bytes land inside the banner and no
+// `^EXTINCTION:` line exists at all.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_extinction_peer_chatter
+#include <thylacine/extinction.h>
+#include <thylacine/smp.h>
+#include "../arch/arm64/timer.h"
+
+static u32 g_chatter_running;
+
+// Bounded, so a kernel without the gate (whose banner never forms) leaves a
+// small log for test-fault.sh to time out on, not minutes of chatter.
+#define CHATTER_NS (5000ull * 1000ull * 1000ull)
+
+static void chatter_entry(void) {
+    __atomic_fetch_add(&g_chatter_running, 1u, __ATOMIC_RELEASE);
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < CHATTER_NS)
+        uart_puts("  chatter: a peer cpu writes the console directly\n");
+    for (;;) __asm__ __volatile__("wfe" ::: "memory");
+}
+
+__attribute__((noinline))
+static void provoke_extinction_peer_chatter(void) {
+    unsigned self = smp_cpu_idx_self();
+    unsigned n = smp_cpu_count();
+    if (n > DTB_MAX_CPUS) n = DTB_MAX_CPUS;
+    // The peers are parked (notify is off through the suite, and main.c turns it
+    // on only after this hook); ready_on must wake them.
+    sched_set_notify_enabled(true);
+    u32 want = 0;
+    for (unsigned c = 0; c < n; c++) {
+        if (c == self) continue;
+        struct Thread *t = thread_create(kproc(), chatter_entry);
+        if (!t) continue;
+        t->cpu_pinned = true;
+        ready_on(c, t);
+        want++;
+    }
+    if (want == 0) {
+        uart_puts("FAIL: extinction_peer_chatter needs a peer cpu (-smp >= 2)\n");
+        return;
+    }
+    u64 t0 = timer_now_ns();
+    while (__atomic_load_n(&g_chatter_running, __ATOMIC_ACQUIRE) < want) {
+        if (timer_now_ns() - t0 > 2000ull * 1000ull * 1000ull) {
+            uart_puts("FAIL: extinction_peer_chatter: the peers never started chattering\n");
+            return;
+        }
+        __asm__ __volatile__("yield" ::: "memory");
+    }
+    // Let every peer get well into its loop before the banner.
+    t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < 20ull * 1000ull * 1000ull)
+        __asm__ __volatile__("yield" ::: "memory");
+    // The extinction entry must mask IRQs before it claims; test-fault.sh
+    // forbids the line a claim taken with IRQs on prints. Only a caller with
+    // IRQs on can tell the two apart.
+    u64 daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    if (daif & (1ull << 7)) {
+        uart_puts("FAIL: extinction_peer_chatter must extinct with irqs on\n");
+        return;
+    }
+    extinction("peer chatter: this banner must reach the wire whole");
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// vbar_pre_reloc / vbar_pre_mmu / vbar_boot_main -- a fault before
+// exception_vectors_verify, when only the vectors start.S installed can turn it
+// into an EXTINCTION line. The two pre-MMU variants call the load below: with stage 1
+// off every access is to Device memory, where an unaligned one always takes an
+// Alignment fault (the realistic pre-MMU fault: a misaligned DTB field). Its own
+// frame, so the dump's ELR names it. vbar_boot_main's provoker is the top of
+// boot_main.
+// ---------------------------------------------------------------------------
+
+#if defined(THYLACINE_FAULT_TEST_vbar_pre_reloc) || defined(THYLACINE_FAULT_TEST_vbar_pre_mmu)
+__attribute__((noinline))
+void fault_test_unaligned_load(void) {
+    static u64 word;
+    u64 v;
+    u64 p = (u64)(uintptr_t)&word + 1u;
+    __asm__ __volatile__("ldr %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+    (void)v;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.
 // ---------------------------------------------------------------------------
-
-void fault_test_run(void);
 
 void fault_test_run(void) {
 #if defined(THYLACINE_FAULT_TEST_canary_smash)
@@ -304,6 +411,13 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking wxe_violation...\n");
     provoke_wxe_violation();
     uart_puts("FAIL: provoke_wxe_violation returned (W^X did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_wxe_install_kernel) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_block) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_gib) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_user)
+    uart_puts("  fault-test: invoking wxe_install...\n");
+    mmu_fault_test_wxe_install();
+    uart_puts("FAIL: a W+X leaf was encoded (the encoder check did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_bti_fault)
     uart_puts("  fault-test: invoking bti_fault...\n");
     provoke_bti_fault();
@@ -326,6 +440,9 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking el1_sync_runaway...\n");
     provoke_el1_sync_runaway();
     uart_puts("FAIL: provoke_el1_sync_runaway returned (no fault fired)\n");
+#elif defined(THYLACINE_FAULT_TEST_extinction_peer_chatter)
+    uart_puts("  fault-test: invoking extinction_peer_chatter...\n");
+    provoke_extinction_peer_chatter();
 #else
     // No fault test selected — production build.
 #endif

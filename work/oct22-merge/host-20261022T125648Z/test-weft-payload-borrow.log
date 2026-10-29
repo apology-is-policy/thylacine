@@ -1,0 +1,3 @@
+PASS clean actual getters refuse enter/reap failure borrows
+PASS tx-unguarded pending write borrow rejected
+PASS rx-unguarded pending read borrow rejected

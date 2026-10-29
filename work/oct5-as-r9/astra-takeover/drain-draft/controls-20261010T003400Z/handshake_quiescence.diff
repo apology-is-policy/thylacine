@@ -1,0 +1,11 @@
+--- control.c
++++ handshake_quiescence.c
+@@ -1994,7 +1994,7 @@
+     if (r->phase == LREQ_ACTIVE &&
+         loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,p->request,reason))
+         extinction("CONNECT lost cancellation obligation");
+-    p->rpc_quiesced=true; // actual cursor abort returned; no operation escaped this handshake
++    p->rpc_quiesced=false; // fault: lost actual quiescence
+     // A concurrent abort caller may still hold the transport during teardown.
+     // Keep ABORTING until a later visit observes it gone; never free under it.
+     if (!p->users) {

@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 30f29ec60..d614a2c26 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -12278,7 +12278,9 @@ static s64 viv_sock_dgram_send(struct Proc *p, struct viv_socktab *tab,
+     if (clen == 0) return -(s64)T_E_INVAL;
+     bool connected;
+     s64  rc;
+-    struct Spoor *ctl = viv_sock_pin_ctl(p, tab, fd_raw, e, RIGHT_WRITE, &connected, &rc);
++    struct Spoor *ctl = sys_lookup_rw_handle(p, (hidx_t)fd_raw, RIGHT_WRITE);
++    connected = false;
++    rc = -(s64)T_E_BADF;
+     if (!ctl) {
+         // A peer thread's connect() won the socket meanwhile: EISCONN, what
+         // vivarium_sendto_decide answers a destination on a socket past FRESH.

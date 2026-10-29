@@ -1,0 +1,1 @@
+Assertion failed: (!t_fixed_read_bytes(done,&bytes,&n)&&n==3&&bytes[0]==1), function main, file test_fixed_requests.c, line 4.

@@ -1,0 +1,33 @@
+
+running 1 test
+test tests::native::queued_walks_keep_their_own_name_cells ... FAILED
+
+failures:
+
+---- tests::native::queued_walks_keep_their_own_name_cells stdout ----
+
+thread 'tests::native::queued_walks_keep_their_own_name_cells' (33619049) panicked at lib/loom-client/src/tests/native.rs:129:5:
+assertion `left == right` failed
+  left: [115, 101, 99, 111, 110, 100]
+ right: [102, 105, 114, 115, 116]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::native::queued_walks_keep_their_own_name_cells
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 170 filtered out; finished in 0.00s
+
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+warning: unused variable: `slot`
+   --> lib/loom-client/src/native/mod.rs:455:17
+    |
+455 |             let slot = self.sq.next_slot() as usize;
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_slot`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning (run `cargo fix --lib -p loom-client --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+error: test failed, to rerun pass `-p loom-client --lib`

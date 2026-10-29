@@ -1,0 +1,15 @@
+diff --git a/kernel/vivarium.c b/kernel/vivarium.c
+index 785615c2c..728126ec1 100644
+--- a/kernel/vivarium.c
++++ b/kernel/vivarium.c
+@@ -2250,8 +2250,8 @@ int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
+             // Spoor -- with a reference of its own, taken before `old` (which
+             // may be that Spoor) is released.
+             socktab_copy_row_locked(tab, &tab->s[i], &snap, newfd);
+-            if (ctl) spoor_ref(ctl);
+-            tab->ctl[i] = ctl;
++            (void)ctl;
++            tab->ctl[i] = NULL;
+             socktab_unlock(tab);
+             socktab_release(old);
+             return 1;

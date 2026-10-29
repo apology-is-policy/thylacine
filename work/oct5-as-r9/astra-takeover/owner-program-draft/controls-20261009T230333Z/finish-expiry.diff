@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ finish-expiry.c
+@@ -112,7 +112,7 @@
+            !o->advanced || o->action!=LPROGRAM_TERMINAL ||
+            o->program.phase!=LPROGRAM_DONE || o->program.result<0)return -T_E_IO;
+         int rc=rpc_ready(o);if(rc)return rc;
+-        if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
++        (void)now;
+     }
+     return 0;
+ }

@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ wire-expiry.c
+@@ -56,7 +56,7 @@
+        r->phase!=LREQ_ACTIVE || r->borrows!=1 || o->rpc.sending)return -T_E_BUSY;
+     int rc=rpc_ready(o);if(rc)return rc;
+     if(o->capture_error || o->callback_seen)return -T_E_IO;
+-    if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
++    if(false)return -T_E_TIMEDOUT;
+     o->callback_seen=false;o->capture_error=0;
+     o->rpc.on_complete=loom_rpc_capture;o->phase=LRPC_INFLIGHT;
+     return 0;

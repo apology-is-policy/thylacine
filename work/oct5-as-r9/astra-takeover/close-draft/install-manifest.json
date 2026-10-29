@@ -1,0 +1,69 @@
+{
+  "base_head": "a978d19c388f512a645cdcbaeea60a81a0a06727",
+  "sources": {
+    "kernel/loom_service_connect.c": {
+      "base_sha256": "3c737a4f8b0dd6f4837663303f422d320508812d37df401c513929504a067e47",
+      "draft_sha256": "52c25501841b75205dfd386fa0709e044ae1855f36379efb44326d293cab880f"
+    },
+    "kernel/loom_service_engine.c": {
+      "base_sha256": "b40ce94467702873874cae331880a316853263bc96a8cc9247baa3b74765a48a",
+      "draft_sha256": "c28ae718559668fa84332fceea7d57348b436e69e1c6906604b79e036aead74f"
+    },
+    "kernel/CMakeLists.txt": {
+      "base_sha256": "d2254e52688ef39fe0d86297cc008891c4e3aa411fb3e5bc3fce29a224874e00",
+      "draft_sha256": "182ad72abfad3ed6f9147fa481f5e80c21ae0482cc43889d574f8e26d33ab47d"
+    },
+    "kernel/loom_service_close_queue.c": {
+      "base_sha256": null,
+      "draft_sha256": "ceaea22a952b8d675f2371449abd16630e50ea853ae623e1f917ab5251d0cda0"
+    },
+    "kernel/loom.c": {
+      "base_sha256": "e6ed13c4e9977899a10076fd6273c63a17bafd52f4a08b6ddeba15860abd0798",
+      "draft_sha256": "15b84649beb8672ef7d1cc5fef4780a3a4313acc139d7cc84675d094b3d62f3d"
+    },
+    "kernel/test/test_loom.c": {
+      "base_sha256": "03261ec8caf85b741740cf79a821fbf540a9e4f35489531b246395302c27ac1e",
+      "draft_sha256": "57fdd25d521c06fbc12a2c121108048c097c84a7df918c6c0eb5ba445a0e17db"
+    },
+    "kernel/test/test.c": {
+      "base_sha256": "5e7144a7338eaf3d2c7cd639142167a6cc1773db859e60f89cb2380ca35a4702",
+      "draft_sha256": "4f16ab18abd870d07fcc0381ded6afea6ede83827da444c084724a265792f55f"
+    },
+    "kernel/include/thylacine/loom.h": {
+      "base_sha256": "7254fc45a6a6883595ca712b551deacf455bb9bdbc67c29da05d53d4996a77a8",
+      "draft_sha256": "3c2987de587af90cf1e424fd92976ea48f40bfde5a2fb31eaa1a14fe1779fee5"
+    },
+    "kernel/include/thylacine/loom_service_nodes.h": {
+      "base_sha256": "9cfafbb971b46ce2b992d7c331cd83b06a204b05eda96d4cc8fbd550865a9c81",
+      "draft_sha256": "8bf4865af4e913b5bdd0b39d1b357f793fa48b50767cdda5bbd2976aecea5b0b"
+    },
+    "kernel/include/thylacine/loom_service_connect.h": {
+      "base_sha256": "bd6564e93d9e5ff8ae1dbc61914510cfaddb7025a489785d385f5d04dcc0658a",
+      "draft_sha256": "29bf530a62e7c1ff2ef780f2355bea3daf28c565b9c211d7f476d328337dd8c4"
+    },
+    "kernel/include/thylacine/loom_service_engine.h": {
+      "base_sha256": "2c2f3cd2aef1cbd4df641e9fa040cacb40271aee840762b0e8a485aaa4fe12fd",
+      "draft_sha256": "feacf840c7ac7876ea22a9db349f2cdf67d7507ff446d1726d8dde7cdbc5777a"
+    },
+    "kernel/include/thylacine/loom_service_close_queue.h": {
+      "base_sha256": null,
+      "draft_sha256": "6a3fe97f5f9afeb11f731caee4f2ce87d9102e4be6b085a1fbc56d4ce06d3ea5"
+    },
+    "work/oct5-as-r9/final-reclaim-control.py": {
+      "base_sha256": "86f85db44e2bc674b74c45a815d0fdeef4c03eda021c6e29700facab3746c2fe",
+      "draft_sha256": "88dc40537d124f6a0bc4cc5a9c8283b317f8144de22458361e425d1e980e4648"
+    },
+    "work/oct5-as-r9/slot-owner-control.py": {
+      "base_sha256": "c06c2737bf52c26defb0cacd5b0b2a909822142768ef76bf7d4812eaec8aebc5",
+      "draft_sha256": "137abd9591e4e128c4f5e860f080f204532ce0731dc5076bf3b4350edf8a8aa3"
+    },
+    "work/oct5-as-r9/private-fixed-control.py": {
+      "base_sha256": "20e1711fee32cb56c292d05e0f1ddc8cbf9659a00d749d2f64ae1d22515c873e",
+      "draft_sha256": "18553bcf4f4eaf65f549af30e377256cb86cafbf8c8ad789233b324c56aa5fff"
+    },
+    "work/oct5-as-r9/connect-control.py": {
+      "base_sha256": "2c25a332e1ffdd699e35bb02b54255c1e2dfa6a49ebb15a0cba6d4d8881f145d",
+      "draft_sha256": "6b86941ab99596d835a6f5722a27ede2be1e5e6d9cca58cc895334558e6ad758"
+    }
+  }
+}

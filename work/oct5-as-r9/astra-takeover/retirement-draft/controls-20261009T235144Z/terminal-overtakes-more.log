@@ -1,0 +1,2 @@
+PASS fixed SQE preparation: 289 checks
+FAIL terminal waits behind committed MORE

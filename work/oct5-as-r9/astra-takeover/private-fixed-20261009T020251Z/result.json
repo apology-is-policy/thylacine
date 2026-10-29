@@ -1,0 +1,78 @@
+{
+  "scope": "Extract fixed reservation owners and pool owners with actual joint ledgers.\nSequential checked lock/Burrow/Loom doubles under ASan/UBSan; no protocol or\nconcurrency proof. Native fixture separately checks actual pins and retirement.\n",
+  "source_head": "93db78ecda3a85471f722366996557a7c8da5da0",
+  "loom_sha256": "0088653627a34a0afa37cb0c69595a13994c90d3c9cb844eae85a2b53aa4d08d",
+  "modules": {
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165"
+  },
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS fixed reservations exclude pools and retain local ownership",
+      "generated_sha256": "659b47624ae7b0dca5f0840be8dbf09f156aa5784cd27422867f4d4a7a339d0c"
+    },
+    {
+      "case": "omit-image",
+      "rc": 11,
+      "expected": "fixed image authority",
+      "generated_sha256": "c309640af6715c928bb0ce29162496618c7a37c76a2c4f7d55da42b1b26c6d01"
+    },
+    {
+      "case": "omit-creator",
+      "rc": 11,
+      "expected": "fixed creator authority",
+      "generated_sha256": "b5dcc2f7571065b010531e78ad94cf02b481bb64362700eb1b1be615888510bc"
+    },
+    {
+      "case": "omit-backing-pin",
+      "rc": 11,
+      "expected": "fixed owns canonical pin and ring",
+      "generated_sha256": "cb042305af5d303fa9926b34f2fe07aa6cac905ecb92a00c89bf132f6ccca144"
+    },
+    {
+      "case": "omit-ring-pin",
+      "rc": 11,
+      "expected": "fixed owns canonical pin and ring",
+      "generated_sha256": "5fffefb29115aae5020801ad8386f412fe1aa0791a70797ef8b6de02e7aeee59"
+    },
+    {
+      "case": "pool-over-fixed",
+      "rc": 11,
+      "expected": "fixed excludes pool alias",
+      "generated_sha256": "bddf6b0690cb334b7783df7acd15eede6fe685ae21a07265f0370744176be566"
+    },
+    {
+      "case": "fixed-over-pool",
+      "rc": 11,
+      "expected": "provisional pool excludes fixed alias",
+      "generated_sha256": "809a7cd56923a1b26d3b0eca8167c2385ca8ee5af1b29d857e5f8ad5a4c8776d"
+    },
+    {
+      "case": "omit-bound",
+      "rc": 11,
+      "expected": "fixed capacity bounded",
+      "generated_sha256": "6ed039b050a22e921e832e25b3533543862ad849cfc128ac416670fbecd4148b"
+    },
+    {
+      "case": "omit-drop",
+      "rc": 11,
+      "expected": "fixed release drops exactly one ownership pair",
+      "generated_sha256": "8adebb2578b26c5e3b4cd92b5b5482ede9221dc97824e45d51feecc85755ef81"
+    },
+    {
+      "case": "omit-owner-drop",
+      "rc": 11,
+      "expected": "fixed release drops exactly one ownership pair",
+      "generated_sha256": "1a064b84e1627046364247471aa78335146ec91e04665229dd4d624f442a51e3"
+    },
+    {
+      "case": "allow-close",
+      "rc": 11,
+      "expected": "fixed close refusal",
+      "generated_sha256": "fb8d0dcdefdba7c3c6f6364ef75856fc6fd2de46abef1493c56cea02eed2c3ff"
+    }
+  ]
+}

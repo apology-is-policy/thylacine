@@ -273,7 +273,7 @@ At every resting point, whether or not you yield (full text in `docs/agent/SESSI
 - **Direct statements.** State results and decisions plainly. During long work, give the user a one-line note when you start a long-running step, change direction, or find something that changes the plan.
 - **No backwards-compat shims** without explicit need. Delete dead code; don't leave re-exports with `// removed` comments.
 - **Avoid comments that reference the author's intent** ("I chose X because..."). The reason goes in the commit message; the code stands on its own.
-- **C99 idiomatic style** (kernel) — `struct Foo` not `Foo_t`; lowercase function names; explicit types; no `#define` magic; no GNU extensions. Plan 9 dialect tendencies are *not* used (no `auto`, no nested functions, no channel keywords).
+- **C99 idiomatic style** (kernel) — `struct Foo` not `Foo_t`; lowercase function names; explicit types; no `#define` magic (the one sanctioned storage-class macro, `VISIBLE_IF_KERNEL_TESTS`, and the cross-file declaration rule are in `.claude/rules/kernel-code.md`); no GNU extensions. Plan 9 dialect tendencies are *not* used (no `auto`, no nested functions, no channel keywords).
 - **Rust idiomatic style** (userspace) — standard rustfmt + clippy clean.
 
 ---
@@ -299,7 +299,7 @@ tools/check-v80-floor.py                 # ARMv8.0 floor; make test-a72 for the 
 
 Every other gate, and what each one proves: `docs/agent/GATES.md`.
 
-**The boot banner and the `EXTINCTION:` prefix are tooling ABI, and so is each extinction body a tool matches** (the six `tools/test-fault.sh` checks; the vault note `abi-boot-banner` keeps the set): rewording one is a format break (escalate). Any other extinction body is prose (operator vote 2026-09-25, `dec-2026-09-25-extinction-bodies`). Find the consumers with `quaestor owner`; detail in `docs/agent/BOOT-BANNER.md`.
+**The boot banner and the `EXTINCTION:` prefix are tooling ABI, and so is each extinction body a tool matches** (the ones `tools/test-fault.sh` checks; the vault note `abi-boot-banner` keeps the set): rewording one is a format break (escalate). Any other extinction body is prose (operator vote 2026-09-25, `dec-2026-09-25-extinction-bodies`). Find the consumers with `quaestor owner`; detail in `docs/agent/BOOT-BANNER.md`.
 
 **Hosts.** thyla-pi (`ssh thyla-pi`) is a permanent ARM64/KVM/V3D box: one QEMU at a time, and `pool.img` + `ramfs.cpio` ship together or not at all -- read `docs/agent/THYLA-PI.md` first. Stratum host sanitizers run on a disposable GCP VM, never locally.
 

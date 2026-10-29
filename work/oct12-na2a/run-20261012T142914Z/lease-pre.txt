@@ -1,0 +1,5 @@
+mac   HELD by you for 18s, 2.0h left
+        why: NA-2a audit close dc7feeb0f: ABI checker + witness, then na2a-run.sh (2 controls + 8 mutant legs + 2 rebuilds, ~70 min)
+        queue 1: astra (42m waiting)
+pi    FREE
+disk: 9.7 GiB available at /Users/northkillpd/projects/thylacine-corona

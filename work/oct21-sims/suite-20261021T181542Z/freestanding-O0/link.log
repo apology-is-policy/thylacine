@@ -1,0 +1,18 @@
+ld.lld: error: undefined symbol: memcpy
+>>> referenced by ring_payload.c:13 (usr/lib/libt/src/loom_client/ring_payload.c:13)
+>>>               work/oct21-sims/suite-20261021T181542Z/freestanding-O0/ring_payload.o:(t_ring_create)
+>>> referenced by paired_cq.c:11 (usr/lib/libt/src/loom_client/paired_cq.c:11)
+>>>               work/oct21-sims/suite-20261021T181542Z/freestanding-O0/paired_cq.o:(t_paired_init)
+>>> referenced by fixed_requests.c:13 (usr/lib/libt/src/loom_client/fixed_requests.c:13)
+>>>               work/oct21-sims/suite-20261021T181542Z/freestanding-O0/fixed_requests.o:(t_fixed_create)
+>>> referenced 36 more times
+
+ld.lld: error: undefined symbol: memset
+>>> referenced by ring_payload.c:10 (usr/lib/libt/src/loom_client/ring_payload.c:10)
+>>>               work/oct21-sims/suite-20261021T181542Z/freestanding-O0/ring_payload.o:(release_pool)
+>>> referenced by fixed_requests.c:24 (usr/lib/libt/src/loom_client/fixed_requests.c:24)
+>>>               work/oct21-sims/suite-20261021T181542Z/freestanding-O0/fixed_requests.o:(prepare)
+>>> referenced by lease_ledger.c:112 (usr/lib/libt/src/loom_client/lease_ledger.c:112)
+>>>               work/oct21-sims/suite-20261021T181542Z/freestanding-O0/lease_ledger.o:(t_lease_release)
+>>> referenced 7 more times
+clang: error: linker command failed with exit code 1 (use -v to see invocation)

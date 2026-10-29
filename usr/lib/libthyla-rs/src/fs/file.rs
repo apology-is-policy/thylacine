@@ -168,6 +168,16 @@ impl File {
         self.handle.rights()
     }
 
+    /// Own a second handle to this same open object, with the same rights.
+    /// Offset and open-object state are shared; closing either handle leaves
+    /// the other live. The kernel refuses any stale or overstated rights.
+    pub fn try_clone(&self) -> Result<File> {
+        let fd = Error::from_syscall_return(unsafe {
+            crate::t_dup(self.as_raw_fd() as i64, self.rights().bits())
+        })?;
+        Ok(File::from_raw_handle(Handle::from_raw(fd as i32, self.rights())))
+    }
+
     /// Fetch the file's metadata via SYS_FSTAT.
     ///
     /// Returns size, type (file/dir/char-device), mode, link count,

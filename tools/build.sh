@@ -60,8 +60,6 @@
 #
 # Options:
 #   --release        Release build (-O2, no debug). Default Debug (assertions on).
-#   --hardening-full Enable P1-H hardening flags.
-#   --kaslr          Enable KASLR.
 #   --sanitize=ubsan UBSan kernel build (separate build dir).
 #   --production     V1.0 lean boot shape: drop the in-kernel test suite
 #                    (KERNEL_TESTS=OFF) + joey's boot-test probe ladder (#61).
@@ -153,8 +151,8 @@ fi
 # --- build configuration (tools/build-config.sh: the typed config artifact) ----
 # docs/BUILD-CONFIG-DESIGN.md. The old flag-bundles + scattered THYLACINE_* env
 # vars are now orthogonal axes resolved here; bc_export threads them onto the knobs
-# this script reads (build_type/kernel_tests/boot_probes/dev_accounts/hardening_full/
-# kaslr/sanitize/no_tickless + the bake env vars). Legacy flags stay as sugar; a bare
+# this script reads (build_type/kernel_tests/boot_probes/dev_accounts/sanitize/
+# no_tickless + the bake env vars). Legacy flags stay as sugar; a bare
 # invocation applies the `default` preset -- the historical dev/CI shape (in-kernel
 # tests + boot-probe ladder ON) that make/tools/test.sh/the SMP gate rely on.
 BC_DIR_CONFIGS="$REPO_ROOT/configs"
@@ -179,13 +177,11 @@ while [[ $# -gt 0 ]]; do
         --show-config) show_config=1; shift ;;
         # -- legacy sugar; preserved behavior (BUILD-CONFIG-DESIGN.md 4.3) --
         --release)         bc_set BUILD_TYPE=release; shift ;;
-        --hardening-full)  bc_set HARDENING_FULL=y;   shift ;;
-        --kaslr)           bc_set KASLR=y;            shift ;;
         --no-tickless)     bc_set TICKLESS=n;         shift ;;
         --sanitize=*)      bc_set "SANITIZE=$(bc__san_alias "${1#--sanitize=}")"; shift ;;
         --production)      # exact old lean shape: tests + probes OFF. Accounts now
                            # stay on (DEV_ACCOUNTS default y) -- the finding-#1 fix.
-                           # `--config production` is the separate hardened preset.
+                           # `--config production` is the separate release preset.
                            bc_set TESTS=n; bc_set BOOT_PROBES=n; config_selected=1; shift ;;
         --dev)             bc_apply_preset dev; config_selected=1; shift ;;
         # -- non-config passthroughs (unchanged) --
@@ -200,14 +196,14 @@ done
 if [[ "$config_selected" == 0 ]]; then bc_apply_preset default; fi
 bc_resolve
 bc_export                 # -> build_type/kernel_tests/boot_probes/dev_accounts/
-                          #    hardening_full/kaslr/sanitize/no_tickless + bake env vars
+                          #    sanitize/no_tickless + bake env vars
 mkdir -p "$BUILD_DIR"
 bc_emit_config "$BUILD_DIR/.config"
 if [[ "$show_config" == 1 ]]; then
     echo "== resolved build config ($BUILD_DIR/.config) =="
     bc_show
     echo "== -> build.sh knobs =="
-    echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts hardening=$hardening_full kaslr=$kaslr sanitize='$sanitize' no_tickless=$no_tickless"
+    echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts sanitize='$sanitize' no_tickless=$no_tickless"
     if [[ ${#extra_cmake_args[@]} -gt 0 ]]; then printf 'cmake extra:'; printf ' %s' "${extra_cmake_args[@]}"; echo; fi
     exit 0
 fi
@@ -231,6 +227,11 @@ elif [[ -n "$sanitize_cmake" ]]; then
     KERNEL_BUILD="$BUILD_DIR/kernel-${sanitize_cmake}"
 elif [[ "$no_tickless" == "ON" ]]; then
     KERNEL_BUILD="$BUILD_DIR/kernel-no-tickless"
+fi
+# The private-async qualification kernel composes with the dirs above, and never
+# shares a CMake cache or an ELF with the image it is not (ASYNC-SERVICE-ABI.md).
+if [[ -z "$build_dir_override" && "${private_async_qual:-OFF}" == "ON" ]]; then
+    KERNEL_BUILD="${KERNEL_BUILD}-private-async-qual"
 fi
 
 # --- build ledger -------------------------------------------------------------
@@ -343,22 +344,49 @@ stratum_host_tools_stale() {
 }
 
 build_kernel() {
-    echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', tests=$kernel_tests, dir=$KERNEL_BUILD)"
+    echo "==> Building kernel (build_type=$build_type, sanitize='${sanitize_cmake}', tests=$kernel_tests, dir=$KERNEL_BUILD)"
     cmake -S "$REPO_ROOT" -B "$KERNEL_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
-        -DTHYLACINE_HARDENING_FULL="$hardening_full" \
-        -DTHYLACINE_KASLR="$kaslr" \
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         -DKERNEL_TESTS="$kernel_tests" \
         -DTHYLACINE_NO_TICKLESS="$no_tickless" \
+        -DTHYLACINE_PRIVATE_ASYNC_QUALIFICATION="${private_async_qual:-OFF}" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;
     # shared with tools/test-fault.sh so every dump path is symbolized).
     "$REPO_ROOT/tools/regen-halls-symtab.sh" "$KERNEL_BUILD" "$verbose"
+
+    # Cross-file declarations (.claude/rules/kernel-code.md; votes 19 + 20). C
+    # compares a declaration with its definition only inside one TU, so a name
+    # with two types across TUs, a .c declaring a name it does not define, or a
+    # struct laid out in two files passes every compile -- a 17-parameter call to
+    # a 16-parameter core did, for three months. This configuration's TUs, after
+    # the symtab regen so the generated one is final. Fatal, no skip switch, and
+    # the checker proves itself first (the floor check's argument in
+    # build_ramfs). Measured 2026-10-27: ~7 s production, ~17 s with the tests.
+    echo "==> cross-file declaration check"
+    local decls_self
+    decls_self="$(python3 "$REPO_ROOT/tools/check-decls.py" --self-test 2>&1)" \
+        || { echo "$decls_self" >&2
+             echo "==> check-decls cannot verify itself -- the build stops here" >&2
+             exit 1; }
+    python3 "$REPO_ROOT/tools/check-decls.py" --build-dir "$KERNEL_BUILD" \
+        || { echo "==> cross-file declaration check FAILED -- see .claude/rules/kernel-code.md," >&2
+             echo "    \"Cross-file declarations\"" >&2
+             exit 1; }
+    # A test g_tests does not name never runs, and no count notices
+    # (devcap.clearance_audio_graph, 51 days; OPEN-BUGS 2026-10-27T07:48Z).
+    # Textual, so it runs in every configuration. Fatal, self-testing.
+    echo "==> kernel test registry check"
+    python3 "$REPO_ROOT/tools/check-test-registry.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-test-registry.py" \
+        || { echo "==> kernel test registry check FAILED -- register the test in" >&2
+             echo "    kernel/test/test.c's g_tests and test_registry.h" >&2
+             exit 1; }
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
-    ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
+    ledger "kernel ELF: BUILT ($build_type, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
     ls -la "$KERNEL_BUILD/thylacine.elf"
 
     # P4-E: build the ramfs cpio alongside the kernel so QEMU's
@@ -573,7 +601,7 @@ EOF
     # into the initrd's bin/. The list is curated below (not glob) so an
     # accidental CMake byproduct doesn't get shipped. Each binary's
     # source-of-truth comment lives in usr/<name>/CMakeLists.txt.
-    local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" "stub-driver" "stub-fs-probe" "stub-walk-probe" "thread-probe" "thread-fault-probe" )
+    local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" "stub-driver" "stub-fs-probe" "stub-walk-probe" "thread-probe" "thread-fault-probe" "loom-bridge-probe" "loom-c-probe" "argwidth-probe" )
     for bin in "${usr_bins[@]}"; do
         local src="$USR_BUILD/$bin/$bin"
         if [[ -f "$src" ]]; then
@@ -585,7 +613,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "lantern" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "protect-probe" "protect-guard-child" "bus-probe-child" "capacity-probe" "heap-probe" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "lantern" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "protect-probe" "protect-guard-child" "bus-probe-child" "capacity-probe" "heap-probe" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "loom-fixture" "loom-native-probe" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -866,6 +894,25 @@ DOSBOXCONF
     python3 "$REPO_ROOT/tools/check-invariants.py" \
         || { echo "==> invariant registry check FAILED -- ARCH section 28 and" >&2
              echo "    CLAUDE.md's condensed table must carry the same rows" >&2
+             exit 1; }
+
+    # ERRORS.md principle 6: a syscall argument that does not fit is refused,
+    # never cast down. Fatal, self-testing, sub-second.
+    echo "==> argument width check (ERRORS.md principle 6)"
+    python3 "$REPO_ROOT/tools/check-arg-width.py" "$REPO_ROOT/kernel/syscall.c" \
+        || { echo "==> argument width check FAILED -- a raw syscall argument is" >&2
+             echo "    narrowed with no full-width check first" >&2
+             exit 1; }
+
+    # A session finds its audit row by the first cell. Merges lost the
+    # VMO / BURROW row and copied five others with divergent addenda, and
+    # nothing failed (OPEN-BUGS 2026-10-28T02:20Z). Fatal, self-testing,
+    # sub-second.
+    echo "==> audit-trigger row check"
+    python3 "$REPO_ROOT/tools/check-audit-rows.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-audit-rows.py" \
+        || { echo "==> audit-trigger row check FAILED -- a row is duplicated, or an" >&2
+             echo "    unpushed merge dropped one and this tree still lacks it" >&2
              exit 1; }
 }
 
@@ -1235,7 +1282,14 @@ build_userspace() {
     rs_targets=$(rustup target list --installed 2>/dev/null || true)
     if grep -q "^$USR_RS_TARGET$" <<<"$rs_targets"; then
         echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
-        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose )
+        local hi_features=()
+        case "${THYLACINE_INTERACTION_QUALIFICATION:-0}" in
+            0) ;;
+            1) hi_features=(--features halcyond/interaction-qualification)
+               echo "==> Halcyon interaction qualification ENABLED (not a release default)" ;;
+            *) echo "THYLACINE_INTERACTION_QUALIFICATION must be 0 or 1" >&2; return 1 ;;
+        esac
+        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose ${hi_features[@]+"${hi_features[@]}"} )
         echo "==> Userspace Rust built under $USR_RS_BUILD"
         ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true
     else

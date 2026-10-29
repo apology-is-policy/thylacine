@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -50,7 +50,7 @@
+     if (!rc) rc = loom_request_prepare(&l->service_requests,l->service_slots,
+                                         l->service_nodes,scope,user_data,deadline,now,&request);
+     if (!rc) {
+-        rc = loom_slot_pin(l->service_slots,scope,LOOM_SERVICE_SCOPE);
++        rc = 0;
+         if (rc) (void)loom_request_rollback(&l->service_requests,l->service_slots,request);
+     }
+     spin_unlock(&l->lock);

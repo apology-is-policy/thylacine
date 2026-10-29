@@ -7,6 +7,15 @@ edition = "2021"
 name = "kaua-term-probe"
 path = "src/main.rs"
 
+[features]
+# Nondefault until HI1-R24 pressure and application workflow qualification.
+interaction-qualification = []
+readiness-qualification = ["libthyla-rs/poll-worker-test"]
+
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs" }
 kaua-term = { path = "../kaua-term" }
+ptyhold = { path = "../lib/ptyhold" }
+inlinewire = { path = "../lib/inlinewire" }
+libhalcyon = { path = "../lib/libhalcyon" }
+libtapestry = { path = "../lib/libtapestry" }

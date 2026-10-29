@@ -1,0 +1,99 @@
+warning: unused variable: `hub`
+  --> src/fixed_futures.rs:43:12
+   |
+43 | fn release(hub: &Rc<RefCell<Hub>>, slot: &mut Option<usize>) {
+   |            ^^^ help: if this is intentional, prefix it with an underscore: `_hub`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning (run `cargo fix --lib -p loom-client --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 12 tests
+test tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference ... FAILED
+test tests::ring::future_clone_callback_completion_is_not_lost ... FAILED
+test tests::ring::future_completion_before_first_poll ... FAILED
+test tests::ring::future_driver_close_and_drop_wake_unfinished ... ok
+test tests::ring::future_drop_unregisters_but_keeps_active_storage ... FAILED
+test tests::ring::future_failed_prepare_and_write_result ... FAILED
+test tests::ring::future_malformed_record_wakes_then_fails_closed ... FAILED
+test tests::ring::future_read_wakes_and_retains_result ... FAILED
+test tests::ring::future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test tests::ring::future_replaced_waker_drop_can_deliver_completion ... ok
+test tests::ring::future_replaces_waker_without_notifying_old_task ... ok
+test tests::ring::future_wake_callback_polls_outside_hub_borrow ... FAILED
+
+failures:
+
+---- tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference stdout ----
+
+thread 'tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference' (31828259) panicked at src/tests/ring.rs:1259:5:
+assertion `left == right` failed
+  left: 64
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::future_clone_callback_completion_is_not_lost stdout ----
+
+thread 'tests::ring::future_clone_callback_completion_is_not_lost' (31828260) panicked at src/tests/ring.rs:1125:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::future_completion_before_first_poll stdout ----
+
+thread 'tests::ring::future_completion_before_first_poll' (31828261) panicked at src/tests/ring.rs:978:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::future_drop_unregisters_but_keeps_active_storage stdout ----
+
+thread 'tests::ring::future_drop_unregisters_but_keeps_active_storage' (31828263) panicked at src/tests/ring.rs:1005:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::future_failed_prepare_and_write_result stdout ----
+
+thread 'tests::ring::future_failed_prepare_and_write_result' (31828264) panicked at src/tests/ring.rs:1058:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::future_malformed_record_wakes_then_fails_closed stdout ----
+
+thread 'tests::ring::future_malformed_record_wakes_then_fails_closed' (31828265) panicked at src/tests/ring.rs:1052:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::future_read_wakes_and_retains_result stdout ----
+
+thread 'tests::ring::future_read_wakes_and_retains_result' (31828266) panicked at src/tests/ring.rs:955:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::future_wake_callback_polls_outside_hub_borrow stdout ----
+
+thread 'tests::ring::future_wake_callback_polls_outside_hub_borrow' (31828270) panicked at src/tests/ring.rs:1164:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference
+    tests::ring::future_clone_callback_completion_is_not_lost
+    tests::ring::future_completion_before_first_poll
+    tests::ring::future_drop_unregisters_but_keeps_active_storage
+    tests::ring::future_failed_prepare_and_write_result
+    tests::ring::future_malformed_record_wakes_then_fails_closed
+    tests::ring::future_read_wakes_and_retains_result
+    tests::ring::future_wake_callback_polls_outside_hub_borrow
+
+test result: FAILED. 4 passed; 8 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

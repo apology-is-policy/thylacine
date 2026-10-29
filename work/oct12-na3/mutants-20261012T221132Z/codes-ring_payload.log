@@ -1,0 +1,14 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes.c:5:
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-ring_payload/thyla/loom_client/ring_payload.h:38:16: error: static assertion failed due to requirement '((-1103)) > -(1000) - 100': T_RING_UNCERTAIN lies in the -1000 block
+   38 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_RING_UNCERTAIN,1000),"T_RING_UNCERTAIN lies in the -1000 block");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-ring_payload/thyla/loom_client/base.h:16:60: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                                            ^~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-ring_payload/thyla/loom_client/ring_payload.h:38:16: note: expression evaluates to '-1103 > -1100'
+   38 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_RING_UNCERTAIN,1000),"T_RING_UNCERTAIN lies in the -1000 block");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-ring_payload/thyla/loom_client/base.h:16:66: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                                            ~~~~~~^~~~~~~~~~~~~
+1 error generated.

@@ -3,17 +3,72 @@ id: sub-kernel-srvconn
 type: sub
 title: "srvconn — the /srv per-connection byte transport"
 parent: moc-kernel-srv
-code: [kernel/srvconn.c, kernel/include/thylacine/srvconn.h]
+code: [kernel/srvconn.c, kernel/include/thylacine/srvconn.h, kernel/test/test_srvconn.c, tools/test-srvconn-admission.py]
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [prose, gate-smp]
-locks: [lock-srvconn-chan-lock]
+locks: [lock-srvconn-chan-lock, lock-srv-admission]
 hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
 updated: 2026-10-28
 ---
+## Admission (October 1, D7)
+
+One admission lock reserves all applicable counters before allocation:
+96 credits per session, 192 for sessions combined, and 256 globally.
+Default connections cost one credit (128 KiB of rings); bulk connections cost
+four (512 KiB). Counts remain separate from credits. The charge is captured
+before allocation and retained independently of later protocol negotiation.
+Boot/internal connections use the global bound only. At most 16 session
+domains may remain retained. Constructors in flight and torn but referenced
+transports count; teardown never releases their tickets. Allocation rollback
+and final destruction return tickets only after storage is freed.
+
+A registry owns a refcounted `SrvDomain`; each admitted connection owns another
+reference. Connections do not retain the registry, so no registry/backlog cycle
+is introduced. The last domain reference returns its domain slot. A routed
+resident connection charges the requesting private view, not its boot provider.
+`/ctl/9p-sessions` exposes session/boot class and local, aggregate, global and
+retained-domain counts; they are observations, not authorization inputs.
+
+The predecessor CAS reserved only the global count. The new single-lock
+transaction replaces it so an over-limit session cannot reserve boot margin,
+even transiently. No allocation, storage free or final domain release occurs
+under the admission lock. The diagnostic list lock may precede admission;
+admission never enters the list or a registry lock.
+
+The actual-source host fixture checks all allocation failures, reentrant
+construction, independent session quotas, aggregate and global saturation,
+rollback and retained teardown, and that a connection carries both ends'
+principals (distinct values; a server principal stamped from the peer's is a
+mutant). The focused fixture includes weighted mixed-class boundaries and intended
+mutants for bulk charging and exact final return. Real kernel
+fixtures cover domain retirement and route charging. These are focused
+functional checks, not a new SMP/sanitizer qualification.
+
+The October 3 implementation is qualified by 50 clean boots across default
+SMP1/4/8 and UBSan SMP4/8, eleven intended source-fixture mutants, and native
+service/media/SAK checks. No total-memory, clipboard, Pi or ASan claim follows.
+
+## Weighted admission (October 3)
+
+The ratified contract is `docs/HALCYON-INTERACTION-CONNECTION-BUDGET.md`.
+Global and combined ring ceilings remain 32/24 MiB; one session may consume
+12 MiB. These are ring bounds, not total kernel memory. At least one credit per
+connection also bounds object counts; the service's independent slot/handshake
+limits still apply. Compile-time assertions tie charges to both ring classes.
+
+`srv_domain_snapshot` samples counts, credits and retained domains under one
+admission lock. `srv_domain_counts` (tests build only) preserves its count-only interface; production reads `srv_domain_snapshot`. The
+connection captures `credit_charge`; final destruction copies it before freeing
+the object and returns it only after all transport storage is freed. Partial
+construction returns the identical reserved charge after rollback. Saturation
+returns ENOSPC before allocation, including a bulk request with only three
+credits left. Boot may borrow unused global credits; sessions cannot consume
+the 64-credit protected margin. No namespace or privilege semantics change.
+
 ## Event-loop I/O
 
 `srvconn_io_nonblock` shares the same rings and channel locks as blocking
@@ -55,10 +110,13 @@ both consumers block instead of failing.
 
 Declarations in `kernel/include/thylacine/srvconn.h`.
 
-**Lifecycle** — `srvconn_create(peer_stripes, peer_pid, peer_principal,
-peer_console, server_stripes, server_principal, msize)` (born LIVE, ref 1; rejects any msize outside the
-two-point class set `{SRVCONN_MSIZE, SRVCONN_BULK_MSIZE}`; NULL on OOM
-with no partial state) · `srvconn_ref`/`srvconn_unref` (atomic; last
+**Lifecycle** — `srvconn_create_in(domain, err, peer_stripes, peer_pid,
+peer_principal, peer_console, server_stripes, server_principal, msize)` (born
+LIVE, ref 1; rejects any msize outside the two-point class set
+`{SRVCONN_MSIZE, SRVCONN_BULK_MSIZE}` (`-T_E_INVAL`); reserves the class's
+credits against the global, domain and session budgets before it allocates
+(`srvconn_reserve`, `-T_E_NOSPC`); NULL with `*err` set on any refusal or OOM,
+with no partial state; `srvconn_create` is the tests' domain-less wrapper) · `srvconn_ref`/`srvconn_unref` (atomic; last
 unref = teardown + magic-clobber + free the rings + the struct; extincts
 on underflow/corrupt magic) · `srvconn_teardown` (LIVE→TORN, idempotent;
 EOF both rings + wake everything) · `srvconn_is_live` ·
@@ -184,8 +242,9 @@ The per-chunk walk in both blocking sends is the [[fnd-cf3b-r1-f1]]
 argument applied symmetrically: the poller is the drainer the send may be
 about to park waiting for.
 
-**Diagnostics** — `srvconn_total_created`/`_freed` (the difference is
-the live count; [[sub-kernel-devsrv]]'s global soft cap reads it).
+**Diagnostics** — `srvconn_total_created`/`_freed`, compiled only with the
+tests (the difference is the live count). Admission does not read them: it is
+`srvconn_reserve`'s credits.
 
 ## Mechanism
 
@@ -407,7 +466,7 @@ blocking client send.
 
 ## Error paths
 
-The sentinel table under Contract is exhaustive; beyond it: `srvconn_create`
+The sentinel table under Contract is exhaustive; beyond it: `srvconn_create_in`
 returns NULL on OOM (struct or either ring — partial allocations freed)
 or a non-class msize; `srvconn_ref`/`unref`/`teardown`/`set_*` extinct
 on a NULL/corrupted conn (accessors and `is_live`/`msize`
@@ -445,7 +504,7 @@ What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed):
   all-or-nothing `send_frame` must never partial-write (desync) and its
   free-space bound must read `ch->cap`, never a compile-time constant
   (the freeb wedge class).
-- **The class policy**: `srvconn_create` rejects any msize outside the
+- **The class policy**: `srvconn_create_in` rejects any msize outside the
   two-point set — an arbitrary ring_msize is an arbitrary kernel-memory
   demand.
 - **Teardown atomicity**: the dual-lock EOF latch (a poller observing
@@ -547,3 +606,15 @@ plain conns) and at the attach (`9p_srvconn_transport.remote_attach`,
 [[sub-kernel-ninep-attach]]). Threaded cases use the cooperative harness
 + the #109 terminal-park reap handshake + `SC_YIELD_UNTIL` observable
 waits.
+
+
+## Private progress witness (AS-1)
+
+The nonblocking-backpressure kernel test also drives a fresh, exclusively owned
+connection through the real p9_srvconn_progress_ops adapter: byte-at-a-time
+version/attach, busy reader-role refusal, captured principal, full-response-only
+readiness, terminal abort and a peer reference surviving local release. The
+adapter reuses srvconn_io_nonblock and srvconn_teardown; it acquires/releases no
+reference itself. This preserves the ordinary final-reference charge rule.
+Private Loom admission/retirement is not activated by the fixture; progress
+and qualification are tracked in docs/ASYNC-SERVICE-STATUS.md.

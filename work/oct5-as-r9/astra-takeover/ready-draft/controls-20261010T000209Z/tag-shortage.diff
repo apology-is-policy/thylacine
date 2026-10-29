@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -35,7 +35,7 @@
+     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+     bool room=(u32)(l->cq_tail-head)<l->cq_entries;
+     bool wire=!reason && !p->locally_retired && !p->progress.io.tx &&
+-              p9_session_has_free_tag(&p->client.session);
++              true;
+     u32 seen=0;struct loom_service_operation *previous=NULL;
+     for(struct loom_service_operation *o=p->op_head;o;o=o->next) {
+         if(++seen>p->op_count || o->prev!=previous || o->protocol!=p || o->owner!=l ||

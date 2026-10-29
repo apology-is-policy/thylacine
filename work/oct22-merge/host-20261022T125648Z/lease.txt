@@ -1,0 +1,5 @@
+mac   HELD by you for 46s, 1.5h left
+        why: corona: merge host harness at 5138d780c -- selector controls, the sanitized fixtures under Homebrew LLVM, then host.sh (46 host legs incl. rust-host); no QEMU; uncertainty is whether the LLVM sanitizers find anything the gcc pre-check could not
+        queue 1: aux (1.8h waiting)
+pi    FREE
+disk: 21.2 GiB available at /Users/northkillpd/projects/thylacine-corona

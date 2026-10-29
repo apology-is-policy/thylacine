@@ -1,0 +1,39 @@
+build/kernel/thylacine.elf:	file format elf64-littleaarch64
+
+0x0003902a: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_declaration	(true)
+
+0x00041412: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_byte_size	(0x0610)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_slots.h")
+              DW_AT_decl_line	(11)
+
+0x00047c95: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_byte_size	(0x0610)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_slots.h")
+              DW_AT_decl_line	(11)
+
+0x0005457f: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_declaration	(true)
+
+0x000ca66e: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_declaration	(true)
+
+0x001a3680: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_declaration	(true)
+
+0x001e78b8: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_declaration	(true)
+
+0x00232d03: DW_TAG_structure_type
+              DW_AT_name	("loom_slot_table")
+              DW_AT_byte_size	(0x0610)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_slots.h")
+              DW_AT_decl_line	(11)

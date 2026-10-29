@@ -243,6 +243,14 @@ The kernel-emitter bracket has two deliberate edges:
   ends in `_torpor`, and a release would let the next push land mid-banner. Past
   the bound it emits unserialized and reports the miss after the dump.
 
+  **Except before the MMU (2026-10-27).** With stage 1 off every data access is
+  Device memory, where the lock's exclusive need not complete: measured, an
+  extinction in `build_page_tables` printed nothing on HVF or on thyla-pi's KVM.
+  `cons_tx_claim_for_dump` therefore returns at once when `extinction_mmu_off()`
+  says so: only the boot CPU runs then and nothing has been staged, so there is
+  nothing to serialize against. Asked in the claim itself, it covers both
+  callers, `extinction()` and `el1_sync_runaway` ([[sub-kernel-halls]]).
+
   Three properties, each the **inverse** of the console-word claim in
   `extinction.c`, for one reason — *who holds the thing you are waiting for*.
   That word's holder is a dying peer that never releases, so try-once is right

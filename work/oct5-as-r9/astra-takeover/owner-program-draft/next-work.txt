@@ -1,0 +1,27 @@
+Continue from this combined uninstalled owner, not old rpc-draft headers/source.
+Constructor retains fresh program.identity; program_start may use its own address.
+Dependencies program-draft and wire-draft remain the verified staged/wire sources.
+
+Next implement actual full-incarnation FID admission from immutable copied SQE:
+resolve source scope, reserve exact WALK destination/open/clunk claims, retain
+source borrows, allocate monotone wire FID outside Ll under the client lock, and
+retain canonical fixed extents or preclaimed BUSY pool members. CLUNK claim and
+request/list admission must occur in one Ll transaction; never leave local close
+admission latched after an unpublished request failure. Failed construction must
+return every real FID/buffer hold before unused operation storage is released.
+
+Complete READY engine and close cleanup before installing this queue. Sole driver
+begin -> unlocked submit -> actual progress/capture -> unlocked advance -> Ll
+requeue or settlement. Recheck abort/deadline before every new effect and final
+mapping/open publication. One request borrow survives all staged attempts.
+Positive result encoding must match the operation (WALK destination vs byte count).
+
+Retained fixed buffers drop outside Ll while SETTLING; actual operation free/refund
+precedes request owner drop/reap then engine/Loom puts. Close must drain owners
+before requiring entry pins zero. Preserve unpublished constructors independently.
+Readiness must include queued work, TX/RX, earliest operation deadline, CQ parking,
+round-robin fairness and empty provided-pool waits/late receipts without auto-return.
+
+Native actual normal/bulk tests and matched gates before activation, then AS3/4,
+MM0-MM4. Do not rerun historical installers or old gates. Keep8192MiB floor, pinned
+Stratum61dde37, Astra pending/protected work and source-matched evidence.

@@ -1,0 +1,23 @@
+
+running 6 tests
+test final_and_out_of_order_return_preserve_earlier_payload ... ok
+test malformed_receipts_do_not_mutate_ownership ... ok
+test stale_and_failed_returns_cannot_recycle ... ok
+test bounded_members_and_lease_wrap ... ok
+test owner_namespace_prevents_cross_ring_token_return ... ok
+test geometry_is_checked_before_any_receipt ... FAILED
+
+failures:
+
+---- geometry_is_checked_before_any_receipt stdout ----
+
+thread 'geometry_is_checked_before_any_receipt' (22109976) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ledger-20261010T032905Z/rust-mutant-overlap/test_lease_ledger.rs:56:35:
+assertion failed: LeaseLedger::new(pool(), &r, &[8]).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    geometry_is_checked_before_any_receipt
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

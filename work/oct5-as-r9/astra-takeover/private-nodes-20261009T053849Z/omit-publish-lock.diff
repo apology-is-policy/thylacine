@@ -1,0 +1,11 @@
+--- control
++++ omit-publish-lock
+@@ -57,7 +57,7 @@
+ }
+ int loom_private_node_publish(struct Loom *l, struct loom_service_ref ref) {
+     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+-    spin_lock(&l->lock);
++    /* lock omitted */
+     int rc = l->service_closing ? -T_E_CANCELED :
+         loom_service_node_publish(l->service_slots, l->service_nodes, ref);
+     spin_unlock(&l->lock);

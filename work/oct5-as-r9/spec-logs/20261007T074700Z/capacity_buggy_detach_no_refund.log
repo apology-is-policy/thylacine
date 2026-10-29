@@ -1,0 +1,64 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Warning: Please run the Java VM, which executes TLC with a throughput optimized garbage collector, by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 2 and seed -9157642029014085561 with 8 workers on 8 cores with 2048MB heap and 64MB offheap memory [pid: 86905] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/capacity.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/_TLCTrace.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/TLCExt.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-2513282329617151090/Integers.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module capacity
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module capacity
+Starting... (2026-10-07 08:47:02)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-07 08:47:02.
+Error: Invariant NoOrphan is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ live = [old |-> TRUE, new |-> FALSE]
+/\ charge = 0
+/\ resident = [ old |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+/\ mapped = [ old |-> (s1 :> TRUE @@ s2 :> TRUE @@ s3 :> TRUE @@ s4 :> TRUE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+
+State 2: <Touch("old",s1) line 104, col 5 to line 107, col 33 of module capacity>
+/\ live = [old |-> TRUE, new |-> FALSE]
+/\ charge = 1
+/\ resident = [ old |-> (s1 :> TRUE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+/\ mapped = [ old |-> (s1 :> TRUE @@ s2 :> TRUE @@ s3 :> TRUE @@ s4 :> TRUE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+
+State 3: <Touch("old",s2) line 104, col 5 to line 107, col 33 of module capacity>
+/\ live = [old |-> TRUE, new |-> FALSE]
+/\ charge = 2
+/\ resident = [ old |-> (s1 :> TRUE @@ s2 :> TRUE @@ s3 :> FALSE @@ s4 :> FALSE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+/\ mapped = [ old |-> (s1 :> TRUE @@ s2 :> TRUE @@ s3 :> TRUE @@ s4 :> TRUE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+
+State 4: <Detach("old",s1) line 147, col 5 to line 155, col 53 of module capacity>
+/\ live = [old |-> TRUE, new |-> FALSE]
+/\ charge = 2
+/\ resident = [ old |-> (s1 :> TRUE @@ s2 :> TRUE @@ s3 :> FALSE @@ s4 :> FALSE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+/\ mapped = [ old |-> (s1 :> FALSE @@ s2 :> TRUE @@ s3 :> TRUE @@ s4 :> TRUE),
+  new |-> (s1 :> FALSE @@ s2 :> FALSE @@ s3 :> FALSE @@ s4 :> FALSE) ]
+
+59 states generated, 37 distinct states found, 20 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 00s at (2026-10-07 08:47:02)
+Trace exploration spec path: ./capacity_TTrace_1791359221.tla

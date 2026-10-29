@@ -1,0 +1,5 @@
+control: PASS (both lines)
+A: FAIL at 'struct t_loom_ring_hdr._pad'
+B: FAIL at 'T_LOOM_OP_CLUNK'
+C: FAIL at 'struct loom_ring_hdr.sq_mask'
+abi-witness: control passes; A, B and C each fail at the checker's own assert

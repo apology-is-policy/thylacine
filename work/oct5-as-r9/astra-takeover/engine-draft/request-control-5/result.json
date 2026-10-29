@@ -1,0 +1,143 @@
+{
+  "inputs": {
+    "kernel/loom_service_requests.c": "acffb39641d25778b5c7f8b69ef6de275d77cb4e019b9969b773a8e4b6d20d81",
+    "kernel/include/thylacine/loom_service_requests.h": "d29e35fd846ea4933d58a51e603d3b1aead174656d31c8519ac362b9105b2d47",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_requests_fixture.h": "2e25ba6cde354047c315a6dc87d45d102988465a152ab2162c492677b9f1bddd",
+    "tools/host-tests/loom-service-requests.c": "6c25e0ece514f53e4c8add7d4f17ea5e3e0d9223bf03594da8ad3f7f71018d49",
+    "tools/test-loom-service-requests.py": "b6b5c34ee8b8c2cff5a542ed6e794db7283e1d4d55be14ac781f4328b2d2b2ad",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/include/thylacine/loom_service_nodes.h": "9cfafbb971b46ce2b992d7c331cd83b06a204b05eda96d4cc8fbd550865a9c81"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "acffb39641d25778b5c7f8b69ef6de275d77cb4e019b9969b773a8e4b6d20d81",
+      "binary_sha256": "0efaf8801685723981912c5d1a3590896cec0219e56e0844d6f649c8e60365e3"
+    },
+    {
+      "case": "reject-success",
+      "expected": "rejected admission validates identity and negative result",
+      "rc": 1,
+      "generated_sha256": "46253a19fafbbd8673fb62cc73c0cf27dff187dd21c9dd550e6ba3514a32ecb8",
+      "binary_sha256": "44457f6c1ba905e26039cad23c0f9594601bd83a9ceec1a20fbd9a349e29b41b"
+    },
+    {
+      "case": "reject-borrow",
+      "expected": "rejected admission waits for local borrow",
+      "rc": 1,
+      "generated_sha256": "7edbe49494fc409d914c07c146cb5e2a73c45e46ca98b1806f71b1a1883b628e",
+      "binary_sha256": "3805771ca4aeb072690a143ac0fa9d899c11fe3c0e512f0874c4435ed9253c10"
+    },
+    {
+      "case": "reject-pin",
+      "expected": "rejected admission retains exact scope pin",
+      "rc": 1,
+      "generated_sha256": "0606db0e6edd07fd1e1dfd8556a334d4c39a012ef917173cd4019c16464e1ccc",
+      "binary_sha256": "adb01c5b425b4f8b1ddcf11c9e71cf64ba623399913578da8ed412922c19e785"
+    },
+    {
+      "case": "reject-rewrite",
+      "expected": "rejected terminal is immutable",
+      "rc": 1,
+      "generated_sha256": "2aabe89c6508ecf336685742a6e8fd0238b079e0b67e9de9e6d76211193daff2",
+      "binary_sha256": "4ddadc51485f40fa6820844207f9540fd4187fe8e01f2bb50a1039eb7de4320b"
+    },
+    {
+      "case": "expired",
+      "expected": "expired request reserves nothing",
+      "rc": 1,
+      "generated_sha256": "35ee97dd5e3cc9e0358bdbeeabca60fa809490a7e49b20445678f537d7e6e48e",
+      "binary_sha256": "f9740419a3e459f03268e4cce990b605c9fd96080f7987126ebc5ced5f49f3bc"
+    },
+    {
+      "case": "admit-expired",
+      "expected": "admission rechecks absolute deadline",
+      "rc": 1,
+      "generated_sha256": "3547f0cf1107850f034af9b91b31685b2da42de89c786e1efccff4ac0383b00b",
+      "binary_sha256": "673b13d7ded02945f83018a400b151895ac89993def00005fd29e6a9eac8bab4"
+    },
+    {
+      "case": "omit-pin",
+      "expected": "prepare reserves terminal and parent",
+      "rc": 1,
+      "generated_sha256": "ee7d0183cde501f7f3f0bccfbfe6a09cd5e69399900602f3123647c70c1b9b46",
+      "binary_sha256": "51d161d80913fd1b2a923124f0c78a99efc84db43bec58a6884d919ac78197d0"
+    },
+    {
+      "case": "omit-unpin",
+      "expected": "rollback releases capacity and pin",
+      "rc": 1,
+      "generated_sha256": "1b1b5a5cd1ced11ad9db227e00f4d350d6f03a3d3f5b9d7f08b97a3af70b5f6b",
+      "binary_sha256": "d07a43b0c7a9abf5a54bd5d5b35c72e7aa56677f70437ed7e3eb6a75b60cfc4e"
+    },
+    {
+      "case": "reuse-identity",
+      "expected": "rollback burns request identity",
+      "rc": 1,
+      "generated_sha256": "53688b89b59f99aaa47a7f30baffc89b3b9c60bd218682853e74a8e2453169ec",
+      "binary_sha256": "4ab777db7f03b415343551f59a702d5c892bb5b58fb6e7fb49cbf5cd4a4181a3"
+    },
+    {
+      "case": "stale",
+      "expected": "stale request cannot mutate replacement",
+      "rc": 1,
+      "generated_sha256": "97c2da9390d0c2a1182f86f0a1fdbda48951bdaee4b7f58e64f77cd784bce571",
+      "binary_sha256": "85b6b2f41298e73cf054c4493e1bd6148af76b3e2c853de94164197f74cd0831"
+    },
+    {
+      "case": "early-terminal",
+      "expected": "live borrow blocks terminal and free",
+      "rc": 1,
+      "generated_sha256": "02d6559fc411a28ace221541ab47c80ee808e73a0b063b5e9492078d5dca465f",
+      "binary_sha256": "9c77e197fc016bb1c85ee5ed733b3dec1cb33b243f94dd4d0f17f2cf90993a10"
+    },
+    {
+      "case": "double-terminal",
+      "expected": "duplicate terminal refused",
+      "rc": 1,
+      "generated_sha256": "34951e702284205ee02ffd305ad4c2946555de14026af170cb483177b5ddadfd",
+      "binary_sha256": "290b227b971dd7c513d2dabc9e093f2578434c5cf004176465ec7168b2102a12"
+    },
+    {
+      "case": "late-success",
+      "expected": "abort forbids fresh success",
+      "rc": 1,
+      "generated_sha256": "d8d91dd69eaa6d9aa0295e75dd1805ffd13bdf36ef55a96aadfa80bfa7bfdec8",
+      "binary_sha256": "cda5f627a1cfb4d7af512cbd6b3cc272db5d61a70f748a5fe462381cf5546c43"
+    },
+    {
+      "case": "early-reap",
+      "expected": "undelivered terminal cannot be discarded or freed",
+      "rc": 1,
+      "generated_sha256": "c4bc87b600f645f4c0b70f20ff953dee6b8addaeca55ae4fd7ad99140b7d35cc",
+      "binary_sha256": "e48c60347ade15eea9ae18f6bd7bd68f33347c1e7ef10c29524cb94b57e5e0de"
+    },
+    {
+      "case": "live-discard",
+      "expected": "undelivered terminal cannot be discarded or freed",
+      "rc": 1,
+      "generated_sha256": "dfae1b284d6ada02ebe95a7732184ff950c7e1b0306eb0f3d0be7f1a85be2927",
+      "binary_sha256": "0f67922eda023e509700db059452613224500f82171592e03bbb9c2b1a7082fc"
+    },
+    {
+      "case": "wrap",
+      "expected": "request identity wrap refused",
+      "rc": 1,
+      "generated_sha256": "18928a07b60258c94be4ccf234b61eda19b4a4383815abc7938facd97d1684c7",
+      "binary_sha256": "115aa2d3a0014c8bdcfd713ba44e2c5ff350c16b9c57f4666f5e332dec6301c9"
+    },
+    {
+      "case": "detach-borrow",
+      "expected": "live borrows prevent consumer detach",
+      "rc": 1,
+      "generated_sha256": "fab71e2717c45cba7a9dcd2a3baa2c41493b317630fa4a3037e31cc1f64d9de6",
+      "binary_sha256": "016e18519d9e8e469ec21b0dc1aaec1c405d15537e32a5ae0d1832ac1bc42b49"
+    }
+  ]
+}

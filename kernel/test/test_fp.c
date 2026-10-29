@@ -298,7 +298,6 @@ static _Alignas(16) u8 g_fp_note_area[FP_AREA_SIZE];
 static _Alignas(16) u8 g_fp_note_verify[32 * 16];
 
 __attribute__((target("+fp+simd")))
-void test_fp_note_area_round_trip(void);
 __attribute__((target("+fp+simd")))
 void test_fp_note_area_round_trip(void) {
     // A sentinel distinguishable per-register: V<n> gets the byte 0x40 + n,

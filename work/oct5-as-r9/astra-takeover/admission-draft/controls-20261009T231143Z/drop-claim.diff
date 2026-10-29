@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ drop-claim.c
+@@ -201,7 +201,7 @@
+         struct loom_service_ref ref=o->fid_claim==P9_TWALK?o->destination:o->source;
+         if(loom_fid_release_claim(l->service_slots,l->service_nodes,ref,o->request.identity))
+             extinction("admission lost exact FID claim");
+-        o->fid_claim=0;
++        o->fid_claim=P9_TLOPEN;
+     }
+ }
+ int loom_admission_enqueue_locked(struct loom_service_operation *o,

@@ -1,0 +1,102 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 94,
+  "profiles": 2,
+  "compile_fail": 2,
+  "positive_compile_control": 1,
+  "mutants_rejected": 3,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "94 passed; 0 failed"
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "94 passed; 0 failed"
+    },
+    {
+      "name": "no-clone-tasks-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "no-send-tasks-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0277"
+    },
+    {
+      "name": "valid-task-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "valid-task-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-shutdown-wakeup-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-shutdown-wakeup-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "missing-close-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "missing-close-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "early-reclaim-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "early-reclaim-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    }
+  ],
+  "limits": "Combined current-source host ownership regressions plus task/root shutdown composition; native SQ and wake-to-park remain unqualified."
+}

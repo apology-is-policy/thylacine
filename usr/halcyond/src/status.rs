@@ -2,11 +2,11 @@
 // section 6; the operator's Daylight mockups for the content): the pure
 // half. One bar at the bottom of the screen, 20px, dark against the light
 // theme -- the one piece of chrome that belongs to the system rather than
-// to any pane. Four slots, left to right: workspaces (ONE filled indicator
+// to any pane. Five slots, left to right: workspaces (ONE filled indicator
 // until a workspace list exists -- the 2026-09-02 vote), the focused
 // context (the focused tile's program, its working directory, its
 // running-or-last command -- centred in what the other slots leave), the
-// condition (the turnstile and `ok` / `exit N` in the key's ink, from the
+// mode, condition (the turnstile and `ok` / `exit N` in the key's ink, from the
 // focused pane's recorded status -- the SAME record the live tile keys; the
 // bar is the redundant channel), and the clock. Every slot is the
 // proportional face (section 7: a path or a command in chrome is
@@ -62,6 +62,7 @@ pub fn condition_for(status: &str) -> Condition {
 pub struct StatusModel {
     pub workspaces: Vec<u8>,
     pub active: u8,
+    pub mode: crate::modeview::DisplayMode,
     /// The focused tile's program (its strip's name); empty when nothing is
     /// focused.
     pub name: String,
@@ -101,6 +102,7 @@ impl StatusModel {
         StatusModel {
             workspaces: alloc::vec![1],
             active: 0,
+            mode: crate::modeview::DisplayMode::Application,
             name: String::new(),
             cwd: String::new(),
             cmd: String::new(),
@@ -178,6 +180,7 @@ pub struct Slots {
     pub ctx_ink: (i32, i32),
     pub cond: (i32, i32),
     pub clock: (i32, i32),
+    pub mode: (i32, i32),
 }
 
 impl Slots {
@@ -197,6 +200,8 @@ impl Slots {
             ctx: (0, 0),
             ctx_ink: (0, 0),
             cond: (0, 0),
+            // Its width is fixed, but its position follows the condition.
+            mode: (0, 0),
             ..*self
         }
     }
@@ -239,7 +244,7 @@ pub fn status_list(
     gs.set_kerning(sheet.kerning);
     // HALCYON-INSTRUMENT 8.2: under the Instrument profile the bar is the
     // bottom rail (`rail::footer_list`); the legacy list below is
-    // byte-identical to what it was.
+    // retains its own typography and slot arrangement.
     if sheet.profile == libhalcyon::instrument::Profile::Instrument {
         return crate::rail::footer_list(m, w, h, sheet, gs);
     }
@@ -293,7 +298,22 @@ pub fn status_list(
             text.push(' ');
         }
         text.push_str(&label);
-        let run = shape(gs, px, &text);
+        // A long notice yields room to the mode chip and the clock.
+        let mut run = shape(gs, px, &text);
+        let limit = (wi / 2).max(0);
+        if run.width > limit {
+            let ell = shape(gs, px, "\u{2026}");
+            while run.width + ell.width > limit {
+                match run.refs.pop() {
+                    Some(g) => run.width -= g.advance,
+                    None => break,
+                }
+            }
+            if ell.width <= limit {
+                run.refs.extend_from_slice(&ell.refs);
+                run.width += ell.width;
+            }
+        }
         let x = clock_x - gap - run.width;
         if !run.refs.is_empty() && x > 0 {
             cart.push_glyphs(gen, x, baseline, ink, &run.refs);
@@ -301,6 +321,14 @@ pub fn status_list(
         (x, run.width)
     };
     slots.cond = (cond_x, cond_w);
+    let mode_run = shape(gs, px, m.mode.label());
+    let mode_pad = sheet.ipx(5).max(1);
+    let mode_text_w = crate::modeview::DisplayMode::ALL.iter()
+        .map(|mode| shape(gs, px, mode.label()).width).max().unwrap_or(0);
+    let mode_w = mode_text_w + 2 * mode_pad;
+    let mode_x = cond_x - gap - mode_w;
+    slots.mode = (mode_x, mode_w);
+
 
     // The workspaces: one indicator per workspace, the bar's full height;
     // the active one an ember box with the number in the bar's own dark,
@@ -343,7 +371,7 @@ pub fn status_list(
     // The context, in what is left between the workspaces and the right
     // group: centred when it fits, else from the left with an ellipsis.
     let span_x = x + pad;
-    let avail = cond_x - pad - span_x;
+    let avail = mode_x - pad - span_x;
     slots.ctx = (span_x, avail.max(0));
     if avail > 0 {
         let text = context_text(&m.name, &m.cwd, &m.cmd);
@@ -370,6 +398,14 @@ pub fn status_list(
             slots.ctx_ink = (span_x, run.width);
         }
     }
+    let mode_inset = sheet.ipx(1).max(1);
+    if mode_x >= 0 && hi > 2 * mode_inset {
+        let (fill, ink) = m.mode.colors(d);
+        cart.ops.push(Op::Rect { x: mode_x, y: mode_inset, w: mode_w as u32,
+            h: (hi - 2 * mode_inset) as u32, color: fill });
+        cart.push_glyphs(gen, mode_x + (mode_w - mode_run.width) / 2, baseline, ink, &mode_run.refs);
+    }
+
     (cart, slots)
 }
 
@@ -392,6 +428,7 @@ mod tests {
         StatusModel {
             workspaces: alloc::vec![1],
             active: 0,
+            mode: crate::modeview::DisplayMode::Application,
             name: String::from("transcript"),
             cwd: String::from("/lib/aurora"),
             cmd: String::from("make check"),

@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ source-incarnation.c
+@@ -179,7 +179,7 @@
+        !source.incarnation || source.slot>=LOOM_SERVICE_SLOT_COUNT)return -T_E_INVAL;
+     struct loom_service_slot *s=&l->service_slots->slots[source.slot];
+     struct loom_service_node *n=&l->service_nodes->nodes[source.slot];
+-    if(s->incarnation!=source.incarnation || s->phase!=LSLOT_LIVE ||
++    if((u32)s->incarnation!=(u32)source.incarnation || s->phase!=LSLOT_LIVE ||
+        (s->kind!=LOOM_SERVICE_SCOPE && s->kind!=LOOM_SERVICE_FID))return -T_E_NOENT;
+     struct loom_service_ref scope=s->kind==LOOM_SERVICE_SCOPE?source:n->parent;
+     if(scope.reserved || !scope.incarnation || scope.slot>=LOOM_SERVICE_SLOT_COUNT)return -T_E_NOENT;

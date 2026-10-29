@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ failed-destination.c
+@@ -225,7 +225,7 @@
+         o->source_borrow=true;
+         if(kind==P9_TWALK) {
+             rc=loom_fid_claim_walk(l->service_slots,l->service_nodes,destination,scope,o->request.identity);
+-            if(rc){admission_put(o);return rc;}
++            if(rc){return rc;}
+             o->fid_claim=kind;
+         }
+     } else if(kind==P9_TLOPEN) {

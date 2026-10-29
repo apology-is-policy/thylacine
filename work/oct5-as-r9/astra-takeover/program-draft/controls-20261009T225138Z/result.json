@@ -1,0 +1,142 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/include/thylacine/loom_service_program.h": "85a744f3c29f7391ecb16303cee55861ee35ae54fe28a945c9c887e93262e969",
+    "work/oct5-as-r9/astra-takeover/program-draft/fixture.c": "33daf2cc569e1f6067910daf40a062d22bd854429f274dba8e1599a2eec146f2",
+    "work/oct5-as-r9/astra-takeover/program-draft/run-controls.py": "e89c06535c01f09d0783e9ee07e7f89bf639e854ad93dd2aa1f5e45553095f6a",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/include/thylacine/loom_service_wire.h": "c3d55e55fd8f61f00cadd7343fc310ce0adef99377ef7e7e7f973b28f1e7a4f3",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "work/oct5-as-r9/astra-takeover/wire-draft/fixture.c": "6fa2b8f8fc321f4d38534895ea2e34ba13425a2f034e1bb8b89860c17928fec7",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "kernel/include/thylacine/9p_client.h": "0eced1c09aacd120201d689b78e03bd6f05381dc28b102f3d361a0fcbaf43c35",
+    "kernel/include/thylacine/9p_session.h": "e5e218787c4a4d25986a664eafe9ba59c6e6093de0317ce934db6b24fbdab402",
+    "kernel/include/thylacine/9p_wire.h": "03729e7a047ae83fb63bd9e3805f43f9ed263f4e517e7c76c9840b3b4f37e3ff",
+    "kernel/include/thylacine/9p_transport.h": "e378b16a654450977085ff1923eaba37c66dd96c6af0ba2680d80ffd3c098756",
+    "kernel/include/thylacine/loom_service_reply.h": "46da857bd6dacdd0576ba3f01c2f0c55bc6cbacc56ade8da1f7c7ffbd4fd2465",
+    "kernel/include/thylacine/proc.h": "37cbad04d411160469a2c910a17e131bc025cc784e7aae8baf4c53103219f3ec",
+    "kernel/include/thylacine/perm.h": "55565ef5194458234fdeb081813d39251ad7c0650894daa9395daf817db94670",
+    "kernel/include/thylacine/caps.h": "932af679d5d137e129f647d988af662fae67d0475ee240027c8e361c33bcf478"
+  },
+  "fixture_sha256": "f779f7ee6fb6fa1051974b4d1c7b5fda0e0d2fd248c3aeada89f67923fde3371",
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+      "binary_sha256": "347f093c10b92c95c9a27da7cdbe162fb940689e04739eed81792c2a5e6271d9"
+    },
+    {
+      "case": "stat-before-open",
+      "expected": "open starts with stat",
+      "rc": 1,
+      "source_sha256": "c8c2c68a5d08d745ea887b0e0e9006dc2bd034201b813d5f707632a35f774b9d",
+      "binary_sha256": "100d72109ca2e83c9f60da494f13ad41d2d9deb52ff100c388d84d7e07926980"
+    },
+    {
+      "case": "identity-copy",
+      "expected": "admission snapshot detached",
+      "rc": 1,
+      "source_sha256": "5bf432ecd75cc691cc1c8577b5223c89f06906a17257ea535ce210fb214e49d0",
+      "binary_sha256": "2f8869bba89cf3a626078466b7119fc2acc2afdd7b4a53b61b0de8522dcfe119"
+    },
+    {
+      "case": "remote-again",
+      "expected": "remote shortage terminal no replay",
+      "rc": 1,
+      "source_sha256": "f0c22abb806c427cd9768e04b25020f5fdb4bb82e888e86fae968d3c12c22f5e",
+      "binary_sha256": "5e38c1b3fcaa889a90124d28291945015aad820861043d9af85641edbba6f753"
+    },
+    {
+      "case": "malformed",
+      "expected": "malformed capture poisons scope",
+      "rc": 1,
+      "source_sha256": "5c853d40b196973667954f933f92904dee1c9440f252c61d58a865b145b355c8",
+      "binary_sha256": "5fe2b725c80d04f425f14f97fe44f55dd723a39530e4ee9283ba684c9d6fb204"
+    },
+    {
+      "case": "mask",
+      "expected": "missing stat field poisons scope",
+      "rc": 1,
+      "source_sha256": "2b07a6040e9dba71a38507d9190ebd721f3662e486b1ee4e05cb0309a75e3fa7",
+      "binary_sha256": "4d90ad1b55eddce88764981a554c4bb5cbaf754e07c0e33e6d31ba697e49b5bc"
+    },
+    {
+      "case": "symlink",
+      "expected": "symlink open refused before DAC",
+      "rc": 1,
+      "source_sha256": "38dc13eb398854e9766f49c01b50d3bb6d6863f63647886a0ab220b923c3809d",
+      "binary_sha256": "5fd3e43bcf75ccf9ec16a949ad19d7cb1c9c56158cccffcbff1e40769910544c"
+    },
+    {
+      "case": "directory",
+      "expected": "directory type before search",
+      "rc": 1,
+      "source_sha256": "f90035289445f399abb075041f1127edfff88b1774753956389a5029b8eaa68f",
+      "binary_sha256": "d1b5c79780945745699b9c5bd62ed4eb82150129a4ea0fb02bab1c466f90f82e"
+    },
+    {
+      "case": "search",
+      "expected": "search permits walk stage",
+      "rc": 1,
+      "source_sha256": "cb022cfb1e63d45cb5f480eb4f64f3e30675c93ccc9042f05343048e321f49a2",
+      "binary_sha256": "e2302a0cfc0663c157bcd9edf289859cd02e4bccb39c01912ddbd10175691646"
+    },
+    {
+      "case": "deny-open",
+      "expected": "denied open sends no effect",
+      "rc": 1,
+      "source_sha256": "178c9414089ddafc3a101e8ee2f073348dcc1c2a534875e8c2e22572b0a01056",
+      "binary_sha256": "569ca17eb72e109f05e5a28f9505e03399a28db7f54241ce5dccef1ed7fece85"
+    },
+    {
+      "case": "effect-type",
+      "expected": "authorized stat advances open",
+      "rc": 1,
+      "source_sha256": "78f7756de160f178bfc9c7094d0f8f3b61ed750d9795198a558d1d6e132f4058",
+      "binary_sha256": "b016206398eb6e7a948c108a42768eb13e5f142b6e57805501f967a70480adda"
+    },
+    {
+      "case": "built",
+      "expected": "uncaptured success rejected",
+      "rc": 1,
+      "source_sha256": "69522946266a309ae4901cb93275d95270ca3467eaff915b3e67c0845894bde4",
+      "binary_sha256": "45c51a0d77dedfa7b529b488394c3afb331f98563fdbfd4477cff2c8b1e7d618"
+    },
+    {
+      "case": "expectation",
+      "expected": "wrong frame expectation rejected",
+      "rc": 1,
+      "source_sha256": "e908ae858d436ddf67b1d119cfb36805ce700abbd5b5feb34dfa65e267129959",
+      "binary_sha256": "aed97582c50f061c3bcdf935e1079de0ee0e8fa211be93ca713e3eb08c5a2f74"
+    },
+    {
+      "case": "result",
+      "expected": "short read preserved",
+      "rc": 1,
+      "source_sha256": "04672d9d4b2aa24dc980e13cb9caba8f7bee6834bc2ca8ec469e07af90fa7032",
+      "binary_sha256": "44184ed60da54fde99155734a67526443679460e6437140fe73dd1d787f3e6b1"
+    },
+    {
+      "case": "open-flags",
+      "expected": "unallocated open mode refused",
+      "rc": 1,
+      "source_sha256": "f19c98ac6d8676e94a529e16bffe7c2100913689baa3f9fa5274c6b39ea710ba",
+      "binary_sha256": "85367583e0bd3e66bec3a1230fb9a9f1e5ad1e68c6d01b201c28fa98cc9efcbc"
+    },
+    {
+      "case": "readwrite",
+      "expected": "denied open sends no effect",
+      "rc": 1,
+      "source_sha256": "9d5f25a6ec413282e0aa9aac304dc0299905dd669c7f427915b16f68943f2169",
+      "binary_sha256": "e188accc497ffb9f900ed82280b20f1a152dba51615caf813eb19d734b19a864"
+    }
+  ],
+  "limits": "Actual staged program/wire/perm/session/codec/transport/capture, extracted real submit function. Host sequential lock/wake/death stand-ins and direct dispatch; already-attached sessions; direct synthetic captured attrs for exhaustive DAC oracle. No native engine/admission/buffer/concurrency proof."
+}

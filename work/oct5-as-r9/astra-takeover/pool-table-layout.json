@@ -1,0 +1,17 @@
+{
+  "layouts": {
+    "Loom": {
+      "bytes": 2872,
+      "buddy_pages": 1,
+      "dwarf_sha256": "27f44f9ba1153842f4035d11f698c1f8f0efc1ba02439ca9f9c6f3b2a43fa73d"
+    },
+    "loom_service_pool_table": {
+      "bytes": 7176,
+      "buddy_pages": 2,
+      "dwarf_sha256": "7b5dd84bc07315a22595e4e5a8a0a11e4e93e8b6b9f175725d7a57cddc6dddfa"
+    }
+  },
+  "slot_allocation_pages": 1,
+  "private_metadata_pages": 4,
+  "elf_sha256": "d294ca339d325d3ffda3ed2e1c942e199b88a0817d73b05a8757653f58b9fba6"
+}

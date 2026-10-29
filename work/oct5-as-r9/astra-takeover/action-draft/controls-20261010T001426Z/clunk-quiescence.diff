@@ -1,0 +1,11 @@
+--- control.c
++++ clunk-quiescence.c
+@@ -1604,7 +1604,7 @@
+     struct Loom *l=o->owner;struct loom_service_protocol *p=o->protocol;
+     // A failed CLUNK still owns the retired FID. Abort the whole scope before
+     // releasing that claim; a mere error completion is not transport teardown.
+-    if(o->fid_claim==P9_TCLUNK && !p->rpc_quiesced)return action_abort(p,reason);
++    /* missing CLUNK quiescence */
+     spin_lock(&l->lock);int rc=0;
+     if(o->phase==LRPC_QUEUED || o->phase==LRPC_INFLIGHT)rc=loom_rpc_settle_locked(o);
+     if(!rc && o->pool_busy)rc=loom_provided_release_busy_locked(o);

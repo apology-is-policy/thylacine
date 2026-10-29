@@ -1,0 +1,2 @@
+slice addition overflow: got0 want-22
+Assertion failed: (0), function check, file buffer-overflow.c, line 73.

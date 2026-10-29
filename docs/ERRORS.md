@@ -62,6 +62,37 @@ v1.0 forward.
    Stratum's `libstratum-9p` C ABI (where `stm_status_t` stays as-is).
    The two systems coexist at the boundary; neither subsumes the other.
 
+6. **An argument that does not fit its declared width is refused, never
+   truncated** (operator vote, 2026-10-13). Every syscall argument
+   arrives in a 64-bit register. libt's Loom wrappers declare `long` and
+   `unsigned long` and libthyla-rs's declare `u64`, so the caller's
+   whole value reaches the kernel. A handler that reads a 32-bit
+   descriptor, count, op or flags word refuses a value whose high bits
+   are set; it does not cast them away. A cast turns a caller's bug into
+   a different, successful request: an entries count of 2^32+8 would
+   make an 8-entry ring, and a descriptor of 2^32+5 would name the
+   caller's descriptor 5. A descriptor that does not fit answers
+   `-T_E_BADF`, as a descriptor that names nothing does (a handler that
+   still answers a dead descriptor with ER-3's flat -1 answers a
+   too-wide one the same way); every other argument answers
+   `-T_E_INVAL`. A handler that checks something before its descriptor
+   lookup keeps that order: the too-wide descriptor is turned into an
+   index that names nothing, and the lookup refuses it. Linux, 9front
+   and Zircon truncate instead; the C declaration there is the narrow
+   type, which libt's is not. A wrapper that declares a narrower signed
+   type sign-extends it, so a 32-bit word with bit 31 set arrives with
+   its high bits set too. A signed argument (a pid, a timeout) is
+   therefore accepted as exactly that sign-extension, and a 32-bit word
+   compared bit for bit (torpor's expected value, which pouch passes as
+   `int` and libt as `unsigned int`) in either extension. A negative
+   descriptor sentinel a handler accepts (the walk-from-root -1) is
+   compared at full width before the lookup. The sweep of 2026-10-13
+   brought every native handler under the rule, and
+   `tools/check-arg-width.py` fails the build on a narrowing cast of a
+   raw argument that no full-width check precedes. The Linux phenotype
+   keeps Linux's truncation: the vivarium narrows the words Linux
+   declares 32-bit before a native handler sees them (VIVARIUM.md).
+
 ## Errno registry
 
 The canonical source is `kernel/include/thylacine/errno.h`. The values
@@ -75,8 +106,8 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour; `SYS_POSTNOTE` to a pid nobody holds) |
 | `T_E_INTR`      | 4     | `EINTR`      | A blocking wait was interrupted by a deliverable **caught** note before its condition became true (item 11 / note-interruptible waits). Distinct from the terminate latch: `thread_die_pending` unwinds a wait to KILL the Thread, `T_E_INTR` unwinds it so a caught note (a Linux-phenotype `sigaction` handler, or a native self-managing notes-fd reader) is delivered at the EL0-return tail while the Thread lives. A native caller re-issues the wait after servicing the note; a Linux-phenotype caller restarts the syscall iff the handler carried `SA_RESTART`, else observes `EINTR` (ARCH 8.8.2, VIVARIUM 6.22). Slot 4 was the last free low errno; operator-ratified 2026-08-18 (Q3=A) |
 | `T_E_IO`        | 5     | `EIO`        | I/O error (storage, device, network) |
-| `T_E_2BIG`      | 7     | `E2BIG`      | Argument list too long — the argv/envp asked for does not fit the new image's frame budget. Distinct from `EINVAL` in the way a caller acts on: `EINVAL` says the request was malformed and retrying it verbatim is pointless, `E2BIG` says it was well-formed and too large, so splitting it will work (which is what `xargs` exists to do). Appended for the LINEAGE L-6c envp projection (#140), the commit wiring its first consumer, under the 2026-08-03 signoff (#142). Emitted by the ENVIRONMENT bounds only (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, in both the `/env` projection and the vivarium `envp` walk); the neighbouring **argv** bounds still answer `T_E_INVAL`, because that is a landed native ABI (`SYS_EXECVE`, L-2a) whose error code is its own deliberate decision, reserved to the #142 rollout rather than changed as a side effect of adding envp |
-| `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd |
+| `T_E_2BIG`      | 7     | `E2BIG`      | Argument list too long — the argv/envp asked for does not fit the new image's frame budget. Distinct from `EINVAL` in the way a caller acts on: `EINVAL` says the request was malformed and retrying it verbatim is pointless, `E2BIG` says it was well-formed and too large, so splitting it will work (which is what `xargs` exists to do). Appended for the LINEAGE L-6c envp projection (#140), the commit wiring its first consumer, under the 2026-08-03 signoff (#142). Emitted by the ENVIRONMENT bounds only (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, in both the `/env` projection and the vivarium `envp` walk, and the `SPAWN_EXT_ENV` spawn tail's: its block past `EXEC_ENV_DATA_MAX`, a value past `ENV_VALUE_MAX`, more than `ENV_MAX_ENTRIES` names); the neighbouring **argv** bounds still answer `T_E_INVAL`, because that is a landed native ABI (`SYS_EXECVE`, L-2a) whose error code is its own deliberate decision, reserved to the #142 rollout rather than changed as a side effect of adding envp |
+| `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd. Also the private Loom service's WALK whose source fid an LOPEN has opened: refused at submit, before any Tgetattr or Twalk reaches the server, because 9P walks only from a fid not opened for I/O (walk(5); operator vote 2026-10-15) |
 | `T_E_CHILD`     | 10    | `ECHILD`     | No child processes — a wait names no matching child. The termination condition of every reap loop, which is why the near-miss answers will not do: a bare `-1` reads to a Linux guest as `EPERM`, the #100 class of wrong answer. Appended for the LINEAGE L-6b `wait4` row. `wait_pid_for`'s two `-1` conditions (no matching child; a #811 death-interrupted sleep) both map here — sound because the death path returns through the sync-from-EL0 tail, where `el0_return_die_check` is noreturn on the die branch, so no observer can tell them apart |
 | `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full, e.g. `SYS_POSTNOTE` to a full note queue; would block) |
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
@@ -88,6 +119,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed from the `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory. Eight producers. Four share that rule: `stalk`'s real-component gate (#79); `stalk`'s `.`/`..` gate, since both are path components and the position they resolve in must be a directory too (#81); `stalk`'s trailing-slash gate, where the separator asserts the whole path names a directory (#82, POSIX 4.13 — three sites, since two success exits skip the quarry); and the single-hop `SYS_WALK_OPEN` / `SYS_WALK_CREATE` handlers, on both the source's type and a source Dev with no `.walk` slot (#80, #81). The `.`/`..` gate reads the tip UNCROSSED and the trailing-slash gate the quarry CROSSED — they ask different questions (where resolution stands vs what the path names), see `docs/reference/104-stalk.md`. The fifth is `SYS_MOUNT`'s Plan 9 `Emount` (ARCH §9.6.1, operator votes 2026-09-25, as Linux answers a bind of a file over a directory): the source's directory-ness differs from the mount point's, or a mount without `MREPL` names a point that is not a directory. `SYS_MOUNT`'s other refusals are still `-1`, and that includes a trailing `/` on a point that is not a directory: `stalk`'s trailing-slash gate refuses the path before the type check runs, and a resolution failure is `-1` in this call. The last three are the Linux phenotype's (VIVARIUM): a trailing `/` on an `unlinkat` without `AT_REMOVEDIR` or on either `renameat` path, `getdents64` on a descriptor that is not a directory, and `openat` with `O_DIRECTORY` on a file |
 | `T_E_ISDIR`     | 21    | `EISDIR`     | Is a directory — the operation names a directory where a non-directory is required. Named with user signoff at #50 (2026-08-25); mints NO new ABI value: a server-side `EISDIR` (Stratum, on write-opening a directory) already reached EL0 through the `[-4095,-2]` Rlerror passthrough. Kernel producer: `SYS_OPEN_CREATE`'s lexical leaf rows — a create against a trailing-slash / `.` / `..` / root leaf (the Linux `open_last_lookups` rows), answered before any RPC |
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
+| `T_E_NOSPC`     | 28    | `ENOSPC`     | Bounded resource capacity exhausted (HI-1 terminal interaction bindings or exhausted IDs) |
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
@@ -278,7 +310,10 @@ sign-off 2026-10-27).
 
 **The raw word**, when the caller passes no flag but `WAIT_WNOHANG`: the exit
 status alone, so a death by note reads 1. The native callers that predate the
-packed word keep it: joey, libthyla-rs's `Child::wait`, Go's `os/exec`.
+packed word keep it: joey's waits for the children it spawns and libthyla-rs's
+`Child::wait`. joey's sweep of the orphans it adopts asks for
+the packed word, so its line reads `signal=9` for a killed orphan and
+`status=1` only for one that exited 1 (operator vote 2026-10-28).
 
 **The packed word**, when the caller passes `WAIT_UNTRACED`, `WAIT_CONTINUED`
 or `WAIT_PACKED`: the Linux `wait(2)` layout, so Pouch's `W*` macros decode it
@@ -296,7 +331,8 @@ The core-dump bit (0x80) is never set: Thylacine writes no core files.
 `WAIT_PACKED` (8) asks for the packed word without asking for stop or continue
 reports. Pouch's `waitpid` and the phenotype `wait4` always pass it, so a Pouch
 or Linux parent sees `WIFSIGNALED` and `WTERMSIG` for a child that died of a
-note. ut packs every wait: its job-control wait passes `WAIT_UNTRACED`, and
+note. Go's `os/exec` passes it too (`syscall.WaitProcess`), so the `Waitmsg` a Go
+parent gets from `ProcessState.Sys()` carries the signal. ut packs every wait: its job-control wait passes `WAIT_UNTRACED`, and
 every other wait (a command substitution, a pipeline's members, a script or
 `ut -c` without job control, `wait`, the background reaper) passes
 `WAIT_PACKED`. So `$status` is the code for an exit and 128 plus the signal for
@@ -517,6 +553,7 @@ See CLAUDE.md §"Audit-triggering changes" for the row.
 | Deaths by note record a signal (`term_sig`, the packed signalled word, `WAIT_PACKED`, Pouch `waitpid`/`abort()`) | LANDED | gcpark-b |
 | Pouch handlers for `snare:*` signals (`SIGSEGV`/`SIGBUS`/... catchable) | DEFERRED | v1.x |
 | Retroactive `-T_E_*` rollout to old syscalls | DEFERRED | per-touch |
+| Argument-width rule (principle 6)          | Loom: votes-7/8 chunk; other handlers: one sweep | 2026-10-13 vote |
 
 ### Imperium integration (2026-09-17)
 

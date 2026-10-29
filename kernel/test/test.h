@@ -27,6 +27,8 @@
 
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>   // ARCH 8.12: TEST_SYSCALL_DISPATCH's mask-only bracket
+#include "test_registry.h"         // every registered test, declared once
+#include "../../arch/arm64/timer.h" // timer_now_ns, for TEST_YIELD_UNTIL
 
 struct test_case {
     const char *name;       // human-readable identifier
@@ -71,6 +73,52 @@ void test_soft_warn(const char *msg);
 // Count of soft-warns recorded during the last test_run_all. Surfaced
 // in the boot summary so host throttling is visible without failing CI.
 unsigned test_soft_warns(void);
+
+// A skipped test is neither passed nor failed: it logs a [skip] line and the
+// boot summary counts it. There is deliberately no bare skip call -- a test
+// skips only through a helper that first proves the configuration permits the
+// absence (test_requires and its wrappers, test_image_lookup), and
+// tools/test.sh refuses a [skip] line of any other shape, and a skip of
+// anything its own configuration attaches. A test must never return early on
+// a configuration it does not have without one of these.
+
+// Count of tests skipped during the last test_run_all.
+unsigned test_skipped(void);
+
+// Look up a file in the boot ramfs that ships whenever `key` does. Returns 0
+// with the blob. A miss returns -1 after FAILING the test when the image
+// carries `key` -- a stale ramfs would otherwise pass by skipping -- and after
+// skipping it when the image carries neither.
+int test_image_lookup(const char *path, const char *key, const void **blob, size_t *size);
+
+// A probe binary: ships whenever the image carries userspace (bin/joey). A
+// userspace-less image fails the suite anyway
+// (test_devramfs_live_bin_holds_the_programs); the skip keeps that one cause
+// from reading as a failure per probe.
+int test_probe_lookup(const char *path, const void **blob, size_t *size);
+
+// What a test needs from the machine, named by the bootargs word the launcher
+// (tools/run-vm.sh) adds once per instance it attached: thylacine.virtio-<kind>
+// per virtio-mmio device, thylacine.virtio-pci-<kind> per virtio PCI function,
+// thylacine.smp for more than one CPU, thylacine.msi for an MSI controller it
+// knows the machine has. `nth` is the instance the test needs (0 = the first).
+// Returns true when that instance is present. Absent and declared: FAILS the
+// test. Absent and undeclared: a counted skip, since this configuration lacks
+// it. Present and undeclared: FAILS the test when `exact` (the launcher
+// declares every instance of that kind, so it attached what it did not
+// declare); a kind the launcher can leave undeclared passes exact = false.
+bool test_requires(bool present, const char *token, u32 nth, bool exact, const char *absent);
+
+// The virtio-mmio device a test drives (test_requires, exact). QEMU's virt
+// machine always has 32 slots and an empty one reads DeviceID 0, so only the
+// launcher knows what it attached. Returns the device, or NULL.
+struct virtio_mmio_dev;
+struct virtio_mmio_dev *test_virtio_device(u32 device_id, const char *token);
+
+// Has a strong source seeded the kernel CSPRNG? An unseeded pool FAILS the
+// test: the boot refuses userspace on one before the suite runs (vote 18), so
+// reaching here unseeded means a seeding bug or a refusal that moved.
+bool test_strong_entropy(void);
 
 // Convenience macros. TEST_ASSERT short-circuits the current test on
 // failure (returns from the test_case's fn). TEST_EXPECT_EQ is a
@@ -243,8 +291,7 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
 // is silently racy again with no signal that the guard never guarded.
 //
 // `sched()` is declared by the includer (every user already calls it directly);
-// timer_now_ns is forward-declared here to keep an arch header out of test.h.
-u64 timer_now_ns(void);
+// timer_now_ns comes from arch/arm64/timer.h, included above.
 
 #define TEST_YIELD_BUDGET_NS (2ull * 1000ull * 1000ull * 1000ull)
 
@@ -395,5 +442,10 @@ extern const char *volatile g_test_proc_wait_what;
         syscall_dispatch(ctxp);                                             \
         spin_unlock_irqrestore(NULL, _tsd);                                 \
     } while (0)
+
+// test_9p_client.c's canned 9P2000.L responder: the one source of the reply
+// byte layouts, which the SrvConn device-gone tests stage handshakes through.
+int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+                                 u8 *resp, size_t resp_cap);
 
 #endif // THYLACINE_KERNEL_TEST_H

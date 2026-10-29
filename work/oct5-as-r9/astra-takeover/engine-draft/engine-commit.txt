@@ -1,0 +1,17 @@
+Retain private CONNECT owners in a charged ring index
+
+Give each private ring a bounded exact-incarnation protocol index.
+Installation owns a pin through publication and accept wake; abort can
+latch during that interval. Failed publication retains a negative terminal
+until actual local abort. Lookup pins prevent removal; collection waits
+for retirement and delivered or detached-discarded completion ownership.
+Round-robin visits permit independent peers to progress.
+
+Charge the index as one private-only buddy page, preserving the one-page
+legacy Loom allocation. Exercise allocation failure, complete unwind and
+final free. Refuse consumer detach while an unindexed constructor remains.
+Keep whole-ring close queue and worker wiring explicitly pending.
+
+Validate through the bounded index/lifecycle models, actual-C sanitized
+controls and named mutations, plus source-matched native diagnostics.
+Self-review only; no Main landing, private activation or memory-limit change.

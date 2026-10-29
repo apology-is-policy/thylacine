@@ -1,0 +1,11 @@
+--- kernel/loom_service_pool_table.c
++++ reap-slot.c
+@@ -76,7 +76,7 @@
+     // remain. Both slot transitions are guaranteed by the checks above and the
+     // common lock; the same identity cannot acquire a new borrower in between.
+     (void)loom_slot_retire(t, ref);
+-    return loom_slot_reap(t, ref);
++    return 0;
+ }
+ 
+ bool loom_service_pools_empty(const struct loom_service_pool_table *pools) {

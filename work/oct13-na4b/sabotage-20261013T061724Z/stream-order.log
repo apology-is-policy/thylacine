@@ -1,0 +1,24 @@
+
+running 1 test
+test tests::native::a_multishot_stream_runs_on_out_of_order_returns ... FAILED
+
+failures:
+
+---- tests::native::a_multishot_stream_runs_on_out_of_order_returns stdout ----
+
+thread 'tests::native::a_multishot_stream_runs_on_out_of_order_returns' (33619321) panicked at lib/loom-client/src/tests/native.rs:180:5:
+assertion `left == right` failed
+  left: ["three", "two", "one", "five", "four", "six"]
+ right: ["one", "two", "three", "four", "five", "six"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::native::a_multishot_stream_runs_on_out_of_order_returns
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 170 filtered out; finished in 0.00s
+
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+error: test failed, to rerun pass `-p loom-client --lib`

@@ -9,7 +9,7 @@ guarded-by: []
 validated-by: [gate-smp]
 locks: [lock-kmem-cache, lock-cache-list, lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -28,7 +28,7 @@ structs; requests above `SLUB_MAX_OBJECT_SIZE` (2048) bypass to
   page-rounding of an n within `PAGE_SIZE-1` of SIZE_MAX wrapped to a
   1-page success — which also defeated `kcalloc`'s n*size overflow
   check for size == 1 — now rejected before rounding.
-- `kzalloc` = `| KP_ZERO`; `kcalloc` overflow-checks n*size.
+- `kzalloc` = `| KP_ZERO`; `kcalloc` (tests build only) overflow-checks n*size.
 - `kfree(p)` — NULL no-op; slab pages validate **slot-boundary**
   (F32: an interior pointer would corrupt the freelist or deref the
   wrong slab metadata); large pages validate pointer ==
@@ -39,7 +39,7 @@ structs; requests above `SLUB_MAX_OBJECT_SIZE` (2048) bypass to
   (RW-1 F-S3 — pre-guard, an impossible geometry left an empty
   freelist that NULL-deref'd at first alloc). `KMEM_CACHE_PANIC_ON_FAIL`
   turns alloc OOM into extinction.
-- `kmem_cache_destroy(c)` — **caller-quiesce contract** (RW-1 F-S2:
+- `kmem_cache_destroy(c)` (tests build only) — **caller-quiesce contract** (RW-1 F-S2:
   no concurrent alloc/free on any CPU; the live-count read and the
   drain run without `c->lock`). A cache holding ANY live object
   extincts (RW-1 F-S1, [[fnd-rw1-fs1]]): `alloc_count - free_count`
@@ -101,9 +101,8 @@ live-object destroy, PANIC_ON_FAIL OOM.
 
 ## Performance
 
-Cache-hit alloc/free is a lock pair + a pointer pop/push. The
-diagnostics (`slub_total_alloc/free`, `slub_active_slabs`,
-`kmem_cache_live_count`) walk under the list lock; live-count is a
+Cache-hit alloc/free is a lock pair + a pointer pop/push. The one
+diagnostic, `kmem_cache_live_count` (compiled only with the tests), is a
 tolerated-stale lock-free read pair.
 
 ## Prosecution
@@ -118,6 +117,25 @@ tolerated-stale lock-free read pair.
   audit discipline "one kfree per kmalloc" is the only guard.
 - The list lock's leaf-ness: any future walker that needs per-cache
   state must drop the list lock before taking `c->lock`.
+- The `KERNEL_TESTS` large-free watch (`kfree_large_watch_*_for_test`,
+  2026-10-08) is one slot on `kfree`'s LARGE branch only, after the
+  page-aligned validation and before `free_pages`, and it compares the
+  pointer alone. It records ENTRY to that call site for one armed
+  pointer, not the buddy outcome, and never sees a slab free. Arming
+  and disarming both clear `fired`. The notifier is ALSO keyed to the
+  arming thread (astra, yip 0161 t81). With the pointer alone, a free
+  of a REUSED address on another CPU could load the old watch, stall,
+  and then store `fired` into a LATER arming, because the slot and the
+  flag are separate atomics, and no acquire/release ordering between
+  them closes that. A notifier's own thread cannot change mid-call, so
+  one on another thread never stores, however late it runs, and the
+  arming thread's store completes inside its own `kfree`. Arm it only
+  on a pointer you own
+  while it is live. An unobserved free is UNKNOWN, never evidence that
+  the object is still allocated: reclaiming on a missing notification
+  double-frees as soon as the observer is the thing that broke. It is
+  compiled out of the production shape, which the inner layout leg's
+  runner checks with relocations ([[sub-kernel-loom]]).
 
 ## Seams
 

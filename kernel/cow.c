@@ -75,6 +75,7 @@ bool cow_page_break_is_sole(struct page *pg) {
     return sole;
 }
 
+#ifdef KERNEL_TESTS
 u32 cow_page_share_for_test(const struct page *pg) {
     if (!pg) return 0;
     spin_lock(&g_cow_lock);
@@ -82,3 +83,4 @@ u32 cow_page_share_for_test(const struct page *pg) {
     spin_unlock(&g_cow_lock);
     return v;
 }
+#endif

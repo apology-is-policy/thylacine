@@ -1,0 +1,39 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::loop_cancellation_does_not_reclaim_before_retirement ... ok
+test tests::ring::loop_expired_outer_deadline_does_not_poll_tasks ... ok
+test tests::ring::loop_fixed_cq_completion_and_last_result_retirement ... ok
+test tests::ring::loop_quiet_step_has_no_internal_allocation ... ok
+test tests::ring::loop_self_wake_prevents_wait_without_starving_expiry ... FAILED
+test tests::ring::loop_wake_during_arm_is_seen_before_wait ... ok
+test tests::ring::loop_wake_during_final_clock_sample_is_seen ... ok
+test tests::ring::loop_wake_during_readiness_is_seen_before_wait ... ok
+test tests::ring::loop_zero_and_partial_task_budget_preserve_readiness ... FAILED
+
+failures:
+
+---- tests::ring::loop_self_wake_prevents_wait_without_starving_expiry stdout ----
+
+thread 'tests::ring::loop_self_wake_prevents_wait_without_starving_expiry' (31863084) panicked at src/tests/ring.rs:2336:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::loop_zero_and_partial_task_budget_preserve_readiness stdout ----
+
+thread 'tests::ring::loop_zero_and_partial_task_budget_preserve_readiness' (31863088) panicked at src/tests/ring.rs:2447:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    tests::ring::loop_self_wake_prevents_wait_without_starving_expiry
+    tests::ring::loop_zero_and_partial_task_budget_preserve_readiness
+
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

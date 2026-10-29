@@ -1,0 +1,36 @@
+
+running 13 tests
+test last_generation_cannot_wrap_or_reuse ... ok
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test overlap_and_global64_members_are_rejected ... FAILED
+test registration_preflight_global_capacity_avoids_native_admission ... FAILED
+test registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test registration_success_binds_actual_identity_without_late_allocation ... ok
+test stale_native_registration_keeps_precharged_reservation_until_close ... ok
+test uncertain_registration_closes_and_quarantines_with_live_payload ... ok
+
+failures:
+
+---- overlap_and_global64_members_are_rejected stdout ----
+
+thread 'overlap_and_global64_members_are_rejected' (22149508) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-global-cap/test_ring_payload.rs:32:394:
+assertion failed: matches!(unsafe{c.attach_pool(id(2,1),&[range(512)])},Err(Error::Busy))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- registration_preflight_global_capacity_avoids_native_admission stdout ----
+
+thread 'registration_preflight_global_capacity_avoids_native_admission' (22149511) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-global-cap/test_ring_payload.rs:63:118:
+assertion failed: matches!(register(&c,&[range(512)]),Err(Error::Busy))
+
+
+failures:
+    overlap_and_global64_members_are_rejected
+    registration_preflight_global_capacity_avoids_native_admission
+
+test result: FAILED. 11 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

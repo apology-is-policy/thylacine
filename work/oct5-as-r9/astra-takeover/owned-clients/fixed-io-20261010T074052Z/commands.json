@@ -1,0 +1,176 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "20 passed; 0 failed"
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "20 passed; 0 failed"
+  },
+  {
+    "name": "fixed-borrow-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0505"
+  },
+  {
+    "name": "fixed-mutable-view-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0594"
+  },
+  {
+    "name": "return-borrow-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0505"
+  },
+  {
+    "name": "mutate-view-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0594"
+  },
+  {
+    "name": "moved-storage-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0382"
+  },
+  {
+    "name": "legacy-reap-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0599"
+  },
+  {
+    "name": "valid-return-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "valid-return-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "early-fixed-view-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "early-fixed-view-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "abandon-refund-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "abandon-refund-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "missing-abort-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "missing-abort-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "fixed-pool-overlap-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "fixed-pool-overlap-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "pool-fixed-overlap-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "pool-fixed-overlap-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "early-retired-refund-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "early-retired-refund-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "oversized-fixed-result-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "oversized-fixed-result-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "late-write-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "late-write-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  }
+]

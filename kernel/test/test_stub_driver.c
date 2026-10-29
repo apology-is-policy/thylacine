@@ -39,8 +39,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_stub_driver_round_trip(void);
-
 #define STUB_DRIVER_BLOB_MAX 32768
 static _Alignas(16) u8 g_stub_driver_blob[STUB_DRIVER_BLOB_MAX];
 
@@ -81,12 +79,8 @@ void test_stub_driver_round_trip(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/stub-driver", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/stub-driver not in ramfs "
-                  "(build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/stub-driver", &cpio_blob, &size);
+    if (rc != 0) return;
     TEST_ASSERT(size <= STUB_DRIVER_BLOB_MAX,
                 "stub-driver binary too large for static buffer");
 

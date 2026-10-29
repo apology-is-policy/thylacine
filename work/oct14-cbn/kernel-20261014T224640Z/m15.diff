@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:08:45
+@@ -11947,7 +11947,7 @@
+     // after the swap, by number, it could flag whatever a peer thread had put
+     // at that number by then). netd's copy of the mode is per connection, so
+     // the swap keeps it.
+-    if (spoor_flag_get(ctl) & CNONBLOCK) spoor_flag_set(dsp, CNONBLOCK);
++    (void)0; // MUTANT M15: data does not carry the O_NONBLOCK bit
+ 
+     // Keyed on ctl: a peer thread that closed this number while the call slept
+     // and put its own file there is refused, not swapped out and released.

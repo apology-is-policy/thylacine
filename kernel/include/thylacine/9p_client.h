@@ -196,6 +196,15 @@ struct p9_reader_hook {
 
 struct p9_attached;
 
+// Exclusive native service progress. The enclosing scope owns this storage and
+// backend until client destruction, and never exports the client as a Spoor.
+struct p9_client_progress {
+    struct p9_transport_progress io;
+    struct p9_handshake_progress handshake;
+    struct p9_rpc *sending;
+    bool rx_next;
+};
+
 struct p9_client {
     u32                  magic;
     // Per-client lock. Protects the session's tag table (with each tag's
@@ -206,6 +215,7 @@ struct p9_client {
     spin_lock_t          lock;
     struct p9_session    session;
     struct p9_transport  transport;
+    struct p9_client_progress *progress; // NULL legacy; immutable after private bind
     // Shared outbound Tmsg buffer. Used only under c->lock during the
     // build+send of one op (serialized), so the elected-reader pipeline can
     // share it across ops without per-op allocation. NOTE (#375): on c2s
@@ -227,6 +237,7 @@ struct p9_client {
     u8                   out_buf_inline[P9_CLIENT_OUT_BUF_MAX];
     u8                  *out_buf;
     u32                  out_buf_cap;
+    bool                 out_buf_owned; // only legacy allocated bulk storage is freed here
     size_t               recv_cap;     // transport recv-buf cap; per-rpc reply_buf size
     // Pipeline state (ARCH §21.10). The rpc registered on a tag's session
     // entry (its `owner`) is the submitter's p9_rpc for the op holding the
@@ -437,6 +448,17 @@ int  p9_client_init(struct p9_client *c,
                      struct p9_transport_ops transport_ops,
                      u8 *recv_buf, size_t recv_cap);
 
+// Allocation-free initialization for an exclusive owner with precharged storage.
+// Both buffers must hold the proposed msize and remain disjoint from each other
+// and *c, exclusively owned through destroy (including progress_abort callbacks).
+// init failure leaves the caller owning both buffers; destroy never frees them.
+// The client must be fresh or previously destroyed, never concurrently in use.
+// This does not itself bind the private transport or grant service authority.
+int p9_client_init_preallocated(struct p9_client *c, u32 root_fid, u32 msize,
+                                struct p9_transport_ops transport_ops,
+                                u8 *recv_buf, size_t recv_cap,
+                                u8 *send_buf, u32 send_cap);
+
 // Tear down: clobbers magic, destroys session + transport.
 void p9_client_destroy(struct p9_client *c);
 
@@ -500,11 +522,13 @@ int  p9_client_walk(struct p9_client *c,
                      const u8 *const *names, const size_t *name_lens,
                      u16 *out_nwqid, struct p9_qid *out_qids);
 
+#ifdef KERNEL_TESTS
 // Convenience: walk a single component from `src_fid` to `new_fid`.
 int  p9_client_walk_one(struct p9_client *c,
                          u32 src_fid, u32 new_fid,
                          const u8 *name, size_t name_len,
                          struct p9_qid *out_qid);
+#endif // KERNEL_TESTS
 
 // Fused walk+getattr (POUNCE, Twalkgetattr 140; docs/POUNCE-DESIGN.md):
 // p9_client_walk's contract PLUS each walked component's full attribute
@@ -522,6 +546,7 @@ int  p9_client_walkgetattr(struct p9_client *c,
                            u16 *out_nwqid, struct p9_qid *out_qids,
                            struct p9_attr *out_attrs);
 
+#ifdef KERNEL_TESTS
 // Clunk (release) a fid, waiting for the Rclunk. Returns 0 once the Tclunk is
 // on the wire and answered -- or on the wire with its waiter dying or
 // interrupted, since a Tclunk is never flushed (FID-LIFECYCLE section 9): it
@@ -533,6 +558,7 @@ int  p9_client_walkgetattr(struct p9_client *c,
 // (its fids died with it) or the fid cannot be clunked here (unbound, the
 // root, a live op on it).
 int  p9_client_clunk(struct p9_client *c, u32 fid);
+#endif // KERNEL_TESTS
 
 // Fire-and-forget clunk (FID-LIFECYCLE async-clunk): send the Tclunk, do NOT
 // block on Rclunk. The fid unbinds at send (I-11; the number is never reused);
@@ -596,8 +622,10 @@ int  p9_client_setattr(struct p9_client *c, u32 fid,
                         const struct p9_setattr *attr);
 int  p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
                         u32 count, u8 *out_data, u32 *out_count);
+#ifdef KERNEL_TESTS
 int  p9_client_statfs(struct p9_client *c, u32 fid,
                        struct p9_statfs *out_statfs);
+#endif // KERNEL_TESTS
 int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 
 // =============================================================================
@@ -625,24 +653,8 @@ int  p9_client_weftio(struct p9_client *c, u32 fid,
 // Mutation operations.
 // =============================================================================
 
-int  p9_client_symlink(struct p9_client *c, u32 fid,
-                        const u8 *name, size_t name_len,
-                        const u8 *symtgt, size_t symtgt_len,
-                        u32 gid, struct p9_qid *out_qid);
-
-int  p9_client_mknod(struct p9_client *c, u32 dfid,
-                      const u8 *name, size_t name_len,
-                      u32 mode, u32 major, u32 minor, u32 gid,
-                      struct p9_qid *out_qid);
-
-int  p9_client_rename(struct p9_client *c, u32 fid, u32 dfid,
-                       const u8 *name, size_t name_len);
-
 int  p9_client_readlink(struct p9_client *c, u32 fid,
                          u8 *out_target, u16 *out_target_len);
-
-int  p9_client_link(struct p9_client *c, u32 dfid, u32 fid,
-                     const u8 *name, size_t name_len);
 
 int  p9_client_mkdir(struct p9_client *c, u32 dfid,
                       const u8 *name, size_t name_len,
@@ -677,7 +689,9 @@ bool   p9_client_is_open(const struct p9_client *c);
 // fid is a real leak; on a dead session the fid died with it, and an unbound
 // fid has nothing to leak (or its Tclunk is already on the wire).
 bool   p9_client_fid_held(struct p9_client *c, u32 fid);
+#ifdef KERNEL_TESTS
 size_t p9_client_inflight(const struct p9_client *c);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Asynchronous (Loom) front-end (Loom-2b; the pluggable-completion seam).
@@ -712,6 +726,19 @@ typedef int (*p9_session_build_fn)(struct p9_session *s, u8 *out, size_t cap,
 int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
                            p9_session_build_fn build, void *build_ctx);
 
+// Bind a fresh, unpublished client to caller-owned progress storage; queues
+// version without I/O. No peer wait. Borrow ends only at client destruction.
+int p9_client_progress_bind(struct p9_client *c, struct p9_client_progress *p,
+                            struct p9_transport_try_ops ops, u32 principal,
+                            u64 deadline_ns);
+// One transport callback and at most one complete reply per visit. Alternates
+// partial TX/RX so a full sender cannot starve replies. Returns 0 pending,
+// 1 ready/progress, or negative terminal error. Caller supplies monotonic time.
+int p9_client_progress_step(struct p9_client *c, u64 now_ns);
+// Abort only this exclusive client, complete every accepted RPC exactly once,
+// and detach all parser/TX borrows locally. Does not free enclosing storage.
+void p9_client_progress_abort(struct p9_client *c);
+
 // The result of p9_client_reader_pump_ready (a SIGNED enum).
 enum p9_pump_result {
     P9_PUMP_DEAD     = -1,  // the session is dead (its ops have their errors)
@@ -732,10 +759,12 @@ enum p9_pump_result {
 // SQPOLL kthread, the dev9p poll kthread) or by whoever holds the role.
 int p9_client_reader_pump_ready(struct p9_client *c);
 
+#ifdef KERNEL_TESTS
 // Hand the elected-reader role to a pending SYNC op (async ops are skipped --
 // they have no thread to run the reader loop). Exposed for the handoff-skip
 // regression; the reader loop uses the internal locked form.
 void p9_client_handoff_reader(struct p9_client *c);
+#endif // KERNEL_TESTS
 
 // Hook `h` to learn when pumping `c` could make progress. Returns -P9_E_IO if
 // the session is dead or its transport closed, and 0 if a frame waits on a
@@ -762,6 +791,7 @@ void p9_client_reader_unhook(struct p9_client *c, struct p9_reader_hook *h);
 // reclaim). The caller must NOT touch the engine for `rpc` afterward.
 void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 
+#ifdef KERNEL_TESTS
 // Mark the whole session DEVICE-GONE (MENAGERIE.md section 10): latch it dead
 // and complete every in-flight ASYNC (Loom) op with a -P9_E_NODEV terminal CQE
 // -- the device-gone result, distinct from the generic -P9_E_IO a transport
@@ -774,6 +804,7 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 // (a no-op on an already-dead session: its in-flight slots are cleared). Under
 // c->lock internally. NULL / magic-mismatch safe.
 void p9_client_mark_devgone(struct p9_client *c);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Errno convention.

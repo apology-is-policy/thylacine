@@ -46,6 +46,14 @@ struct Proc;
 // all-free at alloc; handle_close zeros the slot on release).
 #define HANDLE_MAGIC 0x48414e444c45BAD2ULL    // 'HANDLE' | 0xBAD2
 
+// HANDLE_RESERVED -- a number a call holds and has not filled yet (Linux's
+// get_unused_fd_flags). Not free: no scan and no dup3 takes it. Not live: get,
+// close, replace, the flag setters, close-on-exec, the fork copy and the count
+// pass it by. Only the reserving call fills it or returns it, so a failed call
+// never publishes a descriptor and never unwinds another thread's
+// (vault dec-2026-10-14-descriptor-slot-reservation).
+#define HANDLE_RESERVED 0x5245534552564544ULL // 'RESERVED'
+
 // Per ARCH §18.2. Eight kinds. Order matters — _Static_asserts pin the
 // enum values to specific bits in the transferable + hw masks below.
 enum kobj_kind {
@@ -203,14 +211,18 @@ struct HandleTable {
     // peer threads that race over the slots, so it takes the same protection.
     spin_lock_t   lock;
     u32           _pad_lock;
+    // Objects ever installed at a number of this table (under `lock`). A
+    // reservation is not an install, so a call that fails after reserving
+    // leaves it unchanged: the tests' witness that nothing was published.
+    u64           installs;
     u64           cloexec[HANDLE_CLOEXEC_WORDS];
     struct Handle slots[PROC_HANDLE_MAX];
 };
 
 _Static_assert(sizeof(struct HandleTable) ==
-                   8 + 8 * HANDLE_CLOEXEC_WORDS + 24 * PROC_HANDLE_MAX,
-               "HandleTable size pinned at 8 (lock + pad) + the cloexec bitmap "
-               "+ PROC_HANDLE_MAX * sizeof(Handle)");
+                   16 + 8 * HANDLE_CLOEXEC_WORDS + 24 * PROC_HANDLE_MAX,
+               "HandleTable size pinned at 8 (lock + pad) + the install count "
+               "+ the cloexec bitmap + PROC_HANDLE_MAX * sizeof(Handle)");
 _Static_assert(HANDLE_CLOEXEC_WORDS * 64 >= PROC_HANDLE_MAX,
                "the cloexec bitmap must cover every slot -- a short bitmap "
                "would silently drop the flag on the high slots");
@@ -250,6 +262,34 @@ void handle_table_free(struct HandleTable *t);
 hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
                     rights_t rights, void *obj);
 
+// handle_alloc with the close-on-exec bit set in the same hold (O_CLOEXEC).
+hidx_t handle_alloc_cloexec(struct Proc *p, enum kobj_kind kind,
+                            rights_t rights, void *obj, bool cloexec);
+
+// The three-step life of a descriptor whose call can still fail after it knows
+// its number (a copy-out, a row keyed on the number). handle_reserve takes the
+// lowest free index >= from (-1 when full). handle_install_reserved fills it and
+// cannot fail: its arguments obey handle_alloc's contract, and a bad one, or a
+// slot that is not this call's reservation, is a kernel bug and extincts.
+// handle_dup_into_reserved fills it with a dup of `src` under handle_dup_posix's
+// rules; -1, with the reservation kept, when src is not live or may not be
+// duplicated. handle_unreserve returns an unfilled reservation.
+hidx_t handle_reserve(struct Proc *p, hidx_t from);
+void   handle_install_reserved(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                               rights_t rights, void *obj, bool cloexec);
+int    handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec);
+void   handle_unreserve(struct Proc *p, hidx_t h);
+#ifdef KERNEL_TESTS
+bool   handle_is_reserved(struct Proc *p, hidx_t h);
+#endif // KERNEL_TESTS
+// Runs fn(arg) under the table lock unless `h` is a reservation, and says
+// whether it ran. A reservation cannot be taken while fn runs, so fn's answer
+// holds against every reserving call. Any lock fn takes must be a leaf
+// (spinlock.h): the table lock is refused inside one.
+bool   handle_locked_unless_reserved(struct Proc *p, hidx_t h,
+                                     void (*fn)(void *), void *arg);
+
+#ifdef KERNEL_TESTS
 // Release a handle. Returns 0 on success, -1 if the slot is empty
 // (already-closed or never-allocated) or out-of-range. The slot is zeroed
 // under the table lock; the object's release (a Spoor's clunk, which may
@@ -257,16 +297,32 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 //
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
+#endif // KERNEL_TESTS
 
 // handle_close that also returns, in *close_rc, what the object's last close
 // reported: 0, or a Dev close hook's negative error (close(2)'s EIO).
 int handle_close_report(struct Proc *p, hidx_t h, int *close_rc);
 
-// Swap what a LIVE handle denotes, in place, keeping the same slot index.
+// handle_close, but only while slot h still names (kind, obj); -1 and the slot
+// untouched otherwise (and for a NULL obj). For an unwind that must not close a
+// number a sibling thread has since closed and reused. Pointer equality is
+// identity only while the caller holds its OWN reference on obj: without one,
+// obj can be freed and a new object installed at h from the same address.
+// A guarded HandleClose(p, h): it adds no transition the spec lacks.
+int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj);
+
+#ifdef KERNEL_TESTS
+// Swap what a LIVE handle denotes, in place, keeping the same slot index, and
+// only while the slot still names `expect` -- an object the caller holds its
+// OWN reference on, so its address cannot be freed and handed to a newcomer.
+// connect() sleeps between choosing the socket and the swap; a number a peer
+// thread closed and reused meanwhile names another object and is refused,
+// never swapped out from under that thread.
 // Returns 0 on success, -1 on any refusal (out-of-range h, empty slot, bad
-// args, or a kind outside the permitted pair). On success the outgoing object
-// is released exactly once; on any refusal nothing is touched and the caller
-// still owns the reference it passed in.
+// args, a kind outside the permitted pair, or a slot that no longer names
+// `expect`). On success the outgoing object is released exactly once; on any
+// refusal nothing is touched and the caller still owns the reference it passed
+// in.
 //
 // WHY THIS EXISTS, AND WHY IT IS THIS NARROW (VIVARIUM V-5, docs/VIVARIUM.md
 // section 5.5.1). A Linux `connect()` must turn the guest's socket fd from the
@@ -297,8 +353,19 @@ int handle_close_report(struct Proc *p, hidx_t h, int *close_rc);
 // the phenotype's socket translators, which have already validated the guest's
 // arguments. Exposing it as a syscall would be a new ABI with none of the
 // above applied by whoever called it.
-int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
-                   rights_t rights, void *obj);
+int handle_replace(struct Proc *p, hidx_t h, const void *expect,
+                   enum kobj_kind kind, rights_t rights, void *obj);
+#endif // KERNEL_TESTS
+
+// The same swap with a hook run INSIDE its hold -- after the slot names `obj`,
+// before the lock drops, and only when the swap happened. For state beside the
+// table keyed by its indices (the phenotype socket table), this makes the swap
+// and that state's change ONE step to a reader of both. The hook may take leaf
+// locks only (the socket table's nests here: handle -> socktab) and must neither
+// sleep nor allocate. `under_lock == NULL` is the plain replace.
+int handle_replace_hooked(struct Proc *p, hidx_t h, const void *expect,
+                          enum kobj_kind kind, rights_t rights, void *obj,
+                          void (*under_lock)(void *arg), void *arg);
 
 // Look up a handle into a caller-owned snapshot, with a reference HELD on
 // the underlying kobj. Returns 0 on success (*out filled: kind / rights /
@@ -347,6 +414,7 @@ void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp);
 // Maps to specs/handles.tla::HandleDup(p, h, new_rights).
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 
+#ifdef KERNEL_TESTS
 // LINEAGE L-3c: copy `src`'s handle table into `dst` -- the fd inheritance a
 // forked child gets and a spawned child does not. Called from rfork_internal
 // on the FORK shape only; `dst` must be a freshly-allocated, still-unpublished
@@ -383,6 +451,7 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 // the same size. Returns the number of slots copied (a diagnostic, and what
 // the regression tests assert on).
 int handle_table_copy_into(struct Proc *dst, struct Proc *src);
+#endif // KERNEL_TESTS
 
 // The same copy with a hook run INSIDE the source-lock hold -- after every
 // slot is copied, before either lock drops. For state that lives BESIDE the
@@ -396,6 +465,7 @@ int handle_table_copy_into(struct Proc *dst, struct Proc *src);
 int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
                                   void (*under_src_lock)(void *arg), void *arg);
 
+#ifdef KERNEL_TESTS
 // #151: dup with the parent's rights carried VERBATIM, installing at the lowest
 // free index >= min_idx, and with the new descriptor's close-on-exec flag set to
 // `cloexec`. This is POSIX dup / F_DUPFD / F_DUPFD_CLOEXEC; handle_dup above is
@@ -416,6 +486,7 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // slot, non-transferable kind, devsrv Spoor, table full) plus an out-of-range
 // min_idx.
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
+#endif // KERNEL_TESTS
 
 // #157: dup `old` onto the SPECIFIC index `new_h`, closing whatever was there.
 // This is POSIX dup2 / Linux dup3, and it is a genuinely new combination rather
@@ -459,7 +530,9 @@ hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
 // Returns `new_h` on success, -1 on: either index out of range, old == new_h
 // (refused rather than made a no-op -- the caller's own EINVAL should have
 // caught it, and a primitive that cannot corrupt beats one that happens not
-// to), an empty `old`, or a source the alias gate rejects.
+// to), an empty `old`, or a source the alias gate rejects; HANDLE_DUP_TO_BUSY
+// when `new_h` is another call's reservation (Linux's EBUSY).
+#define HANDLE_DUP_TO_BUSY (-2)
 hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 
 // #151: read / write a slot's close-on-exec flag. Returns 0 or 1 (get) and 0
@@ -494,6 +567,7 @@ int handle_get_status_flags(struct Proc *p, hidx_t h,
 // second reason.
 int handle_close_on_exec(struct Proc *p);
 
+#ifdef KERNEL_TESTS
 // Type classifiers. Map to specs/handles.tla's TxKObjs / HwKObjs /
 // SrvKObjs partitions. kobj_kind_is_transferable returns true for
 // Process / Thread / BURROW / Spoor; kobj_kind_is_hw for MMIO / IRQ /
@@ -508,8 +582,17 @@ bool kobj_kind_is_srv(enum kobj_kind k);
 // diagnostics, not perf-critical).
 int handle_table_count(const struct HandleTable *t);
 
+// p's table's install count (struct HandleTable.installs).
+u64 handle_table_installs(struct Proc *p);
+
 // Diagnostics — cumulative cache statistics.
 u64 handle_total_allocated(void);
 u64 handle_total_freed(void);
+#endif // KERNEL_TESTS
+
+// Infallible exec commit, before the image swap. Leaf latches only; descriptor
+// removal and wakes follow outside the process-table lock through
+// handle_close_on_exec.
+void handle_private_exec_latch(struct Proc *p);
 
 #endif // THYLACINE_HANDLE_H

@@ -1,0 +1,11 @@
+--- control.c
++++ member-view-clear.c
+@@ -961,7 +961,7 @@
+     return 0;
+ }
+ static void provided_clear(struct loom_service_operation *o) {
+-    o->program.wire.payload=NULL;o->program.wire.payload_capacity=0;
++    /* keep stale pointer */o->program.wire.payload_capacity=0;
+ }
+ int loom_provided_detach_locked(struct loom_service_operation *o) {
+     if(!o || !o->pool_stream || o->pool_busy || o->pool_pending ||

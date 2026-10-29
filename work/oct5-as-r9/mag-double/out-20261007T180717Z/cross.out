@@ -1,0 +1,24 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=73348)
+  Read of size 4 at 0x000100824068 by thread T2:
+    #0 magazines_drain_all extracted.inc:98 (mag-double:arm64+0x100001350)
+    #1 drainer_cross mag-double.c:134 (mag-double:arm64+0x100001350)
+
+  Previous write of size 4 at 0x000100824068 by thread T1:
+    #0 mag_free extracted.inc:88 (mag-double:arm64+0x100000bec)
+    #1 owner_thread mag-double.c:124 (mag-double:arm64+0x10000117c)
+
+  Location is global 'g_percpu' at 0x000100824068 (mag-double+0x100008068)
+
+  Thread T2 (tid=9296372, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001028)
+
+  Thread T1 (tid=9296371, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main mag-double.c (mag-double:arm64+0x100001014)
+
+SUMMARY: ThreadSanitizer: data race extracted.inc:98 in magazines_drain_all
+==================
+leg=cross         iters=20000  #807-guard-fires=0  silent-double-alloc=0  double-free=0
+ThreadSanitizer: reported 1 warnings

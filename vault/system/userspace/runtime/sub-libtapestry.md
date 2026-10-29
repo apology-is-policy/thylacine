@@ -4,10 +4,13 @@ type: sub
 title: "libtapestry — the client weave and the shared event ring"
 parent: moc-userspace-runtime
 code:
+  - usr/lib/libtapestry/src/ordered.rs
+  - usr/lib/libtapestry/src/seat.rs
   - usr/lib/libtapestry/src/lib.rs
   - usr/lib/libtapestry/src/ring.rs
+  - usr/lib/libtapestry/src/admission.rs
   - usr/lib/libtapestry/Cargo.toml
-audit: light
+audit: hard
 guarded-by: []
 validated-by: [prose]
 locks: []
@@ -17,6 +20,80 @@ design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
 updated: 2026-10-07
 ---
+## Cooperative hidden storage (October 4)
+
+TAPESTRY-STORAGE.md is implemented on Astra; native storage regressions and
+the five-row50boot SMP/UBSan matrix pass.
+Owned content opt-in, TEV_STORAGE13 and exact visibility tokens preserve the
+semantic surface while retiring hidden pixels. Fresh pixel generations bind
+weave/present fids; full unheld repaint precedes publication. Client mapping,
+Tapestry generation, backend import and scanout each retain their own lifetime
+obligation. There is no quota increase or forced reclaim. Legacy clients keep
+their prior lifecycle. The library exposes open_storage_claim_on, handle_storage,
+is_drawable and is_ready; the renderer must quiesce pixel borrows before handling
+storage, and withhold blind input until a successful repaint.
+
+[[spec-tapestry-storage]]:287states/7namedmutants; existing present model6clean/
+10namedmutants.122Tapestry+23library tests;11actual-source mutations. Native
+stale offer/fid, mapping pin/nonalias, first-full-frame, abort/retry and legacy
+checks pass. Actual mapping refusal after22retained generations recovers after
+release without surface destruction. Full-width16PTY/14controller physicalF10
+passes; hidden output survives reveal and resize. The matrix has50individualPASS outcomes and zero in every failure class.
+Its boot coverage does not qualify graphical workloads, Pi or minimum displays;
+real Halcyon failed-reveal capture and application activation remain open. Evidence and limitations:
+docs/HALCYON-INTERACTION-STATUS.md, work/oct4-hidden-storage/self-review.md.
+
+## Local ordered-stream progress
+
+The ordered exchange exposes runnable local work: a deliverable retained record
+or a read/write needing submission. The service folds this into its poll timeout,
+so consuming a record rearms the channel without waiting for an unrelated seat
+State timeout. Pending I/O and decisions awaiting their write CQE do not spin.
+HSC remains first in the executor pass; no extra timer or authority is introduced.
+
+## Ordered interaction channel
+
+`ordered::Channel` selects one unused ctl fid on the existing declared session
+connection. It has independent read/write SQEs and nonoverlapping 80-byte buffers
+in one registered allocation. It keeps a decision private until the exact write
+CQE succeeds, regardless of completion order. Receiver faults are terminal.
+Ring retirement precedes buffer and fid release; no borrowed UI ring is used.
+A parked read does not prevent writes. HSC cancellation uses its separate lane.
+
+## Independent seat channel (October 2)
+
+`seat` separates normal-connection HSR setup from HSC cancellation. The latter
+uses an independently opened resident service connection, fixed 96-byte buffer,
+four-entry SQPOLL ring, monotone request/CQE identities and one exchange. Pump
+never waits on rendering. Ring teardown precedes registered buffer/fid release.
+HIA `preopen`/`from_file` moves only an owned File from setup to the service
+executor, which constructs its own Ring; no unsafe Send of EventRing or Ring.
+The original `open` also retains its EventRing. Registered in-flight HIA storage
+must remain alive even when the broker has cancelled the action.
+
+## Internal admission client (October 1)
+
+`Surface::interaction_control` is the synchronous setup/test helper. The
+`admission::Channel` opens one ctl on the same authenticated EventRing session
+at setup, registers a fixed 120-byte buffer and fd with a four-entry SQPOLL
+Loom, and drives one request WRITE followed by positioned receipt READs.
+There is one exchange and one SQE in flight, with no per-action allocation,
+open or blocking wait. The renderer can include `poll_fd()` in its existing
+wait set. The channel retains its session and drops the ring before its buffer
+and fd. Cancellation invalidates the broker ticket; an in-flight channel is
+drained or dropped before reuse. New channel construction is setup, not an
+allowed per-action substitute for asynchronous operation.
+
+The pure Exchange matches monotonically unique CQE tags and request IDs,
+handles partial reads and backpressure, rejects duplicate/reordered CQEs,
+and refuses exhaustion. Exact denied decisions remain errors; malformed or
+truncated replies poison the channel. The reusable compositor ctl retains one
+exact request/decision, rejects old or altered IDs, and returns exact retries
+without re-running ACK/CHECK. Receipt correlation is not clipboard authority.
+The native admission probe exercises the channel with the actual clipboard
+broker; application endpoint/controller activation remains outstanding.
+
+
 ## Purpose
 
 The client half of the graphics protocol: connect to the compositor,
@@ -464,3 +541,33 @@ This does not change presentation fences or buffer ownership.
 session uses as the native application's header. It must follow successful
 surface creation. It does not create a second title store or confer authority
 over another pane.
+
+## Pointer shape preference
+
+`Surface::set_cursor(CursorShape)` sends the standard surface ctl command.
+The owning connection and live surface generation gate the write. The stored
+preference affects only the surface under the pointer; it cannot change another
+surface, upload an image, warp the pointer or capture input. Divider tracks have
+a compositor-owned resize shape (`docs/HALCYON-INTERACTION.md` section 14).
+
+## Completion-scoped payload borrows (AS-R8)
+
+RingCore::pump calls ring::route_completion with a lazy range accessor. Only a
+matching slot/generation completion invokes it, and only for that completion's
+positive bounded byte count. The view starts at the slot's EV_REGION offset;
+other surface regions may still be written by pending reads. EOF/errors/stale
+completions never borrow payload. The old whole-staging mutable slice is gone.
+
+Ordered Channel has independent read/write submissions: completed_read checks
+exact read tag and RECORD_BYTES before creating an immutable RX view. A WRITE
+completion never references RX while READ is pending. Admission/seat use
+completed_read_len to require a matching current READ and valid byte count;
+stale/duplicate/write/error CQEs get no payload view. Request copies use direct
+mutable ranges, never a whole-allocation reference across another operation.
+
+All raw registrations explicitly acknowledge the unsafe asynchronous contract;
+channel field order still closes/joins the ring before dropping backing/fids.
+The Exchange rules prevent reusing request bytes before WRITE completion and
+retain unresolved operations after enter errors. Event reads remain single-shot.
+27 host tests include four new ownership assertions; four source mutations fail
+their named tests. This correction adds no wire message or clipboard authority.

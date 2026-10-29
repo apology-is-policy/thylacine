@@ -193,8 +193,10 @@ struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st) {
     return ops;
 }
 
+#ifdef KERNEL_TESTS
 bool p9_spoor_transport_is_open(const struct p9_spoor_transport *st) {
     if (!st)                                   return false;
     if (st->magic != P9_SPOOR_TRANSPORT_MAGIC) return false;
     return st->tx_spoor != NULL;
 }
+#endif // KERNEL_TESTS

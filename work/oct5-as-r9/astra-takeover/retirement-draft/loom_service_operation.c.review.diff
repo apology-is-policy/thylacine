@@ -1,0 +1,40 @@
+diff --git a/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_operation.c b/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_operation.c
+index b6b1a3348..0617ef1de 100644
+--- a/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_operation.c
++++ b/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_operation.c
+@@ -3,6 +3,7 @@
+ // close/abort driver runs during allocation or destruction outside Ll.
+ #include <thylacine/loom_service_operation.h>
+ #include <thylacine/loom_service_engine.h>
++#include <thylacine/loom_service_provided.h>
+ #include <thylacine/loom.h>
+ #include <thylacine/addrspace.h>
+ #include <thylacine/page.h>
+@@ -128,3 +129,27 @@ int loom_private_operation_release_unused(struct loom_service_operation *op) {
+     operation_put(l,scope,p);
+     return 0;
+ }
++
++int loom_private_operation_release_retired(struct loom_service_operation *op) {
++    if(!op || !op->owner || !op->protocol)return -T_E_INVAL;
++    struct Loom *l=op->owner;struct loom_service_protocol *p=op->protocol;
++    struct loom_request_ref request=op->request;struct loom_service_ref scope=op->scope;
++    spin_lock(&l->lock);
++    if(!p->driving || op->phase!=LRPC_TERMINAL || op->fid_claim ||
++       op->source_borrow || op->fixed.owner || op->fixed_dropping ||
++       op->pool_busy || op->pool_pending || op->rpc.sending || op->rpc.on_complete) {
++        spin_unlock(&l->lock);return -T_E_BUSY;
++    }
++    int rc=loom_rpc_unlink_locked(op);
++    if(!rc && op->pool_stream && loom_provided_detach_locked(op))
++        extinction("retired operation lost pool stream");
++    spin_unlock(&l->lock);if(rc)return rc;
++    kfree(op);
++    operation_refund(l);
++    spin_lock(&l->lock);
++    if(loom_request_drop_owner(&l->service_requests,request) ||
++       loom_request_reap(&l->service_requests,l->service_slots,request))
++        extinction("operation lost retired physical owner");
++    spin_unlock(&l->lock);
++    operation_put(l,scope,p);return 0;
++}

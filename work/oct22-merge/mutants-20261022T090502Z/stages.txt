@@ -1,0 +1,8 @@
+mutate.py --check: every anchor occurs exactly once: R1 R2
+2026-10-22T09:05:02Z  HEAD a8d960cb3cfea0502dcfa1e04c6ed1d7754deaeb, clean; go fork 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean; anchors + kill messages checked; verdict self-check passes; mutants: R1 R2 
+2026-10-22T09:05:02Z  disk R1: 9190 MiB free (floor 6144)
+2026-10-22T09:05:16Z  R1: BUILD FAILED (proves nothing); tail in work/oct22-merge/mutants-20261022T090502Z/R1-build.log
+2026-10-22T09:05:17Z  disk R2: 9373 MiB free (floor 6144)
+2026-10-22T09:05:34Z  R2: BUILD FAILED (proves nothing); tail in work/oct22-merge/mutants-20261022T090502Z/R2-build.log
+2026-10-22T09:05:34Z  SURVIVORS: R1(build) R2(build)
+2026-10-22T09:05:34Z  exit 1

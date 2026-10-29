@@ -276,6 +276,13 @@ environment. #140 built the frame half. The lasting asymmetry: the **native**
 `/env` onto the new stack; the **Linux** `viv_execve` follows POSIX, so an empty
 envp now means an empty environment, not an inherited one.
 
+A spawn's exec projects the child's own `/env` the same way, and since
+2026-10-28 that group is either rfork's copy of the spawner's or the one a
+`SPAWN_EXT_ENV` tail named, which the spawn thunk installs before it calls exec
+([[sub-kernel-syscall-dispatch]], [[dec-2026-10-28-spawn-env]]). The projection
+itself is unchanged; only the ordering in the thunk makes the frame carry the
+named environment, and `spawn_env.child_gets_block` reads the frame to pin it.
+
 ## Data structures
 
 No types of its own. It consumes `struct elf_image` from [[sub-kernel-elf]] and
@@ -466,6 +473,34 @@ nothing relates that number to how many entries `exec_fill_auxv` actually
 writes. A ninth entry added without bumping the macro would overrun the
 `AT_RANDOM` block in every process, and the assert would still pass. Correct
 today; the coupling is a comment.
+
+## AT_RANDOM is drawn before the frame, and a refused draw fails the exec (2026-10-26, vote 18)
+
+The frame's sixteen `AT_RANDOM` bytes are musl's stack-protector canary and
+mallocng's secret. `exec_build_init_stack` draws them from the kernel CSPRNG
+before it allocates the frame scratch, so a refusal has nothing to give back,
+and a refused draw fails the exec: the builder returns 0 with `*err_out` left
+at -1 and a diagnostic line (`exec: the CSPRNG refused the AT_RANDOM draw,
+bytes wanted 0x10`). execve reports that as EINVAL, its catch-all for every
+load failure but a refused allocation; a spawned child exits `fail-exec`.
+Until 2026-10-26 the draw discarded the refusal into a zeroed array, so a
+process started on an unseeded pool ran with a zero canary.
+
+The refusal is unreachable in a booted system: the boot refuses userspace on
+an unseeded pool ([[sub-kernel-boot-sequence]]) and the pool never returns to
+unseeded ([[sub-kernel-content]]). The check keeps the contract local to the
+one place that hands entropy to a new image. A test build forces it with
+`exec_random_refuse_for_test` (KERNEL_TESTS only; the production object
+carries no such symbol): `exec.at_random_refusal_fails_exec` arms it,
+releases it before any assert, and checks that the exec failed, that no frame
+page was populated, and that the same exec succeeds once released.
+
+Once copied into the frame, the bytes are scrubbed from the builder's stack
+array, and the frame's copy is scrubbed before the scratch is freed, on the
+populate-failure path too; a refused scratch allocation scrubs the stack
+array before it returns. The slab does not zero an object on free, so an
+unscrubbed copy would sit in freed memory until the object's next owner
+overwrote it.
 
 ## The segments and the stack are user-pool allocations (2026-09-23; B-1a' round-1 close)
 

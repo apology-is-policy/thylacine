@@ -1,0 +1,14 @@
+OK  loom_sq  expect=clean  rc=0  distinct=188
+OK  loom_sq_liveness  expect=clean  rc=0  distinct=188
+OK  loom_sq_buggy_release_before_copy  expect=violates:FifoFidelity  rc=12  distinct=53
+OK  loom_sq_buggy_unlocked_claim  expect=violates:FifoFidelity  rc=12  distinct=104
+OK  loom_sq_buggy_unlocked_claim_exclusive  expect=violates:ClaimExclusive  rc=12  distinct=11
+OK  loom  expect=clean  rc=0  distinct=2429
+OK  loom_liveness  expect=clean  rc=0  distinct=1457
+OK  loom_buggy_live_sqe_reread  expect=violates:ArgPinnedToSnapshot  rc=12  distinct=225
+OK  loom_buggy_recheck_at_completion  expect=violates:ObjPinnedToSnapshot  rc=12  distinct=603
+OK  loom_buggy_double_post  expect=violates:NoDoubleCompletion  rc=12  distinct=626
+OK  loom_buggy_lost_on_full  expect=violates:CqNeverOverfull  rc=12  distinct=1700
+OK  loom_buggy_stale_after_teardown  expect=violates:NoStaleCompletion  rc=12  distinct=160
+OK  loom_buggy_cqwait_no_wake  expect=violates:NoMissedCqWake  rc=12  distinct=877
+OK  loom_buggy_cqwait_check_early  expect=violates:NoMissedCqWake  rc=12  distinct=2043

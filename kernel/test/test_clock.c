@@ -20,13 +20,6 @@
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>
 
-// LS-K syscall handlers (non-static in syscall.c; no public header).
-extern s64 sys_getpid_handler(u64, u64, u64, u64);
-extern s64 sys_getuid_handler(u64, u64, u64, u64);
-extern s64 sys_getgid_handler(u64, u64, u64, u64);
-extern s64 sys_clock_gettime_handler(u64, u64, u64, u64);
-extern s64 sys_clock_settime_handler(u64, u64, u64, u64);   // net-7a
-
 void test_clock_monotonic_advances(void) {
     u64 a = timer_now_ns();
     timer_busy_wait_ticks(2);
@@ -209,7 +202,6 @@ static long cns_sleep(void *arg) {
 // already past returns 0 at once even with a note pending -- the opposite of
 // pause()'s zero timeout -- and an absolute deadline of 0, tsleep's no-deadline
 // sentinel, is a past deadline, never a sleep without one.
-void test_clock_nanosleep_caught_note(void);
 void test_clock_nanosleep_caught_note(void) {
     cns_set(false, false, CNS_LONG);
     struct Proc *lin = test_caught_proc(true);
@@ -328,7 +320,6 @@ static void cnw_release(void *arg) {
 // the instant ends the sleep at once, and a step back sleeps on toward the
 // instant's new place. A relative sleep never consults the wall clock, so a step
 // leaves it alone. Native Procs: the note the fixture posts is ridden out.
-void test_clock_nanosleep_wall_step(void);
 void test_clock_nanosleep_wall_step(void) {
     g_cnw_off0 = timer_wallclock_offset_ns_now();
 

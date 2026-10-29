@@ -101,7 +101,7 @@ immutable on a running Proc — so a plain read is sound. A NULL Proc reads
 non-exempt (fail-closed).
 
 The **graceful-OOM backstop** is what bounds the recursive case: every user
-creation path (`proc_alloc`, `thread_create`, `territory_clone`,
+creation path (`proc_alloc_in`, `thread_create`, `territory_clone`,
 `burrow_create_anon`, the demand-page install) returns an error or
 per-Proc-terminates, never a box extinction. So a bomb that evades a
 per-Proc cap by spreading across Procs still terminates at the physical

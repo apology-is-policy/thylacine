@@ -1,0 +1,37 @@
+2026-10-12T14:29:14Z  HEAD dc7feeb0ff888921a852b84a148fe73db8215305
+2026-10-12T14:29:14Z  expected tests (derived from test.c): 1870
+2026-10-12T14:29:14Z  disk pre: 9893 MiB free (floor 8192)
+2026-10-12T14:29:23Z  ABI: the checker passes on the tree and fails on each sabotaged copy
+2026-10-12T14:30:22Z  disk post-control-d-build: 10033 MiB free (floor 8192)
+2026-10-12T14:31:13Z  control-d: test.sh exit 0
+2026-10-12T14:31:13Z  CONTROL-D GREEN: 1870/1870; the probe ran from the ramfs and printed its default verdict; no private ring made
+2026-10-12T14:32:06Z  disk post-control-q-build: 9973 MiB free (floor 8192)
+2026-10-12T14:32:59Z  control-q: test.sh exit 0
+2026-10-12T14:32:59Z  CONTROL-Q GREEN: 1870/1870; the probe drove every private route from EL0; four rings made, four retired
+2026-10-12T14:32:59Z  disk pre-m10: 9917 MiB free (floor 8192)
+2026-10-12T14:33:52Z  disk post-m10-build: 9969 MiB free (floor 8192)
+2026-10-12T14:34:06Z  m10: test.sh exit 1
+2026-10-12T14:34:06Z  M10 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught 'params echo the granted flags'
+2026-10-12T14:34:06Z  disk pre-m14: 9952 MiB free (floor 8192)
+2026-10-12T14:34:57Z  disk post-m14-build: 9919 MiB free (floor 8192)
+2026-10-12T14:35:11Z  m14: test.sh exit 1
+2026-10-12T14:35:11Z  M14 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught 'reserved params are zero'
+2026-10-12T14:35:11Z  disk pre-m12: 9893 MiB free (floor 8192)
+2026-10-12T14:36:05Z  disk post-m12-build: 9990 MiB free (floor 8192)
+2026-10-12T14:36:18Z  m12: test.sh exit 1
+2026-10-12T14:36:18Z  M12 DISCRIMINATED: exactly loom.bridge_probe FAILs at 'an image that carries userspace carries /bin/loom-bridge-probe'; no skip
+2026-10-12T14:36:18Z  disk pre-m8: 9982 MiB free (floor 8192)
+2026-10-12T14:37:10Z  disk post-m8-build: 9980 MiB free (floor 8192)
+2026-10-12T14:37:23Z  m8: test.sh exit 1
+2026-10-12T14:37:23Z  M8 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught 'both rollbacks closed the handle and unmapped the ring'
+2026-10-12T14:37:23Z  disk pre-m9: 9982 MiB free (floor 8192)
+2026-10-12T14:38:14Z  disk post-m9-build: 9984 MiB free (floor 8192)
+2026-10-12T14:38:27Z  m9: test.sh exit 1
+2026-10-12T14:38:27Z  M9 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught 'a read-only record's result copyout faults'
+2026-10-12T14:38:28Z  disk pre-m15: 9995 MiB free (floor 8192)
+2026-10-12T14:39:18Z  disk post-m15-build: 10206 MiB free (floor 8192)
+2026-10-12T14:39:31Z  m15: test.sh exit 1
+2026-10-12T14:39:31Z  M15 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught 'a read-only POOL QUERY record faults on its copyout'
+2026-10-12T14:39:31Z  disk pre-m13: 10201 MiB free (floor 8192)
+2026-10-12T14:40:24Z  disk post-m13-build: 10209 MiB free (floor 8192)
+2026-10-12T14:40:25Z  exit 5

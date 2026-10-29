@@ -1,0 +1,18 @@
+PASS control PASS wire adapter: 156 checks
+PASS staged program: 18711 total checks
+PASS stat-before-open open starts with stat
+PASS identity-copy admission snapshot detached
+PASS remote-again remote shortage terminal no replay
+PASS malformed malformed capture poisons scope
+PASS mask missing stat field poisons scope
+PASS symlink symlink open refused before DAC
+PASS directory directory type before search
+PASS search search permits walk stage
+PASS deny-open denied open sends no effect
+PASS effect-type authorized stat advances open
+PASS built uncaptured success rejected
+PASS expectation wrong frame expectation rejected
+PASS result short read preserved
+PASS open-flags unallocated open mode refused
+PASS readwrite denied open sends no effect
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/controls-20261009T225138Z

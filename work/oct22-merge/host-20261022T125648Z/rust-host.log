@@ -1,0 +1,51 @@
+==> test-rust: aarch64-apple-darwin, 134 crate(s)
+
+================ test-rust summary ================
+  PASS      aurora                   11 test(s)
+  PASS      beacon                   40 test(s)
+  PASS      cartoon                  28 test(s)
+  PASS      coreutils                53 test(s)
+  PASS      cornucopia               4 test(s)
+  PASS      corvus-authority         49 test(s)
+  PASS      corvus-crypto            17 test(s)
+  PASS      fasces                   7 test(s)
+  PASS      gallery                  11 test(s)
+  PASS      halcyon                  26 test(s)
+  PASS      halcyond                 558 test(s)
+  PASS      haul                     59 test(s), 1 IGNORED (quarantined -- grep the reason)
+  PASS      inlinewire               5 test(s)
+  PASS      kaua                     109 test(s)
+  PASS      kaua-term                57 test(s)
+  PASS      lantern                  30 test(s)
+  PASS      libdriver                89 test(s)
+  PASS      libhalcyon               169 test(s)
+  PASS      libtapestry              27 test(s)
+  PASS      libutopia                394 test(s), 69 STRANDED (declared, compiled into no pass)
+  PASS      lictor                   31 test(s)
+  PASS      loom-client              213 test(s)
+  PASS      manual                   83 test(s)
+  PASS      netdev                   7 test(s)
+  PASS      ninep                    15 test(s)
+  PASS      nora                     249 test(s)
+  PASS      parley                   73 test(s)
+  PASS      tapestryd                122 test(s)
+  PASS      thyla-heap               12 test(s)
+  PASS      view                     16 test(s)
+  PASS      vt                       92 test(s)
+  NO-LIB    corvus                   bin-only -- 3 test(s) STRANDED in a binary that cannot link a harness
+  NO-LIB    98 crate(s) are bin-only (probes, smokes, benches) and declare no tests
+  NO-HOST   curl                     cannot host-test (declares no tests; nothing stranded)
+  NO-HOST   libthyla-rs              cannot host-test (declares no tests; nothing stranded)
+  NO-HOST   ptyhold                  cannot host-test (declares no tests; nothing stranded)
+  NO-HOST   tls                      cannot host-test (declares no tests; nothing stranded)
+===================================================
+test-rust: 31 crate(s) passing, 2656 test(s); 99 bin-only; 0 with no tests; 4 un-host-testable; 0 FAILING
+test-rust: 1 test(s) QUARANTINED with #[ignore]. cargo calls that a pass;
+           this does not. Each carries a reason naming its finding --
+           `grep -rn '#\[ignore' usr --include='*.rs'` lists them.
+test-rust: NOTE -- 72 test(s) STRANDED in 2 crate(s): libutopia corvus.
+           Declared in source but compiled into no pass this script runs, so
+           their assertions have never executed; NOT counted as passing. The
+           fix is per crate: move the pure part out from behind the default
+           feature (PASS), give a bin-only crate a lib (NO-LIB), make
+           libthyla-rs optional (NO-HOST), or add a FEATURE_PASSES entry.

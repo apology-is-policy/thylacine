@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**47 dossiered · 0 missing · 47 modules.**
+**52 dossiered · 2 missing · 54 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -50,6 +50,7 @@ reads as missing, which is the intended pressure.
 | debug_step.tla | [[spec-debug-step]] | dossiered |
 | debug_stop.tla | [[spec-debug-stop]] | dossiered |
 | fs_cache.tla | [[spec-fs-cache]] | dossiered |
+| handle_slots.tla | `spec-handle-slots` | **missing** |
 | handles.tla | [[spec-handles]] | dossiered |
 | imperium.tla | [[spec-imperium]] | dossiered |
 | loom.tla | [[spec-loom]] | dossiered |
@@ -57,7 +58,12 @@ reads as missing, which is the intended pressure.
 | loom_multishot.tla | [[spec-loom-multishot]] | dossiered |
 | loom_order.tla | [[spec-loom-order]] | dossiered |
 | loom_role.tla | [[spec-loom-role]] | dossiered |
+| loom_service.tla | [[spec-loom-service]] | dossiered |
+| loom_service_buffers.tla | [[spec-loom-service-buffers]] | dossiered |
+| loom_service_index.tla | `spec-loom-service-index` | **missing** |
 | loom_sq.tla | [[spec-loom-sq]] | dossiered |
+| mandate.tla | [[spec-mandate]] | dossiered |
+| mandate_commit.tla | [[spec-mandate-commit]] | dossiered |
 | net_poll.tla | [[spec-net-poll]] | dossiered |
 | net_poll_teardown.tla | [[spec-net-poll-teardown]] | dossiered |
 | pipe.tla | [[spec-pipe]] | dossiered |
@@ -78,6 +84,7 @@ reads as missing, which is the intended pressure.
 | tag_pool.tla | [[spec-tag-pool]] | dossiered |
 | tail_order.tla | [[spec-tail-order]] | dossiered |
 | tapestry_present.tla | [[spec-tapestry-present]] | dossiered |
+| tapestry_storage.tla | [[spec-tapestry-storage]] | dossiered |
 | territory.tla | [[spec-territory]] | dossiered |
 | territory_shed.tla | [[spec-territory-shed]] | dossiered |
 | thread_reap.tla | [[spec-thread-reap]] | dossiered |

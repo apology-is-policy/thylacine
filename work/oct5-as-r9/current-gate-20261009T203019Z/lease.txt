@@ -1,0 +1,4 @@
+mac   HELD by you for 51m, 1.1h left
+        why: Astra query/reap native controls and retained diagnostic verification
+pi    FREE
+disk: 10.7 GiB available at /Users/northkillpd/projects/thylacine-astra

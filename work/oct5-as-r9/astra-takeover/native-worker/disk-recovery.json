@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T02:17:45.242820+00:00",
+  "stopped_run": "smoke-20261010T021509Z",
+  "stop_free_mib": 8255,
+  "floor_mib": 8192,
+  "cleanup_command": "go clean -cache",
+  "cleanup_path": "/Users/northkillpd/Library/Caches/go-build",
+  "before_size": "799 MiB",
+  "after_size": "8 KiB",
+  "after_free_mib": 9060,
+  "preserved": "All project sources, saved binaries and raw evidence. Only rebuildable Go compilation cache cleared.",
+  "runner_fix": "Diagnostic catches SIGTERM/SIGINT, terminates and waits for its separately grouped native child in finally, and records interrupted/guard status. No orphan observed in failed run, but concurrent wrapper termination had prevented diagnostic result creation."
+}

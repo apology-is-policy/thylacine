@@ -1,0 +1,11 @@
+--- kernel/loom_service_pool_table.c
++++ prepare-leak.c
+@@ -37,7 +37,7 @@
+     if (rc) {
+         // The untouched provisional identity has no borrower; rollback cannot
+         // fail while this lock remains held, even when member validation fails.
+-        (void)loom_slot_rollback(t, ref);
++
+         return rc;
+     }
+     *out = ref;

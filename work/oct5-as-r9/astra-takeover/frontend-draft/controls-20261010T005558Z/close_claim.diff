@@ -1,0 +1,11 @@
+--- control.c
++++ close_claim.c
+@@ -2577,7 +2577,7 @@
+     struct loom_service_protocol *p=NULL;struct loom_service_ref ref={0};bool handshake=false;
+     spin_lock(&l->lock);
+     if(!l->service_closing){spin_unlock(&l->lock);return -T_E_INVAL;}
+-    if(l->service_engine->submitting){spin_unlock(&l->lock);return 0;}
++    /* fault: close outruns constructor */
+     // No caller can claim after close. Its copied refusal owns no local borrows;
+     // operation owners still drain below before global consumer detach.
+     l->service_engine->rejected=false;

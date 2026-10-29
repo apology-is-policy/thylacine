@@ -37,69 +37,6 @@
 #include "../../mm/slub.h"             // kmalloc (the wb heap scratch)
 #include "../../arch/arm64/uart.h"
 
-void test_dev9p_registered(void);
-void test_dev9p_attach_client_root_spoor(void);
-void test_dev9p_walk_one_component(void);
-void test_dev9p_walk_clone(void);
-void test_dev9p_open_lopens_fid(void);
-void test_dev9p_read_routes_through_client(void);
-void test_dev9p_write_routes_through_client(void);
-void test_dev9p_close_clunks_owned_fid(void);
-void test_dev9p_close_does_not_clunk_root_fid(void);
-void test_dev9p_create_file(void);
-void test_dev9p_create_errno_propagates_eexist(void);   // #99
-void test_dev9p_create_dir(void);
-void test_dev9p_fsync(void);
-void test_dev9p_readdir(void);
-void test_dev9p_poll_regular_file_always_ready(void);
-bool test_dev9p_np_release(void);
-void test_dev9p_poll_snapshot_answers_at_zero_timeout(void);
-void test_dev9p_poll_local_and_remote_both_reported(void);
-void test_dev9p_poll_snapshot_shortage_is_resent(void);
-void test_dev9p_poll_unanswered_snapshot_fails_safe(void);
-void test_dev9p_poll_arm_wakes_the_parked_poller(void);
-void test_dev9p_poll_retry_timer_is_a_wake(void);
-void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
-void test_dev9p_poll_cancel_at_close(void);
-void test_dev9p_poll_gc_flushes_with_the_unlink(void);
-void test_dev9p_poll_reads_every_client(void);
-void test_dev9p_prw_wire_offset_and_cursor(void);
-void test_dev9p_wstat_readonly_fd(void);
-void test_dev9p_wstat_size(void);
-void test_dev9p_walk_attrs(void);
-void test_dev9p_wga_unsupported_latches_by_errno(void);
-void test_dev9p_page_cache_serve_and_gate(void);
-void test_dev9p_cached_open(void);
-void test_dev9p_cached_open_fallbacks(void);
-void test_dev9p_cached_open_loose(void);
-void test_dev9p_wb_coalesce_one_twrite(void);
-void test_dev9p_wb_overlay_read(void);
-void test_dev9p_wb_flush_at_close(void);
-void test_dev9p_wb_fsync_flush_and_error(void);
-void test_dev9p_wb_close_returns_flush_error(void);
-void test_dev9p_wb_dying_flush_keeps_run(void);
-void test_dev9p_wb_dying_wstat_keeps_staging(void);
-void test_dev9p_wb_wstat_keeps_the_latch(void);
-void test_dev9p_wb_dying_loom_register_keeps_staging(void);
-void test_dev9p_wb_loom_register_keeps_the_latch(void);
-void test_dev9p_wb_interrupted_flush_keeps_run(void);
-void test_dev9p_wb_server_eintr_latches(void);
-void test_dev9p_wb_nonappend_writethrough(void);
-void test_dev9p_wb_fstat_staged_size(void);
-void test_dev9p_wb_cap_flush(void);
-void test_dev9p_wb_budget_fallback(void);
-void test_dev9p_wb_populate_readback(void);
-void test_dev9p_wb_populate_append_chain(void);
-void test_dev9p_wb_populate_failed_flush(void);
-void test_dev9p_wb_writethrough_range_invalidate(void);
-void test_dev9p_cape(void);
-void test_dev9p_path_create_refuses_dmsrvcape(void);
-void test_dev9p_walk_create_refuses_dmsrv_bits(void);
-void test_dev9p_remote_format_ns(void);
-void test_dev9p_origin_format_ns(void);
-
-extern struct Dev devnone;
-
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
 static struct p9_client g_client;
@@ -2377,16 +2314,6 @@ void test_dev9p_poll_reads_every_client(void) {
 // tests against the loopback client (the wire-visible halves).
 // =============================================================================
 
-// The positioned inners + the wstat inner (defined in kernel/syscall.c).
-extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
-                              s64 off);
-extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                               u64 len, s64 off);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                              u64 len);
-extern s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                              u32 uid, u32 gid, u64 size);
-
 // #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
 // never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
 // there and advancing it. The loopback responder captures the wire offsets.
@@ -4108,10 +4035,6 @@ void test_dev9p_wb_writethrough_range_invalidate(void) {
 // pattern every real transport absorbs (the demux's #210 orphan-clunk arm).
 // =============================================================================
 
-extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
-                                          const char *kpath, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
-
 // A Proc holding an UNOPENED fd at the loopback root (clone + clone-walk for
 // its own fid -- the walkable start base). CAP_DAC_OVERRIDE: the canonical
 // Rgetattr reports S_IFREG|0644/uid 0x1234, which would fail the A-2d W|X
@@ -4395,10 +4318,6 @@ void test_dev9p_path_create_refuses_dmsrvcape(void) {
     proc_free(p);
     teardown(root);
 }
-
-extern s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
-                                          const char *kname, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
 
 // One fd-based create on a fresh session; *seen = the Tlcreates it sent.
 static s64 wc_dmsrv_create(u32 perm, u32 *seen) {

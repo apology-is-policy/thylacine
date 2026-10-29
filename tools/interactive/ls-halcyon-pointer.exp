@@ -1,0 +1,134 @@
+#!/usr/bin/expect -f
+# HI-0: actual guest cursor pixels via VNC AlphaCursor, plus guest position
+# acknowledgements. Raw framebuffer captures alone cannot witness this plane.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_GPU_RES) 1280x800
+set ::env(THYLACINE_SCALE) 100
+set ::env(THYLACINE_VNC_SOCKET) /tmp/hi0-vnc-[pid].sock
+if {[info exists ::env(THYLACINE_GPU_DEV)] && $::env(THYLACINE_GPU_DEV) eq "virtio-gpu-gl-pci"} {
+    set ::env(THYLACINE_DISPLAY) egl-headless
+    set ::env(THYLACINE_EGL_VNC_SOCKET) $::env(THYLACINE_VNC_SOCKET)
+} else {
+    set ::env(THYLACINE_DISPLAY) vnc-unix
+}
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set dir [expr {[info exists ::env(POINTER_SCREENSHOT_DIR)] ? $::env(POINTER_SCREENSHOT_DIR) : [file join $repo build hi0]}]
+file mkdir $dir
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc move {x y} {
+    global repo qmp
+    set ax [expr {min(32767, ((2*$x+1)*32767)/(2*1279))}]
+    set ay [expr {min(32767, ((2*$y+1)*32767)/(2*799))}]
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs $ax $ay"} e]} { lc_fail $e }
+    after 700
+}
+proc state {shape x y {demo 0}} {
+    if {$demo} { key ret } else { type "tapestry-battery --pointer-state\n" }
+    lc_expect "pointer-probe: cursor $shape 100 $x $y ready" "guest cursor acknowledged $shape at $x,$y"
+}
+proc capture {name x y visible} {
+    global repo dir
+    set out [file join $dir halcyon-pointer-$name.png]
+    if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_VNC_SOCKET) $out --cursor-at $x $y} e]} { lc_fail $e }
+    if {[catch {exec python3 -c {import json,sys; d=json.load(open(sys.argv[1])); assert d['size']==[64,64]; assert (d['visible_pixels']>0)==(sys.argv[2]=='1'),d; print(d)} $out.cursor.json $visible} e]} { lc_fail $e }
+    lc_pass "cursor plane $name visible=$visible: $e"
+    if {$name in {zoomed-arrow text link resize-h resize-v top-left bottom-right restored}} {
+        # The fixture paints a flat scene. Inspect the separately captured raw
+        # framebuffer, not the VNC-viewer composition: old pointer pixels must
+        # never be baked into accelerated scene content or left as trails.
+        if {[catch {exec python3 -c {from PIL import Image; import sys; e=Image.open(sys.argv[1]).crop((16,100,1264,740)).getextrema(); assert e==((23,23),(33,33),(29,29)),e} $out.framebuffer.png} e]} { lc_fail $e }
+        lc_pass "raw scene $name has no cursor pixels or trails"
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        # A lever the image lacks is a SKIP, never a FAIL: a full fleet run on
+        # the gate image must not be red for a reason that is not a defect.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+
+after 1200
+move 240 200
+state arrow 240 200
+capture workspace 240 200 1
+# All standard shapes through a real surface owner in a zoomed tile.
+# The session status bar may keep this composed; gfx-panes covers Direct.
+type "tapestry-battery --cursor-demo\n"
+lc_expect "cursor-demo: ready Arrow" "native cursor fixture"
+key meta_l+f
+move 640 400
+state arrow 640 400 1
+capture zoomed-arrow 640 400 1
+foreach shape {text link resize-h resize-v} {
+    key spc
+    state $shape 640 400 1
+    capture $shape 640 400 1
+}
+# Device/edge clipping must preserve the acknowledged hotspot.
+move 0 0
+state arrow 0 0 1
+capture top-left 0 0 1
+move 1279 799
+state arrow 1279 799 1
+capture bottom-right 1279 799 1
+move 640 400
+key ctrl+alt+f10
+after 1000
+capture trusted-hidden 0 0 0
+key ret
+lc_expect "corvus: imperium: SAK with nothing pending" "trusted episode ended"
+after 1000
+state resize-v 640 400 1
+capture restored 640 400 1
+key esc
+lc_expect "cursor-demo: done" "fixture exited"
+after 1000
+# Closing the zoomed demo restores the split divider under the pointer.
+state resize-h 640 400
+capture divider 640 400 1
+move 900 400
+state arrow 900 400
+capture client-gone 900 400 1
+lc_pass "HI-0 pointer shapes, edges, zoom, trusted exclusion and restore"
+lc_quit

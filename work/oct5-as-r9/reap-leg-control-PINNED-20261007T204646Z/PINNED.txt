@@ -1,0 +1,44 @@
+PINNED CONTROL GENERATION -- the 2026-10-07 20:46:46Z fresh control, the one the
+DISCRIMINATING run was measured against.
+
+WHY IT SITS HERE AND NOT UNDER boot-inputs/
+preserve_boot_inputs prunes $PRESERVE_DIR newest-first down to KEEP_INPUT_GENS
+(=2, lease-runbook.sh), so a generation left there is retained only until two
+more runs happen. A bound you have to remember to raise is not a pin. Moved out
+deliberately, on astra's instruction (yip 0161 t65): "Please pin this new
+control generation outside boot-inputs/ too before any later pruning, retaining
+the old control and rejected-mutant evidence."
+
+WHAT IT IS
+The boot inputs of the fresh control built at 20:46:46Z after the fixture's
+marker text changed, used by run work/oct5-as-r9/reap-leg-20261007T204646Z/:
+  control: tests 1836/1836 PASS vs the DERIVED expectation of 1836, the leg
+  announced with its arrival marker, the normal-fallthrough marker and a PASS
+  verdict in its own block, test.sh exit 0, no extinction.
+  kernel thylacine.bin =
+  dd0c4e67c7306ae0117426bab0ede58c73bdd70cbbc99384386367f1de13ecd1
+
+VERIFIED AFTER THE MOVE: 9 of 9.
+HASHES.txt stores PREFIXES, not full digests. Compare at the width each stored
+hash actually has -- taking it from the stored string rather than assuming 64
+characters, which is how a correct set once reported 0 of 9 and the checker was
+the thing that was wrong.
+
+WHAT IS DELIBERATELY NOT HERE, and must not be pruned either
+  - the ORIGINAL control receipt: ../reap-leg-control-PINNED-20261007T190621Z/
+    (9 fae5eb3... ; a DIFFERENT kernel, correctly, because the fixture changed
+    between the two runs). Retained as the first execution witness.
+  - the REJECTED mutant evidence: ../reap-leg-20261007T190621Z/ (the premature
+    addrspace.c mutant that died ~90 suite lines early, in
+    addrspace.proc_alloc_in_shares, and which the first oracle wrongly called
+    discrimination). Retained because the correction is only checkable against
+    the run that prompted it.
+  - the QUARANTINED mutant images of the discriminating run, under
+    ../reap-leg-20261007T204646Z/mutant-artifacts-DO-NOT-BOOT/ with their
+    WARNING.txt. Never boot or promote them.
+
+INDEPENDENTLY VERIFIED by astra (yip 0161 t65): all nine input hashes, both
+current default kernel ELF/bin byte-identical to this saved control, the
+quarantined mutant bin, loom.c restored against pristine
+cbdd71f6f5ee4c7452284e50e07963279cc8a74e08f35ab13f1414230932223d, tracked tree
+clean, external Stratum exactly 61dde37 and clean.

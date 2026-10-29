@@ -1,0 +1,26 @@
+diff --git a/mm/magazines.c b/mm/magazines.c
+index 381e5b29e..e3f558afb 100644
+--- a/mm/magazines.c
++++ b/mm/magazines.c
+@@ -102,7 +102,6 @@ struct page *mag_alloc(unsigned order) {
+     // lock with its own nested irqsave (order: magazine lock -> zone lock).
+     irq_state_t s = spin_lock_irqsave(NULL);
+     struct percpu_data *pc = &g_percpu[my_cpu()];
+-    spin_lock(&pc->lock);
+     struct magazine *m = &pc->mags[idx];
+     // #807 regression guard: a corrupt count (e.g. a regressed cross-CPU
+     // race re-opening this set) trips here LOUDLY instead of silently
+@@ -111,13 +110,11 @@ struct page *mag_alloc(unsigned order) {
+     if (m->count == 0) {
+         mag_refill(m, mag_idx_to_order(idx));
+         if (m->count == 0) {
+-            spin_unlock(&pc->lock);
+             spin_unlock_irqrestore(NULL, s);
+             return NULL;
+         }
+     }
+     struct page *p = m->entries[--m->count];
+-    spin_unlock(&pc->lock);
+     spin_unlock_irqrestore(NULL, s);
+ 
+     // p is out of the magazine now -- private to this caller; init outside

@@ -1,0 +1,6 @@
+pin a8d960cb3cfea0502dcfa1e04c6ed1d7754deaeb stamp 20261022T090415Z branch corona/merge-main
+2026-10-22T09:04:16Z START gate
+2026-10-22T09:05:02Z END gate rc=1
+2026-10-22T09:05:02Z START guest-mutants
+2026-10-22T09:05:34Z END guest-mutants rc=1
+2026-10-22T09:05:34Z START pi-bake

@@ -107,7 +107,10 @@ the backtrace prints `func+0xN` live, no offline step.
   subtracts `kaslr_get_offset()` first). Wired in `tools/build.sh` +
   `kernel.ld` placement.
 - **Lookup.** `symbolize(link_addr) → "name+0xN"` via binary search over the
-  sorted table; feed it into the Tier-1 backtrace + PC/LR lines.
+  sorted table; feed it into the Tier-1 backtrace + PC/LR lines. A return
+  address (a walked frame, the LR line) is named at its call, the instruction
+  before it, with its own offset: a call that ends its function (a noreturn
+  callee) returns to the next function's first byte.
 - **Cost.** ~tens of KiB of image (we have ~2 MiB headroom under the 3.5 MiB L3
   cap — see `docs/reference/03-mmu.md`). Offline `addr2line` already resolves
   the same info, so Tier 2 is ergonomics, not capability — but cheap and worth

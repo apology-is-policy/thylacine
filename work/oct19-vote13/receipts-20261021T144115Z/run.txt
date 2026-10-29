@@ -1,0 +1,20 @@
+python3 -I tools/test-loom-receipts.py --mutants --logs work/oct19-vote13/receipts-20261021T144115Z  (14:41:15Z 10-21, mac lease, tree = the audit-close commit's)
+PASS clean
+PASS early-tail: publication pairs payload receipt and lease before tail
+PASS wrong-receipt: publication pairs payload receipt and lease before tail
+PASS not-leased: publication pairs payload receipt and lease before tail
+PASS shared-tail: paired payload published
+PASS no-backpressure: full CQ retains pending payload
+PASS no-detached-refusal: detached consumer refuses publication
+PASS no-geometry-guard: legacy ring refuses paired publication
+PASS no-wake: publication wakes the consumer
+PASS refusal-wakes: refusals wake no consumer
+PASS shared-mask: publication wrote a slot the private tail did not select
+PASS settling-only: a cancelled multishot's committed shot still publishes
+PASS terminal-arm-dead: terminal must match its request
+PASS no-request-room: provided terminal delivery lost
+PASS no-terminal-deliver: single-shot terminal and payload share one CQE
+PASS always-more: single-shot terminal and payload share one CQE
+PASS missing-clear: nonleased CQE clears old receipt
+PASS false-buffer: untyped publication cannot mint buffer flag
+PASS short-receipts: receipt geometry bounded aligned

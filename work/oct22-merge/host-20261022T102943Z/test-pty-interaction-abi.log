@@ -1,0 +1,16 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/pty-abi-xx8j4hx0/kernel.c:9:30: error: argument to 'section' attribute is not valid for this target: mach-o section specifier requires a segment and section separated by a comma
+    9 | __attribute__((used, section(".pty_abi_fixture")))
+      |                              ^
+1 error generated.
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-pty-interaction-abi.py", line 97, in <module>
+    subprocess.run(cc + ['-std=c11', '-ffreestanding', '-Wall', '-Wextra',
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                         '-Werror', '-I', str(ROOT / include), '-c', str(src),
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                         '-o', str(obj)], check=True)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['cc', '-std=c11', '-ffreestanding', '-Wall', '-Wextra', '-Werror', '-I', '/Users/northkillpd/projects/thylacine-corona/kernel/include', '-c', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/pty-abi-xx8j4hx0/kernel.c', '-o', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/pty-abi-xx8j4hx0/kernel.o']' returned non-zero exit status 1.

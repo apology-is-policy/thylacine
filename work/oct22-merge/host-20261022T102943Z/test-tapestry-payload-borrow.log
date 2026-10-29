@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-tapestry-payload-borrow.py", line 30, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-tapestry-payload-borrow.py", line 16, in main
+    deps=ROOT/'build/usr-rs/aarch64-apple-darwin/debug/deps';libs=list(deps.glob('liblibhalcyon-*.rlib'));assert libs
+                                                                                                                 ^^^^
+AssertionError

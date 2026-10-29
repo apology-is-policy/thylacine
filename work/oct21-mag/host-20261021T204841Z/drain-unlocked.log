@@ -1,0 +1,304 @@
+summary iters=4000 alias=869 double_free=21 guard=0 zone=497/512 dup=0
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Read of size 4 at 0x000104198068 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:179 (drain-unlocked:arm64+0x100001598)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x100001598)
+
+  Previous write of size 4 at 0x000104198068 by thread T1 (mutexes: write M0):
+    #0 mag_alloc drain-unlocked.c:132 (drain-unlocked:arm64+0x100000998)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x100008068)
+
+  Mutex M0 (0x000104198028) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:179 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Read of size 8 at 0x0001041980b8 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:180 (drain-unlocked:arm64+0x1000015f8)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x1000015f8)
+
+  Previous write of size 8 at 0x0001041980b8 by thread T1 (mutexes: write M0):
+    #0 mag_free drain-unlocked.c:166 (drain-unlocked:arm64+0x100000c20)
+    #1 owner drain-unlocked.c:202 (drain-unlocked:arm64+0x100001448)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x1000080b8)
+
+  Mutex M0 (0x000104198028) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:180 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x000104198068 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:180 (drain-unlocked:arm64+0x1000015e8)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x1000015e8)
+
+  Previous write of size 4 at 0x000104198068 by thread T1 (mutexes: write M0):
+    #0 mag_alloc drain-unlocked.c:132 (drain-unlocked:arm64+0x100000998)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x100008068)
+
+  Mutex M0 (0x000104198028) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:180 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x00010419d128 by thread T1:
+    #0 mag_alloc drain-unlocked.c:138 (drain-unlocked:arm64+0x1000009b8)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Previous write of size 4 at 0x00010419d128 by thread T3:
+    #0 mag_alloc drain-unlocked.c:138 (drain-unlocked:arm64+0x1000009b8)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Location is global 'g_pages' at 0x0001041995b8 (drain-unlocked+0x10000d128)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+  Thread T3 (tid=63582213, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:138 in mag_alloc
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 8 at 0x0001041981e0 by thread T2 (mutexes: write M0):
+    #0 mag_refill drain-unlocked.c:94 (drain-unlocked:arm64+0x100000968)
+    #1 mag_alloc drain-unlocked.c:125 (drain-unlocked:arm64+0x100000968)
+    #2 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Previous read of size 8 at 0x0001041981e0 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:180 (drain-unlocked:arm64+0x1000015f8)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x1000015f8)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x1000081e0)
+
+  Mutex M0 (0x000104198178) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T2 (tid=63582212, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:94 in mag_refill
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x00010419d12c by thread T1:
+    #0 mag_alloc drain-unlocked.c:139 (drain-unlocked:arm64+0x1000009c4)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Previous write of size 4 at 0x00010419d12c by thread T3:
+    #0 mag_alloc drain-unlocked.c:139 (drain-unlocked:arm64+0x1000009c4)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Location is global 'g_pages' at 0x0001041995b8 (drain-unlocked+0x10000d12c)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+  Thread T3 (tid=63582213, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:139 in mag_alloc
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x00010419d130 by thread T1:
+    #0 mag_alloc drain-unlocked.c:140 (drain-unlocked:arm64+0x1000009d4)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Previous write of size 4 at 0x00010419d130 by thread T3:
+    #0 mag_alloc drain-unlocked.c:140 (drain-unlocked:arm64+0x1000009d4)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Location is global 'g_pages' at 0x0001041995b8 (drain-unlocked+0x10000d130)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+  Thread T3 (tid=63582213, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:140 in mag_alloc
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x0001041981b8 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:180 (drain-unlocked:arm64+0x1000015e8)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x1000015e8)
+
+  Previous write of size 4 at 0x0001041981b8 by thread T2 (mutexes: write M0):
+    #0 mag_refill drain-unlocked.c:94 (drain-unlocked:arm64+0x100000958)
+    #1 mag_alloc drain-unlocked.c:125 (drain-unlocked:arm64+0x100000958)
+    #2 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x1000081b8)
+
+  Mutex M0 (0x000104198178) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+  Thread T2 (tid=63582212, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:180 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x00010419d12c by thread T2:
+    #0 mag_free drain-unlocked.c:154 (drain-unlocked:arm64+0x100000a7c)
+    #1 owner drain-unlocked.c:202 (drain-unlocked:arm64+0x100001448)
+
+  Previous write of size 4 at 0x00010419d12c by thread T3:
+    #0 mag_free drain-unlocked.c:154 (drain-unlocked:arm64+0x100000a7c)
+    #1 owner drain-unlocked.c:202 (drain-unlocked:arm64+0x100001448)
+
+  Location is global 'g_pages' at 0x0001041995b8 (drain-unlocked+0x10000d12c)
+
+  Thread T2 (tid=63582212, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+  Thread T3 (tid=63582213, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:154 in mag_free
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x0001041981b8 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:180 (drain-unlocked:arm64+0x1000015e8)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x1000015e8)
+
+  Previous write of size 4 at 0x0001041981b8 by thread T2 (mutexes: write M0):
+    #0 mag_free drain-unlocked.c:166 (drain-unlocked:arm64+0x100000c14)
+    #1 owner drain-unlocked.c:202 (drain-unlocked:arm64+0x100001448)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x1000081b8)
+
+  Mutex M0 (0x000104198178) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+  Thread T2 (tid=63582212, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:180 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x00010419d56c by thread T2:
+    #0 mag_alloc drain-unlocked.c:139 (drain-unlocked:arm64+0x1000009c4)
+    #1 owner drain-unlocked.c:196 (drain-unlocked:arm64+0x1000013c0)
+
+  Previous write of size 4 at 0x00010419d56c by thread T3:
+    #0 mag_free drain-unlocked.c:154 (drain-unlocked:arm64+0x100000a7c)
+    #1 owner drain-unlocked.c:202 (drain-unlocked:arm64+0x100001448)
+
+  Location is global 'g_pages' at 0x0001041995b8 (drain-unlocked+0x10000d56c)
+
+  Thread T2 (tid=63582212, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+  Thread T3 (tid=63582213, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:139 in mag_alloc
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=88273)
+  Write of size 4 at 0x000104198068 by thread T4:
+    #0 magazines_drain_all drain-unlocked.c:180 (drain-unlocked:arm64+0x1000015e8)
+    #1 drainer drain-unlocked.c:208 (drain-unlocked:arm64+0x1000015e8)
+
+  Previous write of size 4 at 0x000104198068 by thread T1 (mutexes: write M0):
+    #0 mag_drain drain-unlocked.c:101 (drain-unlocked:arm64+0x100000b70)
+    #1 mag_free drain-unlocked.c:164 (drain-unlocked:arm64+0x100000b70)
+    #2 owner drain-unlocked.c:202 (drain-unlocked:arm64+0x100001448)
+
+  Location is global 'g_percpu' at 0x000104198028 (drain-unlocked+0x100008068)
+
+  Mutex M0 (0x000104198028) created at:
+    #0 pthread_mutex_init <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x337dc)
+    #1 magazines_init drain-unlocked.c:65 (drain-unlocked:arm64+0x100000ea4)
+    #2 main drain-unlocked.c:213 (drain-unlocked:arm64+0x100000ea4)
+
+  Thread T4 (tid=63582214, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:218 (drain-unlocked:arm64+0x100000fa8)
+
+  Thread T1 (tid=63582211, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main drain-unlocked.c:217 (drain-unlocked:arm64+0x100000f7c)
+
+SUMMARY: ThreadSanitizer: data race drain-unlocked.c:180 in magazines_drain_all
+==================
+ThreadSanitizer: reported 12 warnings

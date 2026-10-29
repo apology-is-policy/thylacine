@@ -1,0 +1,5 @@
+ISOLATION-FIXTURE-R1: build-only failure, smoke-20261010T031230Z.
+New large loom_native_peer designated initializer compiled into external memset,
+which this freestanding kernel does not provide. Link failed before any test VM.
+Preserved source.diff/source.txt/manifest and build log; no passed runtime row.
+Use existing explicit byte-zero loop then assign creator/stop. No production fix.

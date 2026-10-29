@@ -1,0 +1,146 @@
+Astra single-agent review: isolated private SQE shape decoder, not installed.
+No new ABI, CMake/dispatch or runtime activation. Uses existing CONNECT20,
+WALK1, LOPEN2, READ4, WRITE5, CLUNK10 reservations and existing flags. Accepts
+only an immutable kernel SQE copy. Source/destination/pool generations remain
+full64-bit; shared-slot indices must fit64 and source/destination differ.
+Unknown/reserved flags, invalid mode, unused fields, fixed-slice overflow and
+invalid pooled combinations fail before peer I/O. Copies of WALK components
+reject NUL/slash/dot/dot-dot; clone takes no buffer. No authority is conferred:
+creator image, exact table ownership/state, DAC, canonical buffer/pool extents,
+msize/deadline, terminal and fid reservation remain admission obligations.
+
+Actual C host clean1832 shape cases plus component boundaries,13 mutation
+witnesses pass under LLVM22 ASan/UBSan. All thirteen raw failure messages checked
+against mutation-witnesses.json; driver now requires those exact witnesses.
+ARM64 syntax passes with real kernel headers. No native qualification yet.
+Host boundary header extracts actual SQE, opcode enum and flags from loom.h;
+it excludes only unrelated kernel locks/storage, not constants/types under test.
+
+Retained harness failures: first compile used the compiler default nonexistent
+MacOSX26 SDK; explicit xcrun SDK fixed it. Opcode enum extraction was added.
+Second run's component-size mutant survived: the oversized test still had a
+near-UINT64_MAX offset, so overflow rejection masked the absent length guard.
+Set that test's offset to zero to isolate component length. Production decoder
+unchanged. Third run rejects all13mutants; all earlier logs remain retained.
+
+Integration remains blocked only by source freeze of the active executor gate,
+not peer permission. Review/install this helper with the next operation owner
+checkpoint, not by running any executor installer. Remaining RPC storage and
+payload/fid ownership must be implemented and tested before user activation.
+
+Reply capture review (same isolated draft; no installation or native claim):
+The actual9p callback runs under its client lock, may happen synchronously on
+submission failure, and dr is an ephemeral borrow of receive/parser storage.
+New capture helper never takes Loom/client locks, publishes CQ, allocates,
+reenters protocol or drops references. It copies bounded READ bytes into the
+already reserved destination during the callback and retains pointer-free
+qid/attribute/scalar metadata. The owner must retain its driver/parser and
+buffer borrows until callback return, then recheck abort and deadline under Ll
+before success commit. Captured bytes/results alone grant no authority.
+
+Negative callback status bypasses dr entirely (it may be NULL or partially
+initialized on dispatch failure). Success validates expected wire kind and
+fid identities, requested READ/WRITE count, destination capacity, signed CQE
+range, exact clone/one-component WALK arity and bound fid, and the caller's
+required stat/DAC valid bits. Rejected capture leaves output and payload intact.
+Malformed capture must terminally abort the private scope, not clamp counts,
+ignore a partial walk, or let its already-mutated session publish a ring fid.
+Legacy9p session semantics are unchanged; private WALK still needs these
+consumer checks, just as the existing synchronous single-component wrapper
+checks nwqid. No general remote rollback is claimed.
+
+Host actual-C checks use real9p session/wire structs (no schema doubles).
+reply-controls-20261009T212855Z passes clean and13named mutants, with expected
+failure messages verified. Retained payload/metadata tests mutate the source
+storage after capture to reject aliases. ARM64 syntax passes. This proves only
+capture behavior; charged RPC storage, callback ownership, cancellation commit,
+DAC execution and native/SMP integration still remain to be implemented.
+
+Physical request-owner ledger extension (isolated, not installed):
+Reuses the request record's reserved u32 as one physical-storage owner; the
+actual record remains56 bytes. Ll admits that owner only while PREPARED with
+no parser borrows. Rollback/reap refuse reuse until actual destruction and
+exact owner drop; terminal delivery/discard remains independent. Drop refuses
+ACTIVE, borrowed, duplicate or stale identities. Existing CONNECT keeps owners0.
+The ledger does not itself prove physical destruction or callback quiescence;
+the native constructor/driver must retain Loom/protocol roots through free.
+owner-controls-20261009T213908Z passes clean+9 named mutants with ASan/UBSan.
+Existing request-regression-20261009T213932Z passes clean+17 original mutants
+on the new actual source and unchanged fixture/slots/nodes. ARM64 syntax rc0.
+First owner compile failed on a remaining reserved-field empty check; corrected
+to owners, preserved failed213850Z evidence. No native lifetime proof claimed.
+
+Charged operation storage constructor review (uninstalled, no RPC submission):
+Exact indexed engine get retains the protocol across allocation/cleanup; a Loom
+reference retains the creator image. Under Ll, READY/abort/close predicates are
+checked, the CQ-sized request record is reserved and physical owner held.
+Image charge and one full buddy-page allocation run unlocked; all fallible
+paths unwind in physical free -> image refund -> owner/record drop -> engine
+pin -> Loom root order. The successful constructor rechecks close/abort under
+Ll after allocation. Future admission must still recheck deadline, creator
+authority and all operation-specific fid/buffer/DAC predicates before bytes.
+Unused release requires PREPARED, exact request, sole physical owner, no parser
+borrow and no callback/send escape. Exclusive caller ownership is a contract,
+not a refcount; do not use this destructor for submitted/inflight RPC storage.
+No lock spans allocator/image/client calls, callback, wake or final drops.
+An engine entry pin prevents protocol collection; occupied request+Loom root
+prevent premature ring/image retirement. Scope metadata cannot be recycled
+while the exact request pin remains. Constructor failures leave output intact.
+
+operation-controls-20261009T214438Z passes clean+10 exact mutant witnesses with
+LLVM22 ASan/UBSan. Actual constructor and ledger code use explicit host image,
+allocator, engine and layout doubles. Checks include creator refusal, get/charge/
+allocation failure, close/abort during allocation, stale/ACTIVE/callback/send
+destructor refusal and physical-free ownership barriers. Actual ARM64 syntax
+with real headers validates the <=PAGE_SIZE storage bound. No native race,
+physical allocator accounting, RPC execution or public activation proof.
+
+Preserved harness findings:214350Z expiry mutant survived because the underlying
+request ledger independently rejects expired admission. Added an engine-entry
+lookup counter to witness the constructor's intended pre-resource refusal.
+214411Z failed compile due host libc gets name collision; renamed entry_gets.
+No production constructor edits were required by those harness repairs.
+
+Next integrate owner admission and actual callback/commit, fid metadata and
+fixed/provided-buffer pins with the sole READY protocol driver. The current
+constructor does not submit, register with a service operation list or drive
+requests; callers must release unpublished storage explicitly. Never claim
+this primitive completes general operations or qualifies native close alone.
+
+Native storage fixture prepared, NOT RUN: actual normal/bulk indexed READY
+handshakes, expired and real image-budget constructor refusals, exactly one
+additional buddy-page charge, CQ-sized terminal exhaustion before allocation,
+identity burn on reuse, and real close PARKED until unpublished operation
+storage returns its request/entry pins. Once released, close must reach DONE
+with an empty engine and request table; outer fixture checks ring/image refund.
+No synthetic protocol READY or host allocator stands in for those planned
+checks. Actual ARM64 syntax passes for both test files (eight pre-existing
+missing-prototype warnings only). Driver registration is1854 expected.
+No RPC submission is added; this fixture qualifies storage lifecycle only.
+Keep frozen f719 source until the running50-boot matrix AND verifier exit.
+If choosing to native-test this storage prerequisite separately before full
+RPC integration, record that deliberate bounded scope; do not claim a general
+operation gate or launch another50-boot matrix merely for these helpers.
+
+Native fault coverage: adds a KERNEL_TESTS-only one-shot allocation failure,
+consumed on entry even if expiry refuses earlier. Prepared fixture requires
+real allocation failure to refund its page charge and drop request+entry pins.
+Reviewed source reruns operation-controls-20261009T215144Z clean+10mutants and
+ARM64 reviewed-syntax.json all rc0. Public/runtime behavior remains unchanged.
+Astra ten pending/protected hashes rechecked against the retained manifest.
+
+Canonical link exposed CAP-L1: large reply/attr structure assignments emitted
+undefined libc memcpy in this freestanding kernel. Syntax/host checks could
+not expose a kernel link requirement. Replaced those assignments with the same
+explicit byte-loop copying discipline used by9p_client; retained first link
+failure in canonical-build.log. Real target canonical-build-second.log links
+successfully. reply-controls-20261009T215851Z reruns clean+13 exact mutation
+witnesses with LLVM22 ASan/UBSan, including copied metadata and payload alias
+checks. No global libc symbol or relaxed linker flag added.
+
+Native operation-storage-native-20261009T215931Z now VERIFIED1854/1854 with
+D7 overlap and20 distinct cycles. Raw serial and stable eleven source/six input
+hashes rechecked. Actual normal/bulk constructor, charge/refund, terminal-capacity
+and close-held-owner cases pass. Mac lease released immediately after native.
+This is CPU1 bounded storage evidence, not new full Mac or general RPC proof.
+Canonical source now supersedes installed draft copies; no installer rerun.

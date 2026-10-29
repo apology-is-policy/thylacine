@@ -29,6 +29,7 @@
 #include <thylacine/types.h>
 
 struct Thread;
+struct Proc;
 
 // PROC_MAGIC — sentinel set at proc_alloc / proc_init; checked at proc_free.
 // Sits at offset 0 so SLUB's `*(void **)obj = freelist` write on
@@ -99,6 +100,34 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // membership and a consumer resolves beyond the cache by principal_id.
 #define PROC_SUPP_GIDS_MAX 15
 
+// AS-2: immutable admission values, not references to a Proc. A private service
+// operation samples the creator once before admission; completion never borrows
+// a kernel worker's identity or resamples a dead/replaced process. Not an ABI.
+struct ProcAccessIdentity {
+    caps_t caps;
+    u32 principal_id;
+    u32 primary_gid;
+    u32 supp_gids[PROC_SUPP_GIDS_MAX];
+    u8 supp_gid_count;
+};
+struct ProcServiceIdentity {
+    struct ProcAccessIdentity access;
+    u64 stripes;
+    int pid;
+    bool console_attached;
+};
+
+// Direct capture requires an already lifetime-safe caller Proc (ordinary open).
+// The stripes+exact-AS variant is for asynchronous admission: caller pins `as`,
+// and the process-table lock covers ALIVE, incarnation and exec's AS swap. Only
+// values escape. Failed capture clears output; NULL/zero inputs fail closed.
+// A successful capture is submission-time authority, not an ongoing liveness
+// proof. The consumer must still serialize publication with its abort latch.
+bool proc_service_identity_snapshot(const struct Proc *p,
+                                    struct ProcServiceIdentity *out);
+bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
+                                      struct ProcServiceIdentity *out);
+
 // #65 (invariant I-32): the per-Proc resource floor. Fixed maxima that bound a
 // non-TCB Proc's resource use so a fork/thread/memory bomb is bounded, not
 // box-extincting. Tunable; generous for any v1.0 user workload (shell +
@@ -133,7 +162,9 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // Wasm or JS engine reserves 4 GiB regions as a matter of course. Physical
 // exhaustion still fails the fault -> proc_fault_terminate (graceful OOM, never
 // a box extinction), and the TCB (exempt) keeps its reserve.
+#ifdef KERNEL_TESTS
 u32 proc_default_page_budget(void);    // = capacity_pool_pages()
+#endif // KERNEL_TESTS
 u32 proc_page_budget_hard_max(void);   // = capacity_pool_pages()
 // The thread budget (ARCH 7.3.5, operator vote 4): seeded to
 // min(PROC_THREAD_BUDGET_DEFAULT, the hard max), inherited across rfork, and
@@ -157,7 +188,7 @@ u32 proc_thread_budget_hard_max(void); // = capacity_pool_pages() / THREAD_POOL_
 // The Linux vm.max_map_count analog. The eager attach path is already transitively
 // bounded (each VMA charges >=1 page, so the page budget caps eager VMAs), but a FREE
 // lazy reservation (SYS_BURROW_ATTACH_LAZY -- uncharged at attach) reopens a
-// VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove,
+// VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove_in,
 // both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
 // Vma slab is the per-Proc ceiling.
 #define PROC_VMA_MAX    65536u
@@ -347,6 +378,7 @@ struct Proc {
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
 
+
     // #344: formerly `wait_active`, the RW-2 2B-F1/F2 per-Proc wait_pid_for
     // serialization that refused a genuinely-concurrent 2nd waiter with -1.
     // The #344 multi-waiter lift -- a per-Thread stack `poll_waiter` on
@@ -533,7 +565,7 @@ struct Proc {
     // AddrSpace.vma_count -- it bounds the VMA slab, and the VMA list lives in
     // the address space. Reached as `p->as->vma_count`; the discipline is
     // unchanged -- ++ at vma_insert gated on PROC_VMA_MAX unless exempt, -- at
-    // vma_remove, both under the AS lock so the cap stays EXACT.)
+    // vma_remove_in, both under the AS lock so the cap stays EXACT.)
 
     // CL-5's page_peak (the high-water mark of page_count, the Linux
     // /proc/<pid>/status VmHWM analog) is NOT here. It went with page_count to
@@ -994,6 +1026,10 @@ struct Proc {
     // park reads it lock-free. KP_ZERO-fresh NONE; never rfork-inherited. Fills
     // the deliberate u32 tail pad, so sizeof is unchanged.
     u32                debug_birth_hold;
+    // D7 posting lifetime ledger. Never inherited; close before draining.
+    spin_lock_t        srv_post_lock;
+    bool               srv_posts_closed;
+    struct SrvPostMembership *srv_post_memberships;
 
     // What the threads thread_reap_dead has freed leave behind, so the Proc's
     // on-CPU time (proc_cpu_ns) and its kernel-stack watermark
@@ -1313,6 +1349,12 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_EXIT_CLOSE_FORCED)) == 0,
     "the final-close mark must not overlap another flag");
 
+// The Proc may mint a fresh service registry for its login session
+// (SYS_SRV_REGISTRY_NEW); set once by proc_mark_session_registry.
+#define PROC_FLAG_SESSION_REGISTRY   (1u << 14)
+void proc_mark_session_registry(struct Proc *p);
+bool proc_may_create_srv_registry(const struct Proc *p);
+
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
 // lock-free wake gate -- which suppress/observe EVERY terminate family at once.
@@ -1336,7 +1378,7 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
      PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
      PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
      PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
-     PROC_FLAG_MAY_RAISE_THREAD_BUDGET)
+     PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1352,7 +1394,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +
     __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
     __builtin_popcount(PROC_FLAG_MAIN_TID) +
-    __builtin_popcount(PROC_FLAG_MAY_RAISE_THREAD_BUDGET),
+    __builtin_popcount(PROC_FLAG_MAY_RAISE_THREAD_BUDGET) +
+    __builtin_popcount(PROC_FLAG_SESSION_REGISTRY),
     "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
@@ -1361,16 +1404,17 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 488,
+_Static_assert(sizeof(struct Proc) == 504,
  "struct Proc size: the poll hook chunk appended child_owed (a 32-byte "
- "struct poll_owed): 456 -> 488. Before that: "
+ "struct poll_owed): 472 -> 504. Before that: "
  "thread-model C5 appended exec_task (a pointer) + "
- "exec_rendez (a 16-byte Rendez): 432 -> 456. Before that: "
- "thread-model C3 appended threads_lock (a u32 spinlock) + "
- "live_threads int: 424 -> 432. Before that: "
+ "exec_rendez (a 16-byte Rendez), thread-model C3 threads_lock (a u32 "
+ "spinlock) + live_threads int, and D7's posting ledger (srv_post_lock, "
+ "srv_posts_closed, srv_post_memberships): 424 -> 472. Before that: "
  "the in-Proc thread reap appended reaped_run_ns u64 + "
  "reaped_kstack_peak u32 + reaped_kstack_tid int (what a freed exited peer "
- "leaves behind): 408 -> 424. Before that: "
+ "leaves behind) each appended 16 bytes without moving an earlier offset: "
+ "408 -> 440. Before that: "
  "IM-2 appended the propagating-legate pair (legate_caps "
  "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
  "392 -> 408. Before that: "
@@ -1524,12 +1568,12 @@ _Static_assert(__builtin_offsetof(struct Proc, page_budget) == 360,
 _Static_assert(__builtin_offsetof(struct Proc, thread_budget) == 364,
                "thread-model C6 thread_budget fills the 4-byte pad after "
                "page_budget -- no struct growth; the sizeof assert is the control.");
-_Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 424 &&
-               __builtin_offsetof(struct Proc, live_threads) == 428,
+_Static_assert(__builtin_offsetof(struct Proc, threads_lock) == 440 &&
+               __builtin_offsetof(struct Proc, live_threads) == 444,
                "thread-model C3: threads_lock and live_threads append after "
-               "reaped_kstack_tid; nothing moves.");
-_Static_assert(__builtin_offsetof(struct Proc, exec_task) == 432 &&
-               __builtin_offsetof(struct Proc, exec_rendez) == 440,
+               "reaped_kstack_tid, behind D7's 16-byte posting ledger; nothing moves.");
+_Static_assert(__builtin_offsetof(struct Proc, exec_task) == 448 &&
+               __builtin_offsetof(struct Proc, exec_rendez) == 456,
                "thread-model C5: exec_task and exec_rendez append after "
                "live_threads; nothing moves.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
@@ -1564,6 +1608,24 @@ void proc_set_exe_path(struct Proc *p, struct Path *path);
 // context, before exec. Extincts on double-publish or a corrupted Proc.
 void proc_publish_init(struct Proc *p);
 
+// One id space for Procs and threads (thread-model C6, ARCH 7.3.4). A Proc
+// draws its pid here and its first thread takes the pid as its tid, so a main
+// thread's tid is its pid; every later thread draws its own. Ids are never
+// reused, except that an exec moves the pid to the execer. -1 once the space
+// is spent: ids end at PROC_ID_LAST, below 2^31, and a refusal is the caller's
+// to report, never an extinction (I-32). 0 is kproc's and its boot thread's,
+// PROC_ID_INIT is init's (rfork_init); the draws start after it. The last
+// PROC_ID_TCB_TAIL ids are drawn only for the TCB (`exempt`: a creator or a
+// thread's payer that proc_resource_exempt), so a user's churn spends at most
+// the ids below them and the TCB can still spawn (ARCH 7.3.4).
+#define PROC_ID_INIT      1
+#define PROC_ID_LAST      0x7fffffffu
+#define PROC_ID_TCB_TAIL  0x100000u
+#define PROC_ID_USER_LAST (PROC_ID_LAST - PROC_ID_TCB_TAIL)
+int  proc_id_alloc(bool exempt);
+bool proc_id_space_spent(bool exempt);
+
+#ifdef KERNEL_TESTS
 // Accessor for init (joey, the first user Proc). NULL while init is not
 // up — early boot before joey, the in-kernel test phase, or after init
 // died; proc_reparent_children falls back to kproc then. Lock-free
@@ -1587,27 +1649,11 @@ struct Proc *proc_alloc(void);
 // untouched, while the one caller that does not says so explicitly.
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget);
 
-// One id space for Procs and threads (thread-model C6, ARCH 7.3.4). A Proc
-// draws its pid here and its first thread takes the pid as its tid, so a main
-// thread's tid is its pid; every later thread draws its own. Ids are never
-// reused, except that an exec moves the pid to the execer. -1 once the space
-// is spent: ids end at PROC_ID_LAST, below 2^31, and a refusal is the caller's
-// to report, never an extinction (I-32). 0 is kproc's and its boot thread's,
-// PROC_ID_INIT is init's (rfork_init); the draws start after it. The last
-// PROC_ID_TCB_TAIL ids are drawn only for the TCB (`exempt`: a creator or a
-// thread's payer that proc_resource_exempt), so a user's churn spends at most
-// the ids below them and the TCB can still spawn (ARCH 7.3.4).
-#define PROC_ID_INIT      1
-#define PROC_ID_LAST      0x7fffffffu
-#define PROC_ID_TCB_TAIL  0x100000u
-#define PROC_ID_USER_LAST (PROC_ID_LAST - PROC_ID_TCB_TAIL)
-int  proc_id_alloc(bool exempt);
-bool proc_id_space_spent(bool exempt);
-
 // Release a Proc descriptor. Caller must ensure thread_count == 0
 // (no live threads) and state == ZOMBIE (or post-reap path). Extincts
 // on violation.
 void proc_free(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // #65 (invariant I-32): the per-Proc resource floor.
 //
@@ -1630,15 +1676,17 @@ bool proc_resource_exempt(const struct Proc *p);
 bool proc_page_charge(struct Proc *p, u32 npages);
 void proc_page_uncharge(struct Proc *p, u32 npages);
 
+#ifdef KERNEL_TESTS
 // proc_vma_charge / proc_vma_uncharge -- the live-VMA counter (I-32 FOURTH axis;
 //   the overcommit VMA-slab DoS bound). The CALLER MUST HOLD p->vma_lock (the
-//   vma_insert/vma_remove domain), so the check + charge is atomic against a
+//   vma_insert/vma_remove_in domain), so the check + charge is atomic against a
 //   sibling attach and the cap is EXACT. charge returns true (and ++vma_count) if
 //   the Proc is exempt OR vma_count < PROC_VMA_MAX; false (charging nothing) if it
 //   would exceed (the vma_insert caller rejects with -1, like an overlap) or the
 //   counter would saturate. uncharge clamp-decrements (never underflows past 0).
 bool proc_vma_charge(struct Proc *p);
 void proc_vma_uncharge(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // proc_shared_map_charge / proc_shared_map_uncharge -- the cross-Proc shared-in
 //   mapping counter (G-2; the I-32 FIFTH axis). The CALLER MUST HOLD p->vma_lock
@@ -1713,6 +1761,23 @@ bool proc_thread_admit(struct Proc *p, struct Thread *nt);
 bool proc_sqpoll_charge(struct Proc *p);
 void proc_sqpoll_uncharge(struct Proc *p);
 
+// Private service worker charge: no Proc pointer survives admission. The ticket
+// is zero-initialized, noncopyable kernel-owned storage, retained through actual
+// worker retirement. Both operations serialize its contents under the process
+// table lock; never call while holding that lock or a Loom/protocol lock.
+// Admission is the creator's thread budget (its live threads plus its workers),
+// read under its thread lock inside the walk.
+// Caller retains the original AddrSpace descriptor across admission. Admission
+// requires that live original image; refund matches only stripes so
+// exec cannot strand a charge in the surviving Proc. A reaped creator needs no
+// counter refund, and cannot make a replacement Proc receive one. Concurrent
+// refunds of this same ticket are harmless; do not reuse it until both return.
+struct ProcSqpollTicket { u64 stripes; };
+bool proc_sqpoll_ticket_charge(u64 stripes, const struct AddrSpace *as,
+                               struct ProcSqpollTicket *ticket);
+void proc_sqpoll_ticket_release(struct ProcSqpollTicket *ticket);
+
+#ifdef KERNEL_TESTS
 // proc_child_cap_ok -- the rfork/spawn gate. Returns true if the Proc is exempt
 //   OR child_count < PROC_CHILD_MAX. Takes g_proc_table_lock for the read (the
 //   child_count write domain). Checked EARLY in rfork_internal (before the heavy
@@ -1727,12 +1792,14 @@ bool proc_child_cap_ok(struct Proc *p);
 // number of devices reset (a no-op returning 0 on a NULL Proc / NULL table).
 // Exposed for the device-death-quiesce regression test.
 int proc_quiesce_owned_devices(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // The same reset for the devices mapped in `as` alone (proc_quiesce_owned_devices'
 // walk (b)), for a caller that knows nobody else holds `as`; the last
 // addrspace_unref runs it before its drain. Returns the number reset.
 int addrspace_quiesce_mapped_devices(struct AddrSpace *as);
 
+#ifdef KERNEL_TESTS
 // LINEAGE L-3c-2: has a vfork child let go of its parent's address space --
 // and so of the parent's live stack frame, which under RFMEM is the thing the
 // suspend exists to protect? True iff the child exec'd (a different AddrSpace),
@@ -1743,6 +1810,7 @@ int addrspace_quiesce_mapped_devices(struct AddrSpace *as);
 // a RECORD of the release, it is the release, so there is no flag to inspect
 // instead. Caller holds g_proc_table_lock.
 bool vfork_child_released(const struct Proc *parent, const struct Proc *child);
+#endif // KERNEL_TESTS
 
 // P2-D: rfork — Plan 9 process/thread creation primitive.
 //
@@ -1856,10 +1924,12 @@ int rfork_init(void (*entry)(void *), void *arg, caps_t caps_mask);
 // unwinds it. `p` is the child's parent -- the caller's own Proc.
 void spawn_await_birth(struct Proc *p, int child_pid);
 
+#ifdef KERNEL_TESTS
 // spawn_await_birth's whole release decision, exposed for the kernel tests.
 // `child` NULL means "not in the parent's children list". Caller holds
 // g_proc_table_lock.
 bool spawn_birth_released(const struct Proc *parent, const struct Proc *child);
+#endif // KERNEL_TESTS
 
 // rfork flags. Per ARCH §7.4. RFPROC and RFMEM implemented; the rest extinct.
 //
@@ -2193,8 +2263,9 @@ void proc_debug_resume(struct Proc *p);
 // before the reparent consumes the children list.
 void proc_birth_hold_convert_locked(struct Proc *p);
 void proc_birth_hold_release_locked(struct Proc *p);
+#ifdef KERNEL_TESTS
 void proc_birth_hold_mark_parked_locked(struct Proc *p);
-void proc_birth_hold_orphan_rule_locked(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // PTY-1f: the job-control stop (I-20 stop leg; PTY-DESIGN.md section 4;
@@ -2534,14 +2605,18 @@ int proc_getsid(struct Proc *self, int pid);
 // receive signals, so ZOMBIEs do not count here, unlike the getpgid read).
 bool proc_pgrp_in_session(u32 pgid, u32 sid);
 
+#ifdef KERNEL_TESTS
 // wait_pid — reap ANY zombie child, blocking. The pervasive case;
 // equivalent to wait_pid_for(-1, 0, status_out). Plan 9 wait(2) shape.
 // Most kernel callers (test harness rfork-then-reap) use this form.
 int wait_pid(int *status_out);
+#endif // KERNEL_TESTS
 
 // Diagnostic.
 u64 proc_total_created(void);
+#ifdef KERNEL_TESTS
 u64 proc_total_destroyed(void);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P4-C: Proc lookup for devproc.
@@ -2601,6 +2676,7 @@ int proc_parent_pid(struct Proc *p);
 // non-ALIVE Proc.
 void proc_mark_console_attached(struct Proc *p);
 
+#ifdef KERNEL_TESTS
 // proc_revoke_console_attached — clear PROC_FLAG_CONSOLE_ATTACHED on `p`
 // (the unset side the A-4c-2 SAK + the A-5a proc_console_relinquish both use). The
 // AND is atomic (multi-writer bit; see proc_mark_console_attached). A
@@ -2608,6 +2684,7 @@ void proc_mark_console_attached(struct Proc *p);
 // caller's responsibility — proc_console_sak calls this under
 // g_proc_table_lock with the owner pinned.
 void proc_revoke_console_attached(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // proc_is_console_attached — true iff `p` carries
 // PROC_FLAG_CONSOLE_ATTACHED. Returns false for a NULL `p`. The read is an
@@ -2626,7 +2703,9 @@ bool proc_is_console_owner(const struct Proc *p);
 // foreground session (owner shell + its spawned apps), refused for background/
 // other-session/post-SAK callers. console_session_match is the PURE gate logic
 // (owner_sid, caller_sid), split out for unit testing; owner_sid==0 = no owner.
+#ifdef KERNEL_TESTS
 bool console_session_match(u32 owner_sid, u32 caller_sid);
+#endif // KERNEL_TESTS
 bool proc_console_owner_in_session(const struct Proc *p);
 
 // A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
@@ -2698,11 +2777,18 @@ int proc_set_console_renderer(struct Proc *p);
 // g_proc_table_lock). Fail-closed on NULL.
 bool proc_is_console_renderer(const struct Proc *p);
 
+// proc_console_renderer_held — true iff some Proc holds the role. The spawn
+// grant gate's single-holder pre-check; the claim under lock in
+// proc_set_console_renderer is what decides a race.
+bool proc_console_renderer_held(void);
+
+#ifdef KERNEL_TESTS
 // proc_test_console_renderer — test-only: read g_console_renderer.
 struct Proc *proc_test_console_renderer(void);
 
 // proc_test_clear_console_renderer — test-only: release the role + flag.
 void proc_test_clear_console_renderer(void);
+#endif // KERNEL_TESTS
 
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under
@@ -2726,11 +2812,6 @@ void proc_test_clear_console_renderer(void);
 // `cons: SAK (<decision>)` diagnostic line per SAK -- the harness's witness.
 bool proc_console_sak(void);
 
-// proc_is_console_trusted — true iff `p` is the current trusted login
-// authority (compare-only under g_proc_table_lock; never dereferences).
-// Fail-closed on NULL.
-bool proc_is_console_trusted(const struct Proc *p);
-
 // proc_console_episode — the SYS_CONSOLE_EPISODE op core (IM-1). Gated on `p`
 // being the trusted login authority (the identity, not the attach bit: the
 // SAK attached it, and a relinquish ends the episode itself). ARM marks p an
@@ -2739,9 +2820,11 @@ bool proc_is_console_trusted(const struct Proc *p);
 // covers gate + act, so the ZOMBIE chokepoint cannot interleave. 0 / -1.
 int proc_console_episode(struct Proc *p, u32 op);
 
+#ifdef KERNEL_TESTS
 // Test-only readers: the saved pre-SAK owner / the trusted pointer.
 struct Proc *proc_test_console_owner_pre_sak(void);
 struct Proc *proc_test_console_trusted(void);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.
@@ -2757,24 +2840,9 @@ struct Proc *proc_test_console_trusted(void);
 // nothing (never a stale or fabricated tag).
 u64 proc_stripes(const struct Proc *p);
 
-// proc_caps_by_stripes — the SYS_SRV_PEER live-caps lookup
-// (P5-corvus-srv-impl-a3c). Scan the process table for an ALIVE Proc
-// carrying `stripes` and snapshot its capability set into *caps_out.
-// Returns true iff such a Proc exists.
-//
-// Returns false — fail-closed, *caps_out untouched — when `stripes` is
-// the 0 sentinel, `caps_out` is NULL, or no ALIVE Proc matches (the peer
-// has exited / is a zombie / was reaped). The table scan and the caps
-// read run under g_proc_table_lock, so the result is a coherent snapshot
-// — never a torn read, never a use-after-free of a Proc being reaped.
-// The kernel half of specs/corvus.tla ConnOpPeerWasLive: a dead peer
-// authorizes nothing.
-bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
-
-// A-1a: the richer peer snapshot feeding SYS_SRV_PEER's srv_peer_info.
+// A-1a: the peer snapshot feeding SYS_SRV_PEER's srv_peer_info.
 // One walk under g_proc_table_lock snapshots caps + principal_id +
-// primary_gid for the ALIVE Proc carrying `stripes`. proc_caps_by_stripes
-// is now a thin wrapper over this (caps-only). Same fail-closed contract:
+// primary_gid for the ALIVE Proc carrying `stripes`. Fail-closed:
 // `stripes == 0` or no ALIVE match -> returns false, out-params untouched.
 // Any out-param may be NULL (the caller takes only what it needs). Only
 // VALUES escape — never the Proc pointer — so a peer reaped after the scan
@@ -2871,11 +2939,6 @@ struct ProcImageJoin {
 // Caller holds g_proc_table_lock.
 void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out);
 
-// OR `bits` into `p` AND into every other mapper of its address space (zombies
-// included) -- a restriction on the image binds every door to it. Caller holds
-// g_proc_table_lock.
-void proc_image_stamp_locked(struct Proc *p, u32 bits);
-
 // Stamp PROC_FLAG_DEBUG_TAINTED across the image. Caller holds g_proc_table_lock.
 void proc_mark_debug_tainted_locked(struct Proc *p);
 
@@ -2893,6 +2956,7 @@ bool proc_elevation_allowed_locked(const struct Proc *p);
 int proc_become_legate_locked(struct Proc *p, u64 caps_to_or, u32 session_id,
                               u64 valid_until, u32 legate_flags);
 
+#ifdef KERNEL_TESTS
 // =============================================================================
 // A-4a: the legate stamp (the single audited legate-creation write site).
 // =============================================================================
@@ -2932,13 +2996,7 @@ int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
 // (clean exit AND kill / group-terminate; A-4a audit F1). A non-root Proc is a
 // no-op. PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED walk).
 void proc_legate_teardown_if_root(struct Proc *p);
-
-// arm-6 (IDENTITY-DESIGN §9.9.1) -- if `p` leads its own session (sid == pid)
-// armed with PROC_FLAG_SESSION_HANGUP, group-terminate every OTHER ALIVE Proc
-// sharing its sid. The session-lifecycle sibling of the legate teardown above
-// (same chokepoint, same held-lock contract, NOT I-26-gated). A non-armed Proc
-// or an armed non-leader is a no-op. PRECONDITION: caller holds g_proc_table_lock.
-void proc_session_hangup_if_leader(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
@@ -3098,11 +3156,39 @@ void proc_caught_note_wake(struct Proc *p);
 void proc_caught_note_walk(struct Proc *p, struct Thread *skip);
 void proc_caught_note_walk_locked(struct Proc *p, struct Thread *skip);
 
+#ifdef KERNEL_TESTS
 // The parent's side of p's exit: wake the parent's wait_pid sleepers, post it
 // child_exit, and wake a parent blocked in a caught-note-interruptible wait
 // (ARCH 8.8.3). No-op when p has no parent. CALLER HOLDS g_proc_table_lock.
 // Called by the exit path's ZOMBIE transition; exposed so a kernel test drives
 // the same code.
 void proc_exit_notify_parent_locked(struct Proc *p);
+
+// The in-kernel tests' reach into proc.c (.claude/rules/kernel-code.md,
+// "Cross-file declarations"): hooks compiled only with the tests, and
+// functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
+u32 caught_force_stale_for_test(struct Proc *p, u32 n);
+u32 caught_repicks_for_test(void);
+void proc_close_handles_at_exit_for_test(struct Proc *p);
+u64 proc_exec_device_resets_for_test(void);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno);
+u64 proc_exec_peer_waits_for_test(void);
+u64 proc_exec_walk_a_seq_for_test(void);
+void proc_exit_close_test_set_window_hook(void (*fn)(void));
+void proc_exit_tail_test_set_hook(void (*fn)(void));
+u64 proc_id_counter_swap_for_test(u64 v);
+struct Proc *proc_test_console_owner(void);
+void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
+void proc_test_link(struct Proc *p);
+void proc_test_link_child(struct Proc *parent, struct Proc *p);
+void proc_test_orphan_rule(struct Proc *dying);
+u32 proc_test_release_leaked(int *pids, u32 max);
+void proc_test_seat_expire(void);
+void proc_test_seat_reset(void);
+int proc_test_serial_sak(int posture);
+void proc_test_set_init(struct Proc *p);
+void proc_test_unlink(struct Proc *p);
+void vfork_await_release_for_test(struct Proc *p, int child_pid);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_PROC_H

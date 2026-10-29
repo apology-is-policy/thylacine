@@ -1,0 +1,45 @@
+warning: method `progress` is never used
+   --> src/fixed_futures.rs:200:19
+    |
+113 | impl<B: RingBackend> FutureDriver<B> {
+    | ------------------------------------ method in this implementation
+...
+200 |     pub(crate) fn progress(&mut self) -> bool {
+    |                   ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `progress` is never used
+  --> src/retirement_executor.rs:41:8
+   |
+25 | pub(crate) trait Retirable {
+   |                  --------- method in this trait
+...
+41 |     fn progress(&mut self) -> bool;
+   |        ^^^^^^^^
+
+warning: `loom-client` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 2 tests
+test tests::ring::shutdown_retirement_root_wakes_task_and_preserves_held_read ... ok
+test tests::ring::shutdown_task_owner_drop_keeps_retirement_charge_until_proof ... FAILED
+
+failures:
+
+---- tests::ring::shutdown_task_owner_drop_keeps_retirement_charge_until_proof stdout ----
+
+thread 'tests::ring::shutdown_task_owner_drop_keeps_retirement_charge_until_proof' (30955980) panicked at src/tests/ring.rs:2597:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::shutdown_task_owner_drop_keeps_retirement_charge_until_proof
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

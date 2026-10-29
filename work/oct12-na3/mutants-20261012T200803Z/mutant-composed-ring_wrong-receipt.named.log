@@ -1,0 +1,28 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 2 tests
+test tests::ring::composed::composed_abandoned_stream_and_corrupt_record_retain_owned_bytes ... FAILED
+test tests::ring::composed::composed_paired_delivery_keeps_a_across_b_final_and_teardown ... FAILED
+
+failures:
+
+---- tests::ring::composed::composed_abandoned_stream_and_corrupt_record_retain_owned_bytes stdout ----
+
+thread 'tests::ring::composed::composed_abandoned_stream_and_corrupt_record_retain_owned_bytes' (30922552) panicked at src/tests/ring/composed.rs:137:68:
+called `Result::unwrap()` on an `Err` value: Record
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::composed::composed_paired_delivery_keeps_a_across_b_final_and_teardown stdout ----
+
+thread 'tests::ring::composed::composed_paired_delivery_keeps_a_across_b_final_and_teardown' (30922553) panicked at src/tests/ring/composed.rs:66:33:
+called `Result::unwrap()` on an `Err` value: Record
+
+
+failures:
+    tests::ring::composed::composed_abandoned_stream_and_corrupt_record_retain_owned_bytes
+    tests::ring::composed::composed_paired_delivery_keeps_a_across_b_final_and_teardown
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,42 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 20 tests
+test tests::ring::client_and_controller_close_preserve_all_live_payloads ... ok
+test tests::ring::final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test tests::ring::fixed_abandon_is_scope_cancel_not_refund ... ok
+test tests::ring::fixed_and_provided_exclude_overlaps_both_directions ... ok
+test tests::ring::fixed_bad_geometry_and_precise_error ... ok
+test tests::ring::fixed_read_owns_range_through_terminal_and_view ... ok
+test tests::ring::fixed_retirement_reclaims_abandoned_only_after_proof ... ok
+test tests::ring::fixed_unpublished_and_closed_drop_do_not_abort ... ok
+test tests::ring::fixed_write_freezes_after_publish_and_error_preserves_owner ... ok
+test tests::ring::last_generation_cannot_wrap_or_reuse ... ok
+test tests::ring::ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test tests::ring::one_pool_drop_preserves_other_pool_and_ring ... ok
+test tests::ring::overlap_and_global64_members_are_rejected ... ok
+test tests::ring::pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test tests::ring::pool_destroy_error_retains_exclusion_and_incarnation ... FAILED
+test tests::ring::registration_preflight_global_capacity_avoids_native_admission ... ok
+test tests::ring::registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test tests::ring::registration_success_binds_actual_identity_without_late_allocation ... ok
+test tests::ring::stale_native_registration_keeps_precharged_reservation_until_close ... ok
+test tests::ring::uncertain_registration_closes_and_quarantines_with_live_payload ... ok
+
+failures:
+
+---- tests::ring::pool_destroy_error_retains_exclusion_and_incarnation stdout ----
+
+thread 'tests::ring::pool_destroy_error_retains_exclusion_and_incarnation' (30946976) panicked at src/tests/ring.rs:218:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::pool_destroy_error_retains_exclusion_and_incarnation
+
+test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 120 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

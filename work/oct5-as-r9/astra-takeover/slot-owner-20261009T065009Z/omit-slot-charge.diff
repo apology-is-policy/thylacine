@@ -1,0 +1,11 @@
+--- control
++++ omit-slot-charge
+@@ -137,7 +137,7 @@
+     // for tiny rings: the charge follows real physical allocation, not a slab.
+     size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
+     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
+-    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
++    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom))
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+         + 1u + (u32)burrow_backing_pages(request_bytes);

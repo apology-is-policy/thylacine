@@ -1,0 +1,23 @@
+diff --git a/kernel/loom_service_frontend.c b/kernel/loom_service_frontend.c
+index 755a648ef..ab74d7bec 100644
+--- a/kernel/loom_service_frontend.c
++++ b/kernel/loom_service_frontend.c
+@@ -77,7 +77,9 @@ int loom_private_submit(struct Loom *l,struct Proc *p,u32 budget) {
+             spin_unlock(&l->lock);break;
+         }
+         u32 *indices=(void *)(l->ring_kva+l->sq_array_off);
+-        u32 index=__atomic_load_n(&indices[l->sq_head&(l->sq_entries-1u)],__ATOMIC_ACQUIRE);
++        u32 pos=l->sq_head&(l->sq_entries-1u);
++        loom_sq_release(l,h); // MUTANT M3: release before the copy
++        u32 index=__atomic_load_n(&indices[pos],__ATOMIC_ACQUIRE);
+         bool valid=index<l->sq_entries;
+         if(valid) {
+             const volatile u8 *from=(void *)(l->ring_kva+l->sqe_off+index*sizeof(copy));
+@@ -85,7 +87,6 @@ int loom_private_submit(struct Loom *l,struct Proc *p,u32 budget) {
+             for(u32 b=0;b<sizeof(copy);++b)to[b]=from[b];
+             e->submitting=true; // reserves the precharged rejection record
+         } else __atomic_fetch_add(&h->dropped,1,__ATOMIC_RELEASE);
+-        loom_sq_release(l,h);
+         spin_unlock(&l->lock);++consumed;
+         if(!valid)continue;
+         int rc=frontend_dispatch(l,p,&copy);

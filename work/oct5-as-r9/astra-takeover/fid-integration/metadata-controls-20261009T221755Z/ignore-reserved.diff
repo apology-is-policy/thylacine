@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -23,7 +23,7 @@
+                 // Unused children were removed above; no caller can still own
+                 // a provisional child here. READY/ABORTING never use this path.
+                 if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
+-                    n->parent.reserved || n->parent.incarnation || n->reserved ||
++                    n->parent.reserved || n->parent.incarnation || false ||
+                     n->fid_claim || n->fid_borrows)
+                     extinction("private Loom retained pinned retired scope");
+                 *n=(struct loom_service_node){0};

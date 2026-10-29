@@ -1,0 +1,10 @@
+mac   HELD by you for 2m, 2.0h left
+        why: corona: Astra's harness follow-ups at 5b09462a5 -- the checker's self-test on real sanitizer reports, 12 focused driver runs (ordinary + sanitized, mutants), selector controls; no QEMU; uncertainty is whether the stricter verdict finds a report in a run that passed before
+        phase: harness-followup.sh at 5b09462a5 (followup-20261022T141732Z): checker self-test, 5 drivers x ordinary+san with mutants, loom-receipts, sqpoll-ticket, selector controls; host compiles only, no QEMU
+        runner: Mac pid 23536 alive (start Thu Oct 22 16:17:32 2026)
+        pids: [23536] (their registered work -- not a kill list)
+        queue 1: main (34m waiting)
+        queue 2: astra (13m waiting)
+        queue 3: aux (2m waiting)
+pi    FREE
+disk: 20.0 GiB available at /Users/northkillpd/projects/thylacine-corona

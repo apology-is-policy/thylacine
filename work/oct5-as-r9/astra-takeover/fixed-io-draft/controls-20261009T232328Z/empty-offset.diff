@@ -1,0 +1,11 @@
+--- control.c
++++ empty-offset.c
+@@ -601,7 +601,7 @@
+     else {
+         struct loom_reg_buffer *b=&l->reg_buf[index];
+         if(!b->burrow || b->burrow==l->ring || b->burrow->type!=BURROW_TYPE_ANON ||
+-           !b->burrow->pages || offset>b->len)rc=-T_E_INVAL;
++           !b->burrow->pages || false)rc=-T_E_INVAL;
+     }
+     spin_unlock(&l->lock);return rc;
+ }

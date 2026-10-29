@@ -1,0 +1,186 @@
+control: 141 of 141 declared tests pass
+control: a no-op mutant of paired_cq.rs survives 2 named tests
+composed-ring:wrong-receipt                          rejected  5 failing, 2 named  src/tests/ring/composed.rs:137:68: called `Result::unwrap()` on an `Err` value: 
+composed-ring:wrong-pool                             rejected  2 failing, 1 named  src/tests/ring/composed.rs:170:5: assertion failed: book.accept(bad).is_err()
+composed-ring:untracked-lease                        rejected (aborted)  0 failing, 1 named  src/ring_payload.rs:167:9: attempt to subtract with overflow
+deadlines:ignore-deadline                            rejected  5 failing, 1 named  src/tests/ring/deadlines.rs:21:5: assertion `left == right` failed
+deadlines:late-deadline                              rejected  10 failing, 4 named  src/tests/ring/deadlines.rs:132:9: assertion `left == right` failed
+deadlines:repeat-cancel                              rejected  8 failing, 3 named  src/tests/ring/deadlines.rs:135:5: assertion `left == right` failed
+deadlines:drop-double-abort                          rejected  3 failing, 2 named  src/tests/ring/deadlines.rs:139:5: assertion `left == right` failed
+deadlines:unbounded-scan                             rejected  2 failing, 1 named  src/tests/ring/deadlines.rs:130:5: assertion `left == right` failed
+deadlines:mutable-active-deadline                    rejected  1 failing, 1 named  src/tests/ring/deadlines.rs:79:5: assertion failed: r.set_deadline(Some(90)).is_
+fixed-futures:missing-wakeup                         rejected  15 failing, 8 named  src/tests/ring.rs:1255:5: assertion `left == right` failed
+fixed-futures:missing-unregister                     rejected  9 failing, 8 named  src/tests/ring.rs:1259:5: assertion `left == right` failed
+fixed-futures:stale-waker                            rejected  2 failing, 2 named  src/tests/ring.rs:1144:5: assertion `left == right` failed
+fixed-futures:callback-under-borrow                  rejected  1 failing, 1 named  src/fixed_futures.rs:45:25: RefCell already borrowed
+fixed-futures:clone-after-check                      rejected  1 failing, 1 named  src/tests/ring.rs:1124:5: assertion failed: matches!(poll(&mut f,&w),Poll::Ready
+fixed-futures:preparation-slot-leak                  rejected  2 failing, 2 named  src/tests/ring.rs:1013:5: assertion `left == right` failed
+fixed-io:early-fixed-view                            rejected  1 failing, 1 named  src/tests/ring.rs:529:5: assertion failed: f.bytes().is_err()
+fixed-io:abandon-refund                              rejected  5 failing, 2 named  src/tests/ring.rs:560:5: assertion `left == right` failed
+fixed-io:missing-abort                               rejected  10 failing, 1 named  src/tests/ring.rs:558:5: assertion `left == right` failed
+fixed-io:fixed-pool-overlap                          rejected  1 failing, 1 named  src/tests/ring.rs:580:5: assertion failed: unsafe { c.attach_pool(id(2, 1), &[ra
+fixed-io:pool-fixed-overlap                          rejected  1 failing, 1 named  src/tests/ring.rs:578:5: assertion failed: c.reserve_fixed(301, id(0, 1), range(
+fixed-io:early-retired-refund                        rejected  2 failing, 2 named  src/tests/ring.rs:562:5: assertion `left == right` failed
+fixed-io:oversized-fixed-result                      rejected  1 failing, 1 named  src/tests/ring.rs:535:5: assertion failed: unsafe { r.finish_fixed(101, 9) }.is_
+fixed-io:late-write                                  rejected  1 failing, 1 named  src/tests/ring.rs:597:5: assertion failed: f.write_from(&[4; 8]).is_err()
+fixed-requests:unpublished-leak                      rejected  4 failing, 2 named  src/tests/ring.rs:757:5: assertion `left == right` failed
+fixed-requests:lost-abandoned-terminal               rejected  4 failing, 1 named  src/tests/ring.rs:747:5: assertion `left == right` failed
+fixed-requests:retirement-without-proof              rejected  21 failing, 2 named  src/tests/ring.rs:776:5: assertion failed: !d.progress()
+fixed-requests:retired-metadata-leak                 rejected  2 failing, 2 named  src/tests/ring.rs:779:5: assertion `left == right` failed
+fixed-requests:missing-storage-terminal              rejected  20 failing, 4 named  src/tests/ring.rs:748:40: called `Result::unwrap()` on an `Err` value: Storage(B
+fixed-requests:corrupt-keeps-open                    rejected  8 failing, 2 named  src/tests/ring.rs:772:5: assertion `left == right` failed
+future-retirement:wake-under-receive-borrow          rejected  1 failing, 1 named  src/retirement_executor.rs:348:36: RefCell already borrowed
+future-retirement:wake-under-drop-borrow             rejected (aborted)  0 failing, 1 named  src/retirement_executor.rs:303:28: RefCell already mutably borrowed
+future-retirement:wake-under-shutdown-borrow         rejected (aborted)  0 failing, 1 named  src/retirement_executor.rs:304:28: RefCell already mutably borrowed
+future-retirement:skip-retire-notification           rejected  1 failing, 1 named  src/tests/ring.rs:1340:5: assertion failed: flag.get()
+future-retirement:early-reclaim                      rejected  18 failing, 2 named  src/tests/ring.rs:1342:5: assertion `left == right` failed
+future-retirement:close-instead-of-retire            rejected  5 failing, 2 named  src/tests/ring.rs:1341:5: assertion `left == right` failed
+ledger:owner                                         rejected  1 failing, 1 named  src/tests/lease_ledger.rs:107:5: assertion failed: matches!(b.begin_return(&toke
+ledger:stale                                         rejected  2 failing, 2 named  src/tests/lease_ledger.rs:179:5: assertion failed: matches!(b.accept_read(1, 4, 
+ledger:failed-return                                 rejected  4 failing, 1 named  src/tests/lease_ledger.rs:81:5: assertion `left == right` failed
+ledger:busy                                          rejected  2 failing, 2 named  src/tests/lease_ledger.rs:66:5: assertion failed: matches!(b.accept_read(1, 4, r
+ledger:final-release                                 rejected  3 failing, 1 named  src/tests/lease_ledger.rs:62:5: assertion `left == right` failed
+ledger:overlap                                       rejected  1 failing, 1 named  src/tests/lease_ledger.rs:140:5: assertion failed: LeaseLedger::new(pool(), &r, 
+local-progress:lost-owner-signal                     rejected  9 failing, 5 named  src/tests/ring.rs:1488:5: assertion failed: e.needs_progress()
+local-progress:missing-cq-signal                     rejected  3 failing, 1 named  src/tests/ring.rs:1547:5: assertion failed: e.needs_progress()
+local-progress:zero-budget-loses-event               rejected  2 failing, 1 named  src/tests/ring.rs:1526:5: assertion failed: e.needs_progress()
+local-progress:lost-partial-sweep                    rejected  2 failing, 1 named  src/tests/ring.rs:1532:9: assertion `left == right` failed
+local-progress:busy-self-reschedule                  rejected  26 failing, 7 named  src/tests/ring.rs:1486:5: assertion failed: !e.needs_progress()
+local-progress:missing-admission-signal              rejected  1 failing, 1 named  src/tests/ring/local_progress.rs:7:5: assertion failed: e.needs_progress()
+local-tasks:lost-self-wake                           rejected  2 failing, 1 named  src/tests/ring.rs:2173:5: assertion failed: t.ready()
+local-tasks:poll-quiet-tasks                         rejected  2 failing, 2 named  src/tests/ring.rs:2199:9: assertion `left == right` failed
+local-tasks:ignore-budget                            rejected  3 failing, 2 named  src/tests/ring.rs:2174:5: assertion `left == right` failed
+local-tasks:stale-cancel                             rejected  2 failing, 2 named  src/tests/ring.rs:2143:5: assertion failed: !a.cancel(bid)
+local-tasks:drop-pending-task                        rejected  14 failing, 7 named  src/tests/ring.rs:2188:13: assertion failed: t.cancel(old)
+local-tasks:lost-wake                                rejected  10 failing, 4 named  src/tests/ring.rs:2300:5: assertion failed: t.ready()
+local-wait:skip-local-recheck                        rejected  6 failing, 2 named  src/tests/ring.rs:1701:5: assertion `left == right` failed
+local-wait:skip-native-recheck                       rejected  1 failing, 1 named  src/tests/ring.rs:1727:5: assertion `left == right` failed
+local-wait:skip-deadline-recheck                     rejected  3 failing, 1 named  src/tests/ring.rs:1753:5: assertion `left == right` failed
+local-wait:reset-absolute-deadline                   rejected  4 failing, 1 named  src/tests/ring.rs:1798:9: assertion `left == right` failed
+local-wait:skip-disarm                               rejected  16 failing, 7 named  src/tests/ring.rs:1758:5: assertion `left == right` failed
+local-wait:lost-wake-progress                        rejected  3 failing, 2 named  src/tests/ring.rs:1741:5: assertion failed: e.needs_progress()
+owned-mapping:sq-overlap                             rejected  2 failing, 2 named  src/tests/owned_mapping.rs:188:13: assertion failed: matches!(OwnedMapping::new(
+owned-mapping:receipt-stride                         rejected  1 failing, 1 named  src/tests/owned_mapping.rs:161:9: case 3
+owned-mapping:failed-close                           rejected  3 failing, 3 named  src/tests/owned_mapping.rs:35:9: assertion `left == right` failed
+owned-mapping:after-close                            rejected  1 failing, 1 named  src/tests/owned_mapping.rs:123:9: assertion failed: matches!(m.reap(), Err(Error
+owned-mapping:fresh-header                           rejected  1 failing, 1 named  src/tests/owned_mapping.rs:201:9: header 0
+paired:receipt-index                                 rejected  5 failing, 2 named  src/tests/paired_cq.rs:153:9: assertion `left == right` failed
+paired:double-ack                                    rejected  5 failing, 2 named  src/tests/paired_cq.rs:150:9: assertion `left == right` failed
+paired:overlap                                       rejected  1 failing, 1 named  src/tests/paired_cq.rs:123:9: assertion failed: matches!(unsafe { PairedCq::new(
+registration:live-retire                             rejected  4 failing, 2 named  src/tests/ring.rs:289:5: assertion failed: !r.progress()
+registration:pool-closes-ring                        rejected  7 failing, 6 named  src/tests/ring.rs:147:61: called `Result::unwrap()` on an `Err` value: Closing
+registration:global-cap                              rejected  2 failing, 2 named  src/tests/ring.rs:197:5: assertion failed: matches!(unsafe { c.attach_pool(id(2,
+registration:cross-pool-overlap                      rejected  3 failing, 3 named  src/tests/ring.rs:191:5: assertion failed: matches!(unsafe { c.attach_pool(id(1,
+registration:failed-destroy                          rejected  1 failing, 1 named  src/tests/ring.rs:218:5: assertion `left == right` failed
+registration:stale-pool                              rejected  3 failing, 3 named  src/tests/ring.rs:308:5: assertion failed: matches!(unsafe { c.attach_pool(id(63
+registration:missing-precharge                       rejected  5 failing, 5 named  src/tests/ring.rs:440:5: assertion failed: matches!(register(&c, &[range(512)]),
+registration:uncertain-no-close                      rejected  2 failing, 2 named  src/tests/ring.rs:501:5: assertion `left == right` failed
+registration:rollback-no-refund                      rejected  1 failing, 1 named  src/tests/ring.rs:422:5: assertion `left == right` failed
+registration:accept-nonzero-output                   rejected  1 failing, 1 named  src/tests/ring.rs:470:9: assertion failed: matches!(register(&c,&[range(8)]),Err
+request-book:reused-cookie                           rejected  9 failing, 3 named  src/tests/request_book.rs:129:24: called `Result::unwrap()` on an `Err` value: S
+request-book:more-final                              rejected  4 failing, 2 named  src/tests/request_book.rs:134:5: assertion failed: d.abandoned && !d.terminal
+request-book:duplicate-terminal                      rejected  40 failing, 6 named  src/tests/request_book.rs:140:35: called `Result::unwrap()` on an `Err` value: S
+request-book:wrong-pool                              rejected  2 failing, 1 named  src/tests/request_book.rs:117:9: assertion failed: b.accept(r).is_err()
+request-book:oversized-fixed                         rejected  2 failing, 2 named  src/tests/request_book.rs:68:5: assertion failed: b.accept(rec(c, 9, 0)).is_err(
+request-book:repeated-abort                          rejected  1 failing, 1 named  src/tests/request_book.rs:131:5: assertion `left == right` failed
+retirement-executor:early-reclaim                    rejected  18 failing, 5 named  src/tests/ring/executor.rs:36:9: assertion `left == right` failed
+retirement-executor:missing-retire                   rejected  2 failing, 7 named  src/tests/ring/executor.rs:34:5: assertion `left == right` failed
+retirement-executor:frozen-cursor                    rejected  4 failing, 1 named  src/tests/ring/executor.rs:102:5: assertion `left == right` failed
+retirement-executor:excess-budget                    rejected  6 failing, 1 named  src/tests/ring/executor.rs:100:5: assertion `left == right` failed
+retirement-executor:no-shutdown-close                rejected  3 failing, 1 named  src/tests/ring/executor.rs:135:5: assertion `left == right` failed
+retirement-executor:premature-admission              rejected  2 failing, 1 named  src/tests/ring/executor.rs:28:13: internal error: entered unreachable code
+ring-payload:live-retire                             rejected  4 failing, 2 named  src/tests/ring.rs:289:5: assertion failed: !r.progress()
+ring-payload:pool-closes-ring                        rejected  7 failing, 6 named  src/tests/ring.rs:147:61: called `Result::unwrap()` on an `Err` value: Closing
+ring-payload:global-cap                              rejected  2 failing, 2 named  src/tests/ring.rs:197:5: assertion failed: matches!(unsafe { c.attach_pool(id(2,
+ring-payload:cross-pool-overlap                      rejected  3 failing, 3 named  src/tests/ring.rs:191:5: assertion failed: matches!(unsafe { c.attach_pool(id(1,
+ring-payload:failed-destroy                          rejected  1 failing, 1 named  src/tests/ring.rs:218:5: assertion `left == right` failed
+ring-payload:stale-pool                              rejected  3 failing, 3 named  src/tests/ring.rs:308:5: assertion failed: matches!(unsafe { c.attach_pool(id(63
+shutdown-audit:lost-shutdown-wakeup                  rejected  4 failing, 1 named  src/tests/ring.rs:2636:5: assertion failed: tasks.ready()
+shutdown-audit:missing-close                         rejected  3 failing, 1 named  src/tests/ring.rs:2636:5: assertion failed: tasks.ready()
+shutdown-audit:early-reclaim                         rejected  18 failing, 1 named  src/tests/ring.rs:2597:5: assertion `left == right` failed
+task-loop:skip-initial-runnable                      rejected  2 failing, 2 named  src/tests/ring.rs:2336:5: assertion `left == right` failed
+task-loop:skip-final-runnable                        rejected  3 failing, 3 named  src/tests/ring.rs:2351:5: assertion `left == right` failed
+task-loop:skip-task-dispatch                         rejected  6 failing, 6 named  src/tests/ring.rs:2487:5: assertion `left == right` failed
+task-loop:ignore-task-budget                         rejected  1 failing, 1 named  src/tests/ring.rs:2440:5: assertion `left == right` failed
+task-loop:poll-after-outer-expiry                    rejected  1 failing, 1 named  src/tests/ring.rs:2466:5: assertion `left == right` failed
+task-loop:ready-starves-timers                       rejected  7 failing, 1 named  src/tests/ring.rs:2334:5: assertion `left == right` failed
+timer-wait:skip-expiry                               rejected  7 failing, 6 named  src/tests/ring.rs:1978:5: assertion `left == right` failed
+timer-wait:ignore-request-deadline                   rejected  5 failing, 5 named  src/tests/ring.rs:1974:5: assertion `left == right` failed
+timer-wait:ignore-outer-deadline                     rejected  2 failing, 2 named  src/tests/ring.rs:1995:5: assertion `left == right` failed
+timer-wait:due-is-outer-timeout                      rejected  3 failing, 3 named  src/tests/ring.rs:1974:5: assertion `left == right` failed
+timer-wait:unbounded-ring-scan                       rejected  2 failing, 2 named  src/tests/ring.rs:1929:9: assertion `left == right` failed
+timer-wait:skip-retiring-timers                      rejected  1 failing, 1 named  src/tests/ring.rs:2015:5: assertion `left == right` failed
+case:deadlines:no-clone-client                       E0599    refused
+case:deadlines:no-send-executor                      E0277    refused
+case:deadlines:valid-client                          control  compiles and passes
+case:fixed-futures:no-clone-future                   E0599    refused
+case:fixed-futures:no-send-future                    E0277    refused
+case:fixed-futures:valid-future                      control  compiles and passes
+case:fixed-io:fixed-borrow                           E0505    refused
+case:fixed-io:fixed-mutable-view                     E0594    refused
+case:fixed-io:return-borrow                          E0505    refused
+case:fixed-io:mutate-view                            E0594    refused
+case:fixed-io:moved-storage                          E0382    refused
+case:fixed-io:legacy-reap                            E0599    refused
+case:fixed-io:valid-return                           control  compiles and passes
+case:fixed-requests:no-active-view                   E0599    refused
+case:fixed-requests:no-clone                         E0599    refused
+case:fixed-requests:result-borrow                    E0505    refused
+case:fixed-requests:no-mutable-result                E0594    refused
+case:fixed-requests:valid-result                     control  compiles and passes
+case:future-retirement:no-clone-client               E0599    refused
+case:future-retirement:no-send-executor              E0277    refused
+case:future-retirement:valid-client                  control  compiles and passes
+case:local-progress:no-clone-client                  E0599    refused
+case:local-progress:no-send-executor                 E0277    refused
+case:local-progress:valid-client                     control  compiles and passes
+case:local-tasks:no-clone-tasks                      E0599    refused
+case:local-tasks:no-send-tasks                       E0277    refused
+case:local-tasks:valid-task                          control  compiles and passes
+case:local-wait:no-clone-client                      E0599    refused
+case:local-wait:no-send-executor                     E0277    refused
+case:local-wait:valid-client                         control  compiles and passes
+case:owned-mapping:moved-backend                     E0382    refused
+case:owned-mapping:clone-owner                       no method named refused
+case:owned-mapping:raw-mapping                       private  refused
+case:owned-mapping:owned-control                     control  compiles and passes
+case:registration:return-borrow                      E0505    refused
+case:registration:mutate-view                        E0594    refused
+case:registration:moved-storage                      E0382    refused
+case:registration:legacy-reap                        E0599    refused
+case:registration:valid-return                       control  compiles and passes
+case:request-book:clone                              E0599    refused
+case:request-book:send                               E0277    refused
+case:request-book:valid                              control  compiles and passes
+case:retirement-executor:no-clone-client             E0599    refused
+case:retirement-executor:no-send-executor            E0277    refused
+case:retirement-executor:valid-client                control  compiles and passes
+case:ring-payload:return-borrow                      E0505    refused
+case:ring-payload:mutate-view                        E0594    refused
+case:ring-payload:moved-storage                      E0382    refused
+case:ring-payload:legacy-reap                        E0599    refused
+case:ring-payload:valid-return                       control  compiles and passes
+case:shutdown-audit:no-clone-tasks                   E0599    refused
+case:shutdown-audit:no-send-tasks                    E0277    refused
+case:shutdown-audit:valid-task                       control  compiles and passes
+case:task-loop:no-clone-tasks                        E0599    refused
+case:task-loop:no-send-tasks                         E0277    refused
+case:task-loop:valid-task                            control  compiles and passes
+case:timer-wait:no-clone-client                      E0599    refused
+case:timer-wait:no-send-executor                     E0277    refused
+case:timer-wait:valid-client                         control  compiles and passes
+c-codes lease_ledger.h: T_LEASE_BUSY=-3 refused by "lease codes lie in their block"
+c-codes request_book.h: T_REQ_EXHAUSTED=-3 refused by "request book codes lie in their block"
+c-codes owned_mapping.h: T_MAP_CLOSED=-3 refused by "mapping codes lie in their block"
+c-codes paired_cq.h: T_CQ_CORRUPT=-2 refused by "CQ codes lie in their block"
+c-codes ring_payload.h: #define T_RING_UNCERTAIN (-1103) refused by "T_RING_UNCERTAIN lies in the -1000 block"
+c-codes fixed_requests.h: #define T_FIXED_CLOSING (-1100) refused by "T_FIXED_CLOSING lies in the -1000 block"
+c-codes retirement_executor.h: #define T_RETIREMENT_CAPACITY (-1202) refused by "executor codes lie in the -1000 block"
+abi pristine: rc=0
+abi enospc: rc=1
+abi rust-ringhdr: rc=1
+abi rust-constant: rc=1
+abi rust-setup-twin: rc=1
+abi c-setup-twin: rc=1
+abi rust-service: rc=1
+110/110 mutants rejected (3 by a named test aborting the binary); 59/59 cases as required; 7 C code blocks and 6 ABI sabotages refused

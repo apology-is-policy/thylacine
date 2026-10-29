@@ -1,0 +1,41 @@
+Continue autonomously as Astra, single-agent, in corona/async-memory. Keep this
+selector plus retirement-draft, program-draft and wire-draft source-matched.
+No historical installers; canonical kernel remains97d495fcb.
+
+Implement the actual action executor under the selector's claimed driving and
+an independent entry/Loom root. One visit consumes one bounded transition:
+- QUIESCE latches selected reason via actual scope abort, then calls actual
+  retirement_quiesce. Never treat a deadline/abort flag alone as writer release.
+- SUBMIT freshly rechecks actual admission/provided member under Ll, then actual
+  loom_rpc_submit outside Ll. Local pool/TX/tag shortage parks; no blind retry.
+- ADVANCE consumes a captured reply once and requeues NEXT or settles terminal;
+  malformed action aborts the whole scope. A failed fresh requeue must settle
+  and latch cancellation, never leave an already-advanced RPC repeatedly selected.
+- COMMIT returns fixed physical backing outside Ll, then fresh admission/pool
+  commit; negative errors cancel. CLUNK failure needs real scope quiescence.
+- CANCEL releases BUSY/fixed only after callback/TX ends, retains PENDING MORE,
+  and commits negative terminal returning request/FID borrows before CQ delivery.
+- DELIVER/REARM/POST preserve committed MORE before final terminal, with fresh
+  deadline on rearm. FREE uses actual admitted destructor; no pointer after it.
+- DISCARD calls whole-close per-owner cleanup before global detach; new constructor
+  reservations are never taken from their constructor. IO runs one actual bounded
+  progress quantum. Release driving under Ll and notify its return wake.
+
+Wire engine interest to selector values and actual poll registration-before-
+recheck, earliest request deadline, RETURN and CQ-head change wakes. Handshake
+CONNECT ACTIVE/PREPARED still uses its handshake driver; general READY/aborted
+operation state uses the new action executor. Do not let old connect_step mark
+local retirement with active operation writers/borrows. Preserve pending pooled
+results independently of scope-local retirement. Collect protocol only after all
+operation entry pins return. Close visits select even locally-retired scopes if
+operation owners remain, and drain before existing zero-entry-pin/global-detach.
+
+IOUNIT-R1: preserve negotiated Rlopen iounit in the existing64-byte FID ledger
+(using unused metadata space) and pass it on actual READ/WRITE admission to the
+wire adapter. Test negotiated limits and zero/unbounded semantics before install.
+
+Finish immutable shared-SQE frontend and actual pool RETURN wake. Then coherent
+installation, real ARM64 link and native normal/bulk/fullCQ/empty/late-buffer/
+abort/deadline/CLUNK/close/exec fixtures, matched full gates. AS3/4 then MM0-MM4.
+Preserve floor8192MiB, exact clean Stratum61dde37, Astra10pending/protected hashes.
+No Main/private async/clipboard activation or128MiB removal. Self-review only.

@@ -1,0 +1,15 @@
+--- work/oct12-sq1/run-20261012T072527Z/loom.c.pristine	2026-10-12 09:25:28
++++ kernel/loom.c	2026-10-12 09:27:18
+@@ -3434,11 +3434,11 @@
+             break;
+         }
+         u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
++        loom_sq_release(l, h);                              // MUTANT M1: release before the copy
+         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
+         have = (sqe_idx < l->sq_entries);
+         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
+         else __atomic_fetch_add(&h->dropped, 1u, __ATOMIC_RELEASE);
+-        loom_sq_release(l, h);                              // only after the copy
+         // Route under the SAME lock so the chain-non-empty test is consistent with
+         // the snapshot we just took (the chain only grows during this call).
+         to_chain = have && ((ksqe.flags & (LOOM_SQE_LINK | LOOM_SQE_DRAIN)) != 0 ||

@@ -1,0 +1,69 @@
+The COMPLETE boot-input set of the 2026-10-07 real ci-smp-gate run.
+
+run    : run-20261007T140647Z (work/oct5-as-r9/run-20261007T140647Z.log, a LOG,
+         so untracked by convention; the verdict extract is committed as
+         work/oct5-as-r9/gate-report-20261007T140647Z.txt)
+branch : corona/async-memory, kernel sources unchanged since 2666645b7
+verdict: ci-smp-gate: PASS, exit 0. Five labels x N=10 (default-smp1/4/8,
+         ubsan-smp4/8), each 10 PASS with all six failure categories ZERO
+         -> 50/50 CLEAN boots. Suite 1836/1836, 0 skips, 0 EXTINCTION.
+         D7 per boot: ladder reached 50/50, probe PASS 50, FAILED 0.
+         MAC AXIS ONLY. thyla-pi A72/KVM never ran and remains an owned,
+         recorded residual (operator vote: mac gate alone, residual recorded).
+
+WHY THIS DIRECTORY EXISTS, and why it is not boot-inputs/.
+The gate's own build REPLACED three of the four inputs a boot reads: ramfs, the
+pool snapshot and the key were rebaked at 14:11Z, after the post-build
+preservation point at 14:08:52Z. So the morning's curated set
+(private-owner-qualified-kernel/) is NOT this set, and its MANIFEST says as much:
+its ramfs was already LOST when the gap was found, so it pins what the kernel and
+pool were but cannot be booted as a set. astra named that explicitly on 0161 t49
+-- "private-owner-qualified-kernel alone is not its ramfs/pool/key replacement" --
+and asked that these bytes be excluded from rolling pruning until they sat in a
+durable curated set. This is that set: promoted out of
+boot-inputs/run-20261007T140647Z-postgate by `git mv`, every file re-verified
+against the committed HASHES.txt AFTER the move, and marked PINNED so the
+runbook's pruner would skip it even if it were still under boot-inputs/.
+
+THE FULL SET, and every input a boot reads is here for BOTH flavours:
+
+  .config-undefined             cd0200373d03e647   (the sanitizer build's config,
+                                named for the flavour READ OUT OF ITS OWN
+                                `SANITIZE =` line, because build/.config is
+                                shared and every flavour rewrites it)
+  thylacine.elf                 e266c931d9668a44
+  thylacine.bin                 5ced18c43ae8302a   <- QEMU boots the .bin
+  thylacine-undefined.elf       9a9252b1e92140cb
+  thylacine-undefined.bin       988debebc9a4f803   <- and this one for ubsan rows
+  ramfs.cpio                    947dd838eb890f66
+  pool.img.baked-snapshot       b165814100fd4dbf   <- the PRE-BOOT pool
+  system.key                    d98f28f3cc7d2f7f
+  system.key.baked-snapshot     d98f28f3cc7d2f7f   <- equal, so pool_restore's
+                                legality guard (smp-multiboot.sh:281) can be
+                                re-run by a later reader rather than taken on
+                                trust
+
+INDEPENDENTLY VERIFIED, not self-certified. astra hashed all nine of these
+herself (0161 t49), "including the sparse pool and both keys", and each matches
+HASHES.txt; her t47 reading of the five kernel/ramfs hashes was taken before this
+directory existed and agrees. thylacine-undefined.elf 9a9252b1e92140cb is a hash
+I had not measured before she quoted it, so that one is two independent readings
+rather than mine twice.
+
+WHAT THIS SET CAN AND CANNOT DO.
+CAN: it is COMPLETE. Both kernel flavours, the ramfs, the pre-boot pool and the
+key pair are all from this one run, so unlike the morning's set it could be
+booted as a set. That is a property of the files, NOT a claim that it was done:
+nothing here has been re-booted, and saying otherwise would be inventing a run.
+CANNOT: it does not qualify the pi axis, it does not make anything landable, and
+it activates nothing. The 128 MiB protection stays; private async, replacement
+memory accounting and clipboard stay non-default; no syscall reaches
+loom_create_private.
+
+ONE HONEST GAP in the mechanism, not in these bytes: the two preserve call sites
+that would have produced this set INSIDE the run were written after it
+(01f9854e5) and have never executed in a runbook run. These files were preserved
+by running the fixed function directly against the live tree, which is why
+PROVENANCE.txt labels the generation RETROACTIVE. The placement is exercised by
+the next real run, and astra's t49 states the same scope: she reviewed the call
+sites in source and is not claiming a live run through them.

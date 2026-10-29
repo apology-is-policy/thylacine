@@ -1,0 +1,73 @@
+Implementation working set for next AS-2 operation integration (Astra, Oct9).
+This is a plan, not implemented or qualified code; approved designs still bind.
+
+Do not route raw user fids or buffer pointers through the operation owner.
+First resolve copied SQE source/destination full incarnations under Ll and retain
+slot ownership. Derive scope from a READY SCOPE/FID node; never from user_data.
+The current storage constructor reserves terminal/physical storage, but supplies
+NONE of those fid/buffer/DAC admission checks. Its existing exclusive PREPARED
+cleanup cannot free an admitted RPC. Add a distinct driver-owned retirement path.
+
+FID mapping needs bounded kernel-only wire-fid/open-access metadata and an exact
+WALK destination claim. The current node table is40*64=2560 in a charged4096-byte
+page; a64-byte node can add24 bytes without changing that charge. Keep an actual
+ARM64 page-size assertion. Avoid storing qid fields with no consumer: the ABI
+returns reserved slot indices, not qids. Keep actual directory/access facts
+needed for stat/DAC; full parsed qid/attrs remain staged in operation metadata.
+Use monotonically allocated client wire fids and never rewind them on failure.
+Slot incarnation remains the authority even if protocol fid numbers are retired.
+A WALK destination claim must bar duplicate creators across unlocked work.
+
+After all source/destination/fixed/pool reservations, Ll atomically rechecks
+creator image, parent READY, close/abort and absolute deadline, admits terminal,
+and links the operation to its scope's bounded list. The list is bounded by CQ
+request capacity, not an uncharged heap queue. Transfer exclusive owner to the
+engine exactly once; rejected prepublication paths use unused cleanup. Retain
+physical-owner flag and engine/Loom pins until real destruction and image refund.
+
+Extend the existing sole p->driving critical protocol ownership, rather than
+introducing a second client reader/writer or a new thread per operation. Queued
+submission must not overwrite p->progress.io.tx. After submit_async every accepted
+RPC either synchronously callbacks (including AGAIN) or remains in the real tag
+table. The callback only captures into retained operation storage; no Ll, CQ,
+allocation, final drop, client reentry or usercopy. The callback's dr aliases RX
+storage and must not escape. Ownerless/premature replies already fail closed in
+9p_client.c; preserve that path and existing actual-client mutation witnesses.
+
+The callback does not free its container. The driver returns from client code,
+then rechecks scope abort/close/deadline under Ll before committing success.
+Physical fixed-buffer drops run unlocked while a request borrow still prevents
+terminal/reuse; mark any settling state so another visit cannot double-drop.
+Only after actual local parser/buffer borrows end may request_finish commit.
+Pre-abort committed successes remain immutable even behind full CQ. Abort must
+finish actual p9_client_progress_abort callbacks before local retirement; queued
+but unsubmitted operations also receive one terminal. Do not call request_reap
+until physical owner destruction, even if terminal has already been delivered.
+
+READY currently returns immediately in connect_step and has no readiness in
+engine_interest_locked. Extend both coherently: pending TX needs POLLOUT, inflight
+RX POLLIN, queued local work gets a bounded visit, and earliest active operation
+absolute deadline participates in the registered-before-sleep sweep. CONNECT's
+old timer must stay inactive after success. Full-CQ terminals must park, while
+abort and physical reclamation remain independent of CQ room. One protocol frame
+per visit and round-robin peer progress remain binding. Ensure close worker can
+settle operation owners before requiring entry pins==0; otherwise each owner's
+retention pin would create a permanent close/collection cycle.
+
+WALK: reserve exact destination before wire effects; validate clone0/component1
+reply shape, apply ordinary search rules, and publish mapped fid only if success
+wins Ll. Malformed/partial walk must abort scope because session may have bound
+its wire fid. LOPEN: async stat/DAC first, then open and publish access after final
+recheck. READ/WRITE: canonical fixed extent or preclaimed BUSY pool member before
+Tread/Twrite; no allocation on callback/abort/return. CLUNK: root refused, derived
+fid closes admission and waits for earlier source borrows without remote flush;
+local abort never waits for Tclunk. Pooled multishot's receipt and pending CQ
+record remain independent from terminal/request/scope; empty-pool wait still
+observes absolute deadline and fair rearm. Do not automatically return leases.
+
+Required integration evidence: real normal/bulk peers with queued and immediate
+callback errors, interleaved responses, full CQ, malformed reply scope abort,
+response-vs-abort/deadline, held canonical buffer/physical storage, stale fid,
+failed WALK destination, denied stat/open, CLUNK root/borrow refusal, empty pool,
+late receipts and concurrent close/exec. Preserve failed raw cases. Constructor
+host controls and planned1854 native fixture do not establish these guarantees.

@@ -25,6 +25,8 @@ publish.workspace = true
 license.workspace = true
 
 [features]
+# Nondefault until HI1-R24 pressure and application workflow qualification.
+interaction-qualification = []
 default = ["guest", "test-mode"]
 guest = ["dep:libthyla-rs", "dep:libtapestry"]
 # H-3c: the renderer's test levers (the #880 strip-for-production class,

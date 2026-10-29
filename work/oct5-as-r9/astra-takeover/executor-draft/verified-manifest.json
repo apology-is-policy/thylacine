@@ -1,0 +1,69 @@
+{
+  "owner": "astra",
+  "state": "host-and-syntax-verified",
+  "source_base": "ade9c69d17e20a5aa5ac337bfef15d7a5e2304c4",
+  "install_from": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/host-tree",
+  "files": {
+    "kernel/loom.c": "380f7ca98c09763f07dd2be89126b800d0409d1e9a548c3a8593876d86ebff0a",
+    "kernel/loom_service_engine.c": "d955fd9b2a17035621dc84e02a578e29b858b73137e63d4aeeff628e8c15277e",
+    "kernel/include/thylacine/loom_service_engine.h": "25a1f1d999e5e0f219ac2d58100c045db16922780178582d9883c1a0f9eb3942",
+    "kernel/include/thylacine/loom.h": "d4b5a11b58c8d72b268596dff09d3b4e117eeac0d69b0e0158610d2737cb2ee9",
+    "kernel/test/test.c": "4b3327115e2e7cbb8c847697161b17f61d79f2b65a21f0d0b63e7fecc7f71721",
+    "kernel/test/test_loom.c": "3796048072d490428691ad0c3a4fbbfd1c55576b0ac68f71f69542360ec6c384",
+    "work/oct5-as-r9/slot-owner-control.py": "e8983683f33d726cf28e85224cd4188f3dc7129df033902084bb4cf5ed2e2528",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0"
+  },
+  "checks": [
+    {
+      "check": "syntax-loom.c",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/syntax-loom.c.log"
+    },
+    {
+      "check": "syntax-loom_service_engine.c",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/syntax-loom_service_engine.c.log"
+    },
+    {
+      "check": "syntax-test.c",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/syntax-test.c.log"
+    },
+    {
+      "check": "syntax-test_loom.c",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/syntax-test_loom.c.log"
+    },
+    {
+      "check": "readiness",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/readiness.log"
+    },
+    {
+      "check": "worker",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/worker.log"
+    },
+    {
+      "check": "engine",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/engine.log"
+    },
+    {
+      "check": "connect",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/connect.log"
+    },
+    {
+      "check": "constructor",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/constructor.log"
+    },
+    {
+      "check": "final-free",
+      "rc": 0,
+      "log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/reviewed-checks-20261009T210322Z/final-free.log"
+    }
+  ],
+  "limits": "Draft only; no canonical install, native execution, full Mac qualification or user dispatch activation."
+}

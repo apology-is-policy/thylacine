@@ -1,0 +1,3 @@
+PASS: 3 actual mirrors; 30 constants, 10 records and every declared size/offset; ARM64 C layouts.
+PASS: kernel and native C ring mirrors; 32 constants, 5 records, 40 fields against one layout table; the full-table errno (28) of the kernel and the native C client cores.
+PASS: Rust ring mirror (ring_abi.rs) and the cores' twins (t_owned_setup, t_owned_cqe in C; owned_mapping::Setup, paired_cq::Completion in Rust): 7 Rust records, 153 checks.

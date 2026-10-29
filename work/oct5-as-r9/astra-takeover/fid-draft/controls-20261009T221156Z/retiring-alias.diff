@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -27,7 +27,7 @@
+     struct loom_service_ref scope,u32 wire) {
+     for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+         struct loom_service_slot *s=&t->slots[i];struct loom_service_node *p=&n->nodes[i];
+-        if((s->phase==LSLOT_LIVE || s->phase==LSLOT_RETIRING) &&
++        if((s->phase==LSLOT_LIVE) &&
+            (p->fid_flags&LFID_BOUND) && p->wire_fid==wire &&
+            ((s->kind==LOOM_SERVICE_SCOPE && i==scope.slot && s->incarnation==scope.incarnation) ||
+             (s->kind==LOOM_SERVICE_FID && fid_same(p->parent,scope))))return true;

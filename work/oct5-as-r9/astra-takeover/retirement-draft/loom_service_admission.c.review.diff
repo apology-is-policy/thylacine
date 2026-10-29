@@ -1,0 +1,13 @@
+diff --git a/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_admission.c b/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_admission.c
+index d99118e87..b6bc6c7c5 100644
+--- a/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_admission.c
++++ b/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_admission.c
+@@ -122,7 +122,7 @@ int loom_admission_commit_locked(struct loom_service_operation *o,u64 now) {
+ int loom_admission_cancel_locked(struct loom_service_operation *o,s32 reason,
+                                  bool abort_quiesced,u64 now) {
+     if(!o || reason>=0)return -T_E_INVAL;
+-    if(o->fixed.owner || o->fixed_dropping || o->pool_busy || o->pool_pending)return -T_E_BUSY;
++    if(o->fixed.owner || o->fixed_dropping || o->pool_busy)return -T_E_BUSY;
+     int rc=loom_rpc_check_finish_locked(o,reason,now);if(rc)return rc;
+     struct Loom *l=o->owner;
+     if(o->fid_claim==P9_TCLUNK) {

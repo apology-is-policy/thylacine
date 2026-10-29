@@ -1,0 +1,11 @@
+--- control
++++ omit-busy-guard
+@@ -157,7 +157,7 @@
+     for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
+         if (l->service_slots->slots[i].phase != LSLOT_FREE ||
+             l->service_slots->slots[i].pins)
+-            extinction("private Loom retained a service slot");
++            (void)0;
+     kfree(l->service_slots);
+ 
+     // One settled drop rather than claim / drop / restore. The refund is decided

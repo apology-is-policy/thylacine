@@ -2604,6 +2604,193 @@ it after C6. It closes OPEN-BUGS 10-27 15:42Z (nothing capped the hooks on one `
   yip 0263); corona's `sqpoll_ticket_cb` takes the table lock raw and converts at the next join.
 
 
+## Debug teardown witnesses: dap-probe asserts how its debuggee ends — 2026-10-28
+
+OPEN-BUGS "ambush-child orphan" (corona, 2026-10-06; re-measured 2026-10-28 on 851226393). Userspace only;
+the kernel is unchanged.
+
+- **The cause.** dap-probe sent DAP `disconnect(terminateDebuggee)` and killed ambush at once. Delve answers a
+  disconnect only after its kill of the launched child returns and its blocking reap collects it, so the kill raced
+  that path and the kernel's EXITKILL ended the child instead: an orphan line every boot, reaped by joey as
+  `status=1`, and nothing asserted.
+- **dap-probe steps 6 and 7.** Step 6 awaits the disconnect response and requires the debuggee's `/proc` entry gone
+  (positive control first: the pid from the `process` event is a live `ambush-child` of this ambush); ambush must
+  exit 0 by itself. Step 7 abandons a second launched session (ambush killed, no disconnect, no detach) and requires
+  the child to reach ZOMBIE with signal 9 -- EXITKILL's, since `stop` has converted the birth hold.
+- **joey's orphan sweep reads the packed wait word** (operator vote 2026-10-28; `docs/ERRORS.md` "The wait status"):
+  `signal=N` for a death by note, `status=N` for an exit. No ABI change.
+- **Verification.** Lease 09:09-10:06Z (logs `work/oct28-338/`): green suite 2116/2116 with step 6, step 7
+  and joey's `signal=9` line; red A (dap-probe with the old kill-at-once shutdown) fails step 6 on the debuggee
+  still present (ZOMBIE); red B (an ambush fork clone without its `exitkill` write) passes step 6 and fails step 7 at
+  the budget, the child still alive; SMP gate default-smp4 10/10 + ubsan-smp4 10/10, 0 corruption.
+- **Audit.** Round 1 Fable 5.1 (start == end): 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed before the commit (Go's os/exec
+  is a packed caller; `bail` never waits on a refused kill; step 7's claim qualified against the birth-hold rule;
+  the two legs scoped). Not dirty.
+- **Still open, owned.** Nora's `DapHost::shutdown` has the same kill-at-once shape (OPEN-BUGS 2026-10-28T08:35Z);
+  it needs the `dap-nora.exp` gate on a ci image.
+
+## Nora's debug sessions end through Ambush — 2026-10-28
+
+OPEN-BUGS "Nora's debug shutdown never lets ambush end its own debuggee" (corona, 2026-10-28T08:35Z) and "a failed send
+to a nora server marks it dead without reaping it" (10:17Z). Userspace only; the kernel is unchanged.
+
+- **The cause.** `Dap::shutdown`, used by `:kill`, by `:debug` over a live session and by nora's exit, sent DAP
+  `disconnect(terminateDebuggee)` and killed Ambush at once -- the shape dap-probe had before OPEN-BUGS 338. Delve answers
+  a disconnect only after it has killed and reaped the debuggee, so the kill raced that, and the kernel's EXITKILL ended
+  the debuggee and reparented it to init. A 2026-09-10 dap-nora transcript shows `proc: orphan pid=2417
+  name="ambush-child" (parent pid=2416 name="ambush" exiting)` straight after `:kill`.
+- **The end now goes through Ambush.** `:kill` and `:debug` over a live session are asynchronous (NORA-IDE-UX section 6,
+  never block the UI on a round-trip): the session is marked ending, its pipes stay polled, everything but the
+  disconnect's answer is dropped, and Ambush is reaped at its stdout EOF. The event loop's poll takes the session's
+  deadline (2 s after the disconnect) as its one timeout; past it nora kills Ambush and EXITKILL ends the debuggee.
+  `:debug` over a live session waits for the old one to be reaped, then starts. A quit waits for the same end in a
+  bounded poll of its own.
+- **A failed send reaps.** `Dap::send` and `Lsp::send` set the dead flag on a write error without a kill or a wait, and
+  `reap()` returns early on that flag, so a child that broke its stdin was never collected. Both now reap.
+- **Verification.** Mac lease 10:24-11:21Z, a `--config ci` worktree (logs `work/oct28-nora/`). Final source (dap_host sha
+  a4c55323): dap-nora PASS on attempt 1, all three teardown legs, no orphan line and no joey adopted-orphan reap after
+  nora's `:print`; suite 2116/2116. Red, each mutant putting one path back to kill-at-once: `:kill` fails leg 1, `:debug`
+  over a live session fails leg 2, quit fails leg 3, each on the `ambush-child` orphan line; with the timed gate, the
+  `:kill` mutant's orphan lands 4 ms after the send and a no-disconnect (wedged) mutant's 2002 ms after, the deadline.
+  A clock that never advances: with the timed-out-poll fallback the wedged session is still killed at 2022 ms; without
+  it, never (leg 1 times out at 30 s, no orphan). The first green run failed leg 1 on all three attempts on a split
+  token, not on the fix (see the journal). Kernel byte-unchanged; no SMP gate (nora is not on the boot path).
+- **Audit.** Round 1 Fable 5.1 (start == end): 0 P0 / 0 P1 / 1 P2 / 2 P3. F1 [P2] fixed: the quit's bounded wait
+  trusted only this process's clock reads; a poll that waited out the deadline with nothing ready now ends the grace by
+  the kernel's timer. F2 [P3] closed: the failed-send reap adds a trigger to the pre-existing kill-refused hang, which
+  cannot arise while nora has `/proc` (it reads `/proc/<pid>/kstack` every stop). F3 [P3] fixed: the dossier says the
+  deadline fallback still prints the orphan line. Not dirty.
+- **Still open, owned.** `Lsp::shutdown` kills gopls at once at exit; a nora-demo transcript shows its `go` child
+  orphaned (OPEN-BUGS 2026-10-28T10:24Z).
+
+## Nora ends gopls through its goodbye -- 2026-10-28
+
+OPEN-BUGS "Nora's LSP shutdown kills gopls at once; its `go` child is orphaned" (corona, 2026-10-28T10:24Z). Userspace
+only; the kernel is unchanged.
+
+- **The cause.** `Lsp::shutdown` sent `shutdown` and `exit` back to back, closed stdin and killed gopls at once. gopls
+  answers `shutdown` only after cancelling and reaping the go commands its snapshots run, so the kill orphaned a running
+  `go list` to init: `proc: orphan pid=2422 name="go" (parent pid=2415 name="gopls" exiting)` after a 2026-09-10 quit.
+- **The goodbye now runs (operator vote 27, "nora escalates").** nora sends `shutdown` and waits up to 5 s for the answer,
+  then `exit`. gopls handles messages in order and `initialized` holds the queue for the whole first workspace load, so
+  an early quit's answer waits for the load (13.2 s measured on TCG for a quit 0.4 s after `initialized`); an answer not
+  back in 5 s escalates to closing gopls's stdin, on which gopls shuts itself down (cancelling the load, reaping `go`)
+  and exits. On that path gopls closes its stdout BEFORE its session shutdown, so nora waits for the exit itself, never
+  the EOF alone (Fable r2 F1, measured). A server not exited 30 s after the request is killed. `parley::lsp` surfaces the
+  answer as `Action::ShutDown`. nora prints `nora: lsp end=goodbye|disconnect|eof|grace|broken|dead ms=N` beside its
+  `nora: EXIT` line and shows `ending gopls ...` while it waits.
+- **Bounds that do not trust the clock.** An empty timed poll spends a grace; so does a run of 10 000 polls across which
+  the clock reads no time (also added to `Dap::shutdown`); the exit wait counts naps. A failed poll is retried after a
+  5 ms nap (it cannot be a note's EINTR: poll does not deliver one to a native Proc).
+- **lsp-probe** (boot-fatal) runs the same goodbye: the answer must be Ok, then gopls must close stdout and exit by
+  itself with status 0 within 10 s.
+- **Verification.** Mac leases 11:45-12:06Z, 12:24-13:05Z, 14:03-14:43Z and from 14:47Z on a `--config ci`
+  worktree (logs `work/oct28-gopls/`). Final source (lsp_host sha e66d86e4): nora-demo PASS on attempt 1 -- five
+  quits ending goodbye 2412 ms, disconnect 9694, goodbye 184, 1560, 14, no gopls-parented orphan; go6 PASS; suite
+  2116/2116 with `lsp-probe: [gopls] goodbye OK ... status 0`. Reds, each for its stated reason (run.sh WITNESS lines):
+  the old kill-at-once exit orphans `go` 13 ms after `:q!`; no `exit` after the answer is killed at the grace (30013 ms);
+  the same on a clock that never advances ends on the kernel-timed poll (32459 ms); with that poll and the stall count
+  ignored it never ends (45 s timeout); without the escalation's stdin close a goodbye comes after 11084 ms; lsp-probe
+  without `exit` fails "stdout still open after exit", and `exit` with no `shutdown` fails on status 1. The escalation
+  forced at 1 ms passes 5/5, every quit `disconnect` (10-7086 ms). killnow, stuck, stucknofix, the forced escalation and
+  exitonly ran on 3826de5f, which differs from the final source only in the end label's order (an answer now outranks
+  the disconnect) and the gate's bound; noexit on round 1's source (the probe is unchanged since). A diagnostic build
+  (60 s grace, a per-step timeline) measured the 13.2 s answer. Kernel byte-unchanged; no SMP gate (userspace only).
+- **Audit.** Three Fable 5.1 rounds (start == end each). r1 0/0/1/4: the gate's PASS was satisfiable by the grace kill
+  (now the end line), shutdown queues behind the first load (vote 27), the stall bound; gopls's imports refresh enqueued.
+  r2 0/1/0/7, dirty: F1 [P1] the kill at stdout EOF raced gopls's disconnect-path shutdown and orphaned `go` (measured
+  twice), fixed by waiting for the exit; pump errors reap; per-stage witness lines; the disconnect must end in < 10 s;
+  a gopls pre-load re-run window enqueued. r3 0/0/0/4, clean: the EINTR premise behind r2's retry was false (comments
+  corrected, the retry naps), stdin closed before the exit wait, witness discipline per mutant.
+- **Enqueued.** OPEN-BUGS 11:42Z (stderr EOF spins the main loops), 11:43Z (blocking writes to a server), 12:01Z (a `go`
+  child of `go` orphaned mid-session), 12:22Z x2 (gopls's imports refresh; a disconnect during `initialized`'s `go env`),
+  13:02Z (gopls's pre-load re-run window).
+
+## env-a: a spawner names its child's environment (SPAWN_EXT_ENV) -- 2026-10-28
+
+OPEN-BUGS "A spawned child never gets the environment its spawner asked for" (P1, corona, 2026-10-28T15:19Z), found
+under 12:01Z (the `go` orphaned by a `go`: cmd/go's x/telemetry sidecar, whose `GO_TELEMETRY_CHILD=1` never arrived).
+Operator vote 28: a spawn-record tail. Scripture 7bf17edb5 (ARCH 9.7, GO-PORT-PLAN decision 1,
+dec-2026-10-28-spawn-env, the audit row "The spawn environment tail").
+
+- **The tail.** `ext_flags` bit 2, `SPAWN_EXT_ENV`: a 16-byte `sys_spawn_ext_env` { `env_va`, `env_len`, `env_flags` }
+  after the cwd (16) and thread (8) tails whose bits are set. The block is NUL-terminated `NAME=VALUE` records (the
+  argv packing, the shape exec projects) and is the child's whole environment; `env_len` 0 is an empty one. Bound
+  `SYS_SPAWN_ENV_DATA_MAX` 32768, asserted equal to `EXEC_ENV_DATA_MAX`. The record stays 104 bytes.
+- **Kernel.** The handler checks the tail before allocating and copies the records once. The new gate site
+  `sys_spawn_full_argv_env_for_proc` builds the group (`env_from_block`) after every gate and the cwd, so a refusal
+  makes no child: `T_E_INVAL` (no `=`, a name /env refuses, unterminated), `T_E_2BIG` (a value past 4096, a 65th name,
+  a block past 32 KiB), `T_E_FAULT`, `T_E_NOMEM`; a nonzero `env_flags` -1. The thunk installs it (`env_install`)
+  first, before the cwd and before exec projects /env. The install refills rfork's copy in place under its lock --
+  devproc's environ read loads `p->env` with no reference, so a swap-and-free would be a use-after-free.
+- **Userspace.** libt `T_SPAWN_EXT_ENV` / `t_sys_spawn_ext_env`; libthyla-rs `TSpawnExtEnv` and `Command::env`,
+  `env_remove`, `env_clear` (base: the live /env, listed and read). The Go fork (env-b) and pouch (env-c)
+  do not send it yet: the fork is shared, and a kernel without bit 2 refuses the bit.
+- **Witnesses.** `spawn_env.*` (kernel/test/test_spawn_env.c): the parse and each refusal one variable from an accepted
+  control; the in-place refill (same struct, same devno, fresh ids); a held child's /env AND its exec frame against the
+  block, an inheriting child as the control; an empty block; refused spawns that make no child. joey's
+  `probe_spawn_env` (boot-fatal) drives the real ABI: the block, a poison tail behind a clear bit, empty, a repeat, the
+  tail at +120/+112/+128 after each earlier tail, eight refusals. coreutil-smoke's two Beacon legs prove
+  `Command::env`, `env_remove` and `env_clear` reach only the child.
+- **Verification.** Mac lease 19:14-19:42Z (logs `work/oct28-env-a/`). Both kernel builds `-Werror`, check-decls ok
+  (4223 names, 261 TUs), production shape builds; suite 2120/2120 with `joey: probe spawn-env OK` and both
+  coreutil-smoke `env tail:` legs ok. The first frame read (`mmu_cross_proc_read`) failed its control: exec leaves
+  the stack PTE to the first fault, so the read now takes the Burrow slot under `as->lock`. Sabotage, each its own
+  build and boot, with S0 (sabotage-only: a failed kernel suite prints instead of extincting, so userspace witnesses
+  are reached): no install -> kernel, coreutil-smoke and joey red; install after exec -> only the frame leg red;
+  Command::env without the bit -> coreutil-smoke red; a repeat stored twice -> kernel and joey dup red; the tail
+  placed ignoring the thread tail -> joey offsets red.
+- **Audit.** Fable 5.1 round 1 (start == end), 0/0/0/6, clean; all six fixed: the stale exec.c #140 comment;
+  GO-PORT-PLAN's tense (env-b is owed); `T_SPAWN_EXT_FLAGS_ALL` mirrored and held to the kernel by
+  `check-spawn-args-mirrors.py` (member/mask rule + 3 self-test mutations), joey's unknown bit derived from it;
+  joey's poison control behind every tail combination; coreutil-smoke's removal control; `Command::env`'s base read
+  from `/env` itself instead of `/proc/<pid>/environ`.
+- **After the fixes.** Suite 2120/2120 (joey's line now names "behind every tail combination"); set D red as
+  predicted (env_remove of an absent name clearing all -> coreutil-smoke `other-removed=Some(false)`; the cwd bit read as
+  the env bit -> joey `poison-behind-tails=WRONG`). SMP gate 20:40-21:45Z: default-smp1, default-smp4 and ubsan-smp4 each 10/10 PASS, 0 corruption, 0 external-kill, 0 inject-miss, 0 timing, 0 other.
+- **Enqueued / next.** env-b (the Go fork sends `ProcAttr.Env`; after main, b3 and aux-3 carry this kernel half);
+  env-c (pouch `posix_spawn` sends `envp`; closes seam-pouch-spawn-envp); the telemetry boot-confirm (12:01Z);
+  OPEN-BUGS 15:19Z P3 (the sidecar is not detached on thylacine).
+
+## env-c: pouch's posix_spawn sends envp (SPAWN_EXT_ENV) -- 2026-10-28
+
+Closes seam-pouch-spawn-envp, pouch's third of OPEN-BUGS 15:19Z (P1). The kernel and libthyla-rs halves are env-a above;
+the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e; patch 0064 (landed as 0051, renamed after b3's
+0051-0063 with main's agreement, yip 0269).
+
+- **The semantic.** `envp` is the child's whole environment: 0064 packs it the way argv is packed and always announces
+  the tail (`ext_flags = POUCH_SPAWN_EXT_ENV`, a `struct pouch_spawn_ext_env` at record+104). A later record for a name
+  replaces an earlier one; nothing of the parent's `/env` carries over; a NULL `envp` is empty (Linux, and Plan 9 APE's
+  `execve`: RFCENVG, then `/env` written only `if(envp)`). A block past 32 KiB is `E2BIG` before the call; the kernel's
+  refusals (`-T_E_INVAL`/`2BIG`/`FAULT`/`NOMEM`) return as their errno; the record's flat -1 stays `ENOENT`.
+- **The one caller the semantic broke.** tyr-glquake's launcher wrote `/env/GALLIUM_DRIVER` and spawned with a NULL
+  envp, which worked only while pouch ignored envp; it now `setenv`s the driver and passes `environ`.
+- **Witness.** pouch-hello-spawn test 3 (boot-fatal through joey): `PHS_PARENT` is written into the parent's `/env` after
+  its crt read it, so only an inheriting child holds it. Legs: a block with a repeated name; `environ` after two
+  `setenv`s (exact count); a NULL envp (count 0); four refusals with their errnos and `waitpid(-1)` ECHILD after them,
+  its positive twin the block leg's `waitpid(-1)` reap. Every leg reports before the run fails.
+- **Checker.** `check-spawn-args-mirrors.py` reads pouch's tail struct from 0064 (`TAIL_SOURCES`), holds
+  `POUCH_SPAWN_EXT_ENV` to the kernel's bit, fails if any other series patch edits a pouch spawn mirror, and holds the
+  kernel's `T_E_2BIG`/`NOMEM`/`FAULT`/`INVAL` to 7/12/14/22, the musl values 0064's `_Static_assert` pins.
+- **Verification.** Mac lease 22:11-22:41Z (logs `work/oct28-envc/`): suite 2120/2120 on a2693024e with
+  `pouch-hello-spawn: ... env block/environ/empty ok, 4 refusals -- ALL SPAWN TESTS PASS`; no tail -> seven reds
+  (block and environ read 4, count, NULL, the three kernel refusals), the 32 KiB pre-check green; refusals collapsed to
+  ENOENT plus a NULL envp inheriting -> the three refusals errno=2 and the NULL leg. After the fixes, suite 2120/2120.
+  No SMP gate: no kernel change (the path was gated 30/30 at env-a); the next runs with env-b.
+- **The Warp unpace wrappers.** glq-bench's rp5, glq-decomp's rp6 and glq-wedge-probe's rp7 (C typed into the guest)
+  wrote `/env/SDL_THYLACINE_NOPACE` and spawned with a NULL envp; they now `setenv` and pass `environ`. Compiled and
+  symbol-resolved against pouch's libc on the host; their first run needs a `/clade` bake (enqueued).
+- **Audit.** Fable 5.1 round 1 (start == end), 0/0/0/3, clean; all three fixed: the ECHILD leg's positive control (F1);
+  the checker's series scan (F2); the errno wording and the kernel's T_E values held by the checker (F3).
+- **Enqueued / next.** env-b; the glquake virgl run on thyla-pi (`GALLIUM_DRIVER` reaching the game end to end); the
+  wrappers' first run on a `/clade` bake; OPEN-BUGS 21:09Z P3s (quarry's driver via `Command::env`; the stale pouch patches README).
+- **After the close (2026-10-29).** fd0692af2 renumbered the patch 0051 -> 0064 (b3 holds 0051-0063); a48a5f051 points
+  the pouch patches README at `series`; 12ef45a8c hands quarry's driver and pace flag to `Command::env`. The Pi legs ran
+  once the lsp-probe goodbye fix let a clade image boot (thyla-pi KVM, clade `--config ci`, logs
+  `work/oct29-clangd-bye/pi2-*`): glq-virgl `GLQ-VIRGL RENDERER: virgl (V3D 4.2.14.0)` + `LS-CI PASS: glq-virgl` (Mesa
+  selects virgl only on `GALLIUM_DRIVER` in the game's own environment, so the launcher's `environ` carried it);
+  quarry-bench rows hw-gl `virgl`, llvmpipe `llvmpipe`, sw software. Still owed: the rp5/rp6/rp7 wrappers' first run.
+
 ## Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask — 2026-10-29
 
 The last chunk of the thread-model overhaul (`docs/thread-model-review.html`: F-7, decision 6). Operator votes
@@ -2643,3 +2830,32 @@ aux-3-c7-probe.
   Go fork's minit comment says native spawn does not inherit (comment only, with the fork's next move); phase f's
   green kernel ELF hash differed from phase e's although the kernel diff was line-neutral comments (cause not
   established; nothing rests on it).
+## lsp-probe's goodbye spends the session's budget (P1 fix) -- 2026-10-29
+
+Closes OPEN-BUGS 2026-10-29T00:33Z (P1, my own regression from 6443f1874, vote 27): every `/clade`-baked boot of this
+branch on thyla-pi extincted at joey, because lsp-probe's goodbye had a 10 s bound of its own and clangd+headers' exit
+there runs longer. Code eb8e8b807.
+
+- **Measured first.** A private instrumented probe (goodbye bound 120 s, printing when `shutdown` was answered and when
+  stdout closed): under HVF clangd+headers answered at 0 ms and exited with status 0 at 914 ms; on thyla-pi's KVM it
+  answered at 2 ms and exited at 11220 ms (clangd 9125 ms, gopls 1035 ms). Under TCG the clangd+headers session alone
+  runs 16.8-46.8 s (16 boots). Not a hang: clangd's exit costs about what its session did, more when it was short.
+- **The fix.** `GOODBYE_MS` is gone; `goodbye` takes the session's start and fails only once the session's `BUDGET_MS`
+  (240 s) is spent, so joey's 800 s bound on the whole probe ("3 x 240 + margin") still holds. A goodbye heartbeat
+  every 20 s; a budget failure says how far into the goodbye it came; the exit wait drains stderr.
+- **Rejected.** A separate 240 s goodbye budget (3 x 480 s passes joey's bound, which could then fire before the probe
+  names the hung server); nora's `END_GRACE` of 30 s (a UX bound at which nora kills a slow server; a TCG session runs up to 47 s).
+- **Verification.** Mac, the committed tree (02:01-02:05Z): clade default build + suite, `tests: 2120/2120 PASS`,
+  CL-4/CL-7b/CL-5 PASS, `lsp-probe: PASS` with clangd+headers' goodbye at 935 ms (`work/oct29-clangd-bye/f-*`); the
+  pre-audit build likewise (01:37-01:44Z, 905 ms). The
+  discriminating host is thyla-pi: the old bound red in run 2 (`work/oct28-quarry/run2/warp-quake.log:8519`), this fix
+  green in glq-virgl's boot (pre-audit build, clangd+headers 11421 ms) and in a smoke boot of the post-audit build, the
+  committed tree (11476 ms, `pi3-smoke-boot.log`). Red witness: a private no-exit mutant prints the goodbye heartbeat
+  at 21 s to 221 s, then `FAIL [gopls] -- stdout still open after exit when the session budget ran out, 241030ms into
+  the goodbye` and the boot extincts, the probe's own reason inside joey's 800 s.
+- **Audit.** Fable 5.1 round 1 (start == end), 0/0/2/5, clean. F1 the dossier's TCG range came from a census cut by
+  `head` (16.8-46.8 s measured, fixed); F2 the budget failure and heartbeat had never fired (the red run above); F3-F5
+  fixed (how far into the goodbye; the exit wait drains stderr; heartbeat cadence); F6 enqueued (OPEN-BUGS 01:53Z,
+  nora's `END_GRACE` was sized on gopls); F7 this section and the journal entry.
+- **Lesson.** A bound verified only on the servers the image carried is unverified: every gate before this ran with
+  clangd absent, and the skip read as green.

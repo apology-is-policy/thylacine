@@ -1,0 +1,2 @@
+PASS fixed SQE preparation: 268 checks
+FAIL abort preserves MORE but bars new shot

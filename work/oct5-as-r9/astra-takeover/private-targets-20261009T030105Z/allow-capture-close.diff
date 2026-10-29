@@ -1,0 +1,11 @@
+--- control
++++ allow-capture-close
+@@ -105,7 +105,7 @@
+         handle_put(&h);
+     }
+     spin_lock(&l->lock);
+-    if (!rc && l->service_closing) rc = -T_E_CANCELED;
++    if (!rc && l->service_closing && false) rc = -T_E_CANCELED;
+     if (rc) {
+         // This unpublished ref is private to this retained transaction; close
+         // cannot remove it, and no borrower can pin a provisional slot.

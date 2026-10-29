@@ -1,0 +1,11 @@
+
+running 6 tests
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test last_generation_cannot_wrap_or_reuse ... ok
+test overlap_and_global64_members_are_rejected ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

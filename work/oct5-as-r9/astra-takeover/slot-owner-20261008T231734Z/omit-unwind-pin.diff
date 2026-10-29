@@ -1,0 +1,11 @@
+--- control
++++ omit-unwind-pin
+@@ -128,7 +128,7 @@
+         spin_lock(&as->lock);
+         addrspace_uncharge_pages(as, metadata + backing);
+         spin_unlock(&as->lock);
+-        addrspace_private_end(as);
++
+         return NULL;
+     }
+     l->service_slots = slots;

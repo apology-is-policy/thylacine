@@ -1,0 +1,35 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::wait_absolute_deadline_before_and_after_arm ... ok
+test tests::ring::wait_bounded_turn_has_no_internal_allocation ... ok
+test tests::ring::wait_failures_cleanup_without_retry_loop ... ok
+test tests::ring::wait_local_release_during_arm_prevents_sleep ... ok
+test tests::ring::wait_native_ready_and_intervening_event_are_not_lost ... FAILED
+test tests::ring::wait_ready_callback_release_is_checked_last ... ok
+test tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress ... FAILED
+test tests::ring::wait_timeout_is_not_terminal_storage_proof ... ok
+test tests::ring::wait_zero_and_partial_quantum_do_not_sleep ... ok
+
+failures:
+
+---- tests::ring::wait_native_ready_and_intervening_event_are_not_lost stdout ----
+
+thread 'tests::ring::wait_native_ready_and_intervening_event_are_not_lost' (30942434) panicked at src/tests/ring.rs:1741:5:
+assertion failed: e.needs_progress()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress stdout ----
+
+thread 'tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress' (30942436) panicked at src/tests/ring.rs:1799:9:
+assertion failed: e.needs_progress()
+
+
+failures:
+    tests::ring::wait_native_ready_and_intervening_event_are_not_lost
+    tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress
+
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

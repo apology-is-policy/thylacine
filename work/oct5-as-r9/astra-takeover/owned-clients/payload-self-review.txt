@@ -1,0 +1,51 @@
+Astra single-agent self-review of uninstalled owned payload C/Rust cores.
+Ownership is consumed before receipt acceptance. Backend implementations are
+unsafe/trusted and must own stable disjoint eager storage, authenticate kernel
+receipt publication, exclude writes to leased extents, preserve bytes on any
+nonzero RETURN, and close with independent kernel pins/charges retained. These
+are explicit integration obligations, not facts proven by a simulated backend.
+
+PAYLOAD-REVIEW-R1: during Rust construction review, removed caller-supplied
+buffer lengths. Safe construction now derives each length/count from the unsafe
+owned backend and rejects lengths above isize::MAX before forming slices. Ledger
+checks offsets/results; constructor failure retires/closes before dropping storage.
+PAYLOAD-REVIEW-R2: during C review, moved begin/finish ledger state changes out
+of assert expressions so NDEBUG cannot erase them. Optimized NDEBUG core objects
+are tested with test assertions separately enabled, in addition to ASan+UBSan.
+
+Rust PayloadLease owns Rc backing/token; bytes borrows self read-only. Explicit
+return consumes self, and failed return restores the exact still-owning lease and
+errno. Drop has one pre-reserved pending cell per member, with no new allocation.
+The executor-held owner remains independent of client and lease handles. Progress
+attempts at most64returns; no reuse on failed/positive/NOENT returns. Final CQ/EOF
+never clears earlier tokens. Removal requires client closing, zero live leases,
+and confirmed local retirement; retained failed tokens then end through whole
+owner close, not fabricated successful RETURN. Controller destruction closes
+once but outstanding leases keep backing mapped; last reference releases it only
+after closure, while kernel pins independently preserve physical lifetime.
+
+C uses opaque owner/pool/lease handles and64preallocated lease cells. Caller must
+end all payload pointer use before return/abandon and never access a consumed
+handle; address reuse does not resurrect a stale pointer. Single-consumer only.
+Explicit RETURN error preserves the handle; abandon records failed return in its
+member cell. Construction failure and final destruction close before destroy.
+No user callback is invoked while manipulating state; trusted backend callbacks
+must be bounded, non-reentrant and non-panicking. Rc/RefCell core is not Send/Sync.
+
+Six scenarios in each language: held A while B returns/final arrives; exact
+failed-return retention/retry;64failed drops and eventual whole-owner retirement;
+controller teardown with live bytes; invalid geometry cleanup; malformed/duplicate
+receipts. Rust opt0/opt2 plus four compile-fail contracts and valid-return control;
+C LLVM22 ASan+UBSan plus optimized NDEBUG core; four runtime mutants per language.
+PAYLOAD-FIXTURE-R1 initial negative test used wildcard let _=b.bytes (no access),
+so compiled. Failed run034434Z preserved; actual moved-field access rejects E0382
+in corrected034518Z. No full pass claimed for the interrupted initial run.
+
+Critical remaining scope: this is a one-pool ownership component over a simulated
+backend, not the complete ring adapter. Do not create independent retirement
+controllers for multiple pools sharing a native ring: use one full-ring owner,
+enforce the global64-member envelope/cross-pool exclusions, and share registered
+backing/mapping ownership. Bind paired CQ and authenticate request/pool identities;
+add syscall error-preserving control, futures/scope-wide cancel, fixed I/O owners,
+and executor admission/removal of bounded retirement records before activation.
+No native safe-client, physical refund, full AS3 or independent-audit claim.

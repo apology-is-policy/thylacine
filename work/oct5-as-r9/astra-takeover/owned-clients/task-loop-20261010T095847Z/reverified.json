@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:59:43.029221+00:00",
+  "source_count": 13,
+  "command_count": 21,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "6a9f482feaf6a73bdb66ab4b72c0ae101fbd93602ce74e5d3ff4bd003341d058",
+    "rust-run-0": "17ae40705837a0f9da9730dfc5d80e72e1022c8892b44793a4bc48dbee5eda1d",
+    "rust-build-2": "6a9f482feaf6a73bdb66ab4b72c0ae101fbd93602ce74e5d3ff4bd003341d058",
+    "rust-run-2": "9a36c4b407aa8b9724b9019c9318968efa9260a8e74c0fae6bf35d98563fd343",
+    "no-clone-tasks-build": "cbea6cbeb4812462761bd142ec17e7d9d6de1cd537bd252e9f950e3123a04ccf",
+    "no-send-tasks-build": "4a44f184c57b8723496590870668dfdf54280514eb35df68cde3311258ee1706",
+    "valid-task-build": "b0952d035a0312111646d6fd4943dd29ce8740147f709a118a9da7cc81822cd1",
+    "valid-task-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-initial-runnable-build": "5accd2bc515766d794018ac4f667cfbc948a7f27bf48043de87c7979b4b38abd",
+    "skip-initial-runnable-run": "15f1c9c2d02e11f6e79e7d71569e45499ac0ab7c949d9b6c37600e7d7d9cf589",
+    "skip-final-runnable-build": "6d44deaa8d5ac12c9ab47e1e5a35099ec6681d08549c3b863441f4a113330b98",
+    "skip-final-runnable-run": "e850f7bc9464f91823c1e8a1918788947e28fa9b5016741d5a6570bd4b135c7e",
+    "skip-task-dispatch-build": "03a49958cb16dfe851fd5e1ce67efa498831a6d63275c11bae76fa4af9c61d29",
+    "skip-task-dispatch-run": "909e95656dcb163ea0f94c2f21e72295efec7c55290856679f785b6330f4230d",
+    "ignore-task-budget-build": "aa85e2355dc73dc5156b32f41d87255750b75c6ea9fa1a1c2162f955c7df71b8",
+    "ignore-task-budget-run": "4127a8b3b1e7b2427f1b158fcfee2677db0393889270b22eb28c669caba621c4",
+    "poll-after-outer-expiry-build": "6f8ece298b29d56760bebfdea9bf1757d64e6db67ff619b44c240354dc3b52f0",
+    "poll-after-outer-expiry-run": "997d5fa7d25f93d76f6fe18eb1b5c58cc9c3577b63a85b9b62cf5300dade8404",
+    "ready-starves-timers-build": "d0a9b54d4c1a8da80df273759b7facb17183512597ef2b806aa21ccd2600d06f",
+    "ready-starves-timers-run": "e147f44351d0e761585f1e3b5c0461e46aad76271ef69e889063754bf19157d7"
+  }
+}

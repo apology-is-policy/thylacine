@@ -3,7 +3,7 @@ id: sub-kernel-proc
 type: sub
 title: "The Proc: table, lineage, creation, and wait"
 parent: moc-kernel-execution
-code: ["kernel/proc.c", "kernel/include/thylacine/proc.h", "kernel/test/test_resource.c"]
+code: ["kernel/proc.c", "kernel/include/thylacine/proc.h", "kernel/test/test_proc.c", "kernel/test/test_resource.c"]
 audit: hard
 guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44, inv-i48]
 validated-by: [gate-smp]
@@ -12,6 +12,16 @@ design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
 updated: 2026-10-28
 ---
+## Session posting ownership
+
+The factory role is explicitly granted, never inherited by rfork. New Procs
+initialize a private posting lock, empty registry-membership list and open
+posting latch. These fields are appended, preserving existing assembly-visible
+offsets. Successful posts retain each participating registry once. Exit closes
+the latch and detaches the memberships before draining; proc_free repeats the
+idempotent notification for construction/rollback paths. Membership never
+depends on the current namespace. See [[sub-kernel-devsrv]].
+
 ## Graphical seat incarnations
 
 The kernel binds one boot-designated hardware service, one normal compositor
@@ -70,7 +80,7 @@ spent a frame per level would carry any `/proc` lookup past the 16 KiB kernel
 stack. The links hold still across a walk because it runs under
 `g_proc_table_lock`, and they are written only by fork, the reap and a dying
 Proc's own exit, never from a walk callback (`proc_for_each`'s contract
-forbids a callback re-entering rfork, exits or wait_pid).
+forbids a callback re-entering rfork, exits or wait_pid_for).
 
 ## Contract
 
@@ -92,7 +102,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 
 | Surface | Shape |
 |---|---|
-| `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a pid drawn from the id space + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
+| `proc_alloc_in` / `proc_free` | allocate a KP_ZERO'd Proc with a pid drawn from the id space + stripes + pgtable + handle table + note queue (static in production: `rfork_internal` is its one caller; `proc_alloc` is the tests' wrapper); free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
 | `rfork_init` | `RFPROC` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
 | `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1, a user's past `PROC_ID_USER_LAST` (the last 2^20 ids are the TCB's, vote 10), and a refused draw leaves the counter unmoved; nothing is reused |
@@ -110,14 +120,14 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_mark_*` / `proc_is_*` | the one-way `proc_flags` stamps and their fail-closed readers |
 
 `proc_stripes` is the unforgeable per-Proc identity a `/srv` peer query
-resolves against — a fresh monotonic u64 per `proc_alloc`, never inherited,
+resolves against — a fresh monotonic u64 per `proc_alloc_in`, never inherited,
 `0` reserved as the fail-closed sentinel.
 
 ## Mechanism
 
 **Imperium scope flow (2026-09-17).** The `rfork_internal` capability carve
 and table-insertion race check now implement [[sub-kernel-caps#Contract]].
-`proc_become_legate` publishes the coherent scope block through the scope-id
+`proc_become_legate_locked` publishes the coherent scope block through the scope-id
 release store, refuses nested propagating scopes, and shortens an existing
 one-shot deadline rather than extending it. `proc_legate_teardown_if_root`
 marks every scoped member under the same process-table lock used by child
@@ -160,7 +170,7 @@ a ledger of three columns:
 
 - **Inherited** — identity (`principal_id`, `primary_gid`, `supp_gids`),
   session and group (`sid`, `pgid` — POSIX fork semantics, overwriting
-  `proc_alloc`'s own-session default), the legate scope tag, the hardware
+  `proc_alloc_in`'s own-session default), the legate scope tag, the hardware
   allowance (deep-cloned), the environment group (deep-copied), the
   phenotype, `exe_path`, the CL-5 `page_budget` and the thread budget
   (`thread_budget`, thread-model C6). A **PHENO_LINUX** fork
@@ -413,6 +423,10 @@ second and third share a failure mode the first does not.
 - **The pending-note mask.**
 - **The hardware breakpoint and watchpoint slots.**
 
+A fourth operation runs in the same region and is deliberately NOT in that list,
+because it is a **latch, not a reset**: see "The private ring latch at image
+replacement" below.
+
 **The debug slots are the instructive one.** Nothing else disarms them — the
 debug state lives until the process is freed — and the context-switch path
 **re-arms unconditionally** from the stored counts at every switch. So a
@@ -520,7 +534,7 @@ rather than growing the struct.
 
 The three lifecycle states are `INVALID(0)` / `ALIVE` / `ZOMBIE`, with
 `INVALID == 0` asserted so a zero-initialized Proc is detectably unusable.
-There is no REAPED state — by the time `wait_pid` returns the pid, the
+There is no REAPED state — by the time `wait_pid_for` returns the pid, the
 descriptor is freed and its magic clobbered.
 
 The top two bits are the final close's (2026-10-07, ARCH 7.9.1 part B,
@@ -632,7 +646,7 @@ accountant.
   `proc_default_page_budget()` = `proc_page_budget_hard_max()` =
   `capacity_pool_pages()` (RAM minus the TCB reserve, sized once at boot;
   [[sub-kernel-addrspace]]) -- seeded at `proc_init_fields` (the one
-  chokepoint: kproc and every `proc_alloc`, which matters because `KP_ZERO`
+  chokepoint: kproc and every `proc_alloc_in`, which matters because `KP_ZERO`
   would otherwise leave a zero budget that refuses every charge), copied by
   `rfork_internal`, and bounded by the same figure in
   `proc_spawn_budget_resolve` (over it is refused for everyone, never clamped;
@@ -673,7 +687,7 @@ accountant.
 
 ## Error paths
 
-`proc_alloc` returns NULL on any allocation failure (each rolling back
+`proc_alloc_in` returns NULL on any allocation failure (each rolling back
 through `proc_free`). `rfork_internal` returns `-1` uniformly: over the
 child cap, narrowed-allowance parent, or any allocation failure.
 `wait_pid_for` returns `-1` for no-match **and** for "this Proc is
@@ -697,7 +711,7 @@ The DFS walkers are O(procs) and run under a global IRQ-off lock, which is
 fine for the paths that use them (death, `/proc` reads, the pgrp fans) and
 would not be for a hot path — none exists. The orphan rule's walks are
 O(procs) *per candidate group*, explicitly justified in the code by death
-not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
+not being hot. `proc_alloc_in`'s fallible-first ordering costs nothing;
 `wait_pid_for`'s re-scan per wake is O(children), bounded by
 `PROC_CHILD_MAX`.
 
@@ -792,6 +806,17 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   relies on holds by a different mechanism entirely; see [[sub-kernel-pts]]
   and task #69.
 
+## Process owners and asynchronous pins (AS-2a)
+
+AddrSpace total lifetime references now include kernel descriptor pins. Image
+join/stamping and last-driver VMA quiescence use `addrspace_owner_count`, which
+counts only constructor/Proc owners. A pending cleanup is not a competing image
+mapper and cannot suppress final device reset. Actual shared Procs retain their
+ordinary sharing/elevation behavior. Final owner release drains VMAs before its
+total reference is dropped; kernel pins retain only the descriptor/account.
+See [[sub-kernel-addrspace]] and ASYNC-SERVICE-SELF-REVIEW.md for lifetime proof
+and native sharing/device tests. Private Loom is not activated here.
+
 ## Provenance
 
 [[chg-2026-08-15-proc-lineage]] is the re-sweep after the LINEAGE arc: the
@@ -807,6 +832,15 @@ note to a Linux `wait4` (`WAIT_PID_NOTEINTR`; witness
 Thread-model C6 (2026-10-27): one id space for pids and tids (`proc_id_alloc`,
 `rfork_init`, exec moves the pid) and the per-Proc thread budget.
 
+## Terminal ownership observations
+
+`proc_pts_interaction` takes the lifecycle lock and calls the pts core under it.
+`proc_pts_live_locked` uses an iterative lineage walk and returns a borrowed live
+Proc only for the current lock interval. No observer stores a Proc pointer.
+The setsid/setpgid, exec and ZOMBIE hooks invalidate nominations or retire roles
+before publishing the corresponding process change; [[sub-kernel-pts]] owns the
+contract. Allocation and user copies remain outside lifecycle.
+
 ## proc_free and the phenotype's socket cache (2026-09-29, NP-5)
 
 `proc_free` releases the Linux socket table with `viv_socktab_free` instead of a
@@ -815,3 +849,66 @@ so the table is no longer reference-free. The exit close already reset it
 ([[sub-kernel-death]]); what `viv_socktab_free` catches is the direct
 `state = ZOMBIE; proc_free()` paths that never ran that close, whose cached
 Spoors it clunks with the same Tclunk the `handle_table_free` beside it sends.
+
+## AS-2b admission (October 4)
+
+proc_service_snapshot_by_stripes matches ALIVE, permanent stripes and the exact
+pinned AddrSpace under the process-table walk lock. Exec swaps its image under
+that same lock; keeping a Proc identity cannot let an old ring sample the new
+image. Only immutable identity/provenance values escape. The direct snapshot
+requires a lifetime-safe caller and supports legacy synchronous opens. Scope
+publication still needs its own exit/exec/abort latch; this helper is no substitute.
+
+## Private ring sharing and fork exclusion
+
+proc_alloc_in uses addrspace_try_ref under the AS lock. Any private-ring guard
+refuses a new process owner; the unpublished Proc keeps as NULL and follows
+normal rollback, balancing creation/destruction. Existing kernel descriptor pins
+alone do not block sharing. Private setup is still inactive.
+
+## Private worker accounting tickets
+
+`proc_sqpoll_ticket_charge` resolves permanent creator stripes and the retained
+original address space under `g_proc_table_lock`, refuses dead/terminating images,
+and checks and counts the creator's thread budget under the creator's
+`threads_lock`, taken inside the table lock ([[lock-proc-threads]]): the same
+`proc_thread_room_locked` the public SQPOLL charge and every thread admit use,
+so live threads plus workers stay under `thread_budget`
+([[sub-kernel-loom-bridge]]). Its eight-byte
+kernel-owned ticket starts empty and cannot be copied or overwritten while held.
+`proc_sqpoll_ticket_release` consumes it under the same lock, matching stripes
+without requiring the old image: exec does not reset the Proc's counter. Reaping
+the creator makes release a no-op on process counters, never a lookup by recycled
+address or PID. Repeated release of the same retained ticket is harmless; a fresh
+charge requires that all prior ticket users have returned. The owner must keep
+storage alive until actual worker retirement. No wait, allocation or callback.
+
+The private runtime consumer remains gated. Legacy synchronous Loom continues
+using its existing charge API. Tests: actual-source ASan/UBSan,100 pthread
+admission/refund schedules, eight intended mutants and the expanded native
+`proc.stripes_smoke` fixture including real Proc destruction. Fresh boot1830/1830;
+broad SMP/UBSan matrix remains owed for this primitive.
+
+## The private ring latch at image replacement (2026-10-07, AS-R9)
+
+`handle_private_exec_latch(p)` is called from `proc_exec_replace`, two lines
+before `old = p->as; p->as = nas;`, and the position is the whole content of this
+entry. Measured on the function body rather than read off a design doc: the
+proc-table lock is taken at the top of that block (`spin_lock_irqsave(&g_proc_table_lock)`)
+and released after the swap, so the latch runs **under that lock with interrupts
+off**. That is why it must be infallible and leaf-only -- the swap it precedes
+cannot be unwound, and nothing under this lock may sleep.
+
+The descriptor removal and the waiter wake are NOT here: `handle_close_on_exec`
+does both, and the exec syscall calls it directly -- outside
+`proc_exec_replace` entirely and so outside this lock, where a wake is allowed to
+sleep. [[sub-kernel-handle]] owns the latch's contract and the reason
+the two halves sit on opposite sides of the commit point; [[sub-kernel-loom]]
+owns the ring side. What belongs on this dossier is only that the exec path calls
+it, exactly where, and under which guarantee -- the enumeration above is by *who
+re-arms this*, and a latched ring is the case where nothing re-arms but the
+descriptor outlives the image it was admitted against.
+
+The private runtime consumer remains gated: no syscall reaches
+`loom_create_private`, so this path is reachable today only from the kernel
+tests.

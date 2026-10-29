@@ -1,0 +1,11 @@
+--- control
++++ omit-creator
+@@ -60,7 +60,7 @@
+                               struct loom_service_ref *out) {
+     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+         !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+-    if (p->as != l->service_as || p->stripes != l->service_creator)
++    if (p->as != l->service_as)
+         return -T_E_ACCES;
+     if (!l->receipt_size) return -T_E_OPNOTSUPP;
+     if (in->size != sizeof(*in) || in->version != 1 || in->flags ||

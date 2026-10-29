@@ -1,0 +1,1 @@
+Assertion failed: (t_retirement_admit(e,make_driver,&f,&extra)==T_RETIREMENT_FULL&&!extra&&f.calls==1), function main, file test_retirement_executor.c, line 10.

@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -97,7 +97,7 @@
+         selected=(struct loom_ready_selection){LREADY_IO,NULL,0};
+     }
+     struct loom_service_operation *o=selected.operation;
+-    if(o && o!=p->op_tail) {
++    if(false && o && o!=p->op_tail) {
+         if(o->prev)o->prev->next=o->next;else p->op_head=o->next;
+         o->next->prev=o->prev;
+         o->prev=p->op_tail;o->next=NULL;p->op_tail->next=o;p->op_tail=o;

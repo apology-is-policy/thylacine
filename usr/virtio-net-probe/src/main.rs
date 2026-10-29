@@ -594,8 +594,10 @@ pub extern "C" fn rs_main() -> i64 {
     let (slot, slot_va) = match find_net_slot(mmio_base) {
         Some(found) => found,
         None => {
-            log("virtio-net-probe: SKIP — no virtio-mmio slot has DeviceID=1 (no -device virtio-net-device wired in QEMU?)\n");
-            return 0;
+            // The kernel test spawns this probe only after finding the device,
+            // so a scan that misses it is a probe or transport defect, not a skip.
+            log("virtio-net-probe: FAIL — no virtio-mmio slot has DeviceID=1, though the kernel found one\n");
+            unsafe { t_exits(1) };
         }
     };
 

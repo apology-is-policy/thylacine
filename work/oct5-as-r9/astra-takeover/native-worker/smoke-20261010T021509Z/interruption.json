@@ -1,0 +1,28 @@
+{
+  "owner": "astra",
+  "status": "interrupted-before-boot-completion",
+  "flight": {
+    "owner": "astra",
+    "pid": 67775,
+    "state": "failed",
+    "source": "7f3f90471804f3162f969724e1f2b107c71058a4",
+    "diff_sha256": "c010cc9b09793820c5e00e19ad1c3a049f97628a938fc939081841ffd5247980",
+    "run": "work/oct5-as-r9/astra-takeover/native-worker/smoke-20261010T021509Z",
+    "next": "Keep source frozen; five one-boot default1/4/8,UBSan4/8 smoke rows. Verify and checkpoint; not50boot qualification. Then AS-3 hostile peers/owned clients,AS-4,MM0-MM4. No activation.",
+    "phase": "default1",
+    "minimum_free_mib": 8255,
+    "free_mib": 8255,
+    "failure": "RuntimeError('disk stop margin reached')",
+    "rc": 1,
+    "finished_utc": "2026-10-10T02:15:47.871841+00:00"
+  },
+  "raw_sha256": {
+    "serial.log": "6e797b8806af46aec771ee8b6a763cf8a6ea08e5ef7bf81943059e8944c0935d",
+    "harness.log": "596557693a1934ec2a5383d00755e1875f34c1a0d4f408492c4289c6ec7c0e1c",
+    "source.diff": "c010cc9b09793820c5e00e19ad1c3a049f97628a938fc939081841ffd5247980",
+    "source.txt": "9c3a3b34ee315ee511c14491c8a9dc29527d1c9cdb36e50c222ddc67bd94ca1a",
+    "thylacine.elf": "eb0c38487cac147d94b2f8e5f88b32d188902ac82bfb65d8d7e3aa7c4b4de584",
+    "thylacine.bin": "f5a657a0022c9a74a8401925f88bb44489efe1a396361261eb578d61afe81ce2"
+  },
+  "note": "Both disk monitors reached stop margin. Native child terminated QEMU; wrapper concurrently killed diagnostic before its result file. Process inspection found no remaining VM/test jobs. No boot pass claimed."
+}

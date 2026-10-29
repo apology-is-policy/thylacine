@@ -1,0 +1,28 @@
+error[E0382]: borrow of moved value: `b`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/moved-storage.rs:118:89
+    |
+118 | fn main(){let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();}
+    |                                  -                                      -               ^^^^^^^ value borrowed here after move
+    |                                  |                                      |
+    |                                  |                                      value moved here
+    |                                  move occurs because `b` has type `Backing`, which does not implement the `Copy` trait
+    |
+note: consider changing this parameter type in method `new` to borrow instead if owning the value isn't necessary
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/ring_payload.rs:71:28
+    |
+ 71 |  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
+    |                ---         ^ this parameter takes ownership of the value
+    |                |
+    |                in this method
+note: if `Backing` implemented `Clone`, you could clone the value
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/moved-storage.rs:10:1
+    |
+ 10 | struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
+    | ^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+...
+118 | fn main(){let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();}
+    |                                                                         - you could clone this value
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0382`.

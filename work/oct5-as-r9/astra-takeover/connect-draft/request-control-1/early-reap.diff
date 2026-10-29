@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ early-reap.c
+@@ -147,7 +147,7 @@
+ }
+ int loom_request_reap(struct loom_request_table *t, struct loom_slot_table *s,
+                       struct loom_request_ref ref) {
+-    return request_remove(t,s,ref,LREQ_DELIVERED);
++    return request_remove(t,s,ref,LREQ_TERMINAL);
+ }
+ bool loom_requests_empty(const struct loom_request_table *t) {
+     if (!t || !t->records || t->occupied) return false;

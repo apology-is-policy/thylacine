@@ -261,9 +261,11 @@ void pagemap_take(struct pagemap *pm, spin_lock_t *lock, size_t idx,
 
 static u64 g_pagemap_walk_steps;
 
+#ifdef KERNEL_TESTS
 u64 pagemap_walk_steps(void) {
     return __atomic_load_n(&g_pagemap_walk_steps, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // The first slot under entry `e` of the level-`level` node on the path to
 // `idx`: idx's prefix above that level, then `e`, then zeros.

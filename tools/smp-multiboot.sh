@@ -78,6 +78,13 @@ sanflag=""
 
 LOG="$REPO_ROOT/build/test-boot.log"
 FAILDIR="$REPO_ROOT/build/multiboot-fails"
+# SMP_KEEP_LOGS=1 also keeps EVERY boot's logs, not only a non-PASS one's.
+# $LOG is overwritten by the next boot, so a PASSING boot's evidence is gone
+# the moment the next one starts -- which makes a per-boot question
+# unanswerable after the fact ("did the D7 overlapping-login ladder actually
+# RUN in boot 7 of ubsan-smp8?"), and five PASS rows cannot answer it either.
+# Opt-in, so the default gate's disk profile is unchanged.
+KEEPDIR="$REPO_ROOT/build/multiboot-logs"
 # Signatures of a real ctx/stack corruption (the SMP soundness bug class).
 # Use the EXACT extinction strings -- bare "canary" would match the benign
 # "canaries" hardening banner + "canary: initialized" boot line (false positive).
@@ -161,6 +168,13 @@ harness_result_token() {
     # runs AFTER test.sh has already printed '==> PASS: boot banner observed',
     # so a missing arm here does not degrade to 'unknown' -- it degrades to
     # 'pass', which is worse, and would have labelled the capture OTHER-pass.
+    elif grep -aqF '==> FAIL: netd '                                    "$hlog"; then echo netd
+    elif grep -aqF '==> FAIL: a readiness snapshot fail-safe fired'     "$hlog"; then echo poll-failsafe
+    elif grep -aqF '==> FAIL: a clunk was refused on a live session'    "$hlog"; then echo 9p-clunk
+    elif grep -aqF '==> FAIL: a last close lost its staged bytes'       "$hlog"; then echo 9p-flush
+    elif grep -aqF '==> FAIL: a kernel test skipped without a gated helper' "$hlog"; then echo skip-ungated
+    elif grep -aqF '==> FAIL: the kernel suite counted '                "$hlog"; then echo skip-tally
+    elif grep -aqF '==> FAIL: kernel tests skipped what this configuration attaches' "$hlog"; then echo skip-undeclared
     elif grep -aqF '==> FAIL: arc/clade gate verdict'                   "$hlog"; then echo arc-gates
     elif grep -aqF '==> PASS'                                           "$hlog"; then echo pass
     else echo unknown
@@ -215,6 +229,47 @@ if (( ${#prior_captures[@]} > 0 )); then
     echo "  [$LABEL] archived ${#prior_captures[@]} prior capture(s) -> ${ARCHDIR#$REPO_ROOT/}"
 fi
 
+# Same masquerade hazard, same remedy, for the keep-everything logs: a stale
+# per-boot log from an earlier run of THIS label would be counted as current
+# evidence by whatever reads the directory. Archive, never delete (#223).
+# EVERY STEP ON THIS PATH FAILS LOUDLY -- no `|| true`. The fail-capture above
+# can afford suppression (its verdict does not depend on the copy landing), but
+# a READER of these logs counts them, so a suppressed mv or cp leaves a stale
+# file sitting under a current boot's name and satisfies that count with an
+# earlier run's evidence. That is the masquerade the archiving exists to
+# prevent, re-introduced by the suppression (astra, 0161 note 19).
+if [[ -n "${SMP_KEEP_LOGS:-}" ]]; then
+    mkdir -p "$KEEPDIR" || { echo "  [$LABEL] KEEP FAILED: cannot create $KEEPDIR" >&2; exit 1; }
+    shopt -s nullglob
+    prior_keeps=("$KEEPDIR/$LABEL-"*.log)
+    shopt -u nullglob
+    if (( ${#prior_keeps[@]} > 0 )); then
+        KEEPARCH="$KEEPDIR/archive/$LABEL-$(date -u +%Y%m%dT%H%M%SZ)"
+        mkdir -p "$KEEPARCH" || { echo "  [$LABEL] KEEP FAILED: cannot create $KEEPARCH" >&2; exit 1; }
+        if ! mv "${prior_keeps[@]}" "$KEEPARCH"/; then
+            echo "  [$LABEL] KEEP FAILED: could not archive ${#prior_keeps[@]} prior log(s)" >&2
+            echo "  [$LABEL] refusing to boot with an earlier run's logs under current names." >&2
+            exit 1
+        fi
+        echo "  [$LABEL] archived ${#prior_keeps[@]} prior per-boot log(s) -> ${KEEPARCH#$REPO_ROOT/}"
+    fi
+    # POST-CONDITION, asked of the directory rather than of mv's status: the
+    # slot must be EMPTY before the first boot writes into it.
+    shopt -s nullglob
+    left_behind=("$KEEPDIR/$LABEL-"*.log)
+    shopt -u nullglob
+    if (( ${#left_behind[@]} > 0 )); then
+        echo "  [$LABEL] KEEP FAILED: ${#left_behind[@]} prior log(s) still present after archiving" >&2
+        exit 1
+    fi
+    # This run's freshness datum. A kept log must be NEWER than this, which no
+    # survivor of an earlier run can be -- the staleness class dies on a
+    # timestamp instead of on a return code.
+    KEEPSTAMP="$KEEPDIR/.stamp-$LABEL"
+    : > "$KEEPSTAMP" || { echo "  [$LABEL] KEEP FAILED: cannot write $KEEPSTAMP" >&2; exit 1; }
+    echo "  [$LABEL] SMP_KEEP_LOGS=1 -- every boot's logs kept in ${KEEPDIR#$REPO_ROOT/}"
+fi
+
 # Per-boot pool restore (#362): every boot's go4c probes write GOCACHE/$WORK
 # into the Stratum pool with ~6x CoW amplification (#39 -- garbage only a
 # commit sweeps), so N cumulative boots age the pool (later boots slow toward
@@ -227,9 +282,34 @@ POOL_IMG="$REPO_ROOT/build/fixtures/pool.img"
 POOL_SNAP="$POOL_IMG.baked-snapshot"
 KEY_IMG="$REPO_ROOT/build/fixtures/system.key"
 KEY_SNAP="$KEY_IMG.baked-snapshot"
+# A SKIPPED RESTORE IS NEVER SILENT. pool_restore is the first statement of the
+# per-boot loop: it is what makes N boots N INDEPENDENT boots. It had three skip
+# arms and two announced themselves -- the deliberate SMP_GATE_POOL_RESTORE=0
+# opt-out, and a system.key that does not match its twin -- while the missing-file
+# arm returned success mutely. So a row could stop being independent, every later
+# boot running on the pool the previous boot wrote, with nothing in the log: a
+# weaker experiment reported as the stronger one. That arm is the one that fires
+# from ordinary cleanup, since build/fixtures is regenerated by bakes and pruned
+# for disk. Agreed with main on yip 0187 (their option (b)).
+# REFUSING HERE IS SAFE FOR EVERY OTHER CALLER, which is why no gate marker is
+# needed: the source guard above returns before this function is even defined, so
+# test-smp-classify.sh (which sources for the classifier) and test-interactive.sh
+# (which only mentions it) never reach it. Everything that DOES reach it is a
+# multi-boot run that wants independent boots.
 pool_restore() {
     [[ "${SMP_GATE_POOL_RESTORE:-1}" == "0" ]] && return 0
-    [[ -f "$POOL_SNAP" && -f "$POOL_IMG" ]] || return 0
+    if [[ ! -f "$POOL_SNAP" || ! -f "$POOL_IMG" ]]; then
+        local _miss=
+        [[ -f "$POOL_SNAP" ]] || _miss="$_miss $POOL_SNAP"
+        [[ -f "$POOL_IMG"  ]] || _miss="$_miss $POOL_IMG"
+        echo "  [$LABEL] pool restore IMPOSSIBLE -- missing:$_miss" >&2
+        echo "  [$LABEL] without it these boots are NOT independent: each one would" >&2
+        echo "  [$LABEL] inherit what the previous boot wrote to the pool, so per-boot" >&2
+        echo "  [$LABEL] counts would not be evidence. Re-bake to regenerate the" >&2
+        echo "  [$LABEL] snapshot twins, or set SMP_GATE_POOL_RESTORE=0 to say you" >&2
+        echo "  [$LABEL] meant it." >&2
+        return 1
+    fi
     if ! cmp -s "$KEY_IMG" "$KEY_SNAP" 2>/dev/null; then
         echo "  [$LABEL] pool restore SKIPPED: system.key does not match its snapshot (stale twins?)" >&2
         return 0
@@ -264,13 +344,34 @@ boot_secs_total=0
 boot_secs_list=""
 
 for i in $(seq 1 "$N"); do
-    pool_restore
+    # A refused restore is fatal, not a warning: see pool_restore.
+    pool_restore || { echo "  [$LABEL] REFUSING to run boot $i of $N without a pool reset" >&2; exit 2; }
     boot_t0=$(date +%s)
     rc_ok=1
     THYLACINE_TEST_CPUS="$CPUS" "$REPO_ROOT/tools/test.sh" $sanflag >"$HARNESS_LOG" 2>&1 || rc_ok=0
     boot_secs=$(( $(date +%s) - boot_t0 ))
     boot_secs_total=$(( boot_secs_total + boot_secs ))
     boot_secs_list="$boot_secs_list $boot_secs"
+
+    # Retain this boot's evidence BEFORE the classification, so a PASS keeps
+    # its log too (the PASS arm below `continue`s). $LOG is final here: test.sh
+    # has already returned.
+    if [[ -n "${SMP_KEEP_LOGS:-}" ]]; then
+        for keep_pair in "$LOG:$KEEPDIR/$LABEL-$i.log" \
+                         "$HARNESS_LOG:$KEEPDIR/$LABEL-$i-harness.log"; do
+            keep_src="${keep_pair%%:*}"; keep_dst="${keep_pair#*:}"
+            if ! cp "$keep_src" "$keep_dst"; then
+                echo "  [$LABEL $i/$N] KEEP FAILED: cp $keep_src -> $keep_dst" >&2
+                exit 1
+            fi
+            # Non-empty AND newer than this run's stamp: a stale file that
+            # survived cannot pass the second half, whatever cp reported.
+            if [[ ! -s "$keep_dst" || ! "$keep_dst" -nt "$KEEPSTAMP" ]]; then
+                echo "  [$LABEL $i/$N] KEEP FAILED: $keep_dst is empty or not from this run" >&2
+                exit 1
+            fi
+        done
+    fi
 
     if (( rc_ok )); then
         # Belt-and-suspenders: even on exit 0, fail if a corruption marker leaked.

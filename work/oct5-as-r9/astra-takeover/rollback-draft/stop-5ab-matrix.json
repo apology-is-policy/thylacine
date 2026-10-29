@@ -1,0 +1,8 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-09T18:49:15.145744+00:00",
+  "source": "5ab15c4d5e21bd7ff74ce07b7238c485c8c71f2e",
+  "runner": 24735,
+  "action": "SIGTERM own detached runner process group",
+  "reason": "CLOSE-R1 reproduced physical rollback close-barrier gap; partial boots are preserved, not a full qualification."
+}

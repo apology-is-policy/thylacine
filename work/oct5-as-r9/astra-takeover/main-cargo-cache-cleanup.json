@@ -1,0 +1,23 @@
+{
+  "at": "2026-10-08T19:51:15.620510+00:00",
+  "authorization": "Operator authorized Astra to reclaim Main/Aux/Corona resources until Monday; only reproducible unused Cargo native debug outputs reclaimed",
+  "path": "/Users/northkillpd/projects/thylacine/build/usr-rs/aarch64-apple-darwin/debug",
+  "entries": [
+    ".cargo-artifact-lock",
+    ".cargo-build-lock",
+    ".cargo-lock",
+    ".fingerprint",
+    "build",
+    "deps",
+    "examples",
+    "libhalcyond.d",
+    "libhalcyond.rlib",
+    "libnora.d",
+    "libnora.rlib",
+    "libvt.d",
+    "libvt.rlib"
+  ],
+  "before_df": "Filesystem   1024-blocks      Used Available Capacity iused    ifree %iused  Mounted on\n/dev/disk3s5   482797652 445922632   7308572    99% 2902060 73085720    4%   /System/Volumes/Data\n",
+  "du": "2766936\t/Users/northkillpd/projects/thylacine/build/usr-rs/aarch64-apple-darwin/debug\n",
+  "after_df": "Filesystem   1024-blocks      Used Available Capacity iused    ifree %iused  Mounted on\n/dev/disk3s5   482797652 445860372   7370832    99% 2876375 73708320    4%   /System/Volumes/Data\n"
+}

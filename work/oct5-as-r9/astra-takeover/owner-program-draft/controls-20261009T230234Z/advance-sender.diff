@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ advance-sender.c
+@@ -155,7 +155,7 @@
+ int loom_rpc_advance(struct loom_service_operation *o,enum loom_program_action *out) {
+     if(!o || !out || !o->protocol || !o->protocol->driving ||
+        o->phase!=LRPC_INFLIGHT || !o->submitted || !o->callback_seen ||
+-       o->rpc.sending || o->advanced)return -T_E_BUSY;
++       o->advanced)return -T_E_BUSY;
+     o->action=loom_private_program_reply(&o->program,&o->reply,o->capture_error);
+     o->advanced=true;*out=o->action;return 0;
+ }

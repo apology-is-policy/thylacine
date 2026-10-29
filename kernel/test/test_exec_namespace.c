@@ -48,29 +48,6 @@
 #include <thylacine/vivarium.h>    // #217: VIV_PROT_* (the MAP_FIXED prot word)
 #include <thylacine/vma.h>         // #217: vma_drain
 
-extern struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
-                                                 size_t name_len, size_t *size_out);
-// Non-static in syscall.c but header-less, like the resolver above.
-extern s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
-                                  bool exec, u64 offset);
-extern s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
-                                        u64 length_raw, u32 pr, u64 offset);
-extern s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
-                                        u64 length_raw, u64 prot_raw, u64 flags_raw,
-                                        u64 addr_raw);
-
-void test_exec_ns_resolve_absolute_ok(void);
-void test_exec_ns_resolve_relative_ok(void);
-void test_exec_ns_miss_returns_null(void);
-void test_exec_ns_non_executable_denied(void);
-void test_exec_ns_noexec_mount_denied(void);      // #217
-void test_mmap_file_noexec_mount_denied(void);    // #217
-void test_mmap_file_devenv_never_exec_backs(void); // #217 F1
-void test_map_file_native_arms(void);              // B-1d
-void test_map_file_native_refusals(void);          // B-1d
-void test_map_file_native_noexec_denied(void);     // B-1d
-void test_exec_ns_pheno_mount_crossing(void);      // VIVARIUM section 13
-
 void test_exec_ns_resolve_absolute_ok(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");

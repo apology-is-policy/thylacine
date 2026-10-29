@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ walk-arity.c
+@@ -33,7 +33,7 @@
+         if(n>255 || (n==1 && w->component[0]=='.') ||
+            (n==2 && w->component[0]=='.' && w->component[1]=='.'))return -T_E_INVAL;
+         for(u16 i=0;i<n;++i)if(!w->component[i] || w->component[i]=='/')return -T_E_INVAL;
+-        const u8 *name=w->component;size_t len=n;names=n?1:0;
++        const u8 *name=w->component;size_t len=n;names=0;
+         new_fid=w->new_fid;
+         rc=p9_session_send_walk(s,out,cap,w->fid,new_fid,names,&name,&len);break;
+     }

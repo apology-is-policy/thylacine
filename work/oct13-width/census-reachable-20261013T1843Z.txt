@@ -1,0 +1,85 @@
+   89 sys_exits_handler                        status             int                    UNGUARDED
+  110 sys_exit_group_handler                   status             int                    UNGUARDED
+  265 sys_mmio_create_handler                  rights             rights_t               UNGUARDED
+  317 sys_irq_create_handler                   intid              u32                    GUARDED: intid > (u64)0xFFFFFFFFu
+  317 sys_irq_create_handler                   rights             rights_t               UNGUARDED
+  375 sys_irq_wait_handler                     hraw               hidx_t                 GUARDED: handle_get(p, (hidx_t)hraw, &hh) < 0
+  437 sys_mmio_map_handler                     hraw               hidx_t                 GUARDED: handle_get(p, (hidx_t)hraw, &hh) < 0
+  437 sys_mmio_map_handler                     prot_raw           u32                    UNGUARDED
+  527 sys_dma_create_handler                   rights             rights_t               UNGUARDED
+  587 sys_dma_create_weave_handler             rights             rights_t               UNGUARDED
+  624 sys_dma_create_gpu_bo_handler            rights             rights_t               UNGUARDED
+  693 sys_burrow_from_hostmem_handler          pci_hraw           hidx_t                 GUARDED: handle_get(p, (hidx_t)pci_hraw, &hh) < 0
+  875 sys_dma_map_handler                      hraw               hidx_t                 GUARDED: handle_get(p, (hidx_t)hraw, &hh) < 0
+  875 sys_dma_map_handler                      prot_raw           u32                    UNGUARDED
+ 1009 sys_dma_segments_handler                 hraw               hidx_t                 GUARDED: handle_get(p, (hidx_t)hraw, &hh) < 0
+ 1077 sys_pci_claim_handler                    virtio_device_id   u32                    UNGUARDED
+ 1229 sys_pci_windows_handler                  hraw               hidx_t                 GUARDED: hraw >= PROC_HANDLE_MAX
+ 1262 sys_pci_info_handler                     hraw               hidx_t                 GUARDED: handle_get(p, (hidx_t)hraw, &hh) < 0
+ 1318 sys_pci_irq_create_handler               hraw               hidx_t                 GUARDED: !t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || o
+ 1318 sys_pci_irq_create_handler               mode               u32                    GUARDED: !t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || o
+ 1318 sys_pci_irq_create_handler               ordinal            u32                    GUARDED: !t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || o
+ 1342 sys_pci_irq_op                           hraw               hidx_t                 GUARDED: !t || !t->proc || hraw >= PROC_HANDLE_MAX
+ 1727 sys_write_weft_fastpath                  len                u32                    GUARDED: len > 0xFFFFFFFFull
+ 1785 sys_write_handler                        hraw               hidx_t                 UNGUARDED
+ 1832 sys_read_weft_fastpath                   len                u32                    GUARDED: len > 0xFFFFFFFFull
+ 1853 sys_read_handler                         hraw               hidx_t                 GUARDED: heap_scratch) scratch = heap_scratch;             else              sy
+ 1922 sys_pread_handler                        hraw               hidx_t                 GUARDED: heap_scratch) scratch = heap_scratch;             else              sy
+ 1952 sys_pwrite_handler                       hraw               hidx_t                 UNGUARDED
+ 2002 sys_close_handler                        hraw               hidx_t                 UNGUARDED
+ 2075 sys_fstat_for_proc                       hraw               hidx_t                 UNGUARDED
+ 2133 sys_lseek_handler                        hraw               hidx_t                 UNGUARDED
+ 2133 sys_lseek_handler                        whence_raw         u32                    UNGUARDED
+ 2923 sys_walk_open_handler                    spoor_fd_raw       hidx_t                 UNGUARDED
+ 2923 sys_walk_open_handler                    omode_raw          u32                    GUARDED: (nc->qid.type & QTSYMLINK) && !(omode_raw & SYS_WALK_OPEN_OPATH)
+ 3440 sys_fd2path_handler                      fd_raw             hidx_t                 UNGUARDED
+ 3494 sys_fd_devclass_handler                  fd_raw             hidx_t                 UNGUARDED
+ 3554 sys_setpgid_handler                      a0                 int                    UNGUARDED
+ 3554 sys_setpgid_handler                      a1                 int                    UNGUARDED
+ 3561 sys_getpgid_handler                      a0                 int                    UNGUARDED
+ 3568 sys_getsid_handler                       a0                 int                    UNGUARDED
+ 3907 sys_resolve_kpath_for_proc               start_fd_raw       hidx_t                 UNGUARDED
+ 3907 sys_resolve_kpath_for_proc               omode_raw          u32                    GUARDED: omode_raw & SYS_WALK_OPEN_NOFOLLOW) amode |= STALK_NOFOLLOW;     u32 o
+ 4596 sys_fsync_handler                        fd_raw             hidx_t                 UNGUARDED
+ 4836 sys_readdir_handler                      fd_raw             hidx_t                 UNGUARDED
+ 5073 sys_unlink_handler                       flags_raw          u32                    UNGUARDED
+ 5219 sys_wstat_handler                        hraw               hidx_t                 UNGUARDED
+ 5219 sys_wstat_handler                        valid_raw          u32                    UNGUARDED
+ 5219 sys_wstat_handler                        mode_raw           u32                    UNGUARDED
+ 5219 sys_wstat_handler                        uid_raw            u32                    UNGUARDED
+ 5219 sys_wstat_handler                        gid_raw            u32                    UNGUARDED
+ 5928 sys_postnote_handler                     pid_raw            int                    GUARDED: target_pid == p->pid || pid_raw == 0
+ 5928 sys_postnote_handler                     name_len_raw       u32                    GUARDED: name_len_raw > NOTES_POSTNOTE_NAME_MAX
+ 7704 sys_weft_map_handler                     data_fd_raw        hidx_t                 UNGUARDED
+ 7975 sys_loom_setup_handler                   entries_raw        u32                    GUARDED: entries_raw > 0xffffffffull
+ 8051 sys_loom_register_handler                op_raw             u32                    GUARDED: op_raw > 0xffffffffull
+ 8051 sys_loom_register_handler                nargs_raw          u32                    GUARDED: nargs_raw > LOOM_MAX_REG_HANDLES
+ 8129 sys_loom_enter_handler                   to_submit_raw      u32                    GUARDED: (to_submit_raw | min_complete_raw | flags_raw) > 0xffffffffull
+ 8129 sys_loom_enter_handler                   min_complete_raw   u32                    GUARDED: (to_submit_raw | min_complete_raw | flags_raw) > 0xffffffffull
+ 8129 sys_loom_enter_handler                   flags_raw          u32                    GUARDED: (to_submit_raw | min_complete_raw | flags_raw) > 0xffffffffull
+ 8145 sys_torpor_wait_handler                  expected_raw       u32                    UNGUARDED
+ 8154 sys_torpor_wake_handler                  count_raw          u32                    UNGUARDED
+ 8160 sys_dup_handler                          hraw               hidx_t                 UNGUARDED
+ 8160 sys_dup_handler                          new_rights_raw     rights_t               UNGUARDED
+ 8311 sys_mount_handler                        source_fd_raw      hidx_t                 UNGUARDED
+ 8311 sys_mount_handler                        flags_raw          u32                    GUARDED: flags_raw > (u64)0xFFFFFFFFu
+ 8369 sys_mlockall_handler                     flags_raw          u32                    GUARDED: flags_raw > (u64)0xFFFFFFFFu
+ 8395 sys_set_dumpable_handler                 dumpable_raw       u32                    GUARDED: dumpable_raw > (u64)0xFFFFFFFFu
+ 8420 sys_set_traceable_handler                traceable_raw      u32                    GUARDED: traceable_raw > (u64)0xFFFFFFFFu
+ 9255 sys_spawn_full_handler                   fd_count_raw       u32                    GUARDED: fd_count_raw > SYS_SPAWN_MAX_FDS
+ 9302 sys_spawn_with_perms_handler             fd_count_raw       u32                    GUARDED: fd_count_raw > SYS_SPAWN_MAX_FDS
+ 9302 sys_spawn_with_perms_handler             perm_flags_raw     u32                    UNGUARDED
+10221 sys_spawn_with_fds_handler               fd_count_raw       u32                    GUARDED: fd_count_raw > SYS_SPAWN_MAX_FDS
+10310 sys_execve_core                          path_len           u32                    GUARDED: path_len == 0 || path_len > SYS_OPEN_PATH_MAX
+10310 sys_execve_core                          argv_data_len      u32                    GUARDED: argv_data_len > SYS_SPAWN_ARGV_DATA_MAX
+10310 sys_execve_core                          argc               u32                    GUARDED: argc > SYS_SPAWN_ARGV_MAX
+10310 sys_execve_core                          env_data_len       u32                    GUARDED: env_data_len > EXEC_ENV_DATA_MAX
+10310 sys_execve_core                          envc               u32                    GUARDED: envc > EXEC_ENV_MAX
+10733 sys_wait_pid_handler                     want_pid_u         int                    UNGUARDED
+10733 sys_wait_pid_handler                     flags_u            int                    UNGUARDED
+10847 sys_srv_accept_handler                   service_h_raw      hidx_t                 UNGUARDED
+10952 sys_set_nonblock_handler                 fd                 hidx_t                 GUARDED: !t || !t->proc || fd >= PROC_HANDLE_MAX || on > 1
+10990 sys_srv_peer_handler                     conn_h_raw         hidx_t                 UNGUARDED
+11127 sys_poll_handler                         timeout_ms_raw     s32                    UNGUARDED
+11207 sys_trusted_seat_handler                 op                 u32                    GUARDED: !t || !t->proc || op > SEAT_CLIENT || !va ||             va >= UACCESS
+11230 sys_console_episode_handler              op                 u32                    GUARDED: op > 0xffffffffull

@@ -26,6 +26,9 @@
 //      reads a pane's /env through /proc/<pid>/environ, as it can write that
 //      pane's pts -- and those panes are one authority domain
 //      (dec-2026-09-29-inline-media-one-principal).
+// The independently scheduled service owns protocol, peer checks, buffers and
+// the clipboard broker. The UI exchanges bounded route/budget metadata and
+// moved image results; it never lends a Surface or protocol state to the owner.
 // The DoS floor: MAX_CONNS bounds concurrent transfers; the per-image cap
 // (`max_pixels`, the heap residual DIVIDED by MAX_CONNS -- set each loop by the
 // compositor) bounds a single transfer AND, times MAX_CONNS, the aggregate
@@ -34,32 +37,33 @@
 // its content share; the cache evicts oldest rasters, leaving readable captions.
 // Admission and completion also honor the smallest live cache's pixel budget.
 
-use alloc::collections::BTreeMap;
+use crate::serviceio::NativeEndpoint;
 use alloc::string::String;
 use alloc::vec::Vec;
+use halcyond::servicewire::{Dispatch, Handler, Interest, Stream};
+use libthyla_rs::err::Error;
+use libthyla_rs::fs::File;
+use libthyla_rs::handle::Rights;
 
+use halcyond::application::{Application, Context as AppContext, WriteResult};
+use halcyond::controllers::Peer;
+use halcyond::servicepool::{Pool, Connection, CONNECTION_SLOTS};
+use libhalcyon::interaction_wire::Failure;
 use halcyond::inlineaccum::{AccumStep, PlaceAccum};
-use halcyond::paneroute::{self, Node, Quiet};
+use halcyond::paneroute::{self, Node, Quiet, Route, Routes};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_getuid, t_open, t_read, t_srv_accept, t_srv_peer, t_walk_create, t_write, TPollFd,
-    TSrvPeerInfo, T_OPATH, T_OREAD, T_POLLHUP, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_getuid, t_open, t_srv_accept, t_srv_peer, t_walk_create, TPollFd, TSrvPeerInfo,
+    T_OPATH, T_OREAD, T_POLLERR, T_POLLHUP, T_POLLIN, T_POLLNVAL, T_POLLOUT, T_WALK_OPEN_FROM_ROOT,
 };
 
-const SRV_MSIZE: u32 = 32768;
+const SRV_MSIZE: u32 = 8192;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 const MAX_FIDS: usize = 8;
-/// Concurrent connections the session service accepts. Unlike the console spike
-/// (MAX_CONNS=1, one `view` at a time), a session has many tiles that may each
-/// run `view`, so more than one transfer can be in flight. It stays SMALL
-/// because the aggregate in-flight memory is bounded STATICALLY as
-/// `MAX_CONNS * per-image-peak`: the compositor sets the per-image cap to the
-/// heap residual DIVIDED by MAX_CONNS (see `session.rs place_cap`), so the sum
-/// of all in-flight transfers never exceeds the residual regardless of the
-/// display scale -- no per-write byte accounting, and `inlineaccum` is untouched.
-/// A connection beyond this WAITS (the listener drops from the poll set while
-/// full), bounded acceptance, never a spin -- the console spike's model.
-/// Public so the compositor sizes the per-image cap as residual / MAX_CONNS.
+const ACTIVE_CONNECTIONS: usize = if cfg!(feature="interaction-qualification") { CONNECTION_SLOTS } else { 2 };
+/// Media raster slots, independent of the32 control and4 handshake reserves.
+/// The compositor divides its image residual by this count. Promotion must
+/// succeed before a media request can allocate its first accumulator.
 pub const MAX_CONNS: usize = 2;
 const P9_VERSION: &[u8] = b"9P2000.L";
 /// STATX_SIZE -- ninep exports MODE/NLINK/UID/GID but not SIZE.
@@ -90,6 +94,7 @@ fn qid_of(node: Node) -> p9::Qid {
         Node::Root => (p9::P9_QTDIR, 0u64),
         Node::Dir(t) => (p9::P9_QTDIR, fold(t) | 1),
         Node::Place(t) => (p9::P9_QTFILE, fold(t) | 2),
+        Node::Interaction(t) => (p9::P9_QTFILE, fold(t) | 3),
     };
     p9::Qid {
         kind,
@@ -105,7 +110,7 @@ fn mode_of(node: Node) -> u32 {
         // may read its limit and write a raster. The gate is the peer principal
         // at accept; the token routes.
         Node::Root | Node::Dir(_) => S_IFDIR | 0o555,
-        Node::Place(_) => S_IFREG | 0o666,
+        Node::Place(_) | Node::Interaction(_) => S_IFREG | 0o666,
     }
 }
 
@@ -117,6 +122,7 @@ fn is_dir(node: Node) -> bool {
 /// it must inject into. The compositor drains these and calls the tile's
 /// `Tile::place_image` (whose raster cache enforces the per-pane stored quota).
 pub struct PaneCompletedImage {
+    route: Route,
     pub id: u128,
     pub leaf: u32,
     pub w: u32,
@@ -128,12 +134,16 @@ pub struct PaneCompletedImage {
 struct Fid {
     fid: u32,
     node: Node,
+    route: Option<Route>,
     opened: bool,
+    app_id: u64,
 }
 
 enum Disp {
     Reply(usize),
     Fatal,
+    Park(u64),
+    Cancel(u64, usize),
 }
 
 /// The live place-path budget for one service pass (F2/F5): the per-image pixel
@@ -144,22 +154,241 @@ struct Budget {
     max_pixels: u64,
     others_reserved: usize,
     residual_bytes: u64,
+    completion_slots: usize,
 }
 
 #[derive(Default)]
 struct Diag {
-    accepted: Quiet,
-    refused: Quiet,
     walk_noent: Quiet,
     unrouted: Quiet,
 }
 
+// The accepted endpoint is explicitly nonblocking before Conn exists. The
+// common pump owns input/offsets; Protocol owns fids, accumulator and ONE reply.
 struct Conn {
-    handle: i64,
+    id: Connection,
+    peer: Peer,
+    charged: bool,
+    file: File,
+    ready: i16,
+    stream: Stream,
+    protocol: Protocol,
+}
+const _: () = assert!(core::mem::size_of::<Conn>() <= 8192);
+impl Conn {
+    fn new(file: File, id: Connection, peer: Peer, session: Option<u64>) -> Result<Self, Error> {
+        let mut protocol = Protocol::new();
+        protocol.application = session.filter(|_| cfg!(feature="interaction-qualification")).map(|s| Application::new(s, peer)).transpose().map_err(|_| Error::Io)?;
+        Ok(Self {
+            id, peer, charged: false, file,
+            ready: 0,
+            stream: Stream::new(),
+            protocol,
+        })
+    }
+    fn runnable(&self) -> bool {
+        self.stream.runnable() || self.protocol.pending.is_some_and(|p|
+            self.stream.resume_available(p.ticket) && self.protocol.application.as_ref()
+                .is_some_and(|a| a.answer_status(p.fid) != Err(Failure::Busy)))
+    }
+    fn events(&self) -> i16 {
+        match self.stream.interest() {
+            Interest::Read => T_POLLIN,
+            Interest::Write => T_POLLOUT,
+        }
+    }
+    fn service(
+        &mut self,
+        out: &mut Vec<PaneCompletedImage>,
+        shared: &Shared,
+        control: &libthyla_rs::service_worker::Control,
+        other_accums: usize,
+        diag: &mut Diag,
+        deadline: u64,
+        seat: Option<&mut crate::session_seat::Link>,
+        pool: &mut Pool,
+    ) -> bool {
+        let fd = self.file.as_raw_fd() as i64;
+        let mut reply = Reply {
+            id: self.id, charged: &mut self.charged, pool,
+            fd, accepted: self.peer,
+            app_context: seat.map(|s| s.context(self.peer)),
+            protocol: &mut self.protocol,
+            out,
+            shared,
+            control,
+            other_accums,
+            diag,
+        };
+        if let Some(p) = reply.protocol.pending {
+            if self.stream.resume_available(p.ticket) &&
+                reply.protocol.application.as_ref().is_some_and(|a| a.answer_status(p.fid) != Err(Failure::Busy)) {
+                if self.stream.resume_reply(p.ticket, &mut reply, |r| r.protocol.finish_pending()).is_err() { return false; }
+            }
+        }
+        self.stream.service(
+            &mut NativeEndpoint(fd),
+            &mut reply,
+            deadline,
+        )
+    }
+}
+struct Reply<'a> {
+    id: Connection,
+    charged: &'a mut bool,
+    pool: &'a mut Pool,
+    fd: i64,
+    accepted: Peer,
+    app_context: Option<AppContext<'a>>,
+    protocol: &'a mut Protocol,
+    out: &'a mut Vec<PaneCompletedImage>,
+    shared: &'a Shared,
+    control: &'a libthyla_rs::service_worker::Control,
+    other_accums: usize,
+    diag: &'a mut Diag,
+}
+impl Handler for Reply<'_> {
+    fn dispatch(&mut self, frame: &[u8]) -> Result<Dispatch, ()> {
+        self.dispatch_buffered(frame, 0)
+    }
+    fn input_allowance(&self) -> usize {
+        SRV_MSIZE_USIZE.min(halcyond::servicewire::MAX_FRAME.saturating_sub(
+            self.protocol.application.as_ref().map_or(0, |a| a.input_reserved())))
+    }
+    fn output_reserved(&self) -> usize { self.protocol.out_buf.capacity() }
+    fn dispatch_buffered(&mut self, frame: &[u8], input_capacity: usize) -> Result<Dispatch, ()> {
+        let fresh = sample_peer(self.fd, self.accepted.connection).ok_or(())?;
+        if fresh != self.accepted { return Err(()); }
+        if let Some(ctx) = self.app_context.as_mut() {
+            ctx.peer = fresh; ctx.now = libthyla_rs::time::monotonic_ns() / 1_000_000;
+        }
+        let hdr = p9::peek_header(frame)?;
+        let (routes, budget) = {
+            let m = self.shared.mail.lock();
+            if m.failed {
+                return Err(());
+            }
+            (
+                m.routes,
+                Budget {
+                    max_pixels: m.max_pixels,
+                    others_reserved: self.other_accums
+                        + m.completed
+                            .iter()
+                            .flatten()
+                            .map(|i| i.argb.len() * 4)
+                            .sum::<usize>(),
+                    residual_bytes: m.residual,
+                    completion_slots: m.completed.iter().filter(|s| s.is_none()).count(),
+                },
+            )
+        };
+        let result = self.protocol.dispatch_with(frame, hdr, self.out, &routes, budget,
+            self.diag, self.app_context.as_mut(), input_capacity);
+        if !*self.charged && self.protocol.class == Class::Media {
+            self.pool.promote_media(self.id, libthyla_rs::time::monotonic_ns()).map_err(|_| ())?;
+            *self.charged = true;
+        }
+        match result {
+            Disp::Fatal => Err(()),
+            Disp::Park(ticket) => Ok(Dispatch::Park(ticket)),
+            Disp::Cancel(ticket, n) => { self.protocol.out_buf.truncate(n); Ok(Dispatch::Cancel(ticket)) }
+            Disp::Reply(n) => {
+                self.protocol.out_buf.truncate(n);
+                // Publication precedes Rwrite: a successful client may exit or
+                // publish its transcript object immediately after that reply.
+                // Move payloads; no queue ever duplicates an image allocation.
+                if !self.out.is_empty() {
+                    let mut m = self.shared.mail.lock();
+                    for img in self.out.drain(..) {
+                        if !completion_route_current(&m.routes, &img) {
+                            continue;
+                        }
+                        let slot = m.completed.iter_mut().find(|s| s.is_none()).ok_or(())?;
+                        *slot = Some(img);
+                    }
+                    drop(m);
+                    self.control.notify().map_err(|_| ())?;
+                }
+                Ok(Dispatch::Reply)
+            }
+        }
+    }
+    fn reply(&self) -> &[u8] {
+        &self.protocol.out_buf
+    }
+}
+
+fn sample_peer(fd: i64, connection: u64) -> Option<Peer> {
+    let mut p = TSrvPeerInfo::default();
+    if unsafe { t_srv_peer(fd, &mut p) } != 0 || p.alive != 1 { return None; }
+    Some(Peer { connection, stripes: p.stripes, principal: p.principal_id, alive: true })
+}
+struct Applications<'a> { conns: &'a mut Vec<Conn>, pool: &'a mut Pool, routes: Routes }
+impl Applications<'_> {
+    fn remove(&mut self, index: usize, owner: &mut halcyond::interaction::Interaction) -> Result<(), Error> {
+        let mut conn = self.conns.remove(index);
+        self.pool.retire(conn.id).map_err(|_| Error::Io)?;
+        if let Some(app) = conn.protocol.application.as_mut() { app.retire(owner); }
+        owner.disconnect(conn.id.id());
+        // Close before releasing the quota or returning to HSC acknowledgement.
+        let id = conn.id; drop(conn);
+        self.pool.reclaimed(id).map_err(|_| Error::Io)
+    }
+}
+impl crate::session_seat::Applications for Applications<'_> {
+    fn retire(&mut self, owner: &mut halcyond::interaction::Interaction) -> Result<(), Error> {
+        for i in (0..self.conns.len()).rev() {
+            if self.conns[i].protocol.class != Class::Media { self.remove(i, owner)?; }
+        }
+        Ok(())
+    }
+    fn prune(&mut self, owner: &mut halcyond::interaction::Interaction) -> Result<(), Error> {
+        for i in (0..self.conns.len()).rev() {
+            let c = &self.conns[i];
+            let invalid = c.protocol.application.as_ref().is_some_and(|a|
+                !a.valid(owner) || a.route().is_some_and(|r| !self.routes.current(r)));
+            if invalid { self.remove(i, owner)?; }
+        }
+        Ok(())
+    }
+    fn complete(&mut self, done: halcyond::interaction::Completion) {
+        for c in self.conns.iter_mut() {
+            if let Some(a) = c.protocol.application.as_mut() { if a.complete(done) { break; } }
+        }
+    }
+    fn decision(&mut self, owner: &mut halcyond::interaction::Interaction,
+        q: libhalcyon::interaction_control::Request,
+        result: Result<libhalcyon::interaction_control::Reply, Failure>, now: u64) -> Result<bool, Error> {
+        let Some(i) = self.conns.iter().position(|c| c.protocol.application.as_ref()
+            .is_some_and(|a| a.pending_request() == Some(q))) else { return Ok(false); };
+        let c = &mut self.conns[i];
+        let fresh = sample_peer(c.file.as_raw_fd() as i64, c.id.id()).unwrap_or(Peer { alive: false, ..c.peer });
+        let app = c.protocol.application.as_mut().ok_or(Error::Io)?;
+        if app.decision(owner, q, fresh, result, now).is_err() { self.remove(i, owner)?; return Ok(true); }
+        if !c.charged && app.scope().is_some() {
+            let leaf = app.route().ok_or(Error::Io)?.incarnation;
+            if self.pool.promote_control(c.id, leaf, libthyla_rs::time::monotonic_ns()).is_err() {
+                self.remove(i, owner)?;
+            } else { c.charged = true; }
+        }
+        Ok(true)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class { Handshake, Media, Control }
+#[derive(Clone, Copy)]
+struct PendingWrite { tag: u16, fid: u64, count: u32, ticket: u64 }
+struct Protocol {
+    application: Option<Application>,
+    class: Class,
+    next_fid: u64,
+    next_park: u64,
+    pending: Option<PendingWrite>,
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
-    in_buf: Vec<u8>,
     out_buf: Vec<u8>,
     /// The in-flight place transfer and the fid it belongs to. One at a time
     /// per connection (a second concurrent place-open is refused E_BUSY), so a
@@ -167,14 +396,17 @@ struct Conn {
     accum: Option<(u32, PlaceAccum)>,
 }
 
-impl Conn {
-    fn new(handle: i64) -> Conn {
-        Conn {
-            handle,
+impl Protocol {
+    fn new() -> Self {
+        Self {
+            application: None,
+            class: Class::Handshake,
+            next_fid: 1,
+            next_park: 1,
+            pending: None,
             version_done: false,
             msize: SRV_MSIZE,
             fids: [None; MAX_FIDS],
-            in_buf: Vec::new(),
             out_buf: Vec::new(),
             accum: None,
         }
@@ -192,12 +424,14 @@ impl Conn {
         self.accum.as_ref().map_or(0, |(_, a)| a.reserved_bytes())
     }
 
-    fn fid_set(&mut self, fid: u32, node: Node) -> bool {
+    fn fid_set(&mut self, fid: u32, node: Node, route: Option<Route>) -> bool {
         if let Some(i) = self.fid_find(fid) {
             self.fids[i] = Some(Fid {
                 fid,
                 node,
+                route,
                 opened: false,
+                app_id: 0,
             });
             return true;
         }
@@ -205,63 +439,13 @@ impl Conn {
             self.fids[i] = Some(Fid {
                 fid,
                 node,
+                route,
                 opened: false,
+                app_id: 0,
             });
             return true;
         }
         false
-    }
-
-    /// Read available bytes and dispatch every COMPLETE 9P frame (the placesrv
-    /// shape). Completed rasters are pushed to `out`, each tagged via `routes`
-    /// with the live leaf its token names. Returns false to close the
-    /// connection (EOF, a wire violation, or a reply write failure).
-    fn service(
-        &mut self,
-        out: &mut Vec<PaneCompletedImage>,
-        routes: &BTreeMap<u128, u32>,
-        budget: Budget,
-        diag: &mut Diag,
-    ) -> bool {
-        let cur = self.in_buf.len();
-        if cur >= SRV_MSIZE_USIZE {
-            return false; // a full msize buffered with no complete frame
-        }
-        let want = SRV_MSIZE_USIZE - cur;
-        self.in_buf.resize(cur + want, 0);
-        let n = unsafe { t_read(self.handle, self.in_buf.as_mut_ptr().add(cur), want) };
-        if n <= 0 {
-            self.in_buf.truncate(cur);
-            return false;
-        }
-        self.in_buf.truncate(cur + n as usize);
-
-        loop {
-            if self.in_buf.len() < p9::P9_HDR_LEN {
-                return true;
-            }
-            let hdr = match p9::peek_header(&self.in_buf) {
-                Ok(h) => h,
-                Err(_) => return false,
-            };
-            let size = hdr.size as usize;
-            if !(p9::P9_HDR_LEN..=SRV_MSIZE_USIZE).contains(&size) {
-                return false;
-            }
-            if self.in_buf.len() < size {
-                return true; // a partial frame waits for the next read
-            }
-            let frame: Vec<u8> = self.in_buf[..size].to_vec();
-            match self.dispatch(&frame, hdr, out, routes, budget, diag) {
-                Disp::Fatal => return false,
-                Disp::Reply(rlen) => {
-                    if !self.send_all(rlen) {
-                        return false;
-                    }
-                }
-            }
-            self.in_buf.drain(..size);
-        }
     }
 
     fn dispatch(
@@ -269,28 +453,44 @@ impl Conn {
         tmsg: &[u8],
         hdr: p9::Header,
         out: &mut Vec<PaneCompletedImage>,
-        routes: &BTreeMap<u128, u32>,
+        routes: &Routes,
         budget: Budget,
         diag: &mut Diag,
     ) -> Disp {
+        self.dispatch_with(tmsg, hdr, out, routes, budget, diag, None, 0)
+    }
+    fn dispatch_with(&mut self, tmsg: &[u8], hdr: p9::Header,
+        out: &mut Vec<PaneCompletedImage>, routes: &Routes, budget: Budget,
+        diag: &mut Diag, mut context: Option<&mut AppContext<'_>>, input_capacity: usize) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
-        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        let capacity = if hdr.mtype == p9::P9_TREAD {
+            p9::parse_tread(tmsg).map(|a| 11 + (a.count as usize).min(self.msize.saturating_sub(11) as usize)).unwrap_or(512)
+        } else { 512 };
+        if self.out_buf.try_reserve_exact(capacity).is_err() {
+            return Disp::Fatal;
+        }
+        self.out_buf.resize(capacity, 0);
+        if self.pending.is_some_and(|p| p.tag == tag) { return Disp::Fatal; }
+        if tmsg.len() > self.msize as usize { return Disp::Fatal; }
+        if let Some(answer) = self.application_dispatch(tmsg, hdr, routes, context.as_deref_mut(), input_capacity) {
+            return answer;
+        }
         let r = match hdr.mtype {
             p9::P9_TVERSION => self.h_version(tmsg, tag),
             p9::P9_TATTACH => self.h_attach(tmsg, tag),
             p9::P9_TWALK => self.h_walk(tmsg, tag, routes, diag),
-            p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
-            p9::P9_TREAD => self.h_read(tmsg, tag, budget.max_pixels),
+            p9::P9_TLOPEN => self.h_lopen(tmsg, tag, routes),
+            p9::P9_TREAD => self.h_read(tmsg, tag, budget.max_pixels, routes),
             p9::P9_TWRITE => self.h_write(tmsg, tag, out, routes, budget, diag),
-            p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
+            p9::P9_TGETATTR => self.h_getattr(tmsg, tag, routes),
             p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
             _ => self.err(tag, p9::E_NOSYS),
         };
         let len = r.unwrap_or_else(|_| {
             self.out_buf.clear();
-            self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+            self.out_buf.resize(11, 0);
             p9::build_rlerror(&mut self.out_buf, tag, p9::E_PROTO).unwrap_or(0)
         });
         if len == 0 {
@@ -300,16 +500,118 @@ impl Conn {
         }
     }
 
-    fn send_all(&mut self, rlen: usize) -> bool {
-        let mut sent = 0usize;
-        while sent < rlen {
-            let w = unsafe { t_write(self.handle, self.out_buf.as_ptr().add(sent), rlen - sent) };
-            if w <= 0 {
-                return false;
-            }
-            sent += w as usize;
+    fn application_dispatch(&mut self, frame: &[u8], hdr: p9::Header,
+        routes: &Routes, context: Option<&mut AppContext<'_>>, input_capacity: usize) -> Option<Disp> {
+        let tag = hdr.tag;
+        if hdr.mtype == p9::P9_TVERSION && self.application.is_some() && self.version_done {
+            // Reconnect for a new protocol session. Renegotiation must not
+            // silently orphan a controller or reset incarnation watermarks.
+            return Some(Disp::Fatal);
         }
-        true
+        // Decide ownership before dispatch. Once an interaction fid is chosen,
+        // an internal failure closes the connection; it must never fall back
+        // to the legacy media parser (or acknowledge an incomplete clunk).
+        if hdr.mtype != p9::P9_TFLUSH {
+            let numeric = match hdr.mtype {
+                p9::P9_TLOPEN => p9::parse_tlopen(frame).map(|a| a.fid),
+                p9::P9_TREAD => p9::parse_tread(frame).map(|a| a.fid),
+                p9::P9_TWRITE => p9::parse_twrite(frame).map(|a| a.fid),
+                p9::P9_TCLUNK => p9::parse_tclunk(frame).map(|a| a.fid),
+                _ => return None,
+            }.ok()?;
+            let f = self.fids[self.fid_find(numeric)?]?;
+            if !matches!(f.node, Node::Interaction(_)) { return None; }
+        } else if self.application.is_none() { return None; }
+        let Some(ctx) = context else { return Some(Disp::Fatal); };
+        let mut cancel = None;
+        let result: Result<usize, ()> = (|| {
+            if hdr.mtype == p9::P9_TFLUSH {
+                let oldtag = match p9::parse_tflush(frame) { Ok(v) => v.oldtag, Err(_) => return self.err(tag, p9::E_PROTO) };
+                if let Some(p) = self.pending.filter(|p| p.tag == oldtag) {
+                    self.application.as_mut().ok_or(())?.cancel(p.fid, ctx.owner).map_err(|_| ())?;
+                    self.pending = None; cancel = Some(p.ticket);
+                }
+                return p9::build_rflush(&mut self.out_buf, tag);
+            }
+            let numeric = match hdr.mtype {
+                p9::P9_TLOPEN => p9::parse_tlopen(frame).map(|a| a.fid),
+                p9::P9_TREAD => p9::parse_tread(frame).map(|a| a.fid),
+                p9::P9_TWRITE => p9::parse_twrite(frame).map(|a| a.fid),
+                p9::P9_TCLUNK => p9::parse_tclunk(frame).map(|a| a.fid),
+                _ => return Err(()),
+            }?;
+            let i = self.fid_find(numeric).ok_or(())?;
+            let f = self.fids[i].unwrap();
+            if !matches!(f.node, Node::Interaction(_)) { return Err(()); }
+            if hdr.mtype == p9::P9_TCLUNK {
+                if f.app_id != 0 { self.application.as_mut().ok_or(())?.clunk(f.app_id, ctx.owner).map_err(|_| ())?; }
+                if let Some(p) = self.pending.filter(|p| p.fid == f.app_id) {
+                    cancel = Some(p.ticket); self.pending = None;
+                }
+                self.fids[i] = None;
+                return p9::build_rclunk(&mut self.out_buf, tag);
+            }
+            if !routes.fid_current(f.node, f.route) { return self.err(tag, p9::E_NOENT); }
+            if hdr.mtype == p9::P9_TLOPEN {
+                if f.opened || self.class == Class::Media { return self.err(tag, p9::E_PERM); }
+                let a = p9::parse_tlopen(frame)?;
+                if a.flags != 2 { return self.err(tag, p9::E_INVAL); }
+                let id = self.next_fid; self.next_fid = id.checked_add(1).ok_or(())?;
+                if let Err(e) = self.application.as_mut().ok_or(())?.open(id, f.route.ok_or(())?) { return self.err(tag, e as u32); }
+                self.class = Class::Control;
+                self.fids[i] = Some(Fid { opened: true, app_id: id, ..f });
+                return p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.node), 0);
+            }
+            if !f.opened { return self.err(tag, p9::E_BADF); }
+            if hdr.mtype == p9::P9_TREAD {
+                let a = p9::parse_tread(frame)?;
+                let view = match self.application.as_ref().ok_or(())?.response(f.app_id, ctx.peer, ctx.owner, ctx.now) {
+                    Ok(v) => v, Err(e) => return self.err(tag, e as u32),
+                };
+                let count = (a.count as usize).min(self.msize.saturating_sub(11) as usize);
+                // Build the fixed 9P header without another payload buffer.
+                let n = view.copy_range(usize::try_from(a.offset).unwrap_or(usize::MAX), &mut self.out_buf[11..11 + count]);
+                self.out_buf[..4].copy_from_slice(&((11 + n) as u32).to_le_bytes());
+                self.out_buf[4] = p9::P9_RREAD;
+                self.out_buf[5..7].copy_from_slice(&tag.to_le_bytes());
+                self.out_buf[7..11].copy_from_slice(&(n as u32).to_le_bytes());
+                return Ok(11 + n);
+            }
+            let a = p9::parse_twrite(frame)?;
+            let allowance = halcyond::servicewire::MAX_FRAME.saturating_sub(input_capacity);
+            let result = self.application.as_mut().ok_or(())?.write(f.app_id, ctx.peer, a.offset, a.data,
+                allowance, ctx.owner, ctx.bindings, ctx.desired, ctx.now);
+            match result {
+                Err(e) => self.err(tag, e as u32),
+                Ok(WriteResult::Partial) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                Ok(WriteResult::Answered) => match self.application.as_ref().unwrap().answer_status(f.app_id) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count), Err(e) => {
+                        self.err(tag, e as u32)
+                    },
+                },
+                Ok(WriteResult::Pending(q)) => {
+                    if self.pending.is_some() || ctx.queued.is_some() { return Err(()); }
+                    *ctx.queued = Some(q);
+                    let ticket = self.next_park; self.next_park = ticket.checked_add(1).ok_or(())?;
+                    self.pending = Some(PendingWrite { tag, fid: f.app_id, count: a.count, ticket });
+                    Ok(0)
+                }
+            }
+        })();
+        match result {
+            Ok(0) => { self.out_buf.clear(); Some(Disp::Park(self.pending?.ticket)) }
+            Ok(n) => Some(if let Some(ticket) = cancel { Disp::Cancel(ticket, n) } else { Disp::Reply(n) }),
+            Err(()) => Some(Disp::Fatal),
+        }
+    }
+    fn finish_pending(&mut self) -> Result<(), ()> {
+        let p = self.pending.ok_or(())?;
+        self.out_buf.resize(11, 0);
+        let n = match self.application.as_ref().ok_or(())?.answer_status(p.fid) {
+            Ok(()) => p9::build_rwrite(&mut self.out_buf, p.tag, p.count)?,
+            Err(e) => p9::build_rlerror(&mut self.out_buf, p.tag, e as u32)?,
+        };
+        self.out_buf.truncate(n); self.pending = None; Ok(())
     }
 
     fn err(&mut self, tag: u16, code: u32) -> Result<usize, ()> {
@@ -351,14 +653,19 @@ impl Conn {
         if a.fid == p9::P9_NOFID || self.fid_find(a.fid).is_some() {
             return self.err(tag, p9::E_INVAL);
         }
-        if !self.fid_set(a.fid, Node::Root) {
+        if !self.fid_set(a.fid, Node::Root, None) {
             return self.err(tag, p9::E_NOMEM);
         }
         p9::build_rattach(&mut self.out_buf, tag, &qid_of(Node::Root))
     }
 
-    fn h_walk(&mut self, tmsg: &[u8], tag: u16, routes: &BTreeMap<u128, u32>,
-        diag: &mut Diag) -> Result<usize, ()> {
+    fn h_walk(
+        &mut self,
+        tmsg: &[u8],
+        tag: u16,
+        routes: &Routes,
+        diag: &mut Diag,
+    ) -> Result<usize, ()> {
         let a = match p9::parse_twalk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -374,13 +681,19 @@ impl Conn {
         if a.newfid != a.fid && self.fid_find(a.newfid).is_some() {
             return self.err(tag, p9::E_INVAL);
         }
+        if !routes.fid_current(f.node, f.route) {
+            return self.err(tag, p9::E_NOENT);
+        }
         let mut cur = f.node;
+        let mut pin = f.route;
         let mut qids: [p9::Qid; p9::P9_MAX_WALK] = [p9::Qid::default(); p9::P9_MAX_WALK];
         let mut n = 0usize;
         for k in 0..(a.nwname as usize).min(p9::P9_MAX_WALK) {
-            match paneroute::walk_child(cur, a.names[k], |t| routes.contains_key(&t)) {
-                Some(p) => {
+            match routes.walk(cur, pin, a.names[k]) {
+                Some((p, route)) => {
+                    if matches!(p, Node::Interaction(_)) && self.application.is_none() { break; }
                     cur = p;
+                    pin = route;
                     qids[n] = qid_of(p);
                     n += 1;
                 }
@@ -393,23 +706,18 @@ impl Conn {
                 // not (yet) routed, or malformed (a 32-byte name is a token
                 // attempt; anything else is not a place path).
                 if let Some(n) = diag.walk_noent.next() {
-                    say!(
-                        "halcyond: place walk NOENT at root (nwname={} first={} bytes; {} so far)",
-                        a.nwname,
-                        a.names[0].len(),
-                        n
-                    );
+                    let _ = n; // diagnostics must be drained by the UI, never written here
                 }
             }
             return self.err(tag, p9::E_NOENT);
         }
-        if n == a.nwname as usize && !self.fid_set(a.newfid, cur) {
+        if n == a.nwname as usize && !self.fid_set(a.newfid, cur, pin) {
             return self.err(tag, p9::E_NOMEM);
         }
         p9::build_rwalk(&mut self.out_buf, tag, &qids[..n])
     }
 
-    fn h_lopen(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_lopen(&mut self, tmsg: &[u8], tag: u16, routes: &Routes) -> Result<usize, ()> {
         let a = match p9::parse_tlopen(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -419,18 +727,30 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         if f.opened {
             return self.err(tag, p9::E_PROTO);
+        }
+        if matches!(f.node, Node::Place(_)) {
+            if self.class == Class::Control { return self.err(tag, p9::E_PERM); }
+            self.class = Class::Media;
         }
         self.fids[i] = Some(Fid {
             fid: f.fid,
             node: f.node,
+            route: f.route,
             opened: true,
+            app_id: f.app_id,
         });
         p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.node), 0)
     }
 
-    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64) -> Result<usize, ()> {
+    fn h_read(&mut self, tmsg: &[u8], tag: u16, max_pixels: u64, routes: &Routes) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -440,6 +760,12 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         if !f.opened {
             return self.err(tag, p9::E_PROTO);
         }
@@ -459,10 +785,13 @@ impl Conn {
         tmsg: &[u8],
         tag: u16,
         out: &mut Vec<PaneCompletedImage>,
-        routes: &BTreeMap<u128, u32>,
+        routes: &Routes,
         budget: Budget,
         diag: &mut Diag,
     ) -> Result<usize, ()> {
+        if out.len() >= budget.completion_slots {
+            return self.err(tag, p9::E_BUSY);
+        }
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -472,11 +801,26 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         // Only an opened `place` file accepts writes.
         let token = match f.node {
             Node::Place(t) if f.opened => t,
             _ => return self.err(tag, p9::E_INVAL),
         };
+        // Charge queued completions and the current conversion peak even on
+        // a reused fid. Keeping an accumulator object cannot bypass admission
+        // for the next image after an earlier completion moved into the queue.
+        let current_peak = (self.reserved() as u64).saturating_mul(2);
+        let next_peak = budget.max_pixels.saturating_mul(8).max(current_peak);
+        if (budget.others_reserved as u64).saturating_add(next_peak) > budget.residual_bytes {
+            self.accum = None;
+            return self.err(tag, p9::E_NOMEM);
+        }
         // One place transfer per connection at a time: a second place-fid write
         // while one is in flight is refused (bounds the held partials).
         match &mut self.accum {
@@ -496,7 +840,8 @@ impl Conn {
                 // the compositor heap. Fail clean (the client falls back to a
                 // report), never OOM.
                 let new_peak = budget.max_pixels.saturating_mul(8);
-                if (budget.others_reserved as u64).saturating_add(new_peak) > budget.residual_bytes {
+                if (budget.others_reserved as u64).saturating_add(new_peak) > budget.residual_bytes
+                {
                     return self.err(tag, p9::E_NOMEM);
                 }
                 self.accum = Some((a.fid, PlaceAccum::new(budget.max_pixels)));
@@ -519,16 +864,18 @@ impl Conn {
                 if id == 0 || u64::from(w) * u64::from(h) > budget.max_pixels {
                     return self.err(tag, p9::E_INVAL);
                 }
-                if let Some(&leaf) = routes.get(&token) {
-                    out.push(PaneCompletedImage { id, leaf, w, h, argb });
+                if let Some(route) = f.route.filter(|r| r.token == token && routes.current(*r)) {
+                    out.push(PaneCompletedImage {
+                        route,
+                        id,
+                        leaf: route.leaf,
+                        w,
+                        h,
+                        argb,
+                    });
                 } else {
                     if let Some(n) = diag.unrouted.next() {
-                        say!(
-                            "halcyond: place completed {}x{} but its token is not routed (tile gone; {} so far)",
-                            w,
-                            h,
-                            n
-                        );
+                        let _ = n; // diagnostics must be drained by the UI, never written here
                     }
                     return self.err(tag, p9::E_NOENT);
                 }
@@ -543,7 +890,7 @@ impl Conn {
         }
     }
 
-    fn h_getattr(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_getattr(&mut self, tmsg: &[u8], tag: u16, routes: &Routes) -> Result<usize, ()> {
         let fid = match p9::parse_tgetattr(tmsg) {
             Ok(f) => f,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -553,6 +900,12 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        if !routes.fid_current(f.node, f.route) {
+            if self.accum.as_ref().is_some_and(|(fid, _)| *fid == f.fid) {
+                self.accum = None;
+            }
+            return self.err(tag, p9::E_NOENT);
+        }
         let mode = mode_of(f.node);
         let nlink = if is_dir(f.node) { 2u64 } else { 1u64 };
         // Fill the security trio -- dev9p's per-component X-search reads it, and
@@ -595,231 +948,486 @@ impl Conn {
     }
 
     fn h_flush(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
-        // Every op replies synchronously, so there is never an in-flight
-        // request to abandon; acknowledge the flush.
+        // Dispatch is ordered: a previous reply is fully written before a
+        // later Tflush is dispatched. No asynchronous request remains to cancel.
         let _ = p9::parse_tflush(tmsg);
         p9::build_rflush(&mut self.out_buf, tag)
     }
 }
 
-/// The per-user session place server: the listener, its live connections, the
-/// token->leaf routing table, and the queue of rasters completed since the last
-/// drain (each tagged with its target leaf).
-pub struct PanePlaceServer {
-    listener: i64,
-    conns: Vec<Conn>,
-    completed: Vec<PaneCompletedImage>,
-    /// token -> live tile leaf. The compositor keeps this current
-    /// (`register`/`unregister_leaf`); a walk resolves a token ONLY while it is
-    /// present, so a closed tile's token fails closed (E_NOENT).
-    routes: BTreeMap<u128, u32>,
-    /// The session's own principal (from t_getuid at post). A connection whose
-    /// peer principal differs is refused at accept -- the second authority axis.
-    principal: u32,
-    /// The session user, for the `/srv/halcyon-<user>/...` addresses this
-    /// server hands panes (`place_address`). Owned so the compositor need not
-    /// thread it alongside the server.
-    user: String,
-    /// The current per-image pixel cap (heap residual / (8*MAX_CONNS)), set each
-    /// loop by the compositor.
-    max_pixels: u64,
-    /// The current total place-path residual in BYTES (the heap left after the
-    /// scrollback budget + baseline + the display-scaled atlas). The live
-    /// AGGREGATE bound (F2/F5): a new transfer is admitted only if the buffers
-    /// already reserved by OTHER connections plus this transfer's worst-case
-    /// peak fit here -- so two accums, one sized at a pre-resize (larger) cap,
-    /// cannot combine to over-commit the heap.
-    residual_bytes: u64,
-    diag: Diag,
+/// Once setup may have published a listener or enabled a participant, failure
+/// ends the session. It must not leave a live poster with a dead executor.
+#[derive(Debug)]
+pub enum PostError {
+    Unavailable,
+    Published(Error),
 }
-
+const _: () = assert!(core::mem::size_of::<PaneCompletedImage>() <= 128);
+fn completion_route_current(routes: &Routes, image: &PaneCompletedImage) -> bool {
+    image.leaf == image.route.leaf && routes.current(image.route)
+}
+// The desired route table is a bounded, coalesced metadata mailbox: 32 records.
+// Removing a route updates this same durable state; revocations cannot fall out
+// of a full queue. The executor copies metadata, never holds this lock for I/O.
+struct Mailbox {
+    routes: Routes,
+    hosts: halcyond::hostbindings::Desired,
+    #[cfg(feature="test-mode")]
+    bound_count: u64,
+    revision: u64,
+    max_pixels: u64,
+    residual: u64,
+    completed: [Option<PaneCompletedImage>; MAX_CONNS],
+    failed: bool,
+}
+struct Shared {
+    user: String,
+    principal: u32,
+    published: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    mail: libthyla_rs::sync::Mutex<Mailbox>,
+    seat: libthyla_rs::sync::Mutex<Option<crate::session_seat::Setup>>,
+}
+const _: () = assert!(core::mem::size_of::<Shared>() <= 16 * 1024);
+pub struct PanePlaceServer {
+    owner: libthyla_rs::service_worker::ServiceWorker<Shared>,
+    #[cfg(feature="test-mode")]
+    seen_bindings: u64,
+}
 impl PanePlaceServer {
-    /// Post `/srv/halcyon-<user>` (9P-mode; perm 0). Requires
-    /// MAY_POST_SERVICE (login grants the session compositor the bit, one hop).
-    /// None on failure -- the caller keeps running as a plain compositor
-    /// (inline `view` is simply unavailable in its tiles).
-    pub fn post(user: &str) -> Option<PanePlaceServer> {
-        let uid = unsafe { t_getuid() };
-        if uid < 0 {
-            return None; // fail-closed: without a principal the accept gate cannot hold.
-        }
-        let mut name = String::with_capacity(8 + user.len());
-        name.push_str("halcyon-");
-        name.push_str(user);
-        let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
-        if srv < 0 {
-            return None;
-        }
-        let listener =
-            unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD, 0) };
-        let _ = unsafe { t_close(srv) };
-        if listener < 0 {
-            return None;
-        }
-        Some(PanePlaceServer {
-            listener,
-            conns: Vec::new(),
-            completed: Vec::new(),
-            routes: BTreeMap::new(),
-            principal: uid as u32,
-            user: String::from(user),
-            max_pixels: PLACE_MAX_PIXELS_HARD,
-            residual_bytes: PLACE_MAX_PIXELS_HARD * 8 * MAX_CONNS as u64,
-            diag: Diag::default(),
-        })
+    /// Media-only native fixtures do not register clipboard authority.
+    pub fn post(user: &str) -> Result<Self, PostError> {
+        Self::start(user, None)
     }
-
-    /// The `/env/HALCYON_PLACE` address a pane's programs open to place into a
-    /// tile: `/srv/halcyon-<user>/<hex(token)>/place`. The compositor writes
-    /// this into the tile's environment before spawning it.
+    pub fn post_on(user: &str, ring: &tapestry::EventRing) -> Result<Self, PostError> {
+        let admission =
+            tapestry::ordered::Channel::preopen(ring).map_err(|_| PostError::Unavailable)?;
+        let (reservation, snapshot) =
+            tapestry::seat::reserve(ring).map_err(|_| PostError::Unavailable)?;
+        Self::start(
+            user,
+            Some(crate::session_seat::Setup {
+                reservation,
+                admission,
+                snapshot,
+            }),
+        )
+    }
+    fn start(user: &str, seat: Option<crate::session_seat::Setup>) -> Result<Self, PostError> {
+        let uid = unsafe { t_getuid() };
+        if uid < 0 || user.is_empty() || user.len() > 24 {
+            return Err(PostError::Unavailable);
+        }
+        let published = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let shared = Shared {
+            user: String::from(user),
+            principal: uid as u32,
+            published: published.clone(),
+            seat: libthyla_rs::sync::Mutex::new(seat),
+            mail: libthyla_rs::sync::Mutex::new(Mailbox {
+                routes: Routes::empty(),
+                hosts: halcyond::hostbindings::Desired::empty(),
+                #[cfg(feature="test-mode")]
+                bound_count: 0,
+                revision: 0,
+                max_pixels: PLACE_MAX_PIXELS_HARD,
+                residual: PLACE_MAX_PIXELS_HARD * 8 * MAX_CONNS as u64,
+                completed: core::array::from_fn(|_| None),
+                failed: false,
+            }),
+        };
+        libthyla_rs::service_worker::ServiceWorker::new(shared, run_owner)
+            .map(|owner| Self { owner, #[cfg(feature="test-mode")] seen_bindings: 0 })
+            .map_err(|e| {
+                if published.load(core::sync::atomic::Ordering::Acquire) {
+                    PostError::Published(e)
+                } else {
+                    PostError::Unavailable
+                }
+            })
+    }
     pub fn place_address(&self, token: u128) -> String {
+        let user = &self.owner.state().unwrap().user;
         let hex = paneroute::hex32(token);
-        let mut s = String::with_capacity(13 + self.user.len() + 32 + 6);
+        let mut s = String::with_capacity(13 + user.len() + 32 + 6);
         s.push_str("/srv/halcyon-");
-        s.push_str(&self.user);
+        s.push_str(user);
         s.push('/');
-        for &b in hex.iter() {
+        for b in hex {
             s.push(b as char);
         }
         s.push_str("/place");
         s
     }
-
-    /// Bind a token to a live tile leaf (called when the compositor spawns the
-    /// tile, alongside writing the tile's `/env/HALCYON_PLACE`).
-    pub fn register(&mut self, token: u128, leaf: u32) {
-        self.routes.insert(token, leaf);
+    pub fn register(&mut self, token: u128, leaf: u32) -> bool {
+        let Ok(shared) = self.owner.state() else {
+            return false;
+        };
+        {
+            let mut m = shared.mail.lock();
+            if !m.routes.insert(token, leaf) {
+                return false;
+            }
+            let Some(n) = m.revision.checked_add(1) else {
+                m.failed = true;
+                return false;
+            };
+            m.revision = n;
+        }
+        self.owner.wake().is_ok()
     }
-
-    /// Drop every token routing to `leaf` (called when the tile closes/crashes),
-    /// so a subsequent walk to it fails closed.
-    pub fn unregister_leaf(&mut self, leaf: u32) {
-        self.routes.retain(|_, &mut l| l != leaf);
-    }
-
-    /// Set the effective per-image pixel cap AND the total residual budget. The
-    /// compositor derives both from the live display-scaled atlas residual: the
-    /// per-image cap is `residual / (8*MAX_CONNS)` (clamped to
-    /// `[PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD]`), and `residual_bytes` is the
-    /// full residual -- the live aggregate ceiling checked at new-accum
-    /// admission (F2/F5), which catches a stale accum sized at a pre-resize cap.
-    pub fn set_budget(&mut self, per_image_px: u64, residual_bytes: u64) {
-        self.max_pixels = per_image_px.clamp(PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD);
-        // Never below the space one clamped image needs, so a small display can
-        // still admit one transfer.
-        self.residual_bytes = residual_bytes.max(self.max_pixels * 8);
-    }
-
-    /// Append this server's fds (the listener while there is room, plus every
-    /// live connection) to a caller's poll set, so a place write wakes the
-    /// caller's blocking wait alongside its own events.
-    pub fn push_fds(&self, fds: &mut Vec<TPollFd>) {
-        if self.conns.len() < MAX_CONNS {
-            fds.push(TPollFd {
-                fd: self.listener as i32,
-                events: T_POLLIN,
-                revents: 0,
-            });
-        }
-        for c in &self.conns {
-            fds.push(TPollFd {
-                fd: c.handle as i32,
-                events: T_POLLIN | T_POLLHUP,
-                revents: 0,
-            });
-        }
-    }
-
-    /// One non-blocking pass: accept a pending connection (while there is room,
-    /// gated on the peer being the session's own user) and service every
-    /// readable one. Completed rasters accumulate tagged with their leaf; the
-    /// caller drains them with `take_completed`.
-    pub fn service(&mut self) {
-        let has_room = self.conns.len() < MAX_CONNS;
-        let mut pfds: Vec<TPollFd> = Vec::with_capacity(1 + self.conns.len());
-        if has_room {
-            pfds.push(TPollFd {
-                fd: self.listener as i32,
-                events: T_POLLIN,
-                revents: 0,
-            });
-        }
-        let listener_slot = has_room as usize;
-        for c in &self.conns {
-            pfds.push(TPollFd {
-                fd: c.handle as i32,
-                events: T_POLLIN | T_POLLHUP,
-                revents: 0,
-            });
-        }
-        let rc = unsafe { libthyla_rs::t_poll(pfds.as_mut_ptr(), pfds.len(), 0) };
-        if rc <= 0 {
-            return;
-        }
-        if has_room && pfds[0].revents & T_POLLIN != 0 {
-            let h = unsafe { t_srv_accept(self.listener) };
-            if h >= 0 {
-                // The peer-principal gate, the channel's authority: the
-                // connection's peer must be the session's own user, and alive.
-                // Fail-closed on a dead/unknown peer. The token only routes, so
-                // this check is all that keeps another principal out.
-                let mut info = TSrvPeerInfo::default();
-                let ok = unsafe { t_srv_peer(h, &mut info) } == 0
-                    && info.alive == 1
-                    && info.principal_id == self.principal;
-                if ok {
-                    if let Some(n) = self.diag.accepted.next() {
-                        say!("halcyond: place conn from principal {} ({} so far)", info.principal_id, n);
-                    }
-                    self.conns.push(Conn::new(h));
-                } else {
-                    if let Some(n) = self.diag.refused.next() {
-                        say!(
-                            "halcyond: place conn REFUSED (peer {} alive {} != self {}; {} so far)",
-                            info.principal_id,
-                            info.alive,
-                            self.principal,
-                            n
-                        );
-                    }
-                    let _ = unsafe { t_close(h) };
-                }
+    /// Only the UI calls this, with metadata from its sealed child's pipe.
+    pub fn bind_host(&mut self, leaf: u32, pid: u32, binding: u64) -> bool {
+        let Ok(shared) = self.owner.state() else { return false; };
+        {
+            let mut m = shared.mail.lock();
+            let routes = m.routes;
+            let Some(route) = routes.leaf(leaf) else { return false; };
+            if !m.hosts.announce(&routes, halcyond::hostbindings::Host { route, pid, binding }) {
+                return false;
             }
         }
-        let nc = pfds.len() - listener_slot;
-        let mut i = nc;
-        while i > 0 {
-            i -= 1;
-            let pf = pfds[listener_slot + i];
-            if pf.revents & (T_POLLIN | T_POLLHUP) != 0 {
-                // F2/F5: the buffers the OTHER live connections have reserved
-                // right now -- the live aggregate ceiling for conn[i]'s next new
-                // accum. Computed fresh per conn (the immutable sum completes
-                // before the mutable service borrow), so it reflects earlier
-                // iterations' completions.
-                let others: usize = self
-                    .conns
+        self.owner.wake().is_ok()
+    }
+    pub fn unregister_leaf(&mut self, leaf: u32) {
+        if let Ok(shared) = self.owner.state() {
+            let mut m = shared.mail.lock();
+            m.routes.remove_leaf(leaf);
+            let routes = m.routes;
+            m.hosts.retain(&routes);
+            for slot in &mut m.completed {
+                if slot.as_ref().is_some_and(|i| i.leaf == leaf) {
+                    *slot = None;
+                }
+            }
+            if let Some(n) = m.revision.checked_add(1) {
+                m.revision = n;
+            } else {
+                m.failed = true;
+            }
+        }
+        let _ = self.owner.wake();
+    }
+    pub fn set_budget(&mut self, per_image: u64, residual: u64) {
+        let Ok(shared) = self.owner.state() else {
+            return;
+        };
+        let mut m = shared.mail.lock();
+        let max = per_image.clamp(PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD);
+        let residual = residual.max(max * 8);
+        let changed = m.max_pixels != max || m.residual != residual;
+        m.max_pixels = max;
+        m.residual = residual;
+        drop(m);
+        if changed {
+            let _ = self.owner.wake();
+        }
+    }
+    pub fn runnable(&self) -> bool {
+        self.owner
+            .state()
+            .is_ok_and(|s| s.mail.lock().completed.iter().any(Option::is_some))
+    }
+    pub fn push_fds(&self, fds: &mut Vec<TPollFd>) {
+        fds.push(TPollFd {
+            fd: self.owner.notice_fd(),
+            events: T_POLLIN,
+            revents: 0,
+        });
+    }
+    pub fn service(&mut self) -> Result<(), Error> {
+        self.owner.check()?;
+        #[cfg(feature="test-mode")]
+        {
+            let count = self.owner.state()?.mail.lock().bound_count;
+            if count != self.seen_bindings {
+                self.seen_bindings = count;
+                // Console output can park during SAK: diagnostics belong to
+                // the UI, never the independent cancellation executor.
+                say!("halcyond: service-owner terminal bindings={}", count);
+            }
+        }
+        if self.owner.state()?.mail.lock().failed {
+            Err(Error::Io)
+        } else {
+            Ok(())
+        }
+    }
+    pub fn take_completed(&mut self) -> Vec<PaneCompletedImage> {
+        let mut out = Vec::new();
+        let Ok(shared) = self.owner.state() else {
+            return out;
+        };
+        let mut m = shared.mail.lock();
+        if out.try_reserve_exact(MAX_CONNS).is_err() {
+            m.failed = true;
+            return out;
+        }
+        let routes = m.routes;
+        for slot in &mut m.completed {
+            if let Some(img) = slot.take() {
+                if completion_route_current(&routes, &img) { out.push(img); }
+            }
+        }
+        drop(m);
+        let _ = self.owner.wake();
+        out
+    }
+}
+fn run_owner(shared: &Shared, control: &libthyla_rs::service_worker::Control) -> Result<(), Error> {
+    let setup = shared.seat.lock().take();
+    let participated = setup.is_some();
+    let result = serve_owner(shared, control, setup);
+    // A stopped or failed posted service cannot leave a dead resident name.
+    // Shutdown occurs at process/session exit; no console write can precede it
+    // on failure because ordinary console output parks during trusted input.
+    if result.is_err()
+        && (participated || shared.published.load(core::sync::atomic::Ordering::Acquire))
+    {
+        unsafe {
+            libthyla_rs::t_exit_group(1);
+        }
+    }
+    result
+}
+fn serve_owner(
+    shared: &Shared,
+    control: &libthyla_rs::service_worker::Control,
+    setup: Option<crate::session_seat::Setup>,
+) -> Result<(), Error> {
+    #[cfg(feature="interaction-qualification")]
+    say!("halcyond: interaction ledger conn={} link={} shared={} pool={} slots={} heap={}",
+        core::mem::size_of::<Conn>(), crate::session_seat::FIXED_BYTES,
+        core::mem::size_of::<Shared>(), core::mem::size_of::<Pool>(),
+        ACTIVE_CONNECTIONS, libthyla_rs::alloc::footprint());
+    let mut seat = match setup {
+        Some(s) => Some(crate::session_seat::Link::new(s, shared.principal)?),
+        None => None,
+    };
+    let deadline = libthyla_rs::time::monotonic_ns() + 4_000_000_000;
+    if let Some(seat) = seat.as_mut() {
+        while !seat.ready() {
+            if control.stopping() || libthyla_rs::time::monotonic_ns() >= deadline {
+                return Err(Error::TimedOut);
+            }
+            seat.pump()?;
+            let mut p = [
+                TPollFd { fd: seat.fd(), events: T_POLLIN, revents: 0 },
+                TPollFd { fd: seat.admission_fd(), events: T_POLLIN, revents: 0 },
+            ];
+            unsafe { libthyla_rs::t_poll(p.as_mut_ptr(), p.len(), 10); }
+        }
+    }
+    let mut conns = Vec::new();
+    let mut pool = Pool::new();
+    conns
+        .try_reserve_exact(ACTIVE_CONNECTIONS)
+        .map_err(|_| Error::NoMemory)?;
+    let mut completed = Vec::new();
+    completed
+        .try_reserve_exact(MAX_CONNS)
+        .map_err(|_| Error::NoMemory)?;
+    let name = alloc::format!("halcyon-{}", shared.user);
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
+    if root < 0 {
+        return Err(Error::Io);
+    }
+    let fd = unsafe { t_walk_create(root, name.as_ptr(), name.len(), T_OREAD, 0) };
+    unsafe {
+        t_close(root);
+    }
+    if fd < 0 {
+        return Err(Error::Io);
+    }
+    let listener = unsafe { File::from_raw_fd(fd as i32, Rights::READ) };
+    // Publication has happened; caller error paths now end the posting Proc.
+    // This flag is independent of mailbox revision and cannot be coalesced.
+    shared
+        .published
+        .store(true, core::sync::atomic::Ordering::Release);
+    libthyla_rs::service_worker::qualify_published()?;
+    control.ready()?;
+    let mut diag = Diag::default();
+    let mut stopping = false;
+    loop {
+        control.drain_wake()?;
+        if control.stopping() {
+            stopping = true;
+            if let Some(s) = seat.as_mut() {
+                s.stop();
+            } else {
+                return Ok(());
+            }
+        }
+        if let Some(s) = seat.as_mut() {
+            // Copy under the mailbox lock; release before any control I/O.
+            let (routes, hosts) = { let m = shared.mail.lock(); (m.routes, m.hosts) };
+            s.routes(routes, hosts);
+            s.pump_with(&mut Applications { conns: &mut conns, pool: &mut pool, routes })?;
+            #[cfg(feature="test-mode")]
+            {
+                let changed = {
+                    let mut m = shared.mail.lock();
+                    let changed = m.bound_count != s.bound_count();
+                    m.bound_count = s.bound_count();
+                    changed
+                };
+                if changed { control.notify()?; }
+            }
+            if stopping && s.retired() {
+                return Ok(());
+            }
+        }
+        while let Some(id) = pool.expire_one(libthyla_rs::time::monotonic_ns()) {
+            if let Some(i) = conns.iter().position(|c| c.id == id) {
+                if let Some(s) = seat.as_mut() { s.disconnect(id.id()); }
+                drop(conns.remove(i));
+            }
+            pool.reclaimed(id).map_err(|_| Error::Io)?;
+        }
+        if shared.mail.lock().failed {
+            return Err(Error::Io);
+        }
+        if !stopping {
+            if !conns.is_empty() {
+                conns.rotate_left(1);
+            }
+            let deadline = libthyla_rs::time::monotonic_ns() + 2_000_000;
+            let mut i = conns.len();
+            while i > 0 {
+                i -= 1;
+                let c: &Conn = &conns[i];
+                if c.ready == 0 && !c.runnable() {
+                    continue;
+                }
+                let others = conns
                     .iter()
                     .enumerate()
                     .filter(|(j, _)| *j != i)
-                    .map(|(_, c)| c.reserved())
-                    .sum();
-                let budget = Budget {
-                    max_pixels: self.max_pixels,
-                    others_reserved: others,
-                    residual_bytes: self.residual_bytes,
-                };
-                if !self.conns[i].service(&mut self.completed, &self.routes, budget, &mut self.diag) {
-                    let _ = unsafe { t_close(self.conns[i].handle) };
-                    self.conns.remove(i);
+                    .map(|(_, c)| c.protocol.reserved())
+                    .sum::<usize>();
+                let close = conns[i].ready & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0
+                    || !conns[i].service(
+                        &mut completed,
+                        shared,
+                        control,
+                        others,
+                        &mut diag,
+                        deadline,
+                        seat.as_mut(),
+                        &mut pool,
+                    );
+                if close {
+                    let id = conns[i].id;
+                    pool.retire(id).map_err(|_| Error::Io)?;
+                    if let Some(s) = seat.as_mut() { s.disconnect(id.id()); }
+                    drop(conns.remove(i));
+                    pool.reclaimed(id).map_err(|_| Error::Io)?;
+                } else {
+                    conns[i].ready = 0;
                 }
             }
         }
-    }
-
-    /// Take the rasters completed since the last call (each tagged with its
-    /// target tile leaf).
-    pub fn take_completed(&mut self) -> Vec<PaneCompletedImage> {
-        core::mem::take(&mut self.completed)
+        let mut poll = [TPollFd::default(); CONNECTION_SLOTS + 4];
+        poll[0] = TPollFd {
+            fd: control.stop_fd(),
+            events: T_POLLIN,
+            revents: 0,
+        };
+        let mut n = 1;
+        let seat_index = seat.as_ref().map(|s| {
+            let i = n;
+            poll[i] = TPollFd {
+                fd: s.fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            n += 1;
+            i
+        });
+        let admission_index = seat.as_ref().map(|s| {
+            let i = n;
+            poll[i] = TPollFd {
+                fd: s.admission_fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            n += 1;
+            i
+        });
+        // A full service must still accept-and-close excess endpoints. Omitting
+        // the listener would strand their kernel 9P attach until a live peer
+        // disconnects. One accept per pass keeps rejection work bounded.
+        let listener_index = if !stopping {
+            let i = n;
+            poll[i] = TPollFd {
+                fd: listener.as_raw_fd(),
+                events: T_POLLIN,
+                revents: 0,
+            };
+            n += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let base = n;
+        if !stopping {
+            for c in &conns {
+                poll[n] = TPollFd {
+                    fd: c.file.as_raw_fd(),
+                    events: c.events(),
+                    revents: 0,
+                };
+                n += 1;
+            }
+        }
+        let timeout = if seat.as_ref().is_some_and(|s| s.runnable())
+            || (!stopping && conns.iter().any(|c| c.runnable()))
+        {
+            0
+        } else {
+            let deadline = [pool.deadline(), seat.as_ref().and_then(|s| s.deadline())]
+                .into_iter().flatten().min();
+            halcyond::servicepool::poll_timeout(libthyla_rs::time::monotonic_ns(), deadline)
+        };
+        Error::from_syscall_return(unsafe { libthyla_rs::t_poll(poll.as_mut_ptr(), n, timeout) })?;
+        for i in [seat_index, admission_index, listener_index]
+            .into_iter()
+            .flatten()
+        {
+            if poll[i].revents & (T_POLLHUP | T_POLLERR | T_POLLNVAL) != 0 {
+                return Err(Error::Io);
+            }
+        }
+        if !stopping {
+            for (i, c) in conns.iter_mut().enumerate() {
+                c.ready |= poll[base + i].revents;
+            }
+        }
+        if listener_index.is_some_and(|i| poll[i].revents & T_POLLIN != 0) {
+            let fd = unsafe { t_srv_accept(listener.as_raw_fd() as i64) };
+            if fd >= 0 {
+                let file = unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) };
+                let mut peer = TSrvPeerInfo::default();
+                // The File drops here on saturation, before Conn or protocol buffers
+                // are allocated. Existing peers retain their slots unchanged.
+                if conns.len() < ACTIVE_CONNECTIONS
+                    && unsafe { libthyla_rs::t_set_nonblock(fd, true) } == 0
+                    && unsafe { t_srv_peer(fd, &mut peer) } == 0
+                    && peer.alive == 1
+                    && peer.principal_id == shared.principal
+                {
+                    if let Ok(id) = pool.accept(peer.stripes, libthyla_rs::time::monotonic_ns()) {
+                        let observed = Peer { connection: id.id(), stripes: peer.stripes,
+                            principal: peer.principal_id, alive: true };
+                        match Conn::new(file, id, observed, seat.as_ref().map(|s| s.session())) {
+                            Ok(c) => conns.push(c),
+                            Err(_) => { pool.retire(id).map_err(|_| Error::Io)?; pool.reclaimed(id).map_err(|_| Error::Io)?; }
+                        }
+                    }
+                }
+            } else if fd != -11 {
+                return Err(Error::Io);
+            }
+        }
     }
 }

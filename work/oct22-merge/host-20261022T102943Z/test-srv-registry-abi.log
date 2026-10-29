@@ -1,0 +1,3 @@
+kernel: syscall, authority bit and route byte layout PASS
+libt: syscall, authority bit and route byte layout PASS
+Rust: syscall, authority bit and route byte layout PASS

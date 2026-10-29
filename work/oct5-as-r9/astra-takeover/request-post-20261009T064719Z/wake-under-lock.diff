@@ -1,0 +1,12 @@
+--- control
++++ wake-under-lock
+@@ -43,8 +43,8 @@
+     if (rc) { spin_unlock(&l->lock); return rc; }
+     l->cq_tail = tail+1u;
+     __atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);
++    poll_waiter_list_wake(&l->cq_waiters);
+     spin_unlock(&l->lock);
+-    poll_waiter_list_wake(&l->cq_waiters);
+     return 0;
+ }
+ int main(void) {

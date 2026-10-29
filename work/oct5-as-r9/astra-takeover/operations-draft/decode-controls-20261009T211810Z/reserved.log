@@ -1,0 +1,2 @@
+reserved common: got0 want-22
+Assertion failed: (0), function check, file reserved.c, line 73.

@@ -1,0 +1,175 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/loom_service_rpc.c": "53d3e32ce7a0eb64e2619edba774213de01c160ae83bf4082045fd916b9323ce",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/include/thylacine/loom_service_rpc.h": "01bfe3a27a0981f45f88d7650279f9b643616f536d8c83a376449b776cc4615d",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/include/thylacine/loom_service_operation.h": "c97cbc33d0f5639d3bdebbfa050a6c5c4c64d3f2fc1a5bf58aadd7fc5920de8b",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/fixture.c": "0b3f7436be6590bd47ec394cc00aafaf6d7bcc43c1718b279f61781978f17882",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/run-controls.py": "ba0e93bba0e5f0729ead67b8e7ee550a96357ba5a5ad89a0a565de3815b2497a",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/include/thylacine/loom_service_requests.h": "1a4138550a357d10ca02617e88d6b0caff34dfe5d6676c643dbdf96c398d0ed0",
+    "kernel/include/thylacine/loom_service_nodes.h": "19aacddddb54f7b9e93fcc810feb15931585698e17a329a969cb1d5ddb5fefec",
+    "kernel/include/thylacine/loom_service_reply.h": "46da857bd6dacdd0576ba3f01c2f0c55bc6cbacc56ade8da1f7c7ffbd4fd2465",
+    "kernel/include/thylacine/9p_session.h": "e5e218787c4a4d25986a664eafe9ba59c6e6093de0317ce934db6b24fbdab402"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "7c61d0167febd7dc2a416761958b83538b75693935871bc1c7973054079e41a5",
+      "binary_sha256": "ff1f6ae3b021a4e86c9d5db23179feba843ea377ee116da3567c80542e068d0f"
+    },
+    {
+      "case": "malformed-scope",
+      "expected": "malformed capture requires scope abort",
+      "rc": 1,
+      "source_sha256": "a1ab9800ded155fb5747078e6a79ac1f0a2fed5eee8ff23b718dd4a4548e1fb9",
+      "binary_sha256": "b99c5566acefa654248fb1da7a73556d8eebebc091ad3e684bce4c5635eec1b8"
+    },
+    {
+      "case": "request-identity",
+      "expected": "full request identity",
+      "rc": 1,
+      "source_sha256": "9b47f936de29009c300117ccf3eccbca4816809efe23298afcd882c101a041a5",
+      "binary_sha256": "b935065fdfc7cab6fc2a9e46150d2f2372f5e548c9d6ec170d85f7c46dc20e7b"
+    },
+    {
+      "case": "owner-ledger",
+      "expected": "physical owner required",
+      "rc": 1,
+      "source_sha256": "c62173df86b54e1ba71c6d664cfb0898eec878aeacec26debca1a249d241e064",
+      "binary_sha256": "9d574eded807f0b8ea8225bff871428dde5cca495d8adb3d4752eea13fd11e21"
+    },
+    {
+      "case": "ready-admission",
+      "expected": "admission requires READY",
+      "rc": 1,
+      "source_sha256": "a7f1deb879a67c89f9150e7cdbd51b9ab6b370ab6a87f2c2c83db6bfd179223f",
+      "binary_sha256": "f8fff4e6695de3674ebb57f4b7b94fef7616184962cec598cd38b0cb19d72aa8"
+    },
+    {
+      "case": "request-borrow",
+      "expected": "enqueue owns active borrow and list",
+      "rc": 1,
+      "source_sha256": "d5a944f20a1c028043486b7834006dfca161002fe5a169d4d8e0f6692e7cd081",
+      "binary_sha256": "f0ce178cc8801c31c9cb4acd105ddd636386be559206108b2ea4d9d605b7eb3b"
+    },
+    {
+      "case": "list-tail",
+      "expected": "enqueue owns active borrow and list",
+      "rc": 1,
+      "source_sha256": "d184dc37ed5135270660f00f6be936d505b8238d780e72755149ed469616cc43",
+      "binary_sha256": "65d697d63ac0170437b689706852e2a4cf2317076179433d12f299b1a6258f25"
+    },
+    {
+      "case": "queue-bound",
+      "expected": "queue capacity refusal",
+      "rc": 1,
+      "source_sha256": "c6356555ebf5d8ba13a8e3efc84100d44ac2c17e207c3e0148536ccf075f5289",
+      "binary_sha256": "30a6dff490c1f76827278a2eebace78391e90b606c2aaf41dffe29cee81fc3da"
+    },
+    {
+      "case": "driver-begin",
+      "expected": "sole driver required",
+      "rc": 1,
+      "source_sha256": "2e48f523b6ffcffad04381c415073e4f811f5a7adab6fc3fe28a580ba3134670",
+      "binary_sha256": "ce07f8092deac3b6101b3c30c64749013376d419e2f0ffc86edfa3471e84d9f1"
+    },
+    {
+      "case": "wire-expiry",
+      "expected": "expiry before wire",
+      "rc": 1,
+      "source_sha256": "db6d1e627add2ccace0b8620fb0fc9ba86d832ed49e0539bccd2cee46410b34b",
+      "binary_sha256": "b6732f23af995ea21003be714209ef8b2eaac2153f99303a8d3dac28cc9290be"
+    },
+    {
+      "case": "callback-arm",
+      "expected": "callback armed before submit",
+      "rc": 1,
+      "source_sha256": "67475c934e2151ab70b1a0dbccee751fd7a941105a46be791321ca0db08b326e",
+      "binary_sha256": "6a0cd2fd2643603cdc951ed459462eee3b974baeb88e8910c99127d7834ff67b"
+    },
+    {
+      "case": "early-settle",
+      "expected": "inflight callback retains owner",
+      "rc": 1,
+      "source_sha256": "a71e25366920556a64cef174b45690edfcfb8bfbc432b1b295cba4143a744144",
+      "binary_sha256": "c0d1fdd85ee0b9b7de611150487100d7191e3f3a32621e30ca672553fd722b9a"
+    },
+    {
+      "case": "pending-sender",
+      "expected": "pending sender blocks settlement",
+      "rc": 1,
+      "source_sha256": "02cdbc764162770e6a9371c306432df832316e225d2deaa45ef815d663ce7cf7",
+      "binary_sha256": "b39afe2b321a21df390b3ebb4e7efeb810632e39d7c25b8b976d47106f32b298"
+    },
+    {
+      "case": "early-terminal",
+      "expected": "callback copies bytes without terminal",
+      "rc": 1,
+      "source_sha256": "ff010aa964ad9530d44e564d7fda685ff09643cf61a7e714c6de57bb39354941",
+      "binary_sha256": "01a40ec79a7d290373649d4c479f787b347575831687297031b87d79999b5ace"
+    },
+    {
+      "case": "duplicate-callback",
+      "expected": "duplicate callback fails closed",
+      "rc": 1,
+      "source_sha256": "bd210accb577ed648256dcdd00e029bc8807a7feca759e1231c62a27b2d7c9cf",
+      "binary_sha256": "654f4aaa837f08967aa6a5661195c78163d73d5ae9323c44864b3a91547cc84e"
+    },
+    {
+      "case": "finish-borrow",
+      "expected": "all physical borrowers must end",
+      "rc": 1,
+      "source_sha256": "f5674ae37fd839e7f4f20937c324f7a78f0a00746e65b4c9700049e49e5470d2",
+      "binary_sha256": "c83a0a1513b80c80390fe138bef965d1dd5f9a46283886e2c1174c97ce593d02"
+    },
+    {
+      "case": "commit-expiry",
+      "expected": "deadline beats captured success",
+      "rc": 1,
+      "source_sha256": "b32cce78827e64e3275d95e4daddf3757c6005c979e3d3c2770ce503fdf2d0f4",
+      "binary_sha256": "08d567a61a544edb926d3f2c505a092f682b051deb2eb59d797ffc95043bffa4"
+    },
+    {
+      "case": "uncaptured-success",
+      "expected": "queued cancellation cannot fabricate success",
+      "rc": 1,
+      "source_sha256": "60ed4d06f3add11423c1629bd7d277520a316a412f40ce1ffa7dee5431e1ef44",
+      "binary_sha256": "e000422281668091bf3770ccea86e1d1270081df75fb94602e259033fde8a935"
+    },
+    {
+      "case": "physical-owner-drop",
+      "expected": "negative terminal ends borrow retains storage",
+      "rc": 1,
+      "source_sha256": "e825c6358ad082005fdbed38279035bba964727a2c6e15dab7f8e7414063dca5",
+      "binary_sha256": "e2842d30512716ffd3e8de483cacf48b202158e3ccd65152439f81b191ca96c7"
+    },
+    {
+      "case": "early-unlink",
+      "expected": "CQ backpressure retains discoverable owner",
+      "rc": 1,
+      "source_sha256": "b3540da49238a6ac241f28306b5b7ca93c19f4e1edbd952ad621ba379b77b0b8",
+      "binary_sha256": "98a62bb6308f1f89dbaeeb6de67e7cd39522362381dab9dd6b166afacfb9d9ca"
+    },
+    {
+      "case": "unlink-count",
+      "expected": "middle unlink retains neighbors",
+      "rc": 1,
+      "source_sha256": "0113b567b8efb564bb9f324eec8b0ef99532ff72511b86cd0b4284e52751eab3",
+      "binary_sha256": "6c847d7213a115c44c5dee452e76e5f6f89de620691bd86e3f0680f3265650de"
+    },
+    {
+      "case": "retry-borrow",
+      "expected": "retry preserves one obligation and borrow",
+      "rc": 1,
+      "source_sha256": "3646f1bcd7b2e345122c1d69b3fbb3112aebaa17b323e7b5b19e91ae03191eec",
+      "binary_sha256": "bb174beffa127a042c009d0072af2959673236eb3428c43f1afaee3de20f8bb5"
+    }
+  ],
+  "limits": "Actual RPC owner transitions and real request/node/slot/reply modules; simplified host Loom/protocol/RPC layout boundary. Sequential only. No actual client submission, authority, wire or concurrent-engine proof."
+}

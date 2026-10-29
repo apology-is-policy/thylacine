@@ -1,0 +1,10 @@
+mac   HELD by aux for 30s, 2.0h left
+        why: aux C3b lease 2: rebuild + suite, sabotage D, SMP 50/50, storm baseline vs C3b (thylacine-aux-reap; several builds and boots)
+        queue 1: main (44m waiting)
+        queue 2: astra (2m waiting)
+pi    HELD by you for 21s, 2.0h left
+        why: corona: vote-16 pi run (work/oct19-pi/pi-smp.sh run) on the image baked at 7062e8926 -- one QEMU/KVM boot set; released when it ends.
+        phase: corona: pi-smp.sh run on the 7062e8926 bake (sync, N boots per config on KVM A72, pull logs, judge)
+        runner: North-Kill-PD.local pid 4550 alive (start Thu Oct 22 08:47:55 2026)
+        pids: [4550] (their registered work -- not a kill list)
+disk: 10.5 GiB available at /Users/northkillpd/projects/thylacine-corona

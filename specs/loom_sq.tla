@@ -1,7 +1,7 @@
 ---- MODULE loom_sq ----
 (***************************************************************************)
 (* Thylacine Loom -- the SQ slot handoff between a legitimate userspace     *)
-(* producer and the kernel consumer (loom_drain_sq).                       *)
+(* producer and the kernel consumers (loom_drain_sq, loom_private_submit).  *)
 (*                                                                         *)
 (* The SQ is a single-producer ring: userspace writes an SQE body and its   *)
 (* SQ-index entry at position tail, then release-bumps sq_tail. The kernel  *)

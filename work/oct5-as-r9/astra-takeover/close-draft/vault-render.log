@@ -1,0 +1,3 @@
+rendered: vault/views/view-audit-triggers.md
+WARN 46 dossier(s) describe code that has changed since they were written -- run `quaestor stale` for the churn-ordered list
+vault-lint: 1463 notes, 0 fail(s), 1 warn(s) [--render]

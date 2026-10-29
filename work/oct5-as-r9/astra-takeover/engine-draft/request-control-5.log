@@ -1,0 +1,18 @@
+PASS control PASS request terminal obligations
+PASS reject-success rejected admission validates identity and negative result
+PASS reject-borrow rejected admission waits for local borrow
+PASS reject-pin rejected admission retains exact scope pin
+PASS reject-rewrite rejected terminal is immutable
+PASS expired expired request reserves nothing
+PASS admit-expired admission rechecks absolute deadline
+PASS omit-pin prepare reserves terminal and parent
+PASS omit-unpin rollback releases capacity and pin
+PASS reuse-identity rollback burns request identity
+PASS stale stale request cannot mutate replacement
+PASS early-terminal live borrow blocks terminal and free
+PASS double-terminal duplicate terminal refused
+PASS late-success abort forbids fresh success
+PASS early-reap undelivered terminal cannot be discarded or freed
+PASS live-discard undelivered terminal cannot be discarded or freed
+PASS wrap request identity wrap refused
+PASS detach-borrow live borrows prevent consumer detach

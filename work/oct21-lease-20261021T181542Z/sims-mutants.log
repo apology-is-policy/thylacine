@@ -1,0 +1,25 @@
+PASS c control: rc 0
+PASS rust control: rc 0
+KILLED c-order: rc -6; wanted the failure at test_adapter\.c(:|, line )1813\b
+KILLED c-clunking: rc -6; wanted the failure at test_adapter\.c(:|, line )1855\b
+KILLED c-walk-claim: rc -6; wanted the failure at test_adapter\.c(:|, line )1847\b
+KILLED c-dest-scope: rc -6; wanted the failure at test_adapter\.c(:|, line )1842\b
+KILLED c-bounds: rc -6; wanted the failure at test_adapter\.c(:|, line )1828\b
+KILLED c-clunk-fid: rc -6; wanted the failure at test_adapter\.c(:|, line )1852\b
+KILLED r-order: rc 101; wanted the failure at native\.rs:1596:
+KILLED r-clunking: rc 101; wanted the failure at native\.rs:1628:
+KILLED r-walk-claim: rc 101; wanted the failure at native\.rs:1620:
+KILLED r-dest-scope: rc 101; wanted the failure at native\.rs:1617:
+KILLED r-bounds: rc 101; wanted the failure at native\.rs:1605:
+KILLED r-clunk-fid: rc 101; wanted the failure at native\.rs:1626:
+KILLED c-scope-kind: rc -6; wanted the failure at test_adapter\.c(:|, line )1880\b
+KILLED c-aborting: rc -6; wanted the failure at test_adapter\.c(:|, line )1878\b
+KILLED c-int32: rc -6; wanted the failure at test_adapter\.c(:|, line )1885\b
+KILLED c-cancel-retire: rc -6; wanted the failure at test_adapter\.c(:|, line )1870\b
+KILLED c-query: rc -6; wanted the failure at test_adapter\.c(:|, line )1862\b
+KILLED r-scope-kind: rc 101; wanted the failure at native\.rs:1668:
+KILLED r-aborting: rc 101; wanted the failure at native\.rs:1667:
+KILLED r-int32: rc 101; wanted the failure at native\.rs:1671:
+KILLED r-cancel-retire: rc 101; wanted the failure at native\.rs:1658:
+KILLED r-query: rc 101; wanted the failure at native\.rs:1650:
+ALL KILLED: 22 mutants; both controls pass

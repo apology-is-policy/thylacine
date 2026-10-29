@@ -1,0 +1,4 @@
+mac   HELD by you for 21m, 1.6h left
+        why: Astra bounded request and terminal completion ownership integration
+pi    FREE
+disk: 15.7 GiB available at /Users/northkillpd/projects/thylacine-astra

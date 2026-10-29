@@ -1,0 +1,4 @@
+mac   HELD by you for 0s, 19m left
+        why: Astra emitted WRITE and deadline native smoke
+pi    FREE
+disk: 9.1 GiB available at /Users/northkillpd/projects/thylacine-astra

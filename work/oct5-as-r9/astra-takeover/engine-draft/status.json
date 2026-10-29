@@ -1,0 +1,26 @@
+{
+  "owner": "astra",
+  "updated_utc": "2026-10-09T17:53:36.617695+00:00",
+  "base": "b2b263e3f250ecaa42c7975a86beec7b65128f12",
+  "state": "installed and native-qualified; full source-specific matrix pending",
+  "active_gate": null,
+  "flight": "work/oct5-as-r9/astra-takeover/connect-current-flight.json",
+  "source_frozen": false,
+  "next": [
+    "Commit canonical index + evidence/docs with normal hooks.",
+    "Launch full exact-source Mac matrix and freeze source/build.",
+    "Prepare close queue in close-draft, preserving exec leaf latch and separate reference root."
+  ],
+  "protected": "Astra six pending files +four protected drafts checked unchanged; external Stratum clean61dde37; floor8192MiB",
+  "native_fixture": "Corrected misplaced engine allocation fault in protocol fixture; arm64-syntax-3.log passes all seven units. Earlier syntax-2 was FAILED, retained.",
+  "active_defect": {
+    "id": "ENGINE-NATIVE-1",
+    "symptom": "native1849/1850: slot pool target and node pages included in metadata charge fails; new private_engine passes",
+    "evidence": "work/oct5-as-r9/astra-takeover/engine-diagnostic-20261009T1751Z",
+    "state": "resolved; corrected native1850/1850+D7 pass",
+    "cause": "old fixture omitted the newly allocated/charged private index page",
+    "fix": "metadata expected +3 and explicit nonnull/zeroed index"
+  },
+  "native_run": "work/oct5-as-r9/astra-takeover/engine-diagnostic-20261009T1752Z",
+  "processes": "none running; native diagnostic completed, Mac released"
+}

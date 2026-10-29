@@ -105,7 +105,13 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    no_stack_protector to avoid checking
 #                                    a half-initialized cookie.
 #   -fstack-clash-protection       — probe stack guard pages on large
-#                                    function-frame allocations. Mostly
+#                                    function-frame allocations. Given to
+#                                    cc1 through -Xclang: the clang driver
+#                                    forwards it only for Linux and FreeBSD
+#                                    triples and drops it for
+#                                    aarch64-none-elf with an 'argument
+#                                    unused' warning, while the AArch64
+#                                    backend probes for any triple. Mostly
 #                                    inert in our codebase (boot stack is
 #                                    16 KiB, no large frames) but
 #                                    defense-in-depth + future-proof.
@@ -130,6 +136,15 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    never reused (dec-2026-09-28-t-stat-devno-
 #                                    u64); a u32 local or parameter would
 #                                    truncate it with no other symptom.
+#   -Werror                        — every warning fails the build, with the
+#                                    tests and without (operator vote 20,
+#                                    .claude/rules/kernel-code.md "Cross-file
+#                                    declarations"). A warning a merge or a
+#                                    toolchain upgrade brings in is fixed
+#                                    where it appears, never silenced for the
+#                                    file. It reaches the fault-test and
+#                                    sanitizer kernels too: they build from
+#                                    this list.
 #
 # DEFERRED to post-v1.0 (per CLAUDE.md "complexity is permitted only where
 # it is verified"):
@@ -155,10 +170,11 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-mno-outline-atomics"
     "-fno-omit-frame-pointer"
     "-fstack-protector-strong"
-    "-fstack-clash-protection"
+    "SHELL:-Xclang -fstack-clash-protection"
     "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"
+    "-Werror"
     "-Werror=return-type"
     "-Wstrict-prototypes"
     "-Wmissing-prototypes"

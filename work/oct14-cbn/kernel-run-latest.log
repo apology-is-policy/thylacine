@@ -1,0 +1,160 @@
+=== preconditions ===
+2026-10-14T22:46:40Z  HEAD 803a9fc7a29b1d43c607236a4719d3373fb85634
+member: handles.reservation (test_handles_reservation) holds 'dup3 onto it is BUSY'
+member: handles.reservation (test_handles_reservation) holds 'an alloc skips the reserved number'
+member: handles.reservation (test_handles_reservation) holds 'close refuses it (Linux: EBADF)'
+member: handles.replace (test_handles_replace) holds 'a slot that no longer names the caller's object is refused'
+member: sys_pipe.full_table_publishes_nothing (test_sys_pipe_full_table_publishes_nothing) holds 'the refused pipe installed nothing'
+member: vivarium.unwinds_publish_nothing (test_vivarium_unwinds_publish_nothing) holds 'pipe2: a faulted copy-out installed nothing'
+member: vivarium.unwinds_publish_nothing (test_vivarium_unwinds_publish_nothing) holds 'dup, F_DUPFD: the alias rows dropped, the source's kept'
+member: vivarium.unwinds_publish_nothing (test_vivarium_unwinds_publish_nothing) holds 'accept: the number returned'
+member: vivarium.unwinds_publish_nothing (test_vivarium_unwinds_publish_nothing) holds 'dup3 onto a reserved number is EBUSY'
+member: vivarium.close_keeps_a_reserved_row (test_vivarium_close_keeps_a_reserved_row) holds 'a reserved number: close keeps its row, bind is EBADF; a free one's close drops it'
+member: stalk.open_finish_policy (test_stalk_open_finish_policy) holds 'and no descriptor was installed'
+member: stalk.open_finish_policy (test_stalk_open_finish_policy) holds 'before anything is installed'
+member: vivsock.connect_keeps_a_reused_number (test_vivsock_connect_keeps_a_reused_number) holds 'connect refuses to swap a number that no longer names its socket'
+member: vivsock.connect_keeps_a_reused_number (test_vivsock_connect_keeps_a_reused_number) holds 'control: data carries ctl's O_NONBLOCK across the swap'
+member: vivsock.socket_unwind_publishes_nothing (test_vivsock_socket_unwind_publishes_nothing) holds 'socket: the refusal installed nothing'
+2026-10-14T22:46:40Z  predictions derived: each kernel message inside its registered test
+2026-10-14T22:46:40Z  expected tests (derived from test.c): 1891
+2026-10-14T22:46:40Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-14T22:46:40Z  go fork /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/go-thylacine-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+census m1 kernel/handle.c: anchor x1, mutant text x0, MUTANT in new: True
+census m2 kernel/handle.c: anchor x1, mutant text x0, MUTANT in new: True
+census m3 kernel/handle.c: anchor x1, mutant text x0, MUTANT in new: True
+census m4 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m5 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m6 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m7 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m8 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m9 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m10 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m11 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m12 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m13 kernel/handle.c: anchor x1, mutant text x0, MUTANT in new: True
+census m14 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m15 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+census m16 kernel/vivarium.c: anchor x1, mutant text x0, MUTANT in new: True
+census m17 kernel/syscall.c: anchor x1, mutant text x0, MUTANT in new: True
+2026-10-14T22:46:40Z  anchor census: 17 mutants, each anchor once in its file
+2026-10-14T22:46:40Z  disk pre: 11074 MiB free (floor 8192)
+=== CONTROL ===
+2026-10-14T22:47:44Z  disk post-control-build: 11075 MiB free (floor 8192)
+2026-10-14T22:48:38Z  control: test.sh exit 0
+2026-10-14T22:48:38Z  CONTROL GREEN: 1891/1891, the eight named tests PASS, argwidth-probe 72, loom-bridge-probe 70, bin 6e68e3362498db56
+=== CONTROL-Q ===
+2026-10-14T22:49:41Z  disk post-control-q-build: 11061 MiB free (floor 8192)
+2026-10-14T22:50:37Z  control-q: test.sh exit 0
+2026-10-14T22:50:37Z  CONTROL-Q GREEN: 1891/1891, the eight named tests PASS, loom-bridge-probe 71 (qualification path), bin 4fcf881dfa923e2a
+=== TLC ===
+2026-10-14T22:50:37Z  TLC carried from work/oct14-cbn/kernel-20261014T212828Z: specs/ identical at 165ca638a779b497970b8f451e505d0b4bd8f3c0 and 803a9fc7a29b1d43c607236a4719d3373fb85634, jar 7beec0f04818732a older than that run
+  carried: 2026-10-14T21:32:14Z  TLC slots clean: 447 states generated, 80 distinct states found, 0 states left on queue.
+  carried: 2026-10-14T21:32:14Z  TLC slots-close-by-number counterexample: Error: Invariant NoForeignClose is violated.
+  carried: 2026-10-14T21:32:15Z  TLC slots-published counterexample: Error: Invariant FailedPublishesNothing is violated.
+  carried: 2026-10-14T21:32:15Z  TLC slots-dup3 counterexample: Error: Invariant InstallFillsOwnReservation is violated.
+  carried: 2026-10-14T22:41:10Z  TLC handles clean: 1179332587 states generated, 51744096 distinct states found, 0 states left on queue.
+  carried: 2026-10-14T22:41:12Z  TLC handles-srv clean: 202033 states generated, 26784 distinct states found, 0 states left on queue.
+  carried: 2026-10-14T22:41:13Z  TLC handles_buggy_caps counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:14Z  TLC handles_buggy_direct counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:15Z  TLC handles_buggy_elevate counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:15Z  TLC handles_buggy_hw_dup counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:16Z  TLC handles_buggy_hw_nocap counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:17Z  TLC handles_buggy_hw_overlap counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:18Z  TLC handles_buggy_hw counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:19Z  TLC handles_buggy_rfork_elevate counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:20Z  TLC handles_buggy_rfork_hostowner counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:21Z  TLC handles_buggy_spawn_fds_elevate counterexample: Error: Invariant Invariants is violated.
+  carried: 2026-10-14T22:41:22Z  TLC handles_buggy_srv_walk_tx counterexample: Error: Invariant Invariants is violated.
+=== M1: dup3 takes a reservation ===
+2026-10-14T22:50:37Z  disk pre-m1: 10940 MiB free (floor 8192)
+2026-10-14T22:51:43Z  disk post-m1-build: 11060 MiB free (floor 8192)
+2026-10-14T22:51:59Z  m1: test.sh exit 1
+2026-10-14T22:52:00Z  M1 DISCRIMINATED: exactly handles.reservation (dup3 onto it is BUSY) and vivarium.unwinds_publish_nothing (dup3 onto a reserved number is EBUSY); extinction set = the suite's own
+=== M2: an alloc's scan takes a reservation ===
+2026-10-14T22:52:00Z  disk pre-m2: 11076 MiB free (floor 8192)
+2026-10-14T22:53:10Z  disk post-m2-build: 11078 MiB free (floor 8192)
+2026-10-14T22:53:26Z  m2: test.sh exit 1
+2026-10-14T22:53:26Z  M2 DISCRIMINATED: exactly handles.reservation (an alloc skips the reserved number) and vivarium.close_keeps_a_reserved_row (mask 0x10c: its alloc took the reservation); extinction set = the suite's own
+=== M3: close vacates a reservation ===
+2026-10-14T22:53:26Z  disk pre-m3: 11079 MiB free (floor 8192)
+2026-10-14T22:54:41Z  disk post-m3-build: 11071 MiB free (floor 8192)
+2026-10-14T22:54:57Z  m3: test.sh exit 1
+2026-10-14T22:54:58Z  M3 DISCRIMINATED: exactly handles.reservation (close refuses it (Linux: EBADF)) and vivarium.close_keeps_a_reserved_row; extinction set = the suite's own
+=== M4: pipe on a full table publishes the read end, then closes it ===
+2026-10-14T22:54:58Z  disk pre-m4: 11071 MiB free (floor 8192)
+2026-10-14T22:56:12Z  disk post-m4-build: 11073 MiB free (floor 8192)
+2026-10-14T22:56:28Z  m4: test.sh exit 1
+2026-10-14T22:56:29Z  M4 DISCRIMINATED: exactly sys_pipe.full_table_publishes_nothing (the refused pipe installed nothing); extinction set = the suite's own
+=== M5: pipe2 installs before the copy-out ===
+2026-10-14T22:56:29Z  disk pre-m5: 11073 MiB free (floor 8192)
+2026-10-14T22:57:41Z  disk post-m5-build: 11072 MiB free (floor 8192)
+2026-10-14T22:57:58Z  m5: test.sh exit 1
+2026-10-14T22:57:58Z  M5 DISCRIMINATED: exactly vivarium.unwinds_publish_nothing (pipe2: a faulted copy-out installed nothing); extinction set = the suite's own
+=== M6: the dup arm's refusal keeps its alias row ===
+2026-10-14T22:57:58Z  disk pre-m6: 11071 MiB free (floor 8192)
+2026-10-14T22:59:12Z  disk post-m6-build: 11078 MiB free (floor 8192)
+2026-10-14T22:59:27Z  m6: test.sh exit 1
+2026-10-14T22:59:27Z  M6 DISCRIMINATED: exactly vivarium.unwinds_publish_nothing (dup, F_DUPFD: the alias rows dropped, the source's kept); extinction set = the suite's own
+=== M7: the F_DUPFD arm's refusal keeps its alias row ===
+2026-10-14T22:59:28Z  disk pre-m7: 11077 MiB free (floor 8192)
+2026-10-14T23:00:25Z  disk post-m7-build: 11074 MiB free (floor 8192)
+2026-10-14T23:00:39Z  m7: test.sh exit 1
+2026-10-14T23:00:39Z  M7 DISCRIMINATED: exactly vivarium.unwinds_publish_nothing (dup, F_DUPFD: the alias rows dropped, the source's kept); extinction set = the suite's own
+=== M8: the close hook drops a reserved number's row ===
+2026-10-14T23:00:39Z  disk pre-m8: 11075 MiB free (floor 8192)
+2026-10-14T23:01:39Z  disk post-m8-build: 11071 MiB free (floor 8192)
+2026-10-14T23:01:53Z  m8: test.sh exit 1
+2026-10-14T23:01:53Z  M8 DISCRIMINATED: exactly vivarium.close_keeps_a_reserved_row (mask 0x4: the row dropped); extinction set = the suite's own
+=== M9: a kept Spoor is installed, then closed ===
+2026-10-14T23:01:53Z  disk pre-m9: 11070 MiB free (floor 8192)
+2026-10-14T23:02:46Z  disk post-m9-build: 11069 MiB free (floor 8192)
+2026-10-14T23:03:01Z  m9: test.sh exit 1
+2026-10-14T23:03:01Z  M9 DISCRIMINATED: exactly stalk.open_finish_policy (and no descriptor was installed); extinction set = the suite's own
+=== M10: O_DIRECTORY refuses after an install ===
+2026-10-14T23:03:01Z  disk pre-m10: 11068 MiB free (floor 8192)
+2026-10-14T23:03:54Z  disk post-m10-build: 11067 MiB free (floor 8192)
+2026-10-14T23:04:08Z  m10: test.sh exit 1
+2026-10-14T23:04:09Z  M10 DISCRIMINATED: exactly stalk.open_finish_policy (before anything is installed); extinction set = the suite's own
+=== M11: accept's failed listen open leaks its reservation ===
+2026-10-14T23:04:09Z  disk pre-m11: 11067 MiB free (floor 8192)
+2026-10-14T23:05:03Z  disk post-m11-build: 11063 MiB free (floor 8192)
+2026-10-14T23:05:17Z  m11: test.sh exit 1
+2026-10-14T23:05:17Z  M11 DISCRIMINATED: exactly vivarium.unwinds_publish_nothing (accept: the number returned); extinction set = the suite's own
+=== M12: socket's claim refusal installs, then closes by number ===
+2026-10-14T23:05:17Z  disk pre-m12: 11064 MiB free (floor 8192)
+2026-10-14T23:06:13Z  disk post-m12-build: 11061 MiB free (floor 8192)
+2026-10-14T23:06:27Z  m12: test.sh exit 1
+2026-10-14T23:06:27Z  M12 DISCRIMINATED: exactly vivsock.socket_unwind_publishes_nothing (socket: the refusal installed nothing); extinction set = the suite's own
+=== M13: handle_replace ignores expect ===
+2026-10-14T23:06:27Z  disk pre-m13: 11061 MiB free (floor 8192)
+2026-10-14T23:07:23Z  disk post-m13-build: 11060 MiB free (floor 8192)
+2026-10-14T23:07:37Z  m13: test.sh exit 1
+2026-10-14T23:07:37Z  M13 DISCRIMINATED: exactly handles.replace and vivsock.connect_keeps_a_reused_number (connect refuses to swap a number that no longer names its socket); extinction set = the suite's own
+=== M14: connect keys its swap on whatever the number names now ===
+2026-10-14T23:07:37Z  disk pre-m14: 11059 MiB free (floor 8192)
+2026-10-14T23:08:31Z  disk post-m14-build: 11061 MiB free (floor 8192)
+2026-10-14T23:08:45Z  m14: test.sh exit 1
+2026-10-14T23:08:45Z  M14 DISCRIMINATED: exactly vivsock.connect_keeps_a_reused_number (connect refuses to swap a number that no longer names its socket); extinction set = the suite's own
+=== M15: connect stops carrying ctl's O_NONBLOCK onto data ===
+2026-10-14T23:08:45Z  disk pre-m15: 11058 MiB free (floor 8192)
+2026-10-14T23:09:39Z  disk post-m15-build: 11056 MiB free (floor 8192)
+2026-10-14T23:09:53Z  m15: test.sh exit 1
+2026-10-14T23:09:54Z  M15 DISCRIMINATED: exactly vivsock.connect_keeps_a_reused_number (control: data carries ctl's O_NONBLOCK across the swap); extinction set = the suite's own
+=== M16: the close hook nests the handle table inside the socket table ===
+2026-10-14T23:09:54Z  disk pre-m16: 11056 MiB free (floor 8192)
+2026-10-14T23:10:48Z  disk post-m16-build: 11063 MiB free (floor 8192)
+2026-10-14T23:10:56Z  m16: test.sh exit 1
+2026-10-14T23:10:56Z  M16 DISCRIMINATED: exactly 'EXTINCTION: handle table lock taken under a leaf lock', no tally, last announced vivarium.close_keeps_a_reserved_row
+=== M17: the socket arms read the row before the slot ===
+2026-10-14T23:10:56Z  disk pre-m17: 11063 MiB free (floor 8192)
+2026-10-14T23:11:50Z  disk post-m17-build: 11060 MiB free (floor 8192)
+2026-10-14T23:12:05Z  m17: test.sh exit 1
+2026-10-14T23:12:05Z  M17 DISCRIMINATED: exactly vivarium.close_keeps_a_reserved_row (mask 0x100: bind on the reserved number); extinction set = the suite's own
+=== rebuild the committed tree, then SHAPE ===
+2026-10-14T23:13:01Z  rebuild byte-identical to the control kernel
+2026-10-14T23:13:56Z  rebuild-q byte-identical to CONTROL-Q
+2026-10-14T23:13:56Z  disk pre-shape: 11050 MiB free (floor 8192)
+2026-10-14T23:15:22Z  SHAPE: tools/check-production.sh --all exit 0
+2026-10-14T23:15:22Z  go fork unchanged across the run
+-- done: work/oct14-cbn/kernel-20261014T224640Z
+2026-10-14T23:15:22Z  exit 0

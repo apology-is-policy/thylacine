@@ -1,0 +1,2 @@
+rollback waits physical owner
+Assertion failed: (0), function main, file erase-removal-barrier.c, line 210.

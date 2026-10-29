@@ -1,0 +1,31 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T10:29:27.823758+00:00",
+  "source_hashes": 10,
+  "commands": 21,
+  "current_source_and_snapshot_match": true,
+  "head_diff_match": true,
+  "raw_logs": {
+    "rust-version.log": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0.log": "30d23eb92571703b2f040be8206806ef03f194e9ee03eda77f7bd7295ba275a8",
+    "rust-build-2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2.log": "92327ceba3015f611973109ba1c0e914dee0b081bb81bfe49a48c4af365947d6",
+    "no-clone-client-build.log": "0cdf308a736f887ab10d4e548b4b532ca502a8be37de8ae5f2e0125f86b77525",
+    "no-send-executor-build.log": "4f44746d9aaf0be9c55a7a202b5c7797d88731867ff8fcf5382b9e8ffc045b0c",
+    "valid-client-build.log": "a4c725559a05f291b5c66e9d4c61b12802b9192fd764d67b54f134654257b560",
+    "valid-client-run.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "early-reclaim-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "early-reclaim-run.log": "70ef9f2a3e5c38707e69b2ddd0908055c6a1464d75a5e4479d72b4bc983ae344",
+    "missing-retire-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-retire-run.log": "450af767835f7b422fbc5fbc1d9c260e2472bcad929500d4dc45922bce4905c5",
+    "frozen-cursor-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "frozen-cursor-run.log": "eef3dd183560796acfa4f605664f8983136ff8c4a6b3ff2249f077164b06854a",
+    "excess-budget-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "excess-budget-run.log": "6e9745e197b173663223d5a55a36dd5d0f7aaa9fa68a1c7d570876aaa92a9916",
+    "no-shutdown-close-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "no-shutdown-close-run.log": "57de7eded16a7b09297093a41614022ee6a4c29815012d42f0bdf255214a41f3",
+    "premature-admission-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "premature-admission-run.log": "c4337b59acd7221965adf721c26b5206678a14f572ea213815bb8679577ccd10"
+  }
+}

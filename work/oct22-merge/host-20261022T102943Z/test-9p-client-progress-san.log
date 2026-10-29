@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-9p-client-progress.py", line 54, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-9p-client-progress.py", line 38, in main
+    source=(ROOT/'kernel/9p_client.c').read_text();actual='\n\n'.join(function(source,n) for n in NAMES)
+                                                          ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-9p-client-progress.py", line 38, in <genexpr>
+    source=(ROOT/'kernel/9p_client.c').read_text();actual='\n\n'.join(function(source,n) for n in NAMES)
+                                                                      ~~~~~~~~^^^^^^^^^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/test-9p-client-progress.py", line 26, in function
+    m=re.search(r'^(?:static )?[a-zA-Z_][\w *]*\b'+name+r'\([^;]*?\)\s*\{',s,re.M);assert m,name
+                                                                                          ^
+AssertionError: client_honour_locked

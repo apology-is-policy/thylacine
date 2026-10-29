@@ -1,0 +1,6 @@
+argv: clang -std=c11 -O1 -Wall -Wextra -Werror -Wno-unused-parameter -I /Users/northkillpd/projects/thylacine-corona/kernel/include -I /Users/northkillpd/projects/thylacine-corona/kernel/test -I /Users/northkillpd/projects/thylacine-corona/tools/host-tests/host-env /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/9p-client-progress-4s3w62gv/owned-provided.c /Users/northkillpd/projects/thylacine-corona/kernel/9p_transport.c /Users/northkillpd/projects/thylacine-corona/kernel/9p_session.c /Users/northkillpd/projects/thylacine-corona/kernel/9p_wire.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/9p-client-progress-4s3w62gv/owned-provided -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 2c1e09bab9bce8ba6fe2f6b46647b19ae0f445b48dfa54f74f400f126e73b4e6  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/9p-client-progress-4s3w62gv/owned-provided.c
+sha256: ab8ef7ec2327afa1ce2627ed90abbe95443073411e0067b3b7a8781c89461f4d  /Users/northkillpd/projects/thylacine-corona/kernel/9p_transport.c
+sha256: 587218bbad5b8120f0b344c4889c0003bb8d7e5fd92144c54a158ec0c6c9bc96  /Users/northkillpd/projects/thylacine-corona/kernel/9p_session.c
+sha256: e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8  /Users/northkillpd/projects/thylacine-corona/kernel/9p_wire.c

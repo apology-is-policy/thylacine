@@ -48,6 +48,8 @@ impl Driver for Lictor {
         // compositor after this readiness signal and stamps its kernel role.
         libthyla_rs::io::stdout().write_all(b"READY\n").map_err(|_| Error::Hardware)?;
         let mut conns: Vec<Conn> = Vec::new();
+        #[cfg(feature = "test-mode")]
+        let mut witnessed_park = 0;
         loop {
             self.seat.input(&mut self.inputs);
             self.device.reap();
@@ -59,10 +61,20 @@ impl Driver for Lictor {
                     // episode: it recovers to NORMAL, and an error reply here
                     // would make the compositor give up on a display that is
                     // about to come back.
-                    matches!(req, Request::InputInfo { .. } | Request::InputDrain { .. } | Request::SeatState)
+                    matches!(req, Request::InputInfo { .. } | Request::InputDrain { .. } | Request::SeatState | Request::SeatQuiesced { .. })
                         || (self.seat.phase == 0 && (!Device::requires_quiescence(req) || self.device.gpu.all_work_retired()))
                 });
-                if !runnable { continue; }
+                if !runnable {
+                    #[cfg(feature = "test-mode")]
+                    if conn.pending.is_some() && self.seat.phase == 1
+                        && witnessed_park != self.seat.generation {
+                        // This thread alone can ACK the hardware seat. Logging
+                        // before that ACK cannot race entry to EXCLUSIVE.
+                        lictor::backend::diagnostic("lictor: ordinary GPU RPC parked before cancellation ACK\n");
+                        witnessed_park = self.seat.generation;
+                    }
+                    continue;
+                }
                 let (sequence, request) = conn.pending.take().unwrap();
                 let result = match request {
                     Request::InputInfo { index } => {
@@ -79,6 +91,19 @@ impl Driver for Lictor {
                     }
                     Request::SeatState => {
                         let mut bytes = Vec::new(); (self.seat.generation, self.seat.phase).put(&mut bytes); Ok(bytes)
+                    }
+                    Request::SeatQuiesced { generation } => {
+                        // Recheck designation at use, not just connection accept.
+                        let mut peer = TSrvPeerInfo::default();
+                        let mut designated = ep::Message::default();
+                        let known = ep::call(ep::CLIENT, &mut designated).is_ok();
+                        if !known || unsafe { t_srv_peer(conn.fd, &mut peer) } != 0
+                            || peer.alive == 0 || peer.pid != designated.code || peer.stripes != designated.sequence {
+                            Err(Error::Hardware)
+                        } else {
+                            let accepted = self.seat.acknowledge_cancellation(generation);
+                            let mut bytes = Vec::new(); accepted.put(&mut bytes); Ok(bytes)
+                        }
                     }
                     request if self.seat.phase == 0 => self.device.execute(conn.fd, request),
                     _ => Err(Error::Hardware),

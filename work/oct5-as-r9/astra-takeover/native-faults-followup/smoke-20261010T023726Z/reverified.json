@@ -1,0 +1,53 @@
+{
+  "owner": "astra",
+  "rows": [
+    {
+      "row": "default1",
+      "source": "bdba6bc5e46add2e44e08c2e0fc0753afb3e2b83",
+      "diff": "504cd6018e4c4d178babdcdbb6473159550432cd84972803ef6613433f892a56",
+      "serial": "f81997f6c5b3b417ecec0bbd0baf0a827282304b1887d8ad4726f516631ee49d",
+      "harness": "ad40b543dcf510476a1fe09fbfe8f6f3740cd39dda04da6088facdc815b82296",
+      "minimum_free_mib": 9248
+    },
+    {
+      "row": "default4",
+      "source": "bdba6bc5e46add2e44e08c2e0fc0753afb3e2b83",
+      "diff": "504cd6018e4c4d178babdcdbb6473159550432cd84972803ef6613433f892a56",
+      "serial": "b4ef467b3932a59768dbc013b6bc90cf081a226d422339a1e5ab47c8718415a2",
+      "harness": "1ed48530ee10ec494497414b96f6b1844c3a1be532fc6b5ab93fa2e041f23e6d",
+      "minimum_free_mib": 9257
+    },
+    {
+      "row": "default8",
+      "source": "bdba6bc5e46add2e44e08c2e0fc0753afb3e2b83",
+      "diff": "504cd6018e4c4d178babdcdbb6473159550432cd84972803ef6613433f892a56",
+      "serial": "91b471db91c5b942806cad1abfe64ba0d716045cdb0e3f1d38f963c927a566f8",
+      "harness": "e5673286e3e36ada4f5547a6e8e27f017f4c9173bfcad235081ee4497a940930",
+      "minimum_free_mib": 9255
+    },
+    {
+      "row": "ubsan4",
+      "source": "bdba6bc5e46add2e44e08c2e0fc0753afb3e2b83",
+      "diff": "504cd6018e4c4d178babdcdbb6473159550432cd84972803ef6613433f892a56",
+      "serial": "8b55a1f1ce7aa5ed0ac83832d89329ee1c67a6f6336b1a0a89651f0411fb9921",
+      "harness": "7c75b38b85fbfe501efd7a310195c494ee64d1f6de6f59ff1cc2b03570e80b1e",
+      "minimum_free_mib": 9251
+    },
+    {
+      "row": "ubsan8",
+      "source": "bdba6bc5e46add2e44e08c2e0fc0753afb3e2b83",
+      "diff": "504cd6018e4c4d178babdcdbb6473159550432cd84972803ef6613433f892a56",
+      "serial": "07034769c324daa2036a1b35aff44392aa8e3db0350c304d49980c68b0682909",
+      "harness": "5777d23294d576308c1a1ca516f7346bd69591686c753e5502d47853fa428f11",
+      "minimum_free_mib": 9262
+    }
+  ],
+  "raw_logs": 10,
+  "tests": 1857,
+  "schedules_per_class": 8,
+  "classes": 2,
+  "protected_files": 10,
+  "stratum_clean": true,
+  "review": "single-agent",
+  "limit": "Five one-boot smoke rows; not50boot qualification or complete AS3"
+}

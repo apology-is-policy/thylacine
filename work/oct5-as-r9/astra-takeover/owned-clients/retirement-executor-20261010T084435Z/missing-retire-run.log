@@ -1,0 +1,73 @@
+
+running 8 tests
+test executor_held_terminal_result_blocks_reuse_and_preserves_bytes ... FAILED
+test executor_capacity_precedes_factory_and_survives_abandon ... FAILED
+test executor_failed_factory_does_not_leak_cell ... FAILED
+test executor_live_request_blocks_reuse_despite_retirement_proof ... FAILED
+test executor_never_reclaims_attached_client ... FAILED
+test executor_drop_and_progress_do_not_allocate ... FAILED
+test executor_shutdown_closes_once_keeps_live_read_storage ... ok
+test executor_rotation_is_bounded_and_does_not_starve_later_cells ... FAILED
+
+failures:
+
+---- executor_held_terminal_result_blocks_reuse_and_preserves_bytes stdout ----
+
+thread 'executor_held_terminal_result_blocks_reuse_and_preserves_bytes' (22437459) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:170:384:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- executor_capacity_precedes_factory_and_survives_abandon stdout ----
+
+thread 'executor_capacity_precedes_factory_and_survives_abandon' (22437456) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:163:10:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- executor_failed_factory_does_not_leak_cell stdout ----
+
+thread 'executor_failed_factory_does_not_leak_cell' (22437458) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:183:320:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- executor_live_request_blocks_reuse_despite_retirement_proof stdout ----
+
+thread 'executor_live_request_blocks_reuse_despite_retirement_proof' (22437460) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:167:212:
+assertion failed: matches!(r.try_complete(),Err(fixed_requests::Error::Closing))
+
+---- executor_never_reclaims_attached_client stdout ----
+
+thread 'executor_never_reclaims_attached_client' (22437461) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:177:166:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- executor_drop_and_progress_do_not_allocate stdout ----
+
+thread 'executor_drop_and_progress_do_not_allocate' (22437457) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:186:203:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- executor_rotation_is_bounded_and_does_not_starve_later_cells stdout ----
+
+thread 'executor_rotation_is_bounded_and_does_not_starve_later_cells' (22437462) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement-executor-20261010T084435Z/mutant-missing-retire/test_retirement_executor.rs:174:76:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    executor_capacity_precedes_factory_and_survives_abandon
+    executor_drop_and_progress_do_not_allocate
+    executor_failed_factory_does_not_leak_cell
+    executor_held_terminal_result_blocks_reuse_and_preserves_bytes
+    executor_live_request_blocks_reuse_despite_retirement_proof
+    executor_never_reclaims_attached_client
+    executor_rotation_is_bounded_and_does_not_starve_later_cells
+
+test result: FAILED. 1 passed; 7 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

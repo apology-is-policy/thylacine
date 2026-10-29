@@ -1,0 +1,12 @@
+mutate.py --check: every anchor occurs exactly once: R1 R2
+2026-10-22T10:25:05Z  HEAD ca8c2c2b91bb150546b6da04b72696b2e8eef12c, clean; go fork 3471e2ac027de4a5cbbee9337a3f335b96156e29, clean; anchors + kill messages checked; verdict self-check passes; mutants: R1 R2 
+2026-10-22T10:25:05Z  disk R1: 8238 MiB free (floor 6144)
+2026-10-22T10:26:18Z  R1 (ci): loom.register_rejects -> FAIL: and the resolved fd's ref was rolled back
+2026-10-22T10:26:18Z  R1: tally 2084/2085; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-22T10:26:18Z  R1: KILLED
+2026-10-22T10:26:18Z  disk R2: 8353 MiB free (floor 6144)
+2026-10-22T10:27:35Z  R2 (qual): proc.reap_before_private_executor_charge -> FAIL: a private setup frees the exited workers first and fits
+2026-10-22T10:27:35Z  R2: tally 2084/2085; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-22T10:27:35Z  R2: KILLED
+2026-10-22T10:27:35Z  ALL KILLED: R1 R2  (build/ holds the last mutants' kernels -- run gate.sh next)
+2026-10-22T10:27:35Z  exit 0

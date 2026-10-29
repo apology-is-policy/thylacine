@@ -1,0 +1,8 @@
+PASS fixed SQE preparation: 289 checks
+PASS provided ownership: 577 checks
+PASS retirement ownership: 795 checks
+PASS action executor: 1633 checks
+PASS negotiated iounit: 2316 checks
+PASS engine drain integration: 2885 checks
+PASS return wake integration: 3125 checks
+PASS immutable frontend: 3650 checks

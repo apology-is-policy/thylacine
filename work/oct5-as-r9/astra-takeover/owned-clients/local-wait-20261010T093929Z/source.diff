@@ -1,0 +1,116 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs b/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs
+index d274ba42a..cdbc52a54 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs
+@@ -58,13 +58,19 @@ impl<B:RingBackend> FutureDriver<B>{
+  pub(crate) fn retire_deferred(&mut self)->WakeBatch{
+   self.driver.as_mut().unwrap().begin_retire();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
+  }
++ pub(crate) fn next_deadline(&self)->Option<u64>{self.driver.as_ref().unwrap().next_deadline()}
++ pub(crate) fn expire(&mut self,now:u64,budget:usize)->usize{self.driver.as_mut().unwrap().expire(now,budget)}
+  pub(crate) fn bind_progress(&mut self,signal:super::ring_payload::ProgressSignal){self.driver.as_mut().unwrap().bind_progress(signal);}
+  pub(crate) fn progress(&mut self)->bool{self.driver.as_mut().unwrap().progress()}
+  pub(crate) fn registrations(&self)->usize{self.hub.borrow().slots.iter().filter(|s|s.is_some()).count()}
+ }
+ impl<B:RingBackend> Drop for FutureDriver<B>{fn drop(&mut self){self.close();}}
+-impl<B:RingBackend> ReadFuture<B>{pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
+-impl<B:RingBackend> WriteFuture<B>{pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
++impl<B:RingBackend> ReadFuture<B>{pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{self.request.set_deadline(deadline)}
++ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.request.request_cancel()}
++ pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
++impl<B:RingBackend> WriteFuture<B>{pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{self.request.set_deadline(deadline)}
++ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.request.request_cancel()}
++ pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
+ impl<B:RingBackend> Future for ReadFuture<B>{type Output=Result<ReadCompletion<B>,Error>;fn poll(self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<Self::Output>{let me=self.get_mut();if me.slot.is_none(){return Poll::Ready(Err(Error::Consumed));}let waker=cx.waker().clone();let status=me.request.try_complete();finish(&me.hub,&mut me.slot,status,waker)}}
+ impl<B:RingBackend> Future for WriteFuture<B>{type Output=Result<Completion,Error>;fn poll(self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<Self::Output>{let me=self.get_mut();if me.slot.is_none(){return Poll::Ready(Err(Error::Consumed));}let waker=cx.waker().clone();let status=me.request.try_complete();finish(&me.hub,&mut me.slot,status,waker)}}
+ impl<B:RingBackend> Drop for ReadFuture<B>{fn drop(&mut self){release(&self.hub,&mut self.slot);}}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/local_wait.rs b/work/oct5-as-r9/astra-takeover/owned-clients/local_wait.rs
+index 938bb9037..c6a968ab3 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/local_wait.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/local_wait.rs
+@@ -41,3 +41,20 @@ pub(crate) fn turn<D:Retirable,W:WaitSource>(queue:&mut RetireQueue<D>,source:&m
+  drop(armed);
+  Turn{progress,outcome}
+ }
++
++/// Deadline-aware adapter for existing fixed-request owners. No task dispatch or
++/// native timer is implied. A due request with exhausted scan budget returns
++/// Retry; the caller must grant positive budgets in subsequent turns.
++pub(crate) struct TimedTurn{pub turn:Turn,pub cancellation_requests:usize}
++fn earliest(a:Option<u64>,b:Option<u64>)->Option<u64>{match(a,b){(Some(a),Some(b))=>Some(a.min(b)),(a,b)=>a.or(b)}}
++pub(crate) fn timed_turn<D:Retirable,W:WaitSource>(queue:&mut RetireQueue<D>,source:&mut W,progress_budget:usize,ring_budget:usize,fixed_budget:usize,outer_deadline:Option<u64>)->TimedTurn{
++ let now=source.now();
++ if expired(now,outer_deadline){return TimedTurn{turn:Turn{progress:Progress{visited:0,reclaimed:0,occupied:queue.occupied()},outcome:Outcome::Deadline},cancellation_requests:0};}
++ let cancellation_requests=queue.expire(now,ring_budget,fixed_budget);
++ let deadline=earliest(outer_deadline,queue.next_deadline());
++ let mut step=turn(queue,source,progress_budget,deadline);
++ // A request deadline is work for the next bounded expiry sweep, not an outer
++ // caller timeout. Equal outer/request deadlines preserve caller timeout policy.
++ if step.outcome==Outcome::Deadline&&deadline!=outer_deadline{step.outcome=Outcome::Retry;}
++ TimedTurn{turn:step,cancellation_requests}
++}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs b/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs
+index 5d8287485..420878644 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs
+@@ -11,6 +11,7 @@ pub(crate) trait Retirable{
+  fn write(&self,scope:SlotRef,range:PoolMember,input:&[u8])->Result<Self::Write,DriverError>;
+  unsafe fn receive(&mut self,record:Record)->(Result<(),DriverError>,WakeBatch);
+  fn bind_progress(&mut self,signal:ProgressSignal);
++ fn next_deadline(&self)->Option<u64>;fn expire(&mut self,now:u64,budget:usize)->usize;
+  fn retire(&mut self)->WakeBatch;fn close(&mut self)->WakeBatch;fn progress(&mut self)->bool;
+ }
+ impl<B:RingBackend> Retirable for FixedDriver<B>{
+@@ -19,6 +20,8 @@ impl<B:RingBackend> Retirable for FixedDriver<B>{
+  fn write(&self,s:SlotRef,r:PoolMember,b:&[u8])->Result<Self::Write,DriverError>{FixedDriver::write(self,s,r,b)}
+  unsafe fn receive(&mut self,r:Record)->(Result<(),DriverError>,WakeBatch){(unsafe{FixedDriver::receive(self,r)},WakeBatch::empty())}
+  fn bind_progress(&mut self,signal:ProgressSignal){FixedDriver::bind_progress(self,signal);}
++ fn next_deadline(&self)->Option<u64>{FixedDriver::next_deadline(self)}
++ fn expire(&mut self,now:u64,budget:usize)->usize{FixedDriver::expire(self,now,budget)}
+  fn retire(&mut self)->WakeBatch{self.begin_retire();WakeBatch::empty()}
+  fn close(&mut self)->WakeBatch{FixedDriver::close(self);WakeBatch::empty()}
+  fn progress(&mut self)->bool{FixedDriver::progress(self)}
+@@ -29,12 +32,14 @@ impl<B:RingBackend> Retirable for FutureDriver<B>{
+  fn write(&self,s:SlotRef,r:PoolMember,b:&[u8])->Result<Self::Write,DriverError>{FutureDriver::write(self,s,r,b)}
+  unsafe fn receive(&mut self,r:Record)->(Result<(),DriverError>,WakeBatch){unsafe{self.receive_deferred(r)}}
+  fn bind_progress(&mut self,signal:ProgressSignal){FutureDriver::bind_progress(self,signal);}
++ fn next_deadline(&self)->Option<u64>{FutureDriver::next_deadline(self)}
++ fn expire(&mut self,now:u64,budget:usize)->usize{FutureDriver::expire(self,now,budget)}
+  fn retire(&mut self)->WakeBatch{self.retire_deferred()}
+  fn close(&mut self)->WakeBatch{self.close_deferred()}
+  fn progress(&mut self)->bool{FutureDriver::progress(self)}
+ }
+ struct Entry<D:Retirable>{driver:D,retiring:bool}
+-struct State<D:Retirable>{slots:Vec<Option<Entry<D>>>,cursor:usize,open:bool,signal:ProgressSignal,scan_left:usize}
++struct State<D:Retirable>{slots:Vec<Option<Entry<D>>>,cursor:usize,deadline_cursor:usize,open:bool,signal:ProgressSignal,scan_left:usize}
+ pub(crate) struct RetireQueue<D:Retirable>{state:Rc<RefCell<State<D>>>}
+ pub(crate) struct Managed<D:Retirable>{state:Rc<RefCell<State<D>>>,slot:usize}
+ pub(crate) type RetirementExecutor<B> = RetireQueue<FixedDriver<B>>;
+@@ -46,7 +51,7 @@ impl<D:Retirable> RetireQueue<D>{
+  pub(crate) fn new(capacity:usize)->Result<Self,Error>{
+   if capacity==0||capacity>64{return Err(Error::Capacity);}
+   let mut slots=Vec::with_capacity(capacity);slots.resize_with(capacity,||None);
+-  Ok(Self{state:Rc::new(RefCell::new(State{slots,cursor:0,open:true,signal:ProgressSignal::new(),scan_left:0}))})
++  Ok(Self{state:Rc::new(RefCell::new(State{slots,cursor:0,deadline_cursor:0,open:true,signal:ProgressSignal::new(),scan_left:0}))})
+  }
+  /// Factory runs only after capacity check, outside the shared-state borrow.
+  /// Unique &mut self and creator-thread ownership prevent concurrent admission;
+@@ -83,6 +88,18 @@ impl<D:Retirable> RetireQueue<D>{
+  /// Host/native adapter must call for readiness/retirement/deadline events.
+  /// No OS wakeup is implied; all owned handle drops happen on this creator.
+  pub(crate) fn notify_progress(&self){self.state.borrow().signal.notify();}
++ /// Full bounded minimum: at most64 drivers, each with64 fixed-owner cells.
++ /// Includes attached and retiring drivers, whose timers remain owned here.
++ pub(crate) fn next_deadline(&self)->Option<u64>{self.state.borrow().slots.iter().flatten().filter_map(|e|e.driver.next_deadline()).min()}
++ /// Independent rotating timer cursor; retirement visits cannot starve timers.
++ /// At most min(ring_budget,capacity)*min(fixed_budget,64) fixed-cell visits.
++ /// Backend abort callbacks must not reenter; no task Wakers are invoked here.
++ pub(crate) fn expire(&mut self,now:u64,ring_budget:usize,fixed_budget:usize)->usize{
++  let mut s=self.state.borrow_mut();let capacity=s.slots.len();let mut requested=0;
++  for _ in 0..ring_budget.min(capacity){let i=s.deadline_cursor;s.deadline_cursor=(i+1)%capacity;
++   if let Some(e)=s.slots[i].as_mut(){requested+=e.driver.expire(now,fixed_budget);}
++  }requested
++ }
+  pub(crate) fn occupied(&self)->usize{self.state.borrow().slots.iter().filter(|e|e.is_some()).count()}
+ }
+ impl<D:Retirable> Drop for RetireQueue<D>{fn drop(&mut self){

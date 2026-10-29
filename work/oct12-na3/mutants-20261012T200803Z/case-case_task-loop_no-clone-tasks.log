@@ -1,0 +1,18 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/crate)
+error[E0599]: no method named `clone` found for struct `Tasks` in the current scope
+    --> src/tests/ring.rs:2663:38
+     |
+2663 | let t=Tasks::new(1).unwrap();let _=t.clone();
+     |                                      ^^^^^ method not found in `Tasks`
+     |
+    ::: src/local_tasks.rs:58:1
+     |
+  58 | pub(crate) struct Tasks {
+     | ----------------------- method `clone` not found for this struct
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `clone`, perhaps you need to implement it:
+             candidate #1: `Clone`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

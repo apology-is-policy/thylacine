@@ -51,6 +51,7 @@ macro_rules! say {
 mod gpu;
 mod input;
 mod server;
+mod seat_coordinator;
 
 use alloc::vec::Vec;
 
@@ -70,6 +71,7 @@ use crate::input::{
     REL_X, REL_Y,
 };
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
+const _: () = assert!(MAX_CONNS + 2 + libhalcyon::layout::MAX_PANES <= 64);
 use tapestryd::keymap::{self, Mods};
 
 // =============================================================================
@@ -431,6 +433,8 @@ impl Driver for Tapestryd {
         // probe above this is a WITNESS, not a measurement: its arms assert.
         self.comp.warp_img_selftest();
 
+        self.comp.start_seat_coordinator()?;
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();
@@ -469,11 +473,13 @@ impl Driver for Tapestryd {
                 Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
             };
             if phase != 0 {
+                self.comp.interaction_suspend();
                 let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
                 continue;
             }
             if generation != seat_generation {
                 seat_generation = generation;
+                self.comp.interaction_suspend();
                 self.mods = Mods::default();
                 self.comp.seat_resumed();
             }
@@ -773,6 +779,7 @@ impl Driver for Tapestryd {
                     revents: 0,
                 });
             }
+            self.comp.interaction_sweep();
             let conn_base = pollfds.len();
             for c in &conns {
                 pollfds.push(TPollFd {
@@ -781,6 +788,8 @@ impl Driver for Tapestryd {
                     revents: 0,
                 });
             }
+            let interaction_base = pollfds.len();
+            self.comp.interaction_poll(&mut pollfds);
             let remain = period_ms.saturating_sub(elapsed_ms % period_ms.max(1));
             let timeout = if frozen {
                 30 // no tick scheduled; a short pace keeps input drained
@@ -797,6 +806,7 @@ impl Driver for Tapestryd {
                 timeout
             };
             let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
+            if rc >= 0 { self.comp.interaction_ready(&pollfds[interaction_base..]); }
             if rc < 0 {
                 continue;
             }
@@ -813,8 +823,9 @@ impl Driver for Tapestryd {
                     let h = unsafe { t_srv_accept(listener) };
                     if h >= 0 {
                         if conns.len() < MAX_CONNS {
-                            let id = self.comp.next_conn_id();
-                            conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                            if let Some(id) = self.comp.next_conn_id() {
+                                conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                            } else { unsafe { t_close(h) }; }
                         } else {
                             // Refuse fast: the pool is full.
                             unsafe { t_close(h) };
@@ -827,8 +838,9 @@ impl Driver for Tapestryd {
                 let h = unsafe { t_srv_accept(warp_listener) };
                 if h >= 0 {
                     if conns.len() < MAX_CONNS {
-                        let id = self.comp.next_conn_id();
-                        conns.push(Conn::new(h, id, ROOT_WARP));
+                        if let Some(id) = self.comp.next_conn_id() {
+                            conns.push(Conn::new(h, id, ROOT_WARP));
+                        } else { unsafe { t_close(h) }; }
                     } else {
                         unsafe { t_close(h) };
                     }
@@ -836,7 +848,9 @@ impl Driver for Tapestryd {
             }
 
             // (6) Service ready conns (backward, remove-safe).
-            let nc = conns.len().min(pollfds.len().saturating_sub(conn_base));
+            // Watches follow the old connection set. Newly accepted connections
+            // have no poll result in this iteration.
+            let nc = interaction_base - conn_base;
             let mut i = nc;
             while i > 0 {
                 i -= 1;

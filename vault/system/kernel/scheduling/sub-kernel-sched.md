@@ -73,9 +73,10 @@ blocked (see Caveats).
 L-1 address-space extraction — the test was `pgtable_root != 0`, and the
 root now lives one indirection further out, so **the in-kernel test runner
 stays NORMAL because it has no AddrSpace**, not because its root is zero),
-and it never touches an IDLE thread. Its two callers each apply their own trust gate — `kobj_irq_wait`
-is implicitly `CAP_HW_CREATE`-gated by needing an IRQ kobj, and
-`devcons_read` gates on the trusted console session.
+and it never touches an IDLE thread. Its callers each apply their own trust gate — the IRQ waits
+(`kobj_irq_wait_timed`, `pci_irq_wait`) are implicitly `CAP_HW_CREATE`-gated by
+needing an IRQ kobj, and the console reads (`cons_input_read`,
+`cons_drain_read`) gate on the trusted console session.
 
 **The sort.** Each band is a doubly-linked list kept ascending by `vd_t`,
 so the head is the minimum. Ties insert *after* equal keys — FIFO within
@@ -130,6 +131,18 @@ the once-set cross-CPU placement kick, so consuming it would lose the
 placement; the deferred preempt fires at the first IRQ-return after the
 hold drops, within a tick.
 
+**The leaf depth** is the count's companion for lock ORDER
+(`spin_leaf_enter`/`spin_leaf_exit`/`spin_leaf_refuse`, declared in
+`spinlock.h`, bodies beside the count's). A lock declared a leaf marks each
+hold; a lock that must stay outside every leaf calls `spin_leaf_refuse` before
+it acquires, and extincts with its own message inside a leaf hold, so an
+inverted nesting fails the first time it runs rather than the one time two
+CPUs interleave it. The depth is per-CPU (`g_spin_leaf_depth`), which is sound
+because a leaf holder is non-preemptible and its depth stays on its CPU.
+`spin_leaf_refuse` reads nothing when its own thread holds no counted lock:
+such a thread can migrate between reading its CPU index and the depth, and
+would read a stranger's. Today the vivarium socket table's lock is the one leaf
+and the handle table's the one refuser ([[sub-kernel-handle]]).
 **A thread that is not RUNNING is never switched out at an IRQ return**
 (2026-10-20). One that has committed to exit or to sleep is a few instructions
 from its own `sched()`; switched out there instead, an EXITING thread never runs
@@ -383,6 +396,8 @@ that must never happen:
 | `pick_next`, `try_steal` | victim not `RUNNABLE && !on_cpu` |
 | `sched_install_bootcpu_idle` | not IDLE band; not pinned; not on cpu0; before `sched_init(0)` |
 | `spin_preempt_dec` | release at count 0 — an unbalanced release |
+| `spin_leaf_exit` | a leaf release at depth 0 — an unbalanced mark |
+| `spin_leaf_refuse` | a refusing lock acquired inside a leaf hold (the caller's message) |
 | `sched_report_el0_leak` | a counted lock still held at an EL0 return (#361) |
 
 The "deadlock" extinction in `sched()` deserves its own note: after the
@@ -519,3 +534,10 @@ the execve immediate-install, plus the #214 F1 depth reset, are
 [[chg-2026-08-16-sched-addrspace-install]]. The resume tail's free of an
 exited user thread, and the per-band counts, are
 [[chg-2026-10-22-thread-model-c1]].
+
+**`sched_take_deferred_preempt` (2026-10-14).** (Not ARCH 8.12's deleted `sched_preempt_point`, which unmasked a window inside a masked syscall body; this one masks.) `preempt_check_irq` from thread
+context: it masks IRQs, runs the same check (scheduler up, a resched pending,
+a valid thread, preempt count 0, not in a syscall body) and restores. It is
+for a preempt hold that drops with IRQs on: the console gate's per-byte hold
+(sub-kernel-halls). An IRQ landing on the next instruction would run the same
+check, so it adds no switch point a caller could not already meet.

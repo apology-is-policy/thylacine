@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -73,7 +73,7 @@
+     loom_ref(l);
+     struct SrvConnectAdmission admission;
+     rc = devsrv_service_prepare(native, &identity, &admission);
+-    (void)loom_private_target_put(l, target);
++    /* omitted target put */
+     if (rc) { loom_unref(l); return rc; }
+     u32 msize = srvconn_msize(admission.conn);
+     if (msize != SRVCONN_MSIZE && msize != SRVCONN_BULK_MSIZE) {

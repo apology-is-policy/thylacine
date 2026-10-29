@@ -1,0 +1,4 @@
+mac   HELD by you for 36s, 59m left
+        why: Astra rebuildable Go cache cleanup and guarded native smoke
+pi    FREE
+disk: 8.8 GiB available at /Users/northkillpd/projects/thylacine-astra

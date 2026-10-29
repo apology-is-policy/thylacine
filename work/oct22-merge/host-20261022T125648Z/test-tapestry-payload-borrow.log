@@ -1,0 +1,4 @@
+PASS intended mutation: ordered-tag ordered::tests::simultaneous_write_does_not_borrow_pending_read
+PASS intended mutation: admission-tag admission::tests::payload_borrow_requires_matching_read_completion
+PASS intended mutation: seat-tag seat::tests::payload_borrow_requires_matching_read_completion
+PASS intended mutation: event-region ring::tests::completion_borrows_only_its_region_after_identity_check

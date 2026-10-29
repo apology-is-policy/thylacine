@@ -41,80 +41,21 @@
 // Tflush must find no tag either -- what a failed chunk allocation leaves.
 #define TP_POOL 64u
 
-void test_9p_client_init_destroy(void);
-void test_9p_client_handshake(void);
-void test_9p_client_walk_and_clunk(void);
-void test_9p_client_lopen_read(void);
-void test_9p_client_write(void);
-void test_9p_client_getattr(void);
-void test_9p_client_readdir(void);
-void test_9p_client_statfs(void);
-void test_9p_client_weft(void);
-void test_9p_client_weftio(void);
-void test_9p_client_mkdir(void);
-void test_9p_client_unlinkat(void);
-void test_9p_client_readlink(void);
-void test_9p_client_rlerror_propagates_to_negative_errno(void);
-void test_9p_client_rlerror_hostile_ecode_bounded(void);
-void test_9p_client_op_before_handshake_returns_ebusy(void);
-void test_9p_client_lock_released_between_ops(void);
-void test_9p_client_async_op_posts_cqe(void);
-void test_9p_client_async_session_death_posts_error_cqe(void);
-void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
-void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
-void test_9p_client_async_handoff_skips_async(void);
-void test_9p_client_death_hangs_up_once(void);
-void test_9p_client_handoff_skips_stop_parked(void);
-void test_9p_client_reader_hook_contract(void);
-void test_9p_client_pump_ready_idle(void);
-void test_9p_client_pump_ready_data_progresses(void);
-void test_9p_client_pump_ready_chunked_frame_completes(void);
-void test_9p_client_pump_ready_busy_when_reader_active(void);
-void test_9p_client_pump_ready_eof_is_dead(void);
-void test_9p_client_loom_fsync_e2e(void);
-void test_9p_client_loom_rights_deny(void);
-void test_9p_client_loom_quiesce_abandons_inflight(void);
-void test_9p_client_loom_multishot_stream(void);
-void test_9p_client_loom_multishot_backpressure(void);
-void test_9p_client_loom_read_e2e(void);
-void test_9p_client_loom_write_e2e(void);
-void test_9p_client_loom_rw_rejects(void);
-void test_9p_client_loom_readdir_e2e(void);
-void test_9p_client_loom_readlink_e2e(void);
-void test_9p_client_loom_getattr_e2e(void);
-void test_9p_client_loom_statfs_e2e(void);
-void test_9p_client_loom_metaread_rejects(void);
-void test_9p_client_loom_mkdir_e2e(void);
-void test_9p_client_loom_setattr_e2e(void);
-void test_9p_client_loom_renameat_e2e(void);
-void test_9p_client_loom_mutation_rejects(void);
-void test_9p_client_loom_dirmut_dac(void);
-void test_9p_client_loom_dirmut_sqpoll(void);
-void test_9p_client_loom_create_gid(void);
-void test_9p_client_loom_cape(void);
-void test_9p_client_loom_dirmut_names(void);
-void test_9p_client_loom_enter_reads_every_client(void);
-void test_9p_client_loom_enter_partial_set_rescans(void);
-void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
-void test_9p_client_loom_enter_sees_a_sibling_submit(void);
-void test_9p_client_pump_ready_never_waits_inside_a_frame(void);
-void test_9p_client_loom_quiesce_drains_the_late_reply(void);
-
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
 static u8 g_recv_buf[4096];
 static u8 g_loopback_resp[4096];
 
-// Reusable responder that handles every Tmsg type with a sensible
-// canned response. Tests choose which fid path / qid the server
-// returns by reading the request opcode + tag. Non-static: the
-// SrvConn-vehicle device-gone tests (test_9p_srvconn_transport.c)
-// pre-stage handshake replies through it -- the single source of
-// truth for the canonical 9P2000.L reply byte layouts.
 // Staged by the walkgetattr test: the responder answers one element
 // FEWER than requested (a partial walk).
 static bool g_wga_partial = false;
 
+// Reusable responder that handles every Tmsg type with a sensible
+// canned response. Tests choose which fid path / qid the server
+// returns by reading the request opcode + tag. The SrvConn-vehicle
+// device-gone tests (test_9p_srvconn_transport.c) pre-stage handshake
+// replies through it -- the single source of truth for the canonical
+// 9P2000.L reply byte layouts.
 int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap) {
     (void)ctx;
@@ -929,7 +870,11 @@ static int test_build_getattr(struct p9_session *s, u8 *out, size_t cap, void *c
 
 // A demuxed reply drives on_complete, which posts a CQE carrying the op's
 // user_data + the mapped (success = 0) result.
+#include "private_client_fixture.h"
+
 void test_9p_client_async_op_posts_cqe(void) {
+    const char *private_error = private_client_fixture_run();
+    TEST_ASSERT(private_error == NULL, private_error);
     struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
@@ -4318,37 +4263,6 @@ void test_9p_client_async_full_tag_pool_is_eagain(void) {
 // reader role itself (reader_active), as a peer blocked in recv would.
 // =============================================================================
 
-void test_9p_client_clunk_dying_keeps_fid_bound(void);
-void test_9p_client_clunk_killed_while_parked(void);
-void test_9p_client_clunk_killed_in_tag_drain(void);
-void test_9p_client_nowait_clunk_full_share_defers(void);
-void test_9p_client_nowait_clunk_full_ring_takes_back(void);
-void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
-void test_9p_client_flushed_walk_late_reply_to_sink(void);
-void test_9p_client_abandoned_walk_late_reply_kept(void);
-void test_9p_client_abandoned_async_clunk_not_flushed(void);
-void test_9p_client_clunk_rlerror_drains_as_clunk(void);
-void test_9p_client_clunk_malformed_reply_fails_closed(void);
-void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
-void test_9p_client_flush_malformed_reply_fails_closed(void);
-void test_9p_client_note_flush_honours_late_read(void);
-void test_9p_client_note_flush_rflush_first_cancels(void);
-void test_9p_client_note_flush_death_abandons(void);
-void test_9p_client_note_flush_reader_honours_walk(void);
-void test_9p_client_note_flush_full_pool_own_reply(void);
-void test_9p_client_note_flush_pump_wakes_parked_flush(void);
-void test_9p_client_note_flush_reader_rflush_first(void);
-void test_9p_client_note_flush_reply_beats_unsent_flush(void);
-void test_9p_client_note_flush_handoff_skips_staging(void);
-void test_9p_client_handoff_skips_send_parked(void);
-void test_9p_client_note_flush_staging_takes_pumped_tag(void);
-void test_9p_client_async_clunk_drain_takes_pumped_tag(void);
-void test_9p_client_stopped_waiter_elects_on_resume(void);
-void test_9p_client_stopped_owner_reply_frees_tag(void);
-void test_9p_client_note_flush_stopped_staging_reply_frees_tag(void);
-void test_9p_client_handoff_skips_restopped_owner(void);
-void test_9p_client_loom_enter_wakes_when_role_frees(void);
-
 #define DY_CLUNK_ASYNC  1
 #define DY_CLUNK_SYNC   2
 #define DY_WALK         3
@@ -5676,21 +5590,6 @@ static void dy_stop_flag(struct test_dying *d, bool job, u32 v) {
                      __ATOMIC_RELEASE);
 }
 
-// A third op thread: an async clunk.
-static struct test_dying g_dyz;
-static struct { u32 fid; int rc; } g_dyzop;
-
-static void dyz_run(void *arg) {
-    (void)arg;
-    g_dyzop.rc = p9_client_clunk_async(&g_client, g_dyzop.fid);
-}
-
-static bool dyz_start_clunk(u32 fid) {
-    g_dyzop.fid = fid;
-    g_dyzop.rc  = 0x7fffffff;
-    return test_dying_start(&g_dyz, dyz_run, NULL, /*dead_now=*/false);
-}
-
 // The read X waits behind the held reader with its Rread queued and is stopped
 // there (^Z). The reader departs with nobody to designate, and X resumes. X
 // must then take the role and read its own reply. Parked in place, it re-checked
@@ -6374,11 +6273,10 @@ void test_9p_client_loom_sqpoll_parks_on_a_held_role(void) {
 // goes: a destroy under a sleeper frees what it sleeps on. A Loom ring a test
 // leaves alive is not seen here; the ring tests release theirs before their
 // verdicts. Returns whether anything was left up.
-bool test_9p_client_release(void);
 bool test_9p_client_release(void) {
     __atomic_store_n(&g_loom_fanin_test_cap, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_loom_fanin_test_stall, 0u, __ATOMIC_RELEASE);
-    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dyz, &g_dle, &g_dle2 };
+    struct test_dying *ops[] = { &g_dy, &g_dyx, &g_dle, &g_dle2 };
     bool left = false;
     for (u32 i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         struct test_dying *d = ops[i];

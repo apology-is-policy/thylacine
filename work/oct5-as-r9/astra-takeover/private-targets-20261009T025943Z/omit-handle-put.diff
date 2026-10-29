@@ -1,0 +1,11 @@
+--- control
++++ omit-handle-put
+@@ -102,7 +102,7 @@
+         rc = h.kind == KOBJ_SPOOR ?
+             devsrv_service_target_init(h.obj, (const char *)in->name,
+                                        in->name_len, &fresh) : -T_E_OPNOTSUPP;
+-        handle_put(&h);
++        if(false) handle_put(&h);
+     }
+     spin_lock(&l->lock);
+     if (!rc && l->service_closing) rc = -T_E_CANCELED;

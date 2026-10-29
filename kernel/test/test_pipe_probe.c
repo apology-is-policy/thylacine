@@ -11,9 +11,8 @@
 //                                  + t_exits(0)
 //   wait_pid                   → status = 0 → test PASS
 //
-// If /pipe-probe wasn't built (user invoked tools/build.sh kernel only)
-// the devramfs lookup fails — we SKIP rather than FAIL so the kernel
-// boot test runner still passes.
+// A missing /pipe-probe FAILS the test when the image carries userspace
+// (bin/joey); a userspace-less image makes it a counted skip.
 
 #include "test.h"
 
@@ -26,8 +25,6 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/uart.h"
-
-void test_pipe_probe_round_trip(void);
 
 // pipe-probe is slightly larger than virtio-blk-probe etc. (12-16 KiB
 // range): the inline syscall stubs for pipe/read/write/close/dup
@@ -64,11 +61,8 @@ void test_pipe_probe_round_trip(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/pipe-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/pipe-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/pipe-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
     TEST_ASSERT(size <= PIPE_PROBE_BLOB_MAX,
                 "pipe-probe binary too large for static buffer");

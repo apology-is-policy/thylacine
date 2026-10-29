@@ -1,0 +1,11 @@
+--- control
++++ omit-request-unwind
+@@ -159,7 +159,7 @@
+     struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || layout_fault) ? NULL :
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+-        kfree(requests);
++
+         kfree(nodes);
+         kfree(targets);
+         kfree(pools);

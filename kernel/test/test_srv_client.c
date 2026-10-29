@@ -49,29 +49,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-// Read/write + accept cores defined in kernel/syscall.c (non-static).
-extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
-extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
-                              u64 len);
-extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
-
-// Test-support: registry wipe (non-static in kernel/devsrv.c, no
-// production caller).
-extern void srv_registry_reset(void);
-
-void test_srv_client_no_per_proc_cap(void);
-void test_srv_client_byte_mode_propagates_to_conn(void);
-void test_srv_client_byte_mode_conn_dispatch(void);
-void test_srv_client_byte_mode_mode_change_rebind_refused(void);
-void test_srv_client_byte_mode_server_recv_blocking_eof(void);
-void test_srv_client_cape_post(void);
-void test_srv_client_cape_admission(void);
-void test_srv_client_cape_post_syscall(void);
-void test_srv_client_remote_admission(void);
-void test_srv_client_remote_post(void);
-void test_srv_client_remote_recycle(void);
-void test_srv_client_remote_post_syscall(void);
-
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
@@ -441,10 +418,6 @@ void test_srv_client_cape_post(void) {
     srv_registry_reset();
 }
 
-extern s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
-                                          const char *kname, u64 klen,
-                                          u64 omode_raw, u64 perm_raw);
-
 // A service post through SYS_WALK_CREATE's own path (its inner): the cape bit
 // reaches the post and marks the service, and a caped 9P-mode post is refused
 // before anything is registered.
@@ -626,13 +599,22 @@ void test_srv_client_remote_recycle(void) {
     TEST_ASSERT(svc != NULL && !svc->remote, "the recycled entry is plain, as posted");
 
     srv_proc_exit_notify(b);
-    TEST_ASSERT(post_svc_decl(a, "now-remote", 10, SRV_MODE_9P, false, true) >= 0,
+    // D7 closes a dead Proc's posting admission permanently. A new process,
+    // not a resurrected poster, must exercise the second recycle direction.
+    struct Proc *c = make_test_proc();
+    TEST_ASSERT(c != NULL, "replacement poster");
+    c->caps |= CAP_POST_SERVICE;
+    c->legate_scope_id = 0x9abc;
+    TEST_ASSERT(post_svc_decl(c, "now-remote", 10, SRV_MODE_9P, false, true) >= 0,
                 "a remote post of a new name recycles the plain tombstone");
     svc = srv_lookup_in(srv_boot_registry(), "now-remote", 10);
     TEST_ASSERT(svc == old, "the recycle arm took the slot again");
     TEST_ASSERT(svc != NULL && svc->remote, "the recycled entry is remote, as posted");
 
     srv_proc_exit_notify(a);
+    srv_proc_exit_notify(c);
+    c->legate_scope_id = 0;
+    drop_test_proc(c);
     a->legate_scope_id = b->legate_scope_id = 0;
     drop_test_proc(a);
     drop_test_proc(b);

@@ -1,0 +1,11 @@
+--- control
++++ omit-image
+@@ -96,7 +96,7 @@
+                                struct loom_private_fixed *f) {
+     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !m || !f ||
+         !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+-    if (p->as != l->service_as || p->stripes != l->service_creator)
++    if (p->stripes != l->service_creator)
+         return -T_E_ACCES;
+     int rc = 0;
+     struct loom_pool_extent e;

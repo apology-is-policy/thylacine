@@ -3,7 +3,7 @@ id: sub-kernel-mmu
 type: sub
 parent: moc-kernel-memory
 title: "The MMU — page tables, the PTE encoders, and the aliases that keep W^X true"
-code: [arch/arm64/mmu.c, arch/arm64/mmu.h]
+code: [arch/arm64/mmu.c, arch/arm64/mmu.h, kernel/test/test_mmu.c]
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i16, inv-i31, inv-i32, inv-i39]
 validated-by: [prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-10-22
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -32,11 +32,11 @@ Grouped by what they are for, since the file is long:
 |---|---|
 | bring-up | `mmu_enable`, `mmu_program_this_cpu`, `mmu_retire_ttbr0_identity` |
 | kernel views | `mmu_map_mmio`, `pa_to_kva` / `kva_to_pa` (in `page.h`) |
-| guard pages | `mmu_set_no_access[_range]`, `mmu_restore_normal[_range]`, `mmu_pagemap_directmap` |
-| per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_pte(as, ..)`, `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
+| guard pages | `mmu_set_no_access_range`, `mmu_restore_normal_range` (the single-page forms are the tests'), `mmu_pagemap_directmap` |
+| per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
 | self-modification | `mmu_patch_text`, `arch_icache_sync_range` |
 | cross-Proc | `mmu_cross_proc_read` / `_write` |
-| W^X | `pte_violates_wxe` — **and see Caveats: it has no callers** |
+| W^X | none: the leaf encoders check every value through `pte_violates_wxe` (static in production; the tests' declaration is under `KERNEL_TESTS`) |
 
 ## Mechanism
 
@@ -57,8 +57,28 @@ their second level emptied, so the register never points at physical zero.
 **The permission encoding is the invariant.** Composite constants —
 `PTE_KERN_TEXT` (read-only, executable at EL1), `PTE_KERN_RO` and `PTE_KERN_RW`
 (both execute-never) — make the forbidden combination unconstructible, and
-seven `_Static_assert`s pin the bits so a refactor that made kernel text
-writable fails the build rather than the boot.
+fifteen `_Static_assert`s pin the bits of all seven composites, the EL1 leg
+(read-only or `PXN` on each) and the EL0 leg (`UXN` on all seven: EL0
+instruction fetch ignores AP), so a refactor that made kernel text writable, or
+any kernel memory executable at EL0, fails the build rather than the boot.
+
+**And every leaf is checked as it is built** (operator vote 22, 2026-10-27).
+Four encoders build every leaf descriptor in the file -- `make_block_pte_l1`
+and `make_block_pte_l2` (kernel blocks), `make_page_pte_l3` (kernel pages) and
+`make_user_pte_l3` -- and each returns its value through `pte_wxe_checked`,
+which asks `pte_violates_wxe` (writable, AP bit 7 clear, with `PXN` or `UXN`
+clear) and extincts with `PTE violates W^X at install (kernel L1 block)`,
+`(kernel L2 block)`, `(kernel page)` or `(user page)` before any table can hold
+the value. For a kernel leaf the compiler does the checking: every kernel caller
+passes a constant composite, so a clean one folds the check away (neither shipped
+kernel contains the kernel bodies) and one edited past its asserts folds to an
+unconditional extinction at its first use, in `build_page_tables` with the MMU
+off (Caveats). For a user leaf, whose prot is a run-time value, the check runs
+every time. It is the backstop, not the gate:
+the composites are clean by the asserts, and a user `WRITE|EXEC` never reaches
+the encoder (`vma_alloc` refuses the VMA, and both install entries refuse the
+prot). What it catches is a regression in either -- a composite edited past its
+asserts, or a caller that bypassed the VMA layer.
 
 `make_user_pte_l3` derives user permissions from a VMA's prot: writable →
 read-write for both levels; readable → read-only for both; neither → no EL0
@@ -124,8 +144,8 @@ That is worth stating as a pattern: **the race was removed by making the
 dangerous transition impossible at runtime, not by locking it.**
 
 **Unmapping and the invalidate.** Clearing a user PTE is not enough; the stale
-translation must be flushed. `mmu_uninstall_user_pte` clears the leaf, then
-broadcasts an invalidate by address and waits for it. Skipping this was a real
+translation must be flushed. The range clear (`mmu_uninstall_user_range`)
+clears each leaf, then broadcasts an invalidate by address and waits for it. Skipping this was a real
 bug: detached memory kept working through cached translations, and when the
 allocator returned a *different* physical page for the same address on
 re-attach, writes went to the recycled page — content-dependent corruption that
@@ -204,10 +224,11 @@ which the reclaim holds.
 
 ## Invariants enforced
 
-[[inv-i12]] — the composites, the seven asserts, the user encoder, and both
-transient aliases. The **gate** is not here: it is `vma_alloc`'s rejection
-([[sub-kernel-vma]]). This file makes the invariant *representable* and
-unbreakable-by-refactor; one `if` a layer up makes it *true*.
+[[inv-i12]] — the composites, the fifteen asserts, the encoders' check of every
+leaf, the user encoder, and both transient aliases. The **gate** is not here: it
+is `vma_alloc`'s rejection ([[sub-kernel-vma]]). This file makes the invariant
+*representable*, unbreakable-by-refactor and fail-closed at the leaf; one `if` a
+layer up makes it *true*.
 
 [[inv-i13]] — the address-space split itself. Kernel and user live in different
 translation roots.
@@ -274,8 +295,9 @@ found mid-walk. Allocation failure during table growth returns `-1` and the
 fault becomes a per-Proc termination.
 
 The extinctions are for conditions that mean an assumption has already failed:
-a translation fault while patching text, an executable mapping on a non-cacheable
-index or an out-of-range MAIR index at the encoder, vmalloc exhaustion, and the
+a translation fault while patching text, a writable and executable leaf at any
+encoder, an executable mapping on a non-cacheable
+index or an out-of-range MAIR index at the user encoder, vmalloc exhaustion, and the
 allocation failure during boot page-mapping — that last one extincts because the
 invariant it establishes cannot be established later.
 
@@ -295,8 +317,8 @@ returns, and that holds either way.
 ## Prosecution
 
 On any change here: that no PTE constructor can produce writable-and-executable
-(add an assert with each new composite — three of the seven currently have
-none); that the patcher's scratch stays execute-never and the canonical stays
+(add an assert with each new composite, and build every leaf through an
+encoder -- a leaf composed by hand skips the W^X check); that the patcher's scratch stays execute-never and the canonical stays
 read-only, with instruction-cache maintenance between the write and any fetch;
 that the boot pre-demote still covers the whole allocator zone, since the
 lock-free guard path depends on it entirely; that every user-PTE clear keeps its
@@ -318,9 +340,12 @@ Two more, both about arguments rather than code:
 
 ## Seams
 
-- Three of the seven W^X-bearing composites carry no `_Static_assert` — the
-  block-form kernel mappings and the page-grain device mapping. All are correct
-  today; none is pinned. The device one is used for every driver's registers.
+- The leaf check holds by convention: a descriptor composed by hand
+  (`pa | attrs` stored straight into a table) does not pass through it. Three
+  did until vote 22 -- the direct map's 1 GiB blocks, the kernel GiB's 2 MiB
+  blocks and the demote's 2 MiB blocks, all from clean composites -- and now
+  call `make_block_pte_l1` / `make_block_pte_l2`. Nothing but review stops a
+  fourth.
 - The direct map reaches 8 GiB. More physical memory than that needs the map
   extended first; the allocator is capped to match, and the cap is enforced
   where the coupling lives rather than assumed.
@@ -328,13 +353,31 @@ Two more, both about arguments rather than code:
 
 ## Caveats
 
-**`pte_violates_wxe` has no callers.** It is a correct W^X predicate that
-nothing invokes — not the install path, not a test, not a tool. Five documents
-name it as enforcement, including the invariant table in the architecture
-scripture and an error-path table describing what "callers" do. An audit round
-once fixed a real bug *inside* it (it checked only the kernel-execute bit, so a
-writable user-executable page read as clean) and recorded "dormant; 0 callers"
-as a parenthetical without asking why. Full chain in [[inv-i12]]; task #59.
+**`pte_violates_wxe` had no callers until 2026-10-27.** It was a correct W^X
+predicate that nothing invoked -- not the install path, not a test, not a tool --
+while five documents named it as enforcement, including the invariant table in
+the architecture scripture and an error-path table describing what "callers" do.
+An audit round once fixed a real bug *inside* it (it checked only the
+kernel-execute bit, so a writable user-executable page read as clean) and
+recorded "dormant; 0 callers" as a parenthetical without asking why. Its task
+number was later reused, so for twelve weeks it had no owner. Operator vote 22
+wired it into the encoders (Mechanism), which made those documents true. Full
+chain in [[inv-i12]].
+
+**An extinction with the MMU off executes no exclusive (2026-10-27).** With
+stage 1 translation off every data access is Device-nGnRnE, and an exclusive
+pair to Device memory is IMPLEMENTATION DEFINED. `extinction()` used to claim
+the console with one (`ldaxr`/`stlxr` on `.bss`), and every console byte passed
+another, so `build_page_tables`' own extinctions, and a composite edited past
+its asserts (whose folded extinction runs there first), hung with no
+`EXTINCTION:` line. Measured: the `extinction_mmu_off` fault variant printed
+nothing under HVF on Apple silicon and under KVM on thyla-pi's Cortex-A72, where
+the boot CPU spun at the claim's `stlxr` forever. With the MMU off,
+`extinction()` now takes the console without an atomic ([[sub-kernel-halls]]),
+and the variant prints the banner and the dump on both. A second provoker sits at
+the same place for `vbar_pre_mmu`: an unaligned load (an Alignment fault, since
+every access is to Device memory) that only the boot CPU's PA vectors, installed
+before the first C call, turn into a line ([[sub-kernel-boot-sequence]]).
 
 **The ASID argument is vestigial** on the install and uninstall paths and is
 documented as such at each — the invalidates are all-ASID. It is retained for a
@@ -354,7 +397,7 @@ reservation is the producer the chunk exists for, and the burrow window is
 malformed) L0 / L1 / L2 entry skips 512 GiB / 1 GiB / 2 MiB at once
 (`uninstall_next_block`, clamped to the range end; `v < 2^47` and the shift is
 at most 39, so the arithmetic cannot wrap), and only inside a PRESENT L3 table
-does each page go through `mmu_uninstall_user_pte`. So every valid leaf is
+is each page cleared and invalidated one by one. So every valid leaf is
 cleared with exactly the TLBI + DSB ISH it always got -- the load-bearing
 invariant (no stale cached translation observable when the call returns) is
 untouched, only the no-op iterations are gone -- and the per-leaf cost is
@@ -416,7 +459,7 @@ permission fault on it -- a user load, or the kernel's `LDTR` copy
 retry forever (B-1a' audit F13 -- the read
 arm's read-only install over the writable leaf a sibling's break had left was
 exactly such a mismatch, and it terminated the Proc; [[sub-kernel-fault]]). Each uninstall
-(`mmu_uninstall_user_pte`; the range form per page inside a present L3) drops
+(the range clear, per page inside a present L3) drops
 the L3's count for each valid leaf it clears (`table_occupancy_drop`: 0 -> -1
 is a miscount and extincts) and, when the L3 reaches 0, calls
 `user_tables_reclaim(as, va)` -- leaf upward, stopping at the first occupied
@@ -525,6 +568,11 @@ Re-read 2026-08-16: the real-silicon bring-up corrected a table-walk coherence
 claim that named a maintenance operation the tree does not perform.
 [[chg-2026-08-16-mmu-fictional-clean]].
 
+Vote 22 (2026-10-27): the W^X check at every leaf encoder (`pte_wxe_checked`),
+the L1 block encoder, the three hand-built block leaves routed through the
+encoders, and asserts for the three composites that had none plus the `UXN` leg
+of every writable one. The predicate became static in production.
+
 B-2b (2026-10-07): the execute-only row of the user encoder, `AP[1]` in
 `mmu_user_pte_admits`, and the debug reader's refusal of an execute-only leaf.
 
@@ -545,7 +593,12 @@ is its control, a pair's exec alias (`AP=11`) that both readers take.
 figures read the data view, `page_count - pgtable_pages`, since B-1a');
 `capacity.page_tables_charged_and_reclaimed` and
 `capacity.memory_bomb_leaves_the_reserve` the table charge and reclaim.
-`alternatives.*` covers the patcher (every patchable site applied, and the
+`mmu.wxe_predicate` tables the predicate over all sixteen AP x PXN x UXN
+combinations (written out, not computed from the rule it checks), an invalid
+descriptor, and every composite with and without its execute-never bits.
+`tools/test-fault.sh`'s four `wxe_install_*` variants, one per encoder
+(`kernel`, `block`, `gib`, `user`), have that encoder build a writable and
+executable leaf, and pass only on its extinction body. `alternatives.*` covers the patcher (every patchable site applied, and the
 patched instructions computing correctly). The guard pages and the direct map
 are proven by boot: a stack overflow is caught and named, and the boot
 page-map's diagnostic accessor is asserted. The multi-boot SMP gate is the

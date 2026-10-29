@@ -1,0 +1,72 @@
+Astra single-agent self-review, October 10 Prague. No independent audit.
+Uninstalled staged program based on dc47871be; canonical kernel unchanged.
+
+This layer adds staged GETATTR -> permission decision -> WALK/LOPEN, over the
+verified wire adapter. Nonempty WALK first requires the source QID to identify a
+directory (NOTDIR before DAC), then ordinary PERM_X search. Empty clone performs
+no path traversal and goes directly to Twalk with zero names. LOPEN first rejects
+P9_QTSYMLINK with LOOP, preserving the ordinary SYS_WALK_OPEN rule: a link's 0777
+cannot authorize opening its target through a server-dependent interpretation.
+It then uses perm_want_for_omode for exactly mode 0/1/2 and the actual existing
+perm_check_identity. No new privileged principal or worker authority is added.
+
+Each program holds a detached ProcAccessIdentity value for this operation.
+The integrating constructor MUST supply the creator/image's new snapshot, never
+protocol->identity cached at CONNECT. Value copying holds the admission-time
+caps and supplementary groups through retries; another call cannot recapture an
+already-started program. Native private service IDs use the local authority
+namespace, not foreign cape mount translation. Header comments make these caller
+requirements explicit. This layer does not itself pin a creator or sample Proc.
+
+GETATTR must have all mode/uid/gid fields. Malformed capture, inconsistent stage,
+uncaptured success, incorrect expected frame or a duplicate program completion
+requests whole-scope abort. Ordinary negative remote results stage a terminal.
+Only the wire adapter's submit-return no-wire proof allows EAGAIN retry. Thus a
+later remote EAGAIN remains terminal even after earlier local backpressure.
+Permission refusal stages a negative result without ever sending the effect.
+Successful stat merely selects the next step; successful WALK merely stages 0.
+The owner still publishes the exact reserved destination under Ll, mapping it to
+the destination slot result only after abort/deadline and physical lifetime gates.
+
+No callback advances the program. The sole driver calls it after actual client
+return, with callback/phase guards and retained request borrow. NEXT cannot bypass
+Ll rechecks of READY/abort/close/absolute deadline before another wire effect.
+TERMINAL is a tentative program outcome, not a request terminal or CQE. Physical
+FID/buffer cleanup must finish before the request borrow ends; CQ pressure cannot
+hide or free an operation. ABORT must execute actual client abort/quiescence.
+READ/WRITE/CLUNK enter effect directly only because the future admission layer
+must already enforce exact mapped FID rights, CLUNK drain and canonical payload
+ownership. This helper is not a substitute for those still-unimplemented checks.
+
+controls-20261009T225138Z passes 18,711 total assertions (including the existing
+156 wire checks and repeated setup checks) and 15 targeted mutants under LLVM22
+ASan/UBSan. The independent DAC bit oracle covers all 512 modes, all three
+owner/group/other axes and all three open modes: 4,608 permission decisions.
+Owner also matches group to catch owner-first fall-through. Other cases cover
+supplementary group, no SYSTEM-principal bypass, both capability override forms,
+symlink refusal even with override, missing stat fields, denied effect, clone,
+actual stat/open and stat/walk frame/capture chains, local retry then remote
+EAGAIN, short READ and immutable captured authority. Actual perm.c, full headers,
+wire/session/codec/transport/capture and verbatim submit_async are used.
+
+Boundaries: checked sequential host spinlock, inert wake and stand-in client death
+completion; already-attached sessions and direct session dispatch to capture.
+The exhaustive matrix supplies synthetic already-captured attrs. There is no
+native engine, real peer, concurrent lock, actual Proc snapshot, allocator,
+canonical fixed/pool admission or close/exec qualification here. ARM64 compilation
+uses real headers and has no libc dependency. Source/generated/binary hashes are
+recorded and rechecked; older source gates do not qualify this draft.
+
+Development evidence retained: first host compile needed irq_state_t for the real
+Proc header, added to a NEW local host shim (older wire shim/evidence unchanged).
+Second run's identity mutation failed compilation because it removed the last
+use of its source variable; changed to a compiling zero-value copy mutation.
+Third run exposed a masked built-guard witness: the default zero expected kind
+also rejected the synthetic success. Repaired the witness to give the correct
+expected kind while keeping built false. The final targeted mutant fails the
+intended assertion. No compile failure or surviving mutant counts as a pass.
+
+Mac released immediately after verification, 9099 MiB available above8192 floor.
+External Stratum clean exact61dde37 and all ten Astra protected/pending hashes
+rechecked unchanged. Self-review only. No Main/private user async/clipboard
+activation, full new-source Mac claim or128MiB protection change.

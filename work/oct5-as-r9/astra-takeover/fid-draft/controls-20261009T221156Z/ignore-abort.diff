@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -17,7 +17,7 @@
+     struct loom_service_ref scope) {
+     struct loom_service_node *s=fid_exact(t,n,scope,false);
+     return s && !t->closing && t->slots[scope.slot].kind==LOOM_SERVICE_SCOPE &&
+-           s->state==LOOM_SERVICE_READY && !s->reason;
++           !s->reason;
+ }
+ static bool fid_parent(struct loom_slot_table *t,struct loom_service_node *n,
+     struct loom_service_ref ref,struct loom_service_ref scope) {

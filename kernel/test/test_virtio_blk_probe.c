@@ -10,13 +10,11 @@
 //   - SYS_IRQ_CREATE + SYS_IRQ_WAIT for the device's completion IRQ.
 //
 // Setup:
-//   1. devramfs_lookup("bin/virtio-blk-probe", ...) — pre-built userspace
-//      ELF from the cpio. Graceful skip if not built.
+//   1. test_probe_lookup("bin/virtio-blk-probe", ...) — pre-built userspace
+//      ELF from the cpio.
 //   2. Verify a virtio-mmio slot with DeviceID = 2 (block) exists in
-//      the kernel's probe table (populated by virtio_init at boot).
-//      Without a `-device virtio-blk-device,drive=disk0` flag in
-//      tools/run-vm.sh's invocation, no slot will have DeviceID=2 and
-//      we report SKIP rather than spawning a probe that would block
+//      the kernel's probe table (populated by virtio_init at boot), via
+//      test_virtio_device -- never spawning a probe that would block
 //      forever on t_irq_wait.
 //   3. rfork_with_caps(RFPROC, ..., CAP_HW_CREATE) — child starts
 //      with child->caps = kproc.caps & CAP_HW_CREATE = CAP_HW_CREATE.
@@ -58,10 +56,9 @@
 //     would cause the device to never complete the request; t_irq_wait
 //     blocks until BOOT_TIMEOUT.
 //
-// If the probe binary OR the virtio-blk device is absent, the test
-// prints a SKIP notice and returns PASS — production / CI both ship
-// the binary AND the device, so this guards against partial builds
-// in development workflows.
+// A missing probe binary FAILS the test when the image carries userspace
+// (bin/joey), and a missing virtio-blk FAILS it when the launcher declared
+// one; otherwise each is a counted skip.
 
 #include "test.h"
 
@@ -76,8 +73,6 @@
 #include <thylacine/virtio.h>
 
 #include "../../arch/arm64/uart.h"
-
-void test_virtio_blk_probe_rfork_with_caps(void);
 
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
 // requirement on the Ehdr cast in exec_setup). Sized to match the P4-K
@@ -132,24 +127,16 @@ void test_virtio_blk_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-blk-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-blk-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
-    // Verify the kernel-side virtio_init at boot saw a block device.
-    // Without `-device virtio-blk-device,drive=disk0` in tools/run-vm.sh,
-    // QEMU exposes no virtio-mmio slot with DeviceID=2; the probe
-    // would scan 32 slots, find none, exit cleanly with status 0
-    // (its own SKIP path). We short-circuit that here so the kernel
-    // test runner sees a clean SKIP without spawning a child.
+    // Verify the kernel-side virtio_init at boot saw a block device. A boot
+    // whose launcher declared none (no disk.img and no pool.img) skips; one
+    // that declared it and has no DeviceID=2 slot fails. The probe is spawned
+    // only once the device is found, so its own missed scan is a FAIL too.
     struct virtio_mmio_dev *blk_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_BLOCK);
-    if (!blk_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=2 (run-vm.sh missing -device virtio-blk-device?)\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_BLOCK, "thylacine.virtio-blk");
+    if (!blk_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_BLK_PROBE_BLOB_MAX,
                 "virtio-blk-probe binary too large for static buffer");

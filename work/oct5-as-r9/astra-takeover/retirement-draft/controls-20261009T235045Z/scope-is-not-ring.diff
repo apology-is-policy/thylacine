@@ -1,0 +1,11 @@
+--- control.c
++++ scope-is-not-ring.c
+@@ -1139,7 +1139,7 @@
+ int loom_provided_discard_closed_locked(struct loom_service_operation *o) {
+     if(!o || !o->owner || !o->protocol)return -T_E_INVAL;
+     struct Loom *l=o->owner;struct loom_service_protocol *p=o->protocol;
+-    if(!l->service_closing || !l->service_slots->closing || !p->driving ||
++    if(!p->driving ||
+        !p->rpc_quiesced || !p->abort_reason || o->pool_busy ||
+        o->rpc.sending || o->rpc.on_complete ||
+        (o->phase!=LRPC_SETTLING && o->phase!=LRPC_TERMINAL))return -T_E_BUSY;

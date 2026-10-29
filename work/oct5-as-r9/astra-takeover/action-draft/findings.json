@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "review": "single-agent self-review",
+  "findings": [
+    {
+      "id": "ACTION-R1",
+      "state": "fixed-in-uninstalled-draft",
+      "problem": "READY wire predicate ignores full CQ; approved lifecycle section7 requires stopping new submissions while terminal delivery is backpressured.",
+      "next": "Reproduce queued owner/full CQ through actual action executor, then add CQ room to wire selector and exact mutant.",
+      "baseline": "controls-20261010T001341Z/control.log",
+      "verification": "controls-20261010T001426Z/full-cq.log"
+    }
+  ]
+}

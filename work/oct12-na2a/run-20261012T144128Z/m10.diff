@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index f1bc5161f..238a88f7c 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -7957,7 +7957,9 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
+     hidx_t fd;
+     // The private service bits route to their own inner, which reports an errno
+     // (-EOPNOTSUPP in every image built without the qualification lever).
+-    bool private_ring = (flags & (LOOM_SETUP_PRIVATE_SERVICE | LOOM_SETUP_SERVICE_BUFFERS)) != 0;
++    bool private_ring = (flags & (LOOM_SETUP_PRIVATE_SERVICE | LOOM_SETUP_SERVICE_BUFFERS)) != 0 &&
++                        loom_private_routed();
++    if (!private_ring) flags &= LOOM_SETUP_VALID; // MUTANT M10
+     if (private_ring) {
+         int rc = loom_private_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd);
+         if (rc != 0) return rc;

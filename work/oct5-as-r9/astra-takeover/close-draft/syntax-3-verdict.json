@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "six_translation_units_rc0": true,
+  "baseline_warnings": [
+    "no previous prototype for function 'test_loom_service_pool_table' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_private_slot_owner' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_private_fixed' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_private_pool_pins' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_private_buffers' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_service_slots' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]",
+    "no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]"
+  ],
+  "draft_new_warnings": 0,
+  "note": "Initial zero-diagnostics wrapper assertion rejected eight unchanged missing-prototype warnings; baseline comparison resolves this harness verdict. All raw logs retained."
+}

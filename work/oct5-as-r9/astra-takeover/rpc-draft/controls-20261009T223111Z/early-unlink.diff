@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ early-unlink.c
+@@ -120,7 +120,7 @@
+     struct loom_service_request *r=rpc_record(o);
+     if(!r)return -T_E_NOENT;
+     struct loom_service_protocol *p=o->protocol;
+-    if(o->phase!=LRPC_TERMINAL || r->phase!=LREQ_DELIVERED || r->borrows ||
++    if(o->phase!=LRPC_TERMINAL || r->phase!=LREQ_TERMINAL || r->borrows ||
+        o->rpc.on_complete || o->rpc.sending || !p->op_count)return -T_E_BUSY;
+     if((o->prev ? o->prev->next!=o : p->op_head!=o) ||
+        (o->next ? o->next->prev!=o : p->op_tail!=o))return -T_E_INVAL;

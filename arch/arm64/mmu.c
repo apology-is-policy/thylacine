@@ -47,37 +47,16 @@
 #include "kaslr.h"
 #include "asid.h"             // asid_hw_bits (TCR_EL1.AS sizing, RW-1 B-F1)
 #include "hwfeat.h"           // hw_icache_aliasing (arch_icache_sync_range)
+#include "sections.h"         // kernel.ld: the image, section and boot-stack bounds
 
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
 #include <thylacine/extinction.h>   // extinction (P3-Bb mmu_map_mmio guards)
+#include <thylacine/fault_test.h>   // fault_test_unaligned_load (the vbar_pre_mmu variant)
 #include <thylacine/smp.h>          // g_secondary_boot_stacks (P5-secondary-stack-guard)
 #include <thylacine/spinlock.h>     // spin_lock_irqsave(NULL): bare IRQ mask (#806 BBM window)
 #include <thylacine/types.h>
-
-// ---------------------------------------------------------------------------
-// Linker-provided symbols (kernel.ld).
-// ---------------------------------------------------------------------------
-
-extern char _kernel_start[];
-extern char _kernel_end[];
-extern char _bss_start[];
-
-// We don't have explicit per-section start/end symbols for .text /
-// .rodata / .data yet, but we can compute the boundaries based on the
-// kernel.ld layout: each section is page-aligned, and they appear in
-// order .text, .rodata, .data, .bss. We refine kernel.ld below to expose
-// these symbols once mmu.c needs them.
-extern char _text_end[];      // end of .text (== start of .rodata)
-extern char _rodata_end[];    // end of .rodata (== start of .data)
-extern char _data_end[];      // end of .data (== start of .bss)
-// _bss_start, _bss_end are already exported by kernel.ld.
-
-// Boot-stack guard page. Kernel.ld places this 4 KiB slot immediately
-// below the boot stack. mmu.c zeroes its L3 PTE in build_page_tables()
-// so a stack overflow faults synchronously rather than silently
-// corrupting prior BSS.
-extern char _boot_stack_guard[];
+#include <thylacine/visibility.h>
 
 // ---------------------------------------------------------------------------
 // Page table memory.
@@ -251,16 +230,7 @@ static inline u64 make_table_pte(const void *table) {
     return ((u64)(uintptr_t)table) | PTE_VALID | PTE_TYPE_TABLE;
 }
 
-// Build a 2 MiB block descriptor at L2 with the given attribute mask.
-static inline u64 make_block_pte_l2(paddr_t pa, u64 attrs) {
-    return (pa & ~(BLOCK_SIZE_L2 - 1)) | attrs;
-}
-
-// Build a 4 KiB page descriptor at L3 with the given attribute mask.
-static inline u64 make_page_pte_l3(paddr_t pa, u64 attrs) {
-    return (pa & ~(PAGE_SIZE - 1)) | attrs;
-}
-
+VISIBLE_IF_KERNEL_TESTS
 bool pte_violates_wxe(u64 pte) {
     if (!(pte & PTE_VALID)) return false;
     bool writable = !(pte & PTE_AP_RO_EL1);          // AP[2:1] != RO_EL1 / RO_ANY
@@ -277,12 +247,45 @@ bool pte_violates_wxe(u64 pte) {
     return writable && (exec_el1 || exec_el0);
 }
 
+// I-12 at the encoders. Every leaf descriptor this file builds -- kernel or
+// user, page or block -- comes from make_block_pte_l1, make_block_pte_l2,
+// make_page_pte_l3 or make_user_pte_l3, and each hands its value through here
+// before any table can hold it. A leaf composed by hand would bypass the check,
+// so none is. Every kernel caller passes a constant composite, so the compiler
+// decides a kernel leaf's check: a W^X composite (the static asserts below)
+// folds it away, and one edited past the asserts folds to an unconditional
+// extinction wherever it is used. The user encoder's prot is a run-time value,
+// so its check runs on every user leaf.
+static inline u64 pte_wxe_checked(u64 pte, const char *msg) {
+    if (pte_violates_wxe(pte)) extinction(msg);
+    return pte;
+}
+
+// Build a 1 GiB block descriptor at L1 with the given attribute mask.
+static inline u64 make_block_pte_l1(paddr_t pa, u64 attrs) {
+    return pte_wxe_checked((pa & ~(BLOCK_SIZE_L1 - 1)) | attrs,
+                           "PTE violates W^X at install (kernel L1 block)");
+}
+
+// Build a 2 MiB block descriptor at L2 with the given attribute mask.
+static inline u64 make_block_pte_l2(paddr_t pa, u64 attrs) {
+    return pte_wxe_checked((pa & ~(BLOCK_SIZE_L2 - 1)) | attrs,
+                           "PTE violates W^X at install (kernel L2 block)");
+}
+
+// Build a 4 KiB page descriptor at L3 with the given attribute mask.
+static inline u64 make_page_pte_l3(paddr_t pa, u64 attrs) {
+    return pte_wxe_checked((pa & ~(PAGE_SIZE - 1)) | attrs,
+                           "PTE violates W^X at install (kernel page)");
+}
+
 // ---------------------------------------------------------------------------
 // Static assertions on the PTE bit constants.
 //
 // W^X invariant I-12 is enforced at construction time by the PTE_KERN_*
-// helpers. The asserts below would catch a regression where someone
-// changes the helpers and accidentally allows W+X.
+// helpers, and pte_wxe_checked repeats the check in every encoder (decided at
+// compile time for these constants). The asserts below would catch a
+// regression where someone changes the helpers and accidentally allows W+X.
 // ---------------------------------------------------------------------------
 
 _Static_assert((PTE_KERN_TEXT & PTE_AP_RO_EL1) != 0,
@@ -297,8 +300,27 @@ _Static_assert((PTE_KERN_RO & PTE_AP_RO_EL1) != 0,
                "PTE_KERN_RO must be RO at EL1");
 _Static_assert((PTE_KERN_RO & PTE_PXN) != 0,
                "PTE_KERN_RO must NOT allow EL1 execution");
-_Static_assert((PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
+_Static_assert((PTE_KERN_RW_BLOCK & PTE_PXN) != 0,
+               "PTE_KERN_RW_BLOCK must NOT allow EL1 execution");
+_Static_assert((PTE_KERN_RO_BLOCK & PTE_AP_RO_EL1) != 0,
+               "PTE_KERN_RO_BLOCK must be RO at EL1");
+_Static_assert((PTE_DEVICE_RW & PTE_PXN) != 0 && (PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
                "Device PTEs must NOT allow EL1 execution");
+// The EL0 leg: UXN clear makes a page executable at EL0 whatever its AP bits
+// say about EL0 data access, so every kernel attribute sets it -- the writable
+// ones for W^X, the text and read-only ones so EL0 never executes kernel memory.
+_Static_assert((PTE_KERN_RW & PTE_UXN) != 0,
+               "PTE_KERN_RW must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_RW_BLOCK & PTE_UXN) != 0,
+               "PTE_KERN_RW_BLOCK must NOT allow EL0 execution");
+_Static_assert((PTE_DEVICE_RW & PTE_UXN) != 0 && (PTE_DEVICE_RW_BLOCK & PTE_UXN) != 0,
+               "Device PTEs must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_TEXT & PTE_UXN) != 0,
+               "PTE_KERN_TEXT must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_RO & PTE_UXN) != 0,
+               "PTE_KERN_RO must NOT allow EL0 execution");
+_Static_assert((PTE_KERN_RO_BLOCK & PTE_UXN) != 0,
+               "PTE_KERN_RO_BLOCK must NOT allow EL0 execution");
 
 // P1-H BTI guard-page invariant. A future PTE-bit refactor that moves
 // PTE_GP without updating PTE_KERN_TEXT would silently disable BTI on
@@ -317,6 +339,17 @@ _Static_assert((PTE_KERN_TEXT & PTE_GP) != 0,
 #define PL011_BASE_FALLBACK 0x09000000ull
 
 static void build_page_tables(u64 slide) {
+#ifdef THYLACINE_FAULT_TEST_vbar_pre_mmu
+    fault_test_unaligned_load();
+#endif
+#ifdef THYLACINE_FAULT_TEST_extinction_mmu_off
+    // A W+X leaf encoded with stage 1 still off: its extinction must reach the
+    // wire through extinction()'s MMU-off path (tools/test-fault.sh).
+    {
+        volatile u64 pte = make_page_pte_l3(0, PTE_KERN_RW & ~PTE_PXN);
+        (void)pte;
+    }
+#endif
     // PA of kernel start. In PIC mode this is PC-relative — gives the
     // runtime load PA when called pre-MMU-on with PC = load PA.
     u64 pa_kernel_start = (u64)(uintptr_t)_kernel_start;
@@ -541,8 +574,7 @@ static void build_page_tables(u64 slide) {
                 // kernel-image 2 MiB to a page-grain table.
                 for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
                     paddr_t block_pa = pa + ((paddr_t)i << BLOCK_SHIFT_L2);
-                    l2_directmap_kernel[i] =
-                        (block_pa & ~(BLOCK_SIZE_L2 - 1)) | PTE_KERN_RW_BLOCK;
+                    l2_directmap_kernel[i] = make_block_pte_l2(block_pa, PTE_KERN_RW_BLOCK);
                 }
 
                 // Build l3_directmap_kernel: mirror l3_kernel's per-
@@ -622,8 +654,7 @@ static void build_page_tables(u64 slide) {
                 l1_directmap[gib] = make_table_pte(l2_directmap_kernel);
             } else {
                 // Other GiBs: 1 GiB R/W + XN block.
-                l1_directmap[gib] =
-                    (pa & ~(BLOCK_SIZE_L1 - 1)) | PTE_KERN_RW_BLOCK;
+                l1_directmap[gib] = make_block_pte_l1(pa, PTE_KERN_RW_BLOCK);
             }
         }
     }
@@ -1119,7 +1150,7 @@ static u64 *directmap_walk_to_l2(paddr_t pa) {
     paddr_t gib_pa = (paddr_t)gib << BLOCK_SHIFT_L1;
     for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
         paddr_t block_pa = gib_pa + ((paddr_t)i << BLOCK_SHIFT_L2);
-        l2[i] = (block_pa & ~(BLOCK_SIZE_L2 - 1)) | PTE_KERN_RW_BLOCK;
+        l2[i] = make_block_pte_l2(block_pa, PTE_KERN_RW_BLOCK);
     }
 
     // Break-before-make on the L1 entry. Per ARM ARM B2.7.1, changing
@@ -1243,21 +1274,17 @@ static void directmap_tlbi_pages(paddr_t pa, unsigned n_pages) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hooks (the *_for_test convention; absent from the header): the
-// invalidate operand for a page, the count of kstack guard toggles (the two
-// range calls below), and whether a privileged read of `kva` translates right
-// now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs masked across the pair
-// so no handler can replace PAR_EL1 between them.
-u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa);
+// Test hooks: the invalidate operand for a page, the count of kstack guard
+// toggles (the two range calls below), and whether a privileged read of `kva`
+// translates right now -- AT S1E1R with PAR_EL1.F as the fault bit, IRQs
+// masked across the pair so no handler can replace PAR_EL1 between them.
 u64 mmu_directmap_tlbi_operand_for_test(paddr_t pa) {
     return directmap_tlbi_operand(pa);
 }
 static u64 g_guard_toggles_for_test;
-u64 mmu_guard_toggles_for_test(void);
 u64 mmu_guard_toggles_for_test(void) {
     return __atomic_load_n(&g_guard_toggles_for_test, __ATOMIC_RELAXED);
 }
-bool mmu_kva_readable_for_test(const void *kva);
 bool mmu_kva_readable_for_test(const void *kva) {
     u64 par;
     irq_state_t s = spin_lock_irqsave(NULL);
@@ -1271,6 +1298,7 @@ bool mmu_kva_readable_for_test(const void *kva) {
 }
 #endif
 
+#ifdef KERNEL_TESTS
 bool mmu_set_no_access(paddr_t pa) {
     if (pa & (PAGE_SIZE - 1)) return false;
 
@@ -1294,6 +1322,7 @@ bool mmu_restore_normal(paddr_t pa) {
     directmap_tlbi_pages(pa, 1);
     return true;
 }
+#endif // KERNEL_TESTS
 
 bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages) {
     if (pa & (PAGE_SIZE - 1)) return false;
@@ -1403,6 +1432,7 @@ void mmu_pagemap_directmap(paddr_t base, paddr_t end) {
     }
 }
 
+#ifdef KERNEL_TESTS
 // #808 diagnostic / regression-test helper. Reports whether the 2 MiB block
 // containing `pa` is demoted to L3 page granularity in the direct map --
 // i.e. l1_directmap[gib] is a table descriptor AND the covering L2 entry is
@@ -1422,6 +1452,7 @@ bool mmu_directmap_is_pagemapped(paddr_t pa) {
     u64 l2e = l2[l2_idx];
     return (l2e & PTE_VALID) && (l2e & PTE_TYPE_TABLE);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P3-Bcb / P3-Db: per-Proc translation table allocator + recursive teardown.
@@ -1654,8 +1685,31 @@ static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, u32 mair_idx) {
     if (!(prot & VMA_PROT_EXEC)) {
         pte |= PTE_UXN;              // user cannot execute
     }
-    return pte;
+    return pte_wxe_checked(pte, "PTE violates W^X at install (user page)");
 }
+
+#if defined(THYLACINE_FAULT_TEST_wxe_install_kernel) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_block) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_gib) || \
+    defined(THYLACINE_FAULT_TEST_wxe_install_user)
+void mmu_fault_test_wxe_install(void) {
+    // One encoder per variant, each handed a writable attribute with an
+    // execute-never bit cleared. The user leg asks for prot W|X, which both
+    // install entries refuse before they encode: a regression that reached the
+    // encoder is what it stands in for.
+#if defined(THYLACINE_FAULT_TEST_wxe_install_user)
+    volatile u64 pte = make_user_pte_l3(0, VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC,
+                                        MAIR_IDX_NORMAL_WB);
+#elif defined(THYLACINE_FAULT_TEST_wxe_install_block)
+    volatile u64 pte = make_block_pte_l2(0, PTE_KERN_RW_BLOCK & ~PTE_UXN);
+#elif defined(THYLACINE_FAULT_TEST_wxe_install_gib)
+    volatile u64 pte = make_block_pte_l1(0, PTE_KERN_RW_BLOCK & ~PTE_PXN);
+#else
+    volatile u64 pte = make_page_pte_l3(0, PTE_KERN_RW & ~PTE_PXN);
+#endif
+    (void)pte;
+}
+#endif
 
 // Convenience wrapper preserving the original bool device-flag API: false ->
 // Normal-WB (cacheable RAM), true -> Device-nGnRnE (MMIO registers). Kept as
@@ -1995,90 +2049,10 @@ bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec)
     return true;
 }
 
-// B-1a audit F2: leaf visits -- one per mmu_uninstall_user_pte call, one per
-// page visited inside a PRESENT table by the range form -- the diagnostic the
-// range form's subtree skip is pinned against (a test, not a gauge).
+// B-1a audit F2: leaf visits -- one per page visited inside a PRESENT table by
+// the range clear -- the diagnostic its subtree skip is pinned against (a test,
+// not a gauge).
 static u64 g_mmu_uninstall_pte_calls;
-
-// =============================================================================
-// P6 hardening #2 / audit F1 (P1): mmu_uninstall_user_pte
-// =============================================================================
-//
-// Symmetric counterpart to mmu_install_user_pte. Walks the per-Proc
-// TTBR0 tree to find the L3 leaf PTE at `vaddr`, clears it (writes 0),
-// and broadcasts tlbi vaae1is + dsb ish + isb to invalidate any
-// cached translation on this and all sibling CPUs.
-//
-// The walk is non-growing: any L1/L2/L3 sub-table that's not yet
-// allocated means nothing is mapped at `vaddr`, so there's nothing
-// to clear (return 0 idempotently). Same idempotence applies if the
-// L3 leaf PTE is already not-VALID.
-//
-// A clear that empties its L3 reclaims it, and its ancestors if they empty
-// too (B-1a' audit F1, above). This file used to keep every table until
-// proc_pgtable_destroy, arguing that deciding emptiness meant scanning 512
-// slots and that the pages went free at death anyway; the first reason is
-// gone (occupancy is a count) and the second was the hole -- a Proc whose
-// tables never return is a Proc whose footprint never shrinks. In the
-// rolling-ASID model (RW-1 B-F1) there is no per-Proc asid_free: the leaf
-// flush here covers the live unmap, and a dead Proc's remaining translations
-// need no flush at all -- every user PTE is non-global, so they are reachable
-// only under that address space's own ASID, which cannot go live again until
-// the rollover's per-CPU flush_pending has run. (The drain issues no TLBI --
-// measured at L-2; an earlier version of this comment said otherwise.)
-int mmu_uninstall_user_pte(struct AddrSpace *as, u64 vaddr) {
-    __atomic_add_fetch(&g_mmu_uninstall_pte_calls, 1, __ATOMIC_RELAXED);
-
-    if (!as || as->pgtable_root == 0)    return -1;
-    if (vaddr & (PAGE_SIZE - 1))         return -1;
-    // Mirror mmu_install_user_pte's VA bound: bit 47 must be 0 for
-    // the TTBR0 user-half. R10 F158 close.
-    if (vaddr >> 47)                     return -1;
-
-    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
-    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
-    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
-    u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
-
-    // L0 walk (no grow).
-    u64 *l0 = (u64 *)pa_to_kva(as->pgtable_root);
-    u64 e = l0[idx0];
-    if (!(e & PTE_VALID))                return 0;     // nothing mapped
-    if (!(e & PTE_TYPE_TABLE))           return -1;    // malformed
-    paddr_t l1_pa = e & ~0xFFFull;
-
-    // L1 walk (no grow).
-    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
-    e = l1[idx1];
-    if (!(e & PTE_VALID))                return 0;
-    if (!(e & PTE_TYPE_TABLE))           return -1;
-    paddr_t l2_pa = e & ~0xFFFull;
-
-    // L2 walk (no grow).
-    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
-    e = l2[idx2];
-    if (!(e & PTE_VALID))                return 0;
-    if (!(e & PTE_TYPE_TABLE))           return -1;
-    paddr_t l3_pa = e & ~0xFFFull;
-
-    // L3 leaf check + clear.
-    u64 *l3 = (u64 *)pa_to_kva(l3_pa);
-    u64 existing = l3[idx3];
-    if (!(existing & PTE_VALID))         return 0;     // already cleared
-
-    l3[idx3] = 0;
-
-    // Drain the store + broadcast invalidate by VA across the inner-
-    // shareable domain. Same shape as mmu_install_user_pte's tail:
-    // dsb ishst orders the PTE write before the tlbi; dsb ish waits
-    // for the tlbi to complete on all CPUs; isb flushes the local
-    // pipeline so any subsequent EL1 access sees the new mapping
-    // state.
-    user_tlbi_va(vaddr);
-    table_occupancy_drop(table_page(l3_pa));
-    if (table_page(l3_pa)->refcount == 0) user_tables_reclaim(as, vaddr);
-    return 0;
-}
 
 // The first VA past the `shift`-sized block containing `v`, clamped to `end`.
 // v < 2^47 and shift <= 39, so the shifted sum cannot wrap.
@@ -2088,7 +2062,11 @@ static u64 uninstall_next_block(u64 v, u32 shift, u64 end) {
 }
 
 // The range clear behind the two public forms: `reclaim` says whether a table
-// the clears empty goes back to the pool once its block is done.
+// the clears empty goes back to the pool once its block is done. The leaf flush
+// here covers a live unmap; a dead Proc's remaining translations need none. In
+// the rolling-ASID model (RW-1 B-F1) every user PTE is non-global, so it is
+// reachable only under its address space's own ASID, which cannot go live again
+// until the rollover's per-CPU flush_pending has run.
 static long uninstall_range(struct AddrSpace *as, u64 vaddr_start, u64 vaddr_end,
                             bool reclaim) {
     if (!as || as->pgtable_root == 0) return -1;
@@ -2172,9 +2150,11 @@ long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
     return uninstall_range(as, vaddr_start, vaddr_end, false);
 }
 
+#ifdef KERNEL_TESTS
 u64 mmu_uninstall_pte_calls(void) {
     return __atomic_load_n(&g_mmu_uninstall_pte_calls, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // 8a-1b-gamma: cross-Proc user-memory access (I-39; docs/DEBUG-FS-DESIGN.md 4.5).

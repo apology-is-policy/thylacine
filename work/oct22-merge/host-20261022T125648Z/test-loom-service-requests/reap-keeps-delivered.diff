@@ -1,0 +1,10 @@
+--- kernel/loom_service_requests.c
++++ reap-keeps-delivered.c
+@@ -107,7 +107,6 @@
+     struct loom_service_ref scope = r->scope;
+     *r = (struct loom_service_request){0};
+     --t->occupied;
+-    if (phase == LREQ_DELIVERED) --t->delivered;
+     (void)loom_slot_unpin(s,scope);
+     return 0;
+ }

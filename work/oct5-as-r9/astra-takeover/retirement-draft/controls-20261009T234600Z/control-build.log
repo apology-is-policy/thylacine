@@ -1,0 +1,16 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234600Z/control.c:1360:57: error: invalid application of 'sizeof' to an incomplete type 'struct loom_engine_table'
+ 1360 |  l.magic=LOOM_MAGIC;l.refcount=1;memset(&engine,0,sizeof(engine));l.service_engine=&engine;l.service_as=&as;l.service_creator=99;l.cq_entries=4;
+      |                                                         ^~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234600Z/control.c:26:15: note: forward declaration of 'struct loom_engine_table'
+   26 | static struct loom_engine_table engine;
+      |               ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234600Z/control.c:1360:83: error: incompatible pointer types assigning to 'struct loom_service_engine *' from 'struct loom_engine_table *' [-Wincompatible-pointer-types]
+ 1360 |  l.magic=LOOM_MAGIC;l.refcount=1;memset(&engine,0,sizeof(engine));l.service_engine=&engine;l.service_as=&as;l.service_creator=99;l.cq_entries=4;
+      |                                                                                   ^~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234600Z/control.c:26:33: error: tentative definition has type 'struct loom_engine_table' that is never completed
+   26 | static struct loom_engine_table engine;
+      |                                 ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234600Z/control.c:26:15: note: forward declaration of 'struct loom_engine_table'
+   26 | static struct loom_engine_table engine;
+      |               ^
+3 errors generated.

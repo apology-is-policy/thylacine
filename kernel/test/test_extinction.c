@@ -38,10 +38,13 @@
 #include "test.h"
 
 #include <thylacine/extinction.h>
-#include <thylacine/types.h>
+#include <thylacine/sched.h>
+#include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/thread.h>
 
-void test_extinction_claim_word_exactly_one_winner(void);
-void test_extinction_console_unclaimed_on_clean_boot(void);
+#include "../../arch/arm64/timer.h"
+#include <thylacine/types.h>
 
 void test_extinction_claim_word_exactly_one_winner(void) {
     uint32_t word = 0;
@@ -76,4 +79,145 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
     TEST_ASSERT(extinction_console_claimed() == 0,
         "the extinction console must be unclaimed on a healthy boot; a claim "
         "here means every later extinction banner is silently suppressed");
+}
+
+// The per-byte console gate (the third tearing source: a peer's direct
+// uart_putc). Its cores run on the test's own words, for the reason above.
+//
+//   extinction.tx_gate_admits_only_the_owner_once_claimed
+//   extinction.tx_gate_counts_nested_bytes
+//   extinction.tx_enter_holds_the_thread_on_its_cpu
+//   extinction.tx_exit_takes_a_pending_preempt
+//   extinction.tx_wait_waits_out_a_peer_byte
+//
+// Like the claim test these are sequential: they pin each side's decision, not
+// the Dekker race between them. The race is tools/test-fault.sh's
+// extinction_peer_chatter variant, which tears the banner without the gate.
+
+void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
+    volatile uint8_t busy = 0;
+    uint32_t word = 0;
+
+    int open = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t open_busy = busy;
+
+    busy = 0;
+    word = 1;
+    int peer = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t peer_busy = busy;
+
+    busy = 0;
+    int owner = extinction_tx_gate_core(&busy, &word, 1);
+    uint8_t owner_busy = busy;
+
+    TEST_ASSERT(open == 1, "an unclaimed console admits every cpu's byte");
+    TEST_ASSERT(open_busy == 1,
+        "an admitted byte is published as in flight, so a winner can wait it out");
+    TEST_ASSERT(peer == 0,
+        "once a peer owns the console this cpu's byte is dropped -- it would land "
+        "inside the banner");
+    TEST_ASSERT(peer_busy == 0,
+        "a dropped byte must not stay published: the winner would wait on it for "
+        "its whole bound");
+    TEST_ASSERT(owner == 1 && owner_busy == 1,
+        "the owner's own bytes (the banner, the dump) still pass");
+}
+
+// An exception taken inside uart_putc (after the gate, before the byte) can
+// print through the gate again on the same cpu. Its exit, or its refusal by a
+// claim that landed meanwhile, must leave the outer byte marked in flight.
+void test_extinction_tx_gate_counts_nested_bytes(void) {
+    volatile uint8_t busy = 0;
+    uint32_t word = 0;
+
+    int outer = extinction_tx_gate_core(&busy, &word, 0);
+    int inner = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t both = busy;
+    extinction_tx_exit_core(&busy);
+    uint8_t after_inner = busy;
+
+    word = 1;
+    int refused = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t after_refusal = busy;
+    extinction_tx_exit_core(&busy);
+    uint8_t after_outer = busy;
+
+    TEST_ASSERT(outer == 1 && inner == 1 && both == 2,
+        "a nested byte on the same cpu is counted, not merged with the outer one");
+    TEST_ASSERT(after_inner == 1,
+        "the nested byte's exit leaves the outer byte in flight, so a winner "
+        "still waits for it");
+    TEST_ASSERT(refused == 0 && after_refusal == 1,
+        "a nested byte refused by a fresh claim leaves the outer byte in flight");
+    TEST_ASSERT(after_outer == 0, "the outer byte's exit clears the cpu");
+}
+
+// The live gate, on the unclaimed console: the mark is per CPU, so the byte's
+// thread must stay on its CPU from enter to exit. With IRQs masked nothing can
+// move it, and the gate must not read thread state at all: every exception
+// path and extinction() itself print masked, and TPIDR_EL1 may be wild there.
+void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void) {
+    struct Thread *me = current_thread();
+    u32 before = me->preempt_count;
+    int token = extinction_tx_enter();
+    u32 during = me->preempt_count;
+    if (token) extinction_tx_exit(token);
+    u32 after = me->preempt_count;
+
+    irq_state_t s = spin_lock_irqsave(NULL);
+    int mtoken = extinction_tx_enter();
+    u32 mduring = me->preempt_count;
+    if (mtoken) extinction_tx_exit(mtoken);
+    spin_unlock_irqrestore(NULL, s);
+
+    TEST_ASSERT(token == EXTINCTION_TX_HELD, "an unclaimed console admits the byte, held");
+    TEST_ASSERT(during == before + 1u,
+        "an admitted byte holds its thread's preempt count, so the thread cannot leave its cpu mid-byte");
+    TEST_ASSERT(after == before, "exit releases the hold");
+    TEST_ASSERT(mtoken == EXTINCTION_TX_BYTE && mduring == before,
+        "with irqs masked the gate admits the byte without touching thread state");
+}
+
+// A preempt that came due while a byte held the thread is taken when the hold
+// drops, not left for an IRQ that happens to land between two bytes: a thread
+// printing a long line is otherwise non-preemptible for most of it.
+// A tick between the set and the read would take the preempt itself and pass a
+// gate that never does, so the verdict comes from an iteration no tick crossed.
+void test_extinction_tx_exit_takes_a_pending_preempt(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    int token = 0;
+    bool still = true, quiet = false;
+    for (int i = 0; i < 8 && !quiet; i++) {
+        u64 t0 = timer_get_ticks();
+        sched_set_need_resched_for_test(cpu);
+        token = extinction_tx_enter();
+        if (token) extinction_tx_exit(token);
+        still = sched_need_resched_pending(cpu);
+        sched_clear_need_resched_for_test(cpu);
+        quiet = timer_get_ticks() == t0;
+    }
+
+    TEST_ASSERT(quiet, "eight iterations each crossed a tick; no verdict");
+    TEST_ASSERT(token == EXTINCTION_TX_HELD, "the suite runs with irqs on, so the byte is held");
+    TEST_ASSERT(!still, "the hold's drop takes the preempt that came due under it");
+}
+
+void test_extinction_tx_wait_waits_out_a_peer_byte(void) {
+    volatile uint8_t busy[4] = { 0, 0, 0, 0 };
+
+    int clear = extinction_tx_wait_core(busy, 4, 0);
+
+    busy[0] = 1;                                   // the winner's own flag
+    int self_only = extinction_tx_wait_core(busy, 4, 0);
+
+    busy[0] = 0;
+    busy[2] = 1;                                   // a peer that never finishes
+    int stuck = extinction_tx_wait_core(busy, 4, 0);
+
+    TEST_ASSERT(clear == 1, "no byte in flight: the winner proceeds at once");
+    TEST_ASSERT(self_only == 1,
+        "the winner does not wait on its own flag (it would wait out its bound)");
+    TEST_ASSERT(stuck == 0,
+        "a peer byte still in flight is waited on, and the wait is bounded: it "
+        "reports the miss rather than parking the dying machine");
 }

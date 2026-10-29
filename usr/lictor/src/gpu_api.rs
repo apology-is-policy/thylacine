@@ -249,6 +249,9 @@ pub enum Request {
     InputInfo { index: u32 },
     InputDrain { index: u32 },
     SeatState,
+    SeatQuiesced { generation: u64 },
+    /// Semantic cursor only; no client resource or output selection.
+    Cursor { shape: u8, scale: u16, x: u32, y: u32, visible: bool },
 }
 impl Wire for Request {
     fn put(&self, out: &mut Vec<u8>) {
@@ -318,6 +321,8 @@ impl Wire for Request {
             Self::InputInfo { index } => { 62u16.put(out); index.put(out); },
             Self::InputDrain { index } => { 63u16.put(out); index.put(out); },
             Self::SeatState => { 64u16.put(out); },
+            Self::SeatQuiesced { generation } => { 66u16.put(out); generation.put(out); },
+            Self::Cursor { shape, scale, x, y, visible } => { 65u16.put(out); shape.put(out); scale.put(out); x.put(out); y.put(out); visible.put(out); },
         }
     }
     fn get(r: &mut Reader<'_>) -> Result<Self, Malformed> {
@@ -387,6 +392,8 @@ impl Wire for Request {
             62 => Self::InputInfo { index: <u32>::get(r)? },
             63 => Self::InputDrain { index: <u32>::get(r)? },
             64 => Self::SeatState,
+            66 => Self::SeatQuiesced { generation: u64::get(r)? },
+            65 => Self::Cursor { shape: u8::get(r)?, scale: u16::get(r)?, x: u32::get(r)?, y: u32::get(r)?, visible: bool::get(r)? },
             _ => return Err(Malformed),
         })
     }
@@ -409,3 +416,37 @@ impl From<&crate::backend::gpu::Gpu> for Stats {
 /// 9P Rweft on its ring fid, never as a device-private address in a ctl reply.
 pub struct RingInfo { pub res_id: u32, pub size: u64, pub cache: u64 }
 record!(RingInfo { res_id: u32, size: u64, cache: u64 });
+
+#[cfg(test)]
+mod cursor_wire_tests {
+    use super::*;
+    #[test]
+    fn seat_quiescence_keeps_cursor_opcode_distinct() {
+        let mut bytes=Vec::new();
+        Request::SeatQuiesced{generation:0x0807060504030201}.put(&mut bytes);
+        assert_eq!(bytes,[1,0,66,0,1,2,3,4,5,6,7,8]);
+        let mut r=Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(),Request::SeatQuiesced{generation:0x0807060504030201}));
+        r.finish().unwrap();
+    }
+    #[test]
+    fn cursor_record_is_exact_and_rejects_truncation_and_bad_bool() {
+        let mut bytes = Vec::new();
+        Request::Cursor { shape: 4, scale: 175, x: 123, y: 456, visible: true }.put(&mut bytes);
+        assert_eq!(bytes, [1,0,65,0,4,175,0,123,0,0,0,200,1,0,0,1]);
+        for end in 0..bytes.len() {
+            let mut r = Reader::new(&bytes[..end]).unwrap();
+            assert!(Request::get(&mut r).is_err());
+        }
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::Cursor {
+            shape: 4, scale: 175, x: 123, y: 456, visible: true }));
+        r.finish().unwrap();
+        bytes.push(0);
+        let mut r = Reader::new(&bytes).unwrap();
+        Request::get(&mut r).unwrap();
+        assert!(r.finish().is_err());
+        bytes.pop(); *bytes.last_mut().unwrap() = 2;
+        assert!(Request::get(&mut Reader::new(&bytes).unwrap()).is_err());
+    }
+}

@@ -18,14 +18,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
-
-void test_p9_attached_create_destroy(void);
-void test_p9_attached_handshake_failure_returns_null(void);
-void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
-void test_p9_attached_root_spoor_walk_read(void);
-void test_p9_attached_query_helpers(void);
-void test_p9_attached_walked_outlives_root_no_uaf(void);
-void test_p9_attached_ctl_registry(void);
+#include <thylacine/devctl.h>
 
 // File-scope storage for the loopback's response buffer. The attached
 // struct heap-allocates everything else (client + recv_buf).
@@ -359,8 +352,6 @@ static int f1_64char_responder(void *ctx, const u8 *req, size_t req_len,
     return attach_responder(ctx, req, req_len, resp, resp_cap);
 }
 
-void test_sys_walk_open_max_length_name_nul_terminated(void);
-
 void test_sys_walk_open_max_length_name_nul_terminated(void) {
     g_f1_captured_name_len = 0;
     g_f1_walk_seen = 0;
@@ -528,7 +519,6 @@ static bool att_contains(const char *h, size_t hl, const char *needle) {
     return false;
 }
 
-size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
 void test_p9_attached_ctl_registry(void) {
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
                                 sizeof(g_loopback_resp),

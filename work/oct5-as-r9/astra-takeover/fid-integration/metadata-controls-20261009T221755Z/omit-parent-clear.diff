@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -26,7 +26,7 @@
+                     n->parent.reserved || n->parent.incarnation || n->reserved ||
+                     n->fid_claim || n->fid_borrows)
+                     extinction("private Loom retained pinned retired scope");
+-                *n=(struct loom_service_node){0};
++                /* omitted */
+                 if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))
+                     extinction("private Loom lost retired scope metadata");
+                 continue;

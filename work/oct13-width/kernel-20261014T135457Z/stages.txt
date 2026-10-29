@@ -1,0 +1,115 @@
+2026-10-14T13:54:57Z  HEAD 71386536c0b0fe8cbc42aab727695619424f067b
+2026-10-14T13:54:58Z  width checker: self-test and the committed syscall.c pass
+2026-10-14T13:54:58Z  predictions derived: each kernel message inside its registered test, each probe message printable once
+2026-10-14T13:54:58Z  expected tests (derived from test.c): 1884
+2026-10-14T13:54:58Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-14T13:54:58Z  go fork /private/tmp/claude-501/-Users-northkillpd-projects-thylacine-corona/f885b99d-8efd-42ce-992e-dc2cc97a86cb/scratchpad/go-thylacine-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+2026-10-14T13:54:58Z  anchor census: 25 mutants, each anchor once in its file
+2026-10-14T13:54:58Z  disk pre: 14157 MiB free (floor 8192)
+2026-10-14T13:56:13Z  disk post-control-build: 14164 MiB free (floor 8192)
+2026-10-14T13:57:02Z  control: test.sh exit 0
+2026-10-14T13:57:02Z  CONTROL GREEN: 1884/1884, the five named tests PASS, argwidth-probe 72, loom-bridge-probe 70, probes a2b3af222f810b68, bin ba1cca3877c8a19f
+2026-10-14T13:58:17Z  disk post-control-q-build: 14131 MiB free (floor 8192)
+2026-10-14T13:59:07Z  control-q: test.sh exit 0
+2026-10-14T13:59:07Z  CONTROL-Q GREEN: 1884/1884, the five named tests PASS, argwidth-probe 72, loom-bridge-probe 71 (qualification path), bin 938f9999b60b08a7
+2026-10-14T13:59:07Z  disk pre-m1: 14000 MiB free (floor 8192)
+2026-10-14T13:59:56Z  disk post-m1-build: 14131 MiB free (floor 8192)
+2026-10-14T14:00:10Z  m1: test.sh exit 1
+2026-10-14T14:00:11Z  M1 DISCRIMINATED: exactly syscall.argwidth_probe, the probe at 'close: the wide call is refused' (got 0); extinction set = the suite's own
+2026-10-14T14:00:11Z  disk pre-m2: 14110 MiB free (floor 8192)
+2026-10-14T14:00:59Z  disk post-m2-build: 14120 MiB free (floor 8192)
+2026-10-14T14:01:13Z  m2: test.sh exit 1
+2026-10-14T14:01:13Z  M2 DISCRIMINATED: exactly syscall.argwidth_probe, the probe at 'getpgid: the wide call is refused'; extinction set = the suite's own
+2026-10-14T14:01:13Z  disk pre-m3: 14099 MiB free (floor 8192)
+2026-10-14T14:02:01Z  disk post-m3-build: 14111 MiB free (floor 8192)
+2026-10-14T14:02:14Z  m3: test.sh exit 1
+2026-10-14T14:02:15Z  M3 DISCRIMINATED: exactly syscall.argwidth_probe, the probe at 'lseek whence: the wide call is refused' (got 0); extinction set = the suite's own
+2026-10-14T14:02:15Z  disk pre-m4: 14090 MiB free (floor 8192)
+2026-10-14T14:03:03Z  disk post-m4-build: 14101 MiB free (floor 8192)
+2026-10-14T14:03:17Z  m4: test.sh exit 1
+2026-10-14T14:03:17Z  M4 DISCRIMINATED: exactly syscall.argwidth_probe, the probe at 'torpor_wait: the sign-extended word matches' (got -22); extinction set = the suite's own
+2026-10-14T14:03:17Z  disk pre-m5: 14098 MiB free (floor 8192)
+2026-10-14T14:04:04Z  disk post-m5-build: 14094 MiB free (floor 8192)
+2026-10-14T14:04:18Z  m5: test.sh exit 1
+2026-10-14T14:04:19Z  M5 DISCRIMINATED: exactly vivarium.t1_narrows_linux_widths at 'close'; extinction set = the suite's own
+2026-10-14T14:04:19Z  disk pre-m6: 14072 MiB free (floor 8192)
+2026-10-14T14:05:05Z  disk post-m6-build: 14097 MiB free (floor 8192)
+2026-10-14T14:05:19Z  m6: test.sh exit 1
+2026-10-14T14:05:20Z  M6 DISCRIMINATED: exactly vivarium.t2_shells_narrow_linux_widths at 'readlinkat: a negative bufsiz is refused before the path'; extinction set = the suite's own
+2026-10-14T14:05:20Z  disk pre-m7: 14093 MiB free (floor 8192)
+2026-10-14T14:06:06Z  disk post-m7-build: 14090 MiB free (floor 8192)
+2026-10-14T14:06:20Z  m7: test.sh exit 1
+2026-10-14T14:06:20Z  M7 DISCRIMINATED: exactly vivarium.t2_shells_narrow_linux_widths at 'getrandom: a high half in flags is Linux's to drop'; extinction set = the suite's own
+2026-10-14T14:06:20Z  disk pre-m8: 14086 MiB free (floor 8192)
+2026-10-14T14:07:09Z  disk post-m8-build: 14083 MiB free (floor 8192)
+2026-10-14T14:07:23Z  m8: test.sh exit 1
+2026-10-14T14:07:23Z  M8 DISCRIMINATED: syscall.argwidth_probe, the probe at 'getpgid: a sign-extended -1 is a pid, not a width' (got -22); 6 FAIL line(s) and 1 extinction line(s) in all, recorded in m8-fail-set.txt and m8-extinctions.txt
+2026-10-14T14:07:23Z  disk pre-m9: 14063 MiB free (floor 8192)
+2026-10-14T14:08:14Z  m9: build exit 1
+2026-10-14T14:08:15Z  M9 DISCRIMINATED: the build refused at the width check, naming 'kernel/syscall.c:2044: sys_close_handler narrows hraw'
+2026-10-14T14:08:15Z  disk pre-m10: 14155 MiB free (floor 8192)
+2026-10-14T14:09:05Z  disk post-m10-build: 14080 MiB free (floor 8192)
+2026-10-14T14:09:19Z  m10: test.sh exit 1
+2026-10-14T14:09:19Z  M10 DISCRIMINATED: exactly fork.rfork_arg_rejection at 'a flags word wider than 32 bits must be refused, not cut down to RFPROC'; extinction set = the suite's own
+2026-10-14T14:09:19Z  disk pre-m11: 14054 MiB free (floor 8192)
+2026-10-14T14:10:08Z  m11: build exit 1
+2026-10-14T14:10:09Z  M11 DISCRIMINATED: the build refused at the width check, naming 'kernel/syscall.c:10731: sys_rfork_handler narrows ctx->regs[0]'
+2026-10-14T14:10:09Z  disk pre-m12: 14060 MiB free (floor 8192)
+2026-10-14T14:10:59Z  disk post-m12-build: 14049 MiB free (floor 8192)
+2026-10-14T14:11:13Z  m12: test.sh exit 1
+2026-10-14T14:11:13Z  M12 DISCRIMINATED: exactly syscall.argwidth_probe, the probe at 'unlink parent fd: the wide call is refused' (got -95); extinction set = the suite's own
+2026-10-14T14:11:14Z  disk pre-m13: 14022 MiB free (floor 8192)
+2026-10-14T14:12:03Z  m13: build exit 1
+2026-10-14T14:12:03Z  M13 DISCRIMINATED: the build refused at the width check, naming 'kernel/syscall.c:4926: sys_resolve_dir_wr narrows fd_raw'
+2026-10-14T14:12:03Z  disk pre-m14: 14008 MiB free (floor 8192)
+2026-10-14T14:12:53Z  m14: build exit 1
+2026-10-14T14:12:53Z  M14 DISCRIMINATED: the build refused at the width check, naming 'kernel/syscall.c:2896: sys_lookup_root_source narrows fd_raw'
+2026-10-14T14:12:53Z  disk pre-m15: 14015 MiB free (floor 8192)
+2026-10-14T14:13:44Z  disk post-m15-build: 14012 MiB free (floor 8192)
+2026-10-14T14:13:58Z  m15: test.sh exit 1
+2026-10-14T14:13:58Z  M15 DISCRIMINATED: exactly vivarium.t2_shells_narrow_linux_widths at 'writev: a high half on the fd is Linux's to drop'; extinction set = the suite's own
+2026-10-14T14:13:58Z  disk pre-m16: 13986 MiB free (floor 8192)
+2026-10-14T14:14:51Z  disk post-m16-build: 13973 MiB free (floor 8192)
+2026-10-14T14:15:05Z  m16: test.sh exit 1
+2026-10-14T14:15:05Z  M16 DISCRIMINATED: exactly vivarium.t1_keeps_guest_registers at 'a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half'; extinction set = the suite's own
+2026-10-14T14:15:05Z  disk pre-m17: 13964 MiB free (floor 8192)
+2026-10-14T14:15:56Z  disk post-m17-build: 13919 MiB free (floor 8192)
+2026-10-14T14:16:10Z  m17: test.sh exit 1
+2026-10-14T14:16:11Z  M17 DISCRIMINATED: exactly vivarium.t1_keeps_guest_registers at 'a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half'; extinction set = the suite's own
+2026-10-14T14:16:11Z  disk pre-m18: 13898 MiB free (floor 8192)
+2026-10-14T14:17:02Z  m18: build exit 1
+2026-10-14T14:17:02Z  M18 DISCRIMINATED: the build refused at the width check, naming 'kernel/syscall.c:2183: sys_lseek_handler narrows whence_raw'
+2026-10-14T14:17:02Z  disk pre-m19: 13856 MiB free (floor 8192)
+2026-10-14T14:17:54Z  disk post-m19-build: 13818 MiB free (floor 8192)
+2026-10-14T14:18:08Z  m19: test.sh exit 1
+2026-10-14T14:18:09Z  M19 DISCRIMINATED: exactly extinction.tx_gate_counts_nested_bytes at 'a nested byte on the same cpu is counted, not merged with the outer one'; extinction set = the suite's own
+2026-10-14T14:18:09Z  disk pre-m20: 13811 MiB free (floor 8192)
+2026-10-14T14:19:00Z  disk post-m20-build: 13781 MiB free (floor 8192)
+2026-10-14T14:19:14Z  m20: test.sh exit 1
+2026-10-14T14:19:14Z  M20 DISCRIMINATED: exactly extinction.tx_enter_holds_the_thread_on_its_cpu at 'an admitted byte holds its thread's preempt count, so the thread cannot leave its cpu mid-byte'; extinction set = the suite's own
+2026-10-14T14:19:14Z  disk pre-m21: 13771 MiB free (floor 8192)
+2026-10-14T14:20:04Z  disk post-m21-build: 13744 MiB free (floor 8192)
+2026-10-14T14:20:18Z  m21: test.sh exit 1
+2026-10-14T14:20:19Z  M21 DISCRIMINATED: exactly extinction.tx_exit_takes_a_pending_preempt at 'the hold's drop takes the preempt that came due under it'; extinction set = the suite's own
+2026-10-14T14:20:19Z  disk pre-m22: 13732 MiB free (floor 8192)
+2026-10-14T14:21:09Z  disk post-m22-build: 13705 MiB free (floor 8192)
+2026-10-14T14:21:24Z  m22: test.sh exit 1
+2026-10-14T14:21:25Z  M22 DISCRIMINATED: exactly extinction.tx_enter_holds_the_thread_on_its_cpu at 'with irqs masked the gate admits the byte without touching thread state' and extinction.tx_exit_takes_a_pending_preempt at 'the hold's drop takes the preempt that came due under it'; extinction set = the suite's own
+2026-10-14T14:21:25Z  disk pre-fault: 13698 MiB free (floor 8192)
+2026-10-14T14:21:25Z  disk pre-b1: 13698 MiB free (floor 8192)
+2026-10-14T14:23:43Z  b1: test-fault exit 1
+2026-10-14T14:23:43Z  B1 DISCRIMINATED: without the gate extinction_peer_chatter FAILS: ==> [extinction_peer_chatter] FAIL: timeout (60s) — neither expected fault nor unrelated termination.
+2026-10-14T14:23:43Z  disk pre-b4: 13632 MiB free (floor 8192)
+2026-10-14T14:24:44Z  b4: test-fault exit 1
+2026-10-14T14:24:44Z  B4 DISCRIMINATED: a claim with IRQs on FAILS the variant: ==> [extinction_peer_chatter] FAIL: saw 'EXTINCTION: peer chatter: this banner must reach the wire whole' but ALSO 'console-claim: taken with irqs on'
+2026-10-14T14:24:44Z  disk pre-b5: 13597 MiB free (floor 8192)
+2026-10-14T14:26:48Z  b5: test-fault exit 1
+2026-10-14T14:26:48Z  B5 DISCRIMINATED: a gate that reads thread state silences recursive_kernel_fault: ==> [recursive_kernel_fault] FAIL: timeout (60s) — neither expected fault nor unrelated termination.
+2026-10-14T14:27:49Z  B2: with the gate extinction_peer_chatter PASSes, the banner a whole line
+2026-10-14T14:40:35Z  B3: ==> Summary: 9 PASS, 0 FAIL out of 9
+2026-10-14T14:41:23Z  rebuild byte-identical to the control kernel
+2026-10-14T14:42:09Z  rebuild-q byte-identical to CONTROL-Q
+2026-10-14T14:42:09Z  disk pre-shape: 11659 MiB free (floor 8192)
+2026-10-14T14:43:24Z  SHAPE: tools/check-production.sh --all exit 0
+2026-10-14T14:43:25Z  go fork unchanged across the run
+2026-10-14T14:43:25Z  exit 0

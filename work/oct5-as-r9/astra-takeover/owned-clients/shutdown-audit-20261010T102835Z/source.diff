@@ -1,0 +1,25 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_task_loop.rs b/work/oct5-as-r9/astra-takeover/owned-clients/test_task_loop.rs
+index ad23fce71..2ca3aac83 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_task_loop.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_task_loop.rs
+@@ -382,3 +382,20 @@ impl WaitSource for ClockCallback{type Ticket=u64;fn now(&mut self)->u64{if self
+ #[test]fn loop_quiet_step_has_no_internal_allocation(){
+  let mut tasks=Tasks::new(1).unwrap();let(t,_,_,_)=task_probe(false,false,false);tasks.spawn(||t).unwrap();let mut e=quiet_queue();let mut w=Events::new();LATE_ALLOCS.with(|x|x.set(0));WATCH_ALLOCS.with(|x|x.set(true));let r=task_loop::turn(&mut tasks,&mut e,&mut w,budgets(),None);WATCH_ALLOCS.with(|x|x.set(false));assert_eq!(LATE_ALLOCS.with(|x|x.get()),0);assert_eq!(r.wait.turn.outcome,Outcome::Woke(WakeReason::Spurious));assert_eq!(w.disarms,1);
+ }
++
++#[test]fn shutdown_task_owner_drop_keeps_retirement_charge_until_proof(){
++ let mut e=quiet_queue();let(p,a)=future_client(&mut e);let mut f=a.read(id(0,1),range(0)).unwrap();unsafe{f.publish().unwrap();}
++ let mut tasks=Tasks::new(1).unwrap();tasks.spawn(||async move{let _=f.await;}).unwrap();tasks.dispatch(1);assert!(!tasks.ready());
++ drop(tasks);assert_eq!(p.aborts.get(),1);drop(a);assert_eq!(e.progress(1).reclaimed,0);assert_eq!(p.freed.get(),0);assert_eq!(e.occupied(),1);
++ p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);assert_eq!(p.freed.get(),1);assert_eq!(p.closes.get(),1);
++}
++#[test]fn shutdown_retirement_root_wakes_task_and_preserves_held_read(){
++ let mut e=FutureExecutor::new(2).unwrap();let(p,a)=future_client(&mut e);let(q,mut b)=future_client(&mut e);
++ let mut pending=a.read(id(0,1),range(0)).unwrap();unsafe{pending.publish().unwrap();}
++ let mut ready=b.read(id(0,1),range(8)).unwrap();let cookie=unsafe{ready.publish().unwrap()};unsafe{b.receive(typed_record(cookie,3,0)).unwrap();}
++ let(_,w)=counter();let held=match poll(&mut ready,&w){Poll::Ready(Ok(r))=>r,_=>panic!("not ready")};drop(ready);
++ let seen=Rc::new(Cell::new(false));let out=seen.clone();let mut tasks=Tasks::new(1).unwrap();tasks.spawn(||async move{out.set(matches!(pending.await,Err(fixed_requests::Error::Closing)));}).unwrap();tasks.dispatch(1);assert!(!tasks.ready());
++ drop(e);assert!(tasks.ready());assert_eq!(p.closes.get(),1);assert_eq!(q.closes.get(),1);drop(a);drop(b);assert_eq!(p.freed.get(),0);assert_eq!(q.freed.get(),0);
++ assert_eq!(tasks.dispatch(1).completed,1);assert!(seen.get());assert_eq!(tasks.occupied(),0);assert_eq!(p.freed.get(),1);assert_eq!(p.aborts.get(),0);
++ assert_eq!(held.bytes().unwrap(),&[1;3]);drop(tasks);assert_eq!(q.freed.get(),0);drop(held);assert_eq!(q.freed.get(),1);
++}

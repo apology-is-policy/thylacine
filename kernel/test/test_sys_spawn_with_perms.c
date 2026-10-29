@@ -48,42 +48,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
-
-extern int sys_spawn_with_perms_for_proc(struct Proc *p,
-                                         const char *name, size_t name_len,
-                                         const u32 *fds, u32 fd_count,
-                                         caps_t cap_mask, u32 perm_flags);
-
-// A-5b #827b: the per-bit grant gate, exported so the decision can be driven
-// directly on synthetic Procs (decoupled from the heavyweight spawn body).
-extern int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
-
-// LS-5: the perm-application helper (the bit->action mapping both spawn thunks
-// run) + the console-owner accessor, exported so the owner-set WIRING can be
-// driven deterministically — a real spawn races the child's fast exit clearing
-// g_console_owner, so the wiring is unobservable through a full spawn.
-extern void apply_spawn_perms(struct Proc *p, u32 perm_flags);
-extern struct Proc *proc_test_console_owner(void);
-
-void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
-void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
-void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
-void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
-void test_sys_spawn_with_perms_holder_delegates_may_post(void);
-void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
-void test_sys_spawn_with_perms_console_owner_grant_gate(void);
-void test_sys_spawn_with_perms_console_owner_set_wiring(void);
-void test_sys_spawn_with_perms_seat_roles(void);
-
-extern void proc_test_seat_reset(void);
-// (U) F1: the I-39 debug-authority predicate, so the NOTRACE arm can assert the
-// CONSEQUENCE of the stamp and not merely that a bit landed in a word.
-// The seal's one-way setters (kernel/syscall.c); the test drives their re-enable
-// refusal directly (devproc's image gate is pinned in test_devproc.c).
-extern int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
-extern int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
-extern bool devproc_debug_authorized(const struct Proc *caller,
-                                     const struct Proc *target);
+#include <thylacine/devproc.h>
 
 static void drain_zombies(void) {
     int status = 0;
@@ -176,6 +141,36 @@ void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void) {
     TEST_EXPECT_EQ(rc, -1,
         "perm_flags set + parent not console-attached → -1");
 
+    unprivileged->caps |= CAP_POST_SERVICE | CAP_TCB_DIAL | CAP_SET_IDENTITY;
+    proc_mark_console_attached(unprivileged);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(unprivileged, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "console and capabilities do not mint factory role");
+    struct Proc *valid_parent = current_thread()->proc;
+    TEST_ASSERT(!proc_may_create_srv_registry(valid_parent), "boot test caller lacks factory role");
+    caps_t parent_caps = valid_parent->caps;
+    valid_parent->caps |= CAP_SET_IDENTITY;
+    TEST_EXPECT_EQ(sys_spawn_with_perms_for_proc(valid_parent, "hello", 5,
+        NULL, 0, CAP_NONE, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "legacy permission spawn refuses factory delegation");
+    TEST_EXPECT_EQ(sys_spawn_full_argv_for_proc(valid_parent, "hello", 5,
+        NULL, 0, 0, NULL, 0, CAP_NONE, SPAWN_PERM_SESSION_REGISTRY), -1,
+        "argv spawn refuses factory delegation");
+    TEST_EXPECT_EQ(sys_spawn_full_argv_debug_for_proc(valid_parent, "hello", 5,
+        NULL, 0, 0, NULL, 0, CAP_NONE, SPAWN_PERM_SESSION_REGISTRY,
+        true, 1000, 1000, NULL, 0, NULL, 0, 0, 0), -1,
+        "identity/budget/phenotype/debug spawn core refuses factory delegation");
+    valid_parent->caps = parent_caps;
+    proc_mark_session_registry(unprivileged);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(unprivileged, SPAWN_PERM_SESSION_REGISTRY), 0,
+        "explicit factory holder delegates");
+    struct Proc *child = proc_alloc();
+    TEST_ASSERT(child, "factory stamp target");
+    apply_spawn_perms(child, 0);
+    TEST_ASSERT(!proc_may_create_srv_registry(child), "ordinary spawn has no factory role");
+    apply_spawn_perms(child, SPAWN_PERM_SESSION_REGISTRY);
+    TEST_ASSERT(proc_may_create_srv_registry(child), "explicit spawn stamps factory role");
+    child->state = PROC_STATE_ZOMBIE;
+    proc_free(child);
     // Clean up the throwaway Proc.
     unprivileged->state = PROC_STATE_ZOMBIE;
     proc_free(unprivileged);

@@ -1,0 +1,42 @@
+Astra single-agent self-review: C deadline/cancellation parity, October10.
+Uninstalled draft with simulated backends. Not an independent audit.
+
+Reviewed against approved AS3 C submit/poll/cancel/reap contract and the existing
+Rust deadline implementation. C opaque handles previously could only cancel by
+being dropped, and exposed no deadline polling. New typed APIs forward into the
+shared fixed-owner cells; no additional queue/node or caller-owned buffer pointer.
+Each cell resets deadline/has_deadline/abort_requested when reserved. Set/clear is
+prepared-only. Zero remains a valid local deadline via the enabled flag; no native
+ABI encoding is asserted. Next deadline scans64cells, excludes prepared, terminal,
+already-cancelled and closed state. Expire visits min(budget,64) distinct cells
+with a rotating cursor; zero budget is zero work. Arithmetic compares absolute
+uint64 values directly, including UINT64_MAX, without deadline addition/overflow.
+
+Explicit cancel, expiry and Drop share one cancellation routine. It sets the bit
+before the backend call; callbacks remain bounded, nonblocking and nonreentrant.
+The request handle/cookie cannot be reused while live; C callers must obey opaque
+handle lifetime rules. Scope abort may affect siblings and is idempotent in the
+backend contract, not remote per-request cancellation or rollback. No timer or
+ABORT result changes fixed phase, correlation, backing ownership or accounting.
+A valid CQ still supplies the actual result, including successful late WRITE.
+Terminal READ holds its buffer until result destruction. Closed owners suppress
+abort; normally retiring owners still allow expiry. Root/drop and global retirement
+proof remain distinct. Caller must service remaining due cells before sleeping.
+No native timer, OS wake, SQ publication or C event-loop integration is claimed.
+
+Eight tests cover prepared/zero timing, reused state, late WRITE success and no
+observed calloc, terminal READ ownership, close suppression/retirement proof,
+64cell budget/fairness/max integer, clear-deadline, and retiring-driver expiry.
+Six semantic mutants fail for repeated abort, early expiry, lost cursor, ignored
+budget, early storage reuse, and stale next-deadline after cancellation. Clean
+LLVM22 ASan+UBSan and optimized NDEBUG-core runs pass; harness assertions stay on.
+Regression profiles/mutants also pass for typed requests, backing and retirement.
+Raw source/snapshot/HEAD/diff and log checks:13/13/7/15hashes,25/25/25/27commands.
+See deadlines-c101109Z, fixed-requests-c101122Z, fixed-io-c101136Z and
+retirement-executor-c101143Z on20261010. No failures or ignored diagnostics.
+
+Remaining immediate C parity gap: timer forwarding through retirement manager
+(attached and retiring drivers), then independent shutdown/drain coverage review.
+Native integration remains blocked by parked SQ dependency; no workaround attempted.
+No production installation, Main landing, AS4/MM0-MM4 advance or128MiB change.
+Protected10, clean exact external61dde37, parked patch and restored kernel verified.

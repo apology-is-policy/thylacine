@@ -1,0 +1,12 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 6bbfb3539..4fd6bfed3 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -8294,7 +8294,6 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
+     return 0;
+ 
+ rollback:
+-    for (u32 i = 0; i < got; i++) spoor_clunk(spoors[i]);
+     handle_put(&lh);
+     return rc;
+ }

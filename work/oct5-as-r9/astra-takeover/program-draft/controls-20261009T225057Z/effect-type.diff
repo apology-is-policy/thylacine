@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ effect-type.c
+@@ -60,7 +60,7 @@
+         } else return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+         if(perm_check_identity(&p->identity,&st,want))
+             return program_end(p,-T_E_ACCES,LPROGRAM_TERMINAL);
+-        p->phase=LPROGRAM_EFFECT;p->wire.kind=p->operation;
++        p->phase=LPROGRAM_EFFECT;p->wire.kind=P9_TREAD;
+         return LPROGRAM_NEXT;
+     }
+     if(p->wire.kind!=p->operation)return program_end(p,-T_E_IO,LPROGRAM_ABORT);

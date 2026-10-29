@@ -1,0 +1,94 @@
+2026-10-22T12:56:48Z  HEAD 5138d780c5237e26a4dcb9581a04b3bb7f8dc586, clean
+2026-10-22T12:56:48Z  START rust-host: tools/test-rust.sh
+2026-10-22T13:00:20Z  END rust-host rc=0
+2026-10-22T13:00:20Z  START test-9p-client-progress: python3 -I tools/test-9p-client-progress.py --logs work/oct22-merge/host-20261022T125648Z/test-9p-client-progress --mutants
+2026-10-22T13:00:35Z  END test-9p-client-progress rc=0
+2026-10-22T13:00:35Z  START test-9p-client-progress-san: python3 -I tools/test-9p-client-progress.py --sanitize --logs work/oct22-merge/host-20261022T125648Z/test-9p-client-progress-san
+2026-10-22T13:00:40Z  END test-9p-client-progress-san rc=0
+2026-10-22T13:00:40Z  START test-9p-progress: python3 -I tools/test-9p-progress.py --logs work/oct22-merge/host-20261022T125648Z/test-9p-progress --mutants
+2026-10-22T13:01:03Z  END test-9p-progress rc=0
+2026-10-22T13:01:03Z  START test-9p-progress-san: python3 -I tools/test-9p-progress.py --sanitize --logs work/oct22-merge/host-20261022T125648Z/test-9p-progress-san
+2026-10-22T13:01:07Z  END test-9p-progress-san rc=0
+2026-10-22T13:01:07Z  START test-addrspace-lifetime: python3 -I tools/test-addrspace-lifetime.py --logs work/oct22-merge/host-20261022T125648Z/test-addrspace-lifetime --mutants
+2026-10-22T13:01:19Z  END test-addrspace-lifetime rc=0
+2026-10-22T13:01:19Z  START test-addrspace-lifetime-san: python3 -I tools/test-addrspace-lifetime.py --sanitize --logs work/oct22-merge/host-20261022T125648Z/test-addrspace-lifetime-san
+2026-10-22T13:01:22Z  END test-addrspace-lifetime-san rc=0
+2026-10-22T13:01:22Z  START test-app-records: python3 -I tools/test-app-records.py
+2026-10-22T13:01:30Z  END test-app-records rc=0
+2026-10-22T13:01:30Z  START test-application-dispatch: python3 -I tools/test-application-dispatch.py
+2026-10-22T13:01:43Z  END test-application-dispatch rc=0
+2026-10-22T13:01:43Z  START test-clipboard-admission: python3 -I tools/test-clipboard-admission.py --out work/oct22-merge/host-20261022T125648Z/test-clipboard-admission
+2026-10-22T13:01:49Z  END test-clipboard-admission rc=0
+2026-10-22T13:01:49Z  START test-controllers: python3 -I tools/test-controllers.py
+2026-10-22T13:02:06Z  END test-controllers rc=0
+2026-10-22T13:02:06Z  START test-corvus-sessions: python3 -I tools/test-corvus-sessions.py
+2026-10-22T13:02:11Z  END test-corvus-sessions rc=0
+2026-10-22T13:02:11Z  START test-host-bindings: python3 -I tools/test-host-bindings.py
+2026-10-22T13:02:30Z  END test-host-bindings rc=0
+2026-10-22T13:02:30Z  START test-interaction-admission: python3 -I tools/test-interaction-admission.py --out work/oct22-merge/host-20261022T125648Z/test-interaction-admission
+2026-10-22T13:02:36Z  END test-interaction-admission rc=0
+2026-10-22T13:02:36Z  START test-interaction-owner: python3 -I tools/test-interaction-owner.py
+2026-10-22T13:03:01Z  END test-interaction-owner rc=0
+2026-10-22T13:03:01Z  START test-interaction-wire: python3 -I tools/test-interaction-wire.py
+2026-10-22T13:03:02Z  END test-interaction-wire rc=0
+2026-10-22T13:03:02Z  START test-loom-receipts: python3 -I tools/test-loom-receipts.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-receipts --mutants
+2026-10-22T13:03:28Z  END test-loom-receipts rc=0
+2026-10-22T13:03:28Z  START test-loom-rust-ownership: python3 -I tools/test-loom-rust-ownership.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-rust-ownership
+2026-10-22T13:03:30Z  END test-loom-rust-ownership rc=0
+2026-10-22T13:03:30Z  START test-loom-service-fids: python3 -I tools/test-loom-service-fids.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-fids
+2026-10-22T13:03:39Z  END test-loom-service-fids rc=0
+2026-10-22T13:03:39Z  START test-loom-service-nodes: python3 -I tools/test-loom-service-nodes.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-nodes
+2026-10-22T13:03:53Z  END test-loom-service-nodes rc=0
+2026-10-22T13:03:53Z  START test-loom-service-pool-table: python3 -I tools/test-loom-service-pool-table.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-pool-table
+2026-10-22T13:04:00Z  END test-loom-service-pool-table rc=0
+2026-10-22T13:04:00Z  START test-loom-service-pool: python3 -I tools/test-loom-service-pool.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-pool --mutants
+2026-10-22T13:04:06Z  END test-loom-service-pool rc=0
+2026-10-22T13:04:06Z  START test-loom-service-pool-san: python3 -I tools/test-loom-service-pool.py --sanitize --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-pool-san
+2026-10-22T13:04:08Z  END test-loom-service-pool-san rc=0
+2026-10-22T13:04:08Z  START test-loom-service-requests: python3 -I tools/test-loom-service-requests.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-requests
+2026-10-22T13:04:28Z  END test-loom-service-requests rc=0
+2026-10-22T13:04:28Z  START test-loom-service-slots: python3 -I tools/test-loom-service-slots.py --logs work/oct22-merge/host-20261022T125648Z/test-loom-service-slots
+2026-10-22T13:04:37Z  END test-loom-service-slots rc=0
+2026-10-22T13:04:37Z  START test-magazines: python3 -I tools/test-magazines.py --logs work/oct22-merge/host-20261022T125648Z/test-magazines --mutants
+2026-10-22T13:04:53Z  END test-magazines rc=0
+2026-10-22T13:04:53Z  START test-ordered-interaction: python3 -I tools/test-ordered-interaction.py
+2026-10-22T13:05:03Z  END test-ordered-interaction rc=0
+2026-10-22T13:05:03Z  START test-pane-routes: python3 -I tools/test-pane-routes.py
+2026-10-22T13:05:16Z  END test-pane-routes rc=0
+2026-10-22T13:05:16Z  START test-pci-msi-dtb: python3 -I tools/test-pci-msi-dtb.py
+2026-10-22T13:05:17Z  END test-pci-msi-dtb rc=0
+2026-10-22T13:05:17Z  START test-pty-interaction-abi: python3 -I tools/test-pty-interaction-abi.py
+2026-10-22T13:05:17Z  END test-pty-interaction-abi rc=0
+2026-10-22T13:05:17Z  START test-seat-control: python3 -I tools/test-seat-control.py
+2026-10-22T13:05:24Z  END test-seat-control rc=0
+2026-10-22T13:05:24Z  START test-service-admission: python3 -I tools/test-service-admission.py --logs work/oct22-merge/host-20261022T125648Z/test-service-admission --mutants
+2026-10-22T13:05:30Z  END test-service-admission rc=0
+2026-10-22T13:05:30Z  START test-service-admission-san: python3 -I tools/test-service-admission.py --sanitize --logs work/oct22-merge/host-20261022T125648Z/test-service-admission-san
+2026-10-22T13:05:32Z  END test-service-admission-san rc=0
+2026-10-22T13:05:32Z  START test-service-replies: python3 -I tools/test-service-replies.py
+2026-10-22T13:05:39Z  END test-service-replies rc=0
+2026-10-22T13:05:39Z  START test-sqpoll-ticket: python3 -I tools/test-sqpoll-ticket.py --logs work/oct22-merge/host-20261022T125648Z/test-sqpoll-ticket --mutants
+2026-10-22T13:05:45Z  END test-sqpoll-ticket rc=0
+2026-10-22T13:05:45Z  START test-srv-registry-abi: python3 -I tools/test-srv-registry-abi.py
+2026-10-22T13:05:45Z  END test-srv-registry-abi rc=0
+2026-10-22T13:05:45Z  START test-srv-registry-factory: python3 -I tools/test-srv-registry-factory.py
+2026-10-22T13:05:47Z  END test-srv-registry-factory rc=0
+2026-10-22T13:05:47Z  START test-srvconn-admission: python3 -I tools/test-srvconn-admission.py
+2026-10-22T13:05:52Z  END test-srvconn-admission rc=0
+2026-10-22T13:05:52Z  START test-tapestry-payload-borrow: python3 -I tools/test-tapestry-payload-borrow.py --logs work/oct22-merge/host-20261022T125648Z/test-tapestry-payload-borrow
+2026-10-22T13:05:56Z  END test-tapestry-payload-borrow rc=0
+2026-10-22T13:05:56Z  START test-weft-payload-borrow: python3 -I tools/test-weft-payload-borrow.py --logs work/oct22-merge/host-20261022T125648Z/test-weft-payload-borrow
+2026-10-22T13:05:57Z  END test-weft-payload-borrow rc=0
+2026-10-22T13:05:57Z  START loom-client: tools/test-loom-client.sh --out work/oct22-merge/host-20261022T125648Z/loom-client
+2026-10-22T13:06:32Z  END loom-client rc=0
+2026-10-22T13:06:32Z  START sims-mutants: python3 -I work/oct21-sims/mutants.py work/oct22-merge/host-20261022T125648Z/sims
+2026-10-22T13:07:05Z  END sims-mutants rc=0
+2026-10-22T13:07:06Z  START burrow-spec: sh specs/check-burrow.sh
+2026-10-22T13:07:08Z  END burrow-spec rc=0
+2026-10-22T13:07:08Z  START loom-service-index: python3 -I tools/check-loom-service-index.py --logs work/oct22-merge/host-20261022T125648Z/loom-service-index
+2026-10-22T13:07:10Z  END loom-service-index rc=0
+2026-10-22T13:07:10Z  START loom-service-abi: python3 -I tools/check-loom-service-abi.py
+2026-10-22T13:07:14Z  END loom-service-abi rc=0
+2026-10-22T13:07:14Z  START authority-abi: python3 -I tools/check-authority-abi.py
+2026-10-22T13:07:14Z  END authority-abi rc=0
+2026-10-22T13:07:14Z  ALL 46 HOST LEGS PASS at 5138d780c5237e26a4dcb9581a04b3bb7f8dc586

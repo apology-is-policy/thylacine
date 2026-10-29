@@ -1,0 +1,14 @@
+[
+  {
+    "id": "NATIVE-FIXTURE-1",
+    "cause": "Large aggregate initializer emitted unavailable freestanding memset.",
+    "fix": "Explicit byte initialization.",
+    "evidence": "build.log; successful build-2.log"
+  },
+  {
+    "id": "NATIVE-FIXTURE-2",
+    "cause": "Provided positive CQEs include mandatory LOOM_CQE_SERVICE_BUFFER; initial fixture wrongly expected flags0.",
+    "fix": "Assert exact SERVICE_BUFFER and MORE combinations, zero flags on EOF. Production unchanged.",
+    "evidence": "provided-20261010T0208Z (1855/1856 failed), provided-20261010T0210Z (1856/1856 passed)"
+  }
+]

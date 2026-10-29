@@ -1,0 +1,10 @@
+== clean (must run to completion) ==
+ok   burrow: rc=0, 100 distinct states
+== buggy (must violate, and violate the NAMED invariant) ==
+ok   burrow_buggy_free_on_close: rc=12, NoUseAfterFree violated as claimed (62 distinct states)
+ok   burrow_buggy_free_on_unmap: rc=12, NoUseAfterFree violated as claimed (52 distinct states)
+ok   burrow_buggy_never_free: rc=12, NoUseAfterFree violated as claimed (56 distinct states)
+ok   burrow_buggy_claim_restore: rc=12, NoRecordAfterFree violated as claimed (266 distinct states)
+ok   burrow_buggy_claim_restore_ledger: rc=12, RefundExactlyOnce violated as claimed (343 distinct states)
+
+burrow: ALL CFGS AS CLAIMED

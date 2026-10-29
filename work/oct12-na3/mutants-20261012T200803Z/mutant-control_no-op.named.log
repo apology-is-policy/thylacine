@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 2 tests
+test tests::ring::composed::composed_abandoned_stream_and_corrupt_record_retain_owned_bytes ... ok
+test tests::ring::composed::composed_paired_delivery_keeps_a_across_b_final_and_teardown ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 138 filtered out; finished in 0.00s
+

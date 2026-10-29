@@ -1,0 +1,7 @@
+mac   HELD by you for 1m, 3.0h left
+        why: corona: the main-merge gate at 0374cf0ba (46 host legs incl cargo host tests + sims mutants, 1 guest mutant, then CI/qual/UBSan/production/SMP 5x10); first build after a 263-commit merge rebuilds widely, duration uncertain
+        phase: corona main-merge lease at d645dd0eb: gate (ci/qual/UBSan/production/SMP 5x10) -> guest mutants R1+R2 -> pi bake (ubsan+ci) -> host legs (46); driver work/oct22-merge/lease-20261022T085724Z
+        runner: Mac pid 33144 alive (start Thu Oct 22 10:57:24 2026)
+        pids: [33144] (their registered work -- not a kill list)
+pi    FREE
+disk: 9.0 GiB available at /Users/northkillpd/projects/thylacine-corona

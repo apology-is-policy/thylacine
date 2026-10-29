@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/loom_service_control.c	2026-10-13 16:56:16
++++ kernel/loom_service_control.c	2026-10-13 17:15:18
+@@ -115,7 +115,7 @@
+     u32 kind=0,state=0;
+     spin_lock(&l->lock);
+     struct loom_service_slot *s=control_exact(l,in->object);
+-    if(!s)s=control_retiring_fid(l,in->object);
++    if(!s && in->flags)s=control_retiring_fid(l,in->object); // MUTANT M14: no RETIRING FID lookup (control_input refused any flags)
+     if(!s)rc=-T_E_NOENT;
+     else {kind=s->kind;if(kind==LOOM_SERVICE_SCOPE || kind==LOOM_SERVICE_FID)state=l->service_nodes->nodes[in->object.slot].state;}
+     spin_unlock(&l->lock);

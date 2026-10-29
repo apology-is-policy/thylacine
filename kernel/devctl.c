@@ -39,16 +39,19 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spoor.h>
-#include <thylacine/srvconn.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
+#include <thylacine/srvconn.h>
+#include <thylacine/devsrv.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
 #include <thylacine/thread.h>   // ARCH 8.12: THREAD_KSTACK_* (/ctl/kstack)
-#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count (/proc/stat intr)
 #include "../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident + linux_hwcap (/proc/cpuinfo)
 #include "../arch/arm64/kaslr.h"
 #include "../mm/phys.h"
+#include <thylacine/devctl.h>
+#include <thylacine/devproc.h>
+#include <thylacine/visibility.h>
 
 // =============================================================================
 // Qid encoding.
@@ -138,13 +141,6 @@ static size_t fmt_gated_udec(char *buf, size_t cap, size_t off, bool shown, u64 
     return shown ? fmt_udec(buf, cap, off, (unsigned long)v) : fmt_str(buf, cap, off, "-");
 }
 
-// devproc.c: owner (same principal, never none) or CAP_HOSTOWNER; the caller
-// holds g_proc_table_lock, as format_procs_cb does.
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
-// devproc.c: true when a reader running as none may not see target (Plan 9's
-// nonone; IDENTITY-DESIGN's reserved ids).
-bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
-
 // IMPERIUM-DESIGN 11.3 item 10: a counter that moves whenever any Proc runs --
 // per-CPU idle time, context switches and interrupts, the runnable count, the
 // park counts -- changes once per key the trusted episode's authority handles on
@@ -152,8 +148,8 @@ bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 // counters are the system principal's: shown exactly to PRINCIPAL_SYSTEM (the
 // TCB, and the boot benchmarks) and to a CAP_HOSTOWNER holder. Both fields are
 // cross-thread writable (proc_apply_identity, proc_become_legate), hence the
-// atomic loads. Non-static: test-driven.
-bool devctl_system_counters_readable(const struct Proc *reader);
+// atomic loads.
+VISIBLE_IF_KERNEL_TESTS
 bool devctl_system_counters_readable(const struct Proc *reader) {
     if (!reader) return false;
     if (__atomic_load_n(&reader->principal_id, __ATOMIC_ACQUIRE) == PRINCIPAL_SYSTEM)
@@ -187,12 +183,12 @@ static const char *procs_state_name(const struct Proc *p) {
     return state_name(p->state);
 }
 
-// Test hook (the *_for_test convention: absent from the header, extern-declared
-// by the harness, no production caller): the STATE column's word for `p`.
-const char *devctl_procs_state_name_for_test(const struct Proc *p);
+#ifdef KERNEL_TESTS
+// Test hook: the STATE column's word for `p`.
 const char *devctl_procs_state_name_for_test(const struct Proc *p) {
     return procs_state_name(p);
 }
+#endif
 
 // =============================================================================
 // Per-leaf content generators.
@@ -339,12 +335,13 @@ static size_t format_procs(const struct Proc *reader, char *buf, size_t cap) {
     return s.off;
 }
 
-// Test hook (the *_for_test convention): /ctl/procs formatted into a buffer of
-// the caller's size, so a test can make any row the one that overflows.
-size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
+#ifdef KERNEL_TESTS
+// Test hook: /ctl/procs formatted into a buffer of the caller's size, so a
+// test can make any row the one that overflows.
 size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_procs(reader, buf, cap);
 }
+#endif
 
 // ARCH 8.12's kernel-stack watermark, per Proc and as a whole-system peak.
 //
@@ -807,6 +804,16 @@ static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
 #define EMIT_GDEC(v) do { if (shown) EMIT_DEC(v); else EMIT_STR("-"); } while (0)
     EMIT_STR("conn peer=");   EMIT_DEC(row->peer_pid);
     EMIT_STR(" msize=");      EMIT_DEC(row->msize);
+    EMIT_STR(row->session_domain ? " session=" : " boot="); EMIT_DEC(row->domain_used);
+    EMIT_STR(" guests="); EMIT_DEC(row->sessions_used);
+    EMIT_STR(" all="); EMIT_DEC(row->global_used);
+    EMIT_STR(" domains="); EMIT_DEC(row->domains_retained);
+    EMIT_STR(" credits="); EMIT_DEC(row->domain_credits);
+    EMIT_STR("/"); EMIT_DEC(row->session_domain ? SRV_CREDITS_DOMAIN : SRV_CREDITS_GLOBAL);
+    EMIT_STR(" guestcredits="); EMIT_DEC(row->session_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_SESSIONS);
+    EMIT_STR(" allcredits="); EMIT_DEC(row->global_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_GLOBAL);
     EMIT_STR(row->byte_mode ? " byte" : " 9p");
     EMIT_STR(row->kernel_attached ? " ka" : " -");
     EMIT_STR(row->state == 1 ? " live" : " torn");
@@ -874,6 +881,29 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
     }
     EMIT_STR("\n");
     return true;
+}
+
+// Emit the bounded global summary first; detail may fill the 4 KiB read buffer.
+// Snapshot takes only admission lock, before the diagnostic-list walk begins.
+static bool format_9p_admission(struct ctl_9p_fmt *f) {
+    struct srv_admission_snapshot s;
+    srv_domain_snapshot(NULL, &s);
+    size_t line = f->off;
+    size_t n;
+    EMIT_STR("admission count="); EMIT_DEC(s.global_count);
+    EMIT_STR(" guests="); EMIT_DEC(s.session_count);
+    EMIT_STR(" boot="); EMIT_DEC(s.local_count);
+    EMIT_STR(" credits="); EMIT_DEC(s.global_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_GLOBAL);
+    EMIT_STR(" guestcredits="); EMIT_DEC(s.session_credits);
+    EMIT_STR("/"); EMIT_DEC(SRV_CREDITS_SESSIONS);
+    EMIT_STR(" bootcredits="); EMIT_DEC(s.local_credits);
+    EMIT_STR(" domainlimit="); EMIT_DEC(SRV_CREDITS_DOMAIN);
+    EMIT_STR(" domains="); EMIT_DEC(s.domains);
+    EMIT_STR("/"); EMIT_DEC(SRV_MAX_DOMAINS);
+    EMIT_STR(" creditbytes="); EMIT_DEC(SRV_CREDIT_BYTES);
+    EMIT_STR("\n");
+    return true;
 #undef EMIT_STR
 #undef EMIT_DEC
 #undef EMIT_GDEC
@@ -882,16 +912,17 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
 static size_t format_9p_sessions(const struct Proc *reader, char *buf, size_t cap) {
     struct ctl_9p_fmt f = { buf, cap, 0, false, devctl_system_counters_readable(reader),
         reader ? __atomic_load_n(&reader->principal_id, __ATOMIC_ACQUIRE) : PRINCIPAL_INVALID };
-    srvconn_ctl_iterate(format_9p_conn_cb, &f);
+    if (format_9p_admission(&f)) srvconn_ctl_iterate(format_9p_conn_cb, &f);
     if (!f.full) p9_attached_ctl_iterate(format_9p_sess_cb, &f);
     return f.off;
 }
 
-// Test hook (the *_for_test convention): /ctl/9p-sessions as `reader` sees it.
-size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
+#ifdef KERNEL_TESTS
+// Test hook: /ctl/9p-sessions as `reader` sees it.
 size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap) {
     return format_9p_sessions(reader, buf, cap);
 }
+#endif
 
 // =============================================================================
 // Per-leaf table.
@@ -933,9 +964,10 @@ static const struct ctl_leaf *leaf_for_kind(u32 kind) {
 // KASLR). The other leaves stay world-readable (Plan 9 introspection); procs,
 // cpu, sched and 9p-sessions render the fields IMPERIUM-DESIGN 11.3 item 10
 // withholds as "-" per reader.
-// Non-static so the deny/allow regression test can drive it with synthetic
+// Visible to the tests so the deny/allow regression can drive it with synthetic
 // callers (devctl.perm_enforced is false -- the gate is at the read site, the
 // devproc kill-gate idiom). `caller` is the reading Proc; NULL -> deny.
+VISIBLE_IF_KERNEL_TESTS
 bool devctl_kernel_base_readable(const struct Proc *caller) {
     if (!caller) return false;
     return (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER) != 0;

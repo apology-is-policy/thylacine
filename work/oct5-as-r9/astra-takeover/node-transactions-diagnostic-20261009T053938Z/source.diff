@@ -1,0 +1,125 @@
+diff --git a/kernel/include/thylacine/loom.h b/kernel/include/thylacine/loom.h
+index 5dcb04c09..8bd4e3a0e 100644
+--- a/kernel/include/thylacine/loom.h
++++ b/kernel/include/thylacine/loom.h
+@@ -708,6 +708,18 @@ int loom_private_fixed_release(struct Loom *, struct loom_private_fixed *);
+ // Internal target registration: complete immutable kernel record, retained owner
+ // and creator in its stable syscall image. Resolves the actual registry_fd via
+ // handle_get; navigation is not connect authority. No syscall activation.
++// Internal SCOPE/FID metadata transactions, not activated register handlers.
++// Input is a kernel snapshot. Caller retains l and its stable creator syscall
++// image through prepare/copyout/publish-or-rollback; these functions do not add
++// a reference. Failed prepare leaves output untouched. Publish rechecks close
++// and a FID's exact READY parent. Rollback/reap progress after close; only unused
++// RESERVED nodes can use this reap, never active or retired protocol objects.
++int loom_private_node_prepare(struct Loom *, struct Proc *,
++                              const struct loom_service_reserve *, struct loom_service_ref *);
++int loom_private_node_publish(struct Loom *, struct loom_service_ref);
++int loom_private_node_rollback(struct Loom *, struct loom_service_ref);
++int loom_private_node_reap_unused(struct Loom *, struct loom_service_ref);
++
+ int loom_private_target_prepare(struct Loom *, struct Proc *,
+                                 const struct loom_service_target *, struct loom_service_ref *);
+ // Continuations retain the Loom across usercopy and every publish/remove call.
+diff --git a/kernel/loom.c b/kernel/loom.c
+index 1d926d7ee..8cc6ba861 100644
+--- a/kernel/loom.c
++++ b/kernel/loom.c
+@@ -1313,6 +1313,52 @@ int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
+     return loom_private_pool_remove(l,ref,false);
+ }
+ 
++// SCOPE/FID reserve transactions use an immutable, already-copied ABI record.
++// The syscall owns a Loom reference and a stable creator image across prepare,
++// copyout and publish/rollback. No user pointer or Proc escapes. The same ring
++// lock protects both ledgers and the close/parent-abort publication check.
++// This only reserves metadata: it grants no protocol authority, creates no
++// client and cannot reap a node that has entered the protocol state machine.
++int loom_private_node_prepare(struct Loom *l, struct Proc *p,
++                              const struct loom_service_reserve *in,
++                              struct loom_service_ref *out) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
++        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
++    if (p->as != l->service_as || p->stripes != l->service_creator)
++        return -T_E_ACCES;
++    if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
++        in->flags || in->reserved || in->result.slot || in->result.reserved ||
++        in->result.incarnation) return -T_E_INVAL;
++    spin_lock(&l->lock);
++    int rc = l->service_closing ? -T_E_CANCELED :
++        loom_service_node_prepare(l->service_slots, l->service_nodes,
++                                  in->kind, in->scope, out);
++    spin_unlock(&l->lock);
++    return rc;
++}
++int loom_private_node_publish(struct Loom *l, struct loom_service_ref ref) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
++    spin_lock(&l->lock);
++    int rc = l->service_closing ? -T_E_CANCELED :
++        loom_service_node_publish(l->service_slots, l->service_nodes, ref);
++    spin_unlock(&l->lock);
++    return rc;
++}
++int loom_private_node_rollback(struct Loom *l, struct loom_service_ref ref) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
++    spin_lock(&l->lock);
++    int rc = loom_service_node_rollback(l->service_slots, l->service_nodes, ref);
++    spin_unlock(&l->lock);
++    return rc;
++}
++int loom_private_node_reap_unused(struct Loom *l, struct loom_service_ref ref) {
++    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
++    spin_lock(&l->lock);
++    int rc = loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
++    spin_unlock(&l->lock);
++    return rc;
++}
++
+ // TARGET transactions consume the shared slot quota before resolving the actual
+ // handle. Native capture and all handle/registry drops occur outside the ring
+ // lock; the caller retains l and a stable creator syscall image throughout.
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index 986c793ae..4949c99ff 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -668,6 +668,7 @@ void test_loom_create_geometry(void);
+ void test_loom_private_owner_lifecycle(void);
+ void test_loom_service_slots(void);
+ void test_loom_service_nodes(void);
++void test_loom_private_node_owner(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+ void test_loom_private_buffers(void);
+@@ -2753,6 +2754,7 @@ struct test_case g_tests[] = {
+     { "loom.private_fixed",              test_loom_private_fixed,              false, NULL },
+     { "loom.private_slot_owner",         test_loom_private_slot_owner,         false, NULL },
+     { "loom.service_pool_table",         test_loom_service_pool_table,         false, NULL },
++    { "loom.private_node_owner",         test_loom_private_node_owner,         false, NULL },
+     { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
+     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
+     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 3a86f8172..cacd04224 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -96,6 +96,20 @@ void test_loom_service_nodes(void) {
+     TEST_ASSERT(!error, error);
+ }
+ 
++#include "loom_node_owner_fixture.h"
++
++void test_loom_private_node_owner(void);
++void test_loom_private_node_owner(void) {
++    struct Proc *p = test_proc_make();
++    struct Loom *l = p ? loom_create_private(p,2,2,true) : NULL;
++    u64 goal = loom_private_retired() + (l ? 1 : 0);
++    const char *error = !l ? "node owner allocation" : loom_node_owner_fixture(l,p);
++    if (l) loom_unref(l);
++    if (!lp_wait(goal) && !error) error = "node owner retirement timeout";
++    if (p) test_proc_drop(p);
++    TEST_ASSERT(!error,error);
++}
++
+ #include "loom_pool_table_fixture.h"
+ 
+ void test_loom_service_pool_table(void) {

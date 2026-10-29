@@ -62,6 +62,12 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // write into a segfault.
 #define VMA_FLAG_COW        (1u << 1)
 
+// AS-2: kernel-owned private Loom SQ/CQ mapping. Never a userspace map flag.
+// COW fork omits it; protect/range splits retain it. Only the private ring
+// setup path may stamp it, never registration of an ordinary user I/O buffer.
+#define VMA_FLAG_PRIVATE_RING (1u << 2)
+
+
 // The permission CEILING (B-1a; ARCH 6.5 "The permission ceiling"; I-12): bits
 // 8..10 of `flags` hold the VMA_PROT_* set this mapping may never be raised past.
 // Fixed by the mint and lowered only by PROTECT_SEAL; nothing raises it.
@@ -77,12 +83,12 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // the eager-anon SHARE arm sound: an eager mapping is shared across a fork only
 // when its CEILING excludes WRITE, since the current prot can be raised back.
 //
-// Lives in `flags` so struct Vma stays 64 bytes. The two bits below it are the
-// mapping's STATE (shared-in, COW); the D-3b split's "no flags" refusal reads
+// Lives in `flags` so struct Vma stays 64 bytes. The low bits below it are the
+// mapping's STATE (shared-in, COW, private ring); the D-3b split's "no flags" refusal reads
 // the state bits only (VMA_FLAG_STATE_MASK).
 #define VMA_FLAG_MAX_SHIFT  8
 #define VMA_FLAG_MAX_MASK   (7u << VMA_FLAG_MAX_SHIFT)
-#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW)
+#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW | VMA_FLAG_PRIVATE_RING)
 
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).
@@ -175,16 +181,8 @@ bool vma_free_freed(struct Vma *v);
 // event vma_free_freed's bool does. See burrow_free_deferred + deferred_free_next.
 struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
 
-// AS-R9: the settled form -- frees the Vma and drops its mapping ref through
-// burrow_release_mapping_settled_deferred, so the payer's I-32 charge is settled
-// in the SAME lock interval that decides whether the drop freed the region.
-// `payer` is the exact AddrSpace incarnation that paid, or NULL to settle
-// nothing; *out_refund is the pages to refund outside the Burrow's leaf lock,
-// nonzero only when this drop qualified. vma_free_deferred is this with no
-// payer.
-struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
-                                         bool *out_freed, u32 *out_refund);
 
+#ifdef KERNEL_TESTS
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
 // any existing VMA in the list. Returns 0 on success, -1 on overlap
 // (caller must vma_free the rejected VMA themselves; this function
@@ -194,10 +192,7 @@ struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *
 // Phase 5+ multi-thread Procs need a per-Proc lock around the list;
 // documented as a trip-hazard when added.
 int vma_insert(struct Proc *p, struct Vma *v);
-
-// Remove `v` from Proc `p`'s VMA list. Caller still owns the Vma
-// after the remove (typically calls vma_free next).
-void vma_remove(struct Proc *p, struct Vma *v);
+#endif // KERNEL_TESTS
 
 // Look up the VMA covering `vaddr`. Returns the matching Vma * or
 // NULL. O(N) at v1.0 (sorted list walk; Phase 5+ RB-tree is O(log N)).
@@ -219,7 +214,7 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
 //
 // Caller must hold the serializing lock (Proc.vma_lock) across the
 // find AND the subsequent vma_insert — the same single-mutator
-// discipline vma_insert / vma_remove already assume.
+// discipline vma_insert / vma_remove_in already assume.
 int vma_find_gap(struct Proc *p, u64 length,
                  u64 window_start, u64 window_end, u64 *out_vaddr);
 
@@ -230,11 +225,13 @@ int vma_find_gap(struct Proc *p, u64 length,
 int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
                          u64 window_start, u64 window_end, u64 *out_vaddr);
 
+#ifdef KERNEL_TESTS
 // Walk every VMA in Proc `p`'s list and free it. Used at proc_free
 // to release all VMAs (and decrement their VMOs' mapping counts).
 // Caller (proc_free) calls this BEFORE handle_table_free — handle
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
+#endif // KERNEL_TESTS
 
 // B-1a' (ARCH 6.5 "Range detach"): remove [vaddr, vaddr+length) from the
 // address space, whatever it cuts -- the Linux munmap shape, and the primitive
@@ -325,10 +322,12 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
 // built FOR. Passing it in rather than a Proc keeps this layer free of identity.
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
+#ifdef KERNEL_TESTS
 // True iff v sits in as's list, by its links and the head -- for a Vma in as's
 // list or in none; one interior to another space's list reads linked.
 // vma_remove_in extincts on a Vma for which this is false. Caller holds as->lock.
 bool        vma_linked_in(const struct AddrSpace *as, const struct Vma *v);
+#endif // KERNEL_TESTS
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 
 // #199: lowest-addressed VMA overlapping [lo, hi), or NULL. Caller holds
@@ -408,9 +407,11 @@ bool vma_reprotect_is_noop_in(struct AddrSpace *as, u64 vaddr, u64 length,
 int  vma_reprotect_headroom_in(struct AddrSpace *as, bool exempt, u64 vaddr,
                               u64 length);
 
+#ifdef KERNEL_TESTS
 // Diagnostic accessors.
 u64      vma_total_allocated(void);
 u64      vma_total_freed(void);
 u64      vma_scan_steps(void);      // nodes visited by vma_next_overlap_in (audit F2)
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_VMA_H

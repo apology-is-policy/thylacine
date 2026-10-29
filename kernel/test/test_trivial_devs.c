@@ -13,9 +13,8 @@
 //   full.attach_open_close              — lifecycle plumbing
 //   full.read_fills_zeroes              — Linux /dev/full read shape
 //   full.write_returns_minus1           — every write fails (-1)
-//   random.rndr_available_or_skipped    — RNDR detection (must be
-//                                          available on QEMU virt
-//                                          -cpu max)
+//   random.read_serves_bytes            — a read once a strong source
+//                                          seeded the CSPRNG
 //   random.read_produces_nonzero_bytes  — ROADMAP §6.2 exit criterion
 //   random.read_varies_across_calls     — basic CSPRNG sanity
 //   cons.write_advances                 — write returns n; bytes go
@@ -31,21 +30,6 @@
 #include <thylacine/dev.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
-
-void test_trivial_devs_bestiary_smoke(void);
-void test_null_attach_open_close(void);
-void test_null_read_returns_eof(void);
-void test_null_write_consumes(void);
-void test_zero_read_fills_zeroes(void);
-void test_zero_write_consumes(void);
-void test_full_attach_open_close(void);
-void test_full_read_fills_zeroes(void);
-void test_full_write_returns_minus1(void);
-void test_random_rndr_available(void);
-void test_random_read_produces_nonzero_bytes(void);
-void test_random_read_varies_across_calls(void);
-void test_cons_write_advances(void);
-void test_trivial_devs_devnull_10k_no_leak(void);
 
 // =============================================================================
 // Helpers — shared lifecycle pattern: dev->attach, dev->open, ..., spoor_clunk.
@@ -235,30 +219,24 @@ void test_full_write_returns_minus1(void) {
     spoor_clunk(c);
 }
 
-// RNDR detection — on QEMU virt with -cpu max, FEAT_RNG should be live.
-// If for some reason RNDR is absent (unusual config), random.read will
-// return -1 and the boot banner notes it; this test then becomes a
-// reminder that random.read is degenerate.
-void test_random_rndr_available(void) {
+// devrandom serves bytes once a strong source (RNDR, or the virtio-rng pull)
+// has seeded the CSPRNG, and refuses (-1) before.
+void test_random_read_serves_bytes(void) {
+    if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");
 
     u8 buf[8];
     long got = devrandom.read(c, buf, 8, 0);
-
-    // Either RNDR is available (got > 0) or absent (got == -1). Both
-    // are valid. The exit criterion only applies when RNDR is up.
-    TEST_ASSERT(got == 8 || got == -1,
-                "devrandom.read on RNDR-capable CPU returns 8; on "
-                "non-RNDR CPU returns -1");
-
     spoor_clunk(c);
+    TEST_ASSERT(got == 8, "devrandom.read returns the 8 bytes asked for");
 }
 
 // ROADMAP §6.2 exit criterion: "cat /dev/random produces non-zero
 // bytes." Read 16 bytes; assert at least one is non-zero. (16 bytes
 // being all zero by chance from a CSPRNG is 2^-128.)
 void test_random_read_produces_nonzero_bytes(void) {
+    if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");
 
@@ -266,15 +244,8 @@ void test_random_read_produces_nonzero_bytes(void) {
     for (int i = 0; i < 16; i++) buf[i] = 0;
 
     long got = devrandom.read(c, buf, 16, 0);
-    if (got == -1) {
-        // RNDR unavailable — exit criterion is conditional on FEAT_RNG.
-        // Skip with a soft note; this is observable in the boot banner.
-        spoor_clunk(c);
-        return;
-    }
-
-    TEST_ASSERT(got == 16,
-                "devrandom.read must return full 16 bytes when RNDR up");
+    spoor_clunk(c);
+    TEST_ASSERT(got == 16, "devrandom.read returns the 16 bytes asked for");
 
     bool any_nonzero = false;
     for (int i = 0; i < 16; i++) {
@@ -282,23 +253,17 @@ void test_random_read_produces_nonzero_bytes(void) {
     }
     TEST_ASSERT(any_nonzero,
                 "ROADMAP §6.2: cat /dev/random produces non-zero bytes");
-
-    spoor_clunk(c);
 }
 
 void test_random_read_varies_across_calls(void) {
+    if (!test_strong_entropy()) return;
     struct Spoor *c = open_spoor(&devrandom, 0);
     TEST_ASSERT(c != NULL, "open devrandom OK");
 
     u8 a[16], b[16];
     long ga = devrandom.read(c, a, 16, 0);
     long gb = devrandom.read(c, b, 16, 0);
-
-    if (ga == -1 || gb == -1) {
-        spoor_clunk(c);
-        return;             // RNDR unavailable; skip
-    }
-
+    spoor_clunk(c);
     TEST_ASSERT(ga == 16 && gb == 16, "two 16-byte reads succeed");
 
     bool different = false;
@@ -308,8 +273,6 @@ void test_random_read_varies_across_calls(void) {
     TEST_ASSERT(different,
                 "two consecutive devrandom reads must differ "
                 "(probabilistic; 2^-128 fail rate)");
-
-    spoor_clunk(c);
 }
 
 void test_cons_write_advances(void) {

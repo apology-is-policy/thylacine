@@ -1,0 +1,45 @@
+Astra single-agent self-review, October10. Not an independent audit.
+Uninstalled READY selector; retirement-draft remains its ownership dependency.
+Canonical kernel remains97d495fcb. No executor dispatch or native claim.
+
+Ll and an independent engine entry/Loom root are required. Interest exports
+values only; it refuses to inspect cursors while p.driving or p.users is set.
+The action claim rescans under Ll, then sets driving and rotates the selected
+owner in the same critical section. Only that successful claim may export an
+operation pointer. Later actual action/free must retain driving and the entry
+root, and notify the executor when it returns. List counts/back-links and exact
+request identity/one physical owner are checked; no allocator/native/client
+step runs here. Queue traversal is bounded by the existing terminal capacity.
+
+Empty pool and full tags/TX yield native/wake interest, never futile local
+submission. Exact AVAILABLE pool incarnation permits a claim; an existing BUSY
+member permits a proven unsent retry, and nonce exhaustion remains actionable
+without a free member so it can terminate NOSPC. CLUNK drains do not head-block
+unrelated requests. An early callback cannot advance while TX still borrows it.
+Full CQ preserves pending data and tracks the earliest active deadline. Terminal
+records stop contributing expired deadlines. Locally retired scopes may still
+own PENDING/terminal storage requiring ordered CQ delivery and physical free;
+local retirement therefore cannot remove them from scheduling entirely.
+
+READY-R1: self-review identified first-runnable selection could choose SUBMIT
+before discovering a later expired request on the same scope. Scan now gives
+QUIESCE priority across all owners, before any additional submission. Exact old
+selection mutant fails the new later-expired witness. before-review.c retains
+the earlier source; raw failed/masked/compile harness evidence is retained.
+
+54 checks and12 exact mutants under ASan/UBSan pass.17 inputs,13 raw source/
+binary/log pairs and actual ARM64 object/transitive headers reverified. No libc
+copy/set/move symbols. Initial missing pool-table include and fixture pointer
+cast errors were repaired. One mutation hit a generic claim assertion before its
+named witness; that witness now combines the return and selected identity. A
+CLUNK mutant's tautological expression failed compilation and was replaced with
+a compiling, semantically identical guard removal; only executed mutants count.
+
+Fixtures use synthetic owner/ledger/CQ/pool/native-ready states and real data
+headers/session tag availability. They do not establish actual poll registration,
+RETURN wakes, callback/transport driving, concurrent close or native scheduling.
+The selector is one prerequisite, not a running READY executor. Action execution,
+engine/CONNECT routing, independent entry pins and real register-before-recheck
+integration remain required before installation. IOUNIT-R1 is explicitly owned:
+LOPEN's negotiated iounit must be persisted in FID metadata and passed into the
+existing bounded wire adapter before dispatch is installed. No policy/ABI change.

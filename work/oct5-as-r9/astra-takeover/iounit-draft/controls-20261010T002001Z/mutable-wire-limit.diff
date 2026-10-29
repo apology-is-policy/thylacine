@@ -1,0 +1,10 @@
+--- control.c
++++ mutable-wire-limit.c
+@@ -2021,6 +2021,7 @@
+         // Successful begin transfers exactly one attempt to the client. The
+         // adapter captures synchronous negative refusals (including local AGAIN)
+         // exactly once; ADVANCE decides retry versus remote terminal next visit.
++        o->program.wire.iounit=l->service_nodes->nodes[o->source.slot].fid_iounit;
+         (void)loom_rpc_submit(o);return 1;
+     case LREADY_ADVANCE:
+         rc=loom_rpc_advance(o,&next);if(rc)return rc;

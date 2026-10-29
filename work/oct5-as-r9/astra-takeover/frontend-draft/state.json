@@ -1,0 +1,24 @@
+{
+  "owner": "astra",
+  "state": "qualified-uninstalled-immutable-frontend",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "dependencies": [
+    "return-draft then drain-draft exact next-work overlay order"
+  ],
+  "overrides": [
+    "kernel/loom_service_frontend.c",
+    "kernel/include/thylacine/loom_service_frontend.h",
+    "kernel/loom_service_engine.c",
+    "kernel/include/thylacine/loom_service_engine.h"
+  ],
+  "run": "work/oct5-as-r9/astra-takeover/frontend-draft/controls-20261010T005558Z",
+  "checks": 3674,
+  "mutants": 13,
+  "input_hashes": 59,
+  "raw_pairs": 14,
+  "arm64_objects": 3,
+  "model_results": 16,
+  "self_review": "single-agent; not independent",
+  "next": "next-work.txt",
+  "limits": "Uninstalled internal frontend. CONNECT constructor failure is controlled; successful actual constructor/adoption is not qualified by this frontend fixture. Native IO/poll/wake/ref/backing/allocation/final protocol destruction remain controlled. Existing models do not model the new refusal record. No syscall/native/full Mac qualification."
+}

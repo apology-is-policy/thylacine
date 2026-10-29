@@ -1,0 +1,25 @@
+{
+  "owner": "astra",
+  "state": "qualified-uninstalled-negotiated-iounit",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "dependencies": [
+    "action-draft",
+    "retirement-draft",
+    "program-draft",
+    "wire-draft",
+    "ready-draft/kernel/include"
+  ],
+  "overrides": [
+    "kernel/include/thylacine/loom_service_nodes.h",
+    "kernel/loom_service_nodes.c",
+    "kernel/loom_service_fids.c",
+    "kernel/loom_service_admission.c"
+  ],
+  "run": "work/oct5-as-r9/astra-takeover/iounit-draft/controls-20261010T002001Z",
+  "checks": 2316,
+  "mutants": 11,
+  "arm64_objects": 4,
+  "self_review": "single-agent; not independent",
+  "next": "next-work.txt",
+  "limits": "Actual admission/open metadata and wire builder compose through host action fixture. Captured Rlopen/GETATTR responses are synthetic, progress/engine/ref/allocator boundaries controlled. Not native negotiated I/O or engine integration."
+}

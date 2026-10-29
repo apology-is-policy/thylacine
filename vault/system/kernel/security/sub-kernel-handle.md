@@ -11,7 +11,7 @@ guarded-by: []
 validated-by: [prose, gate-smp]
 locks: []
 abis: []
-design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
+design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
 updated: 2026-10-27
 ---
@@ -39,6 +39,13 @@ result (0 or negative, [[sub-kernel-dev]]); 0 for every other kind. Only
 `SYS_CLOSE` asks, to map a negative to `EIO` with the fd already gone
 (2026-10-07, ARCH section 21.11); `handle_close` and its other callers keep
 the 0 / -1 contract.
+`handle_close_obj(p, h, kind, obj)` is `handle_close` that acts only while slot
+`h` still names `(kind, obj)`, decided in the same lock hold as the vacate, and
+answers `-1` with the slot untouched otherwise. It is for an unwind that runs
+after its descriptor was published: a sibling thread may have closed the number
+and been handed it back for another file in between. Pointer equality is
+identity only while the caller holds its **own** reference on `obj`; without
+one, `obj` can be freed and a new object installed at `h` from the same address.
 
 `handle_get(p, h, out)` returns a **by-value snapshot** with the object's
 refcount already bumped; `handle_put` drops that borrowed reference. The
@@ -65,7 +72,7 @@ table but is keyed by its indices (the vivarium's socket table) can only be
 snapshotted consistently with it there: the source lock is what stops a peer
 thread closing fd N and opening a different object at N between the two
 copies. The hook may take leaf locks (handle -> socktab nests) and must neither
-sleep nor allocate. `handle_table_copy_into` is the hooked copy with no hook.
+sleep nor allocate. `handle_table_copy_into` is the hooked copy with no hook, for the tests; fork calls `handle_table_copy_into_hooked`.
 
 `handle_snapshot_spoor(out, sp)` (NP-5, 2026-09-29) builds the same snapshot
 for a Spoor held **outside** any table — KOBJ_SPOOR, RIGHT_READ, its own
@@ -85,12 +92,14 @@ from, and whether the destination may already be occupied:
 
 | | source | destination |
 |---|---|---|
-| `handle_dup_posix` | a slot | first free ≥ `min_idx`; the index is an **output** |
-| `handle_replace` | a caller-held object | a fixed index that must be **live**; outgoing released |
-| `handle_table_copy_into` | a slot in **another** table | the same fixed index, which must be free |
+| `handle_dup_posix` (tests build only; production reserves then `handle_dup_into_reserved`) | a slot | first free ≥ `min_idx`; the index is an **output** |
+| `handle_replace` (tests build only; connect calls `handle_replace_hooked`) | a caller-held object | a fixed index that must be **live** and still name the caller's `expect`; outgoing released |
+| `handle_table_copy_into` (tests build only; fork calls `_hooked`) | a slot in **another** table | the same fixed index, which must be free |
 | `handle_dup_to` | a slot | a fixed index, free **or** live; outgoing released if live |
 
-`min_idx` is why `handle_dup_posix` exists rather than being folded into
+`min_idx` is why `handle_dup_posix` (the tests' one-call form) and its
+production path -- `handle_reserve(p, min_fd)` then `handle_dup_into_reserved`,
+which `VIV_FCNTL_DUPFD` runs -- exist rather than being folded into
 `handle_dup`: a shell's `savefd()` asks for the lowest free descriptor **at
 or above 10**, precisely to move its bookkeeping out of the low range where
 a user redirection could collide with it. Returning the first free slot
@@ -116,6 +125,36 @@ or out-of-range rights are refused; and an out-of-enum kind extincts (the
 compile-time assert defends the build, the `default:` arm defends against
 memory corruption at runtime).
 
+### Releasing an owner, not merely a reference
+
+A handle that names a PRIVATE Loom carries an obligation ordinary kinds do not:
+its object must learn that its last *handle* is gone, separately from its
+refcount reaching zero, because the retirement it then schedules has to be
+latched before the reference drops. `handle_release_owner(kind, obj)` wraps
+`handle_release_obj` for that: for `KOBJ_LOOM` it calls `loom_handle_closed`
+first, then releases.
+
+IT IS SWAPPED INTO FOUR OF THE SIX RELEASE SITES, and the two it leaves alone
+are the interesting part. `handle_table_free`, `handle_close`, `handle_replace_hooked`
+and `handle_dup_to` each destroy a handle, so each may be destroying the last
+one. `handle_put` does not: it returns a BORROWED reference while the handle
+still exists, so latching there would mark a live ring closing on a mere borrow.
+Nor does the dup-rollback site: it releases an acquire that never became a
+handle at all. The discriminator is "did a handle cease to exist", never "was a
+reference dropped" -- those differ, and only the first may latch.
+
+`handle_private_exec_latch(p)` is the exec-time half, and it runs **before**
+exec's commit point rather than after, which is the opposite of
+`handle_close_on_exec` above and for a reason that does not contradict it. The
+latch is infallible and leaf-only -- it takes no lock that can sleep and cannot
+fail -- because the image swap it precedes cannot be unwound; whereas the actual
+descriptor removal and waiter wake stay in `handle_close_on_exec`, after the
+commit point, where sleeping is allowed. So the two halves sit on opposite sides
+of the same commit point by design: *latch what cannot fail before*, *close what
+may sleep after*. `handle_close_on_exec` additionally ORs private Loom slots
+into its pending set, so a flagged private ring is latched and then closed by
+the same pass.
+
 ## Mechanism
 
 **The four-way kind partition is the whole of I-5, expressed as a compile-time
@@ -139,21 +178,21 @@ negation of the spec's `h.kobj \in TxKObjs` precondition.
 
 **One kind is split by a magic word rather than by its enum.** A `KOBJ_SRV`
 object is discriminated at release time by the `u64` at offset 0:
-`SRV_SERVICE_MAGIC` (a registry entry whose lifetime is the poster Proc's,
-so closing the handle must *not* touch it) versus `SRV_CONN_MAGIC` (a
-refcounted connection). Anything else extincts as corruption. Post-`stalk-3c`
-the connection arm is unreachable — connection endpoints became `KOBJ_SPOOR`
-— but it is deliberately retained as a UAF guard.
+`SRV_SERVICE_MAGIC` (a listener registry entry) versus `SRV_CONN_MAGIC`
+(a refcounted connection). Anything else extincts as corruption. Post-stalk-3c
+connection handles are unreachable: endpoints are `KOBJ_SPOOR`. The defensive
+connection release arm remains; any future reintroduction of that handle kind
+would also require a matching connection acquire.
 
-**The acquire side is not symmetric with the release side, and the asymmetry
-is load-bearing.** `handle_acquire_obj`'s `KOBJ_SRV` arm is a deliberate
-no-op, balanced against a release arm that *does* work — sound only because
-a `KObj_Srv` handle is now always a service listener, whose release is also
-a no-op. The code says so explicitly: if a `KObj_Srv` handle ever again named
-a refcounted `SrvConn`, this no-op would underflow the get/put pairing into a
-UAF. `KOBJ_LOOM` and `KOBJ_PCI` are the contrasting cases — both name
-refcounted objects, so both *must* bump, and their comments say why a no-op
-would free the object early.
+**Listener acquire/release holds the containing registry.** Posting transfers
+one registry ref into the table slot. `handle_get` takes another under the
+table lock; `handle_close` and `handle_put` release outside it. Thus a listener
+snapshot pins both the service and its embedded poll list after all namespace
+roots and the table slot disappear. Poll releases its snapshot after its sweep.
+The final registry drop can drain and free, but a normal close does not unpost
+or release a trusted name reservation. A failed listener allocation aborts its
+reservation before dropping the provisional registry ref. The lifecycle and
+rollback fixtures in `kernel/test/test_devsrv.c` exercise these cases.
 
 **Two kinds carry a runtime convention check.** `handle_alloc` extincts if a
 `KOBJ_BURROW` arrives with `handle_count <= 0`, or a `KOBJ_LOOM` with
@@ -252,7 +291,7 @@ a second handle naming one object and faces the identical hazard. Its
 argued rather than assumed: the destination is being *closed*, and
 `handle_close` places no kind restriction on closing, so refusing here
 would invent a rule that dup2-onto-fd-N is less permitted than
-close(N)-then-dup. `handle_replace` refuses a non-Spoor outgoing for a
+close(N)-then-dup. `handle_replace_hooked` refuses a non-Spoor outgoing for a
 reason the header says does **not** transfer — its swap is internal to
 `connect()` and invisible to the guest, whereas a dup3 caller has
 explicitly named the fd it wants gone.
@@ -268,7 +307,7 @@ call's end (no path between the alloc and the set reaches one) — so no exec
 can swap between them.
 
 **Fork copies the table, and what it declines to copy is the interesting
-half.** `handle_table_copy_into` carries rights verbatim (POSIX fork gives
+half.** `handle_table_copy_into_hooked` carries rights verbatim (POSIX fork gives
 the child the parent's access; I-6 holds by non-increasing) and each copied
 slot takes its own reference, so the child's `handle_table_free` releases
 them and a failed fork's rollback is already correct. It cannot fail — no
@@ -324,6 +363,92 @@ after releasing, making a double put a no-op.
 The one rollback: if `handle_dup`'s install fails on a full table, the
 acquired reference is released **outside** the lock.
 
+## Reserved numbers (2026-10-14, vote 10)
+
+A slot has a third state beside free (magic 0) and live (`HANDLE_MAGIC`):
+**reserved** (`HANDLE_RESERVED`), a number a call holds and has not filled.
+It is Linux's `get_unused_fd_flags` -> `fd_install` / `put_unused_fd` split
+([[dec-2026-10-14-descriptor-slot-reservation]]), for a call that can still
+fail after it knows its number: a copy-out of the number (pipe2), a peer
+address copy-out (accept), a socket-table row keyed on the number (socket,
+accept, the dup alias).
+
+- `handle_reserve(p, from)` takes the lowest free index at or above `from`.
+- `handle_install_reserved` fills it and cannot fail. A bad argument, or a
+  slot that is not reserved, is a kernel bug and extincts: no other path
+  writes a reserved slot, so the reserving call has lost its own number.
+- `handle_dup_into_reserved` fills it with a dup under `handle_dup_posix`'s
+  rules. A refused source answers -1 and leaves the reservation in place for
+  its caller to return.
+- `handle_unreserve` returns it.
+
+The state is not free: `handle_install_locked`'s scan, `handle_reserve` and
+the fork copy's destination check all want magic 0. It is not live: get,
+close, replace, the flag setters, close-on-exec, the fork copy's source walk
+and `handle_table_count` all want `HANDLE_MAGIC`. `handle_dup_to` onto a
+reserved number returns `HANDLE_DUP_TO_BUSY`, which the phenotype's dup3
+answers EBUSY (Linux's own answer). So a failed call publishes nothing, and
+its unwind touches only a number no other thread could see.
+`handle_table_free` has no reserved arm: a reservation lives inside one
+syscall of a live thread. The table is freed only when no live thread remains
+(the premise every handle operation already rests on, and the one any
+cross-Proc accessor would break).
+
+`handle_alloc_cloexec` is the fused form for a call with nothing left to fail
+(O_CLOEXEC set in the install's own hold). `struct HandleTable.installs`
+counts objects ever installed (`handle_table_installs`). A reservation is not
+an install, which is how the tests show that a failed call published nothing.
+
+`handle_replace(p, h, expect, ...)` swaps only while the slot still names
+`expect`, an object the caller holds its own reference on. It is the tests'
+NULL-hook form; the one kernel caller, connect, calls the hooked form below
+directly, and sleeps between taking the
+socket's ctl Spoor and the swap. A number a
+peer closed and reused in that time names another object, so the swap is
+refused rather than releasing the peer's file. Pointer identity is enough
+here, although it cannot tell two dups of one object apart: the object is the
+socket itself, so a dup of the same ctl at the number is the same socket.
+
+`specs/handle_slots.tla` models the numbers, which `handles.tla` does not.
+Its three buggy configurations each find a counterexample:
+- an unwind by number closes a peer's object;
+- a failed call's object was visible;
+- dup3 overwrites a reservation.
+
+`handle_locked_unless_reserved(p, h, fn, arg)` runs `fn` inside the table
+hold unless `h` is a reservation, so no call can reserve the number between
+the answer and what `fn` does with it. The close hook's drop
+(`viv_socktab_drop_closing`) is its caller, and nests the vivarium's
+socket-table lock inside this table's lock: the order the fork snapshot
+(`handle_table_copy_into_hooked`) already took. The first version asked
+`handle_is_reserved` under the socket-table lock, the reverse order, which
+deadlocks a close on one CPU against a fork of the same Proc on another.
+
+The socket-table lock is a LEAF and the order is enforced, not argued: every
+acquire of this table's lock goes through `table_lock`, which calls
+`spin_leaf_refuse` first, and every socket-table hold is marked with
+`spin_leaf_enter`/`spin_leaf_exit`. An inverted nesting extincts with "handle
+table lock taken under a leaf lock" the first time it runs, contended or not.
+`handle_replace_hooked` counts its swap in `installs`: it publishes a new object at
+the number.
+
+## The hooked replace (2026-10-19, 17:09Z)
+
+`handle_replace_hooked(p, h, expect, kind, rights, obj, under_lock, arg)` is
+`handle_replace` with a hook run inside the swap's hold: after the slot names
+`obj` and `installs` counts it, before the lock drops, and only when the swap
+happened (every refusal returns before it). `handle_replace` is the NULL-hook
+form. It exists for the hooked copy's reason: state beside the table that is
+keyed by its indices can change in one step with the table only inside the
+table's hold. Its one hooked caller is connect, whose commit
+(`viv_socktab_connected_locked`, [[sub-kernel-vivarium]]) marks the socket's
+row CONNECTED and detaches its ctl identity in the hold that swaps the fd from
+ctl onto data, so no reader of both sees the fd on data while the row still
+reads CONNECTING. The rule is the hooked copy's: the hook may take leaf locks
+(handle -> socktab) and must neither sleep nor allocate. connect's commit
+clunks nothing inside; it hands the detached reference back for the caller to
+release after the unlock.
+
 ## Performance
 
 Linear scan for a free index — **O(1024)** worst case on every fd creation,
@@ -347,8 +472,13 @@ atomics for diagnostics only.
   completeness assert fails the build otherwise. Do not "fix" that assert by
   widening a mask.
 - A new kind whose object is refcounted **must** bump in
-  `handle_acquire_obj`. The `KOBJ_SRV` no-op is sound only because that
-  handle is always a non-refcounted service listener.
+  `handle_acquire_obj`. `KOBJ_SRV` pins its containing registry, because
+  its service pointer is interior to that allocation.
+- An unwind that closes a descriptor it published earlier must close it by
+  **identity** (`handle_close_obj`, holding its own reference on the object),
+  never by number: between the publish and the unwind the number is the whole
+  Proc's to close and reuse. The Loom setup rollback does (2026-10-13); twelve
+  other syscall sites still close by number, queued as one sweep.
 - Any new fd-creating path must install through `handle_install_locked`
   under the table lock — the `#844` F1 lesson, now with four callers. It is
   the single install chokepoint and takes the starting index and the
@@ -408,4 +538,6 @@ sides), are stated Phase-5+ items.
 [[chg-2026-08-02-authority-sweep]] → #91-follow (`34ff46df`, 2026-08-27): the
 per-open-file nonblocking flag → the socktab-across-images audit close
 (`4e694e5f`, 2026-09-02): the hooked fork copy → NP-5 (2026-09-29):
-`handle_snapshot_spoor`, the snapshot for a Spoor held outside the table.
+`handle_snapshot_spoor`, the snapshot for a Spoor held outside the table →
+the close-by-number sweep (2026-10-14, vote 10): reserved numbers → 17:09Z
+(2026-10-19): the hooked replace.

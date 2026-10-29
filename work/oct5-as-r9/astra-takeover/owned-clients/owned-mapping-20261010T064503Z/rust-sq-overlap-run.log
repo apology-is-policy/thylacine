@@ -1,0 +1,28 @@
+
+running 5 tests
+test fresh_header_checks_and_wakeup ... ok
+test every_region_pair_rejects_overlap ... FAILED
+test min_max_copy_and_cleanup ... ok
+test malformed_geometry_cleanup ... FAILED
+test post_setup_corruption_is_detected ... ok
+
+failures:
+
+---- every_region_pair_rejects_overlap stdout ----
+
+thread 'every_region_pair_rejects_overlap' (22288598) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/mutant-rust-sq-overlap/test_owned_mapping.rs:29:240:
+assertion failed: matches!(OwnedMapping::new(b,p),Err(Error::Geometry))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- malformed_geometry_cleanup stdout ----
+
+thread 'malformed_geometry_cleanup' (22288600) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/mutant-rust-sq-overlap/test_owned_mapping.rs:26:2:
+case 20
+
+
+failures:
+    every_region_pair_rejects_overlap
+    malformed_geometry_cleanup
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

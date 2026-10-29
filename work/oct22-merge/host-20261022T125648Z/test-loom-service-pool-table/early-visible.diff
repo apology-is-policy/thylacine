@@ -1,0 +1,10 @@
+--- kernel/loom_service_pool_table.c
++++ early-visible.c
+@@ -40,6 +40,7 @@
+         (void)loom_slot_rollback(t, ref);
+         return rc;
+     }
++    (void)loom_slot_publish(t, ref);
+     *out = ref;
+     return 0;
+ }

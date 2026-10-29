@@ -3,17 +3,78 @@ id: sub-kernel-devsrv
 type: sub
 title: "devsrv — the /srv service registry, Dev, and accept/peer syscalls"
 parent: moc-kernel-srv
-code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c]
+code: [kernel/devsrv.c, kernel/include/thylacine/devsrv.h, kernel/test/test_devsrv.c, tools/test-srv-registry-abi.py, tools/test-srv-registry-factory.py, kernel/test/test_devsrv_conn.c, tools/test-service-admission.py, tools/host-tests/service-admission.c]
 audit: hard
 guarded-by: [inv-i1]
 validated-by: [spec-corvus, gate-smp]
-locks: [lock-srv-registry-lock]
+locks: [lock-srv-registry-lock, lock-srv-posting]
 hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
 updated: 2026-10-27
 ---
+## D7 implementation (October 1)
+
+Login now creates and MREPL-mounts a mortal private registry before AUTH.
+`SYS_SRV_REGISTRY_NEW` (134) requires the explicit one-hop factory role
+(public spawn bit 10, internal Proc bit 29), a boot O_PATH root, and a
+validated immutable manifest of at most 16 forty-byte routes. It returns
+an owned root descriptor; it does not mount on behalf of userspace.
+The source reference is private, with no boot fallback in the namespace.
+
+Eleven resident names are routed; local posts cannot shadow them, even while
+a resident is offline. Opens resolve current trusted boot postings, preserve
+D8, recheck posting generation on enqueue, and charge the requesting view's
+domain. Capability-posted boot names cannot satisfy a resident route.
+Route qids occupy the high half; local monotonically allocated qids the low.
+
+Each poster owns a deduplicated list of covering registry references.
+`Proc.srv_post_lock` serializes reserve/handle-install/commit with the death
+latch. Death marks posting closed, detaches the list, then drains matching
+posts and drops references outside that lock; `proc_free` covers rollback.
+The registry lock never surrounds allocation or teardown. Handle, poll,
+namespace and service-leaf references retain their earlier lifetime rules.
+See [[sub-kernel-srvconn]] for the ratified 96/192/256 credit admission
+(default1/bulk4) and retained-domain lifetime. Private names, resident routes
+and the 16-entry accept backlog are unchanged.
+
+The older capacity diagnosis below is historical. The implementation and its
+multi-session dependencies are under final verification in
+`work/oct1-srv-sessions/`; no Main landing or sanitizer/SMP result is implied.
+
+## Ratified D7 completion
+
+[[dec-2026-10-01-session-registries]] approves the private registry factory,
+fixed resident routes, posting-membership lifecycle and charged resource domains.
+See `docs/SRV-SESSION-REGISTRY-DESIGN.md`; this is a contract, not an activation
+claim. [[seam-srv-registry-lifecycle]] remains open until runtime verification.
+
+## October 1 capacity recheck
+
+The stable Main/Aux reconciliation still defines `SRV_MAX_SERVICES` as 16.
+Trusted-service tombstones retain names and slots; the restricted recycling of
+capability-posted tombstones does not reclaim boot/home services. The September
+15/16 one-user observation remains historical, not a fresh occupancy measurement.
+Both registry drain and poster exit still have capacity-scaled stack arrays.
+The open repair must address headroom and stale-handle lifetime together, with
+three-user/service-post coverage; increasing the constant alone is insufficient.
+See `docs/ASTRA-2026-09-24-STATUS.md` for the reconciled operator queue.
+
+
+## Listener lifetime prerequisite (October 1)
+
+`devsrv.registry_lifecycle` now removes all namespace/create references while
+keeping a listener, retains a handle snapshot and registers a poll waiter,
+closes the original handle, then sweeps the hook before the final put. The
+registry is destroyed exactly at that final put. `devsrv.post_rollback` also
+checks that a full handle table leaks no provisional ref on a mortal registry.
+The default 1830-test boot passes; three deliberate source mutants fail at the
+intended assertions. All 50 default/UBSan SMP boots pass with zero failures
+or timing exceptions. Four relevant existing model mutants still produce
+their expected counterexamples. Single-agent self-review only. Evidence:
+`work/oct1-srv-lifetime/`. This does not close the capacity/session-policy seam.
+
 ## Nonblocking endpoints
 
 `CNONBLOCK` selects `srvconn_io_nonblock` on raw client/server transport
@@ -238,14 +299,13 @@ entry is unreachable and cannot be unmounted by name -- it holds its slot and
 its source ref until the namespace ends (B-1d-v audit round 3, F3; the general
 fix is a generation in the mount key, tracked in OPEN-BUGS).
 
-**open=connect** (`devsrv_open_connect`): global soft cap
-(`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
-per-service backlog under the lock) → resolve the service and capture
+**open=connect** (`devsrv_open_connect`): resolve the service and capture
 `poster_stripes` + `poster_principal` + `mode` + `ring_msize` + `cape` under
-the registry lock ATOMICALLY with the LIVE check → `srvconn_create` (identity
-by value, the connector's principal and the poster's among it -- the conn's
-two ends in `/ctl/9p-sessions`, [[dec-2026-10-06-9p-sessions-ends]]; create
-ref 1) → byte-mode flag and cape mark if selected
+the registry lock ATOMICALLY with the LIVE check → enforce connect authority →
+`srvconn_create_in` (atomically reserve global capacity before allocation;
+identity by value, the connector's principal and the poster's among it -- the
+conn's two ends in `/ctl/9p-sessions`, [[dec-2026-10-06-9p-sessions-ends]];
+create ref 1) → byte-mode flag and cape mark if selected
 (`srvconn_set_byte_mode` / `srvconn_set_cape`, both before publication)
 → +1 ref
 for the backlog slot → `srv_backlog_push_locked` (re-checks LIVE
@@ -324,7 +384,7 @@ Constants: `SRV_NAME_MAX` 32 · `SRV_MAX_SERVICES` 16 (raised 8→16 at
 #30 when permanent tombstones filled the registry at the login prompt;
 the raise discipline + the ~2 KiB drain-stack cost live in the header
 comment) · `SRV_ACCEPT_BACKLOG` 16 (a connect past a full backlog fails
-fast) · `SRV_MAX_CONNS` 64 (the global soft cap bounding worst-case
+fast) · `SRV_MAX_CONNS` 64 (the allocator's atomic reservation bound limiting
 ring memory at ≈32 MiB all-bulk).
 
 ## Concurrency
@@ -351,9 +411,11 @@ single-threaded on the accept path — a documented precondition, not a
 guard). Registry-ref discipline: every devsrv Spoor INSTANCE carrying
 `aux = reg` holds exactly one ref (the mounted root, each cross-clone,
 each svc-ref), dropped at `devsrv_close`; `spoor_ref` on the same
-instance adds none. The mortal-registry ordering obligation
-([[fnd-stalk3a-r1-f2]]) is the standing constraint on any future
-non-immortal registry.
+instance adds none. Every listener table slot and every `handle_get`
+snapshot now holds an additional covering registry ref. Poll keeps its
+snapshot until after unregistering its waiter. This discharges the raw-listener
+allocation-lifetime obligation ([[fnd-stalk3a-r1-f2]]); per-registry poster
+termination and session activation remain separate, unfinished work.
 
 ## Invariants enforced
 
@@ -402,7 +464,7 @@ What an auditor attacks here:
   captured INSIDE the registry-lock block that checks LIVE, beside mode and
   cape, because a tombstone-then-rebind could otherwise name a different
   service's posting authority than the one connected to. `p->caps` is read with
-  an ACQUIRE load (`proc_become_legate` is a cross-thread writer). The self-post
+  an ACQUIRE load (`proc_become_legate_locked` is a cross-thread writer). The self-post
   exemption keys on `stripes`, a FRESH PER-PROC tag, so it means exactly the
   same Proc -- prosecute any reading that would admit a child or a Proc group,
   and that `proc_stripes` fail-closing to 0 cannot match a LIVE service's
@@ -444,9 +506,10 @@ What an auditor attacks here:
 - **The peer read's fail-closure**: every mutable field rides ONE
   alive-gated walk — a dead peer must never yield stale caps, a stale
   renderer grant, or a reused pid.
-- **The mortal-registry obligation**: any future non-immortal registry
-  must order its last unref after every handle into `entries[]` closes,
-  or give those holders covering refs ([[seam-srv-registry-lifecycle]]).
+- **Mortal-registry lifetime**: listener slots and handle snapshots keep
+  `entries[]` alive with covering registry refs. Poll must unregister before
+  its final put; raw internal pointers need a covering root/registry ref
+  ([[seam-srv-registry-lifecycle]]).
 - **I-1**: no EL0-reachable path may bind a registry other than through
   a mounted root's aux.
 
@@ -477,8 +540,10 @@ What an auditor attacks here:
   code post-stalk-3c (the only KObj_Srv obj is a listener; conn
   endpoints are Spoors) — retained as a corruption canary
   ([[fnd-stalk3c-r1-f1]]).
-- The listener handle's obj points INTO `entries[]`; closing it is a
-  no-op (the entry's lifetime is the poster's, tombstoned never freed).
+- The listener handle's obj points INTO `entries[]`; closing it releases
+  its covering registry ref, without unposting or freeing its trusted name.
+  A failed handle allocation aborts the reservation, then drops the provisional
+  ref. Namespace roots can disappear before listeners without freeing them.
 - `srv_lookup_in` returns a pointer whose `state` may change after the
   call — every consumer re-validates under the lock (the push and the
   accept both do).
@@ -547,3 +612,19 @@ tail runs for every arm, so deleting the check masked it), when the rebind
 identity check was deleted, and when connect stopped capturing it. The 9p-mode
 connect has NO unit case ([[seam-srv-9p-connect-unit]]); the boot E2E
 (joey/login/legate → corvus + stratumd) is its regression.
+
+## AS-2b admission (October 4)
+
+Private-service targets retain the actual CWALKONLY native registry view, fixed
+service slot and its generation. A name alone, or a generation from another
+slot, cannot identify a replacement. Strict targets reject byte/cape/remote.
+Preparation captures route/mode/domain and reserves weighted connection storage;
+publication separately rechecks LIVE/generation under the registry lock. The
+caller serializes publish with cancellation and wakes outside its lock. Admission
+holds the registry until local release; an accepted endpoint holds actual
+connection storage/credits until its final release. Legacy opens use the same
+core and still perform their normal blocking handshake afterward. Preparation
+also captures the poster's principal with the post, and the connection is
+stamped with both ends' principals by value; the host fixture
+(`tools/test-service-admission.py`) checks both, and its mutants drop the
+poster's from the capture or stamp the peer's in its place.

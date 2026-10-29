@@ -1,0 +1,11 @@
+--- control
++++ omit-retire-pool-free
+@@ -192,7 +192,7 @@
+         loom_private_drop_buffer(as, b);
+     }
+     l->n_reg_buf = 0;
+-    kfree(l->service_pools);
++
+     kfree(l->service_slots);
+ 
+     // One settled drop rather than claim / drop / restore. The refund is decided

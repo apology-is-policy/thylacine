@@ -1,0 +1,28 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 8 tests
+test tests::ring::local_last_future_drop_schedules_after_closing_poll ... ok
+test tests::ring::local_native_retirement_requires_explicit_event_not_busy_spin ... ok
+test tests::ring::local_pool_and_payload_release_share_noncallback_signal ... ok
+test tests::ring::local_progress::local_admission_signals_before_request_publication ... FAILED
+test tests::ring::local_pulse_drop_and_bounded_progress_do_not_allocate ... ok
+test tests::ring::local_result_drop_schedules_retirement_without_new_cq ... ok
+test tests::ring::local_terminal_cq_signals_even_without_registered_waker ... ok
+test tests::ring::local_zero_partial_budget_and_coalesced_events_preserve_sweep ... ok
+
+failures:
+
+---- tests::ring::local_progress::local_admission_signals_before_request_publication stdout ----
+
+thread 'tests::ring::local_progress::local_admission_signals_before_request_publication' (30938456) panicked at src/tests/ring/local_progress.rs:7:5:
+assertion failed: e.needs_progress()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::local_progress::local_admission_signals_before_request_publication
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

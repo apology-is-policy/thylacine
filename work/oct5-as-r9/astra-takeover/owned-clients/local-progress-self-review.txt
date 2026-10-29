@@ -1,0 +1,40 @@
+Astra single-agent self-review: local retirement progress, October 10.
+Uninstalled Rust draft with simulated backends; not an independent audit.
+
+A shared creator-thread Rc<Cell<bool>> pulse connects the existing ring lifetime
+core to its one retirement queue. Admission, client retirement, terminal fixed
+completion, pool drop, payload return/drop and fixed request/result drop notify.
+There are no callbacks, allocations or syscalls in notify. This avoids invoking
+user Wakers beneath the manager/driver lifetime borrows. One-time binding rejects
+two retirement owners. Rc keeps the signal alive for owned results after root
+shutdown, but it does not retain the queue or introduce a lifetime cycle.
+
+A notification schedules one full rotating sweep, with each call visiting at most
+min(budget,capacity) cells. Zero budget leaves the notification untouched; partial
+budget retains remaining visits. Events coalesce without losing a later event
+raised during a sweep. Busy entries do not self-reschedule: native readiness,
+retirement or timer changes require an explicit adapter notification. This is
+creator-local bookkeeping, not a cross-thread/OS wake or a sleep protocol.
+
+Last READ-result or unfinished-Future drop can now make a retiring cell eligible
+without a new CQ event. Eligibility still requires the existing backend retired
+proof and the end of all local storage owners; no return value substitutes for
+that proof. Existing driver retirement, ownership charges and close-once rules
+are unchanged. Callback dispatch remains outside manager borrows. C is unchanged.
+
+Seven focused cases at opt0/2 cover held READ results, unfinished Futures,
+explicit native-retirement notification, busy quiescence, coalesced/zero/partial
+budgets, terminal completion without a Waker, pool/payload release and observed
+allocation-free drop/progress. local-progress091022Z passes, with two compile-fail
+controls, positive control and six rejected mutants. Future/retirement regression
+091254Z passes six cases; polling retirement091311Z passes eight cases, each at
+opt0/2 with two compile-fail controls, positive control and six rejected mutants.
+All three runs: ten source hashes, twenty-one command records, raw diagnostics,
+source snapshots and HEAD/diff verified before documentation edits.
+
+Protected ten hashes, clean external61dde37 and parked kernel base remain intact.
+No new defect or harness failure occurred in this checkpoint. Next implement the
+independent local event-loop/sleep/deadline contract using simulated events. A
+caller must still run progress_notified and inspect needs_progress before sleep;
+no automatic native wake or full async qualification is claimed. SQ remains
+parked and unapplied; AS3/AS4/MM0-MM4 and activation gates remain outstanding.

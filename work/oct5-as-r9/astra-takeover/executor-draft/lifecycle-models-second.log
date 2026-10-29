@@ -1,0 +1,17 @@
+PASS loom.cfg Invariants
+PASS loom_buggy_cqwait_check_early.cfg NoMissedCqWake
+PASS loom_buggy_cqwait_no_wake.cfg NoMissedCqWake
+PASS loom_buggy_double_post.cfg NoDoubleCompletion
+PASS loom_buggy_live_sqe_reread.cfg ArgPinnedToSnapshot
+PASS loom_buggy_lost_on_full.cfg CqNeverOverfull
+PASS loom_buggy_recheck_at_completion.cfg ObjPinnedToSnapshot
+PASS loom_buggy_stale_after_teardown.cfg NoStaleCompletion
+PASS loom_service.cfg TypeOK
+PASS loom_service_buggy_cqfull.cfg CqBounded
+PASS loom_service_buggy_double.cfg NoDoubleTerminal
+PASS loom_service_buggy_earlyfree.cfg NoEarlyFree
+PASS loom_service_buggy_late.cfg NoLateSuccess
+PASS loom_service_buggy_peerwait.cfg RetirementProgress
+PASS loom_service_buggy_refund.cfg CreditsRetained
+PASS loom_service_buggy_reuse.cfg NoStaleSlot
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/lifecycle-models-20261009T210233Z

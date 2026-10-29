@@ -9,14 +9,6 @@
 #include <thylacine/cpio.h>
 #include <thylacine/types.h>
 
-void test_cpio_is_valid_recognizes_magic(void);
-void test_cpio_iter_empty_archive(void);
-void test_cpio_iter_single_entry(void);
-void test_cpio_iter_two_entries(void);
-void test_cpio_iter_rejects_truncated(void);
-void test_cpio_iter_rejects_bad_magic(void);
-void test_cpio_count_matches(void);
-
 // =============================================================================
 // Helpers — build a cpio newc entry into a buffer at a given offset.
 // =============================================================================

@@ -1,0 +1,11 @@
+--- control.c
++++ queued-quiescence.c
+@@ -1174,7 +1174,7 @@
+     struct Loom *l=o->owner;struct loom_service_protocol *p=o->protocol;
+     spin_lock(&l->lock);
+     if(!l->service_closing || !l->service_slots->closing || !p->driving ||
+-       !p->rpc_quiesced || p->abort_reason>=0 || o->phase==LRPC_NEW) {
++       p->abort_reason>=0 || o->phase==LRPC_NEW) {
+         spin_unlock(&l->lock);return -T_E_BUSY;
+     }
+     int rc=0;

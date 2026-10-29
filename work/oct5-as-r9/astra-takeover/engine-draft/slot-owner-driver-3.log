@@ -1,0 +1,56 @@
+PASS omit-engine-charge 0 slot and pool pages charged in metadata
+PASS omit-engine-unwind 4 rollback frees slot and pool pages
+PASS omit-engine-free 0 retirement frees owner and tables
+PASS control 0 PASS owner
+PASS control 1 PASS refusal
+PASS control 2 PASS refusal
+PASS control 3 PASS refusal
+PASS control 4 PASS refusal
+PASS control 5 PASS refusal
+PASS control 6 PASS refusal
+PASS control 7 private Loom retained active or invalid node
+PASS control 8 PASS refusal
+PASS control 9 PASS refusal
+PASS control 10 PASS refusal
+PASS control 11 PASS refusal
+PASS control 12 PASS refusal
+PASS control 13 PASS owner
+PASS control 14 PASS owner
+PASS control 15 PASS owner
+PASS control 16 PASS owner
+PASS control 17 private Loom retained active or invalid node
+PASS control 18 private Loom retained unowned node
+PASS control 19 PASS refusal
+PASS control 20 PASS refusal
+PASS control 21 PASS owner
+PASS control 22 private Loom retained admitted request
+PASS control 23 private Loom retained request payload
+PASS control 24 PASS owner
+PASS control 25 PASS refusal
+PASS control 26 PASS owner
+PASS control 27 PASS refusal
+PASS control 28 PASS refusal
+PASS omit-slot-charge 0 slot and pool pages charged in metadata
+PASS omit-target-charge 0 slot and pool pages charged in metadata
+PASS omit-target-unwind 4 rollback frees slot and pool pages
+PASS omit-target-free 0 retirement frees owner and tables
+PASS omit-pool-charge 0 slot and pool pages charged in metadata
+PASS omit-unwind-pool-free 4 rollback frees slot and pool pages
+PASS omit-retire-pool-free 0 retirement frees owner and tables
+PASS omit-unwind-free 4 rollback frees slot and pool pages
+PASS omit-unwind-refund 2 refusal restores accounting
+PASS omit-unwind-pin 2 refusal restores lifetime
+PASS omit-retire-free 0 retirement frees owner and tables
+PASS omit-close 0 close freezes ledger
+PASS parent-before-child 15 private Loom retained active or invalid node
+PASS omit-node-cleanup 13 private Loom retained a service slot
+PASS omit-node-charge 0 slot and pool pages charged in metadata
+PASS omit-node-unwind 4 rollback frees slot and pool pages
+PASS omit-node-free 0 retirement frees owner and tables
+PASS omit-node-orphan-guard 18 invalid node retirement returned
+PASS undersize-request-table 24 request allocation follows CQ geometry
+PASS omit-request-charge 0 slot and pool pages charged in metadata
+PASS omit-request-unwind 4 rollback frees slot and pool pages
+PASS omit-request-free 0 retirement frees owner and tables
+PASS omit-request-cleanup 21 private Loom retained active or invalid node
+work/oct5-as-r9/astra-takeover/slot-owner-20261009T173323Z

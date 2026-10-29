@@ -34,9 +34,8 @@
 //   - Look up /virtio-blk-rw in devramfs; copy to the static blob
 //     (with R5-G alignment).
 //   - Confirm a virtio-mmio slot with DeviceID = 2 (block) exists
-//     (graceful SKIP if -device virtio-blk-device is absent in
-//     tools/run-vm.sh's flags, e.g. tools/run-vm.sh --no-share for a
-//     headless dev VM that nonetheless ships disk-less).
+//     (test_virtio_device: FAILS when the launcher declared one, a
+//     counted skip when it attached no virtio-blk).
 //   - rfork_with_caps(RFPROC, ..., CAP_HW_CREATE).
 //   - wait_pid; assert exit_status == 0.
 //
@@ -61,8 +60,6 @@
 #include <thylacine/virtio.h>
 
 #include "../../arch/arm64/uart.h"
-
-void test_virtio_blk_rw_rfork_with_caps(void);
 
 // 16 KiB per blob (P4-image-shrink convention; every userspace binary
 // fits under 16 KiB with -z max-page-size=4096 on both Rust + C sides).
@@ -112,22 +109,14 @@ void test_virtio_blk_rw_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-blk-rw", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-blk-rw not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-blk-rw", &cpio_blob, &size);
+    if (rc != 0) return;
 
-    // Same SKIP logic as virtio-blk-probe: if no virtio-blk-device is
-    // wired in QEMU, the userspace probe would scan + bail early but
-    // we short-circuit kernel-side to keep the test runner output
-    // clean.
+    // Same rule as virtio-blk-probe: skip only when the launcher declared
+    // no virtio-blk-device; declared and absent fails.
     struct virtio_mmio_dev *blk_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_BLOCK);
-    if (!blk_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=2\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_BLOCK, "thylacine.virtio-blk");
+    if (!blk_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_BLK_RW_BLOB_MAX,
                 "virtio-blk-rw binary too large for static buffer");

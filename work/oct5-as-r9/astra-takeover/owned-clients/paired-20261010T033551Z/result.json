@@ -1,0 +1,115 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "rust_scenarios": 4,
+  "rust_profiles": 2,
+  "c_sanitizers": [
+    "address",
+    "undefined"
+  ],
+  "concurrent_records_per_run": 100000,
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-receipt-index-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-receipt-index-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-receipt-index-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-receipt-index-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-double-ack-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-double-ack-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-double-ack-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-double-ack-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "rust-mutant-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "rust-mutant-overlap-run",
+      "rc": 101,
+      "expected_failure": true
+    },
+    {
+      "name": "c-mutant-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "c-mutant-overlap-run",
+      "rc": -6,
+      "expected_failure": true
+    }
+  ],
+  "limits": "Uninstalled paired reader only; concurrency stress is not a memory-model proof or owned-client/native qualification"
+}

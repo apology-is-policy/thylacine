@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -47,7 +47,7 @@ int           spoor_stat_native(struct Spoor *c, struct t_stat *out);
 struct Walkqid *walkqid_alloc(int max_qids);          // >= 1 slot even at 0
 void            walkqid_free(struct Walkqid *w);
 
-u64 spoor_total_allocated(void);  u64 spoor_total_freed(void);   // diagnostics
+u64 spoor_total_allocated(void);  u64 spoor_total_freed(void);   // diagnostics (tests build only)
 ```
 
 The two release entry points are NOT interchangeable, and picking the

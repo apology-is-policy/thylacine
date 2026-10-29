@@ -1,0 +1,2 @@
+unknown flag or unqualified combination: got0 want-22
+Assertion failed: (0), function check, file flags.c, line 73.

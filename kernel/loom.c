@@ -16,6 +16,13 @@
 // holds a reference.
 
 #include <thylacine/loom.h>
+#include <thylacine/addrspace.h>
+#include <thylacine/loom_service_pool.h>
+#include <thylacine/loom_service_slots.h>
+#include <thylacine/loom_service_pool_table.h>
+#include <thylacine/loom_service_targets.h>
+#include <thylacine/loom_service_nodes.h>
+#include <thylacine/loom_service_fids.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -36,6 +43,7 @@
 #include <thylacine/syscall.h>    // T_WSTAT_GID (the create-gid rule)
 #include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vma.h>        // vma_lookup / VMA_PROT_* (Loom-6 registered buffers)
 #include <thylacine/weft.h>       // weft_binding / weft_binding_validate_rw (Weft-6c)
 
@@ -183,17 +191,37 @@ _Static_assert((LOOM_MAX_ENTRIES & (LOOM_MAX_ENTRIES - 1u)) == 0,
 static u64 g_loom_created;
 static u64 g_loom_destroyed;
 
+#ifdef KERNEL_TESTS
 u64 loom_total_created(void)   { return __atomic_load_n(&g_loom_created, __ATOMIC_RELAXED); }
 u64 loom_total_destroyed(void) { return __atomic_load_n(&g_loom_destroyed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS
 
 static u32 align_up_u32(u32 x, u32 a) { return (x + (a - 1u)) & ~(a - 1u); }
 
 static bool is_pow2_u32(u32 x) { return x != 0u && (x & (x - 1u)) == 0u; }
 
-struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
-    if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return NULL;
-    if (!is_pow2_u32(cq_entries))                                   return NULL;
-    if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return NULL;
+// The ring geometry, computed without allocating anything. A private owner must
+// know ring_size to reserve its storage charge BEFORE it commits to building a
+// ring, so the measurement is separated from the construction rather than
+// duplicated at the second caller.
+struct loom_layout {
+    u32 hdr_off;
+    u32 sq_array_off;
+    u32 sq_array_size;
+    u32 sqe_off;
+    u32 sqe_size;
+    u32 cqe_off;
+    u32 cqe_size;
+    u32 receipt_off;
+    u32 receipt_size;
+    u32 ring_size;
+};
+
+static bool loom_measure(u32 sq_entries, u32 cq_entries, bool receipts,
+                         struct loom_layout *g) {
+    if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return false;
+    if (!is_pow2_u32(cq_entries))                                   return false;
+    if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return false;
 
     // Geometry. Each region 64-aligned (cache line); the whole ring
     // page-rounded. All sizes are bounded (sq/cq <= 2*LOOM_MAX_ENTRIES, each
@@ -206,12 +234,69 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     u32 sqe_size      = sq_entries * (u32)sizeof(struct loom_sqe);
     u32 cqe_off       = align_up_u32(sqe_off + sqe_size, 64u);
     u32 cqe_size      = cq_entries * (u32)sizeof(struct loom_cqe);
-    u32 ring_end      = cqe_off + cqe_size;
+    u32 receipt_off  = receipts ? align_up_u32(cqe_off + cqe_size, 64u) : 0;
+    u32 receipt_size = receipts ? cq_entries * (u32)sizeof(struct loom_service_buffer_receipt) : 0;
+    u32 ring_end     = receipts ? receipt_off + receipt_size : cqe_off + cqe_size;
     u32 ring_size     = (ring_end + (PAGE_SIZE - 1u)) & ~((u32)PAGE_SIZE - 1u);
+
+    g->hdr_off       = hdr_off;
+    g->sq_array_off  = sq_array_off;
+    g->sq_array_size = sq_array_size;
+    g->sqe_off       = sqe_off;
+    g->sqe_size      = sqe_size;
+    g->cqe_off       = cqe_off;
+    g->cqe_size      = cqe_size;
+    g->receipt_off   = receipt_off;
+    g->receipt_size  = receipt_size;
+    g->ring_size     = ring_size;
+    return true;
+}
+
+#ifdef KERNEL_TESTS
+// Keyed to the arming thread, so a Loom created on any other thread never meets
+// the fault, and a NULL current (before thread_init) never matches a disarmed
+// slot. Taken only after the metadata allocation succeeded.
+static struct Thread *g_loom_ring_fault_thread;
+
+void loom_layout_ring_fault_arm_for_test(void) {
+    struct Thread *me = current_thread();
+    if (!me) extinction("loom_layout_ring_fault_arm_for_test without a thread");
+    __atomic_store_n(&g_loom_ring_fault_thread, me, __ATOMIC_RELAXED);
+}
+
+void loom_layout_ring_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_ring_fault_thread, NULL, __ATOMIC_RELAXED);
+}
+
+bool loom_layout_ring_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_ring_fault_thread, __ATOMIC_RELAXED) != NULL;
+}
+
+static bool loom_layout_ring_fault_take(const struct Loom *l) {
+    struct Thread *me = current_thread();
+    if (!me) return false;
+    if (!__atomic_compare_exchange_n(&g_loom_ring_fault_thread, &me, NULL, false,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return false;
+    kfree_large_watch_arm_for_test(l);
+    return true;
+}
+#else
+static inline bool loom_layout_ring_fault_take(const struct Loom *l) {
+    (void)l;
+    return false;
+}
+#endif
+
+static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exempt,
+                                        bool receipts) {
+    struct loom_layout g;
+    if (!loom_measure(sq_entries, cq_entries, receipts, &g)) return NULL;
 
     struct Loom *l = kmalloc(sizeof(struct Loom), KP_ZERO);
     if (!l) return NULL;
-    struct Burrow *r = burrow_create_anon((size_t)ring_size, exempt);
+    struct Burrow *r = loom_layout_ring_fault_take(l)
+                           ? NULL : burrow_create_anon((size_t)g.ring_size, exempt);
     if (!r) { kfree(l); return NULL; }
 
     l->magic    = LOOM_MAGIC;
@@ -229,14 +314,16 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     l->ring_kva = (u8 *)pa_to_kva(page_to_pa(r->pages));
     l->sq_entries    = sq_entries;
     l->cq_entries    = cq_entries;
-    l->hdr_off       = hdr_off;
-    l->sq_array_off  = sq_array_off;
-    l->sqe_off       = sqe_off;
-    l->cqe_off       = cqe_off;
-    l->sq_array_size = sq_array_size;
-    l->sqe_size      = sqe_size;
-    l->cqe_size      = cqe_size;
-    l->ring_size     = ring_size;
+    l->hdr_off       = g.hdr_off;
+    l->sq_array_off  = g.sq_array_off;
+    l->sqe_off       = g.sqe_off;
+    l->cqe_off       = g.cqe_off;
+    l->sq_array_size = g.sq_array_size;
+    l->sqe_size      = g.sqe_size;
+    l->cqe_size      = g.cqe_size;
+    l->ring_size     = g.ring_size;
+    l->receipt_off   = g.receipt_off;
+    l->receipt_size  = g.receipt_size;
     l->cq_tail       = 0;   // kernel-private authoritative CQ tail (the shared mirror starts 0 too)
     l->drive_gen     = 0;
 
@@ -245,7 +332,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     // + entry counts are written here. A dsb ish publishes the stores to the
     // inner-shareable domain so a secondary CPU that maps + reads the ring sees
     // them (burrow_create_anon already dsb'd its own zeroing).
-    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + hdr_off);
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + g.hdr_off);
     h->sq_mask    = sq_entries - 1u;
     h->sq_entries = sq_entries;
     h->cq_mask    = cq_entries - 1u;
@@ -254,6 +341,604 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
 
     __atomic_fetch_add(&g_loom_created, 1, __ATOMIC_RELAXED);
     return l;
+}
+
+struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
+    return loom_create_layout(sq_entries, cq_entries, exempt, false);
+}
+
+#ifdef KERNEL_TESTS
+struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt) {
+    return loom_create_layout(sq_entries, cq_entries, exempt, true);
+}
+#endif // KERNEL_TESTS
+
+// The intrusive queue is bounded by already charged rings. Its lock never
+// encloses ring cleanup; an idle owner parks indefinitely rather than polling.
+static spin_lock_t service_retire_lock;
+static struct Rendez service_retire_wait;
+static struct Loom *service_retire_head;
+static struct Loom **service_retire_tail;
+static bool service_retire_ready;
+static struct loom_close_queue service_close_queue;
+static u64 service_retired_count;
+static u64 service_created_count;
+
+void loom_retire_init(void) {
+    spin_lock_init(&service_retire_lock);
+    rendez_init(&service_retire_wait);
+    service_retire_tail = &service_retire_head;
+    loom_closeq_init(&service_close_queue);
+    service_retire_ready = true;
+}
+
+bool loom_is_private(const struct Loom *l) { return l && l->service_as != NULL; }
+
+#ifdef KERNEL_TESTS
+u64 loom_private_retired(void) {
+    return __atomic_load_n(&service_retired_count, __ATOMIC_ACQUIRE);
+}
+
+// Every ring counted here reaches loom_private_destroy, so created minus retired
+// is the number of private rings still alive.
+u64 loom_private_created(void) {
+    return __atomic_load_n(&service_created_count, __ATOMIC_ACQUIRE);
+}
+
+static bool g_loom_private_layout_fault;
+static bool g_loom_private_slots_fault;
+static bool g_loom_private_pools_fault;
+static bool g_loom_private_targets_fault;
+static bool g_loom_private_nodes_fault;
+
+void loom_private_pools_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_pools_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_pools_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_pools_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_pools_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_pools_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_targets_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_targets_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_targets_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_targets_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_targets_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_targets_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_nodes_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_nodes_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_nodes_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_nodes_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_nodes_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_nodes_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
+}
+
+static bool g_loom_private_engine_fault;
+void loom_private_engine_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_engine_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_engine_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_engine_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_engine_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_engine_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
+}
+
+static bool g_loom_private_requests_fault;
+void loom_private_requests_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_requests_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_requests_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_requests_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_requests_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_requests_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_requests_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_requests_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_slots_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_slots_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_slots_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_slots_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_slots_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_slots_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_slots_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_slots_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_layout_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_layout_fault, true, __ATOMIC_RELAXED);
+}
+
+void loom_private_layout_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+}
+
+bool loom_private_layout_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_layout_fault, __ATOMIC_RELAXED);
+}
+
+static bool loom_private_layout_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+}
+#else
+static inline bool loom_private_engine_fault_take(void) { return false; }
+static inline bool loom_private_layout_fault_take(void) { return false; }
+static inline bool loom_private_slots_fault_take(void) { return false; }
+static inline bool loom_private_pools_fault_take(void) { return false; }
+static inline bool loom_private_targets_fault_take(void) { return false; }
+static inline bool loom_private_nodes_fault_take(void) { return false; }
+static inline bool loom_private_requests_fault_take(void) { return false; }
+#endif
+
+#ifdef KERNEL_TESTS
+struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
+    return loom_create_private_why(p, sq, cq, receipts, NULL);
+}
+#endif // KERNEL_TESTS
+
+struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receipts,
+                                     int *why) {
+    int ignored;
+    if (!why) why = &ignored;
+    // Taken before any refusal, so a shot armed for this call cannot outlive it.
+    bool layout_fault = loom_private_layout_fault_take();
+    bool slots_fault = loom_private_slots_fault_take();
+    bool pools_fault = loom_private_pools_fault_take();
+    bool targets_fault = loom_private_targets_fault_take();
+    bool nodes_fault = loom_private_nodes_fault_take();
+    bool requests_fault = loom_private_requests_fault_take();
+    bool engine_fault = loom_private_engine_fault_take();
+    struct loom_layout g;
+    *why = -T_E_AGAIN;
+    if (!service_retire_ready) return NULL;
+    *why = -T_E_INVAL;
+    if (!p || p->magic != PROC_MAGIC || !p->as || !loom_measure(sq, cq, receipts, &g))
+        return NULL;
+    struct AddrSpace *as = p->as;
+    // Refused while another Proc shares this address space (or the guard count
+    // would wrap): a sibling could write SQEs no syscall check can attribute.
+    *why = -T_E_BUSY;
+    if (!addrspace_private_begin(as)) return NULL;
+    *why = -T_E_NOMEM;
+    // Loom uses the buddy path of kmalloc; a conservative whole page also
+    // attributes its ring's slab descriptor for as long as ring mappings live.
+    _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
+    _Static_assert(sizeof(struct Burrow) <= PAGE_SIZE, "descriptor page attribution bounds object");
+    // Reserve an entire buddy page for the 1552-byte identity ledger. Charging
+    // that physical page avoids pretending shared slab occupancy is exact.
+    // No allocator work under as->lock; unwind frees storage BEFORE its refund.
+    _Static_assert(sizeof(struct loom_slot_table) <= PAGE_SIZE, "slot ledger page");
+    _Static_assert(PAGE_SIZE > SLUB_MAX_OBJECT_SIZE, "slot page uses buddy kmalloc");
+    _Static_assert(sizeof(struct loom_service_pool_table) > SLUB_MAX_OBJECT_SIZE,
+                   "pool table uses buddy kmalloc");
+    _Static_assert(sizeof(struct loom_service_target_table) == PAGE_SIZE, "target table page");
+    _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
+    // Geometry already bounds cq to 8192. Allocate at least a buddy page even
+    // for tiny rings: the charge follows real physical allocation, not a slab.
+    _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
+    size_t request_bytes = (size_t)loom_request_records(cq) * sizeof(struct loom_service_request);
+    if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
+    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+        + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;
+    u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
+    bool exempt = proc_resource_exempt(p);
+    spin_lock(&as->lock);
+    bool charged = addrspace_charge_pages(as, metadata + backing, exempt);
+    spin_unlock(&as->lock);
+    if (!charged) { addrspace_private_end(as); return NULL; }
+    struct loom_slot_table *slots = slots_fault ? NULL : kmalloc(PAGE_SIZE, KP_ZERO);
+    struct loom_service_pool_table *pools = (!slots || pools_fault) ? NULL :
+        kmalloc(sizeof(struct loom_service_pool_table), KP_ZERO);
+    struct loom_service_target_table *targets = (!pools || targets_fault) ? NULL :
+        kmalloc(sizeof(struct loom_service_target_table), KP_ZERO);
+    struct loom_service_node_table *nodes = (!targets || nodes_fault) ? NULL :
+        kmalloc(PAGE_SIZE, KP_ZERO);
+    struct loom_service_request *requests = (!nodes || requests_fault) ? NULL :
+        kmalloc(request_bytes, KP_ZERO);
+    struct loom_service_engine *engine = (!requests || engine_fault) ? NULL :
+        kmalloc(PAGE_SIZE, KP_ZERO);
+    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || !engine || layout_fault) ? NULL :
+        loom_create_layout(sq, cq, exempt, receipts);
+    if (!l) {
+        kfree(engine);
+        kfree(requests);
+        kfree(nodes);
+        kfree(targets);
+        kfree(pools);
+        kfree(slots);
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, metadata + backing);
+        spin_unlock(&as->lock);
+        addrspace_private_end(as);
+        return NULL;
+    }
+    l->service_engine = engine;
+    l->service_slots = slots;
+    l->service_pools = pools;
+    l->service_targets = targets;
+    l->service_nodes = nodes;
+    l->service_requests = (struct loom_request_table){ .records=requests,
+        .capacity=loom_request_records(cq), .admit=cq };
+    l->service_as = as;
+    l->service_creator = p->stripes;
+    l->service_metadata_pages = metadata;
+    // The charge follows the ring Burrow, including when a mapping survives fd
+    // retirement. No raw Proc pointer is consulted by the eventual refund.
+    burrow_charge_record(l->ring, p, backing);
+    __atomic_fetch_add(&service_created_count, 1, __ATOMIC_RELEASE);
+    *why = 0;
+    return l;
+}
+
+void loom_exec_latch(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    spin_lock(&l->lock);
+    l->service_closing = true;
+    // Leaf-only exec latch: publish predicate change without entering scheduler.
+    if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+        extinction("private executor change counter exhausted");
+    loom_slots_close(l->service_slots);
+    spin_unlock(&l->lock);
+}
+
+static void loom_private_close_notify(struct Loom *l) {
+    loom_exec_latch(l);
+    poll_waiter_list_wake(&l->cq_waiters);
+    wakeup(&l->sqpoll_park);
+}
+void loom_private_close_changed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    // Every external driver/constructor/pin return reaches this wake. The wait
+    // predicate reads only this atomic counter and poll flags, never takes Ll.
+    if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+        extinction("private executor change counter exhausted");
+    wakeup(&l->sqpoll_park);
+    spin_lock(&service_retire_lock);
+    bool wake=loom_closeq_kick(&service_close_queue,&l->service_close_work);
+    spin_unlock(&service_retire_lock);
+    if (wake) wakeup(&service_retire_wait);
+}
+void loom_handle_closed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    // Actual handle close retains l, outside process/handle-table locks. Exec's
+    // earlier leaf latch deliberately does not enter this scheduler path.
+    loom_private_close_notify(l);
+    spin_lock(&service_retire_lock);
+    bool started=loom_closeq_start(&service_close_queue,&l->service_close_work);
+    if (started) loom_ref(l); // caller still holds a live ref; never resurrection
+    spin_unlock(&service_retire_lock);
+    if (started) wakeup(&service_retire_wait);
+}
+
+static void loom_private_enqueue(struct Loom *l) {
+    // refcount is already zero. Do not call the root-taking handle-close path.
+    loom_private_close_notify(l);
+    spin_lock(&service_retire_lock);
+    l->service_retire_next = NULL;
+    *service_retire_tail = l;
+    service_retire_tail = &l->service_retire_next;
+    spin_unlock(&service_retire_lock);
+    wakeup(&service_retire_wait);
+}
+
+static int loom_private_pending(void *unused) {
+    (void)unused;
+    spin_lock(&service_retire_lock);
+    int pending = service_retire_head != NULL || service_close_queue.head != NULL;
+    spin_unlock(&service_retire_lock);
+    return pending;
+}
+
+// A private ring retains this exact image until AFTER all table pins settle.
+// Never rediscover a Proc or follow a post-exec p->as when retiring a buffer.
+static void loom_private_drop_buffer(struct AddrSpace *as, struct Burrow *b) {
+    if (!b) return;
+    u32 refund = 0;
+    (void)burrow_unref_settled_in(b, as, &refund);
+    if (refund) {
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, refund);
+        spin_unlock(&as->lock);
+    }
+}
+
+// Zero Loom references prove that no target borrower or registration transaction
+// remains. TARGET owns only a native registry ref: clearing it performs no peer
+// I/O. Other record kinds still require their engine-specific retirement first.
+// The retire worker owns the ring exclusively here; no Loom lock encloses drops.
+static void loom_private_targets_destroy(struct Loom *l) {
+    if (!l->service_targets || !l->service_slots)
+        extinction("private Loom lost target storage");
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+        struct loom_service_slot *s = &l->service_slots->slots[i];
+        struct SrvServiceTarget *t = &l->service_targets->targets[i];
+        if (s->phase != LSLOT_FREE && s->kind == LOOM_SERVICE_TARGET) {
+            if (s->pins || !t->view ||
+                (s->phase != LSLOT_PROVISIONAL && s->phase != LSLOT_LIVE))
+                extinction("private Loom retained invalid target");
+            devsrv_service_target_clear(t);
+            *s = (struct loom_service_slot){0};
+        } else if (t->view) {
+            extinction("private Loom retained unowned target");
+        }
+    }
+}
+
+// Last-owner retirement may discard only unused reservations, never protocol
+// state. The retiring worker has exclusive ownership (zero Loom references).
+// Reap children first: their parent pins must drain before an unused scope can
+// retire. READY and later states must already have been retired by the engine;
+// this bounded local cleanup performs no peer I/O or waiting.
+static void loom_private_nodes_destroy(struct Loom *l) {
+    if (!l->service_nodes || !l->service_slots)
+        extinction("private Loom lost node storage");
+    const u32 kinds[2] = { LOOM_SERVICE_FID, LOOM_SERVICE_SCOPE };
+    for (u32 pass = 0; pass < 2; ++pass) {
+        for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+            struct loom_service_slot *s = &l->service_slots->slots[i];
+            if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
+            struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
+            struct loom_service_node *n=&l->service_nodes->nodes[i];
+            if (kinds[pass]==LOOM_SERVICE_FID && s->phase!=LSLOT_PROVISIONAL &&
+                n->state!=LOOM_SERVICE_RESERVED) {
+                // The engine has actually aborted the parent client before
+                // zero-reference destruction. No physical operation can still
+                // own a ring reference here. Refuse any leaked claim/borrow.
+                if (loom_fid_retire_aborted(l->service_slots,l->service_nodes,ref) ||
+                    loom_fid_reap(l->service_slots,l->service_nodes,ref))
+                    extinction("private Loom retained live derived fid");
+                continue;
+            }
+            if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
+                // Protocol/index/request cleanup precedes final zero-ref free.
+                // Unused children were removed above; no caller can still own
+                // a provisional child here. READY/ABORTING never use this path.
+                if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
+                    n->parent.reserved || n->parent.incarnation || n->reserved ||
+                    n->fid_claim || n->fid_borrows)
+                    extinction("private Loom retained pinned retired scope");
+                *n=(struct loom_service_node){0};
+                if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))
+                    extinction("private Loom lost retired scope metadata");
+                continue;
+            }
+            int rc = s->phase == LSLOT_PROVISIONAL ?
+                loom_service_node_rollback(l->service_slots, l->service_nodes, ref) :
+                loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+            if (rc) extinction("private Loom retained active or invalid node");
+        }
+    }
+    if (!loom_service_nodes_empty(l->service_nodes))
+        extinction("private Loom retained unowned node");
+}
+
+static void loom_private_requests_destroy(struct Loom *l) {
+    // Exclusive zero-reference owner. An unused pre-admission reservation has
+    // no external effects and can unwind locally. Admitted requests require the
+    // engine's terminal/local-retirement cleanup before it drops its last ref.
+    struct loom_request_table *t = &l->service_requests;
+    if (!t->records || t->capacity != loom_request_records(l->cq_entries) ||
+        t->admit != l->cq_entries)
+        extinction("private Loom lost request storage");
+    for (u32 i=0;i<t->capacity;++i) {
+        struct loom_service_request *r = &t->records[i];
+        if (r->phase == LREQ_FREE) continue;
+        struct loom_request_ref ref = { .index=i, .identity=r->identity };
+        if (loom_request_rollback(t,l->service_slots,ref))
+            extinction("private Loom retained admitted request");
+    }
+    if (!loom_requests_empty(t)) extinction("private Loom retained request payload");
+}
+
+static int loom_private_executor_exited(void *arg) {
+    return __atomic_load_n(&((struct Loom *)arg)->sqpoll_exited,__ATOMIC_ACQUIRE);
+}
+static void loom_private_executor_join(struct Loom *l) {
+    // Only the zero-reference retirer calls this. A protocol's final unref may
+    // originate in the executor itself; that enqueues here, never self-joins.
+    // Keep all ring/index/native storage alive until its actual thread exits.
+    if (l->sqpoll) {
+        __atomic_store_n(&l->sqpoll_stopping,true,__ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+        while (!__atomic_load_n(&l->sqpoll_exited,__ATOMIC_ACQUIRE))
+            (void)sleep(&l->sqpoll_join,loom_private_executor_exited,l);
+        thread_free(l->sqpoll);
+        l->sqpoll=NULL;
+    }
+    proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
+}
+
+// Final zero-reference worker only: no constructor, request, parser or consumer
+// can own this ring. Leases may survive scope retirement, but not exclusive
+// whole-ring destruction. Their backing allocations still have independent refs.
+static int loom_private_pools_destroy(struct Loom *l) {
+    if(!l || !l->service_pools || !l->service_slots || !l->service_engine ||
+       __atomic_load_n(&l->refcount,__ATOMIC_ACQUIRE) || !l->service_closing ||
+       !l->service_slots->closing || !loom_engine_empty(l->service_engine) ||
+       !loom_requests_empty(&l->service_requests) || l->service_fixed ||
+       l->service_fixed_count || l->service_fixed_settling)return -T_E_BUSY;
+    struct loom_service_pool_table *t=l->service_pools;
+    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];u32 count=0;
+    // Validate all records before changing any; no partially reclaimed bank.
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_pool *p=&t->pools[i];struct loom_service_slot *s=&l->service_slots->slots[i];
+        if(p->phase==LPOOL_EMPTY) {
+            if(s->phase!=LSLOT_FREE && s->kind==LOOM_SERVICE_POOL)return -T_E_INVAL;
+            continue;
+        }
+        if(p->streams || s->pins)return -T_E_BUSY;
+        if(p->ref.slot!=i || p->ref.reserved || !p->ref.incarnation ||
+           s->kind!=LOOM_SERVICE_POOL || s->incarnation!=p->ref.incarnation ||
+           !p->count || p->count>LOOM_SERVICE_POOL_MEMBERS ||
+           !((p->phase==LPOOL_RESERVED && s->phase==LSLOT_PROVISIONAL) ||
+             (p->phase==LPOOL_LIVE && s->phase==LSLOT_LIVE)))return -T_E_INVAL;
+        u32 found=0;u64 ordinals=0;
+        for(u32 j=0;j<LOOM_SERVICE_POOL_MEMBERS;++j) {
+            struct loom_pool_cell *c=&t->bank.cells[j];
+            if(c->phase==LMEMBER_FREE || c->pool.slot!=i)continue;
+            if(c->pool.reserved || c->pool.incarnation!=p->ref.incarnation ||
+               c->ordinal>=p->count || (ordinals&(1ull<<c->ordinal)) || !c->extent.backing)
+                return -T_E_INVAL;
+            if(c->phase!=LMEMBER_AVAILABLE && c->phase!=LMEMBER_LEASED)return -T_E_BUSY;
+            if(p->phase==LPOOL_RESERVED && c->phase!=LMEMBER_AVAILABLE)return -T_E_INVAL;
+            ordinals|=1ull<<c->ordinal;++found;
+        }
+        if(found!=p->count)return -T_E_INVAL;
+    }
+    for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i) {
+        struct loom_pool_cell *c=&t->bank.cells[i];if(c->phase==LMEMBER_FREE)continue;
+        if(c->pool.slot>=LOOM_SERVICE_SLOT_COUNT ||
+           t->pools[c->pool.slot].phase==LPOOL_EMPTY)return -T_E_INVAL;
+        pins[count++]=(struct Burrow *)c->extent.backing;
+    }
+    for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i)
+        if(t->bank.cells[i].phase==LMEMBER_LEASED)t->bank.cells[i].phase=LMEMBER_AVAILABLE;
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_pool *p=&t->pools[i];if(p->phase==LPOOL_EMPTY)continue;
+        int rc=p->phase==LPOOL_RESERVED?loom_service_pool_rollback(l->service_slots,t,p->ref)
+                                      :loom_service_pool_reap(l->service_slots,t,p->ref);
+        if(rc)extinction("exclusive pool destruction changed ledger");
+    }
+    // Ledger exclusions are gone but saved pins keep every backing alive until
+    // its physical settled drop. Never turn this into a metadata-only memset.
+    for(u32 i=0;i<count;++i)loom_private_drop_buffer(l->service_as,pins[i]);
+    return 0;
+}
+
+static void loom_private_destroy(struct Loom *l) {
+    // Snapshotted before anything frees l: everything after the kfree below
+    // reaches the address space through these two locals and never through l.
+    struct AddrSpace *as = l->service_as;
+    u32 metadata = l->service_metadata_pages;
+
+    // The existing private retirer joins only the nonblocking private branch,
+    // before touching any owner storage. Legacy RPC/clunk cleanup stays banned.
+    loom_private_executor_join(l);
+    if (l->sqpoll || l->inflight_ops || l->service_engine->worker_starting)
+        extinction("private Loom reached legacy cleanup state");
+    if (!loom_engine_empty(l->service_engine))
+        extinction("private Loom reached final free with indexed protocols");
+    if (l->service_close_work.state!=LCLOSE_NEW && l->service_close_work.state!=LCLOSE_DONE)
+        extinction("private Loom reached final free with a close queue root");
+    if (l->service_fixed || l->service_fixed_count || l->service_fixed_settling)
+        extinction("private Loom reached cleanup with fixed borrows");
+    for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
+        if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
+
+    // Targets and unused nodes have only local ownership and can retire here.
+    // Protocol-active records must be empty before the engine drops its last ref.
+    loom_private_requests_destroy(l);
+    if(loom_private_pools_destroy(l))extinction("private Loom retained active pool owner");
+    loom_private_nodes_destroy(l);
+    loom_private_targets_destroy(l);
+    if (!l->service_slots) extinction("private Loom lost slot storage");
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
+        if (l->service_slots->slots[i].phase != LSLOT_FREE ||
+            l->service_slots->slots[i].pins)
+            extinction("private Loom retained a service slot");
+    if (!loom_service_pools_empty(l->service_pools))
+        extinction("private Loom retained pool storage");
+    // No pool, writer or owner borrower survives here. Detach the bounded table
+    // before settling each pin outside locks, while the exact image is retained.
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {
+        struct Burrow *b = l->reg_buf[i].burrow;
+        l->reg_buf[i] = (struct loom_reg_buffer){0};
+        loom_private_drop_buffer(as, b);
+    }
+    l->n_reg_buf = 0;
+    kfree(l->service_engine);
+    kfree(l->service_requests.records);
+    kfree(l->service_nodes);
+    kfree(l->service_targets);
+    kfree(l->service_pools);
+    kfree(l->service_slots);
+
+    // One settled drop rather than claim / drop / restore. The refund is decided
+    // inside the same v->lock interval that decides whether this drop ends the
+    // ring's occupancy, so a peer holder's final drop cannot land in a gap and
+    // leave this one writing a charge record through a freed descriptor. A
+    // nonfinal drop reports zero and leaves the record for whichever drop does
+    // end the occupancy -- a ring mapping that outlives the fd settles it at VMA
+    // teardown, which is why the refund is read from the drop and not from a
+    // value claimed before it. The guards above bound LEGACY EXECUTION, BUFFER
+    // AND FID state; they say nothing about mapping references, so a second
+    // holder of this ring is not merely possible but routine, and no exclusivity
+    // argument is available here or relied on.
+    u32 refund = 0;
+    (void)burrow_unref_settled_in(l->ring, as, &refund);
+
+    l->magic = 0;
+    kfree(l);
+
+    // The pin addrspace_private_begin took is what keeps `as` addressable here,
+    // so it is released LAST: addrspace_private_end may drop the final lifetime
+    // reference and free the descriptor, and nothing may touch `as` after it.
+    spin_lock(&as->lock);
+    addrspace_uncharge_pages(as, metadata + refund);
+    spin_unlock(&as->lock);
+    addrspace_private_end(as);
+
+    __atomic_fetch_add(&g_loom_destroyed, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&service_retired_count, 1, __ATOMIC_RELEASE);
+}
+
+static void loom_private_retire_one(void) {
+        spin_lock(&service_retire_lock);
+        struct loom_close_work *work=loom_closeq_take(&service_close_queue);
+        if (work) {
+            struct Loom *owner=(void *)((char *)work-__builtin_offsetof(struct Loom,service_close_work));
+            ++owner->service_close_visits;
+        }
+        struct Loom *l = service_retire_head;
+        if (l) {
+            service_retire_head = l->service_retire_next;
+            if (!service_retire_head) service_retire_tail = &service_retire_head;
+        }
+        spin_unlock(&service_retire_lock);
+        if (work) {
+            struct Loom *closing=(void *)((char *)work-__builtin_offsetof(struct Loom,service_close_work));
+            int progress=loom_engine_close_visit(closing);
+            if (progress<0) extinction("close queue reached invalid private owner");
+            spin_lock(&service_retire_lock);
+            enum loom_close_finish action=loom_closeq_finish(&service_close_queue,work,progress==2,progress==1);
+            spin_unlock(&service_retire_lock);
+            if (action==LCLOSE_DROP) loom_unref(closing); // final drop outside Q
+        }
+        if (l) loom_private_destroy(l);
+}
+void loom_retirer_main(void) {
+    for (;;) {
+        (void)sleep(&service_retire_wait, loom_private_pending, NULL);
+        loom_private_retire_one();
+    }
 }
 
 // Last-ref teardown. No concurrent access (refcount hit 0), so no lock is
@@ -413,24 +1098,13 @@ static void loom_free(struct Loom *l) {
     // That is the I-32-breaking direction, the one every other tie in this
     // mechanism is deliberately broken away from.
     //
-    // The two arms are NOT interchangeable, which is why this is not simply
-    // loom_owner_live(l). `owner` binds LAST in setup (after the final failure
-    // path) and `sqpoll_owner` binds FIRST (at the charge), on purpose: the
-    // rollbacks uncharge pages explicitly and must not be double-refunded,
-    // while they deliberately do NOT settle the thread charge and leave it to
-    // this function. So on a rollback `owner` is still NULL and routing through
-    // loom_owner_live would return NULL, SKIP the uncharge, and leak a thread
-    // charge for the Proc's whole life -- turning a backstop into a defect on
-    // paths that are actually exercised (sqpoll start failure, handle_alloc
-    // failure).
-    //
-    // owner == NULL is instead PROOF the Proc is alive: it means setup never
-    // reached its last stanza, so no handle exists, so the only reference is
-    // the local one in sys_loom_setup -- we are executing inside the creator's
-    // own syscall. Validate when there is something to validate; rely on the
-    // synchronous path when there is not.
+    // Setup binds `owner` with the ring's page charge, before it takes this
+    // one, so a charged Loom always has an owner here. Setup's own rollbacks
+    // leave the thread charge to this function; they run inside the creator's
+    // syscall, so loom_owner_live finds the creator alive and the uncharge is
+    // never skipped on those (exercised) paths.
     if (l->sqpoll_charged) {
-        struct Proc *so = l->owner ? loom_owner_live(l) : l->sqpoll_owner;
+        struct Proc *so = loom_owner_live(l);
         if (so) proc_sqpoll_uncharge(so);
         l->sqpoll_charged = false;
     }
@@ -548,13 +1222,15 @@ void loom_unref(struct Loom *l) {
     if (!l || l->magic != LOOM_MAGIC) return;
     if (__atomic_fetch_sub(&l->refcount, 1, __ATOMIC_RELEASE) == 1) {
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        loom_free(l);
+        if (loom_is_private(l)) loom_private_enqueue(l);
+        else loom_free(l);
     }
 }
 
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n) {
     if (!l || l->magic != LOOM_MAGIC)  return -T_E_INVAL;
+    if (loom_is_private(l))            return -T_E_OPNOTSUPP;
     if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
     if (n > 0 && (!spoors || !rights)) return -T_E_INVAL;
 
@@ -630,9 +1306,419 @@ static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
     return 0;
 }
 
+// Internal private-buffer admission only. Public setup/registration remain
+// disabled. The caller retains l and p, calls in the creator's stable syscall
+// image (exec requires its peers to leave), and supplies an immutable kernel
+// snapshot. Never call from a worker borrowing somebody else's Proc identity.
+int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+                                  const struct loom_buf_reg *bufs, u32 n) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+    struct AddrSpace *as = l->service_as;
+    if (p->as != as || p->stripes != l->service_creator) return -T_E_ACCES;
+    if (n > LOOM_MAX_REG_BUFFERS || (n && !bufs)) return -T_E_INVAL;
+
+    struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i)
+        fresh[i] = (struct loom_reg_buffer){0};
+    u32 done = 0;
+    int rc = 0;
+    // Resolve the complete set against the retained creator image. Refuse the
+    // ring itself, even when its mapping passes the ordinary ANON/RW gates.
+    spin_lock(&as->lock);
+    while (done < n) {
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done])) {
+            rc = -T_E_INVAL;
+            break;
+        }
+        if (fresh[done++].burrow == l->ring) { rc = -T_E_INVAL; break; }
+    }
+    spin_unlock(&as->lock);
+    if (!rc) {
+        spin_lock(&l->lock);
+        // Close may win while resolution runs. Both provisional and live pools
+        // forbid rebinding; the old table remains intact on either refusal.
+        if (l->service_closing) rc = -T_E_CANCELED;
+        else if (!loom_service_pools_empty(l->service_pools)) rc = -T_E_BUSY;
+        else {
+            for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {
+                struct loom_reg_buffer old = l->reg_buf[i];
+                l->reg_buf[i] = fresh[i];
+                fresh[i] = old;
+            }
+            l->n_reg_buf = n;
+            done = LOOM_MAX_REG_BUFFERS; // displaced pins, not the new table
+        }
+        spin_unlock(&l->lock);
+    }
+    // Every refusal and replacement uses the same settled-drop primitive. An
+    // unmap can have made this pin the final holder during the unlocked gap.
+    for (u32 i = 0; i < done; ++i)
+        loom_private_drop_buffer(as, fresh[i].burrow);
+    return rc;
+}
+
+// Called with the retained private owner's lock held. Registration pins keep
+// the ANON direct-map base stable; no address-space lock or mapping lookup here.
+static int loom_private_extent_locked(struct Loom *l,
+                                      const struct loom_service_pool_member *m,
+                                      struct loom_pool_extent *out) {
+    if (m->reserved || m->buffer_index >= l->n_reg_buf || !m->length) {
+        return -T_E_INVAL;
+    }
+    const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
+    if (!b->burrow || b->burrow == l->ring ||
+        b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
+        m->offset > b->len || m->length > b->len - m->offset) {
+        return -T_E_INVAL;
+    }
+    // Integer subtraction avoids pointer-difference UB and overflowing
+    // user offset+length. Table pins guarantee this ANON direct-map base
+    // remains stable even after every original user mapping is detached.
+    u64 base = (u64)pa_to_kva(page_to_pa(b->burrow->pages));
+    u64 kva = (u64)b->kva;
+    if (kva < base || kva - base > b->burrow->size ||
+        b->len > b->burrow->size - (kva - base)) {
+        return -T_E_INVAL;
+    }
+    *out = (struct loom_pool_extent){b->burrow,kva - base + m->offset,m->length};
+    return 0;
+}
+
+static bool loom_private_fixed_conflicts_locked(struct Loom *l,
+                                                 struct loom_pool_extent e) {
+    for (struct loom_private_fixed *f = l->service_fixed; f; f = f->next)
+        if (loom_pool_extents_overlap(e,f->extent)) return true;
+    return false;
+}
+
+int loom_private_fixed_acquire(struct Loom *l, struct Proc *p,
+                               const struct loom_service_pool_member *m,
+                               struct loom_private_fixed *f) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !m || !f ||
+        !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    int rc = 0;
+    struct loom_pool_extent e;
+    spin_lock(&l->lock);
+    if (l->service_closing) rc = -T_E_CANCELED;
+    else if (f->owner || f->next || f->extent.backing || f->extent.offset || f->extent.length)
+        rc = -T_E_BUSY;
+    else if (l->service_fixed_count + l->service_fixed_settling >= l->cq_entries) rc = -T_E_AGAIN;
+    else if ((rc = loom_private_extent_locked(l,m,&e)) == 0) {
+        if (loom_pool_conflicts(&l->service_pools->bank,e)) rc = -T_E_BUSY;
+        else {
+            // Existing CQ capacity bounds traversal. Actual request admission
+            // still owes its own shared terminal reservation before dispatch.
+            burrow_ref((struct Burrow *)e.backing);
+            loom_ref(l);
+            *f = (struct loom_private_fixed){l->service_fixed,l,e};
+            l->service_fixed = f;
+            ++l->service_fixed_count;
+        }
+    }
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+int loom_private_fixed_release(struct Loom *l, struct loom_private_fixed *f) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !f) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct loom_private_fixed **link = &l->service_fixed;
+    while (*link && *link != f) link = &(*link)->next;
+    if (!*link || f->owner != l) { spin_unlock(&l->lock); return -T_E_NOENT; }
+    struct Burrow *b = (struct Burrow *)f->extent.backing;
+    struct AddrSpace *as = l->service_as;
+    *link = f->next;
+    --l->service_fixed_count;
+    ++l->service_fixed_settling;
+    *f = (struct loom_private_fixed){0};
+    spin_unlock(&l->lock);
+    // A concurrent rebind can drop the last table pin after unlink. This pin
+    // still owns the pages; release it and settle before dropping the owner.
+    // No reference to f or l is used after the final Loom unref.
+    loom_private_drop_buffer(as,b);
+    spin_lock(&l->lock);
+    --l->service_fixed_settling;
+    spin_unlock(&l->lock);
+    loom_private_close_changed(l);
+    loom_unref(l);
+    return 0;
+}
+
+// Internal pool transaction front-end. No public registration is enabled here.
+// The input is a single immutable kernel copy; output lives in kernel memory.
+// As for private buffer registration, the caller holds a Loom and creator Proc
+// reference in its stable syscall image. The ring lock stabilizes the buffer
+// table through canonical resolution, member reservation and pin acquisition.
+int loom_private_pool_prepare(struct Loom *l, struct Proc *p,
+                              const struct loom_service_pool_create *in,
+                              struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (!l->receipt_size) return -T_E_OPNOTSUPP;
+    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
+        in->reserved || in->result.slot || in->result.reserved ||
+        in->result.incarnation || !in->count ||
+        in->count > LOOM_SERVICE_POOL_MEMBERS) return -T_E_INVAL;
+    for (u32 i = in->count; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+        const struct loom_service_pool_member *m = &in->members[i];
+        if (m->buffer_index || m->reserved || m->offset || m->length)
+            return -T_E_INVAL;
+    }
+    struct loom_pool_extent extents[LOOM_SERVICE_POOL_MEMBERS];
+    int rc = 0;
+    spin_lock(&l->lock);
+    if (l->service_closing) { rc = -T_E_CANCELED; goto unlock; }
+    // Private legacy dispatch is disabled. Refuse unexpected legacy work;
+    // private request callers must reserve their canonical fixed extents using
+    // the owner API above before releasing this lock for local dispatch.
+    if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
+        l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
+    for (u32 i = 0; i < in->count; ++i) {
+        rc = loom_private_extent_locked(l,&in->members[i],&extents[i]);
+        if (rc) goto unlock;
+        if (loom_private_fixed_conflicts_locked(l,extents[i])) {
+            rc = -T_E_BUSY; goto unlock;
+        }
+    }
+    rc = loom_service_pool_prepare(l->service_slots,l->service_pools,
+                                   extents,in->count,out);
+    if (!rc) {
+        // One independent pin per member, including disjoint aliases of the
+        // same Burrow. Ref cannot fail; the table's pin prevents destruction.
+        // Provisional membership already excludes table replacement and other
+        // overlapping pool registrations before this lock is released.
+        for (u32 i = 0; i < in->count; ++i)
+            burrow_ref((struct Burrow *)extents[i].backing);
+    }
+unlock:
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// These are kernel-owner continuations, not authority-bearing user entry points.
+// The caller retains l across copyout and until publish/rollback finishes.
+int loom_private_pool_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_pool_publish(l->service_slots,l->service_pools,ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// Rollback/reap may run after close or creator exec. Settlement uses the retained
+// image, never a current Proc. Only pools made by private_pool_prepare belong to
+// this front-end: do not mix raw ledger-only reservations into a private owner.
+// Snapshot pins under the same lock as the joint ledger transition; a refusal
+// drops nothing. Successful removal permits rebinding immediately, but the
+// saved independent pins keep every backing alive across that unlocked gap.
+static int loom_private_pool_remove(struct Loom *l, struct loom_service_ref ref,
+                                    bool rollback) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];
+    u32 count = 0;
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+        const struct loom_pool_cell *c = &l->service_pools->bank.cells[i];
+        if (c->phase != LMEMBER_FREE && c->pool.slot == ref.slot &&
+            c->pool.incarnation == ref.incarnation &&
+            c->pool.reserved == ref.reserved)
+            pins[count++] = (struct Burrow *)c->extent.backing;
+    }
+    int rc = rollback ? loom_service_pool_rollback(l->service_slots,l->service_pools,ref)
+                      : loom_service_pool_reap(l->service_slots,l->service_pools,ref);
+    spin_unlock(&l->lock);
+    if (!rc)
+        for (u32 i = 0; i < count; ++i)
+            loom_private_drop_buffer(l->service_as,pins[i]);
+    return rc;
+}
+int loom_private_pool_rollback(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_pool_remove(l,ref,true);
+}
+int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_pool_remove(l,ref,false);
+}
+
+// SCOPE/FID reserve transactions use an immutable, already-copied ABI record.
+// The syscall owns a Loom reference and a stable creator image across prepare,
+// copyout and publish/rollback. No user pointer or Proc escapes. The same ring
+// lock protects both ledgers and the close/parent-abort publication check.
+// This only reserves metadata: it grants no protocol authority, creates no
+// client and cannot reap a node that has entered the protocol state machine.
+int loom_private_node_prepare(struct Loom *l, struct Proc *p,
+                              const struct loom_service_reserve *in,
+                              struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
+        in->flags || in->reserved || in->result.slot || in->result.reserved ||
+        in->result.incarnation) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = l->service_closing ? -T_E_CANCELED :
+        loom_service_node_prepare(l->service_slots, l->service_nodes,
+                                  in->kind, in->scope, out);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = l->service_closing ? -T_E_CANCELED :
+        loom_service_node_publish(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_rollback(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_node_rollback(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_reap_unused(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_fid_reap(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_fid_reap_retired(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// TARGET transactions consume the shared slot quota before resolving the actual
+// handle. Native capture and all handle/registry drops occur outside the ring
+// lock; the caller retains l and a stable creator syscall image throughout.
+// PROVISIONAL is invisible to borrowers until successful copyout + publish.
+// These helpers are internal only. CONNECT still owes actual caller identity
+// and devsrv_service_prepare; retaining a target never grants connect authority.
+static struct SrvServiceTarget *loom_private_target_exact(struct Loom *l,
+                                      struct loom_service_ref ref, u32 phase) {
+    if (ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
+        return NULL;
+    struct loom_service_slot *s = &l->service_slots->slots[ref.slot];
+    struct SrvServiceTarget *t = &l->service_targets->targets[ref.slot];
+    return s->incarnation == ref.incarnation && s->kind == LOOM_SERVICE_TARGET &&
+           s->phase == phase && t->view ? t : NULL;
+}
+
+int loom_private_target_prepare(struct Loom *l, struct Proc *p,
+                               const struct loom_service_target *in,
+                               struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
+        in->registry_fd < 0 || !in->name_len || in->name_len > 255 ||
+        in->result.slot || in->result.reserved || in->result.incarnation)
+        return -T_E_INVAL;
+    for (u32 i = in->name_len; i < sizeof(in->name); ++i)
+        if (in->name[i]) return -T_E_INVAL;
+    struct loom_service_ref ref;
+    spin_lock(&l->lock);
+    int rc = loom_slot_reserve(l->service_slots, LOOM_SERVICE_TARGET, &ref);
+    spin_unlock(&l->lock);
+    if (rc) return rc;
+
+    struct SrvServiceTarget fresh = {0};
+    struct Handle h;
+    rc = handle_get(p, in->registry_fd, &h) ? -T_E_BADF : 0;
+    if (!rc) {
+        rc = h.kind == KOBJ_SPOOR ?
+            devsrv_service_target_init(h.obj, (const char *)in->name,
+                                       in->name_len, &fresh) : -T_E_OPNOTSUPP;
+        handle_put(&h);
+    }
+    spin_lock(&l->lock);
+    if (!rc && l->service_closing) rc = -T_E_CANCELED;
+    if (rc) {
+        // This unpublished ref is private to this retained transaction; close
+        // cannot remove it, and no borrower can pin a provisional slot.
+        (void)loom_slot_rollback(l->service_slots, ref);
+    } else {
+        l->service_targets->targets[ref.slot] = fresh;
+        *out = ref;
+    }
+    spin_unlock(&l->lock);
+    if (rc) devsrv_service_target_clear(&fresh);
+    return rc;
+}
+
+int loom_private_target_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_private_target_exact(l, ref, LSLOT_PROVISIONAL) ?
+        loom_slot_publish(l->service_slots, ref) : -T_E_NOENT;
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+static int loom_private_target_remove(struct Loom *l, struct loom_service_ref ref,
+                                      bool rollback) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    struct SrvServiceTarget detached = {0};
+    spin_lock(&l->lock);
+    struct SrvServiceTarget *t = loom_private_target_exact(l, ref,
+                                      rollback ? LSLOT_PROVISIONAL : LSLOT_LIVE);
+    int rc = !t ? -T_E_NOENT : l->service_slots->slots[ref.slot].pins ? -T_E_BUSY : 0;
+    if (!rc) {
+        // Validate phase/identity/zero pins before either ledger changes. All
+        // transitions below are then infallible under the common owner lock.
+        detached = *t;
+        *t = (struct SrvServiceTarget){0};
+        if (rollback) (void)loom_slot_rollback(l->service_slots, ref);
+        else {
+            (void)loom_slot_retire(l->service_slots, ref);
+            (void)loom_slot_reap(l->service_slots, ref);
+        }
+    }
+    spin_unlock(&l->lock);
+    if (!rc) devsrv_service_target_clear(&detached);
+    return rc;
+}
+int loom_private_target_rollback(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_target_remove(l, ref, true);
+}
+int loom_private_target_reap(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_target_remove(l, ref, false);
+}
+
+int loom_private_target_get(struct Loom *l, struct loom_service_ref ref,
+                            const struct SrvServiceTarget **out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !out) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct SrvServiceTarget *t = loom_private_target_exact(l, ref, LSLOT_LIVE);
+    int rc = t ? loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_TARGET) : -T_E_NOENT;
+    if (!rc) { loom_ref(l); *out = t; }
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_target_put(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_private_target_exact(l, ref, LSLOT_LIVE) ?
+        loom_slot_unpin(l->service_slots, ref) : -T_E_NOENT;
+    spin_unlock(&l->lock);
+    if (!rc) loom_unref(l); // may enqueue final owner; never touch l again
+    return rc;
+}
+
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n) {
     if (!l || l->magic != LOOM_MAGIC || !p)  return -T_E_INVAL;
+    if (loom_is_private(l))                  return -T_E_OPNOTSUPP;
     if (n > LOOM_MAX_REG_BUFFERS)            return -T_E_INVAL;
     if (n > 0 && !bufs)                      return -T_E_INVAL;
 
@@ -647,12 +1733,12 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     u32 done = 0;
     int rc = 0;
     for (; done < n; done++) {
-        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -1; break; }
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -T_E_INVAL; break; }
     }
     spin_unlock(&p->as->lock);
     if (rc != 0) {
         for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
-        return -T_E_INVAL;
+        return rc;
     }
 
     // Install: swap the table under l->lock, then unref the displaced pins OUTSIDE
@@ -688,14 +1774,19 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     return 0;
 }
 
-// Something a ring's driver must act on moved: a CQE, a completion's re-arm or
-// chain result, an op gone in flight. Under l->lock (struct Loom, drive_gen).
+// Something a public ring's driver must act on moved: a CQE, a completion's
+// re-arm or chain result, an op gone in flight. Under l->lock (struct Loom,
+// drive_gen). Two CQE posters skip it, both private-ring only
+// (loom_private_post_terminal, loom_provided_deliver): no drive_gen waiter
+// runs on a private ring.
 static void loom_drive_moved_locked(struct Loom *l) {
     __atomic_store_n(&l->drive_gen, l->drive_gen + 1u, __ATOMIC_RELEASE);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (flags & LOOM_CQE_SERVICE_BUFFER) return -1;
 
     spin_lock(&l->lock);
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
@@ -727,6 +1818,13 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     cqe[idx].user_data = user_data;
     cqe[idx].result    = result;
     cqe[idx].flags     = flags;
+    // A non-pooled result must not inherit a prior payload receipt at a reused
+    // CQ slot. Legacy rings have no companion array and keep their old layout.
+    if (l->receipt_size) {
+        struct loom_service_buffer_receipt *r =
+            (void *)(l->ring_kva + l->receipt_off);
+        r[idx] = (struct loom_service_buffer_receipt){0};
+    }
     // Advance the private tail, then publish it to the shared mirror with a
     // release store (so a user-side load-acquire of cq_tail sees a fully-written
     // slot). The mirror also overwrites any hostile value userspace wrote.
@@ -748,6 +1846,40 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     poll_wake_deferred(&l->cq_owed);
     return 0;
 }
+
+int loom_private_post_terminal(struct Loom *l, struct loom_request_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct loom_request_table *t = &l->service_requests;
+    u64 user_data; s32 result;
+    int rc = loom_request_peek(t,ref,&user_data,&result);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    if (t->detached) { spin_unlock(&l->lock); return -T_E_CANCELED; }
+    struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
+    u32 tail = l->cq_tail;
+    u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+    if ((u32)(tail-head) >= l->cq_entries || !loom_request_deliver_room(t)) {
+        spin_unlock(&l->lock);
+        return -T_E_AGAIN;
+    }
+    u32 idx = tail & (l->cq_entries-1u);
+    struct loom_cqe *cq = (void *)(l->ring_kva+l->cqe_off);
+    cq[idx] = (struct loom_cqe){ .user_data=user_data, .result=result };
+    if (l->receipt_size) {
+        struct loom_service_buffer_receipt *receipts = (void *)(l->ring_kva+l->receipt_off);
+        receipts[idx] = (struct loom_service_buffer_receipt){0};
+    }
+    // No abort check here: a terminal committed before abort stays truthful.
+    // Copy, mark delivered, and publish the tail under one lock interval.
+    rc = loom_request_deliver(t,ref);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    l->cq_tail = tail+1u;
+    __atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+    poll_waiter_list_wake(&l->cq_waiters);
+    return 0;
+}
+
 
 // =============================================================================
 // Loom-3: SQE dispatch + the submit-time pin (I-30) + SYS_LOOM_ENTER.
@@ -1746,6 +2878,7 @@ short loom_poll(struct Loom *l, short events, struct poll_waiter *pw) {
     if ((events & POLLIN) && loom_cq_ready(l) > 0) {
         revents |= POLLIN;
     }
+    if (l->service_closing) revents |= POLLHUP;
     spin_unlock(&l->lock);
     return revents;
 }
@@ -2041,9 +3174,9 @@ static int loom_cqw_cond(void *arg) {
 #define LOOM_FANIN_MAX        LOOM_MAX_REG_HANDLES
 #define LOOM_FANIN_RESCAN_NS  (10ull * 1000ull * 1000ull)   // 10 ms
 
-u32 g_loom_fanin_test_cap;
-volatile u32 g_loom_fanin_test_stall;
-volatile u32 g_loom_fanin_test_stalled;
+VISIBLE_IF_KERNEL_TESTS u32 g_loom_fanin_test_cap;
+VISIBLE_IF_KERNEL_TESTS volatile u32 g_loom_fanin_test_stall;
+VISIBLE_IF_KERNEL_TESTS volatile u32 g_loom_fanin_test_stalled;
 
 // The test's window between an ENTER's client hooks and its CQ register
 // (g_loom_fanin_test_stall). A voluntary yield, so a test on one CPU runs.
@@ -2367,6 +3500,15 @@ void loom_setup_installed_for_test(struct Proc *p, hidx_t fd) {
         __atomic_load_n(&loom_setup_installed_hook, __ATOMIC_ACQUIRE);
     if (hook) hook(p, fd);
 }
+static void (*loom_setup_mapped_hook)(struct Proc *, u64);
+void loom_setup_mapped_hook_for_test(void (*hook)(struct Proc *, u64)) {
+    __atomic_store_n(&loom_setup_mapped_hook, hook, __ATOMIC_RELEASE);
+}
+void loom_setup_mapped_for_test(struct Proc *p, u64 ring_va) {
+    void (*hook)(struct Proc *, u64) =
+        __atomic_load_n(&loom_setup_mapped_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(p, ring_va);
+}
 #endif
 
 // Advance and publish sq_head past one consumed position. The published head is
@@ -2508,8 +3650,15 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
 }
 
 int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
-    if (!l || l->magic != LOOM_MAGIC) return -1;
-    if (flags & ~LOOM_ENTER_VALID)    return -1;
+    if (!l || l->magic != LOOM_MAGIC) return -T_E_INVAL;
+    if (flags & ~LOOM_ENTER_VALID)    return -T_E_INVAL;
+
+    if (loom_is_private(l)) {
+        spin_lock(&l->lock);
+        bool closed = l->service_closing;
+        spin_unlock(&l->lock);
+        return closed ? -T_E_CANCELED : -T_E_OPNOTSUPP;
+    }
 
     // --- SUBMIT phase. ---
     // On an SQPOLL ring the poll-thread OWNS submission (LOOM.md 8.6): ENTER does
@@ -2659,11 +3808,36 @@ static void loom_sqpoll_fanin_park(struct loom_sqpoll_wait *w, u32 gen0) {
 // inside loom_free's join.
 static u32 g_loom_sqpoll_exit_hold;
 
+#ifdef KERNEL_TESTS
 void loom_sqpoll_hold_exit_for_test(bool hold) {
     __atomic_store_n(&g_loom_sqpoll_exit_hold, hold ? 1u : 0u, __ATOMIC_RELEASE);
 }
+#endif
 
-void loom_sqpoll_main(void *arg) {
+static void loom_private_executor_loop(struct Loom *l) {
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    for (;;) {
+        spin_lock(&l->lock);
+        bool closing=l->service_closing;
+        spin_unlock(&l->lock);
+        if (closing || __atomic_load_n(&l->sqpoll_stopping,__ATOMIC_ACQUIRE)) return;
+        // Same bounded primitive as explicit progress. No legacy SQ drain or
+        // blocking client pump is reachable from this internal private branch.
+        if (loom_engine_ready_visit(l,timer_now_ns())>0) continue;
+        __atomic_fetch_or(&h->flags,LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+        u64 deadline=0;
+        int armed=loom_engine_wait_arm(l,timer_now_ns(),&deadline);
+        if (armed<0) extinction("private executor lost exclusive wait ownership");
+#ifdef KERNEL_TESTS
+        loom_private_close_boundary_for_test(l,5); // registered, before sleep
+#endif
+        (void)tsleep(&l->sqpoll_park,loom_engine_wait_changed,l,deadline);
+        loom_engine_wait_disarm(l);
+        __atomic_fetch_and(&h->flags,~(u32)LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+    }
+}
+
+static void loom_sqpoll_main(void *arg) {
     struct Loom *l = (struct Loom *)arg;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     // The fan-in set and the CQ hook live on this stack, filed on the park
@@ -2676,6 +3850,10 @@ void loom_sqpoll_main(void *arg) {
     // loom_free joins this thread, so a reap's last close must not wait for
     // its server (ARCH 7.9.1 part C).
     current_thread()->closes_never_wait = true;
+    if (loom_is_private(l)) {
+        loom_private_executor_loop(l);
+        goto executor_exiting;
+    }
 
     for (;;) {
         if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) break;
@@ -2747,9 +3925,11 @@ void loom_sqpoll_main(void *arg) {
     while (__atomic_load_n(&g_loom_sqpoll_exit_hold, __ATOMIC_ACQUIRE)) sched();
     loom_reap_terminal(l);
 
+executor_exiting:
     (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
     thread_kthread_retire();   // the EXITING commit, under its Proc's threads_lock
     __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
+    if (loom_is_private(l)) loom_private_close_changed(l);
     // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
     // the release it pairs with has already published state==EXITING. wakeup()
     // takes g_timerwait -> sqpoll_join->lock -> cpu_sched and we hold none of
@@ -2762,16 +3942,73 @@ void loom_sqpoll_main(void *arg) {
     extinction("loom_sqpoll_main: returned from terminal sched");
 }
 
-int loom_start_sqpoll(struct Loom *l) {
-    if (!l || l->magic != LOOM_MAGIC || !l->sqpoll_owner) return -1;
+int loom_private_start_executor(struct Loom *l, struct Proc *owner) {
+    if (!l || l->magic!=LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    if (!owner || owner->stripes!=l->service_creator) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    if (l->service_closing || l->sqpoll || l->service_engine->worker_starting) {
+        int rc=l->service_closing ? -T_E_CANCELED : -T_E_BUSY;
+        spin_unlock(&l->lock); return rc;
+    }
+    l->service_engine->worker_starting=true;
+    spin_unlock(&l->lock);
+    int rc=0;
+    struct Thread *kt=NULL;
+    if (!proc_sqpoll_ticket_charge(l->service_creator,l->service_as,
+                                  &l->service_engine->worker_ticket)) rc=-T_E_AGAIN;
+    else {
+        // The executor's stack and slot come out of the creator's share of the
+        // user pool (ARCH 7.3.5). The create reads owner and keeps nothing of it.
+        kt=thread_create_kthread_for(owner,loom_sqpoll_main,l);
+        if (!kt) rc=-T_E_NOMEM;
+    }
+    spin_lock(&l->lock);
+    if (!rc && l->service_closing) rc=-T_E_CANCELED;
+    if (!rc) l->sqpoll=kt;
+    // Keep the start token across unlocked rollback/refund. Another start
+    // cannot reuse the ticket until the failed transaction fully settles.
+    spin_unlock(&l->lock);
+    if (rc) {
+        if (kt) thread_free(kt); // never readied, no running thread can use l
+        proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
+    }
+    spin_lock(&l->lock);
+    l->service_engine->worker_starting=false;
+    spin_unlock(&l->lock);
+    if (!rc) ready(kt);
+    loom_private_close_changed(l);
+    return rc;
+}
+
+int loom_start_sqpoll(struct Loom *l, struct Proc *owner) {
+    if (!l || l->magic != LOOM_MAGIC || !owner) return -T_E_INVAL;
+    if (loom_is_private(l))                     return -T_E_OPNOTSUPP;
     // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
     // group-terminates and its only exit is the stop-flag terminal above), its
     // kernel memory charged to the user pool as the creator's (ARCH 7.3.5). Set
     // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free
     // would observe it; ready() then makes it runnable.
-    struct Thread *kt = thread_create_kthread_for(l->sqpoll_owner, loom_sqpoll_main, l);
-    if (!kt) return -1;
+    struct Thread *kt = thread_create_kthread_for(owner, loom_sqpoll_main, l);
+    if (!kt) return -T_E_NOMEM;
     l->sqpoll = kt;
     ready(kt);
     return 0;
 }
+
+#ifdef KERNEL_TESTS
+static void (*service_close_test_hook)(struct Loom *, u32);
+void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32)) {
+    __atomic_store_n(&service_close_test_hook,hook,__ATOMIC_RELEASE);
+}
+void loom_private_close_boundary_for_test(struct Loom *l, u32 stage) {
+    void (*hook)(struct Loom *, u32)=__atomic_load_n(&service_close_test_hook,__ATOMIC_ACQUIRE);
+    if(hook)hook(l,stage);
+}
+u32 loom_private_close_observe_for_test(struct Loom *l, u64 *visits) {
+    spin_lock(&service_retire_lock);
+    u32 state=l->service_close_work.state;
+    if (visits) *visits=l->service_close_visits;
+    spin_unlock(&service_retire_lock);
+    return state;
+}
+#endif

@@ -42,8 +42,12 @@
 //                                            non-exempt principal: the cap
 //                                            never refuses (it did at 256).
 //   proc.sqpoll_charge_after_finished_workers
-//                                          -- 255 finished workers leave the
-//                                            budget open for an SQPOLL charge.
+//                                          -- a budget's worth of finished
+//                                            workers leave the budget open for
+//                                            an SQPOLL charge.
+//   proc.private_executor_charge_after_finished_workers
+//                                          -- the same for a private ring's
+//                                            executor (qualification image).
 //   proc.exit_tail_runs_to_its_end        -- a preempt armed across tick
 //                                            returns does not cut an exit
 //                                            tail short; the tail keeps its
@@ -134,6 +138,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/image.h>
 #include <thylacine/loom.h>
+#include <thylacine/loom_service_syscall.h>
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -142,38 +147,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
-
-void test_thread_create_user_ctx_layout(void);
-void test_thread_exit_self_marks_exiting(void);
-void test_thread_exit_self_last_thread_zombies(void);
-void test_proc_exited_threads_freed_at_switch(void);
-void test_proc_exited_threads_bounded_by_cpus(void);
-void test_proc_reap_keeps_thread_cap_open(void);
-void test_proc_sqpoll_charge_after_finished_workers(void);
-void test_proc_cap_counts_live_threads(void);
-void test_proc_threads_lock_slot(void);
-void test_proc_spawn_arms_decide_at_the_admit(void);
-void test_proc_multi_thread_reap(void);
-void test_proc_exit_tail_runs_to_its_end(void);
-void test_proc_exec_waits_for_exiting_peer(void);
-void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
-void test_proc_spawn_refused_in_dying_proc(void);
-void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
-void test_proc_ids_are_one_space(void);
-void test_thread_id_space_keeps_a_tcb_tail(void);
-void test_proc_exec_from_a_peer_takes_the_pid(void);
-void test_thread_kernel_memory_charged_to_the_pool(void);
-void test_thread_pool_refuses_users_keeps_tcb(void);
-void test_proc_exec_claim_dooms_every_other_thread(void);
-void test_proc_exec_claim_kills_sleeping_and_running_peers(void);
-void test_proc_exec_claim_abandoned_on_group_death(void);
-void test_proc_exec_claim_woken_by_an_abandoned_create(void);
-void test_proc_exec_claim_does_not_hold_for_a_stop(void);
-void test_proc_exec_claim_survives_a_doomed_exit(void);
-void test_proc_exec_claim_holds_through_a_terminate_latch(void);
-void test_proc_exec_claim_refused_drops_the_new_image(void);
-void test_proc_exec_claim_kills_a_thread_readied_after_it(void);
-void test_proc_exec_claim_wakes_a_vfork_parent(void);
+#include <thylacine/syscall.h>
 
 // ---------------------------------------------------------------------------
 // thread.create_user_ctx_layout
@@ -634,6 +608,7 @@ void test_proc_note_death_with_live_peer_reaps_signalled(void) {
 // proc.exited_threads_bounded_by_cpus
 // proc.reap_keeps_thread_cap_open
 // proc.sqpoll_charge_after_finished_workers
+// proc.private_executor_charge_after_finished_workers
 //
 // An exited thread is freed by the resume path of its last switch-out (ARCH
 // 7.3.2, I-48). Nothing in these children spawns, execs or waits to free one:
@@ -985,16 +960,91 @@ void test_proc_sqpoll_charge_after_finished_workers(void) {
     TEST_EXPECT_EQ(g_rsq_sqpoll_closed, 0, "the charge settled on close");
 }
 
+// The private ring's executor is charged to the same budget, after the same
+// finished workers. Only the qualification image routes a private setup; the
+// default one refuses it before anything is charged.
+static volatile int  g_rpx_count_before, g_rpx_count_after, g_rpx_setup_rc;
+static volatile int  g_rpx_charged_after, g_rpx_close_rc, g_rpx_charged_closed;
+static volatile bool g_rpx_exempt;
+
+static void rpx_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    proc_apply_identity(p, 1000u, 1000u, NULL, 0);
+    g_rpx_exempt   = proc_resource_exempt(p);
+    g_rpx_setup_rc = g_rpx_close_rc = g_rpx_charged_closed = -1;
+    __atomic_store_n(&p->thread_budget, (u32)CAP_TEST_BUDGET, __ATOMIC_RELEASE);
+    for (int i = 0; i < CAP_TEST_BUDGET - 1; i++) {
+        struct Thread *w = thread_create_with_arg(p, ret_worker_entry, NULL);
+        if (!w) extinction("rpx_entry: thread_create_with_arg failed");
+        ready(w);
+    }
+    TEST_YIELD_UNTIL_PROC(rsq_alone(p));
+
+    irq_state_t s = proc_threads_lock(p);
+    g_rpx_count_before = p->thread_count;
+    proc_threads_unlock(p, s);
+    struct loom_params kp;
+    hidx_t fd = -1;
+    u64 made0 = loom_private_created(), gone0 = loom_private_retired();
+    g_rpx_setup_rc = loom_private_setup_for_proc(p, 8, LOOM_SETUP_PRIVATE_SERVICE, &kp, &fd);
+    s = proc_threads_lock(p);
+    g_rpx_count_after   = p->thread_count;
+    g_rpx_charged_after = p->loom_sqpoll_count;
+    proc_threads_unlock(p, s);
+    if (g_rpx_setup_rc == 0) {
+        g_rpx_close_rc = handle_close(p, fd);
+        // The ring retires on the retirer's thread, which refunds the ticket
+        // before it counts the retirement, so the count read after it settled.
+        u64 deadline = timer_now_ns() + 5000000000ull;
+        while (loom_private_retired() - gone0 < loom_private_created() - made0 &&
+               timer_now_ns() < deadline)
+            sched();
+        s = proc_threads_lock(p);
+        g_rpx_charged_closed = p->loom_sqpoll_count;
+        proc_threads_unlock(p, s);
+    }
+    exits("ok");
+}
+
+void test_proc_private_executor_charge_after_finished_workers(void) {
+    u64 made0 = loom_private_created(), gone0 = loom_private_retired();
+    int child_pid = rfork(RFPROC, rpx_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    TEST_EXPECT_EQ(wait_pid(&status), child_pid, "wait_pid pid mismatch");
+    // The retirer is its own thread; both counts are monotonic, so wait until
+    // every ring this test made has gone before the next test reads a gauge.
+    u64 deadline = timer_now_ns() + 5000000000ull;
+    while (loom_private_retired() - gone0 < loom_private_created() - made0 &&
+           timer_now_ns() < deadline)
+        sched();
+    u64 made = loom_private_created() - made0, gone = loom_private_retired() - gone0;
+
+    TEST_EXPECT_EQ(status, 0, "child exited cleanly");
+    TEST_ASSERT(!g_rpx_exempt, "the child runs as a user, so the cap applies");
+    TEST_EXPECT_EQ(g_rpx_count_before, 1,
+        "a budget's worth of finished workers were freed as they finished: the budget is open");
+    TEST_EXPECT_EQ(g_rpx_count_after, 1, "only the caller is counted");
+    TEST_EXPECT_EQ(gone, made, "every private ring made here retired");
+#ifdef LOOM_PRIVATE_QUALIFICATION
+    TEST_EXPECT_EQ(g_rpx_setup_rc, 0, "a private setup fits");
+    TEST_EXPECT_EQ(g_rpx_charged_after, 1, "the executor took its charge");
+    TEST_EXPECT_EQ(g_rpx_close_rc, 0, "close the private ring");
+    TEST_EXPECT_EQ(g_rpx_charged_closed, 0, "the charge settled when the ring retired");
+    TEST_EXPECT_EQ(made, 1ull, "the setup made one private ring");
+#else
+    TEST_EXPECT_EQ(g_rpx_setup_rc, -T_E_OPNOTSUPP,
+        "the default image routes no private setup");
+    TEST_EXPECT_EQ(g_rpx_charged_after, 0, "a refused setup charged nothing");
+    TEST_EXPECT_EQ(made, 0ull, "a refused setup made no ring");
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // The exit tail, exec against an exiting peer, a spawn in a dying Proc, and
 // the tid and pid spaces at their edge.
 // ---------------------------------------------------------------------------
-
-// Test hooks (the *_for_test convention; absent from the headers).
-u64  proc_id_counter_swap_for_test(u64 v);
-void proc_exit_tail_test_set_hook(void (*fn)(void));
-u64  proc_exec_peer_waits_for_test(void);
-s64  sys_thread_spawn_for_test(u64 entry_va, u64 sp_va, u64 arg_va, u64 tls_va, u64 ptid_va);
 
 // A user entry and stack the spawn gates accept; nothing maps them, and no
 // thread spawned here reaches EL0 in a passing run.
@@ -1316,10 +1366,8 @@ void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void) {
     unsigned cpu  = DTB_MAX_CPUS;
     for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS; c++)
         if (c != self && g_cpu_alive[c]) { cpu = c; break; }
-    if (cpu == DTB_MAX_CPUS) {
-        uart_puts("  proc.exec_waits_for_exiting_peer_on_another_cpu: one CPU, so it did not run\n");
+    if (!test_requires(cpu != DTB_MAX_CPUS, "thylacine.smp", 0, true, "no peer CPU is alive"))
         return;
-    }
     g_ewr_proc   = NULL;
     g_ewr_old    = NULL;
     g_ewr_waits0 = 0;
@@ -1380,7 +1428,6 @@ void test_proc_spawn_refused_in_dying_proc(void) {
 // refused there and links nothing. An arm that linked at create, as before C3,
 // returns a thread instead -- the primitive's own test cannot see that. The hook
 // running is the proof the arm reached its admit, past every earlier refusal.
-s64 viv_clone_thread_for_test(struct exception_context *ctx, const u64 *args);
 
 static volatile s64  g_sta_rc;
 static volatile int  g_sta_linked;
@@ -2067,9 +2114,6 @@ enum xc_phase { XC_SETUP, XC_CLAIMING, XC_DONE, XC_FAILED };
 #define XC_SVC      "c5svc"
 #define XC_SVC_LEN  5
 
-void vfork_await_release_for_test(struct Proc *p, int child_pid);
-__attribute__((noreturn)) void sys_exit_group_for_test(u64 status);
-extern void srv_registry_reset(void);
 
 // The fixture each test sets before it forks.
 static int          g_xc_npeers;
@@ -2582,7 +2626,6 @@ void test_proc_exec_claim_holds_through_a_terminate_latch(void) {
     TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(0), "the child exited cleanly after the exec");
 }
 
-s64 exec_claim_or_drop_for_test(struct Proc *p, struct AddrSpace *nas, struct Spoor *exe);
 
 static volatile bool g_xr_setup_failed, g_xr_ctl_owned;
 static volatile s64  g_xr_ctl_rc, g_xr_rc;

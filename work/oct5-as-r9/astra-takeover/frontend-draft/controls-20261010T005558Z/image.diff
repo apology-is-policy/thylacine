@@ -1,0 +1,11 @@
+--- control.c
++++ image.c
+@@ -2770,7 +2770,7 @@
+ int loom_private_submit(struct Loom *l,struct Proc *p,u32 budget) {
+     if(!l || l->magic!=LOOM_MAGIC || !loom_is_private(l) || !p || p->magic!=PROC_MAGIC)
+         return -T_E_INVAL;
+-    if(p->as!=l->service_as || p->stripes!=l->service_creator)return -T_E_ACCES;
++    if(p->stripes!=l->service_creator)return -T_E_ACCES;
+     spin_lock(&l->lock);bool closed=l->service_closing;spin_unlock(&l->lock);
+     if(closed)return -T_E_CANCELED;
+     // ENTER is also the explicit CQ-reap kick, including a zero-submit call.

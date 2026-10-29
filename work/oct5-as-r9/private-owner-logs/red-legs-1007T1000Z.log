@@ -1,0 +1,18 @@
+
+== evidence dir work/oct5-as-r9/private-owner-logs/red-legs/20261007T095600Z (HEAD d7312e99504b08941e5b53f9059fd57b4f7e35af)
+
+== expected suite size, derived from kernel/test/test.c: 1836
+
+== LEG 1: delete the vaddr_start guard, expect the interior fixture RED
+
+== build (interior-unmap)
+
+== suite (interior-unmap)
+test.sh rc=1, 114654 bytes of NEW serial evidence
+FAIL  leg=interior-unmap burrow.unmap_interior_start_refused -> ABSENT (want FAIL)
+
+REFUSING: leg interior-unmap did not redden its intended test; evidence kept in work/oct5-as-r9/private-owner-logs/red-legs/20261007T095600Z
+
+== cleanup (exit, status 3)
+source restored and verified byte-for-byte: kernel/burrow.c kernel/loom.c
+*** build/ IS UNQUALIFIED: stamped build/MUTANT-UNQUALIFIED ***

@@ -23,6 +23,22 @@
 //      exactly as the dap-selftest tolerates)
 //   5. scopes -> variables -> evaluate(main.Sentinel), asserting the exact value
 //      Ambush reads back from the target's memory (0x0AABB00DCAFE0001).
+//   6. disconnect(terminateDebuggee) -> its response. Delve answers only after
+//      its kill of the launched child returned and its blocking reap collected
+//      the zombie, and pids are never reused, so the child's /proc entry must
+//      already be gone; then ambush leaves by itself with status 0.
+//   7. A second session, launched and then abandoned: ambush is killed with no
+//      disconnect and no detach, the way a crashed debugger dies. The kernel's
+//      EXITKILL (I-39 die-with-launcher, DEBUG-FS-DESIGN 5d) must end the
+//      stopped child, so /proc/<pid>/status reads ZOMBIE with signal 9. Nothing
+//      else can end it -- killgrp ends ambush's own thread group only, the
+//      child parks forever, and the `stop` ambush sent at launch converted the
+//      birth hold, whose orphan rule would kill it with the same signal -- so
+//      that zombie is EXITKILL's. joey's orphan sweep reaps it after boot.
+//
+// Before 6 and 7 existed the probe killed ambush straight after sending the
+// disconnect, so EXITKILL, unasserted, ended every launched child, and a broken
+// teardown read exactly like a working one in the boot log.
 //
 // This proves parley::dap classifies real Ambush frames, parley::dapc sequences
 // the launch handshake against a real backend, and the stdio transport carries
@@ -39,11 +55,13 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
+use libthyla_rs::err::Error;
+use libthyla_rs::io::Read;
 use libthyla_rs::poll::PollTimeout;
-use libthyla_rs::process::Command;
-use libthyla_rs::time::Instant;
+use libthyla_rs::process::{Command, ExitStatus};
+use libthyla_rs::time::{sleep, Duration, Instant};
 use libthyla_rs::{fs, t_exits, t_putstr};
 
 use parley::dap;
@@ -72,6 +90,8 @@ const POLL_MS: u32 = 2_000;
 const HEARTBEAT_MS: u64 = 15_000;
 /// How many times to `continue` looking for the parkLoop frame before giving up.
 const MAX_CONTINUE: u32 = 4;
+/// How often to re-read the abandoned debuggee's status while EXITKILL ends it.
+const DEATH_POLL_MS: u64 = 10;
 
 const TAG_OUT: Tag = 1;
 const TAG_ERR: Tag = 2;
@@ -97,14 +117,19 @@ enum Phase {
     Eval,
     /// The sentinel checked out.
     Done,
+    /// Sent `disconnect(terminateDebuggee)`, awaiting its response.
+    Disconnecting,
+    /// ambush answered the disconnect.
+    Disconnected,
+    /// The abandoned session: the target is launched and stopped, and the
+    /// session configures nothing more.
+    Launched,
 }
 
 /// What one handled action did to the session.
 enum Progress {
     /// Keep polling.
     Wait,
-    /// The whole round-trip PASSED.
-    Pass,
     /// A step failed for this reason (boot-fatal).
     Fail(String),
 }
@@ -112,20 +137,31 @@ enum Progress {
 struct Session {
     client: dapc::Client,
     phase: Phase,
+    /// Stop at `Launched` instead of setting the breakpoint (step 7).
+    abandon: bool,
+    /// The debuggee's pid, from ambush's `process` event; 0 until it arrives.
+    child: i64,
     thread_id: i64,
     frame_id: i64,
     continues: u32,
 }
 
 impl Session {
-    fn new() -> Session {
+    fn new(abandon: bool) -> Session {
         Session {
             client: dapc::Client::new(),
             phase: Phase::Init,
+            abandon,
+            child: 0,
             thread_id: 0,
             frame_id: 0,
             continues: 0,
         }
+    }
+
+    /// The inspect chain passed, so the debuggee's end is now expected.
+    fn ending(&self) -> bool {
+        matches!(self.phase, Phase::Done | Phase::Disconnecting | Phase::Disconnected)
     }
 
     /// Advance the sequence for one classified action. Returns whether to keep
@@ -150,6 +186,20 @@ impl Session {
                     return fatal("send launch");
                 }
                 self.phase = Phase::Launching;
+                Progress::Wait
+            }
+
+            // The launched debuggee's pid: the subject of the teardown checks.
+            Action::Process { pid } => {
+                if pid <= 0 || pid > i32::MAX as i64 {
+                    return Progress::Fail(String::from("process event without a usable pid"));
+                }
+                self.child = pid;
+                Progress::Wait
+            }
+
+            Action::ConfigureBreakpoints if self.phase == Phase::Launching && self.abandon => {
+                self.phase = Phase::Launched;
                 Progress::Wait
             }
 
@@ -256,7 +306,7 @@ impl Session {
                 t_putstr("\n");
                 if er.result.contains(SENTINEL_DEC) {
                     self.phase = Phase::Done;
-                    Progress::Pass
+                    Progress::Wait
                 } else {
                     fatal("main.Sentinel value mismatch")
                 }
@@ -271,6 +321,12 @@ impl Session {
                 if !o.output.ends_with('\n') {
                     t_putstr("\n");
                 }
+                Progress::Wait
+            }
+
+            Action::Ack("disconnect") if self.phase == Phase::Disconnecting => {
+                t_putstr("dap-probe: ack disconnect\n");
+                self.phase = Phase::Disconnected;
                 Progress::Wait
             }
 
@@ -292,12 +348,12 @@ impl Session {
 
             // The target died before we finished -- fatal (it should park until
             // we disconnect).
-            Action::Exited(code) if self.phase != Phase::Done => {
+            Action::Exited(code) if !self.ending() => {
                 let mut s = String::from("child exited early, code ");
                 s.push_str(&itoa(code));
                 Progress::Fail(s)
             }
-            Action::Terminated if self.phase != Phase::Done => {
+            Action::Terminated if !self.ending() => {
                 Progress::Fail(String::from("session terminated early"))
             }
 
@@ -323,14 +379,50 @@ fn fatal(what: &str) -> Progress {
     Progress::Fail(s)
 }
 
-/// Bail (boot-fatal). Does NOT reap ambush: exiting closes our pipe fds, ambush
-/// sees stdin EOF and leaves, and a probe failure is boot-fatal anyway. A killed
-/// session's launched child is joey-reaped.
+/// Fail (boot-fatal) with no ambush left to reap; `bail` reaps one first.
 fn fail(msg: &str) -> ! {
     t_putstr("dap-probe: FAIL -- ");
     t_putstr(msg);
     t_putstr("\n");
     unsafe { t_exits(1) }
+}
+
+/// Fail with ambush still running: kill it and reap it first. A launched child
+/// it leaves behind is ended by EXITKILL and joey-reaped. After a refused kill
+/// the wait would never return while our end of its stdin is open, so it fails
+/// without one, and ambush leaves on the EOF our exit gives it.
+fn bail(srv: &mut Server, msg: &str) -> ! {
+    if srv.kill().is_ok() {
+        let _ = srv.wait();
+    }
+    fail(msg)
+}
+
+/// The probe's one budget, and the heartbeat that tells a slow step from a hang.
+struct Clock {
+    start: Instant,
+    next_hb: u64,
+}
+
+impl Clock {
+    fn new() -> Clock {
+        Clock { start: Instant::now(), next_hb: HEARTBEAT_MS }
+    }
+
+    /// `false` once the budget is spent; prints the heartbeat when it is due.
+    fn tick(&mut self) -> bool {
+        let waited = self.start.elapsed().as_millis() as u64;
+        if waited > BUDGET_MS {
+            return false;
+        }
+        if waited >= self.next_hb {
+            self.next_hb += HEARTBEAT_MS;
+            t_putstr("dap-probe: waiting (");
+            print_u32((waited / 1000) as u32);
+            t_putstr("s)\n");
+        }
+        true
+    }
 }
 
 #[no_mangle]
@@ -344,52 +436,115 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
-    // Spawn the real ambush over piped stdio (Server forces all three to Piped),
-    // no args beyond `dap-stdio`, inheriting env + caps EXACTLY as the editor
-    // spawns it. launch/attach configuration comes over the wire, not argv.
+    let mut mux = Mux::new();
+    let mut clock = Clock::new();
+    orderly_session(&mut mux, &mut clock);
+    abandoned_session(&mut mux, &mut clock);
+
+    t_putstr("dap-probe: PASS -- ambush DAP launch + breakpoint + inspect + disconnect + EXITKILL (");
+    print_u32(clock.start.elapsed().as_millis() as u32);
+    t_putstr("ms)\n");
+    0
+}
+
+/// Steps 1-6: launch, break, inspect, then the orderly goodbye.
+fn orderly_session(mux: &mut Mux, clock: &mut Clock) {
+    let mut sess = Session::new(false);
+    let mut srv = start_session(&mut sess);
+    drive(&mut sess, &mut srv, mux, clock, Phase::Done);
+    t_putstr("dap-probe: inspect OK -- launch + breakpoint + main.Sentinel\n");
+    let child = debuggee(&sess, &mut srv);
+    let bye = sess.client.disconnect(true);
+    if srv.send(&bye).is_err() {
+        bail(&mut srv, "send disconnect");
+    }
+    sess.phase = Phase::Disconnecting;
+    drive(&mut sess, &mut srv, mux, clock, Phase::Disconnected);
+    match proc_status(child) {
+        Status::Gone => {}
+        Status::Present(st) => {
+            let mut s = String::from("ambush answered the disconnect with its debuggee still present (state ");
+            s.push_str(field(&st, "state:").unwrap_or("?"));
+            s.push(')');
+            bail(&mut srv, &s);
+        }
+        Status::Unreadable(e) => bail(&mut srv, &unreadable(child, e)),
+    }
+    t_putstr("dap-probe: disconnect OK -- ambush ended and reaped its debuggee pid=");
+    print_u32(child as u32);
+    t_putstr("\n");
+    let st = await_exit(&mut srv, mux, clock);
+    if !st.success() {
+        let mut s = String::from("ambush exited status ");
+        s.push_str(&itoa(st.raw() as i64));
+        s.push_str(" after the disconnect");
+        fail(&s);
+    }
+}
+
+/// Step 7: a launched debuggee whose debugger dies without letting go.
+fn abandoned_session(mux: &mut Mux, clock: &mut Clock) {
+    let mut sess = Session::new(true);
+    let mut srv = start_session(&mut sess);
+    drive(&mut sess, &mut srv, mux, clock, Phase::Launched);
+    let child = debuggee(&sess, &mut srv);
+    // A refused kill must not reach the wait: this ambush waits for
+    // configurationDone and would never exit. Failing closes our end of its
+    // pipes instead, and it leaves on the EOF.
+    if srv.kill().is_err() {
+        fail("kill the abandoned session's ambush");
+    }
+    if srv.wait().is_err() {
+        fail("reap the abandoned session's ambush");
+    }
+    await_exitkill(child, clock);
+}
+
+/// Spawn the real ambush over piped stdio (Server forces all three to Piped),
+/// no args beyond `dap-stdio`, inheriting env + caps EXACTLY as the editor
+/// spawns it -- launch/attach configuration comes over the wire, not argv --
+/// and open the session.
+fn start_session(sess: &mut Session) -> Server {
     let mut cmd = Command::new(AMBUSH);
     cmd.arg("dap-stdio");
     let mut srv = match Server::spawn(&mut cmd) {
         Ok(s) => s,
         Err(_) => fail("Server::spawn(/bin/ambush dap-stdio)"),
     };
-
-    let mut sess = Session::new();
     let init = sess.client.initialize("go");
     if srv.send(&init).is_err() {
-        let _ = srv.kill();
-        let _ = srv.wait();
-        fail("send initialize");
+        bail(&mut srv, "send initialize");
     }
+    srv
+}
 
-    let mut mux = Mux::new();
-    let start = Instant::now();
-    let mut next_hb = HEARTBEAT_MS;
-
+/// Run the session until it reaches `goal`. Every failure is boot-fatal: a step
+/// that failed, ambush leaving, a broken stream, the budget spent.
+fn drive(sess: &mut Session, srv: &mut Server, mux: &mut Mux, clock: &mut Clock, goal: Phase) {
     loop {
-        let waited = start.elapsed().as_millis() as u64;
-        if waited > BUDGET_MS {
-            let _ = srv.kill();
-            let _ = srv.wait();
-            fail("no PASS within budget (session wedged or too slow)");
+        // Decoded frames go first: the read that reached the last goal may have
+        // carried more, and poll does not report bytes already read.
+        loop {
+            let body = match srv.next_frame() {
+                Ok(Some(b)) => b,
+                Ok(None) => break,
+                Err(_) => bail(srv, "frame decode (stream desync)"),
+            };
+            if let Progress::Fail(msg) = dispatch(&body, sess, srv) {
+                bail(srv, &msg);
+            }
+            if sess.phase == goal {
+                return;
+            }
         }
-        if waited >= next_hb {
-            next_hb += HEARTBEAT_MS;
-            t_putstr("dap-probe: waiting (");
-            print_u32((waited / 1000) as u32);
-            t_putstr("s)\n");
+        if !clock.tick() {
+            bail(srv, "no PASS within budget (session wedged or too slow)");
         }
-
         let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
         let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
             Ok(r) => r,
-            Err(_) => {
-                let _ = srv.kill();
-                let _ = srv.wait();
-                fail("mux.poll");
-            }
+            Err(_) => bail(srv, "mux.poll"),
         };
-
         for r in &ready {
             match r.tag {
                 // Drain + discard: a server that fills its stderr pipe BLOCKS,
@@ -407,37 +562,7 @@ pub extern "C" fn rs_main() -> i64 {
                                 let _ = srv.wait();
                                 fail("ambush stdout EOF (server exited)");
                             }
-                            Err(_) => {
-                                let _ = srv.kill();
-                                let _ = srv.wait();
-                                fail("pump");
-                            }
-                        }
-                        loop {
-                            let body = match srv.next_frame() {
-                                Ok(Some(b)) => b,
-                                Ok(None) => break,
-                                Err(_) => {
-                                    let _ = srv.kill();
-                                    let _ = srv.wait();
-                                    fail("frame decode (stream desync)");
-                                }
-                            };
-                            match dispatch(&body, &mut sess, &mut srv) {
-                                Progress::Wait => {}
-                                Progress::Pass => {
-                                    t_putstr("dap-probe: PASS -- ambush DAP launch + breakpoint + inspect (");
-                                    print_u32(start.elapsed().as_millis() as u32);
-                                    t_putstr("ms)\n");
-                                    shutdown(&mut sess, &mut srv);
-                                    return 0;
-                                }
-                                Progress::Fail(msg) => {
-                                    let _ = srv.kill();
-                                    let _ = srv.wait();
-                                    fail(&msg);
-                                }
-                            }
+                            Err(_) => bail(srv, "pump"),
                         }
                     } else if r.hup {
                         let _ = srv.wait();
@@ -466,15 +591,143 @@ fn dispatch(body: &[u8], sess: &mut Session, srv: &mut Server) -> Progress {
     sess.on_action(act, srv)
 }
 
-/// The orderly DAP goodbye + make sure ambush is gone. disconnect terminates the
-/// debuggee; closing stdin gives ambush its EOF; the kill+wait guarantees no
-/// orphan holding the child.
-fn shutdown(sess: &mut Session, srv: &mut Server) {
-    let bye = sess.client.disconnect(true);
-    let _ = srv.send(&bye);
+/// The debuggee's pid, checked to be a live ambush-child whose parent is this
+/// ambush. The positive control for the teardown checks: without it, an absent
+/// /proc entry afterwards could mean a wrong pid rather than a reap.
+fn debuggee(sess: &Session, srv: &mut Server) -> i32 {
+    if sess.child == 0 {
+        bail(srv, "ambush sent no process event");
+    }
+    let child = sess.child as i32;
+    let st = match proc_status(child) {
+        Status::Present(st) => st,
+        Status::Gone => bail(srv, "the debuggee ambush named has no /proc entry"),
+        Status::Unreadable(e) => bail(srv, &unreadable(child, e)),
+    };
+    let parent = itoa(srv.pid() as i64);
+    if field(&st, "name:") != Some("ambush-child")
+        || field(&st, "state:") != Some("ALIVE")
+        || field(&st, "ppid:") != Some(parent.as_str())
+    {
+        bail(srv, "the debuggee ambush named is not its live ambush-child");
+    }
+    child
+}
+
+/// Let ambush leave by itself and reap it. Delve stops its server once a
+/// disconnect ends the session; the closed stdin covers a server that waits for
+/// EOF instead.
+fn await_exit(srv: &mut Server, mux: &mut Mux, clock: &mut Clock) -> ExitStatus {
     srv.close_stdin();
-    let _ = srv.kill();
-    let _ = srv.wait();
+    loop {
+        if !clock.tick() {
+            bail(srv, "ambush did not exit after the disconnect");
+        }
+        let fds = [(srv.stdout_fd(), TAG_OUT), (srv.stderr_fd(), TAG_ERR)];
+        let ready = match mux.poll(&fds, PollTimeout::Millis(POLL_MS)) {
+            Ok(r) => r,
+            Err(_) => bail(srv, "mux.poll"),
+        };
+        for r in &ready {
+            match r.tag {
+                TAG_ERR => {
+                    if r.readable {
+                        let _ = srv.drain_stderr();
+                    }
+                }
+                TAG_OUT => {
+                    if r.readable || r.hup {
+                        match srv.pump() {
+                            // The trailing `terminated` event: read and dropped.
+                            Ok(false) => {
+                                while let Ok(Some(_)) = srv.next_frame() {}
+                            }
+                            Ok(true) => match srv.wait() {
+                                Ok(st) => return st,
+                                Err(_) => fail("reap ambush after the disconnect"),
+                            },
+                            Err(_) => bail(srv, "pump"),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Wait for the abandoned debuggee to die, then check that it died of a kill.
+fn await_exitkill(child: i32, clock: &mut Clock) {
+    loop {
+        let st = match proc_status(child) {
+            Status::Present(st) => st,
+            Status::Gone => fail("the abandoned debuggee was reaped before it was seen dead"),
+            Status::Unreadable(e) => fail(&unreadable(child, e)),
+        };
+        if field(&st, "state:") == Some("ZOMBIE") {
+            if field(&st, "signal:") != Some("9") {
+                let mut s = String::from("the abandoned debuggee died, but not of a kill (exit ");
+                s.push_str(field(&st, "exit:").unwrap_or("?"));
+                s.push_str(", signal ");
+                s.push_str(field(&st, "signal:").unwrap_or("none"));
+                s.push(')');
+                fail(&s);
+            }
+            t_putstr("dap-probe: EXITKILL OK -- ambush died without detach and the kernel ended its debuggee pid=");
+            print_u32(child as u32);
+            t_putstr(" (ZOMBIE, signal 9; init reaps it)\n");
+            return;
+        }
+        if !clock.tick() {
+            fail("EXITKILL: the abandoned debuggee outlived its killed debugger");
+        }
+        let _ = sleep(Duration::from_millis(DEATH_POLL_MS));
+    }
+}
+
+/// What `/proc/<pid>/status` says about a pid.
+enum Status {
+    Present(String),
+    /// No Proc has the pid. Ids are never reused, so that one was reaped.
+    Gone,
+    Unreadable(String),
+}
+
+fn proc_status(pid: i32) -> Status {
+    let mut path = String::from("/proc/");
+    path.push_str(&itoa(pid as i64));
+    path.push_str("/status");
+    let mut f = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(Error::NotFound) => return Status::Gone,
+        Err(e) => return Status::Unreadable(e.to_string()),
+    };
+    let mut buf = [0u8; 1024];
+    let mut total = 0usize;
+    while total < buf.len() {
+        match f.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(k) => total += k,
+            Err(e) => return Status::Unreadable(e.to_string()),
+        }
+    }
+    match core::str::from_utf8(&buf[..total]) {
+        Ok(s) => Status::Present(String::from(s)),
+        Err(_) => Status::Unreadable(String::from("not UTF-8")),
+    }
+}
+
+/// The value of the status line that starts with `key`.
+fn field<'a>(status: &'a str, key: &str) -> Option<&'a str> {
+    status.lines().find_map(|l| l.strip_prefix(key)).map(str::trim)
+}
+
+fn unreadable(pid: i32, e: String) -> String {
+    let mut s = String::from("cannot read /proc/");
+    s.push_str(&itoa(pid as i64));
+    s.push_str("/status: ");
+    s.push_str(&e);
+    s
 }
 
 /// Decimal print without `format!` -- this runs on the boot path.

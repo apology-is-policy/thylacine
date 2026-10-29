@@ -1,7 +1,7 @@
 // P5-corvus-syscalls — kernel-internal tests for the 5 v1.0 hardening
 // syscalls + 2 new caps (CORVUS-DESIGN.md §4.1.1 + ARCH §11.2b).
 //
-// Each syscall is tested via its non-static `_for_proc` inner with a
+// Each syscall is tested via its `_for_proc` core with a
 // kernel-allocated test Proc. The SVC wrapper's user-VA validation
 // path is shared with SYS_PUTS / SYS_READ / SYS_WRITE and tested by
 // userspace probes (deferred to P5-corvus-bringup when corvus's
@@ -41,18 +41,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/types.h>
-
-// Inner SVC handlers (extern; defined in kernel/syscall.c).
-extern int sys_mlockall_for_proc(struct Proc *p, u32 flags);
-extern int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
-extern int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
-
-void test_sys_mlockall_cap_gate(void);
-void test_sys_set_dumpable_one_way_to_zero(void);
-void test_sys_set_traceable_one_way_to_zero(void);
-void test_sys_corvus_caps_kproc_has_new_caps(void);
-void test_kern_random_seeded_returns_true_on_qemu(void);
-void test_kern_random_bytes_produces_nonzero(void);
+#include <thylacine/syscall.h>
 
 static struct Proc *make_test_proc_no_caps(void) {
     return proc_alloc();
@@ -156,15 +145,16 @@ void test_sys_corvus_caps_kproc_has_new_caps(void) {
         "kproc still has CAP_HW_CREATE");
 }
 
-void test_kern_random_seeded_returns_true_on_qemu(void) {
-    // QEMU's virt machine reports FEAT_RNG; kern_random_seeded() ≡
-    // g_rndr_available is true. If this fails the boot environment
-    // changed.
-    TEST_ASSERT(kern_random_seeded(),
-        "kern_random_seeded() returns true on QEMU virt");
+// Only an unobserved strong source flips kern_random_seeded(): RNDR, or the
+// virtio-rng pull after virtio_init (hvf's Apple cores have no RNDR). The check
+// is the whole test: a seeded pool passes and an unseeded one fails, since the
+// boot refuses userspace on an unseeded pool before the suite runs (vote 18).
+void test_kern_random_strong_source_seeded(void) {
+    (void)test_strong_entropy();
 }
 
 void test_kern_random_bytes_produces_nonzero(void) {
+    if (!test_strong_entropy()) return;
     u8 buf[32] = {0};
     long got = kern_random_bytes(buf, (long)sizeof(buf));
     TEST_EXPECT_EQ(got, (long)sizeof(buf),

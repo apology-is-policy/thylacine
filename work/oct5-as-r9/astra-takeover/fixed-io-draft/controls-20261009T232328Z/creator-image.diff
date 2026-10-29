@@ -1,0 +1,11 @@
+--- control.c
++++ creator-image.c
+@@ -633,7 +633,7 @@
+                             u64 now,struct loom_service_operation **out) {
+     if(!l || l->magic!=LOOM_MAGIC || !loom_is_private(l) || !p ||
+        p->magic!=PROC_MAGIC || !s || !out)return -T_E_INVAL;
+-    if(p->as!=l->service_as || p->stripes!=l->service_creator)return -T_E_ACCES;
++    if(p->stripes!=l->service_creator)return -T_E_ACCES;
+     // Caller owns this immutable copy for the whole call; no shared-ring reads.
+     int rc=loom_private_sqe_shape(s,false);if(rc)return rc;
+     u8 kind=io_kind(s->opcode);if(!kind)return -T_E_OPNOTSUPP;

@@ -24,8 +24,6 @@
 
 #include "../../arch/arm64/uart.h"
 
-void test_virtio_net_loop_rfork_with_caps(void);
-
 // 16 KiB per blob (P4-image-shrink convention; every userspace binary
 // fits under 16 KiB with -z max-page-size=4096 on both Rust + C sides).
 #define VIRTIO_NET_LOOP_BLOB_MAX 32768
@@ -74,18 +72,12 @@ void test_virtio_net_loop_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/virtio-net-loop", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/virtio-net-loop not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/virtio-net-loop", &cpio_blob, &size);
+    if (rc != 0) return;
 
     struct virtio_mmio_dev *net_dev =
-        virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_NET);
-    if (!net_dev) {
-        uart_puts("    [skip] no virtio-mmio slot with DeviceID=1\n");
-        return;
-    }
+        test_virtio_device(VIRTIO_DEVICE_ID_NET, "thylacine.virtio-net");
+    if (!net_dev) return;
 
     TEST_ASSERT(size <= VIRTIO_NET_LOOP_BLOB_MAX,
                 "virtio-net-loop binary too large for static buffer");

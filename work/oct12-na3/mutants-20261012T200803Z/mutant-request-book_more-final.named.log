@@ -1,0 +1,33 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 7 tests
+test tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once ... FAILED
+test tests::request_book::bounded_prepublication_and_terminal_retention ... ok
+test tests::request_book::fixed_and_control_refuse_payload_more_and_oversize ... ok
+test tests::request_book::geometry_maximum_capacity_and_cookie_exhaustion ... ok
+test tests::request_book::malformed_receipts_flags_and_lengths_leave_active ... ok
+test tests::request_book::multishot_more_and_final_keep_payload_separate ... FAILED
+test tests::request_book::ring_local_identity_cannot_alias_other_book_cookie ... ok
+
+failures:
+
+---- tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once stdout ----
+
+thread 'tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once' (30949611) panicked at src/tests/request_book.rs:134:5:
+assertion failed: d.abandoned && !d.terminal
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::request_book::multishot_more_and_final_keep_payload_separate stdout ----
+
+thread 'tests::request_book::multishot_more_and_final_keep_payload_separate' (30949621) panicked at src/tests/request_book.rs:85:5:
+assertion failed: !d.terminal && !d.abandoned
+
+
+failures:
+    tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once
+    tests::request_book::multishot_more_and_final_keep_payload_separate
+
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `--lib`

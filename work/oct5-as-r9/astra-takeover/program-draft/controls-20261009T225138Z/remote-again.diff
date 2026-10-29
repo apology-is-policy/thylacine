@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ remote-again.c
+@@ -32,7 +32,7 @@
+         return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+     // Only submit-return proof licenses no-wire retry. A server's EAGAIN is
+     // an ordinary terminal error, including after a prior local shortage.
+-    if(loom_private_wire_retry(&p->wire,0,r))return LPROGRAM_NEXT;
++    if(r->result==-T_E_AGAIN)return LPROGRAM_NEXT;
+     if(r->result<0)return program_end(p,r->result,LPROGRAM_TERMINAL);
+     if(!p->wire.built || p->wire.expect.kind!=p->wire.kind)
+         return program_end(p,-T_E_IO,LPROGRAM_ABORT);

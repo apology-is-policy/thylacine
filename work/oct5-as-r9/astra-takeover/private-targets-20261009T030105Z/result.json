@@ -1,0 +1,86 @@
+{
+  "scope": "Extracted target owner transactions and real shared slot ledger.\nChecked sequential handle/native-capture/Loom doubles under ASan/UBSan; forced\nclose during capture. Native fixture separately covers actual registry lifetime.\nNo protocol, concurrent schedule or guest allocator qualification.\n",
+  "source_head": "0efb3c9bb93ac765e1ff80a0cbbc70857783fd71",
+  "loom_sha256": "e1550de8c04f4c7187facad1d920a15245f9e8a1754ddb0c62d93bf9e3ab2f38",
+  "slot_sha256": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS target transactions and final borrower ownership",
+      "generated_sha256": "fae57443035ae80376faf32a3d34d622fcfafa12dc5c25a65e707a1160983e84"
+    },
+    {
+      "case": "omit-image",
+      "rc": 11,
+      "expected": "target image authority",
+      "generated_sha256": "cef8da4a7ec0f1ab4389edc0ce80a95a44232f62be6a71108fc0d7664de00f9a"
+    },
+    {
+      "case": "omit-creator",
+      "rc": 11,
+      "expected": "target creator authority",
+      "generated_sha256": "9dd1613a44b42b76a462eafb42bebb5a74558d815561cce2ea6696eac6c1d68c"
+    },
+    {
+      "case": "allow-tail",
+      "rc": 11,
+      "expected": "target tail validated",
+      "generated_sha256": "d8ad3ffff8410425688a7713786b8ae6a99ea801e724706b5a94aa75d9b2ca00"
+    },
+    {
+      "case": "omit-handle-put",
+      "rc": 11,
+      "expected": "typed handle refused",
+      "generated_sha256": "a4c2fe23cc1cdf0dd75b3e8fd0724c4e3c7473c6e0ac076d9c36d86c122a1d45"
+    },
+    {
+      "case": "omit-rollback-drop",
+      "rc": 11,
+      "expected": "rollback drops registry",
+      "generated_sha256": "d8a0494387f839509f0a8ad018ca63479118edd5c6df08de44a42f41b23837da"
+    },
+    {
+      "case": "omit-stale",
+      "rc": 11,
+      "expected": "stale reap unchanged",
+      "generated_sha256": "daaf1f05b5a63aa4de15e3c6f9c4b3b6a4a5b7174b771309d97920eff9d64984"
+    },
+    {
+      "case": "omit-owner-pin",
+      "rc": 11,
+      "expected": "borrow pins owner and exact target",
+      "generated_sha256": "8a2e9d360c430cf03b3c8f7f89156af50272a4a225e8254944eba3d66be4fd2e"
+    },
+    {
+      "case": "allow-busy-reap",
+      "rc": 11,
+      "expected": "busy reap unchanged",
+      "generated_sha256": "38d2673f35c68a9a1882cb3d4197ec5228e05bf0ab9b7d741458fea3ba9e34c7"
+    },
+    {
+      "case": "omit-owner-drop",
+      "rc": 11,
+      "expected": "put releases owner pin",
+      "generated_sha256": "6f6302d5bb2bacde7a30aeea6fec1d3869ee41dd3f5f9c1e6675bae0cdb7c3ef"
+    },
+    {
+      "case": "allow-capture-close",
+      "rc": 11,
+      "expected": "close during capture rolls back both ownerships",
+      "generated_sha256": "e78d1e6e9d2930de78f143b312c8d3500713397a3180c609a95bf0aab6903061"
+    },
+    {
+      "case": "omit-capture-drop",
+      "rc": 11,
+      "expected": "close during capture rolls back both ownerships",
+      "generated_sha256": "88b4a23b20edadd44b8b039981541f126ade328790cb4e714acf971ef77d273a"
+    },
+    {
+      "case": "omit-final-drop",
+      "rc": 11,
+      "expected": "last borrow clears live and provisional targets",
+      "generated_sha256": "90cf674b8d67a813ed557b00b7fcd4ebd13e9303375ad8b85be4e5cc746869fd"
+    }
+  ]
+}

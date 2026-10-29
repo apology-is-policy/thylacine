@@ -1,0 +1,8 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/retirement_executor.c:1:
+work/oct12-na2b/mutants-20261012T190121Z/hdr-retirement_executor/include/thyla/loom_client/retirement_executor.h:17:16: error: static assertion failed due to requirement '(-101) <= -1000': executor codes must lie below every errno
+   17 | _Static_assert(T_RETIREMENT_FULL<=-1000&&T_RETIREMENT_CAPACITY<=-1000,"executor codes must lie below every errno");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~
+work/oct12-na2b/mutants-20261012T190121Z/hdr-retirement_executor/include/thyla/loom_client/retirement_executor.h:15:27: note: expanded from macro 'T_RETIREMENT_FULL'
+   15 | #define T_RETIREMENT_FULL (-101)
+      |                           ^
+1 error generated.

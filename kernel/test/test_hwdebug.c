@@ -13,13 +13,6 @@
 #include "../../arch/arm64/hwdebug.h"
 #include "../../arch/arm64/hwfeat.h"
 
-void test_hwdebug_dfr0_enumerate(void);
-void test_hwdebug_arm_disarm_roundtrip(void);
-void test_hwdebug_bp_table(void);
-void test_hwdebug_singlestep_benign(void);
-void test_hwdebug_wp_table(void);
-void test_hwdebug_wp_encode(void);
-
 // DFR0 enumeration: every ARMv8 debug implementation has at least 2 breakpoints
 // and 2 watchpoints (architectural minimum). hw_features_detect already ran at
 // boot; re-run to be self-contained.

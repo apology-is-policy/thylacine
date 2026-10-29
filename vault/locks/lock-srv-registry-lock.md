@@ -6,8 +6,18 @@ kind: spin-irqsave
 orders-before: []
 guards: "All 16 SrvService entries of one registry: state machine (FREE/RESERVING/LIVE/TOMBSTONED), name, poster identity, mode + ring_msize, and every accept-backlog ring (backlog[]/head/tail/count)."
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-10-01
 ---
+## Posting transaction lock order
+
+`Proc.srv_post_lock` precedes the registry and handle-table locks during
+reserve/install/commit. Neither inner lock remains held when the other is
+entered. Membership allocation happens before the posting lock; discarded
+candidates and rollback refs are freed after unlocking. Death only detaches
+the memberships under the posting lock, then drains registries outside it.
+Registry routes are immutable and do not acquire a parent-registry lock
+while holding the local registry lock.
+
 ## Discipline
 
 - **Near-leaf, irqsave** (`spin_lock_irqsave` at every site). Nothing

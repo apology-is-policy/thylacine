@@ -1,0 +1,195 @@
+sabotage: 96 cases over 71 of 71 scenarios
+sabotage: control -- 81 scenarios pass unedited
+RED          ring-detach                    setup_registers_every_buffer_and_drop_detaches_every_region
+             Assertion failed: (f->sim->nregions == 0), function finish, file test_adapter.c, line 64.
+RED          attach-unwind                  a_refused_attach_detaches_what_was_attached
+             Assertion failed: (f->sim->nregions == 0), function finish, file test_adapter.c, line 64.
+RED          fixed-offset                   connect_walk_open_write_then_read_round_trips
+             Assertion failed: (len == strlen(want) && !memcmp(bytes, want, len)), function read_is, file test_adapter.c, line 140.
+RED          connect-fail-unreaped          a_failed_connect_reaps_its_scope
+             Assertion failed: (sim_live_slots(f.sim) == 1), function a_failed_connect_reaps_its_scope, file test_adapter.c, line 224.
+RED          name-late                      each_walk_name_is_read_inside_the_enter_that_consumes_it
+             Assertion failed: (run(f->r, K_WALK, wa, &o) >= 0), function walks_read_their_files, file test_adapter.c, line 233.
+RED          name-one-cell                  queued_walks_keep_their_own_name_cells
+             Assertion failed: (run(r, K_READ, read_op(f, m, 0, 0), &o) == (int32_t)strlen(want) && o.read), function read_is, file test_adapter.c, line 137.
+RED          stream-order                   a_multishot_stream_runs_on_out_of_order_returns
+             Assertion failed: (len == strlen(shots[seen]) && !memcmp(bytes, shots[seen], len)), function a_multishot_stream_runs_on_out_of_order_returns, file test_adapter.
+RED          no-deadline                    a_deadline_ends_the_operation_and_aborts_its_scope
+             Assertion failed: (has_due), function k_poll, file sim_kernel.c, line 765.
+RED          poll-floor                     poll_rounds_the_time_left_up_to_a_whole_millisecond
+             Assertion failed: (f.sim->npolls == 1 && f.sim->polls[0] == 2), function poll_rounds_the_time_left_up_to_a_whole_millisecond, file test_adapter.c, line 338.
+RED          no-abort                       dropping_an_operation_aborts_its_scope_and_settles_its_entry
+             Assertion failed: (f.sim->naborts == before + 1), function dropping_an_operation_aborts_its_scope_and_settles_its_entry, file test_adapter.c, line 355.
+RED          burst-loss                     a_full_cq_defers_completions_and_loses_none
+             Assertion failed: (end == 0 && got == 8), function a_full_cq_defers_completions_and_loses_none, file test_adapter.c, line 394.
+RED          no-turn-enter                  a_short_enter_leaves_the_rest_queued_for_a_later_turn
+             Assertion failed: (has_due), function k_poll, file sim_kernel.c, line 765.
+RED          no-space-check                 a_full_sq_answers_enospc
+             Assertion failed: (t_loom_walk(s, "", 0, 0, 0, &c) == -28 && !c), function a_full_sq_answers_enospc, file test_adapter.c, line 430.
+RED          open-masks-errno               a_rejected_sqe_ends_its_operation_with_the_kernels_errno
+             Assertion failed: (open_rc(f.r, fid, 7) == SIM_EINVAL), function a_rejected_sqe_ends_its_operation_with_the_kernels_errno, file test_adapter.c, line 443.
+RED          dropped-ignored                a_dropped_sqe_ends_the_process
+             enter_ring: no fatal there (status 0)
+RED          forged-not-failed              a_forged_completion_fails_the_ring
+             Assertion failed: (wait_op(f.r, K_CONNECT, op, &o) == SIM_EIO), function a_forged_completion_fails_the_ring, file test_adapter.c, line 484.
+RED          close-detaches                 closing_with_leases_held_keeps_their_bytes_until_they_drop
+             Assertion failed: (f.sim->nregions == 3 && !t_loom_idle(f.base)), function closing_with_leases_held_keeps_their_bytes_until_they_drop, file test_adapter.c, line
+RED          enter-ebadf-ignored            an_enter_that_finds_the_descriptor_closed_forgets_it
+             Assertion failed: (rc == SIM_ECANCELED || (rc == 1 && o.result == SIM_ECANCELED)), function closed_under, file test_adapter.c, line 540.
+RED          enter-ecanceled-ignored        an_enter_that_races_the_close_forgets_the_descriptor
+             Assertion failed: (rc == SIM_ECANCELED || (rc == 1 && o.result == SIM_ECANCELED)), function closed_under, file test_adapter.c, line 540.
+RED          lost-closes                    an_enter_that_races_the_close_forgets_the_descriptor
+             Assertion failed: (closed_under(1, 1) == 0), function an_enter_that_races_the_close_forgets_the_descriptor, file test_adapter.c, line 558.
+RED          pollnval-ignored               a_poll_that_finds_the_descriptor_closed_forgets_it
+             Assertion failed: (t_loom_turn(f.r, 0, 0) == SIM_ECANCELED), function closed_under, file test_adapter.c, line 546.
+RED          pollhup-ignored                a_hangup_while_polling_forgets_the_descriptor
+             Assertion failed: (t_loom_turn(f.r, 0, 0) == SIM_ECANCELED), function closed_under, file test_adapter.c, line 546.
+RED          retire-no-abort                retire_waits_until_the_kernel_retires_every_scope
+             Assertion failed: (t_loom_retired(f.r)), function retire_waits_until_the_kernel_retires_every_scope, file test_adapter.c, line 572.
+RED          retired-early                  retire_waits_until_the_kernel_retires_every_scope
+             Assertion failed: (kernel_retired), function retire_waits_until_the_kernel_retires_every_scope, file test_adapter.c, line 579.
+RED          clunk-skipped                  a_dropped_fid_is_clunked_then_reaped
+             Assertion failed: (sim_live_slots(f.sim) == 2), function a_dropped_fid_is_clunked_then_reaped, file test_adapter.c, line 597.
+RED          reap-one-pass                  a_dropped_scope_is_reaped_after_its_fids_without_clunking_them
+             Assertion failed: (sim_live_slots(f.sim) == 1), function a_dropped_scope_is_reaped_after_its_fids_without_clunking_them, file test_adapter.c, line 617.
+RED          walk-drop-clunks               a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk
+             Assertion failed: (f.sim->clunk_sqes == 0), function a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk, file test_adapter.c, line 633.
+RED          clunk-aborted-scope            a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked
+             Assertion failed: (f.sim->clunk_sqes == 0), function a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked, file test_adapter.c, line 652.
+RED          abandon-no-abort               an_open_dropped_in_flight_aborts_its_scope
+             Assertion failed: (f.sim->naborts == 1), function an_open_dropped_in_flight_aborts_its_scope, file test_adapter.c, line 667.
+RED          abort-twice                    an_explicit_scope_abort_ends_its_operations_once
+             Assertion failed: (f.sim->naborts == 1), function an_explicit_scope_abort_ends_its_operations_once, file test_adapter.c, line 687.
+RED          reap-busy-dropped              a_target_dropped_under_its_connect_is_reaped_after_it
+             Assertion failed: (sim_live_slots(f.sim) == 1), function a_target_dropped_under_its_connect_is_reaped_after_it, file test_adapter.c, line 707.
+RED          no-reap-retry                  an_exhausted_slot_table_reaps_before_it_refuses
+             Assertion failed: (t_loom_walk(s, name, strlen(name), 0, 0, &op) == 0 && op), function walk_op, file test_adapter.c, line 113.
+RED          book-wiped                     an_operation_held_across_retirement_keeps_its_terminal
+             Assertion failed: (wait_op(r, kind, op, o) == 1), function run, file test_adapter.c, line 96.
+RED          retired-before-posted          retirement_waits_for_terminals_posted_after_the_scope_retires
+             Assertion failed: (!t_loom_retired(f.r)), function retirement_waits_for_terminals_posted_after_the_scope_retires, file test_adapter.c, line 769.
+RED          unentered-sqe                  an_sqe_not_yet_entered_holds_retirement_back
+             Assertion failed: (!t_loom_retired(f.r)), function an_sqe_not_yet_entered_holds_retirement_back, file test_adapter.c, line 791.
+RED          cq-unrouted                    a_terminal_posted_but_not_yet_routed_holds_retirement_back
+             Assertion failed: (!t_loom_retired(f.r)), function a_terminal_posted_but_not_yet_routed_holds_retirement_back, file test_adapter.c, line 831.
+RED          closing-lease-kept             a_terminal_posted_but_not_yet_routed_holds_retirement_back
+             Assertion failed: (f.sim->returns == 8), function a_terminal_posted_but_not_yet_routed_holds_retirement_back, file test_adapter.c, line 835.
+RED          refusal-unposted               an_enter_refusal_not_yet_posted_holds_retirement_back
+             Assertion failed: (!t_loom_retired(f.r)), function an_enter_refusal_not_yet_posted_holds_retirement_back, file test_adapter.c, line 857.
+RED          dropped-stream-lease-kept      a_stream_dropped_before_its_end_returns_the_shots_still_arriving
+             Assertion failed: (f.sim->returns == 8), function a_stream_dropped_before_its_end_returns_the_shots_still_arriving, file test_adapter.c, line 876.
+RED          return-lost-ignored            a_late_shot_after_the_ring_closed_under_forgets_the_descriptor
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_ECANCELED), function a_late_shot_after_the_ring_closed_under_forgets_the_descriptor, file te
+RED          register-ebadf-kept            a_scope_dropped_after_the_ring_closed_under_never_closes_the_number
+             Assertion failed: (!sim_closed(s, fd)), function k_close, file sim_kernel.c, line 775.
+RED          register-ebadf-kept-retired    a_ring_whose_register_finds_it_closed_never_reports_retired
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r)) == SIM_ECANCELED), function a_ring_whose_register_finds_it_closed_never_reports_retired, file test_adapt
+RED          register-ebadf-kept-connect    a_connect_after_the_ring_closed_under_answers_a_close
+             Assertion failed: (t_loom_connect(t, 0, 0, &op) == SIM_ECANCELED && !op), function a_connect_after_the_ring_closed_under_answers_a_close, file test_adapter.c, l
+RED          register-ebadf-kept-pool       a_pool_made_after_the_ring_closed_under_answers_a_close
+             Assertion failed: (t_loom_pool(f.r, m, 1, &p) == SIM_ECANCELED && !p), function a_pool_made_after_the_ring_closed_under_answers_a_close, file test_adapter.c, li
+RED          register-ebadf-kept-payload    a_payload_dropped_after_the_ring_closed_under_closes_the_ring
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r)) == SIM_ECANCELED), function a_payload_dropped_after_the_ring_closed_under_closes_the_ring, file test_ada
+RED          register-ebadf-kept-pool-reap  a_pool_dropped_after_the_ring_closed_under_never_closes_the_number
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r)) == SIM_ECANCELED), function a_pool_dropped_after_the_ring_closed_under_never_closes_the_number, file tes
+RED          target-probe-skipped           a_target_refused_for_its_registry_keeps_the_ring
+             Assertion failed: (t_loom_target(f.r, 99, "clip", 4, &t) == SIM_EBADF && !t), function a_target_refused_for_its_registry_keeps_the_ring, file test_adapter.c, li
+RED          target-ebadf-kept              a_target_registered_after_the_ring_closed_under_never_closes_the_number
+             Assertion failed: (t_loom_target(f.r, 5, "clip", 4, &t) == SIM_ECANCELED && !t), function a_target_registered_after_the_ring_closed_under_never_closes_the_numbe
+RED          enter-recheck-skipped          a_close_learnt_by_the_turns_enter_is_reported_as_a_close
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_ECANCELED), function a_close_learnt_by_the_turns_enter_is_reported_as_a_close, file test_ada
+RED          claim-gate-open                a_held_refusal_claims_no_further_sqe
+             Assertion failed: (sim_hdr_word(f.sim, 0) - head == 1), function a_held_refusal_claims_no_further_sqe, file test_adapter.c, line 989.
+RED          replay-returned                a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_EIO), function a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return, file te
+RED          not-ready-remapped             an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled
+             Assertion failed: (open_rc(f.r, fid, 0) == SIM_ENOENT), function an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled, file test_adapter.c
+RED          walk-from-scope                a_walk_from_a_file_fid_clones_it_or_answers_enotdir
+             Assertion failed: (run(r, K_READ, read_op(f, m, 0, 0), &o) == (int32_t)strlen(want) && o.read), function read_is, file test_adapter.c, line 137.
+RED          return-errno-masked            a_refused_return_hands_the_payload_back
+             Assertion failed: (t_loom_payload_return(pl) == SIM_EINVAL), function a_refused_return_hands_the_payload_back, file test_adapter.c, line 1158.
+RED          enter-errno-ignored            an_enter_refusal_that_is_not_a_close_fails_the_ring
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_EIO), function an_enter_refusal_that_is_not_a_close_fails_the_ring, file test_adapter.c, lin
+RED          eintr-fails                    a_poll_interrupted_by_a_note_is_a_spurious_wake
+             Assertion failed: (t_loom_turn(f.r, 1, deadline) == 0), function a_poll_interrupted_by_a_note_is_a_spurious_wake, file test_adapter.c, line 1195.
+RED          pollerr-ignored                a_poll_error_fails_the_ring
+             Assertion failed: (t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_EIO), function a_poll_error_fails_the_ring, file test_adapter.c, line 1209.
+RED          close-noop                     an_explicit_close_with_live_handles_cancels_their_use
+             Assertion failed: (s->nclosed == 1 && s->closed_fds[0] == 7), function closed_once, file test_adapter.c, line 912.
+RED          uncertain-pool-kept-open       an_uncertain_pool_registration_fails_the_ring
+             Assertion failed: (t_loom_target(f.r, 5, "clip", 4, &t) == SIM_EIO && !t), function an_uncertain_pool_registration_fails_the_ring, file test_adapter.c, line 127
+RED          setup-errno-masked             a_refused_setup_detaches_every_region
+             Assertion failed: (setup_on(&f, 8, b, 1) == SIM_ENOMEM && !f.r), function a_refused_setup_detaches_every_region, file test_adapter.c, line 1283.
+RED          setup-regions-kept             a_refused_setup_detaches_every_region
+             Assertion failed: (f->sim->nregions == 0), function finish, file test_adapter.c, line 64.
+RED          unmapped-fd-forgotten          a_setup_without_a_mapping_closes_its_descriptor
+             Assertion failed: (s->nclosed == 1 && s->closed_fds[0] == 7), function closed_once, file test_adapter.c, line 912.
+RED          unvalidated-ring-detached      a_mapping_that_fails_validation_is_closed_and_left_mapped
+             Assertion failed: (f.sim->nregions == 1 && f.sim->regions[0].va == f.sim->ring_va), function a_mapping_that_fails_validation_is_closed_and_left_mapped, file tes
+RED          geometry-unchecked             a_ring_of_another_geometry_is_closed_and_detached
+             Assertion failed: (setup_on(&f, 8, b, 1) == SIM_EIO && !f.r), function a_ring_of_another_geometry_is_closed_and_detached, file test_adapter.c, line 1314.
+RED          buffers-fd-forgotten           a_refused_buffer_registration_closes_the_ring
+             Assertion failed: (s->nclosed == 1 && s->closed_fds[0] == 7), function closed_once, file test_adapter.c, line 912.
+RED          misaligned-kept                a_misaligned_attach_is_detached
+             Assertion failed: (f->sim->nregions == 0), function finish, file test_adapter.c, line 64.
+RED          core-not-a-holder              a_read_result_keeps_the_storage_until_it_drops
+             Assertion failed: (f.sim->nregions == 3 && !t_loom_idle(f.base)), function a_read_result_keeps_the_storage_until_it_drops, file test_adapter.c, line 1352.
+RED          shape-cq-unchecked             setup_refuses_a_bad_shape_before_the_kernel
+             Assertion failed: (t_loom_ring_setup(&st->base, st->book, st->ops, 8, &k, 8, b, 1, &r) == SIM_EINVAL && !r), function setup_refuses_a_bad_shape_before_the_kerne
+RED          kind-connect                   asking_for_another_kinds_completion_answers_einval
+             Assertion failed: (complete(K_CONNECT, w, &o) == SIM_EINVAL), function asking_for_another_kinds_completion_answers_einval, file test_adapter.c, line 1405.
+RED          kind-walk                      asking_for_another_kinds_completion_answers_einval
+             Assertion failed: (complete(K_WALK, op, &o) == SIM_EINVAL), function asking_for_another_kinds_completion_answers_einval, file test_adapter.c, line 1395.
+RED          kind-open                      asking_for_another_kinds_completion_answers_einval
+             loom-client fatal: scope_unref:367
+RED          kind-read                      asking_for_another_kinds_completion_answers_einval
+             /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/fixed_requests.c:85:36: runtime error: member access within null pointer of type 'stru
+RED          kind-write                     asking_for_another_kinds_completion_answers_einval
+             /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/fixed_requests.c:89:27: runtime error: member access within null pointer of type 'stru
+RED          kind-stream                    asking_for_another_kinds_completion_answers_einval
+             Assertion failed: (t_loom_stream_next(op, &pl, &end, &o.result) == SIM_EINVAL), function asking_for_another_kinds_completion_answers_einval, file test_adapter.c
+RED          route-cell-claimable           a_full_operation_table_refuses_before_the_kernel
+             Assertion failed: (sim_live_slots(f.sim) == live), function a_full_operation_table_refuses_before_the_kernel, file test_adapter.c, line 1432.
+RED          route-cell-kept                a_full_operation_table_refuses_before_the_kernel
+             Assertion failed: (t_loom_connect(t, 0, 0, &op) == 0), function a_full_operation_table_refuses_before_the_kernel, file test_adapter.c, line 1436.
+RED          foreign-pool-accepted          a_pool_of_another_ring_answers_einval
+             Assertion failed: (t_loom_stream(fid, other, 0, 64, 0, 0, 0, &op) == SIM_EINVAL && !op), function a_pool_of_another_ring_answers_einval, file test_adapter.c, li
+RED          stream-end-unlatched           a_stream_asked_again_after_its_end_answers_einval
+             loom-client fatal: t_fixed_book_take:64
+RED          claim-lowest-first             a_consumed_operation_dropped_again_ends_the_process
+             op_ring: no fatal there (status 0)
+RED          op-guard-off                   a_consumed_operation_dropped_again_ends_the_process
+             loom-client fatal: t_loom_op_drop:1190
+RED          slot-guard-off                 a_handle_whose_slot_was_freed_ends_the_process
+             /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/adapter.c:121:33: runtime error: member access within null pointer of type 'struct t_l
+RED          pool-guard-off                 a_handle_whose_slot_was_freed_ends_the_process
+             loom-client fatal: held:121
+RED          clock-guard-off                a_dropped_ring_used_again_ends_the_process
+             ==16289==ERROR: AddressSanitizer: SEGV on unknown address 0xfffffffffffffff8 (pc 0x0001045dcf6c bp 0x00016b876050 sp 0x00016b875fb0 T0)
+RED          retired-guard-off              a_dropped_ring_used_again_ends_the_process
+             loom-client fatal: t_loom_now:720
+RED          rust-uncertain-pool-kept-open  rust:tests::native::an_uncertain_pool_registration_fails_the_ring
+             thread 'tests::native::an_uncertain_pool_registration_fails_the_ring' (46838086) panicked at lib/loom-client/src/tests/native.rs:1238:5:
+RED          rust-setup-errno-masked        rust:tests::native::a_refused_setup_detaches_every_region
+             thread 'tests::native::a_refused_setup_detaches_every_region' (46838392) panicked at lib/loom-client/src/tests/native.rs:1251:5:
+RED          rust-unmapped-fd-forgotten     rust:tests::native::a_setup_without_a_mapping_closes_its_descriptor
+             thread 'tests::native::a_setup_without_a_mapping_closes_its_descriptor' (46838720) panicked at lib/loom-client/src/tests/native.rs:1261:5:
+RED          rust-unvalidated-ring-detached rust:tests::native::a_mapping_that_fails_validation_is_closed_and_left_mapped
+             thread 'tests::native::a_mapping_that_fails_validation_is_closed_and_left_mapped' (46839039) panicked at lib/loom-client/src/tests/native.rs:1273:5:
+RED          rust-geometry-unchecked        rust:tests::native::a_ring_of_another_geometry_is_closed_and_detached
+             thread 'tests::native::a_ring_of_another_geometry_is_closed_and_detached' (46839352) panicked at lib/loom-client/src/tests/native.rs:1282:5:
+RED          rust-buffers-fd-forgotten      rust:tests::native::a_refused_buffer_registration_closes_the_ring
+             thread 'tests::native::a_refused_buffer_registration_closes_the_ring' (46839679) panicked at lib/loom-client/src/tests/native.rs:1295:5:
+RED          rust-misaligned-kept           rust:tests::native::a_misaligned_attach_is_detached
+             thread 'tests::native::a_misaligned_attach_is_detached' (46840021) panicked at lib/loom-client/src/tests/native.rs:1309:5:
+RED          refuse-takes-lease             test_lease_ledger
+             Assertion failed: (t_lease_refuse_read(&rb,4,5,receipt(1,12),&back)==1&&back.member==1&&back.lease==12&&rb.outstanding==1), function main, file test_lease_ledge
+RED          refuse-keeps-order             test_lease_ledger
+             Assertion failed: (t_lease_refuse_read(&rb,4,5,receipt(1,12),&back)==T_LEASE_STALE), function main, file test_lease_ledger.c, line 71.
+RED          slot-any-result                test_request_book
+             Assertion failed: (accept(b,rec(a,6,0),&d)==T_REQ_RECORD&&accept(b,rec(a,5,1),&d)==T_REQ_RECORD&&accept(b,wide,&d)==T_REQ_RECORD), function main, file test_requ
+RED          slot-unbounded                 test_request_book
+             Assertion failed: (!t_request_create(b,es,1)&&t_request_reserve(b,id(1,1),s64,&a)==T_REQ_GEOMETRY&&t_request_reserve(b,id(1,1),c5,&a)==T_REQ_GEOMETRY), function
+RED          rust-slot-any-result           rust:tests::request_book::a_slot_request_ends_with_its_own_slot_or_an_errno
+             thread 'tests::request_book::a_slot_request_ends_with_its_own_slot_or_an_errno' (46840744) panicked at lib/loom-client/src/tests/request_book.rs:86:5:
+sabotage: every case red

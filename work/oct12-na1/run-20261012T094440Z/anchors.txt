@@ -1,0 +1,1 @@
+anchors: 5 mutants, 8 pairs, 0 bad

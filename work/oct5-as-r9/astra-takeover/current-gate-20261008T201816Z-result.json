@@ -1,0 +1,2043 @@
+{
+  "source": "98c50e844fcaf2d62da3705fbfa0d45de383152c",
+  "run": "work/oct5-as-r9/current-gate-20261008T201816Z",
+  "gate_rc": 0,
+  "runner_rc": 0,
+  "clean_boots": 50,
+  "expected_tests": 1836,
+  "rows": [
+    "default-smp1",
+    "default-smp4",
+    "default-smp8",
+    "ubsan-smp4",
+    "ubsan-smp8"
+  ],
+  "d7_overlap_boots": 50,
+  "d7_twenty_cycle_boots": 50,
+  "private_owner_boots": 50,
+  "minimum_recorded_admission_free_mib": 8758,
+  "stratum": "61dde3727921e70e2c72fbd3c9e2044a192f4a54 /Users/northkillpd/projects/stratum-astra/v2",
+  "inputs_sha256": {
+    ".config-default": "cf91bb7fed5759254deaa6c62ca2d5833f5c1ec61e9f32343fcfb26daf3a51f6",
+    ".config-undefined": "cd0200373d03e647b9e53d8835b585153bc0e426aefb96d70ab97ad3dcfed7f4",
+    "thylacine-undefined.bin": "39772be897d553711297c49140a63dedb63c61c41c627e3406833abc90da2fc8",
+    "thylacine-undefined.elf": "676421beea23dd4fc349e884ca9872c3f83fa25e0eb10399e5547ae954e51618",
+    "thylacine.bin": "aa7b16dc8fdfad3b4c271ce9ac1adc47480a09fa20c29d8eaa07215744e07404",
+    "thylacine.elf": "7af632d30a34b6957c5e0297bbd7455d1c6560073205406bf58d1fea49763c23",
+    "ramfs.cpio": "637d2ad320c9c4838a9a064b689a5def489a2dbba5a5cd92ec1b984b46b4e1a6",
+    "pool.img.baked-snapshot": "4ac0dc30d54f43d8211a60fcebb72178beb9471ca52b56f6923319be4601694a",
+    "system.key": "5f2ed16d1c092cc99a330277aaedfda52fd9c9e5098afbde4875c731795419a9",
+    "system.key.baked-snapshot": "5f2ed16d1c092cc99a330277aaedfda52fd9c9e5098afbde4875c731795419a9"
+  },
+  "gate_log_sha256": "5cdcc0497bbe2cfe79c850d6eb83ead343146a6b0525a06e9e6b2531d2733974",
+  "verification_script_sha256": "712f14d4d94e97fbbf78693d1c8973e42ce30b28cd9b9eafcd1e6f8fc3e13208",
+  "records": [
+    {
+      "label": "default-smp1",
+      "boot": 1,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-1.log": "ad56cf2e51a0f9ad3605c5e5e7beea5c7d296eaf0ab42717069a796e7fa12903",
+        "default-smp1-1-harness.log": "c4ab619bf6cbb9e11f970b06e2c5ac7932defd8a39f58db53a4df17195ffec71"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 2,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-2.log": "2b387a1193385c2038d77bd3919fb0b637bad1a9d852976e5fd3ea992eff058b",
+        "default-smp1-2-harness.log": "29118b284a84b36a7bdb52d998eee29add8d0b0869d82a6a94a798136ce4e5ba"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 3,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-3.log": "886827fc83a631084404d926c6880826ef7c6382385c606c4d56922f35283141",
+        "default-smp1-3-harness.log": "c1f6c07cd1f9d7b09fc0c2b510475ecec5de396bc331c108a3294fd8dd4804c5"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 4,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-4.log": "80adfda28fc9f3306280aa18ceb43a93be7f4b2853a0981cc1f67e2da4b74d1c",
+        "default-smp1-4-harness.log": "07ce93675a0b6c2e80d4098cf7aa434fbd611d9de5cfdf6db5df76f38ec44d10"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 5,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-5.log": "543309e179791f258e96a20f06f5fa68f7feee492ee1ae65fc14aef50948deb2",
+        "default-smp1-5-harness.log": "9158a130777c7e9a71f90c4e76e9e5997440ab831fabd1b1d0fc5ad7f6b94043"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 6,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-6.log": "798724aa384de95dc085d6510b4dedd909e33b51304d2cde4ed9f51e8f73ddd9",
+        "default-smp1-6-harness.log": "3267616b0528d373a6588af9f0b556caaecd99a03177d93f6d5a77a5b3ddaafe"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 7,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-7.log": "02bc337eb98f0b0d0a38c2a4bd6bf1f5d4bf67b16f45b9a31beb4ad47104ffb0",
+        "default-smp1-7-harness.log": "ccdfaf5080485367561657bdddc5e1d73b25ad987518da3d4b2a427497967624"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 8,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-8.log": "8f1bced3b5440b3d1b6b5bde3a109d024af2e8df55decdeb14b9d4811e48ab09",
+        "default-smp1-8-harness.log": "cd11faa9429b246bdace8f174aa16ea9e7a738540653bf3da01553cb5b4bc6ea"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 9,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-9.log": "8a6c1fe67973a1abee520d158c1c746048f7181f187e4ba8a4dcd416c2b233a5",
+        "default-smp1-9-harness.log": "fee5de74317706daa5261a09a8674080c4544c73dc597ec04d349d6aa37a3699"
+      }
+    },
+    {
+      "label": "default-smp1",
+      "boot": 10,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp1-10.log": "44d1b6849f7c4c32ac85e08b828579036540260468ed99cd342e957e26bebd2b",
+        "default-smp1-10-harness.log": "d9a19832d64d02aa013737df4d1ab93e67d4d93f4b04d0cc667d1573a212e572"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 1,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-1.log": "620ac5f5337ae4bd9a7b48d9fb731164f3fc884d5b1030b2a2e77077b15223d4",
+        "default-smp4-1-harness.log": "3f86219e96b00a173798de5c46a3c353324c21cf4b7f323fbb7b6e322bad63cf"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 2,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-2.log": "b561620b3a6db80985b7c2d31d09eee2daafca7d39e30aacb15c89c8dc850398",
+        "default-smp4-2-harness.log": "4e3b73da9e25ea6c6fc89e41548d6f0b61893821bb809936b3a325258039a509"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 3,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-3.log": "f9ab3fc02a816b05f7f0817ed62aa44af37d6d71d4ca8b4ddfde4101a0cd314e",
+        "default-smp4-3-harness.log": "c9acb4e7ae37193ddeb37aaa0c6997a8600bd9789b5373853daaf1f4050fa1f9"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 4,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-4.log": "ff00d41a728347eaf7a1b2e7d452fcc51370e2742656f6915e2c48e91361f591",
+        "default-smp4-4-harness.log": "27880f2fcba7f511fb35f060c88aa92803627d633286b86495261aacfd091ab0"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 5,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-5.log": "f059ca12c9a2e8c385982afd7f9b5a7a585975b9ce097555847d4b9e2927ff35",
+        "default-smp4-5-harness.log": "9095bac7a3bb7ae7fa9a86aa129f2cf51aeee2d385ef9531e185599d02743d97"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 6,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-6.log": "9fa87f2e49dd10d7ff305935d03e7a59b8817120d3087837206189083f015f0f",
+        "default-smp4-6-harness.log": "d96de9b5d9bfff9ae30a7b15ec5025b28821627a0c33289b9d6aec30d57ee2a4"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 7,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-7.log": "70259f41177ae717fb582c1a585e0fec6660aa5065083434891a2b0c1ff96a11",
+        "default-smp4-7-harness.log": "1187fb0f53ab21f3f01ca000c40663883dbe2bab2180716f116bdf5ec9b5b2e7"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 8,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-8.log": "ec522712c04a39fd85b21bbf7b9c14db98dcc24d12762584ef096f13950842d3",
+        "default-smp4-8-harness.log": "c2ad1c1ed71dbf9f124079108735011114cea288e90bc2b585eaaa8c17490a56"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 9,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-9.log": "cd26c05a5165dc690b62562e5dc5cb6675b5cfdb18858585b59cb185c664f3f7",
+        "default-smp4-9-harness.log": "6bec7c239da67ca126b2207cf63a73c9cbca0c13135d56222a95c2bf02221b12"
+      }
+    },
+    {
+      "label": "default-smp4",
+      "boot": 10,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp4-10.log": "387f7b81a9de25162e44caf61a6b6c206f0a7629a9acf66678c92987a6eba1fc",
+        "default-smp4-10-harness.log": "dbc4f52ceebf15f426ddef8b8b28c0fd589fca731ca84367eacda5ee59977834"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 1,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-1.log": "d637a2528a4a22303686d5306140bc5618179a2d7a22d98cdde332fd184a4c83",
+        "default-smp8-1-harness.log": "8350cd4be34f3e544eba0df407d97dae6721f56adb84042850b57297858519f1"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 2,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-2.log": "6afa81ca8cd9ea1bdae09366434d7a49042012cf62652eebd0178270d89eb8f5",
+        "default-smp8-2-harness.log": "682907af7e7e7daf047a49a591013f62bd45b92f7d5ce61dbf5f762e8efa2d8c"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 3,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-3.log": "cd1a547a988e7919d6de2319ef12cc875909a0850e053cff7d71cfecec4d3317",
+        "default-smp8-3-harness.log": "a57307b518a1b522a0c493134f773ac43009fd2c54d37ae83f28c27a775e7869"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 4,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-4.log": "cdd165c1058be7956cb9303e40cae83b4e25398fcc66e533e0c9d46105c57a24",
+        "default-smp8-4-harness.log": "d37345e4b1dc126697421f6a5893ffc1753dcee2dccc8b53979dc62af2fd30ee"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 5,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-5.log": "7e26c5576c6cf90f614fe82161c82dc1fae3fe13047876678207f12e8ebea761",
+        "default-smp8-5-harness.log": "bf5e17c8d6dafb90d766c19a3b57b557c61deb2c9434281237c2cd45cedc74d2"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 6,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-6.log": "975886605d304042ff70768a4df75636c1f6b02d2b5d9ed7fda3253cb6afc39f",
+        "default-smp8-6-harness.log": "e2a047c4f70834cdd86d6b78d853de43dcded7ee4af5ad184c37474b53b16843"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 7,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-7.log": "65584f07a136142a7a21c4d2c21f06cff45d177c7fdc4558e6ebb1b0e4f81345",
+        "default-smp8-7-harness.log": "5a77affa594a7c056dda36ad6baab4479d7cde29b1ce9b50a23c71b145f33115"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 8,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-8.log": "b534a70a121fa4280059c82d3ebb7223add1016713e80441bca561e0e76ad866",
+        "default-smp8-8-harness.log": "14dbc097b71008b1f1a86137f81d5b98dea64c1ee8e5019b353fd4b9f63d13cd"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 9,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-9.log": "de9934358f4fb393510ad1bb0f9371e0f30b60ae99adf33c4d148813b903229f",
+        "default-smp8-9-harness.log": "4b9546b003638f5259bd20d9f8f05674355983545595dc4cea7eb83dc2082368"
+      }
+    },
+    {
+      "label": "default-smp8",
+      "boot": 10,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "default-smp8-10.log": "e3eb2de80e35353bfe028346c7da2a1b99bf56335b7b7dc4b447b41682cfb4cf",
+        "default-smp8-10-harness.log": "5c7ce4af3bddba3a1462f692d0a71087db2e4852cda63314d34b8cf8d951e3e5"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 1,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-1.log": "8cf8241cb78c62b41685ea277f389ff9a5d40366cc8926cae2eb61f372adf8d5",
+        "ubsan-smp4-1-harness.log": "04ba9e166fc611f35378ec209b2b879460073bce2fa9c082008b42ef6d9425f1"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 2,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-2.log": "e62c8023cad4d5d51a8204eb6de6e82676fe15f4fe194afc2324bcd40a6f68b7",
+        "ubsan-smp4-2-harness.log": "6372f3adc4a7d23b46f7334145a79888678c4edb2c4831e319a8a1a41d1217a9"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 3,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-3.log": "d4aac662091615bd4cc29bea2bd0521e12059d100067931b9b538299ff24f08f",
+        "ubsan-smp4-3-harness.log": "b8d7ae352bbddfddc60c078ce56a5758b92599801ec19fb65facb89671df0566"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 4,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-4.log": "84612804e029b0efd050b9fbd4396ff758944be99f4907d5268e862ca927d1e2",
+        "ubsan-smp4-4-harness.log": "2362ba77a0d2f1988022fc189e175470c6e00eaa91e9e60086fcae66cccd9d5c"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 5,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-5.log": "3bcab6a58b8fd3e2f74eaf9ec46302c37ac8437ff165fdb156d2dfc4817cb39b",
+        "ubsan-smp4-5-harness.log": "9fb467eddf943b6a443912c43dfe25785004f7e816f09828e5a14e89186ffaa1"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 6,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-6.log": "a2e3e0e79e4b0dc2125e9dd5e1d453c1e69a97a7c9eb06e16266812a53644e08",
+        "ubsan-smp4-6-harness.log": "4a7f27d21a936082c36304cd0aed1151a43419551d561034ee6ee6f6fcb73914"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 7,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-7.log": "4eb76c6e44232cade5e8a0d7c58c4362d5f61902a6b4548c7b6da92cdd189690",
+        "ubsan-smp4-7-harness.log": "f529098beaaaa02d8bfd2d8d12734e385444063547cf3a09696c9cd7e95c8546"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 8,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-8.log": "b76f1ce2f27875c287b0648c789d76e188070a1cbcbec779cdd95fff5bfed54d",
+        "ubsan-smp4-8-harness.log": "985f95b59b6a46d56186e1f21dba287d2b35c87d11a125b9f164cc960045a01b"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 9,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-9.log": "803c78f3b30bac61e049ff52d741f8b72d1092ada849afc81563fd4df79f17b5",
+        "ubsan-smp4-9-harness.log": "95ab7b529ecaac4becd88a8d446da9e2e1648c5cf305407df337343a68da3d5a"
+      }
+    },
+    {
+      "label": "ubsan-smp4",
+      "boot": 10,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp4-10.log": "2e6cc76dded8441a4573b06c400e9e71b2c0b699d6ed6700cd43f88c9ffae23f",
+        "ubsan-smp4-10-harness.log": "8579fff468774685ba528eed8739c08017a171f5c132a5872705afa1b26ec07c"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 1,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-1.log": "64195c0e2bf4a6a9ff60ebac7ce2c7aef9507a2a0f962369dbef44e5de8187c2",
+        "ubsan-smp8-1-harness.log": "94ee59adc0e5fb7f5128d1b60a3e7465e90041b803fc81bd520f531748b7dbf9"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 2,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-2.log": "909453a8bff4e2af79d6d0a903e141009e5302ebd7204c500a25bb3cfe29cdb1",
+        "ubsan-smp8-2-harness.log": "d2f5477bb01a983c9951aa3287324b8e1634c2b97588d486743322e45935a7e8"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 3,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-3.log": "3b26975640edc9de66db749c94addc95072461a5c7120e70e8025c865065d147",
+        "ubsan-smp8-3-harness.log": "db8085bb7bfa9a3ddcc5d668cf1397e742f55ecdecc38a1ddd8a2d52052a79e4"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 4,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-4.log": "1f52154fff143ab6651b5b347181a3075d1f139f34ad41be66403ab0be94f642",
+        "ubsan-smp8-4-harness.log": "2b252f4876a00da7db05354fc56efe5d19094b3769df657a445824cd27b8cfa1"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 5,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-5.log": "31e7206803e1a5082b9f2e3203eab75d0bca362aca5549f46b68fda854538575",
+        "ubsan-smp8-5-harness.log": "4dc2f40a9d5baf9348d9954d28a27183cf77f5a3d376a58f8717aefb6702cd2f"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 6,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-6.log": "42be3ce4d7fe5ebd3034f84472e2f70b54acd50d351cf4d9751ebc993483d563",
+        "ubsan-smp8-6-harness.log": "bf2d71b7fca71252bacd8bb434d8a64c84eb1c35ab93c925cc29f14aed58ed84"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 7,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-7.log": "666206e6e1adefe8389bbe7ee1a96d82da4d7d45f223cd0e76d3325d4849d4dc",
+        "ubsan-smp8-7-harness.log": "de0ab63463c0f21b13ed6634601a760ff9d719e53ed15bba21a721289539b7a8"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 8,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-8.log": "5ba7c57d4aa0157dede1c44bf02c34021b3e18dbe6d18c8896d5169a4433dd47",
+        "ubsan-smp8-8-harness.log": "36bb4517eb3cbfa8b83b3ea2647f4722135ef311f84d346ce25eeca2ba80c86c"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 9,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-9.log": "5a2bdb77fd466840fd7aa27d9ffe444ad6500c735389a2a3b33a23dec1f9a4c0",
+        "ubsan-smp8-9-harness.log": "b8004d8ca4739b1ab799c2a0e8b28a90491a45f6a7379cf2682eec0f190149c3"
+      }
+    },
+    {
+      "label": "ubsan-smp8",
+      "boot": 10,
+      "tests": 1836,
+      "private_owner_normal_fallthrough": true,
+      "d7_overlap": true,
+      "d7_twenty_cycles": true,
+      "distinct_cycle_users": [
+        "d7user00",
+        "d7user01",
+        "d7user02",
+        "d7user03",
+        "d7user04",
+        "d7user05",
+        "d7user06",
+        "d7user07",
+        "d7user08",
+        "d7user09",
+        "d7user10",
+        "d7user11",
+        "d7user12",
+        "d7user13",
+        "d7user14",
+        "d7user15",
+        "d7user16",
+        "d7user17",
+        "d7user18",
+        "d7user19"
+      ],
+      "boot_banner": true,
+      "optional_graphics_absent": [
+        "thylacine-venus-prove",
+        "thylacine-vk-sdl-prove"
+      ],
+      "kernel_skip_lines": 0,
+      "sha256": {
+        "ubsan-smp8-10.log": "6966f442d21dc5124320c259a7449b32171801779b66b2bc67745c51a628b073",
+        "ubsan-smp8-10-harness.log": "0a46c1da56b1748daf3b7a296cfba9952b9e2300b51d7f665dbb24d97d47247c"
+      }
+    }
+  ],
+  "limits": [
+    "Mac HVF only; Pi/A72/KVM not run",
+    "final AddrSpace descriptor/page-table reclamation remains open",
+    "optional Venus/Vulkan graphics probes absent from captured ramfs, no graphics qualification",
+    "self-review, not independent audit",
+    "no Main integration or private async/clipboard activation; 128 MiB protection retained"
+  ]
+}

@@ -1,0 +1,103 @@
+
+running 94 tests
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test composed_payload_result_blocks_cell_until_last_view_ends ... ok
+test composed_receive_wake_can_drop_another_client_and_poll ... ok
+test composed_drop_progress_no_internal_allocation ... ok
+test composed_terminal_survives_client_retire_before_poll ... ok
+test composed_client_drop_wake_can_access_peer_and_retire_both ... ok
+test composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict ... ok
+test fixed_abandon_is_scope_cancel_not_refund ... ok
+test fixed_and_provided_exclude_overlaps_both_directions ... ok
+test fixed_bad_geometry_and_precise_error ... ok
+test fixed_read_owns_range_through_terminal_and_view ... ok
+test fixed_retirement_reclaims_abandoned_only_after_proof ... ok
+test fixed_unpublished_and_closed_drop_do_not_abort ... ok
+test fixed_write_freezes_after_publish_and_error_preserves_owner ... ok
+test future_all64_cells_wake_and_reuse_without_old_handle_interference ... ok
+test future_clone_callback_completion_is_not_lost ... ok
+test future_completion_before_first_poll ... ok
+test future_driver_close_and_drop_wake_unfinished ... ok
+test future_drop_unregisters_but_keeps_active_storage ... ok
+test future_failed_prepare_and_write_result ... ok
+test future_malformed_record_wakes_then_fails_closed ... ok
+test future_read_wakes_and_retains_result ... ok
+test future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test future_replaced_waker_drop_can_deliver_completion ... ok
+test future_replaces_waker_without_notifying_old_task ... ok
+test future_wake_callback_polls_outside_hub_borrow ... ok
+test last_generation_cannot_wrap_or_reuse ... ok
+test ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test local_last_future_drop_schedules_after_closing_poll ... ok
+test local_native_retirement_requires_explicit_event_not_busy_spin ... ok
+test local_pool_and_payload_release_share_noncallback_signal ... ok
+test local_pulse_drop_and_bounded_progress_do_not_allocate ... ok
+test local_result_drop_schedules_retirement_without_new_cq ... ok
+test local_terminal_cq_signals_even_without_registered_waker ... ok
+test local_zero_partial_budget_and_coalesced_events_preserve_sweep ... ok
+test loop_cancellation_does_not_reclaim_before_retirement ... ok
+test loop_expired_outer_deadline_does_not_poll_tasks ... ok
+test loop_fixed_cq_completion_and_last_result_retirement ... ok
+test loop_quiet_step_has_no_internal_allocation ... ok
+test loop_self_wake_prevents_wait_without_starving_expiry ... ok
+test loop_wake_during_arm_is_seen_before_wait ... ok
+test loop_wake_during_final_clock_sample_is_seen ... ok
+test loop_wake_during_readiness_is_seen_before_wait ... ok
+test loop_zero_and_partial_task_budget_preserve_readiness ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test overlap_and_global64_members_are_rejected ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... ok
+test registration_preflight_global_capacity_avoids_native_admission ... ok
+test registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test registration_success_binds_actual_identity_without_late_allocation ... ok
+test shutdown_retirement_root_wakes_task_and_preserves_held_read ... ok
+test shutdown_task_owner_drop_keeps_retirement_charge_until_proof ... ok
+test stale_native_registration_keeps_precharged_reservation_until_close ... ok
+test task_capacity_precedes_factory_and_ids_are_owner_specific ... ok
+test task_completed_and_cancelled_wakers_cannot_wake_reused_slot ... 
+thread 'task_unwind_detaches_owner_and_keeps_other_tasks' (22574321) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/shutdown-audit-20261010T102835Z/test_task_loop.rs:319:209:
+task panic probe
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+test task_completion_and_root_drop_release_owned_futures ... ok
+test task_dispatch_and_wake_have_no_internal_allocation ... ok
+test task_fixed_completion_wakes_and_result_stays_owned ... ok
+test task_fixed_future_cancel_retains_storage_until_terminal ... ok
+test task_pending_stays_quiet_until_woken ... ok
+test task_self_wake_survives_poll_and_is_bounded ... ok
+test task_zero_budget_and_many_wakes_coalesce ... ok
+test timer_due_after_arm_retries_then_cancels ... ok
+test task_unwind_detaches_owner_and_keeps_other_tasks ... ok
+test timer_future_cancel_waits_for_actual_terminal ... ok
+test timer_outer_deadline_keeps_separate_policy ... ok
+test timer_polling_driver_uses_same_queue_and_no_allocation ... ok
+test timer_publication_during_arm_prevents_stale_sleep ... ok
+test timer_queue_minimum_and_independent_fair_cursor ... ok
+test timer_retiring_driver_still_owns_deadline ... ok
+test timer_wait_uses_earliest_and_expiry_preserves_storage ... ok
+test timer_zero_expiry_budgets_preserve_due_work ... ok
+test typed_abandon_retains_obligation_until_terminal ... ok
+test typed_corruption_closes_without_refunding_active_storage ... ok
+test typed_driver_drop_reports_closing_to_pending_handle ... ok
+test typed_drop_terminal_does_not_abort_or_leak ... ok
+test typed_foreign_cookie_fails_only_its_driver ... ok
+test typed_prepare_rolls_back_both_tables ... ok
+test typed_read_owns_until_consumed_view_ends ... ok
+test typed_retire_prepared_prevents_publication ... ok
+test typed_retirement_without_cq_keeps_metadata_until_proof ... ok
+test typed_write_and_read_errors_are_preserved ... ok
+test uncertain_registration_closes_and_quarantines_with_live_payload ... ok
+test wait_absolute_deadline_before_and_after_arm ... ok
+test wait_bounded_turn_has_no_internal_allocation ... ok
+test wait_failures_cleanup_without_retry_loop ... ok
+test wait_local_release_during_arm_prevents_sleep ... ok
+test wait_native_ready_and_intervening_event_are_not_lost ... ok
+test wait_ready_callback_release_is_checked_last ... ok
+test wait_spurious_wakes_keep_original_deadline_and_schedule_progress ... ok
+test wait_timeout_is_not_terminal_storage_proof ... ok
+test wait_zero_and_partial_quantum_do_not_sleep ... ok
+
+test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -5,7 +5,12 @@ parent: moc-kernel-entry
 title: "The syscall dispatcher — argument marshalling, the staging tiers, and where a gate is allowed to live"
 code:
   - kernel/syscall.c
+  - kernel/test/test_argwidth_probe.c
+  - kernel/test/test_syscall.c
+  - usr/argwidth-probe/argwidth-probe.c
+  - tools/check-arg-width.py
   - kernel/test/test_spawn_cwd.c
+  - kernel/test/test_spawn_env.c
   - kernel/test/test_sys_spawn_full_argv.c
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
@@ -19,10 +24,30 @@ design:
 created: 2026-08-03
 updated: 2026-10-29
 ---
+## Session registry factory
+
+Native call 127 copies at most sixteen 40-byte route records into bounded
+kernel scratch before construction. It checks the explicit factory role before
+copyin; source-fd validation takes and releases a handle snapshot. Invalid
+flags/count, copy faults, wrong handle kind/rights, private source roots,
+allocation failure and full descriptor tables fail without publishing a root.
+All spawn-permission entry paths retain the shared grant check; public bit 10
+cannot be delegated by a caller lacking internal factory role bit 29.
+The C/kernel, C/libt and Rust compiled ABI witnesses agree on number, bit and
+record layout. See [[sub-kernel-devsrv]].
+
+Numbers 129..133 are assigned nothing on this tree (b3 holds them; 127 and 128
+are main's JIT_CREATE_SEALED and ICACHE_SYNC_SPACE).
+`syscall.native_gap_unassigned` (`kernel/test/test_syscall.c`) pins the gap by
+the unknown arm's own counter, `syscall_unknown_count()`, rather than by the -1
+that arm answers, because many native handlers refuse zeroed arguments with the
+same -1. Its control, 134, answers the factory-role gate and leaves the counter
+alone.
+
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is 123. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 134 (SRV_REGISTRY_NEW; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before
@@ -539,6 +564,32 @@ budget at once. Regressions: `spawn_cwd.thread_budget_resolves`
 (`kernel/test/test_spawn_cwd.c`, which holds the cwd tail's `spawn_cwd.*` too);
 the `sys_spawn_full_argv.*` validate legs (`kernel/test/test_sys_spawn_full_argv.c`); joey's `probe_thread_budget`
 ([[sub-stratum-boot]]) drives the real ABI, both tails included.
+
+**The spawn's environment tail (2026-10-28, [[dec-2026-10-28-spawn-env]]).**
+When `ext_flags` carries `SPAWN_EXT_ENV`, the handler reads the 16-byte
+`sys_spawn_ext_env` tail at the record's address + 104 plus the cwd tail's 16
+and the thread tail's 8 when their bits are set. It checks the fields before it
+allocates anything: an unreadable tail is `T_E_FAULT`, a nonzero `env_flags`
+-1 (the unknown-bits rule), an `env_len` past `SYS_SPAWN_ENV_DATA_MAX`
+`T_E_2BIG`, a block that is not user memory `T_E_FAULT`. After the cwd copy it
+copies the records once into a kmalloc'd buffer, and nothing reads the user
+block again, so a peer thread rewriting it cannot change a record between the
+check and the use. The gate site is now `sys_spawn_full_argv_env_for_proc`
+(`sys_spawn_full_argv_cwd_for_proc` became the kernel-test wrapper with no
+environment). After every gate and the cwd it builds the child's environment
+with `env_from_block` ([[sub-kernel-content]]), so a malformed block fails the
+spawn with that errno before any child exists. The body hands the built group
+to the child in the spawn args; a refused spawn returns it to the gate site,
+which frees it. The thunk installs it first, before the cwd and before
+`exec_setup_from_spoor` projects `/env` onto the new stack: an install cannot
+fail, and once it has run the group is the child's and is freed with it on
+every exit below. The spawner's own environment never changes. Regressions:
+`spawn_env.*` (`kernel/test/test_spawn_env.c`: the parse and its refusals, the
+in-place refill, a held child's environment against the block, the inherit
+control and an empty block, and refused spawns that make no child); the
+`sys_spawn_full_argv.validate_req` leg for the new bit; joey's
+`probe_spawn_env` ([[sub-stratum-boot]]) drives the real ABI, the tail after
+each earlier tail included.
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
@@ -1198,6 +1249,14 @@ threshold so small transfers never pay the extra handle lookup.
   accurate description of `dma_handle.c` sitting on top of `syscall.c`'s copy,
   which is how a reader is most likely to believe the parameterisation is here.
 
+## Spawn budget ownership predicate (AS-2a)
+
+The pre-EL0 spawn budget stamp uses `addrspace_owner_count(as) == 1` rather than
+the total descriptor reference count. Kernel retirement pins confer no process
+sharing, so they cannot masquerade as an owner and suppress the resolved budget.
+Actual shared address spaces retain their existing cap. This changes no syscall
+record or memory limit; [[sub-kernel-addrspace]] owns the new internal distinction.
+
 ## Provenance
 
 [[chg-2026-08-03-syscall-dispatch-sweep]] established the file.
@@ -1483,6 +1542,77 @@ Deleted: `detach_one_locked` and `detach_args_check` (their bodies are the
 core's phases), and every `PROC_PAGE_MAX` / `PROC_PAGE_HARD_MAX` mention in
 this file's comments. The holotype audit of this surface is owed.
 
+## Cleared Aux integration (2026-09-24)
+`sys_loom_setup_handler` supplies the caller's resource-exemption verdict to
+`loom_create` and binds ring identity before publication. Both independent
+contracts survive the Astra merge;1691/1691 kernel tests pass on the merged CI
+image. The new Aux test calls use the existing non-exempt false argument.
+
+## Loom private routing (NA-1, 2026-10-12)
+
+The SETUP handler sends PRIVATE_SERVICE or SERVICE_BUFFERS to
+`loom_private_setup_held_for_proc`, everything else to
+`sys_loom_setup_held_for_proc`, and returns a refusal's negative errno. The legacy path
+returns the errnos of LOOM.md 8.2a (operator vote 7, 2026-10-13; it answered -1
+before). REGISTER ops 2..9 go to `sys_loom_register_private`, which
+copies the op's fixed-size record once into kmalloc'd memory, and results return
+through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
+BUFFERS and ENTER branch on `loom_is_private`. Both held setups hand the handler its own
+ring reference, kept across the params copyout; a copyout fault on either ring
+kind passes it to `sys_loom_setup_rollback`, which closes the descriptor and
+detaches the ring only while they still name this ring (2026-10-13: by number
+and by range before, which a sibling thread's reuse turned against its own
+file or mapping). Without the qualification lever,
+every private arm is -EOPNOTSUPP. `sys_weft_share_for_proc` refuses a
+private-ring VMA, so no other Proc can map one ([[sub-kernel-weft]]). Mechanism
+and fixes: [[sub-kernel-loom-bridge]].
+
+A descriptor that names no ring (a dead slot, or a handle of another kind)
+answers -T_E_BADF from ENTER and, once its arguments pass, from REGISTER: the
+legacy ops in every image, the private ops in the qualification image (without
+the lever a private op answers -T_E_OPNOTSUPP before any lookup). An unknown
+REGISTER op answers -T_E_INVAL (operator vote 6, 2026-10-13; before it ENTER
+and the legacy REGISTER answered -1, which ERRORS.md forbids). A client tells
+a ring closed under it from its own error by this answer. The legacy
+REGISTER's argument refusals come first: -T_E_INVAL for nargs over the cap,
+-T_E_FAULT for an array the kernel cannot read (vote 7). An argument wider than
+its declared type is refused, never truncated (vote 8, ERRORS.md principle 6):
+`sys_hidx_arg` turns a descriptor above 31 bits into an index that names
+nothing, so the lookup answers -T_E_BADF after the default image's private-op
+-T_E_OPNOTSUPP; an op, entries count, ENTER count or flags word above 32 bits
+answers -T_E_INVAL before any lookup, and nargs is checked at full width on
+both routes. Pins: `loom.setup_rejects`, `loom.setup_resource_refusals`,
+`loom.register_rejects`, `loom.register_buffers_rejects`,
+`loom.sqpoll_charges_thread_budget`, and `loom-bridge-probe`'s
+`ordinary_refusals`, run in both images.
+
+## Terminal interaction suboperations
+
+SYS_PTY_REGISTER subops 16..21 use [[abi-pty-interaction]]. BIND borrows two
+RIGHT_READ Spoors, resolves the real master, and takes observer stripes from
+an actual devsrv client or SrvConn-backed dev9p root. It refuses the slave side,
+server endpoints and other transports. Spoors stay held until the process/pts
+check completes. No PID argument supplies observer identity. Existing ptyfs
+subops 0..2 keep their server-only gates.
+
+STATE/ACK/CHECK validate exact sizes and user ranges; ACK/CHECK copy into a kernel
+record before the lifecycle/pts hold, STATE copies out afterward. UNBIND/WATCH
+refuse nonzero unused arguments. WATCH installs only RIGHT_READ; handle-table
+failure clunks the new Spoor, releasing its bounded reservation. Allocation and
+uaccess never run under the process or pts spinlocks. Private reservation/read/
+poll operations 32..35 have no native dispatch path.
+
+Fresh role, incarnation, group, principal and epoch checks live in
+[[sub-kernel-pts]]. The frontend cannot replace them with its earlier fd lookup.
+A copyout fault may lose a consumed watch notification; the caller recovers via
+STATE. A successful CHECK applies only to that admission, not a reusable token.
+
+A KERNEL_TESTS-only wrapper calls the actual static native PTY marshaller using
+the test thread's current process and TTBR0. Boot tests verify unmapped copyin/
+copyout faults, wrong record sizes, wrapping user ranges and unchanged nomination
+after failed copyin. This is fault-path coverage, not a positive EL0 client test.
+The wrapper adds no syscall operation and is excluded from the production build.
+
 ## B-1d: SYS_BURROW_MAP_FILE over the three D-3 cores (2026-09-24)
 
 **`sys_burrow_map_file_for_proc(p, fd, offset, length, prot, flags, addr)`**
@@ -1583,7 +1713,7 @@ Spoor its socktab row caches (resolved on the socket's first poll; polled via
 `sys_poll_for_proc_spoors`, [[sub-kernel-poll]]); its borrowed `pre[]` follows
 the V-5d F1 compaction while the owning `ready[]` array stays in caller order
 and is released on every return. `connect` resolves `data` privately and hands
-that reference to `handle_replace`. `accept` resolves `listen`, `remote` and
+that reference to `handle_replace_hooked`. `accept` resolves `listen`, `remote` and
 `data` privately and installs only `data`, with `handle_alloc` (a full table
 is EMFILE, as Linux answers it; it was ECONNABORTED). An unconnected UDP
 `sendto` and `recvmsg` resolve `data` per call (`viv_sock_resolve`) and move the
@@ -1637,9 +1767,10 @@ unmarked. An unheld spawn keeps `rfork_with_caps` and the path it always had.
 stopped being ALIVE, or left the caller's children. The parent it waits on is
 `current_thread()->proc`, the Proc `rfork` forked, which a kernel test's `p` is
 not always. A caller killed while waiting unwinds (#811), and its own death then
-kills the child through the orphan rule. `sys_spawn_full_argv_cwd_for_proc`,
-its no-cwd wrapper `sys_spawn_full_argv_debug_for_proc` and the budget wrapper
-under that are the kernel-test entries, declared where the tests call them.
+kills the child through the orphan rule. `sys_spawn_full_argv_env_for_proc`,
+its no-environment wrapper `sys_spawn_full_argv_cwd_for_proc`, the no-cwd
+wrapper `sys_spawn_full_argv_debug_for_proc` and the budget wrapper under that
+are the kernel-test entries, declared where the tests call them.
 
 ## `viv_wait4` answers a caught note with EINTR (2026-10-05)
 
@@ -1809,3 +1940,145 @@ aliases, `arch_icache_sync_range` invalidates the whole I-cache once per page,
 do; no current target takes that path (QEMU and the Pi are PIPT,
 `arch/arm64/hwfeat.h`). Both were weighed in the B-2e2 audit (round 1, F4, P3)
 and left as they are.
+## Argument width (2026-10-13, vote 8)
+
+Every argument reaches a handler as a whole register, and a handler that reads
+a narrower type refuses a value that does not fit instead of casting the high
+bits away (ERRORS.md principle 6; the forms are in [[sub-kernel-syscall-abi]]).
+The helpers sit at the top of `syscall.c`: `sys_hidx_arg` (a descriptor wider
+than an index becomes -1, so the lookup refuses it after any check that
+precedes the lookup), `sys_s32_arg` (pids, poll's timeout: exactly the
+sign-extension an `int` binding produces) and `sys_word32_arg` (torpor's
+expected value: either extension). An unsigned 32-bit word is compared against
+`0xffffffff` where the cast used to be, so every earlier refusal keeps its
+order. `tools/check-arg-width.py` runs in `build_ramfs` beside the invariant
+registry check, self-tests first, and fails on any cast to a narrower type in
+`syscall.c` of a raw word (a `u64` parameter, a register read from the
+exception frame such as `ctx->regs[0]`, or a `u64` local copied from one) that
+no full-width compare, mask with a 64-bit complement or helper precedes. The
+frame rule found `sys_rfork_handler`, which took the whole frame and cast its
+flags word down: it now refuses a flags word wider than 32 bits with -EINVAL,
+and `fork.rfork_arg_rejection` pins it against the RFPROC leg one bit away. A
+deliberate narrowing carries a `// width:`
+note on its line or the line above (exits' status byte, pci_claim's packed
+ordinal, a protection word `burrow_prot_word_check` or `sys_attach_9p_flags_ok`
+already refused). It reads the cast, not the value: a constant bound named in
+capitals passes unread, and a comparison whose result is ignored would pass,
+so the audit still reads each guard. Functions named `viv_*` are exempt: they
+translate Linux calls, whose narrowing is Linux's ([[sub-kernel-vivarium]]).
+`/bin/argwidth-probe`, spawned by `syscall.argwidth_probe`, makes each covered
+call twice from EL0, the second time with a bit set above the declared width,
+and requires the refusal from the wide call and anything else from the narrow
+one. A narrow call that could change a shared file (wstat) names a closed
+descriptor, so it passes the width check and stops at the lookup's -1: the
+probe runs inside the suite, and a chmod of a ramfs binary would outlive it.
+Not covered at runtime, because their refusals share the flat -1 (ER-3)
+or need hardware or a service: the hardware handles (irq_wait, mmio_map,
+dma_map, dma_segments, pci_info, burrow_from_hostmem), weft_map, mount,
+attach_9p and attach_9p_srv, srv_accept and srv_peer, the tty pair,
+walk_create and the create form of open. Those rest on the static check.
+
+**Width audit round 1 append (2026-10-14).** `sys_lookup_root_source` (chroot,
+pivot_root) and `sys_resolve_dir_wr` (unlink, both rename directories) cast a
+raw fd down unchecked; both now take `sys_hidx_arg`. The width checker had
+never read them: its function pattern stopped at a `*` in the return type. It
+now reads pointer-returning functions, ignores a `// width:` inside a string,
+and counts a compare as a guard only when its statement refuses (returns, or
+opens a block that returns). `spoor_create_install`'s rights cast carries a
+note naming its callers' full-width omode check, which the old rule had taken
+from a strip. The native arms now live in `syscall_native_switch`; the
+phenotype branch stays in `syscall_dispatch_body`. Probe pairs: unlink's
+parent fd and rename's two directory fds, through a path handle and a missing
+name. chroot and pivot_root are covered statically only (the probe shares its
+parent's namespace).
+
+**Width audit round 2 append (2026-10-14).** The checker keeps char literals
+whole when it strips comments (a `'"'` had paired with a string's quote and
+blanked the rest of its line), and a compare on a cast of the word (`(u32)x >=
+N`) no longer counts as a guard: it is a low-half compare. A guard that returns
+any value counts, `return 0;` included; the cast never sees the wide word,
+and the answer's errno is review's question. Self-test cases charq, castcmp,
+castmask and clamp.
+
+**Width audit round 3 append (2026-10-14).** The checker normalises spacing
+before it searches for a guard, so `(u32)  x >= N` is still a cast compare
+(self-test castnote), and the mask guard takes the same uncast rule.
+
+The guard search normalises every run of whitespace, newlines included, so a
+cast split from its word across a line is still a cast compare (self-test
+castnl).
+
+## A failed call publishes no descriptor (2026-10-14, vote 10)
+
+Twelve sites installed a descriptor and, on a later failure, closed it by
+number. A peer thread could close and reuse the number in between and have
+its own file closed. The sweep moved every one of them onto the reserved slot
+of [[sub-kernel-handle]] ([[dec-2026-10-14-descriptor-slot-reservation]]).
+The pattern is reserve, do the work that can fail, install last.
+
+- **The open and create cores take a finish policy** (`struct
+  sys_open_finish`: `cloexec`, `dir_required`, `keep`). `sys_open_finish`
+  checks O_DIRECTORY on the resolved Spoor's qid before anything is
+  installed. It sets close-on-exec in the install's own hold
+  (`handle_alloc_cloexec`), or hands the Spoor back instead of installing
+  it. `sys_open_kpath_how` and `sys_open_create_kpath_how` thread the policy
+  through `open_create_try_create` and `spoor_create_install`. The `_for_proc`
+  names keep their old behaviour with a NULL policy.
+- `sys_copy_open_path` is SYS_OPEN's user-path copy, shared with the
+  phenotype's openat and fchmodat.
+- `sys_wstat_spoor_consume` is the wstat core's second half: field words
+  already checked, the Spoor's reference consumed. fchmodat calls it on a
+  Spoor it never installed.
+- **pipe**: `sys_pipe_reserve` takes both numbers and creates the pipe,
+  `sys_pipe_install` fills both, and `sys_pipe_abandon` returns both. Native
+  SYS_PIPE is reserve plus install. A table with one free number now refuses
+  before anything is published, where it used to install the read end and
+  close it.
+
+- **connect**: `viv_sock_connect_dial` takes the socket's ctl Spoor once and
+  runs `viv_sock_connect_dial_on` on it. The dial is written to it, and
+  `handle_replace_hooked` swaps only while the number still names it
+  ([[sub-kernel-vivarium]]). `viv_socket_for_test` drives the real socket arm
+  through `viv_tier2`.
+- **The socket arms' row lookup** (`viv_sock_row`) refuses a number that is not
+  live before it reads the row, so a reserved number's row is EBADF.
+- **close's hook** (`viv_socktab_drop_closing`) drops the row inside the
+  handle-table hold that answers whether the number is reserved
+  (`handle_locked_unless_reserved`, [[sub-kernel-handle]]).
+
+`sys_open_kpath_for_proc` still answers -1 for a full table, and
+`spoor_create_install` still answers -ENOMEM; `sys_open_finish` takes each
+core's answer as `full_rc`. The phenotype sites are in [[sub-kernel-vivarium]].
+
+## The socket verb arms prove their ctl (2026-10-19, 17:09Z)
+
+`viv_sock_pin_ctl` is the one place the three arms that write netd a ctl verb
+reach the fd: it pins with `sys_lookup_rw_handle` and keeps the pin only if
+`viv_socktab_ctl_is` says it is the row's own ctl, before any side effect (the
+identity, its lifecycle and the refusal errnos are in [[sub-kernel-vivarium]]).
+None of the three writes by number any more; `spoor_write_common` keeps its
+native callers.
+
+- **connect.** `viv_sock_connect_dial` pins through it -- RIGHT_WRITE for a
+  fresh dial, no right for a CONNECTING finish, which writes nothing -- and
+  `viv_sock_connect_dial_on`'s swap is `handle_replace_hooked` with connect's
+  commit (`viv_socktab_connected_locked`) as the hook, so the swap and the
+  CONNECTED transition are one step ([[sub-kernel-handle]]). The commit carries
+  the ctl Spoor the swap took out, so it also lands on a row a peer re-made
+  with that identity. A refused swap whose same-epoch row is CONNECTED returns
+  0: a peer finished the same connect.
+- **the datagram sendto.** `viv_sock_dgram_sendto` copies and parses the
+  destination and hands it to `viv_sock_dgram_send`, which pins, writes the
+  re-dial to the pin, and holds the pin through the data open and the send: a
+  fid on connection N keeps netd from handing N to another socket while data is
+  opened by path. A caught signal during the re-dial stays EINTR; any other
+  short write is ECONNREFUSED.
+- **listen.** `viv_sock_listen` pins after its decide and writes the announce to
+  the pin.
+
+Test drivers beside the others: `viv_listen_for_test` (the real arm through
+`viv_tier2`), `viv_sock_dgram_send_for_test` (past the parse, with a kernel
+address and an empty payload, so no user memory is read), and the KERNEL_TESTS
+hook `viv_sock_pin_hook_for_test`, which runs a test's stand-in peer thread
+between an arm's row read and its pin.
+

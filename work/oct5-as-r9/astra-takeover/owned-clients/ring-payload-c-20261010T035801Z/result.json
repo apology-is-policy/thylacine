@@ -1,0 +1,118 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 7,
+  "profiles": [
+    "asan+ubsan",
+    "optimized-ndebug-core"
+  ],
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-ring_payload.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-ring_payload.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "live-retire-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "live-retire-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "pool-closes-ring-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "pool-closes-ring-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "global-cap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "global-cap-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "cross-pool-overlap-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "cross-pool-overlap-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "failed-destroy-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "failed-destroy-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "stale-pool-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "stale-pool-run",
+      "rc": -6,
+      "expected_failure": true
+    }
+  ],
+  "limits": "Uninstalled full-ring C payload core; simulated backend, native registration/CQ/futures/executor integration pending"
+}

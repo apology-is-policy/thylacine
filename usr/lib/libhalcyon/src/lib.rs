@@ -14,12 +14,20 @@
 extern crate alloc;
 
 pub mod carve;
+pub mod cursor;
 pub mod instrument;
+pub mod interaction_control;
+pub mod interaction_wire;
+pub mod interaction_body;
+pub mod interaction_frame;
 pub mod layout;
 pub mod motion;
 pub mod place;
 pub mod scale;
+pub mod seat_control;
 pub mod skeleton;
 pub mod tag;
 pub mod theme;
 pub mod toml;
+
+pub mod interaction_events;

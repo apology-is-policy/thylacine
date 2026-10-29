@@ -1,0 +1,2 @@
+source bound: got0 want-22
+Assertion failed: (0), function check, file source-bound.c, line 73.

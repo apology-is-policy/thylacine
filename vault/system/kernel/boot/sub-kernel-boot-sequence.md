@@ -10,6 +10,7 @@ code:
   - kernel/canary.c
   - kernel/include/thylacine/canary.h
   - kernel/fault_test.c
+  - kernel/include/thylacine/fault_test.h
   - tools/test-fault.sh
 audit: hard
 guarded-by: [inv-i15]
@@ -19,7 +20,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -82,11 +83,24 @@ behaviour, and exec init.
 - **The user pool sized after the physical allocator and before the first
   Proc** (B-1a', 2026-09-23). `capacity_init` reads `phys_total_pages()`
   immediately after `phys_init` to fix the TCB reserve and the pool, and
-  `proc_init`'s kproc and every later `proc_alloc` seed their budget from it
+  `proc_init`'s kproc and every later `proc_alloc_in` seed their budget from it
   -- a Proc created earlier would carry a zero budget and refuse every charge,
   and the pool refuses every non-exempt charge until it is sized
   (fail-closed). A second call extincts, as does a machine that leaves no pool
   ([[sub-kernel-addrspace]]).
+- **No userspace without a strong seed, decided before the suite**
+  (2026-10-26, operator vote 18). Right after `virtio_init` the boot
+  strong-reseeds the CSPRNG from the virtio-rng device. If the pool is still
+  unseeded -- neither RNDR (absent, or dry on every read) nor a virtio-mmio
+  virtio-rng gave it entropy -- the boot extincts: `EXTINCTION: CSPRNG
+  unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the boot reseed
+  entropy; refusing to start userspace`. It sits
+  ahead of the suite, not just ahead of init, because the suite's probes are
+  EL0 processes too and exec fails closed on an unseeded pool
+  ([[sub-kernel-exec]]): a refusal after the suite would never print in a
+  test build, which would die under failed probe execs instead. The pool
+  never returns to unseeded ([[sub-kernel-content]]), so the check holds for
+  every exec after it.
 - **The idle thread before the suite**, because tests block, and a blocking
   thread with nothing else runnable needs somewhere to go.
 - **Console receive and the manager thread after the scheduler**, because the
@@ -125,7 +139,7 @@ the overwrite, and a compiler barrier forces the write to complete before
 lifetime. A frame that straddled the write would fail its own epilogue check on a
 stack it never smashed. `__stack_chk_fail` routes a detected smash to
 `extinction()`, the last-resort path any kernel invariant break takes; it is one
-of the seven `tools/test-fault.sh` provokers that prove the protection actually
+of the fourteen `tools/test-fault.sh` provokers that prove the protection actually
 *fires* rather than merely compiling in.
 
 **Those provokers are load-bearing precisely because they are fragile, and the
@@ -141,7 +155,13 @@ stores; `bti_fault` calls a non-guarded target through a function pointer, but
 clang devirtualizes `fp()` to a direct `bl`, which does not set `PSTATE.BTYPE`,
 so the BTI check never runs — a `volatile` on the pointer forces the `blr` that
 does. `wxe_violation` writes to `_kernel_start` (RX, no W) and the MMU raises the
-permission fault. `pac_mismatch` is deferred (forging a poisoned LR depends on
+permission fault. The four `wxe_install_*` variants (vote 22, 2026-10-27), one
+per leaf encoder, have `mmu.c` encode a writable and executable leaf -- a kernel
+page, an L2 and an L1 kernel block, each with an execute-never bit cleared, and
+a user page asked for `W|X` past the install entries' refusal -- and pass only
+on the encoder's own extinction body, which names the leaf kind (an L1 block
+apart from an L2), so the permission-fault path cannot satisfy them; each also
+fails if the provoker's own `FAIL: a W+X leaf was encoded` line appears ([[sub-kernel-mmu]]). `pac_mismatch` is deferred (forging a poisoned LR depends on
 FEAT_FPAC specifics); v1.0 verifies PAC by asserting `SCTLR_EL1.EnIA` + a
 non-zero APIA key, code-reviewing `paciasp/autiasp` emission, and the ARM-mandated
 hardware enforcement. The matrix is only as good as its being *run*:
@@ -222,6 +242,29 @@ The banner contract [[abi-boot-banner]] is UNCHANGED: `Thylacine boot OK` and
 the `EXTINCTION:` prefix are what it pins, and this is an additive diagnostic
 line of the same class as its two neighbours.
 
+### Service kernel threads started late, and why the retirer is one of them
+
+`boot_main` starts a small number of permanently resident kernel threads on `kproc()` once
+the subsystems they serve exist. The private-ring retirer joins the weft reaper
+there: `loom_retire_init()` then a `thread_create(kproc(), loom_retirer_main)`
+made `ready`, with an `extinction` on allocation failure because a boot that
+cannot create its service threads has no sound state to continue into.
+
+WHY THE TEARDOWN NEEDS A THREAD AT ALL, since that is the part a reader will
+question. A private Loom's last reference can be dropped by a thread that must
+not block, but the teardown it triggers settles the ring's backing charge and
+releases the address-space pin -- work that must happen under locks a dropping
+thread may not be in a position to take. So the drop ENQUEUES and this thread
+performs. It parks indefinitely while the queue is empty, and the queue needs no
+admission control of its own because every entry on it is a ring that was
+already charged on creation: the bound is the charge, not the queue.
+
+This is an ordering constraint on boot, not merely a placement preference. The
+retirer must exist before anything can create a private ring, which is why it is
+started in `boot_main` rather than lazily on first use -- a lazily-created
+retirer would have to be created by the dropping thread, which is exactly the
+thread that cannot block. See [[sub-kernel-loom]] for the lifecycle it serves.
+
 ## Data structures
 
 Almost none of its own: a one-shot completion flag, a painted boot stack for
@@ -255,7 +298,8 @@ Almost every initializer that can fail is fatal, and deliberately so: there is n
 degraded mode for a kernel without a physical allocator or an interrupt
 controller. The exceptions are the ones with a defined fallback — no
 power-management interface means running with one CPU, no entropy device means
-keeping the boot seed, no real-time clock means an epoch of zero and a clock that
+keeping the boot seed on a CPU with RNDR (and refusing userspace on one without,
+above), no real-time clock means an epoch of zero and a clock that
 reads uptime.
 
 The suite failing is fatal. Init exiting non-zero before signalling completion is
@@ -357,3 +401,57 @@ emitter's writer role — the delivery half of [[abi-boot-banner]] — is
 unowned) — the `__stack_chk_guard` link-time-magic → KASLR-seeded-runtime-cookie
 lifecycle, the barrier that keeps one cookie per frame, and `__stack_chk_fail` →
 `extinction` — at the 12-hardening absorption.
+
+**Fault variant append (2026-10-14).** `extinction_peer_chatter` pins a
+chattering thread to every peer CPU (enabling notify itself, since
+`fault_test_run` runs before main.c does) and extincts on cpu0;
+tools/test-fault.sh requires the banner as a whole line.
+
+The chatter threads stop after 5 s, so a kernel without the gate leaves a
+small log to time out on. The provoker refuses to extinct with IRQs masked
+(only a caller with IRQs on can tell a masked claim from an unmasked one), and
+test-fault.sh forbids `console-claim: taken with irqs on` for the variant.
+
+test-fault.sh lets the log stop growing (bounded, ~5 s) before it kills a
+variant that printed its expected line: the whole-line and forbidden-line
+checks read what the kernel prints after the banner, and a log cut short
+would judge a late line absent.
+
+test-fault.sh passes `THYLACINE_FAULT_BUILD_ARGS` (word-split) to build.sh
+before the variant's define. A harness whose mutant fails a suite test, which
+would extinct before the provoker, builds that variant with `--config default
+--set TESTS=n`.
+
+**Launch variant (2026-10-26).** `no_entropy` builds no provoker: its
+`launch_env_for` entry boots it under TCG `-cpu cortex-a72` (no RNDR) with
+`THYLACINE_NO_RNG=1`, and test-fault.sh requires the refusal's body with the
+suite's first line, `  tests:`, absent -- a refusal printed once the suite
+had started came too late.
+
+**Fault variant append (2026-10-27).** `extinction_mmu_off` encodes a W+X kernel
+page at the top of `build_page_tables`, with stage 1 still off, so its
+extinction must print through `extinction()`'s MMU-off path, which executes no
+exclusive ([[sub-kernel-halls]]). It reuses the `PTE violates W^X at install
+(kernel page)` body, so the matched set stays twelve bodies, and test-fault.sh's
+new `require_for` names what the expected line cannot: the report line
+`console-claim: skipped with the MMU off` and a symbolized `extinction+0x` frame
+(before the MMU every code address is physical, and only the dump's rebase names
+it). Without the fix the variant printed nothing, on HVF and on thyla-pi's KVM.
+Since 2026-10-28 it also requires a `  mmu_enable+0x` frame: `mmu_enable` ends in
+its call to `extinction`, so only a dump that names a return address at its call
+names that frame for it ([[sub-kernel-halls]]).
+
+**The vectors before the first C call (2026-10-27, later).** Arming the vector
+table is no longer a step of this sequence: `start.S` installs it before
+`kaslr_init` and again at the high VA before `boot_main`
+([[sub-kernel-boot-entry]]), and the step that used to install it,
+`exception_init`, became `exception_vectors_verify`, which extincts if the table
+is not installed. Every step this note lists before it -- the DTB parse, the
+console remap, the feature probes, the physical allocator, the DTB relocation,
+the slab allocator -- used to fault into a reset-UNKNOWN vector base and hang
+silently; now each prints. Three fault variants witness it, provoked from
+`fault_test_unaligned_load` (`kernel/fault_test.c`) and the top of `boot_main`:
+`vbar_pre_reloc` in `kaslr_init` before the relocation walk, `vbar_pre_mmu` at
+the top of `build_page_tables`, both `EXTINCTION: unhandled kernel alignment
+fault` with the MMU off; `vbar_boot_main`, `EXTINCTION: PTE violates W^X` with the
+banner forbidden (its text read from this file's banner line).

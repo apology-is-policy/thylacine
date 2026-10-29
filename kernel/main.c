@@ -28,7 +28,9 @@
 #include "../mm/magazines.h"
 #include "../mm/phys.h"
 #include "../mm/slub.h"
+#ifdef KERNEL_TESTS
 #include "test/test.h"
+#endif
 
 #include <thylacine/pci_irq.h>
 #include <thylacine/canary.h>
@@ -52,44 +54,22 @@
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
 #include <thylacine/image.h>    // image_cache_init (REVENANT R-3)
-#include <thylacine/vdso.h>
-#include <thylacine/weft.h>     // vdso_init (the clock vDSO page, #343)
+#include <thylacine/vdso.h>     // vdso_init (the clock vDSO page, #343)
+#include <thylacine/weft.h>
+#include <thylacine/loom.h>     // loom_retire_init / loom_retirer_main
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/9p_attach.h>  // p9_closer_start (FID-LIFECYCLE section 9)
 #include <thylacine/dev9p.h>
 #include <thylacine/pipe.h>
-#include <thylacine/random.h>  // random_seed_from_virtio (Lazarus W3b)
+#include <thylacine/random.h>  // random_seed_from_virtio (Lazarus W3b), kern_random_seeded
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/virtio_pci.h>
 
 #include "../arch/arm64/psci.h"
-
-// From arch/arm64/start.S — DTB physical address handed to us by the
-// bootloader (in x0 per the Linux ARM64 boot protocol). Populated
-// before boot_main() is called.
-extern volatile u64 _saved_dtb_ptr;
-
-// From arch/arm64/start.S — 1 if the kernel was entered at EL2 and
-// dropped to EL1 by _real_start, 0 if entered at EL1 directly. Used
-// for the el-entry banner diagnostic; surfaces a Pi 5 (or other
-// EL2-entry firmware) condition that QEMU virt never exhibits.
-extern volatile u64 _entered_at_el2;
-
-// From arch/arm64/start.S — CNTPCT_EL0 captured at the very start of
-// _real_start. Used to compute the boot-time banner (P1-I).
-extern volatile u64 _boot_start_cntpct;
-
-// From arch/arm64/kernel.ld.
-extern char _kernel_start[];
-extern char _kernel_end[];
-
-// From arch/arm64/kernel.ld — the boot CPU's static 16 KiB stack. The
-// kthread (TID 0, kstack_base==NULL) runs the entire in-kernel test suite
-// on this stack, including the deep proc.rfork_stress_1000 chain.
-extern char _boot_stack_bottom[];
-extern char _boot_stack_top[];
+#include "../arch/arm64/sections.h"
+#include <thylacine/fault_test.h>
 
 // #806 boot-stack high-water probe. Paint the unused boot stack at boot_main
 // entry, scan the deepest sentinel-overwrite after the suite -> measure the
@@ -257,6 +237,15 @@ bool boot_mark_complete(void) {
 }
 
 void boot_main(void) {
+#ifdef THYLACINE_FAULT_TEST_vbar_boot_main
+    // A W^X fault before the banner and before exception_vectors_verify: only
+    // the vectors start.S installed can turn it into an EXTINCTION line.
+    {
+        volatile char *text = _kernel_start;
+        __asm__ __volatile__("" : "+r"(text));
+        *text = (char)0xCC;
+    }
+#endif
     // #806 probe: paint the unused boot stack first thing, before any deep
     // call uses it. boot_stack_report() (post-suite) reads the high-water.
     boot_stack_paint();
@@ -274,7 +263,7 @@ void boot_main(void) {
 
     // Phase 1: parse the DTB (early prints use the fallback PL011 base
     // 0x09000000 from uart.c; if the DTB places PL011 elsewhere,
-    // uart_set_base() below will update it before the banner prints).
+    // uart_remap_to_vmalloc() below will update it before the banner prints).
     bool dtb_ok = dtb_init((paddr_t)_saved_dtb_ptr);
 
     u64 mem_base = 0, mem_size = 0;
@@ -452,15 +441,11 @@ void boot_main(void) {
     // kfree / kmem_cache_*.
     slub_init();
 
-    // Phase 4: arm the exception vector table (P1-F). After this,
-    // synchronous faults route through arch/arm64/exception.c —
-    // boot-stack guard region accesses → extinction("kernel stack
-    // overflow"); kernel-image permission faults → extinction(
-    // "PTE violates W^X"); other sync faults → extinction with
-    // ESR/FAR/ELR diagnostic. The IRQ slot is wired by P1-G below.
-    // FIQ / SError + lower-EL group remain unexpected (Phase 2
-    // wires up the lower-EL group when userspace lands).
-    exception_init();
+    // Phase 4: the exception vector table (P1-F). start.S installed it before
+    // the first C call (at its PA, then at its high VA before boot_main), so
+    // every fault above already routed through arch/arm64/exception.c. The IRQ
+    // slot is wired by P1-G below.
+    exception_vectors_verify();
 
     // Phase 5: bring up the GIC, ARM generic timer, and route the
     // timer IRQ (PPI 11 → INTID 27, the virtual timer) through. After this the kernel
@@ -635,6 +620,14 @@ void boot_main(void) {
             uart_puts(" iters; chacha keeps the boot seed)\n");
         }
     }
+
+    // Vote 18 (PORTABILITY.md section 6): no EL0 code runs on an unseeded pool.
+    // This reseed is the last one before the suite's probes and init, and
+    // g_rng_seeded never goes back to false, so every exec after this line
+    // draws from a seeded pool.
+    if (!kern_random_seeded())
+        extinction("CSPRNG unseeded: neither RNDR nor a virtio-mmio virtio-rng gave the "
+                   "boot reseed entropy; refusing to start userspace");
 
     // P4-Ib R9 F142: reserve kernel-owned INTIDs in g_intid_claimed
     // so that subsequent kobj_irq_create (via SYS_IRQ_CREATE syscall
@@ -833,6 +826,18 @@ void boot_main(void) {
         if (!weft_reaper) extinction("boot_main: weft_reaper alloc failed");
         ready(weft_reaper);
     }
+
+    // The private-ring retirer. A private Loom's last reference can be dropped
+    // by a thread that must not block, so the teardown -- which settles the
+    // ring's charge and releases the image pin -- is handed to this thread
+    // instead. Parks indefinitely while nothing is queued; the queue is bounded
+    // by rings that are already charged, so it needs no admission control.
+    loom_retire_init();
+    {
+        struct Thread *retirer = thread_create(kproc(), loom_retirer_main);
+        if (!retirer) extinction("boot_main: private Loom retirer alloc failed");
+        ready(retirer);
+    }
     uart_puts("  cons:  UART RX live (INTID ");
     uart_putdec((u64)UART_INTID_PL011);
     uart_puts("); console_mgr kthread up\n");
@@ -873,6 +878,15 @@ void boot_main(void) {
             uart_putdec(test_soft_warns());
             uart_puts(" soft-warn)");
         }
+        if (test_skipped() > 0) {
+            // Tests this configuration could not run (a device, a second CPU
+            // or an MSI controller the launcher did not declare): not
+            // passes, and never silent.
+            // Appended last, so every `tests: N/M PASS` reader still matches.
+            uart_puts(" (");
+            uart_putdec(test_skipped());
+            uart_puts(" skipped)");
+        }
         uart_puts("\n");
     } else {
         uart_puts(" FAIL\n");
@@ -904,7 +918,6 @@ void boot_main(void) {
     // was hit on this boot (host-stalled secondary; common only under E-core
     // contention) AND the on_cpu gate handled it instead of corrupting.
     {
-        extern u64 thread_free_oncpu_waits(void);
         u64 waits = thread_free_oncpu_waits();
         if (waits > 0) {
             uart_puts("  thread_free on_cpu-waits: ");
@@ -937,7 +950,6 @@ void boot_main(void) {
     // THYLACINE_FAULT_TEST is set, this triggers exactly one
     // hardening protection (canary smash / W^X / BTI); the resulting
     // EXTINCTION: line is what tools/test-fault.sh checks for.
-    extern void fault_test_run(void);
     fault_test_run();
 
     // P3-G: enable cross-CPU work-stealing IPIs from ready()/wakeup().
@@ -979,6 +991,5 @@ void boot_main(void) {
     // the banner already printed via SYS_BOOT_COMPLETE if joey got that far).
     // boot_main() must not return; start.S falls through to _torpor, but be
     // explicit.
-    extern void _torpor(void) __attribute__((noreturn));
     _torpor();
 }

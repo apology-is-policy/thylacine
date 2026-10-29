@@ -4,14 +4,16 @@ type: moc
 title: "Boot — establishing what everything after it assumes"
 parent: moc-kernel
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-27
 ---
 The path from the bootloader's first instruction to `Thylacine boot OK`: the
 image header and the pre-C stub ([[sub-kernel-boot-entry]]), the randomized
 kernel base ([[sub-kernel-kaslr]]), the hardware description everything else is
 derived from ([[sub-kernel-dtb]]), the boot-time rewrite of the atomic baseline
 ([[sub-kernel-alternatives]]), and the ordering contract that composes them
-([[sub-kernel-boot-sequence]]).
+([[sub-kernel-boot-sequence]]). Beside them, the rule the image's files see each
+other by: one checked declaration per shared name, the linker's symbols among
+them ([[sub-kernel-declarations]]).
 
 ## The organizing fact
 

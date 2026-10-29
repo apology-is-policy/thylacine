@@ -1,0 +1,26 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "source_base": "0bfcd2447c155a0c8be3df09f4686719ebc5ecb6",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "state": "verified-uninstalled-operation-retirement",
+  "run": "work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T235256Z",
+  "checks": 795,
+  "prior_provided_checks": 554,
+  "mutants": 15,
+  "operation_bytes": 920,
+  "protocol_bytes": 42288,
+  "arm64": "arm64-result.json",
+  "verified_inputs": 39,
+  "verified_source_binary_pairs": 16,
+  "verified_arm_objects": 10,
+  "limits": "Actual client-mark-dead/progress-abort, transport/session/codec abort, per-owner close and physical operation destructor, final pool-destruction helper, request/FID/pool/CQ transitions. Parsed successful replies remain synthetic; submission forbidden. Host native teardown, translation, allocator, image snapshot, ref/engine/wake and physical backing drop boundaries. Earlier preparation/provided cases retain manual fixture destruction; new retirement cases use actual destructor. Final pool helper is called at simulated zero Loom references, not actual retirer. No native READY/frontend/close/concurrency qualification.",
+  "review": "single-agent self-review; not independent audit",
+  "utc": "2026-10-09T23:54:00.826034+00:00",
+  "next": "next-work.txt",
+  "issues": {
+    "RETIRE-R1": "actual abort TX-flag defect reproduced and draft-repaired; canonical installation owed",
+    "RETIRE-R2": "terminal commit separated from MORE delivery in draft; driver routing owed",
+    "PROVIDED-R3": "per-owner whole-close disposal implemented in draft; actual engine integration owed"
+  }
+}

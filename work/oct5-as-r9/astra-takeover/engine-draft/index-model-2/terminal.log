@@ -1,0 +1,126 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 29 and seed 2630471986781694254 with 1 worker on 8 cores with 455MB heap and 64MB offheap memory [pid: 20997] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/specs/loom_service_index.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-11468984935356261685/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-11468984935356261685/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-11468984935356261685/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-11468984935356261685/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module loom_service_index
+Linting of module loom_service_index
+Starting... (2026-10-09 19:47:45)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 19:47:45.
+Error: Invariant TerminalRetained is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ terminal |-> FALSE,
+  phase |-> "empty",
+  gen |-> 0,
+  pins |-> 0,
+  allocated |-> FALSE,
+  aborted |-> FALSE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+State 2: <Prepare line 10, col 12 to line 13, col 53 of module loom_service_index>
+s = [ terminal |-> FALSE,
+  phase |-> "prepared",
+  gen |-> 1,
+  pins |-> 0,
+  allocated |-> TRUE,
+  aborted |-> FALSE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+State 3: <Install line 14, col 12 to line 16, col 66 of module loom_service_index>
+s = [ terminal |-> FALSE,
+  phase |-> "installing",
+  gen |-> 1,
+  pins |-> 1,
+  allocated |-> TRUE,
+  aborted |-> FALSE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> TRUE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+State 4: <Abort line 17, col 10 to line 18, col 40 of module loom_service_index>
+s = [ terminal |-> FALSE,
+  phase |-> "installing",
+  gen |-> 1,
+  pins |-> 1,
+  allocated |-> TRUE,
+  aborted |-> TRUE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> TRUE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+State 5: <WakeDone line 22, col 13 to line 24, col 62 of module loom_service_index>
+s = [ terminal |-> FALSE,
+  phase |-> "live",
+  gen |-> 1,
+  pins |-> 0,
+  allocated |-> TRUE,
+  aborted |-> TRUE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> FALSE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+State 6: <LocalAbort line 32, col 15 to line 33, col 60 of module loom_service_index>
+s = [ terminal |-> TRUE,
+  phase |-> "live",
+  gen |-> 1,
+  pins |-> 0,
+  allocated |-> TRUE,
+  aborted |-> TRUE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> TRUE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+State 7: <Collect line 36, col 12 to line 39, col 45 of module loom_service_index>
+s = [ terminal |-> TRUE,
+  phase |-> "removed",
+  gen |-> 1,
+  pins |-> 0,
+  allocated |-> TRUE,
+  aborted |-> TRUE,
+  published |-> FALSE,
+  delivered |-> FALSE,
+  local |-> TRUE,
+  installer |-> FALSE,
+  exposed |-> FALSE,
+  late |-> FALSE,
+  stale |-> FALSE ]
+
+21 states generated, 17 distinct states found, 6 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 00s at (2026-10-09 19:47:45)

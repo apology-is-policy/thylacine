@@ -43,9 +43,8 @@
 //     stale RAM contents instead of the live "virt" magic, and the
 //     probe would exit 1.
 //
-// If /mmio-probe wasn't built (fresh checkout where `tools/build.sh
-// userspace` hasn't run yet), the test prints a skip notice and
-// returns PASS. Production / CI always builds the full ramfs.
+// A missing /mmio-probe FAILS the test when the image carries userspace
+// (bin/joey); a userspace-less image makes it a counted skip.
 
 #include "test.h"
 
@@ -58,8 +57,6 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/uart.h"
-
-void test_mmio_probe_rfork_with_caps(void);
 
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
 // requirement on the Ehdr cast in exec_setup). Sized to match the P4-K
@@ -114,11 +111,8 @@ void test_mmio_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/mmio-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/mmio-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/mmio-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
     TEST_ASSERT(size <= MMIO_PROBE_BLOB_MAX,
                 "mmio-probe binary too large for static buffer");

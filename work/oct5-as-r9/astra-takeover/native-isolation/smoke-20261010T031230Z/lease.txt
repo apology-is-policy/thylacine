@@ -1,0 +1,4 @@
+mac   HELD by you for 0s, 19m left
+        why: Astra same-worker independent scope smoke
+pi    FREE
+disk: 8.9 GiB available at /Users/northkillpd/projects/thylacine-astra

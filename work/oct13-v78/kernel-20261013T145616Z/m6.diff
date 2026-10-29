@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/loom.c	2026-10-13 16:56:16
++++ kernel/loom.c	2026-10-13 17:05:55
+@@ -1746,7 +1746,7 @@
+     u32 done = 0;
+     int rc = 0;
+     for (; done < n; done++) {
+-        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -T_E_INVAL; break; }
++        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -1; break; } // MUTANT M6
+     }
+     spin_unlock(&p->as->lock);
+     if (rc != 0) {

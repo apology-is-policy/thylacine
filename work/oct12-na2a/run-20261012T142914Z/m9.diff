@@ -1,0 +1,13 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index f1bc5161f..630f1880c 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -7983,7 +7983,7 @@ static int loom_record_copyout_user(void *ctx, u32 offset, const void *src, u32
+     u64 base = ((const struct loom_record_user *)ctx)->va;
+     const u8 *b = (const u8 *)src;
+     for (u32 i = 0; i < len; i++)
+-        if (uaccess_store_u8(base + offset + i, b[i]) != 0) return -T_E_FAULT;
++        (void)uaccess_store_u8(base + offset + i, b[i]); // MUTANT M9
+     return 0;
+ }
+ 

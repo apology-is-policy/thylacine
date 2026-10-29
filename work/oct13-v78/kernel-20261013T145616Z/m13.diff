@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:14:16
+@@ -7981,7 +7981,7 @@
+     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
+         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
+             sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
+-            return -T_E_FAULT;
++            return -1; // MUTANT M13
+         }
+     }
+     return (s64)fd;

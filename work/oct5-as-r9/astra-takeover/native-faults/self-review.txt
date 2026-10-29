@@ -1,0 +1,24 @@
+Astra single-agent self-review, October 10. This is not an independent audit.
+
+New fixture only: canonical production async source is unchanged. Six READ
+schedules per connection class follow real worker CONNECT/WALK/LOPEN. No explicit
+engine visits drive these operations. Peer capture is bounded, validates exact
+TREAD framing, and injects no response, header/body fragment, length6, or wrong
+reply type. The sixth schedule cancels after filling the two-entry CQ.
+
+Observation pin and peer endpoint remain held while the worker must retire the
+scope locally. Query uses Ll and CQ uses acquire/release. Full CQ must preserve
+the canceled terminal until creator zero-submit acknowledges room. One negative
+CQE must retain the copied correlation. Physical fixed/request ownership must
+return before payload unregister; failed READ must not publish partial bytes.
+Cleanup uses existing whole-close/join before dropping peer or mapping. Outer
+fixture requires eventual Loom retirement and process page/accounting restoration.
+
+Limits: partial-fragment consumption before cancellation is scheduler-dependent
+(the worker is yielded to, not deterministically paused at a receive offset).
+Malformed cases assert scope retirement and a negative result, not a specific
+protocol errno. The endpoint remains referenced; no remote filesystem is tested.
+These are six schedules in two classes, not exhaustive AS3. WRITE unknown-commit,
+deadline, connection-stage faults, repeated reconnect, independent media progress,
+owned clients and AS4/MM0-MM4 still need qualification. Five single-boot rows do
+not replace the50boot gate. No public activation or128MiB change.

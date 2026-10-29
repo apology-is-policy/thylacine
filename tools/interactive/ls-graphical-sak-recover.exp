@@ -115,7 +115,7 @@ witness restored
 # And the seat itself works again, end to end, through a real conferral.
 type "imperium chown dac\n"
 after 1200
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 after 1000
 type "imperium-key-michael-v1"
 key "ret"

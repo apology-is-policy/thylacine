@@ -1,0 +1,12 @@
+PASS control
+PASS omit-deadline
+PASS omit-owner-ref
+PASS omit-target-put
+PASS omit-owner-charge
+PASS omit-send-charge
+PASS alias-inline
+PASS omit-recv-free
+PASS omit-native-release
+PASS omit-published-guard
+PASS omit-close-recheck
+PASS early-owner-drop

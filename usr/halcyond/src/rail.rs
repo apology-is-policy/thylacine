@@ -847,6 +847,8 @@ pub fn footer_list(
 
     // --- Right: the pane count, the separator, the host ------------------------
     let host = m.host.as_deref().unwrap_or("LOCAL").to_uppercase();
+    // Host context yields before it can displace the fixed mode field.
+    let host = fit_end(gs, mono, mono_px, &host, (wi / 3).max(0));
     let host_run = tracked(gs, mono, mono_px, &host);
     let host_x = wi - pad - host_run.width;
     push(&mut cart, gen, host_x, base, i.secondary, &host_run);
@@ -863,7 +865,14 @@ pub fn footer_list(
     let panes_x = sep_x - sm - panes_run.width;
     push(&mut cart, gen, panes_x, base, i.secondary, &panes_run);
     slots.clock = (panes_x, wi - pad - panes_x);
-    let right_start = panes_x;
+    let mode_run = tracked(gs, mono, mono_px, m.mode.label());
+    let mode_pad = sheet.ipx(5).max(1);
+    let mode_text_w = crate::modeview::DisplayMode::ALL.iter()
+        .map(|mode| tracked(gs, mono, mono_px, mode.label()).width).max().unwrap_or(0);
+    let mode_w = mode_text_w + 2 * mode_pad;
+    let mode_x = panes_x - sm - mode_w;
+    let right_start = mode_x;
+    slots.mode = (mode_x, mode_w);
 
     // --- Left: the condition, or the notice ---------------------------------------
     let gb = sheet.ipx(GLYPH_BOX);
@@ -966,6 +975,11 @@ pub fn footer_list(
             push(&mut cart, gen, x, base, s.color, &s.run);
             x += s.run.width + hgap;
         }
+    }
+    if mode_x >= 0 && ch > 2 * hair {
+        let (fill, ink) = m.mode.colors(&sheet.theme);
+        rect(&mut cart, mode_x, oy + hair, mode_w, ch - 2 * hair, fill);
+        push(&mut cart, gen, mode_x + (mode_w - mode_run.width) / 2, base, ink, &mode_run);
     }
     (cart, slots)
 }
@@ -1582,7 +1596,7 @@ mod tests {
         let left_end = ready.0 + ready.4;
         let (cx, cw) = sl.ctx;
         assert_eq!(cx, centre[0].0);
-        assert!(((cx - left_end) - (panes.0 - (cx + cw))).abs() <= 1, "centred between the groups");
+        assert!(((cx - left_end) - (sl.mode.0 - (cx + cw))).abs() <= 1, "centred between the groups");
         // One pane reads singular.
         let (c, _) = footer_list(&StatusModel { pane_count: 1, ..footer_model() }, 1440, 25, &s, &mut gs);
         assert!(runs(&c).iter().any(|x| x.3 == "1 PANE".len() && x.0 > 1200));

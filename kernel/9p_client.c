@@ -79,6 +79,7 @@ static void copy_attr(struct p9_attr *dst, const struct p9_attr *src) {
     dst->data_version = src->data_version;
 }
 
+#ifdef KERNEL_TESTS
 static void copy_statfs(struct p9_statfs *dst, const struct p9_statfs *src) {
     dst->type    = src->type;
     dst->bsize   = src->bsize;
@@ -90,6 +91,7 @@ static void copy_statfs(struct p9_statfs *dst, const struct p9_statfs *src) {
     dst->fsid    = src->fsid;
     dst->namelen = src->namelen;
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Internal: error mapping.
@@ -231,6 +233,19 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
     // c->lock, and no caller here holds a pipe or srvconn lock: those locks
     // are private to pipe.c and srvconn.c, neither of which calls the client.
     if (!was_dead) p9_transport_hangup(&c->transport);
+    if (c->progress) {
+        // Completion may free an RPC. Drop the TX pointer before callbacks;
+        // terminal teardown never waits for a frame, Tflush or Tclunk.
+        struct p9_rpc *sending = c->progress->sending;
+        c->progress->sending = NULL;
+        p9_handshake_progress_abort(&c->progress->handshake);
+        p9_transport_progress_abort(&c->progress->io);
+        // The progress cursor no longer borrows its frame. End the RPC's TX
+        // hold before callbacks can settle/free it, including an early-replied
+        // RPC already removed from inflight[]. Legacy blocking senders retain
+        // their existing ownership; this edge is progress-mode only.
+        if (sending) sending->sending = false;
+    }
     struct p9_outstanding *e;
     for (u32 tag = 0; (e = p9_session_next_active(&c->session, &tag)) != NULL; tag++) {
         struct p9_rpc *r = e->owner;
@@ -494,6 +509,12 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         return;
     }
     struct p9_rpc *owner = client_owner(c, tag);
+    if (c->progress && (!owner || owner->sending)) {
+        // A private session has no ownerless flush/clunk flows. In particular,
+        // a guessed reply must not retire the RPC whose TX buffer is borrowed.
+        client_mark_dead_locked(c, false);
+        return;
+    }
     if (owner) {
         c->demux_owned++;          // #210
         if (owner->on_complete) {
@@ -1413,6 +1434,12 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         rpc->on_complete(rpc, -P9_E_IO, NULL);   // own it: complete + bail
         return -P9_E_IO;
     }
+    if (c->progress && c->progress->io.tx) {
+        // The shared out_buf is immutable until the partial frame is sent.
+        client_unlock(c);
+        rpc->on_complete(rpc, -P9_E_AGAIN, NULL);
+        return -P9_E_AGAIN;
+    }
     // A full share is a shortage, not a failure of this op: a sync op waits
     // for a tag (client_await_tag_locked), but an async submitter must not
     // block, so the op completes with the retryable -P9_E_AGAIN before
@@ -1464,6 +1491,20 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     p9_session_mark_async(&c->session, tag);
     client_register(c, tag, rpc);
 
+    if (c->progress) {
+        rpc->sending = true;
+        c->progress->sending = rpc;
+        if (p9_transport_progress_queue(&c->progress->io, c->out_buf,
+                                        (size_t)built) < 0) {
+            client_mark_dead_locked(c, false);
+            client_unlock(c);
+            return -P9_E_IO;
+        }
+        c->total_ops++;
+        client_unlock(c);
+        return 0;
+    }
+
     int src = p9_transport_send(&c->transport, c->out_buf, (size_t)built);
     if (src == P9_TRANSPORT_EAGAIN) {
         // A full send ring is back-pressure, not a break, as on the sync path
@@ -1491,6 +1532,72 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     return 0;
 }
 
+// Private clients reuse the same builders, tag table and demux. The progress
+// cursor only changes byte delivery: no blocking path may touch its out_buf.
+int p9_client_progress_bind(struct p9_client *c, struct p9_client_progress *p,
+                            struct p9_transport_try_ops ops, u32 principal,
+                            u64 deadline_ns) {
+    if (!c || c->magic != P9_CLIENT_MAGIC || !p) return -P9_E_INVAL;
+    client_lock(c);
+    if (c->progress || c->dead || c->reader_active ||
+        c->session.state != P9_SESS_INIT || c->session.total_sent ||
+        p9_session_inflight(&c->session)) {
+        client_unlock(c); return -P9_E_INVAL;
+    }
+    *p = (struct p9_client_progress){0};
+    if (p9_transport_progress_init(&p->io, &c->transport, ops,
+                                   c->session.msize) < 0) {
+        client_unlock(c); return -P9_E_INVAL;
+    }
+    p->sending = NULL;
+    p->rx_next = false;
+    c->progress = p;
+    int rc = p9_handshake_progress_init(&p->handshake, &c->session, &p->io,
+                                        c->out_buf, c->out_buf_cap, principal,
+                                        deadline_ns);
+    if (rc < 0) client_mark_dead_locked(c, false);
+    client_unlock(c);
+    return rc;
+}
+
+void p9_client_progress_abort(struct p9_client *c) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return;
+    client_lock(c);
+    if (c->progress) client_mark_dead_locked(c, false);
+    client_unlock(c);
+}
+
+int p9_client_progress_step(struct p9_client *c, u64 now_ns) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    client_lock(c);
+    struct p9_client_progress *p = c->progress;
+    if (!p) { client_unlock(c); return -P9_E_INVAL; }
+    if (c->dead) { client_unlock(c); return -P9_E_IO; }
+    if (p->handshake.phase != P9_HS_READY) {
+        int rc = p9_handshake_progress_step(&p->handshake, now_ns);
+        if (rc < 0) client_mark_dead_locked(c, false);
+        client_unlock(c);
+        return rc;
+    }
+    int rc;
+    if (p->io.tx && !p->rx_next) {
+        p->rx_next = true;
+        rc = p9_transport_progress_send(&p->io);
+        if (rc > 0) {
+            p->sending->sending = false;
+            p->sending = NULL;
+        }
+    } else {
+        p->rx_next = false;
+        rc = p9_transport_progress_recv(&p->io);
+        if (rc > 0) { demux_frame_locked(c, (size_t)rc); rc = 1; }
+    }
+    if (rc < 0) client_mark_dead_locked(c, false);
+    if (c->dead) rc = -P9_E_IO;
+    client_unlock(c);
+    return rc;
+}
+
 // A closed transport samples as ready (a recv on it fails at once), but a
 // backend that does not own its ends still reads the live stream, where
 // recv_now finds nothing: a pumper would loop between the two forever.
@@ -1501,6 +1608,7 @@ static bool client_unreadable_locked(const struct p9_client *c) {
 int p9_client_reader_pump_ready(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return P9_PUMP_DEAD;
     client_lock(c);
+    if (c->progress) { client_unlock(c); return -P9_E_INVAL; }
     if (client_unreadable_locked(c)) { client_unlock(c); return P9_PUMP_DEAD; }
     if (c->reader_active)            { client_unlock(c); return P9_PUMP_BUSY; }
     if (!p9_transport_recv_ready(&c->transport, NULL)) {
@@ -1540,12 +1648,14 @@ int p9_client_reader_pump_ready(struct p9_client *c) {
     return ret;
 }
 
+#ifdef KERNEL_TESTS
 void p9_client_handoff_reader(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return;
     client_lock(c);
     client_handoff_reader_locked(c, NULL);
     client_unlock(c);
 }
+#endif // KERNEL_TESTS
 
 int p9_client_reader_hook(struct p9_client *c, struct p9_reader_hook *h) {
     if (!c || c->magic != P9_CLIENT_MAGIC || !h) return -P9_E_INVAL;
@@ -1621,6 +1731,15 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
     // caller owns the container's teardown with no concurrent completer.
     if (!c || c->magic != P9_CLIENT_MAGIC || !rpc) return;
     client_lock(c);
+    if (c->progress) {
+        // Preserve abandon's no-callback promise for this RPC, then abort the
+        // exclusive stream instead of waiting for peer flush acknowledgement.
+        client_unregister(c, rpc->tag, rpc);
+        client_mark_dead_locked(c, false);
+        client_unlock(c);
+        return;
+    }
+
     u16 tag = rpc->tag;
     if (client_owner(c, tag) == rpc) {
         client_unregister(c, tag, rpc);
@@ -1661,6 +1780,7 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
     client_unlock(c);
 }
 
+#ifdef KERNEL_TESTS
 // Mark the session DEVICE-GONE (MENAGERIE.md section 10): the explicit entry
 // point for a holder of the client (a device-teardown / warden-removal hook)
 // to proactively fail every in-flight ASYNC (Loom) op with a -P9_E_NODEV
@@ -1675,18 +1795,22 @@ void p9_client_mark_devgone(struct p9_client *c) {
     client_mark_dead_locked(c, true);
     client_unlock(c);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // Lifecycle.
 // =============================================================================
 
-int p9_client_init(struct p9_client *c,
+static int p9_client_init_storage(struct p9_client *c,
                     u32 root_fid, u32 msize,
                     struct p9_transport_ops transport_ops,
-                    u8 *recv_buf, size_t recv_cap) {
+                    u8 *recv_buf, size_t recv_cap,
+                    u8 *send_buf, u32 send_cap, bool provided) {
     if (!c) return -P9_E_INVAL;
     if (!recv_buf) return -P9_E_INVAL;
     if (recv_cap < P9_HDR_LEN) return -P9_E_INVAL;
+    if (provided && (!send_buf || send_cap < msize || recv_cap < msize))
+        return -P9_E_INVAL;
     int rc = p9_session_init(&c->session, root_fid, msize);
     if (rc < 0) return -P9_E_INVAL;
     rc = p9_transport_init(&c->transport, transport_ops, recv_buf, recv_cap);
@@ -1707,6 +1831,7 @@ int p9_client_init(struct p9_client *c,
     // relying on allocation zeroing, so an in-place re-init of a recycled
     // client (destroy -> init, no re-alloc -- the test scaffolding's shape)
     // can never carry a stale loose/cacheable/wga latch across lives.
+    c->progress        = NULL;
     c->loose           = false;
     c->cape            = false;
     c->cape_uid        = 0;
@@ -1720,11 +1845,16 @@ int p9_client_init(struct p9_client *c,
     c->orphan_kept     = 0;
     c->out_buf     = c->out_buf_inline;
     c->out_buf_cap = P9_CLIENT_OUT_BUF_MAX;
-    if (msize > P9_CLIENT_OUT_BUF_MAX) {
+    c->out_buf_owned = false;
+    if (provided) {
+        c->out_buf = send_buf;
+        c->out_buf_cap = send_cap;
+    } else if (msize > P9_CLIENT_OUT_BUF_MAX) {
         u8 *big = kmalloc(msize, 0);
         if (big) {
             c->out_buf     = big;
             c->out_buf_cap = msize;
+            c->out_buf_owned = true;
         }
     }
     c->magic        = P9_CLIENT_MAGIC;
@@ -1773,9 +1903,25 @@ int p9_client_init(struct p9_client *c,
     return 0;
 }
 
+int p9_client_init(struct p9_client *c, u32 root_fid, u32 msize,
+                   struct p9_transport_ops transport_ops,
+                   u8 *recv_buf, size_t recv_cap) {
+    return p9_client_init_storage(c, root_fid, msize, transport_ops,
+                                  recv_buf, recv_cap, NULL, 0, false);
+}
+
+int p9_client_init_preallocated(struct p9_client *c, u32 root_fid, u32 msize,
+                                struct p9_transport_ops transport_ops,
+                                u8 *recv_buf, size_t recv_cap,
+                                u8 *send_buf, u32 send_cap) {
+    return p9_client_init_storage(c, root_fid, msize, transport_ops,
+                                  recv_buf, recv_cap, send_buf, send_cap, true);
+}
+
 void p9_client_destroy(struct p9_client *c) {
     if (!c) return;
     if (c->magic != P9_CLIENT_MAGIC) return;
+    if (c->progress) p9_client_progress_abort(c);
     c->magic = 0;
     // F8 (round-2): free the deferred reply buffer under c->lock so the impl
     // matches the documented "freed at the next completion or at destroy, both
@@ -1789,9 +1935,11 @@ void p9_client_destroy(struct p9_client *c) {
     poll_deferred_await(&c->send_owed);
     poll_deferred_await(&c->role_owed);
     // CF-3 B: release a heap out_buf (bulk-msize tier). The inline tier is
-    // storage inside *c -- nothing to free. No op is in flight at destroy
-    // (the last attached ref dropped), so no builder can be mid-frame here.
-    if (c->out_buf && c->out_buf != c->out_buf_inline) kfree(c->out_buf);
+    // storage inside *c -- nothing to free. Preallocated private storage belongs
+    // to its enclosing charged owner, which releases it after destroy. No op is
+    // in flight (the last attached ref dropped), so no builder is mid-frame.
+    if (c->out_buf_owned) kfree(c->out_buf);
+    c->out_buf_owned = false;
     c->out_buf     = NULL;
     c->out_buf_cap = 0;
     // L1e: free the Larder's lazily-allocated page buffers (the attr/dentry
@@ -1843,6 +1991,7 @@ int p9_client_close(struct p9_client *c) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     int rc = p9_transport_close(&c->transport);
     int rc2 = p9_session_close(&c->session);
     client_unlock(c);
@@ -1862,6 +2011,7 @@ int p9_client_handshake(struct p9_client *c,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
 
     // Phase 1: Tversion → Rversion (drives INIT → VERSIONED). Tversion is the
     // only NOTAG message; client_run's NOTAG branch keeps it serial.
@@ -1900,6 +2050,7 @@ int p9_client_walk(struct p9_client *c,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -1923,6 +2074,7 @@ int p9_client_walk(struct p9_client *c,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int p9_client_walk_one(struct p9_client *c,
                         u32 src_fid, u32 new_fid,
                         const u8 *name, size_t name_len,
@@ -1937,6 +2089,7 @@ int p9_client_walk_one(struct p9_client *c,
     if (out_qid) copy_qid(out_qid, &qids[0]);
     return 0;
 }
+#endif // KERNEL_TESTS
 
 int p9_client_walkgetattr(struct p9_client *c,
                           u32 src_fid, u32 new_fid,
@@ -1948,6 +2101,7 @@ int p9_client_walkgetattr(struct p9_client *c,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -1984,10 +2138,12 @@ int p9_client_walkgetattr(struct p9_client *c,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     // A dying caller cannot send (client_send_flow refuses it), so refuse it
@@ -2010,6 +2166,7 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
     client_unlock(c);
     return 0;
 }
+#endif // KERNEL_TESTS
 
 // Fire-and-forget clunk (FID-LIFECYCLE async-clunk; docs/FID-LIFECYCLE-DESIGN.md
 // section 3.1): send the Tclunk and return WITHOUT blocking on Rclunk, so the
@@ -2049,6 +2206,7 @@ static int client_clunk_async(struct p9_client *c, u32 fid, bool no_wait) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     if (client_self_dying()) CLIENT_UNLOCK_RET(c, -P9_E_AGAIN);
@@ -2129,6 +2287,7 @@ int p9_client_lopen(struct p9_client *c, u32 fid, u32 flags,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2153,6 +2312,7 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2201,6 +2361,7 @@ int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (count > 0 && !out_data) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     u32 rmax = client_max_read_count(c);
@@ -2236,6 +2397,7 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (count > 0 && !data) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     u32 wmax = client_max_write_payload(c);
@@ -2267,6 +2429,7 @@ int p9_client_getattr(struct p9_client *c, u32 fid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2289,6 +2452,7 @@ int p9_client_setattr(struct p9_client *c, u32 fid,
     if (!c || !attr) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2310,6 +2474,7 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (count > 0 && !out_data) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2331,11 +2496,13 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 int p9_client_statfs(struct p9_client *c, u32 fid,
                       struct p9_statfs *out_statfs) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2351,11 +2518,13 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
     client_unlock(c);
     return 0;
 }
+#endif // KERNEL_TESTS
 
 int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2384,6 +2553,7 @@ int p9_client_weft(struct p9_client *c, u32 fid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2409,6 +2579,7 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2429,83 +2600,13 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
 // Mutation operations.
 // =============================================================================
 
-int p9_client_symlink(struct p9_client *c, u32 fid,
-                       const u8 *name, size_t name_len,
-                       const u8 *symtgt, size_t symtgt_len,
-                       u32 gid, struct p9_qid *out_qid) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    client_lock(c);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_symlink(&c->session, c->out_buf,
-                                       c->out_buf_cap,
-                                       fid, name, name_len,
-                                       symtgt, symtgt_len, gid);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    if (out_qid) copy_qid(out_qid, &r.created_qid);
-    client_unlock(c);
-    return 0;
-}
-
-int p9_client_mknod(struct p9_client *c, u32 dfid,
-                     const u8 *name, size_t name_len,
-                     u32 mode, u32 major, u32 minor, u32 gid,
-                     struct p9_qid *out_qid) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    client_lock(c);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_mknod(&c->session, c->out_buf,
-                                     c->out_buf_cap,
-                                     dfid, name, name_len,
-                                     mode, major, minor, gid);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    if (out_qid) copy_qid(out_qid, &r.created_qid);
-    client_unlock(c);
-    return 0;
-}
-
-int p9_client_rename(struct p9_client *c, u32 fid, u32 dfid,
-                      const u8 *name, size_t name_len) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    client_lock(c);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_rename(&c->session, c->out_buf,
-                                      c->out_buf_cap,
-                                      fid, dfid, name, name_len);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    client_unlock(c);
-    return 0;
-}
-
 int p9_client_readlink(struct p9_client *c, u32 fid,
                         u8 *out_target, u16 *out_target_len) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     if (!out_target || !out_target_len) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2529,33 +2630,13 @@ int p9_client_readlink(struct p9_client *c, u32 fid,
     return 0;
 }
 
-int p9_client_link(struct p9_client *c, u32 dfid, u32 fid,
-                    const u8 *name, size_t name_len) {
-    if (!c) return -P9_E_INVAL;
-    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
-    client_lock(c);
-    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
-    int te = client_await_tag_locked(c);
-    if (te != 0) CLIENT_UNLOCK_RET(c, te);
-    int len = p9_session_send_link(&c->session, c->out_buf,
-                                    c->out_buf_cap,
-                                    dfid, fid, name, name_len);
-    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
-    struct p9_dispatch_result r;
-    int e = client_run(c, (size_t)len, &r);
-    c->total_ops++;
-    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
-    client_unlock(c);
-    return 0;
-}
-
 int p9_client_mkdir(struct p9_client *c, u32 dfid,
                      const u8 *name, size_t name_len,
                      u32 mode, u32 gid, struct p9_qid *out_qid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2580,6 +2661,7 @@ int p9_client_renameat(struct p9_client *c, u32 olddirfid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2602,6 +2684,7 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     client_lock(c);
+    if (c->progress) CLIENT_UNLOCK_RET(c, -P9_E_INVAL);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int te = client_await_tag_locked(c);
@@ -2667,6 +2750,7 @@ void p9_client_set_orphan_sink(struct p9_client *c, p9_orphan_sink_fn fn,
     client_unlock(c);
 }
 
+#ifdef KERNEL_TESTS
 size_t p9_client_inflight(const struct p9_client *c) {
     if (!c) return 0;
     if (c->magic != P9_CLIENT_MAGIC) return 0;
@@ -2675,3 +2759,4 @@ size_t p9_client_inflight(const struct p9_client *c) {
     client_unlock((struct p9_client *)c);
     return n;
 }
+#endif // KERNEL_TESTS

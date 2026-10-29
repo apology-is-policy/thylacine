@@ -1,0 +1,78 @@
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test.c.obj
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/test/test_loom.c.obj
+clang: clang: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:216:6: warning: no previous prototype for function 'test_loom_service_pool_table' [-Wmissing-prototypes]
+  216 | void test_loom_service_pool_table(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:216:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  216 | void test_loom_service_pool_table(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:358:6: warning: no previous prototype for function 'test_loom_private_slot_owner' [-Wmissing-prototypes]
+  358 | void test_loom_private_slot_owner(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:358:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  358 | void test_loom_private_slot_owner(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:671:6: warning: no previous prototype for function 'test_loom_private_fixed' [-Wmissing-prototypes]
+  671 | void test_loom_private_fixed(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:671:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  671 | void test_loom_private_fixed(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:676:6: warning: no previous prototype for function 'test_loom_private_pool_pins' [-Wmissing-prototypes]
+  676 | void test_loom_private_pool_pins(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:676:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  676 | void test_loom_private_pool_pins(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:681:6: warning: no previous prototype for function 'test_loom_private_buffers' [-Wmissing-prototypes]
+  681 | void test_loom_private_buffers(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:681:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  681 | void test_loom_private_buffers(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:686:6: warning: no previous prototype for function 'test_loom_service_slots' [-Wmissing-prototypes]
+  686 | void test_loom_service_slots(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:686:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  686 | void test_loom_service_slots(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:694:6: warning: no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]
+  694 | void test_loom_private_owner_lifecycle(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:694:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  694 | void test_loom_private_owner_lifecycle(void) {
+      | ^
+      | static 
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1672:6: warning: no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]
+ 1672 | void test_loom_sqpoll_charges_thread_budget(void) {
+      |      ^
+/Users/northkillpd/projects/thylacine-corona/kernel/test/test_loom.c:1672:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1672 | void test_loom_sqpoll_charges_thread_budget(void) {
+      | ^
+      | static 
+8 warnings generated.
+[  2%] Linking C executable ../thylacine.elf
+Kernel post-link: flat binary + size summary
+Flat binary: /Users/northkillpd/projects/thylacine-corona/build/kernel-undefined/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff   3317472 Oct 10 04:15 /Users/northkillpd/projects/thylacine-corona/build/kernel-undefined/thylacine.bin
+-rwxr-xr-x@ 1 northkillpd  staff  10999104 Oct 10 04:15 /Users/northkillpd/projects/thylacine-corona/build/kernel-undefined/thylacine.elf
+-105553110230144 0000000000041864 b g_reap_fake_client
+-105553110661824 0000000000041864 b g_sc_client
+-105553111196456 0000000000047456 b pc
+-105553112597416 0000000000059424 D g_tests
+-105553111785008 0000000000065536 b test_exec_interp_argv_shape.big
+-105553110444419 0000000000065792 b g_pe_payload
+-105553110365856 0000000000083728 b pti_front_clients
+-105553110543759 0000000000098304 b test_srvconn_bulk_ring_class.bigframe
+-105553112770996 0000000000128664 R halls_symtab_names
+-105553112395776 0000000000143360 B g_secondary_boot_stacks
+leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)
+[100%] Built target thylacine.elf

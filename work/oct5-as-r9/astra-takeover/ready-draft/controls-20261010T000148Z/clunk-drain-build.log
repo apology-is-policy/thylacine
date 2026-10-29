@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/ready-draft/controls-20261010T000148Z/clunk-drain.c:68:27: error: '||' of a value and its negation always evaluates to true [-Werror,-Wtautological-negation-compare]
+   68 |             if(clunk_wait || !clunk_wait)action=LREADY_SUBMIT;
+      |                ~~~~~~~~~~~^~~~~~~~~~~~~~
+1 error generated.

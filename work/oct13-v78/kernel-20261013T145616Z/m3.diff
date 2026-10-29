@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:02:48
+@@ -7829,7 +7829,7 @@
+         spin_unlock(&p->as->lock);
+         loom_unref(l);
+         loom_unref(l);
+-        return -T_E_MFILE;
++        return -1; // MUTANT M3
+     }
+ #ifdef KERNEL_TESTS
+     loom_setup_installed_for_test(p, fd);

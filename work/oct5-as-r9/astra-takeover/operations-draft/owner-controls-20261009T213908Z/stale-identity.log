@@ -1,0 +1,2 @@
+stale hold refused
+Assertion failed: (0), function main, file stale-identity.c, line 217.

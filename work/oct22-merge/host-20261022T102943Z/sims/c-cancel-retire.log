@@ -1,0 +1,2 @@
+running admission_follows_the_kernels_order
+Assertion failed: (s->slots[6].state == SIM_RETIRED), function admission_follows_the_kernels_order, file test_adapter.c, line 1870.

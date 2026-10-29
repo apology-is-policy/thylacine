@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:10:02
+@@ -7872,7 +7872,7 @@
+ // A descriptor argument wider than an index names nothing, so the lookup refuses
+ // it after any check that precedes the lookup (ERRORS.md principle 6).
+ static hidx_t sys_hidx_arg(u64 raw) {
+-    return raw > 0x7fffffffull ? (hidx_t)-1 : (hidx_t)raw;
++    return (hidx_t)raw; // MUTANT M10: truncated
+ }
+ 
+ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,

@@ -1,0 +1,36 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+warning: method `walk_claimed` is never used
+   --> lib/loom-client/src/tests/native/sim.rs:738:8
+    |
+378 | impl State {
+    | ---------- method in this implementation
+...
+738 |     fn walk_claimed(&self, i: usize) -> bool {
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+
+running 1 test
+test tests::native::admission_follows_the_kernels_order ... FAILED
+
+failures:
+
+---- tests::native::admission_follows_the_kernels_order stdout ----
+
+thread 'tests::native::admission_follows_the_kernels_order' (67285064) panicked at lib/loom-client/src/tests/native.rs:1633:5:
+assertion `left == right` failed
+  left: 0
+ right: -16
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::native::admission_follows_the_kernels_order
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 212 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p loom-client --lib`

@@ -1,0 +1,6 @@
+The completed draft now includes readiness visits, exclusive retained wait
+sweeps, fail-closed change counter, creator-ticket admission, private SQPOLL
+loop, actual exit barrier and zero-reference join before ticket/storage refund.
+Public dispatch remains disabled. All ten host/ARM64 syntax checks pass.
+Use verified-manifest.json and self-review.txt, then next-review.txt; these
+supersede earlier planning notes. Native/SMP qualification remains pending.

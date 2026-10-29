@@ -1,0 +1,12 @@
+--- control.c
++++ refund-before-free.c
+@@ -525,8 +525,8 @@
+     if(!rc && op->pool_stream && loom_provided_detach_locked(op))
+         extinction("retired operation lost pool stream");
+     spin_unlock(&l->lock);if(rc)return rc;
++    operation_refund(l);
+     kfree(op);
+-    operation_refund(l);
+     spin_lock(&l->lock);
+     if(loom_request_drop_owner(&l->service_requests,request) ||
+        loom_request_reap(&l->service_requests,l->service_slots,request))

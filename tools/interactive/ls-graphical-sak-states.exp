@@ -81,7 +81,7 @@ key "meta_l+f"
 capture workspace
 lc_raw_send "\001b" "serial BREAK must not authorize in graphical-only posture"
 witness baseline
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 after 1000
 capture empty
 key "ret"
@@ -90,7 +90,7 @@ after 1200
 type "imperium chown dac\n"
 after 1200
 capture request
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 after 1000
 capture prompt
 type "imperium-key-michael-v1"
@@ -120,7 +120,7 @@ witness restored
 # Wrong key: the requesting tool must return and the original shell stay plain.
 type "imperium kill\n"
 after 1200
-# The second reserved chord: keyboards without Delete (this leg proves F10).
+# The primary physical attention chord is also exercised on denial.
 key "ctrl+alt+f10"
 capture axe
 type "deliberately-wrong-key"
@@ -133,7 +133,7 @@ witness denied
 # Escape cancels without KDF/authority; input must not leak into the workspace.
 type "imperium chown\n"
 after 1200
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 key "esc"
 capture cancelled
 key "ret"
@@ -146,7 +146,7 @@ lc_pass "graphical SAK: empty, confer, real DAC authority, abdicate, wrong key, 
 # clock or shortened timeout. Capture before the verdict's 10-second dismissal.
 type "imperium chown\n"
 lc_expect "-- awaiting the SAK" "expiry request posted"
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 after 60500
 capture expired
 key "ret"
@@ -158,7 +158,7 @@ witness denied
 for {set i 2} {$i <= 5} {incr i} {
     type "imperium kill\n"
     lc_expect "-- awaiting the SAK" "wrong-key request $i posted"
-    key "ctrl+alt+delete"
+    key "ctrl+alt+f10"
     type "deliberately-wrong-key"
     key "ret"
     after 1000
@@ -168,7 +168,7 @@ for {set i 2} {$i <= 5} {incr i} {
 }
 type "imperium kill\n"
 lc_expect "-- awaiting the SAK" "lockout request posted"
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 capture locked
 key "ret"
 lc_expect "corvus: imperium: RATE-LIMITED michael" "five wrong keys lock authorization"

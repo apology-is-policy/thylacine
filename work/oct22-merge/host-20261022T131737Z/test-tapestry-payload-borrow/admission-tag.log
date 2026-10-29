@@ -1,0 +1,17 @@
+
+running 1 test
+test admission::tests::payload_borrow_requires_matching_read_completion ... FAILED
+
+failures:
+
+failures:
+    admission::tests::payload_borrow_requires_matching_read_completion
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+
+thread 'admission::tests::payload_borrow_requires_matching_read_completion' (68309943) panicked at /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tapestry-borrow-kiazk_rk/admission-tag/admission.rs:374:9:
+assertion `left == right` failed
+  left: Some(1)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

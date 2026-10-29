@@ -1,0 +1,5 @@
+commit 7062e8926c3d8c3fa4edbb66d8c6a00da789803b
+expect 1901
+last stalk.open_create_containment_and_denials
+stratum 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
+gofork a6567baeaa716811783031fdf543477fdcd1707d

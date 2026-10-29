@@ -1,0 +1,15 @@
+{
+  "owner": "astra",
+  "checks": {
+    "usr/halcyond/src/layout.rs": true,
+    "docs/HALCYON-INTERACTION-STATUS.md": true,
+    "docs/JOURNAL.md": true,
+    "vault/system/userspace/shell-tui/sub-halcyond.md": true,
+    "docs/HALCYON-TEXT-CELL-SELF-REVIEW.md": true,
+    "vault/record/changes/chg-2026-10-06-halcyon-text-cell.md": true,
+    ".claude/settings.json": true,
+    "docs/USER-AUTHORITY-DESIGN.md": true,
+    "kernel/test/test.c": true,
+    "kernel/test/test_devproc.c": true
+  }
+}

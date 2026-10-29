@@ -100,6 +100,9 @@ impl Device {
         if Self::requires_quiescence(&request) && !self.gpu.all_work_retired() { return Err(Error::Hardware); }
         let mut out = Vec::new();
         match request {
+            Request::Cursor { shape, scale, x, y, visible } => {
+                self.gpu.cursor(shape, scale, x, y, visible).put(&mut out);
+            }
             Request::Info => {
                 Info::from(&self.gpu).put(&mut out);
             }
@@ -440,7 +443,7 @@ impl Device {
             Request::InputDrain { .. } => {
                 return Err(Error::BadField);
             }
-            Request::SeatState => {
+            Request::SeatState | Request::SeatQuiesced { .. } => {
                 return Err(Error::BadField);
             }
         }

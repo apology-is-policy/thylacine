@@ -17,6 +17,7 @@
 #include <thylacine/spinlock.h>      // R7 F128: irq_state_t + irqsave/restore
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/gic.h"
 #include "../arch/arm64/hwdebug.h"     // 8a-2: hwdebug_init_cpu (per-PE OS-Lock unlock)
@@ -24,13 +25,9 @@
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/psci.h"
 #include "../arch/arm64/timer.h"
+#include "../arch/arm64/exception.h"   // _exception_vectors
+#include "../arch/arm64/sections.h"    // _kernel_start: secondary_entry's PA
 #include "../arch/arm64/uart.h"
-
-// Linker-defined kernel image bounds — used to compute secondary_entry's PA.
-extern char _kernel_start[];
-
-// Asm trampoline label (defined in arch/arm64/start.S).
-extern void secondary_entry(void);
 
 // Per-CPU online flag. Set by secondary_entry's trampoline (asm strb)
 // before pac_apply / mmu_program / branch-to-high-VA. Earliest signal
@@ -50,7 +47,7 @@ __attribute__((aligned(64)))
 volatile u8 g_cpu_stage[DTB_MAX_CPUS * SMP_MAILBOX_BYTES];
 
 // P2-Cb: per-CPU "fully initialized at high VA" flag. Set by
-// per_cpu_main after VBAR_EL1 + TPIDR_EL1 are configured. The
+// per_cpu_main after VBAR_EL1 is verified and TPIDR_EL1 configured. The
 // stricter "alive" signal — secondary's PAC + MMU work and the C
 // runtime is reachable.
 volatile u8 g_cpu_alive[DTB_MAX_CPUS];
@@ -110,7 +107,7 @@ void *smp_bootcpu_idle_stack_top(void) {
 // P2-Cdc: IPI_RESCHED receive counter per CPU. Incremented by the
 // IPI handler on every receive; tests read to verify cross-CPU
 // IPI delivery.
-volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
+VISIBLE_IF_KERNEL_TESTS volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
 
 unsigned smp_cpu_idx_self(void) {
     u64 mpidr;
@@ -140,7 +137,17 @@ static void ipi_resched_handler(u32 intid, void *arg) {
     }
 }
 
-void smp_cpu_ipi_init(unsigned cpu_idx) {
+// P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
+// secondary AFTER sched_init + g_cpu_alive flag is set. Performs the
+// per-CPU GIC redistributor + CPU interface init via gic_init_secondary,
+// attaches the IPI_RESCHED handler, enables SGI 0 at the source, and
+// unmasks DAIF.I so IRQs can be delivered. From this point on, the
+// secondary can receive IPIs.
+//
+// Must run BEFORE the secondary's idle loop enters its first WFI; the
+// loop body's `for(;;){sched();wfi;}` pattern relies on IRQs being
+// enabled to wake from WFI when an IPI arrives.
+static void smp_cpu_ipi_init(unsigned cpu_idx) {
     if (cpu_idx == 0) extinction("smp_cpu_ipi_init: cpu_idx 0 reserved for boot path");
     if (!gic_init_secondary(cpu_idx))
         extinction("smp_cpu_ipi_init: gic_init_secondary failed");
@@ -429,8 +436,8 @@ unsigned smp_cpu_online_count(void) {
 //   - Long-branch via kaslr_high_va_addr to this function.
 //
 // Sets up the remaining per-CPU state:
-//   1. VBAR_EL1 — exception vector table (shared with primary at v1.0;
-//      P2-Cd may give each CPU its own routing table for IRQ affinity).
+//   1. VBAR_EL1 — verified, not set: secondary_entry installed the vector
+//      table (shared with the primary) before the long branch here.
 //   2. TPIDR_EL1 — per-CPU current_thread pointer. NULL at P2-Cb (no
 //      per-CPU run tree yet); P2-Cd or later assigns each CPU's idle
 //      thread.
@@ -441,8 +448,6 @@ unsigned smp_cpu_online_count(void) {
 // default), nothing wakes the CPU — at P2-Cd when GIC SGIs land, the
 // boot CPU can send IPI_RESCHED to wake a secondary into useful work.
 // ---------------------------------------------------------------------------
-
-extern char _exception_vectors[];
 
 __attribute__((noreturn))
 void per_cpu_main(int cpu_idx) {
@@ -494,14 +499,8 @@ void per_cpu_main(int cpu_idx) {
     // any EL0 code, which the idle-loop entry below guarantees.
     hw_cpu_ident_detect((unsigned)cpu_idx);
 
-    // VBAR_EL1 — install the kernel exception vector table. ISB so
-    // any subsequent exception sees the new VBAR.
-    u64 vbar = (u64)(uintptr_t)_exception_vectors;
-    __asm__ __volatile__(
-        "msr vbar_el1, %0\n"
-        "isb\n"
-        :: "r"(vbar) : "memory"
-    );
+    // secondary_entry installed VBAR_EL1 before the long branch here (#214).
+    exception_vectors_verify();
 
     // P2-Cd: allocate this CPU's idle thread + park in TPIDR_EL1.
     // The idle thread doesn't own a kstack — it runs on the per-CPU

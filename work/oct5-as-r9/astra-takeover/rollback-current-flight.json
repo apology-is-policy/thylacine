@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "source": "ba2ae6df3dd815a4853985cc81e9f981ca0d1bdb",
+  "implementation": "9b6672f7d076e8f7368df28dfee93467bd04dfb3",
+  "pid": 45375,
+  "state": "verified",
+  "launched_utc": "2026-10-09T18:56:05.331052+00:00",
+  "run": "work/oct5-as-r9/current-gate-20261009T185605Z",
+  "verifier": "work/oct5-as-r9/current-gate-20261009T185605Z/verify.py",
+  "floor_mib": 8192,
+  "next": "Record verified evidence checkpoint, then continue only reviewed/tested next async control draft after acquiring Astra Mac lease. No Main/private activation/128MiB change.",
+  "verification_rc": 0,
+  "verified_utc": "2026-10-09T19:36:36.820160+00:00"
+}

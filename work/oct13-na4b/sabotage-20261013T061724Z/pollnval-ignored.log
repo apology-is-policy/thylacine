@@ -1,0 +1,132 @@
+
+running 1 test
+
+thread 'tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it' (33622944) panicked at lib/loom-client/src/tests/native.rs:395:17:
+assertion `left == right` failed
+  left: None
+ right: Some(-125)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it' (33622944) panicked at lib/loom-client/src/tests/native/sim.rs:1064:9:
+a second close of fd 7, which may name another file now
+stack backtrace:
+   0:        0x104faa9e4 - std[7648081134ee26d8]::backtrace_rs::backtrace::libunwind::trace
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1:        0x104faa9e4 - std[7648081134ee26d8]::backtrace_rs::backtrace::trace_unsynchronized::<std[7648081134ee26d8]::sys::backtrace::_print_fmt::{closure#1}>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/../../backtrace/src/backtrace/mod.rs:66:14
+   2:        0x104faa9e4 - std[7648081134ee26d8]::sys::backtrace::_print_fmt
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/backtrace.rs:74:9
+   3:        0x104faa9e4 - <<std[7648081134ee26d8]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[318a34b566a36fe]::fmt::Display>::fmt
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/backtrace.rs:44:26
+   4:        0x104fbb4e8 - <core[318a34b566a36fe]::fmt::rt::Argument>::fmt
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/fmt/rt.rs:152:76
+   5:        0x104fbb4e8 - core[318a34b566a36fe]::fmt::write
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/fmt/mod.rs:1687:22
+   6:        0x104fae3fc - std[7648081134ee26d8]::io::default_write_fmt::<alloc[fd24334a81e9fcd2]::vec::Vec<u8>>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/io/mod.rs:622:11
+   7:        0x104fae3fc - <alloc[fd24334a81e9fcd2]::vec::Vec<u8> as std[7648081134ee26d8]::io::Write>::write_fmt
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/io/mod.rs:1977:13
+   8:        0x104f92488 - <std[7648081134ee26d8]::sys::backtrace::BacktraceLock>::print
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/backtrace.rs:47:25
+   9:        0x104f92488 - std[7648081134ee26d8]::panicking::default_hook::{closure#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:292:27
+  10:        0x104fa45b4 - std[7648081134ee26d8]::panicking::default_hook
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:316:9
+  11:        0x104f59c14 - <alloc[fd24334a81e9fcd2]::boxed::Box<dyn for<'a, 'b> core[318a34b566a36fe]::ops::function::Fn<(&'a std[7648081134ee26d8]::panic::PanicHookInfo<'b>,), Output = ()> + core[318a34b566a36fe]::marker::Sync + core[318a34b566a36fe]::marker::Send> as core[318a34b566a36fe]::ops::function::Fn<(&std[7648081134ee26d8]::panic::PanicHookInfo,)>>::call
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/alloc/src/boxed.rs:2289:9
+  12:        0x104f59c14 - test[2c59eae1d55b8e96]::test_main_inner::<test[2c59eae1d55b8e96]::test_main_static::{closure#0}>::{closure#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/test/src/lib.rs:155:21
+  13:        0x104fa496c - <alloc[fd24334a81e9fcd2]::boxed::Box<dyn for<'a, 'b> core[318a34b566a36fe]::ops::function::Fn<(&'a std[7648081134ee26d8]::panic::PanicHookInfo<'b>,), Output = ()> + core[318a34b566a36fe]::marker::Sync + core[318a34b566a36fe]::marker::Send> as core[318a34b566a36fe]::ops::function::Fn<(&std[7648081134ee26d8]::panic::PanicHookInfo,)>>::call
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/alloc/src/boxed.rs:2289:9
+  14:        0x104fa496c - std[7648081134ee26d8]::panicking::panic_with_hook
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:833:13
+  15:        0x104f9251c - std[7648081134ee26d8]::panicking::panic_handler::{closure#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:698:13
+  16:        0x104f87c58 - std[7648081134ee26d8]::sys::backtrace::__rust_end_short_backtrace::<std[7648081134ee26d8]::panicking::panic_handler::{closure#0}, !>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/backtrace.rs:182:18
+  17:        0x104f92acc - __rustc[6ef78fba13ac776c]::rust_begin_unwind
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+  18:        0x104fca668 - core[318a34b566a36fe]::panicking::panic_fmt
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+  19:        0x104f29ec8 - <loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel as loom_client[c2d6aaac9bc4c40f]::native::kernel::Kernel>::close
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/tests/native/sim.rs:1064:9
+  20:        0x104f49e74 - <loom_client[c2d6aaac9bc4c40f]::native::kernel::Shared<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>::close_fd
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/native/kernel.rs:158:25
+  21:        0x104f4a7c4 - <loom_client[c2d6aaac9bc4c40f]::native::kernel::Backend<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel> as loom_client[c2d6aaac9bc4c40f]::ring_payload::RingBackend>::close
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/native/kernel.rs:375:16
+  22:        0x104ebcf28 - <loom_client[c2d6aaac9bc4c40f]::ring_payload::Core<loom_client[c2d6aaac9bc4c40f]::native::kernel::Backend<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>>::close
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/ring_payload.rs:123:26
+  23:        0x104eb2dcc - <loom_client[c2d6aaac9bc4c40f]::ring_payload::RingOwner<loom_client[c2d6aaac9bc4c40f]::native::kernel::Backend<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>>::close
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/ring_payload.rs:395:19
+  24:        0x104ec32b0 - <loom_client[c2d6aaac9bc4c40f]::fixed_requests::Core<loom_client[c2d6aaac9bc4c40f]::native::kernel::Backend<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>>::fail
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/fixed_requests.rs:33:20
+  25:        0x104ec596c - <loom_client[c2d6aaac9bc4c40f]::fixed_requests::FixedDriver<loom_client[c2d6aaac9bc4c40f]::native::kernel::Backend<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>>::close
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/fixed_requests.rs:237:32
+  26:        0x104e60f94 - <loom_client[c2d6aaac9bc4c40f]::native::Inner<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>::shutdown
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/native/mod.rs:722:34
+  27:        0x104e5ff34 - <loom_client[c2d6aaac9bc4c40f]::native::Inner<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>::close
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/native/mod.rs:719:14
+  28:        0x104e968f8 - <loom_client[c2d6aaac9bc4c40f]::native::Ring<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel> as core[318a34b566a36fe]::ops::drop::Drop>::drop
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/native/mod.rs:319:20
+  29:        0x104e8ef14 - core[318a34b566a36fe]::ptr::drop_glue::<loom_client[c2d6aaac9bc4c40f]::native::Ring<loom_client[c2d6aaac9bc4c40f]::tests::native::sim::SimKernel>>
+                               at /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:825:1
+  30:        0x104e6390c - loom_client[c2d6aaac9bc4c40f]::tests::native::closed_under
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/tests/native.rs:401:1
+  31:        0x104e6bdf8 - loom_client[c2d6aaac9bc4c40f]::tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/tests/native.rs:420:9
+  32:        0x104f1c76c - loom_client[c2d6aaac9bc4c40f]::tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it::{closure#0}
+                               at /Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client/src/tests/native.rs:418:56
+  33:        0x104ea201c - <loom_client[c2d6aaac9bc4c40f]::tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it::{closure#0} as core[318a34b566a36fe]::ops::function::FnOnce<()>>::call_once
+                               at /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  34:        0x104f4ed80 - <fn() -> core[318a34b566a36fe]::result::Result<(), alloc[fd24334a81e9fcd2]::string::String> as core[318a34b566a36fe]::ops::function::FnOnce<()>>::call_once
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+  35:        0x104f4ed80 - test[2c59eae1d55b8e96]::__rust_begin_short_backtrace::<core[318a34b566a36fe]::result::Result<(), alloc[fd24334a81e9fcd2]::string::String>, fn() -> core[318a34b566a36fe]::result::Result<(), alloc[fd24334a81e9fcd2]::string::String>>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/test/src/lib.rs:724:18
+  36:        0x104f5a1c8 - test[2c59eae1d55b8e96]::run_test_in_process::{closure#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/test/src/lib.rs:747:74
+  37:        0x104f5a1c8 - <core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<test[2c59eae1d55b8e96]::run_test_in_process::{closure#0}> as core[318a34b566a36fe]::ops::function::FnOnce<()>>::call_once
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panic/unwind_safe.rs:275:9
+  38:        0x104f5a1c8 - std[7648081134ee26d8]::panicking::catch_unwind::do_call::<core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<test[2c59eae1d55b8e96]::run_test_in_process::{closure#0}>, core[318a34b566a36fe]::result::Result<(), alloc[fd24334a81e9fcd2]::string::String>>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:581:40
+  39:        0x104f5a1c8 - std[7648081134ee26d8]::panicking::catch_unwind::<core[318a34b566a36fe]::result::Result<(), alloc[fd24334a81e9fcd2]::string::String>, core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<test[2c59eae1d55b8e96]::run_test_in_process::{closure#0}>>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:544:19
+  40:        0x104f5a1c8 - std[7648081134ee26d8]::panic::catch_unwind::<core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<test[2c59eae1d55b8e96]::run_test_in_process::{closure#0}>, core[318a34b566a36fe]::result::Result<(), alloc[fd24334a81e9fcd2]::string::String>>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panic.rs:359:14
+  41:        0x104f5a1c8 - test[2c59eae1d55b8e96]::run_test_in_process
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/test/src/lib.rs:747:27
+  42:        0x104f5a1c8 - test[2c59eae1d55b8e96]::run_test::{closure#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/test/src/lib.rs:668:43
+  43:        0x104f55050 - test[2c59eae1d55b8e96]::run_test::{closure#1}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/test/src/lib.rs:698:41
+  44:        0x104f55050 - std[7648081134ee26d8]::sys::backtrace::__rust_begin_short_backtrace::<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/backtrace.rs:166:18
+  45:        0x104f5c720 - std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked::<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1}::{closure#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/thread/lifecycle.rs:70:13
+  46:        0x104f5c720 - <core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core[318a34b566a36fe]::ops::function::FnOnce<()>>::call_once
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panic/unwind_safe.rs:275:9
+  47:        0x104f5c720 - std[7648081134ee26d8]::panicking::catch_unwind::do_call::<core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:581:40
+  48:        0x104f5c720 - std[7648081134ee26d8]::panicking::catch_unwind::<(), core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:544:19
+  49:        0x104f5c720 - std[7648081134ee26d8]::panic::catch_unwind::<core[318a34b566a36fe]::panic::unwind_safe::AssertUnwindSafe<std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()>
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panic.rs:359:14
+  50:        0x104f5c720 - std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked::<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/thread/lifecycle.rs:68:26
+  51:        0x104f5c720 - <std[7648081134ee26d8]::thread::lifecycle::spawn_unchecked<test[2c59eae1d55b8e96]::run_test::{closure#1}, ()>::{closure#1} as core[318a34b566a36fe]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+  52:        0x104faa3f8 - <alloc[fd24334a81e9fcd2]::boxed::Box<dyn core[318a34b566a36fe]::ops::function::FnOnce<(), Output = ()> + core[318a34b566a36fe]::marker::Send> as core[318a34b566a36fe]::ops::function::FnOnce<()>>::call_once
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/alloc/src/boxed.rs:2275:9
+  53:        0x104faa3f8 - <std[7648081134ee26d8]::sys::thread::unix::Thread>::new::thread_start
+                               at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/thread/unix.rs:118:17
+  54:        0x18e5b3c58 - __pthread_cond_wait
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+
+thread 'tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it' (33622944) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `-p loom-client --lib`
+
+Caused by:
+  process didn't exit successfully: `/Users/northkillpd/projects/thylacine-corona/usr/../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807 'tests::native::a_poll_that_finds_the_descriptor_closed_forgets_it' --exact` (signal: 6, SIGABRT: process abort signal)

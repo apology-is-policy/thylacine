@@ -713,6 +713,7 @@ void dev9p_poll_priv_release(struct dev9p_priv *p) {
     dev9p_poll_state_unref(ps);
 }
 
+#ifdef KERNEL_TESTS
 // Test accessors: the arm registry's length, and the snapshots still linked (a
 // released snapshot is unlinked, so a count back at its baseline means every one
 // was released). No lock for the atomic count; the walk takes g_lock.
@@ -754,7 +755,6 @@ bool dev9p_poll_test_gc_release(void) {
                                __ATOMIC_ACQ_REL) != (int)DEV9P_POLL_GC_RUN;
 }
 
-#ifdef KERNEL_TESTS
 void dev9p_poll_test_under_lock(void (*fn)(void *), void *arg) {
     dpl_lock();
     fn(arg);

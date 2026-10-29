@@ -1,0 +1,11 @@
+--- control.c
++++ pending-terminal-order.c
+@@ -799,7 +799,7 @@
+ int loom_admission_cancel_locked(struct loom_service_operation *o,s32 reason,
+                                  bool abort_quiesced,u64 now) {
+     if(!o || reason>=0)return -T_E_INVAL;
+-    if(o->fixed.owner || o->fixed_dropping || o->pool_busy || o->pool_pending)return -T_E_BUSY;
++    if(o->fixed.owner || o->fixed_dropping || o->pool_busy )return -T_E_BUSY;
+     int rc=loom_rpc_check_finish_locked(o,reason,now);if(rc)return rc;
+     struct Loom *l=o->owner;
+     if(o->fid_claim==P9_TCLUNK) {

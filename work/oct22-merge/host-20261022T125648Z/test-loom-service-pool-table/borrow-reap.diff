@@ -1,0 +1,10 @@
+--- kernel/loom_service_pool_table.c
++++ borrow-reap.c
+@@ -69,7 +69,6 @@
+                             struct loom_service_ref ref) {
+     struct loom_pool *p = pool_record(t, pools, ref, LSLOT_LIVE);
+     if (!p) return -T_E_NOENT;
+-    if (t->slots[ref.slot].pins) return -T_E_BUSY;
+     int rc = loom_pool_reap(&pools->bank, p);
+     if (rc) return rc;
+     // No streams, local writers, pending/leased payloads or metadata borrowers

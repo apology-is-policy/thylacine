@@ -1,0 +1,8 @@
+{
+  "status": "failed",
+  "gate": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/current-gate-20261009T065820Z",
+  "gate_pid": 10770,
+  "pid": 56771,
+  "updated": "2026-10-09T07:38:26.316513+00:00",
+  "error": "CalledProcessError(2, ['cmake', '--build', 'build/kernel', '-j4'])"
+}

@@ -1,0 +1,114 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/ready-draft/kernel/loom_service_ready.c": "2987e9575c6eedf25d02171254bcba34e768ba2e659f1dc9b00b041e044bfb6c",
+    "work/oct5-as-r9/astra-takeover/ready-draft/kernel/include/thylacine/loom_service_ready.h": "46069d6587dffa141be421fc735a9aa1409273087fe2f38b0926c29d87d45ac5",
+    "work/oct5-as-r9/astra-takeover/ready-draft/fixture.c": "2a8e67247a7e58dc00bafb56bc835e03367651621198cdf16ace254e85ef2156",
+    "work/oct5-as-r9/astra-takeover/ready-draft/run-controls.py": "44eb8a5901b329ff9e125e7d87b454bf88f24452b64e5ecd709295ac0e17ae32",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_rpc.h": "ac57d3c6651e7579f8adc823614314e9ac94a42320112cf63cd2b64bae9a3e0d",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_operation.h": "8d47a0168f24e8f3cf9f245b67915c65fc5fe0cfaf3539292245b64d330b86a5",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_retirement.h": "bbe47924c85c9fd915bca78f1091c22adb5caf83e14ff4aa75f50a8991267370",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_provided.h": "59ce9999162599c6a8e42e8afc877d7792c188789175710c42d34231fa3b48f8",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_protocol.h": "baffbf92ba331d0dec270f48d3cacb3025fe9431244af398caafb1e95e7f5f49",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_requests.h": "30dd3c98627837daf3106a706c2e5d958e47dc8ec237c11bb6d5c551ad140dc2"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "2987e9575c6eedf25d02171254bcba34e768ba2e659f1dc9b00b041e044bfb6c",
+      "binary_sha256": "a08686a0955192a7967ddc6748181047c8199605796523bf57499c45c9986feb"
+    },
+    {
+      "case": "deadline-priority",
+      "expected": "expired later owner preempts earlier submission",
+      "rc": 1,
+      "source_sha256": "aa0c0e0853b7c4316703c94e5d506e4010da7a44aeb85edb6522ca5c629c36a1",
+      "binary_sha256": "0addf4aea8fa159e7436f70332b3f7338d9e38b6f21f565a037151858f739700"
+    },
+    {
+      "case": "deadline",
+      "expected": "earliest deadline scans past first runnable owner",
+      "rc": 1,
+      "source_sha256": "1f653d158b51bcd4aec74d6aa8879dc2b672c9dfc6f5acb1a4fb5dfc2f1e6c77",
+      "binary_sha256": "51be63baf791661cf4bef244b64a9ba8b11c7548bb0c588ea37c3db2d878d8e5"
+    },
+    {
+      "case": "rotation",
+      "expected": "round robin rotates every admitted owner",
+      "rc": 1,
+      "source_sha256": "d85173498443a59d3b87d3e88949642ce53159b511e11b8a12d71886b206ea00",
+      "binary_sha256": "fae16a448a178f7fe9c05e0135bfb54b74833168e570430710b83567b771083c"
+    },
+    {
+      "case": "driver-cursor",
+      "expected": "interest never reads live driver cursors",
+      "rc": 1,
+      "source_sha256": "d468f359462cd127bacbd86e6eaedf5ee9603a4b2476a6207749538b6b9c890d",
+      "binary_sha256": "43330bfe20babf33a989ab88a2b682765974293bca693e365fadb1b62a2970c1"
+    },
+    {
+      "case": "tx-shortage",
+      "expected": "occupied TX parks queued owners on native readiness",
+      "rc": 1,
+      "source_sha256": "0a86ce91bddb6dc5c903368e70d4a47499648aea2b62be9300cfeacd727d1761",
+      "binary_sha256": "33469370fc4e0ce7e8ab9ad55aa5e3f02ae8e203582c80b818f38622f7bebe4b"
+    },
+    {
+      "case": "tag-shortage",
+      "expected": "full tag pool waits for receive without submit spin",
+      "rc": 1,
+      "source_sha256": "d18de467caa62b0df7012494b5ea3b981ce396b533c15985ebf6967e59fff511",
+      "binary_sha256": "b1d548fd4fdcb3ab1fb9bd4db56f57ea3d27d5e02dbd33f12cf4438c86bef695"
+    },
+    {
+      "case": "pool-incarnation",
+      "expected": "old pool incarnation cannot wake stream",
+      "rc": 1,
+      "source_sha256": "6c84198e3a206fe5cdb90ae8b563ec540a29d7b0050b4e0e2030c32683833a3f",
+      "binary_sha256": "823e1fc4cd448df4bd070e99bfd4f9e60e82b745db71e92f3e38cf0ac2df0d8e"
+    },
+    {
+      "case": "busy-retry",
+      "expected": "local no-wire retry keeps busy member eligible",
+      "rc": 1,
+      "source_sha256": "d5fb365853ccc53082d97bb8d3a29d77d08824e4cac75be9889e358b91dfda2f",
+      "binary_sha256": "543cd6a2307af89559eef9c961ecc11f62b06b994898f8c18e8645b21b749648"
+    },
+    {
+      "case": "lease-exhaust",
+      "expected": "exhausted leases are actionable without available member",
+      "rc": 1,
+      "source_sha256": "57849e0e8acc2c3ddc239c1e5dad98bc4689670008b3d84d16955e54d88b6962",
+      "binary_sha256": "cda9be2b421b38b4d7b5faaac2d82458dc83eb49c73a9a2d7877ea974940b686"
+    },
+    {
+      "case": "clunk-drain",
+      "expected": "CLUNK drain cannot block unrelated owner",
+      "rc": 1,
+      "source_sha256": "18edebc39b18d72c1f57890da2b6c786987e4333933ff401c1921d4e7ea55ef1",
+      "binary_sha256": "a3c9f7b4790fc198468d4dea3aa961ada389e3ceb60118b83161392590c0d3e5"
+    },
+    {
+      "case": "early-reply",
+      "expected": "early reply still waits for TX owner",
+      "rc": 1,
+      "source_sha256": "dabe219cbed60f3580cc2187234bfaf4694a1e4095a73813e96d0c458a1b7d3d",
+      "binary_sha256": "7f121df6d1f3b058d41f76172a4d7d27059ef2a44611b3ea3ed017d023bf30c0"
+    },
+    {
+      "case": "terminal-deadline",
+      "expected": "retired pending owners park without expired-deadline spin",
+      "rc": 1,
+      "source_sha256": "3853359b096def842a31762ca4bb97d019b8f5be72b17c472dc62e78de68d746",
+      "binary_sha256": "10f0aaebb2a9cd4502a4ab1314b8cd47bb92cd007d3c5523405b53c807114ee3"
+    }
+  ]
+}

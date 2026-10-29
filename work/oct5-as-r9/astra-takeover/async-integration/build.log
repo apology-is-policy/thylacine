@@ -1,0 +1,26 @@
+-- Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/northkillpd/projects/thylacine-corona/build/kernel
+[  0%] Building C object kernel/CMakeFiles/thylacine.elf.dir/main.c.obj
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom.c.obj
+[  1%] Building C object kernel/CMakeFiles/thylacine.elf.dir/handle.c.obj
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_fids.c.obj
+clangclang: : clang: clangwarning: : argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]warning: 
+argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_nodes.c.obj
+[  2%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_operation.c.obj
+[  3%] Building C object kernel/CMakeFiles/thylacine.elf.dir/loom_service_requests.c.obj
+clang: clang: clang: warning: warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+warning: argument unused during compilation: '-fstack-clash-protection' [-Wunused-command-line-argument]
+/Users/northkillpd/projects/thylacine-corona/kernel/loom_service_operation.c:12:10: fatal error: 'mm/slub.h' file not found
+   12 | #include "mm/slub.h"
+      |          ^~~~~~~~~~~
+1 error generated.
+gmake[2]: *** [kernel/CMakeFiles/thylacine.elf.dir/build.make:802: kernel/CMakeFiles/thylacine.elf.dir/loom_service_operation.c.obj] Error 1
+gmake[2]: *** Waiting for unfinished jobs....
+gmake[1]: *** [CMakeFiles/Makefile2:106: kernel/CMakeFiles/thylacine.elf.dir/all] Error 2
+gmake: *** [Makefile:91: all] Error 2

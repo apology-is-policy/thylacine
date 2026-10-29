@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -O0 /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sanitizer-check-4qec4ld1/ubsan-then-assertion.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sanitizer-check-4qec4ld1/ubsan-then-assertion -fsanitize=address,undefined -fno-omit-frame-pointer -g -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+env: {}
+sha256: 4ec642f0b8b29fa0693c1f54ea7446689b6894a261db90e789b331853f6bbeff  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/sanitizer-check-4qec4ld1/ubsan-then-assertion.c

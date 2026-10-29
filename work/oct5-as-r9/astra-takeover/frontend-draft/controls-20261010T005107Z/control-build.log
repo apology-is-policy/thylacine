@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/frontend-draft/controls-20261010T005107Z/control.c:3471:12: error: incompatible integer to pointer conversion assigning to 'u8 *' (aka 'unsigned char *') from 'u64' (aka 'unsigned long long') [-Wint-conversion]
+ 3471 |  l.ring_kva=(u64)frontend_ring;l.hdr_off=0;l.sq_array_off=256;l.sqe_off=512;l.cqe_off=1024;l.receipt_off=1536;
+      |            ^~~~~~~~~~~~~~~~~~~
+1 error generated.

@@ -35,6 +35,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 
 #include "../arch/arm64/uart.h"
 
@@ -213,6 +214,7 @@ static int ramfs_load_cb(const struct cpio_entry *ce, void *arg) {
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int ramfs_table_load(struct ramfs_table *t, const u8 *blob, size_t size) {
     t->count     = 0;
     t->skipped   = 0;
@@ -270,6 +272,7 @@ static void devramfs_init_hook(void) {
 // Lookup by archive path.
 // =============================================================================
 
+VISIBLE_IF_KERNEL_TESTS
 int ramfs_table_find_file(const struct ramfs_table *t, const char *path) {
     for (int i = 0; i < t->count; i++) {
         const struct ramfs_entry *e = &t->e[i];
@@ -307,6 +310,7 @@ static void ramfs_qid_set(struct Qid *q, u64 path, u8 type) {
 // One step from `cur`. A step starts at a directory, as a 9P walk does: from a
 // file every name misses, `..` included. `..` climbs to the parent; the root's
 // `..` is the root, and so is an (empty) mount point's.
+VISIBLE_IF_KERNEL_TESTS
 bool ramfs_table_walk_one(const struct ramfs_table *t, u64 cur, const char *name,
                           struct Qid *out) {
     ramfs_qid_set(out, 0, 0);
@@ -433,6 +437,7 @@ static int devramfs_stat(struct Spoor *c, u8 *dp, int n) {
 // from the per-component loop).
 //
 // Returns 0 on success, -1 if `qid_path` does not name a known node.
+VISIBLE_IF_KERNEL_TESTS
 int ramfs_table_stat(const struct ramfs_table *t, u64 qid_path, struct t_stat *out) {
     // Zero everything first so any field we don't set is a defined zero.
     // The caller can rely on every t_stat reaching it byte-for-byte equal
@@ -563,6 +568,7 @@ static int devramfs_close(struct Spoor *c) {
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 long ramfs_table_read(const struct ramfs_table *t, u64 qid_path, void *buf, long n,
                       s64 off) {
     if (!buf) return -1;
@@ -636,6 +642,7 @@ static int devramfs_fsync(struct Spoor *c, u32 datasync) {
 // listing -- instead we signal "buffer too small" the way Linux getdents does
 // with EINVAL, and the caller must enlarge its buffer. libthyla_rs::fs::ReadDir
 // stages 4 KiB, far above 24 + any name, so it never trips this.
+VISIBLE_IF_KERNEL_TESTS
 long ramfs_table_readdir(const struct ramfs_table *t, u64 dir_path, void *buf, long n,
                          s64 off) {
     if (!buf) return -1;
@@ -768,6 +775,7 @@ struct Dev devramfs = {
     .power    = devramfs_power,
 };
 
+#ifdef KERNEL_TESTS
 // Diagnostic accessors for tests.
 int  devramfs_entry_count(void)             { return g_ramfs.count; }
 int  devramfs_synth_dir_count(void)         { return (int)RAMFS_SYNTH_COUNT; }
@@ -781,3 +789,4 @@ int devramfs_root_child_count(void) {
         if (g_ramfs.e[i].parent == RAMFS_PARENT_ROOT) n++;
     return n;
 }
+#endif // KERNEL_TESTS

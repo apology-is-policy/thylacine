@@ -17,4 +17,5 @@ default = ["guest"]
 guest = ["dep:libthyla-rs"]
 
 [dependencies]
+libhalcyon = { path = "../libhalcyon" }
 libthyla-rs = { path = "../libthyla-rs", optional = true }

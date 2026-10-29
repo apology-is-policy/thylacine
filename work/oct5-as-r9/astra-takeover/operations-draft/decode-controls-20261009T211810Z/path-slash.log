@@ -1,0 +1,1 @@
+Assertion failed: (loom_private_walk_component(bad[i],n[i])==-T_E_INVAL), function main, file path-slash.c, line 120.

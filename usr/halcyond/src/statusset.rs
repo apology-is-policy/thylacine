@@ -62,6 +62,7 @@ fn legacy_same(a: &StatusModel, b: &StatusModel) -> bool {
         let StatusModel {
             workspaces,
             active,
+            mode,
             name,
             cwd,
             cmd,
@@ -83,6 +84,7 @@ fn legacy_same(a: &StatusModel, b: &StatusModel) -> bool {
             // workspaces from the legacy bar's sameness key.
             workspaces.clone(),
             *active,
+            *mode,
             name.clone(),
             cwd.clone(),
             cmd.clone(),
@@ -131,6 +133,7 @@ pub struct StatusBar {
         bool,
         u32,
         (Vec<u8>, u8),
+        halcyond::modeview::DisplayMode,
     )>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
@@ -361,6 +364,7 @@ impl StatusBar {
                     } else {
                         (Vec::new(), 0)
                     },
+                    model.mode,
                 );
                 #[cfg(feature = "test-mode")]
                 if self.said_slots.as_ref() != Some(&key) {
@@ -376,7 +380,7 @@ impl StatusBar {
                         let _ = core::fmt::write(&mut ws_list, format_args!("{}", n));
                     }
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {} workspaces {} active0 {}",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {} workspaces {} active0 {} mode {} modebox [{} {}]",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
@@ -399,7 +403,7 @@ impl StatusBar {
                     //
                     // Note `ws [..]` above is the workspaces SLOT's geometry,
                     // a different thing entirely.
-                    ws_list, model.active
+                    ws_list, model.active, model.mode.label(), slots.mode.0, slots.mode.1
                     ));
                 }
                 let _ = slots;

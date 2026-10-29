@@ -1,0 +1,11 @@
+--- control
++++ omit-node-orphan-guard
+@@ -279,7 +279,7 @@
+         }
+     }
+     if (!loom_service_nodes_empty(l->service_nodes))
+-        extinction("private Loom retained unowned node");
++        (void)0;
+ }
+ static void loom_private_requests_destroy(struct Loom *l) {
+     // Exclusive zero-reference owner. An unused pre-admission reservation has

@@ -27,28 +27,12 @@
 
 #include "../../arch/arm64/uart.h"
 #include "../../mm/phys.h"   // alloc_pages/free_pages for the hand-built skein
-
-void test_dma_handle_create_basic(void);
-void test_dma_handle_create_zero_size_rejected(void);
-void test_dma_handle_create_oversize_rejected(void);
-void test_dma_handle_create_round_up_to_page(void);
-void test_dma_handle_distinct_pa(void);
-void test_dma_handle_unref_releases_chunk(void);
-void test_dma_handle_zero_init(void);
-void test_burrow_dma_create_basic(void);
-void test_burrow_dma_create_null_rejected(void);
-void test_burrow_dma_holds_kobj_ref(void);
-void test_burrow_dma_lifecycle_round_trip(void);
-void test_dma_map_install_vma(void);
-void test_dma_map_proc_free_releases_kobj(void);
+#include <thylacine/syscall.h>
 
 // Test sizes — small (fits comfortably in any test universe).
 #define TEST_DMA_SIZE_1PAGE  0x1000ull
 #define TEST_DMA_SIZE_4PAGE  0x4000ull
 #define USER_VA_DMA          0x50000000ull
-
-extern struct Proc *proc_alloc(void);
-extern void         proc_free(struct Proc *p);
 
 // =============================================================================
 // KObj_DMA layer.
@@ -607,8 +591,6 @@ void test_skein_one_block_resolves_throughout(void) {
 // handler reads current_thread()->proc, so a hand-rolled Proc would not be
 // what it sees. kproc holds CAP_ALL, so the capability gate passes and the
 // REFUSAL legs are what these actually measure.
-extern s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries);
-
 void test_dma_segments_refuses_rather_than_truncates(void) {
     struct Proc *me = kproc();
     TEST_ASSERT(me != NULL, "kproc");

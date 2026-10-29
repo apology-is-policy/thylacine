@@ -1,0 +1,49 @@
+Astra single-agent self-review: Future/retirement composition, October10.
+Uninstalled simulated-backend checks, not an independent audit or native gate.
+
+RetireQueue shares the previous bounded retirement mechanism through an internal
+Retirable interface. FixedDriver keeps its polling API and produces empty wake
+batches; FutureDriver produces deferred batches from receive/retire/close. Both
+reserve the same preallocated cell before invoking their factory. Future wrappers
+retain exact request/storage ownership; no additional backend close owner is made.
+
+All user Waker code must execute outside every manager/Hub/driver borrow, including
+Waker drop. Managed receive, client drop and root shutdown extract a batch inside
+the borrow and dispatch after it ends. Root marks the queue closed before any
+callback; callbacks may therefore drop peer clients but cannot start new work.
+Each retirement progress visit detaches a ready entry before dropping its driver,
+so automatic close cannot invoke user code under the queue borrow. At most64cells
+per round and at most64Wakers per batch; no dynamically growing notification list.
+Internal Retirable implementations must return notification batches, never invoke
+user callbacks from their methods under the queue borrow. Backend callbacks retain
+their separate no-reentry/no-panic/no-peer-wait contract.
+
+Client retirement stops admission but preserves an already-terminal successful
+WRITE result for a later poll. It must not be replaced by corruption/forced close:
+that would turn committed bytes into a misleading Closing result. Actual root
+shutdown still detaches delivery and closes once, while held READ results retain
+backing. Live results prevent retirement cell refund even after backend retirement.
+Caller-driven progress and actual native pins remain separate obligations.
+
+Six composition scenarios cover callback-driven peer drop, callback polling,
+client-drop callback accessing another client, root-shutdown callback peer drop,
+held-result admission retention, successful terminal delivery after normal retire,
+and allocation-free observed Arc-waker paths. Future-retirement090037Z passes
+opt0/2,2compile-fail+control,6mutants;10sources/21rawcommands. Regression of old
+polling retirement090048Z:8cases,2compile-fail+control,6mutants,10sources/21commands.
+Future regression090111Z:12cases,2compile-fail+control,6mutants,9sources/21commands.
+All source/diff/snapshot/raw diagnostics verified before docs. C code unchanged.
+
+FUTURE-RETIRE-HARNESS-R1: initial090001Z clean profiles passed. Fault-injected
+wake-under-drop-borrow caused exact RefCell panic followed by destructor cleanup
+abort; no FAILED footer. Preserved raw failure and corrected only expected
+RefCell diagnostic for the three borrow mutants; full retry passes. No initial
+full-suite pass. Review checked callback ownership, recursive peer retirement,
+factory failure, slot reuse, detach-before-destroy, and bounded stack batches.
+Protected10, cleanexternal61dde37 and parked kernel base preserved.
+
+Next local event/sleep/deadline integration must arrange progress when a request
+or READ result releases the last local owner; merely waiting for new CQ would
+strand a retiring cell. Current APIs still require explicit caller progress;
+no automatic progress, sleeping-loop lost-wakeup proof or native qualification is
+claimed. SQ reuse patch remains parked/unapplied. AS3/AS4/MM0-MM4 remain pending.

@@ -75,10 +75,11 @@ tools/test-smp-classify.sh
 # `test-a72` and `check-v80-floor` -- one screen down, in this block -- did not.
 # test-fault builds one kernel per provoker and PASSes iff each EXTINCTIONs with
 # its expected message: the ONLY proof that the canary / W^X / BTI / the two
-# stack guards / the idle guard / the recursion arm actually FIRE, as opposed to
+# stack guards / the idle guard / the recursion arm / the no-entropy refusal
+# (vote 18; a launch with no RNDR and no virtio-rng) actually FIRE, as opposed to
 # merely being compiled in. Its absence from every gate is how #244 --
 # recursive_kernel_fault emitting nothing at all -- hid for about a month.
-tools/test-fault.sh                 # all 7 variants    (or: make test-fault)
+tools/test-fault.sh                 # every variant     (or: make test-fault)
 tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 
 # verify-kaslr multi-boots and PASSes iff the slide varies across N: ROADMAP
@@ -87,6 +88,23 @@ tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 # slide that never moves -- the same shape as test.sh being blind to LSE above.
 tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
 tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
+
+# Every host checker at once (tools/test-*.py, each with --mutants and --sanitize
+# where it takes them). They read the tree's own sources -- a kernel function
+# found by name, a header by a text anchor -- so a change ANYWHERE that renames,
+# moves or wraps that text breaks them; run this after any such change, not only
+# after one to the checker's own surface. An unbuilt series broke two of them on
+# 2026-10-27 with no failure anywhere. Host only; minutes. Logs default to
+# build/host-checkers/<stamp>/. Name checkers to run a subset.
+tools/test-host-checkers.sh
+tools/test-host-checkers.sh test-magazines test-sqpoll-ticket
+
+# The per-CPU magazines' host witness (vote 16, vault gate-magazines-tsan): the
+# actual mm/magazines.c bodies under ThreadSanitizer, three CPUs churning while
+# a fourth drains. --mutants adds three one-sided lock drops and the pre-lock
+# source pinned at b057de8eb; each must draw a race report, and the clean leg
+# none. Homebrew LLVM; guest twin: the suite's phys.drain_meets_live_owners.
+python3 -I tools/test-magazines.py --mutants --logs <dir>
 
 # Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
 # TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
@@ -126,6 +144,52 @@ make test-haul-kat                  # or: usr/haul/kat/regen.sh [--write]
 tools/check-v80-floor.py            # fast: source + the ramfs binaries (~7 s)
 tools/check-v80-floor.py --all      # + /clade + /goroot   (or: make check-floor)
 make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
+
+# Cross-file declarations (votes 19 + 20, 2026-10-27; .claude/rules/kernel-code.md).
+# Runs in every `build.sh kernel`, after the link, on that configuration's TUs:
+# FATAL, no skip switch, self-test first. One name, one type across every TU of
+# the kernel ELF (kernel/, arch/, mm/, lib/, generated); no .c declares a name it
+# does not define, at file or block scope; a struct/union tag is defined in one
+# file; every name a TU sees is defined in the configuration (C or a C file's
+# own file-scope asm, .S globals, or the linker script -- a test hook's
+# prototype left outside #ifdef KERNEL_TESTS fails this on a production build,
+# not the link). The compiler cannot see any
+# of the four: it compares a declaration with its definition only inside one
+# TU. Run it by hand on another build directory:
+tools/check-decls.py --build-dir build/kernel    # 0 ok; non-zero on a violation or a tree it cannot read
+tools/check-decls.py --self-test                 # each rule turns red on a seeded case
+
+# Kernel-to-userspace prot-bit mirror (corona, 2026-10-07). Userspace cannot
+# include a kernel header, so VMA_PROT_* and BURROW_PROT_* are RETYPED in
+# usr/lib/libt and usr/lib/libthyla-rs behind a comment asking the author to keep
+# them equal -- and the kernel's own copies are pinned by _Static_assert while
+# this edge had nothing on it. Drift is silent and W^X-adjacent (I-12): a prot
+# meant as EXEC arrives as something else, presenting as a wrong-permission
+# fault rather than a refusal. The check is DERIVED (both sides enumerated, so
+# an APPENDED bit is seen) and refuses outright when a side yields zero
+# constants. An absence is reported rather than failed -- a composite
+# (VMA_PROT_RW) or a bit named only so its refusal can be spelled
+# (BURROW_PROT_EXEC) has no business in userspace -- and --expect-unmirrored
+# pins the absence COUNT, which is what makes an unmirrored new bit fail with no
+# allowlist to maintain. NOT yet wired into build.sh: the wiring belongs with
+# the next bake, not with a run that is mid-gate.
+tools/check-prot-mirror.py                       # 0 agree / 1 drift / 2 cannot measure
+tools/check-prot-mirror.py --expect-unmirrored 5 # today's absence count
+
+# The native Loom client cores: C in libt (thyla/loom_client/, NA-2b) and the
+# Rust twins in usr/lib/loom-client (NA-3). Host only, no boot, a few minutes. Every host test under ASan + UBSan with no recovery
+# (a control proves a signed overflow fails that build), then at -O2 with
+# NDEBUG cores; a test passes only by exiting 0 AND printing its own PASS line.
+# Then the cores built with libt's exact flags for aarch64-none-elf: no mem*
+# import, and every public function linked under --no-undefined; an -O0
+# control must fail that link on memcpy. Then the Rust twins' tests with cargo,
+# in the dev profile and in the guest's release profile; each run must pass every
+# #[test] the crate declares, with no build warning. The mutant drivers
+# work/oct12-na2b/na2b-mutants.py (C) and work/oct12-na3/na3-mutants.py (Rust)
+# are the discrimination evidence behind it. Last, the Rust ring's ownership
+# witnesses (tools/test-loom-rust-ownership.py): raw registration must be unsafe,
+# and a range borrow can neither alias a mutable one nor outlive its buffer.
+make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --
 # login + assert rendered command output (the test that would have caught LS-1).

@@ -1,0 +1,23 @@
+Continue autonomously as Astra on corona/async-memory, single-agent.
+Current uninstalled overlay order (do not rerun historical installers):
+1 drain-draft engine/header, CONNECT, protocol, READY and action modules.
+2 iounit-draft node header/nodes/fids/admission.
+3 action-draft action header and ready-draft READY header.
+4 retirement-draft operation/RPC/IO/provided/retirement/requests/client/loom and headers.
+5 program-draft and wire-draft program/wire modules and headers.
+6 canonical97d495 remaining sources.
+
+Next actual immutable shared-SQE/frontend routing and canonical pool RETURN/CQ
+wake integration; preserve decoded value/creator identity across unlocked work.
+Validate lease RETURN makes parked multishot runnable and changes the registered
+wait predicate. Audit every constructor/borrow/drop wake needed by the new engine.
+Qualify multiple owners/scopes, normal/bulk, full CQ, empty pool, abort/late buffer,
+CLUNK and close/exec through actual frontend and native transport paths.
+Do not treat the host engine fixture's controlled native IO/protocol destructor,
+allocator/ref/wake and prebound engine setup as native qualification or adoption.
+
+After coherent review install only the combined current overlay; then real ARM64
+full link and source-matched native/full Mac gates. The prior50/50 applies only
+to f719ee4a. AS3/4 then MM0-MM4 follow; no Main/private async/clipboard activation
+or removal of128MiB protection before required gates. Preserve raw runs/objects,
+8GiB floor, clean Stratum61dde37 and Astra six pending/four protected hashes.

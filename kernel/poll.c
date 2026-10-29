@@ -60,14 +60,10 @@
 // Diagnostics.
 // =============================================================================
 
-static u64 g_poll_calls;
 static u64 g_poll_slept;
 static u64 g_poll_resleeps;
 
-u64 poll_total_calls(void) {
-    return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
-}
-
+#ifdef KERNEL_TESTS
 // g_poll_slept counts callers that ENTERED the slow path — incremented
 // just before `tsleep`. The counter is "slow path entered" rather than
 // "actually parked": if a producer races the first scan + register and
@@ -85,11 +81,13 @@ u64 poll_total_slept(void) {
 u64 poll_total_resleeps(void) {
     return __atomic_load_n(&g_poll_resleeps, __ATOMIC_RELAXED);
 }
+#endif // KERNEL_TESTS
 
 static u64 g_poll_snap_failsafes;
 static u64 g_poll_arm_retries;
 static u64 g_poll_snap_bound_ns;    // 0 = POLL_SNAP_BOUND_NS; a test's bound is silent
 
+#ifdef KERNEL_TESTS
 u64 poll_total_snap_failsafes(void) {
     return __atomic_load_n(&g_poll_snap_failsafes, __ATOMIC_RELAXED);
 }
@@ -105,6 +103,7 @@ void poll_test_set_snap_bound_ns(u64 bound_ns) {
 bool poll_test_snap_bound_release(void) {
     return __atomic_exchange_n(&g_poll_snap_bound_ns, 0ull, __ATOMIC_RELAXED) != 0;
 }
+#endif
 
 // Only the first few are printed: the first one already fails every gate, and a
 // hung server would otherwise print one line per polled fd per second.
@@ -793,8 +792,6 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
     if (!p)                                   return -1;
     if (nfds == 0 || nfds > POLL_MAX_NFDS)    return -1;
     if (!kfds)                                return -1;
-
-    __atomic_fetch_add(&g_poll_calls, 1u, __ATOMIC_RELAXED);
 
     // The poller's private rendez and the per-fd arrays -- stack-allocated for
     // the lifetime of this call. With nfds <= POLL_MAX_NFDS (64): waiters[]

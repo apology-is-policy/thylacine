@@ -12,8 +12,18 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-10-28
 ---
+## Session factory handoff
+
+Kernel bootstrap stamps Joey with the explicit session-registry factory role.
+Userspace Joey delegates it only to login, whose first namespace operation
+creates the private resident-service view. CI boot probes exercise three
+users, same-principal overlap and twenty distinct login/logout cycles. The
+extra THYLA_D7_HOLD_LOGINS fixture is default-OFF and exists solely to hold
+two pipe-fed logins during a third interactive Haul session; normal production
+builds do not retain fixture users.
+
 ## Purpose
 
 Take the machine from a read-only initrd to a disk-backed root. joey spawns
@@ -127,6 +137,30 @@ tail; a raise by one, a budget past the hard maximum (0xFFFFFFFF), a zero
 budget (-22) and an unknown `threads_flags` bit (-1) are refused -- joey holds
 no raise authority, as for the page budget. Each child is killed and reaped.
 Boot-fatal.
+
+**The spawn environment tail, through the real ABI (2026-10-28,
+[[dec-2026-10-28-spawn-env]]).** `probe_spawn_env` runs after the thread
+budget probe. It first sets `PE_JOEY=here` in joey's own `/env`, so the
+spawner's environment and the block cannot read alike, and unsets it after.
+Each record (`union senv_record`) always writes the environment tail at its
+offset, so a leg can clear the bit and leave a poisoned tail in place. It spawns
+`/bin/hello` held and reads each child's `/proc/<pid>/environ` before the child
+runs:
+- the block arrives exactly;
+- with the bit clear, the poisoned tail is never read and the child carries
+  joey's environment -- at +104, and behind a cwd tail (+120), a thread tail
+  (+112) and both (+128), the cwd still landing;
+- an empty block gives an empty environment;
+- a repeated name arrives once, with the later value;
+- the tail is read at +120 after a cwd tail, +112 after a thread tail and +128
+  after both, and the cwd still lands.
+Refused, with no child: a record with no `=` (-22), a `/` in a name (-22), an
+unterminated block (-22), a value past 4096 bytes (-7), a length past 32768
+(-7), a NULL pointer with a length (-14), a nonzero `env_flags` (-1) and the
+next unknown `ext_flags` bit (-1). joey's own environment is checked unchanged.
+Boot-fatal. Both probes derive the next unknown bit from libt's
+`T_SPAWN_EXT_FLAGS_ALL`, which the mirror check holds to the kernel's, so a new
+tail cannot turn an "unknown bit" leg into a garbage-tail read.
 
 **go-threads, the budget against Go's M model.** Inside the go-goroutines
 success branch, `go_threads_run` spawns `/bin/go-threads` (300 goroutines,
@@ -338,6 +372,23 @@ diagnostic in precisely the branch whose diagnostic mattered most. The
 kernel now waits by pid (#94), so joey's own status is what the extinction
 reports.
 
+**The adopted-orphan reaper.** A Proc whose parent exits is reparented to joey,
+and its zombie waits in joey's children until joey reaps it.
+`reap_adopted_orphans` drains every zombie that is ready with a non-blocking
+wait-any and never blocks: it stops at 0 (live children remain) or -1 (none).
+It cannot take a child joey is tracking, because every wait joey makes for a
+child it spawned is by pid, and the sweep runs only between session waits in the
+getty loop, never between a spawn and its wait. Each reap prints one line. A pid
+in the daemon registry is labelled `DAEMON EXITED`, a registry that overflowed
+is labelled UNKNOWN, and anything else is an adopted orphan; the kernel's
+adoption line (`proc: orphan pid=... name=...`) names which Proc it was. The
+sweep asks for the packed wait word, so the line ends `signal=N` for a death by
+note and `status=N` for an exit (operator vote 2026-10-28; docs/ERRORS.md "The
+wait status"). The raw word reads 1 for every kill, which once let a debuggee
+ended by EXITKILL, a faulted daemon and a program that exited 1 print the same
+line. dap-probe leaves one orphan on purpose, its abandoned debuggee
+([[sub-parley]]), which this sweep reaps as `signal=9`.
+
 ## Data structures
 
 The spawn is one `t_sys_spawn_args`: flat NUL-separated argv (14 strings,
@@ -398,7 +449,7 @@ event-driven; no timing constant appears in this path.
   it here.
 - The readiness read must keep draining, and the drainer must keep owning
   the pipe. A reader that stops reading wedges the FS.
-- `wait_pid` must not be reintroduced on the daemon path.
+- A blocking reap (`wait_pid_for`) must not be reintroduced on the daemon path.
 
 ## Seams
 
@@ -464,14 +515,15 @@ event-driven; no timing constant appears in this path.
   this dossier.
 
   The rest of the file is init's other jobs and nothing in the vault describes
-  any of them: the long-lived-daemon registry and the adopted-orphan reaper; the
+  any of them: the long-lived-daemon registry (the adopted-orphan reaper that
+  reads it is under Mechanism since 2026-10-28); the
   ~850-line identity-daemon bringup and its wire helpers; the boundary-line smoke
   suite; the exec, fork and foreign-shell gates; the login and recovery
   end-to-end runs; the **session getty loop, which is what init actually spends
   its life doing**; the language-toolchain and GL gates; and seven numbered
   regression probes. Searching the vault for the terms that name these — the
   foreign-shell gate, the identity-daemon bringup, the smoke suite, the
-  toolchain gate, the orphan reaper's own function — returns **zero notes each**.
+  toolchain gate — returns **zero notes each**.
   The 2026-09-04/05 churn enlarged exactly this region: the session getty loop
   gained the login-spawned per-user `halcyond --session` bootstrap (KT-1.5d-1a),
   and the smoke suite gained a kaua-term transport boot-prove and the VIVARIUM

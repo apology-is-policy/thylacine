@@ -18,11 +18,19 @@ BUILD_DIR="$REPO_ROOT/build"
 # P1-I: optional --sanitize=ubsan flag selects the alternate build dir
 # so the production build's CMake cache isn't clobbered.
 sanitize=""
+private_async_qual=0
 extra_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sanitize=*)
             sanitize="${1#--sanitize=}"
+            shift
+            ;;
+        --private-async-qual)
+            # The kernel `tools/build.sh kernel --config <preset> --set
+            # PRIVATE_ASYNC_QUAL=y` builds, in its own dir (docs/ASYNC-SERVICE-ABI.md,
+            # Qualification bridge); the preset is what puts the suite in it.
+            private_async_qual=1
             shift
             ;;
         *)
@@ -40,6 +48,10 @@ case "$sanitize" in
         exit 1
         ;;
 esac
+
+if [[ "$private_async_qual" == 1 ]]; then
+    KERNEL_BUILD="${KERNEL_BUILD}-private-async-qual"
+fi
 
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
@@ -149,6 +161,14 @@ mkdir -p "$BUILD_DIR"
 
 # Build first if the ELF is missing.
 if [[ ! -f "$KERNEL_ELF" ]]; then
+    if [[ "$private_async_qual" == 1 ]]; then
+        # A fallback build here would make the DEFAULT shape and boot nothing.
+        echo "==> FAIL: no qualification kernel at $KERNEL_ELF." >&2
+        # Name a preset: a bare --set selects none, and TESTS then defaults to n,
+        # so the suite this flag exists to run would not be in the kernel.
+        echo "    Build it: tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y" >&2
+        exit 1
+    fi
     echo "==> Kernel ELF missing; building..."
     if [[ -n "$sanitize" ]]; then
         "$REPO_ROOT/tools/build.sh" kernel "--sanitize=$sanitize"
@@ -161,7 +181,8 @@ fi
 # was not that --production was broken -- it was that NOTHING BUILT IT, so it
 # stayed broken silently for weeks while every gate stayed green. A Makefile
 # target nobody remembers to run does not fix that; putting it in the loop that
-# actually runs does. It costs ~2 s and does not touch the tree (scratch dir).
+# actually runs does. It costs under 30 s (joey twice, then the KERNEL_TESTS=OFF
+# kernel and its check-decls) and does not touch the tree (scratch dirs).
 #
 # Skipped, not failed, when its input is absent: the generated headers are a
 # product of `build.sh userspace`, and a kernel-only iteration legitimately has
@@ -255,9 +276,10 @@ while [[ $(date +%s) -lt $deadline ]]; do
         # the login prompt's arrival is a second independent driver) --
         # identical-forever dumps = a dead present loop. The bounded retry
         # absorbs aurora's connect + first-present + login's prompt timing; a
-        # persistent miss is a FAIL (tapestryd or aurora down/blank). Skipped
-        # when the device/socket is absent (THYLACINE_NO_GPU=1 /
-        # THYLACINE_NO_QMP=1), THYLACINE_GPU_GATE=0, or python3 is missing.
+        # persistent miss is a FAIL (tapestryd or aurora down/blank). Off under
+        # THYLACINE_NO_GPU=1, THYLACINE_NO_QMP=1 or THYLACINE_GPU_GATE=0; when
+        # it applies but cannot run (no python3, no gate socket, QEMU gone),
+        # the boot FAILS rather than passing unread.
         # The build shape, from joey's own report (#212's line, which prints
         # before the banner and so is already in the log). Used below to skip
         # gates that are structurally inapplicable to the lean image -- keyed on
@@ -272,11 +294,24 @@ while [[ $(date +%s) -lt $deadline ]]; do
         # check below stays skipped, because debug-probe really is a probe.
         lean_shape=0
         grep -aq "ARC-GATES not-built" "$LOG_FILE" 2>/dev/null && lean_shape=1
+        # When the gate applies, a reason it cannot run is a failure: a missing
+        # socket is what a deleted socket or a dead monitor looks like.
+        gpu_gate_unrun=""
         if [[ "$result" == "pass" \
               && "${THYLACINE_NO_GPU:-0}" != "1" \
-              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]] \
-           && [[ -S "$QMP_GATE_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
-           && kill -0 "$QEMU_PID" 2>/dev/null; then
+              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]]; then
+            if ! command -v python3 >/dev/null 2>&1; then
+                gpu_gate_unrun="python3 is not on PATH"
+            elif [[ ! -S "$QMP_GATE_SOCK" ]]; then
+                gpu_gate_unrun="its QMP socket $QMP_GATE_SOCK is not a socket"
+            elif ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                gpu_gate_unrun="QEMU exited before the console could be read"
+            fi
+            [[ -z "$gpu_gate_unrun" ]] || result="gpu-gate-unrun"
+        fi
+        if [[ "$result" == "pass" \
+              && "${THYLACINE_NO_GPU:-0}" != "1" \
+              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]]; then
             # Keep the LAST attempt's output: screendump -c prints the actual
             # numbers ("bg 12.3%, exact-fg 41, edges ...") and names which
             # threshold missed. Discarding it left this gate's FAIL arm
@@ -440,6 +475,83 @@ case "$result" in
             grep -a '9p: close: flush of fid' "$LOG_FILE" >&2 || true
             exit 1
         fi
+        # The kernel suite's skips (vote 17). A test skips only through a helper
+        # that proves the configuration permits it: something tools/run-vm.sh
+        # did not declare (a thylacine.<kind> bootargs word), or a ramfs file
+        # whose companion the image lacks too. A [skip] of any other shape is
+        # an ungated skip. A skip of something this script's own configuration
+        # attaches means the launcher dropped it without declaring the drop.
+        # Any skip is reported, and reported as NOT coverage.
+        skip_lines="$(grep -ao '\[skip\] .*' "$LOG_FILE" | tr -d '\r' || true)"
+        skip_count=0
+        [[ -z "$skip_lines" ]] || skip_count="$(grep -c . <<<"$skip_lines")"
+        gated_skip='^\[skip\] (thylacine\.[a-z0-9-]+( x[0-9]+)?: the launcher did not declare it|/[^ ]+ not in ramfs, and neither is /[^ ]+)$'
+        if [[ -n "$skip_lines" ]] && grep -vqE "$gated_skip" <<<"$skip_lines"; then
+            echo "==> FAIL: a kernel test skipped without a gated helper (test_requires / test_image_lookup):" >&2
+            grep -vE "$gated_skip" <<<"$skip_lines" >&2 || true
+            exit 1
+        fi
+        # The suite's summary counts its skips whatever the console did to their
+        # lines; a skip read here must be a skip counted there, and the reverse.
+        tally_line="$(grep -a '  tests: [0-9]*/[0-9]* ' "$LOG_FILE" | tail -1 | tr -d '\r' || true)"
+        tally_skipped="$(sed -nE 's/.* \(([0-9]+) skipped\)$/\1/p' <<<"$tally_line")"
+        if [[ "${tally_skipped:-0}" != "$skip_count" ]]; then
+            echo "==> FAIL: the kernel suite counted ${tally_skipped:-0} skip(s), but $skip_count [skip] line(s) are readable:" >&2
+            echo "    ${tally_line:-(no tests: summary line)}" >&2
+            exit 1
+        fi
+        if [[ -n "$skip_lines" ]]; then
+            # run-vm.sh's own line names the machine it built; without it the
+            # CPU and MSI skips cannot be explained, so they fail.
+            qemu_line="$(grep -a -m1 '^==> qemu: accel=' "$LOG_FILE" | tr -d '\r' || true)"
+            skip_explained() { # skip_explained <what>: this configuration does not attach it
+                local q_accel="" q_gic="" q_smp="" q_its=""
+                [[ "$qemu_line" =~ accel=([^ ]+) ]] && q_accel="${BASH_REMATCH[1]}"
+                [[ "$qemu_line" =~ gic=v([^ ]+) ]] && q_gic="${BASH_REMATCH[1]}"
+                [[ "$qemu_line" =~ smp=([0-9]+) ]] && q_smp="${BASH_REMATCH[1]}"
+                [[ "$qemu_line" =~ its=([^ ]+) ]] && q_its="${BASH_REMATCH[1]}"
+                case "$1" in
+                    thylacine.virtio-net) [[ "${THYLACINE_NO_NET:-0}" == "1" ]] ;;
+                    thylacine.virtio-input|thylacine.virtio-pci-input*) [[ "${THYLACINE_NO_INPUT:-0}" == "1" ]] ;;
+                    thylacine.virtio-rng|thylacine.virtio-pci-rng) [[ "${THYLACINE_NO_RNG:-0}" == "1" ]] ;;
+                    thylacine.virtio-gpu)
+                        [[ "${THYLACINE_NO_GPU:-0}" == "1" ]] && return 0
+                        case "${THYLACINE_DISPLAY:-none}" in
+                            console|vnc:*|vnc-unix|egl-headless|dbus-gl|gpu) return 0 ;;
+                        esac
+                        return 1 ;;
+                    thylacine.virtio-blk)
+                        [[ ! -f "${THYLACINE_DISK_IMG:-$REPO_ROOT/build/disk.img}" \
+                           && ! -f "${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}" ]] ;;
+                    thylacine.smp) [[ -n "$q_smp" ]] && (( q_smp < 2 )) ;;
+                    thylacine.msi)
+                        [[ -n "$q_gic" && -n "$q_its" && -n "$q_accel" ]] || return 1
+                        case "$q_gic:$q_its:$q_accel" in
+                            2:*|3:on:tcg|3:auto:tcg) return 1 ;;
+                        esac
+                        return 0 ;;
+                    /lib/libc.so) [[ ! -f "$REPO_ROOT/build/sysroot/lib/libc.so" ]] ;;
+                    *) return 1 ;;
+                esac
+            }
+            unexplained=""
+            while IFS= read -r skip_line; do
+                case "$skip_line" in
+                    "[skip] thylacine."*) what="${skip_line#\[skip\] }"; what="${what%%:*}"; what="${what%% *}" ;;
+                    *) what="${skip_line##*, and neither is }" ;;
+                esac
+                skip_explained "$what" || unexplained+="$skip_line"$'\n'
+            done <<<"$skip_lines"
+            if [[ -n "$unexplained" ]]; then
+                echo "==> FAIL: kernel tests skipped what this configuration attaches (the launcher dropped it undeclared):" >&2
+                printf '%s' "$unexplained" >&2
+                exit 1
+            fi
+            echo "==> kernel suite: $(grep -c . <<<"$skip_lines") skip line(s) -- NOT coverage:"
+            while IFS= read -r skip_line; do
+                echo "==>   $skip_line"
+            done <<<"$skip_lines"
+        fi
         # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
         # verdict. Both soft-skip when their external Alpine bundle is absent,
         # which is right, but nothing carried the skip into the exit status --
@@ -474,6 +586,10 @@ case "$result" in
         tail -20 "$LOG_FILE"
         echo "----------------"
         exit 0
+        ;;
+    gpu-gate-unrun)
+        echo "==> FAIL: G-4 console gate could not run: $gpu_gate_unrun." >&2
+        exit 1
         ;;
     gpu-gate)
         echo "==> FAIL: G-4 console gate -- the Aurora scanout did not verify." >&2

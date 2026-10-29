@@ -1,0 +1,1 @@
+Assertion failed: (b.outstanding==1), function main, file test_lease_ledger.c, line 17.

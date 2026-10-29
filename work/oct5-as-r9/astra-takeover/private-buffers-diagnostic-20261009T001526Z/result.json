@@ -1,0 +1,19 @@
+{
+  "rc": 0,
+  "source_head": "3dcff4cb91a2c61092e9e1c983a6f219cadda101",
+  "source_diff_sha256": "cafec55f5ad7980e51f98a5fc871ab8bc8809d5e2f00f9fadd5e65e5c2a2defc",
+  "inputs_sha256": {
+    "build/kernel/thylacine.elf": "4ddcc7dd41de352744c066b914c774a0ab5cfceccdd4c84164d2c3386e7d82e0",
+    "build/kernel/thylacine.bin": "7b9305cd8fcf7cf67a130cebc819aece6e85ecbf13a0be1164fad9b8373f9290",
+    "build/ramfs.cpio": "2aac2d83a1967e15e68cadec5a6fb415d4f59b79c2814edac328e5508acf51ec",
+    "build/fixtures/pool.img.baked-snapshot": "820202cb38ba179e3b9212d54b57b12d26f7623f1849b0517ffd48fa1366a17f",
+    "build/fixtures/system.key": "0b01a586e7c5454f12217c76e4352f882db11f152aeff18a9622fa0b79475614",
+    "build/fixtures/system.key.baked-snapshot": "0b01a586e7c5454f12217c76e4352f882db11f152aeff18a9622fa0b79475614"
+  },
+  "scope": "single default SMP1 diagnostic after fixture-only VA/lock correction; not full matrix qualification",
+  "raw_verified": true,
+  "private_buffers": true,
+  "d7_overlap": true,
+  "d7_twenty_distinct_cycles": true,
+  "serial_sha256": "522d3730553e68b532c9e2ed4676856f07fea65d5d4236ca7e501ff914605e35"
+}

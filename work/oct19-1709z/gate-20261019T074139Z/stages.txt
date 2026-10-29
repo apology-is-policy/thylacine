@@ -1,0 +1,24 @@
+2026-10-19T07:41:39Z  occurs self-check: a true count passes, a false one fails
+2026-10-19T07:41:39Z  HEAD c6a3dca72edc9d255ef96d051b282f66e2dbfdf0, clean
+2026-10-19T07:41:39Z  expected tests (derived from test.c): 1899
+2026-10-19T07:41:39Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla' (self-check: a wrong set refuses); no untracked build input
+2026-10-19T07:41:39Z  go fork /Users/northkillpd/projects/go-thylacine-pin-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+2026-10-19T07:41:39Z  disk pre: 12748 MiB free (floor 8192)
+2026-10-19T07:42:27Z  disk post-control-build: 12722 MiB free (floor 8192)
+2026-10-19T07:42:28Z  control kernel 81ae9d4c7e1b648457e1c067445182d96a13e78cfd64bcaabaa9cddf22ff60f6; programs 04d1d9ba534b1dbc4437e497823195fcbec85886c0403a3c10646fd1460b2a9d
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/ramfs-src/bin/stratumd
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/pouch/stratumd-cmake/src/cmd/stratumd/stratumd
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/pouch/progs/stratumd
+2026-10-19T07:43:19Z  control: test.sh exit 0
+2026-10-19T07:43:19Z  CONTROL GREEN: 1899/1899, D7 PASS; measured: loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-native-probe:;fixture status 76 expected 76;probe status 78 expected 78;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-c-probe:;fixture status 76 expected 76;probe status 74 expected 74;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;
+2026-10-19T07:44:16Z  disk post-control-q-build: 12665 MiB free (floor 8192)
+2026-10-19T07:44:17Z  control-q kernel 253692a013910895e6b11d381735ffb6c914ff19adedfc5816da022220479d96
+2026-10-19T07:45:13Z  control-q: test.sh exit 0
+2026-10-19T07:45:13Z  CONTROL-Q GREEN: 1899/1899, D7 PASS; measured: loom-fixture: sessions 6 ended 6 violations 0 stalled 2 flushes 0 clunks 92 getattrs 127 walks 110 opens 16 reads 31 writes 1;loom-native-probe:;fixture status 77 expected 77;probe status 79 expected 79;rings made 2 expected 2;rings retired 2 expected 2;connections made 6 expected 6;connections freed 6 expected 6;registries destroyed 1 expected 1;loom-fixture: sessions 6 ended 6 violations 0 stalled 2 flushes 0 clunks 92 getattrs 127 walks 110 opens 16 reads 31 writes 1;loom-c-probe:;fixture status 77 expected 77;probe status 75 expected 75;rings made 2 expected 2;rings retired 2 expected 2;connections made 6 expected 6;connections freed 6 expected 6;registries destroyed 1 expected 1;
+2026-10-19T07:46:30Z  disk post-ubsan-build: 12107 MiB free (floor 8192)
+2026-10-19T07:46:30Z  ubsan kernel 7006a10aa677fcc78e48cf7f111f6de837c8937835cf2a5bc872eb0ce46748ba
+2026-10-19T07:47:21Z  ubsan: test.sh exit 0
+2026-10-19T07:47:21Z  UBSAN GREEN: 1899/1899, D7 PASS, no trap; measured: loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-native-probe:;fixture status 76 expected 76;probe status 78 expected 78;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;loom-fixture: sessions 0 ended 0 violations 0 stalled 0 flushes 0 clunks 0 getattrs 0 walks 0 opens 0 reads 0 writes 0;loom-c-probe:;fixture status 76 expected 76;probe status 74 expected 74;rings made 0 expected 0;rings retired 0 expected 0;connections made 0 expected 0;connections freed 0 expected 0;registries destroyed 1 expected 1;
+2026-10-19T07:48:41Z  PRODUCTION: tools/check-production.sh --all passes
+2026-10-19T07:48:42Z  ALL GREEN: corona c6a3dca72edc9d255ef96d051b282f66e2dbfdf0, stratum 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, go fork a6567baeaa716811783031fdf543477fdcd1707d
+2026-10-19T07:48:42Z  exit 0

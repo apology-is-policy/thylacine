@@ -136,6 +136,9 @@ pub enum Action {
     Log(String),
     /// One of our requests failed; the string is the server's message.
     Failed(String),
+    /// The server answered `shutdown` (`Err` carries its message if it refused).
+    /// Send [`Client::exit`] either way: the server waits for it.
+    ShutDown(core::result::Result<(), String>),
     /// Nothing to do: an unmatched or superseded response, or a notification we
     /// do not consume. NEVER an error -- a client must tolerate anything a
     /// server says without falling over.
@@ -225,8 +228,8 @@ impl Client {
     /// `file://` URI -- see [`path_to_uri`]).
     ///
     /// `processId` is sent as null: it is the server's liveness hint for
-    /// self-exit, and the pure layer has no pid. The transport's
-    /// close-stdin/kill shutdown is the real lifetime control.
+    /// self-exit, and the pure layer has no pid. The host's shutdown is the
+    /// real lifetime control.
     pub fn initialize(&mut self, root_uri: &str) -> Value {
         let id = self.mint(Pending::Initialize);
         let caps = obj(vec![
@@ -417,7 +420,8 @@ impl Client {
                     Pending::Hover => Action::Hover(None),
                     Pending::Definition => Action::Definition(None),
                     Pending::Completion => Action::Completion(Vec::new()),
-                    _ => Action::Failed(e.message),
+                    Pending::Shutdown => Action::ShutDown(Err(e.message)),
+                    Pending::Initialize => Action::Failed(e.message),
                 };
             }
         };
@@ -430,7 +434,7 @@ impl Client {
             Pending::Definition => Action::Definition(parse_definition(&value)),
             Pending::Hover => Action::Hover(parse_hover(&value)),
             Pending::Completion => Action::Completion(parse_completion(&value)),
-            Pending::Shutdown => Action::Ignored,
+            Pending::Shutdown => Action::ShutDown(Ok(())),
         }
     }
 
@@ -963,6 +967,21 @@ mod tests {
         let msg = alloc::format!(r#"{{"id":{},"error":{{"code":-32603,"message":"boom"}}}}"#, id);
         assert_eq!(feed(&mut c, &msg), Action::Failed(String::from("boom")));
         assert!(!c.is_ready());
+    }
+
+    #[test]
+    fn a_shutdown_answer_surfaces_either_way() {
+        let mut c = Client::new();
+        let id = id_of(&c.shutdown());
+        let msg = alloc::format!(r#"{{"id":{},"result":null}}"#, id);
+        assert_eq!(feed(&mut c, &msg), Action::ShutDown(Ok(())));
+        assert_eq!(c.outstanding(), 0);
+
+        let id = id_of(&c.shutdown());
+        let msg = alloc::format!(r#"{{"id":{},"error":{{"code":-32603,"message":"busy"}}}}"#, id);
+        assert_eq!(feed(&mut c, &msg), Action::ShutDown(Err(String::from("busy"))));
+        // A duplicate answer is not a second shutdown.
+        assert_eq!(feed(&mut c, &msg), Action::Ignored);
     }
 
     #[test]

@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-10-19
+updated: 2026-10-27
 ---
 ## Purpose
 
@@ -39,9 +39,12 @@ Burrow with `handle_count = 1, mapping_count = 0`:
 | `burrow_create_code` | anonymous, demand-zeroed — identical to lazy anon (B-2a, 2026-10-07; one contiguous chunk before) | **sparse** |
 
 **Refcounting** is four calls: `burrow_ref`/`burrow_unref` on the handle side,
-`burrow_acquire_mapping`/`burrow_release_mapping` on the mapping side. The
-mapping pair is not for general use — the VMA layer owns it — but is public so
-the lifecycle can be exercised in isolation against the model.
+`burrow_acquire_mapping` and the release on the mapping side — the VMA layer
+drops through `burrow_release_mapping_freed` and
+`burrow_release_mapping_settled_deferred`. The mapping calls are not for
+general use — the VMA layer owns them; the plain `burrow_release_mapping` is
+compiled only with the tests, which exercise the lifecycle in isolation against
+the model.
 
 **Mapping** is `burrow_map(p, v, vaddr, length, prot)` / `burrow_unmap`, which
 install and remove a VMA and take the mapping ref as a side effect.
@@ -70,7 +73,7 @@ release cannot apply to) for the phenotype `madvise` row and the Pouch wrapper
 -- the native `SYS_BURROW_DECOMMIT` still flattens to -1;
 `burrow_release_lazy_range_in(as, v, lo, hi)` is the per-mapping half the
 decommit and the range detach both loop over, returning the slots it released.
-`burrow_lazy_resident_count` is O(1) (the pagemap keeps the count) and
+`burrow_lazy_resident_count` (the tests' reader; production reads `burrow_lazy_footprint`) is O(1) (the pagemap keeps the count) and
 `burrow_lazy_footprint` adds the map's node pages to it.
 `burrow_image_resident_count(v)` / `burrow_image_strip(v, want)` are the FILE-side
 pair the Image cache's reclaim uses (the round-2 close, below): the resident
@@ -292,13 +295,30 @@ under the caller's `as->lock` — and qualifies on `freed || shared_out`, readin
 at drop time rather than before the drop can only **add** a reason to settle,
 never miss one that mattered.
 
+**One implementation per decision (AS-R9 self-audit).** The first cut of this
+repair left the `{0,0}` dual-counter decision written *twice* — once in
+`burrow_unref_freed` / `burrow_release_mapping_{freed,deferred}` and again in the
+settled forms — which is the same drift hazard the claim refactor above exists to
+avoid, reintroduced one layer down. It also left
+`burrow_release_mapping_deferred` with no callers at all, since
+`vma_free_deferred` had moved to the settled path. The two unsettled forms that
+have callers are now thin wrappers over the settled ones (the mapping-freed form
+adding only the inline free its non-deferred contract promises), so each decision
+has exactly one copy and a caller that holds no charge record still has a name to
+call that does not make it pass NULLs; the callerless deferred one was deleted
+(the AS-R9 backport's audit, P3-1). The settled forms carry the *historical* extinction
+bodies, so the wrappers' messages are unchanged; none of those bodies is in the
+`tools/test-fault.sh` matched set, so they are prose rather than tooling ABI.
+
 Five callers were migrated: `loom_drop_pin_settling`, Loom's displaced
 registered-buffer pins, Weft's share unregister and owner orphan sweep, and the
 eager-ANON arm of `vma_detach_range_in` (through `vma_free_settled_deferred`,
 of which `vma_free_deferred` is now the no-payer wrapper — [[sub-kernel-vma]]).
 On main the stand-alone `burrow_charge_claim`, `burrow_charge_restore` and
-`burrow_is_shared_out` were then **deleted** rather than kept: `SYS_JIT_DESTROY`
-settles by footprint since B-2a and never used them, so after the migration
+`burrow_is_shared_out` were then **deleted** rather than kept (corona, which
+had kept the pair for its older `SYS_JIT_DESTROY`, took the deletion when it
+merged main on 2026-10-21): `SYS_JIT_DESTROY` settles by footprint since B-2a
+and never used them, so after the migration
 nothing called them, and a claim that can be taken outside a drop is the
 primitive this defect was made of.
 
@@ -650,6 +670,27 @@ The model is three types behind for the same reason, and that gap is
 substantive rather than cosmetic: it predates the sparse backings entirely. See
 [[spec-burrow]] for what that does and does not leave unproven.
 
+## Exact payer retained after process exit (AS-2a)
+
+The settled drops take the exact live AddrSpace instead of consulting a Proc
+(`burrow_unref_settled` is the Proc wrapper). The asynchronous caller holds a
+descriptor pin, and since AS-R9 it settles
+through the drop itself: `burrow_unref_settled_in(b, as, &refund)` takes the
+record inside the hold that decides finality, so only the drop that destroys the
+storage refunds, exactly once, to the pinned address space. (This section first
+prescribed claim before the release and restore on a nonfinal drop; AS-R9 showed
+that shape writes through a freed Burrow when another holder's final drop lands
+between the two.) The leaf lock and claim-once semantics are unchanged; no PID
+lookup or successor image can receive the refund. A native test destroys the
+Proc, rejects a fresh address space as payer, and settles the pinned original
+account after the last buffer release; tests read a live record under its
+leaf lock rather than claiming it. The stand-alone claim/restore pair, in both
+its Proc form and the exact-AddrSpace `_in` form AS-2a added for this cleanup,
+is deleted (above). The legacy shared-out
+detach policy is unchanged, and the new MM hierarchy is not implemented here.
+Evidence is in ASYNC-SERVICE-SELF-REVIEW.md, whose claim/restore paragraph
+AS-R9 superseded (noted there).
+
 ## Provenance
 
 The dual refcount was specified before it was built, and the specification's
@@ -770,3 +811,18 @@ when their leaves went ([[sub-kernel-vma]]), and an idle image has none. The
 protect, the unmap, the decommit and the detach's phase 2 clear their leaves
 through `vma_uninstall_range_in` now, mapping by mapping, so a FILE mapping's
 refund lands on the right counter.
+
+## The test file is claimed, not newly described (2026-10-07)
+
+`kernel/test/test_burrow.c` was UNOWNED -- `quaestor owner` put it among the 109
+unclaimed files under `kernel/test`, which is how a test file ends up describing
+a surface nobody is responsible for. It is claimed here because this dossier owns
+the code it exercises, which is the convention the memory dossiers already follow
+(vma, fault, addrspace and pagemap each claim their own).
+
+Nothing new is asserted by the claim: the five AS-R9 witnesses it added --
+`settled_drop_retains_nonfinal_charge`, `settled_drop_exact_payer`,
+`settled_mapping_drop_defers_free`, `unmap_failure_leaves_mapping_attached`,
+`unmap_interior_start_refused` -- are already described above, each beside the
+arm of the repair it pins. What changes is that churn in that file now flags THIS
+dossier, which is the point of ownership.

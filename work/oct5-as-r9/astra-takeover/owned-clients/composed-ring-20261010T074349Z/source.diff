@@ -1,0 +1,399 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c
+index 552bcf1f0..1c8abfb37 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c
+@@ -1,23 +1,27 @@
+ #include "ring_payload.h"
+ #include <assert.h>
+ #include <stdlib.h>
++#include <string.h>
+ struct ring_core;struct pool_state;
+ struct t_ring_owner{struct ring_core *core;};struct t_ring_client{struct ring_core *core;};struct t_ring_pool{struct pool_state *pool;};
+ struct t_ring_payload{struct pool_state *pool;struct t_lease_token token;unsigned active,pending;};
+ struct member{struct t_loom_service_pool_member range;struct t_ring_payload lease;};
+ struct pool_state{struct ring_core *core;struct t_loom_service_ref identity;struct t_lease_ledger ledger;size_t count,live;unsigned handle_alive,closing;struct t_ring_pool handle;struct member members[];};
+-struct ring_core{struct t_ring_backend b;struct pool_state *pools[64],*quarantine;uint64_t last[64];size_t members,live,pool_handles;unsigned closing,closed,root_alive,client_alive;struct t_ring_owner root;struct t_ring_client client;};
++enum fixed_phase{FIX_FREE,FIX_PREPARED,FIX_ACTIVE,FIX_TERMINAL};
++struct t_ring_fixed{struct ring_core *core;struct t_loom_service_pool_member range;struct t_loom_service_ref scope;uint64_t cookie;enum fixed_phase phase;int32_t result;unsigned write,alive,abandoned;};
++struct ring_core{struct t_ring_fixed fixed[64];size_t fixed_handles;struct t_ring_backend b;struct pool_state *pools[64],*quarantine;uint64_t last[64];size_t members,live,pool_handles;unsigned closing,closed,root_alive,client_alive;struct t_ring_owner root;struct t_ring_client client;};
+ static void retire(struct ring_core *c){if(!c->closing){c->closing=1;c->b.begin_retire(c->b.context);}}
+ static void close_owner(struct ring_core *c){retire(c);if(!c->closed){c->closed=1;c->b.close(c->b.context);}}
+-static void maybe_free(struct ring_core *c){if(!c->root_alive&&!c->client_alive&&!c->pool_handles&&!c->live){close_owner(c);for(size_t i=0;i<64;++i)free(c->pools[i]);free(c->quarantine);c->b.destroy(c->b.context);free(c);}}
++static void maybe_free(struct ring_core *c){if(!c->root_alive&&!c->client_alive&&!c->pool_handles&&!c->fixed_handles&&!c->live){close_owner(c);for(size_t i=0;i<64;++i)free(c->pools[i]);free(c->quarantine);c->b.destroy(c->b.context);free(c);}}
+ static void failed_create(struct t_ring_backend b){b.begin_retire(b.context);b.close(b.context);b.destroy(b.context);}
+-int t_ring_create(struct t_ring_backend b,struct t_ring_owner **root,struct t_ring_client **client){assert(root&&client&&b.count&&b.length&&b.buffer&&b.return_buffer&&b.retire_pool&&b.destroy_pool&&b.begin_retire&&b.retired&&b.close&&b.destroy&&b.register_pool);*root=NULL;*client=NULL;size_t n=b.count(b.context);if(!n||n>64){failed_create(b);return T_LEASE_GEOMETRY;}for(size_t i=0;i<n;++i){size_t len=b.length(b.context,i);if(!len||len>PTRDIFF_MAX){failed_create(b);return T_LEASE_GEOMETRY;}}struct ring_core *c=calloc(1,sizeof(*c));if(!c){failed_create(b);return -12;}c->b=b;c->root_alive=1;c->client_alive=1;c->root.core=c;c->client.core=c;*root=&c->root;*client=&c->client;return 0;}
++int t_ring_create(struct t_ring_backend b,struct t_ring_owner **root,struct t_ring_client **client){assert(root&&client&&b.count&&b.length&&b.buffer&&b.return_buffer&&b.retire_pool&&b.destroy_pool&&b.begin_retire&&b.retired&&b.close&&b.destroy&&b.register_pool&&b.abort_scope);*root=NULL;*client=NULL;size_t n=b.count(b.context);if(!n||n>64){failed_create(b);return T_LEASE_GEOMETRY;}for(size_t i=0;i<n;++i){size_t len=b.length(b.context,i);if(!len||len>PTRDIFF_MAX){failed_create(b);return T_LEASE_GEOMETRY;}}struct ring_core *c=calloc(1,sizeof(*c));if(!c){failed_create(b);return -12;}c->b=b;c->root_alive=1;c->client_alive=1;c->root.core=c;c->client.core=c;*root=&c->root;*client=&c->client;return 0;}
+ static int identity_ok(struct ring_core *c,struct t_loom_service_ref identity){
+  if(identity.reserved||!identity.incarnation||identity.slot>=64)return T_LEASE_GEOMETRY;
+  unsigned slot=identity.slot;if(c->pools[slot])return T_LEASE_BUSY;
+  if(identity.incarnation<=c->last[slot])return T_LEASE_STALE;
+  return 0;
+ }
++static int fixed_overlap(struct t_loom_service_pool_member a,struct t_loom_service_pool_member b){return a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length;}
+ static int prepare(struct ring_core *c,const struct t_loom_service_pool_member *ranges,size_t n,struct pool_state **out){
+  if(c->closing)return T_LEASE_STATE;
+  if(!ranges||!n||n>64)return T_LEASE_GEOMETRY;
+@@ -25,6 +29,7 @@ static int prepare(struct ring_core *c,const struct t_loom_service_pool_member *
+  struct t_lease_ledger ledger;uint64_t lengths[64];size_t count=c->b.count(c->b.context);for(size_t i=0;i<count;++i)lengths[i]=c->b.length(c->b.context,i);
+  int rc=t_lease_prepare(&ledger,ranges,n,lengths,count);if(rc)return rc;
+  for(size_t i=0;i<64;++i){struct pool_state *p=c->pools[i];if(!p)continue;for(size_t j=0;j<p->count;++j){struct t_loom_service_pool_member a=p->members[j].range;for(size_t k=0;k<n;++k){struct t_loom_service_pool_member b=ranges[k];if(a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length)return T_LEASE_GEOMETRY;}}}
++ for(size_t i=0;i<64;++i){if(c->fixed[i].phase==FIX_FREE)continue;for(size_t j=0;j<n;++j){if(fixed_overlap(c->fixed[i].range,ranges[j]))return T_LEASE_GEOMETRY;}}
+  struct pool_state *p=calloc(1,sizeof(*p)+n*sizeof(struct member));if(!p)return -12;
+  p->core=c;p->ledger=ledger;p->count=n;p->handle.pool=p;for(size_t i=0;i<n;++i){p->members[i].range=ranges[i];p->members[i].lease.pool=p;}*out=p;return 0;
+ }
+@@ -57,8 +62,41 @@ int64_t t_ring_return(struct t_ring_payload *l){assert(l->active);struct pool_st
+ void t_ring_abandon(struct t_ring_payload *l){assert(l->active);struct pool_state *p=l->pool;struct ring_core *c=p->core;int64_t rc=attempt(l);l->active=0;l->pending=rc!=0;--p->live;--c->live;maybe_free(c);}
+ void t_ring_pool_drop(struct t_ring_pool *h){struct pool_state *p=h->pool;struct ring_core *c=p->core;assert(p->handle_alive);p->handle_alive=0;p->closing=1;--c->pool_handles;c->b.retire_pool(c->b.context,p->identity);maybe_free(c);}
+ void t_ring_client_drop(struct t_ring_client *h){struct ring_core *c=h->core;assert(c->client_alive);c->client_alive=0;retire(c);maybe_free(c);}
+-int t_ring_progress(struct t_ring_owner *h){struct ring_core *c=h->core;assert(c->root_alive);for(size_t i=0;i<64;++i){struct pool_state *p=c->pools[i];if(!p)continue;for(size_t j=0;j<p->count;++j){struct t_ring_payload *l=&p->members[j].lease;if(l->pending&&!attempt(l))l->pending=0;}if(p->closing&&!p->live&&!p->ledger.outstanding){if(c->b.destroy_pool(c->b.context,p->identity)==0){c->members-=p->count;c->pools[i]=NULL;free(p);}}}return c->closing&&!c->live&&c->b.retired(c->b.context);}
++int t_ring_progress(struct t_ring_owner *h){struct ring_core *c=h->core;assert(c->root_alive);for(size_t i=0;i<64;++i){struct pool_state *p=c->pools[i];if(!p)continue;for(size_t j=0;j<p->count;++j){struct t_ring_payload *l=&p->members[j].lease;if(l->pending&&!attempt(l))l->pending=0;}if(p->closing&&!p->live&&!p->ledger.outstanding){if(c->b.destroy_pool(c->b.context,p->identity)==0){c->members-=p->count;c->pools[i]=NULL;free(p);}}}int done=c->b.retired(c->b.context);size_t occupied=0;for(size_t i=0;i<64;++i){struct t_ring_fixed *f=&c->fixed[i];if(done&&f->abandoned)f->phase=FIX_FREE;occupied+=f->phase!=FIX_FREE;}return c->closing&&!c->live&&!occupied&&done;}
+ size_t t_ring_members(const struct t_ring_owner *h){assert(h->core->root_alive);return h->core->members;}
+ size_t t_ring_live(const struct t_ring_owner *h){assert(h->core->root_alive);return h->core->live;}
+ size_t t_ring_pending(const struct t_ring_owner *h){struct ring_core *c=h->core;assert(c->root_alive);size_t n=0;for(size_t i=0;i<64;++i){struct pool_state *p=c->pools[i];if(p)for(size_t j=0;j<p->count;++j)n+=p->members[j].lease.pending;}return n;}
+ void t_ring_owner_drop(struct t_ring_owner *h){struct ring_core *c=h->core;assert(c->root_alive);c->root_alive=0;close_owner(c);maybe_free(c);}
++
++int t_ring_fixed_reserve(struct t_ring_client *client,uint64_t cookie,struct t_loom_service_ref scope,struct t_loom_service_pool_member range,int write,struct t_ring_fixed **out){
++ struct ring_core *c=client->core;assert(c->client_alive&&out);*out=NULL;if(c->closing)return T_LEASE_STATE;
++ size_t i=range.buffer_index;
++ if(!cookie||scope.slot>=64||scope.reserved||!scope.incarnation||range.reserved||!range.length||range.length>INT32_MAX||i>=c->b.count(c->b.context)||range.length>UINT64_MAX-range.offset||range.offset+range.length>c->b.length(c->b.context,i))return T_LEASE_GEOMETRY;
++ if(c->fixed[i].phase!=FIX_FREE)return T_LEASE_BUSY;
++ for(size_t j=0;j<64;++j){if(c->fixed[j].phase!=FIX_FREE&&c->fixed[j].cookie==cookie)return T_LEASE_BUSY;struct pool_state *p=c->pools[j];if(p)for(size_t k=0;k<p->count;++k){if(fixed_overlap(p->members[k].range,range))return T_LEASE_GEOMETRY;}}
++ struct t_ring_fixed *f=&c->fixed[i];*f=(struct t_ring_fixed){.core=c,.range=range,.scope=scope,.cookie=cookie,.phase=FIX_PREPARED,.write=!!write,.alive=1};++c->fixed_handles;*out=f;return 0;
++}
++int t_ring_fixed_write(struct t_ring_fixed *f,const void *bytes,size_t len){
++ assert(f->alive);struct ring_core *c=f->core;if(c->closing)return T_LEASE_STATE;
++ if(!f->write||f->phase!=FIX_PREPARED)return T_LEASE_BUSY;
++ if(!bytes||len!=f->range.length)return T_LEASE_GEOMETRY;
++ memcpy((unsigned char *)c->b.buffer(c->b.context,f->range.buffer_index)+(size_t)f->range.offset,bytes,len);return 0;
++}
++int t_ring_fixed_publish(struct t_ring_fixed *f){assert(f->alive);if(f->core->closing)return T_LEASE_STATE;if(f->phase!=FIX_PREPARED)return T_LEASE_BUSY;f->phase=FIX_ACTIVE;return 0;}
++int t_ring_fixed_finish(struct t_ring_owner *root,uint64_t cookie,int32_t result){
++ struct ring_core *c=root->core;assert(c->root_alive);
++ for(size_t i=0;i<64;++i){struct t_ring_fixed *f=&c->fixed[i];if(f->phase==FIX_FREE||f->cookie!=cookie)continue;
++  if(f->phase!=FIX_ACTIVE)return T_LEASE_BUSY;
++  if(result>0&&(uint64_t)result>f->range.length)return T_LEASE_GEOMETRY;
++  if(f->abandoned){f->phase=FIX_FREE;}else{f->phase=FIX_TERMINAL;f->result=result;}return 0;
++ }return T_LEASE_STALE;
++}
++int64_t t_ring_fixed_bytes(const struct t_ring_fixed *f,const unsigned char **out,size_t *len){
++ assert(f->alive&&out&&len);*out=NULL;*len=0;if(f->write||f->phase!=FIX_TERMINAL)return T_LEASE_BUSY;if(f->result<0)return f->result;
++ *out=f->core->b.buffer(f->core->b.context,f->range.buffer_index)+(size_t)f->range.offset;*len=(size_t)f->result;return 0;
++}
++void t_ring_fixed_drop(struct t_ring_fixed *f){
++ assert(f->alive);struct ring_core *c=f->core;f->alive=0;--c->fixed_handles;
++ if(f->phase==FIX_ACTIVE){f->abandoned=1;if(!c->closed)c->b.abort_scope(c->b.context,f->scope);}else{f->phase=FIX_FREE;}maybe_free(c);
++}
++size_t t_ring_fixed_count(const struct t_ring_owner *root){struct ring_core *c=root->core;assert(c->root_alive);size_t n=0;for(size_t i=0;i<64;++i)n+=c->fixed[i].phase!=FIX_FREE;return n;}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h
+index 46a1f081d..c2f0bad19 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h
+@@ -6,7 +6,9 @@
+ #ifndef THYLA_RING_PAYLOAD_H
+ #define THYLA_RING_PAYLOAD_H
+ #include "lease_ledger.h"
+-struct t_ring_backend{void *context;size_t(*count)(void *);size_t(*length)(void *,size_t);const unsigned char *(*buffer)(void *,size_t);int64_t(*return_buffer)(void *,struct t_loom_service_buffer_receipt);void(*retire_pool)(void *,struct t_loom_service_ref);int64_t(*destroy_pool)(void *,struct t_loom_service_ref);void(*begin_retire)(void *);int(*retired)(void *);void(*close)(void *);void(*destroy)(void *);int64_t(*register_pool)(void *,const struct t_loom_service_pool_member *,size_t,struct t_loom_service_ref *);};
++/* Backing is initialized and writable; fixed terminal proves all local access
++ * ended. abort_scope is bounded and never grants buffer reuse. */
++struct t_ring_backend{void *context;size_t(*count)(void *);size_t(*length)(void *,size_t);const unsigned char *(*buffer)(void *,size_t);int64_t(*return_buffer)(void *,struct t_loom_service_buffer_receipt);void(*retire_pool)(void *,struct t_loom_service_ref);int64_t(*destroy_pool)(void *,struct t_loom_service_ref);void(*begin_retire)(void *);int(*retired)(void *);void(*close)(void *);void(*destroy)(void *);int64_t(*register_pool)(void *,const struct t_loom_service_pool_member *,size_t,struct t_loom_service_ref *);void(*abort_scope)(void *,struct t_loom_service_ref);};
+ struct t_ring_owner;struct t_ring_client;struct t_ring_pool;struct t_ring_payload;
+ /* Consumes well-formed backend even on geometry/allocation failure. */
+ int t_ring_create(struct t_ring_backend,struct t_ring_owner **,struct t_ring_client **);
+@@ -34,4 +36,18 @@ size_t t_ring_members(const struct t_ring_owner *);
+ size_t t_ring_live(const struct t_ring_owner *);
+ size_t t_ring_pending(const struct t_ring_owner *);
+ void t_ring_owner_drop(struct t_ring_owner *);
++/* Exclusive fixed-I/O ownership, one preallocated reservation per registered
++ * buffer. Cookie comes from this ring's request book. Do not retain/use aliases
++ * after dropping a handle. No view is available during submitted I/O.
++ * publish is paired with request activation immediately before SQ release;
++ * finish is only for an authenticated terminal CQ after local access ends.
++ * Failed ENTER and requested ABORT do not authorize finish or buffer reuse. */
++struct t_ring_fixed;
++int t_ring_fixed_reserve(struct t_ring_client *,uint64_t,struct t_loom_service_ref,struct t_loom_service_pool_member,int,struct t_ring_fixed **);
++int t_ring_fixed_write(struct t_ring_fixed *,const void *,size_t);
++int t_ring_fixed_publish(struct t_ring_fixed *);
++int t_ring_fixed_finish(struct t_ring_owner *,uint64_t,int32_t);
++int64_t t_ring_fixed_bytes(const struct t_ring_fixed *,const unsigned char **,size_t *);
++void t_ring_fixed_drop(struct t_ring_fixed *);
++size_t t_ring_fixed_count(const struct t_ring_owner *);
+ #endif
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
+index 0657e1ccc..07122941c 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
+@@ -12,6 +12,8 @@ use super::{lease_ledger::{LeaseLedger,LeaseToken,LeaseError},service_abi::{Slot
+ /// reference remains. Ring retirement stops admission globally. `retired` proves
+ /// all local writers stopped. `close` is bounded/idempotent, preserves leased
+ /// bytes and independent kernel pins/payer charges beyond backend destruction.
++/// Backing is initialized and writable. Provided and fixed users must obey this
++/// owner's exclusive reservations; fixed terminal CQ ends all local access.
+ /// No callback may reenter, panic, block on peers or expose mutable backing.
+ pub(crate) unsafe trait RingBackend {
+  /// Zero creates exactly the returned pool. Negative + all-zero output proves
+@@ -25,6 +27,8 @@ pub(crate) unsafe trait RingBackend {
+  fn return_buffer(&self,receipt:BufferReceipt)->i64;
+  fn retire_pool(&self,pool:SlotRef);
+  fn destroy_pool(&self,pool:SlotRef)->i64;
++ /// Scope-wide cancellation; bounded, idempotent, no storage reuse implied.
++ fn abort_scope(&self,scope:SlotRef);
+  fn begin_retire(&self);
+  fn retired(&self)->bool;
+  fn close(&self);
+@@ -33,7 +37,12 @@ struct PoolState {
+  identity:SlotRef,ledger:LeaseLedger,ranges:Box<[PoolMember]>,
+  pending:Box<[Option<LeaseToken>]>,live:usize,closing:bool,
+ }
+-struct State {quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
++#[derive(Clone,Copy,PartialEq,Eq)]
++enum FixedPhase{Prepared,Active,Terminal(i32)}
++#[derive(Clone,Copy)]
++struct FixedState{cookie:u64,scope:SlotRef,range:PoolMember,write:bool,phase:FixedPhase,abandoned:bool}
++fn overlap(a:PoolMember,b:PoolMember)->bool{a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length}
++struct State {fixed:[Option<FixedState>;64],quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
+ struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>}
+ impl<B:RingBackend> Core<B>{
+  fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();}}
+@@ -52,6 +61,8 @@ impl<B:RingBackend> Core<B>{
+ impl<B:RingBackend> Drop for Core<B>{fn drop(&mut self){self.close();}}
+ pub(crate) struct RingOwner<B:RingBackend>{core:Rc<Core<B>>}
+ pub(crate) struct RingClient<B:RingBackend>{core:Rc<Core<B>>}
++/// Exclusive fixed-I/O range; no view while submitted. Shares the whole-ring owner.
++pub(crate) struct FixedIo<B:RingBackend>{core:Rc<Core<B>>,index:usize,cookie:u64}
+ pub(crate) struct Pool<B:RingBackend>{core:Rc<Core<B>>,identity:SlotRef}
+ pub(crate) struct Payload<B:RingBackend>{core:Rc<Core<B>>,token:Option<LeaseToken>}
+ #[derive(Debug,PartialEq,Eq)]
+@@ -60,7 +71,7 @@ impl<B:RingBackend> RingOwner<B>{
+  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
+   let count=backend.buffer_count();let valid=count>0&&count<=64&&(0..count).all(|i|{let n=backend.buffer_len(i);n>0&&n<=isize::MAX as usize});
+   if !valid{backend.begin_retire();backend.close();return Err(Error::Geometry);}
+-  let core=Rc::new(Core{backend,state:RefCell::new(State{quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
++  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
+   Ok((Self{core:core.clone()},RingClient{core}))
+  }
+  /// At most64 RETURN and64 pool-destroy attempts; no allocation on this path.
+@@ -76,14 +87,40 @@ impl<B:RingBackend> RingOwner<B>{
+     if self.core.backend.destroy_pool(identity)==0{let mut s=self.core.state.borrow_mut();let p=s.pools[slot].take().unwrap();s.members-=p.ranges.len();}
+    }
+   }
+-  self.core.closing.get()&&self.core.state.borrow().live==0&&self.core.backend.retired()
++  let retired=self.core.backend.retired();
++  if retired{for slot in &mut self.core.state.borrow_mut().fixed{if slot.as_ref().is_some_and(|f|f.abandoned){*slot=None;}}}
++  self.core.closing.get()&&self.core.state.borrow().live==0&&self.core.state.borrow().fixed.iter().all(Option::is_none)&&retired
+  }
++ /// # Safety
++ /// Only the authenticated terminal CQ for this exact ring/request after the
++ /// final local fixed-buffer access has ended. ENTER failure/ABORT is not proof.
++ pub(crate) unsafe fn finish_fixed(&mut self,cookie:u64,result:i32)->Result<(),Error>{
++  let mut s=self.core.state.borrow_mut();let slot=s.fixed.iter_mut().find(|f|f.as_ref().is_some_and(|f|f.cookie==cookie)).ok_or(Error::Stale)?;
++  let f=slot.as_mut().unwrap();if f.phase!=FixedPhase::Active{return Err(Error::Busy);}
++  if result>0&&result as u64>f.range.length{return Err(Error::Geometry);}
++  if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}Ok(())
++ }
++ pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
+  pub(crate) fn members(&self)->usize{self.core.state.borrow().members}
+  pub(crate) fn live(&self)->usize{self.core.state.borrow().live}
+  pub(crate) fn pending(&self)->usize{self.core.state.borrow().pools.iter().flatten().map(|p|p.pending.iter().filter(|x|x.is_some()).count()).sum()}
+ }
+ impl<B:RingBackend> Drop for RingOwner<B>{fn drop(&mut self){self.core.close();}}
+ impl<B:RingBackend> RingClient<B>{
++ /// One preallocated fixed reservation per existing registered buffer (<=64).
++ /// Cookie is allocated by this ring's RequestBook before any SQ publication.
++ /// Adapter excludes all native accesses except this request; backing is writable
++ /// and initialized, and fixed ranges cannot overlap provided-pool reservations.
++ pub(crate) fn reserve_fixed(&self,cookie:u64,scope:SlotRef,range:PoolMember,write:bool)->Result<FixedIo<B>,Error>{
++  if self.core.closing.get(){return Err(Error::Closing);}
++  let i=range.buffer_index as usize;
++  if cookie==0||scope.slot>=64||scope.reserved!=0||scope.incarnation==0||range.reserved!=0||range.length==0||range.length>i32::MAX as u64||i>=self.core.backend.buffer_count()||range.offset.checked_add(range.length).is_none_or(|end|end>self.core.backend.buffer_len(i)as u64){return Err(Error::Geometry);}
++  let mut s=self.core.state.borrow_mut();
++  if s.fixed[i].is_some()||s.fixed.iter().flatten().any(|f|f.cookie==cookie){return Err(Error::Busy);}
++  for p in s.pools.iter().flatten(){if p.ranges.iter().any(|r|overlap(*r,range)){return Err(Error::Geometry);}}
++  s.fixed[i]=Some(FixedState{cookie,scope,range,write,phase:FixedPhase::Prepared,abandoned:false});
++  Ok(FixedIo{core:self.core.clone(),index:i,cookie})
++ }
+  fn prepare(&self,ranges:&[PoolMember])->Result<Box<PoolState>,Error>{
+   if self.core.closing.get(){return Err(Error::Closing);}
+   let s=self.core.state.borrow();
+@@ -95,6 +132,7 @@ impl<B:RingBackend> RingClient<B>{
+   for p in s.pools.iter().flatten(){for a in p.ranges.iter(){for b in ranges{
+    if a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length{return Err(Error::Geometry);}
+   }}}
++  for f in s.fixed.iter().flatten(){for r in ranges{if overlap(f.range,*r){return Err(Error::Geometry);}}}
+   // Every heap allocation precedes native admission. OOM cannot orphan a pool.
+   Ok(Box::new(PoolState{identity:SlotRef{slot:0,reserved:0,incarnation:0},ledger,ranges:ranges.into(),pending:(0..ranges.len()).map(|_|None).collect::<alloc::vec::Vec<_>>().into_boxed_slice(),live:0,closing:false}))
+  }
+@@ -155,3 +193,33 @@ impl<B:RingBackend> Payload<B>{
+  pub(crate) fn try_return(mut self)->Result<(),(i64,Self)>{let token=self.token.take().unwrap();let slot=token.receipt().pool.slot as usize;match self.core.give_back(token){Ok(())=>{self.core.finish_live(slot);Ok(())},Err((rc,token))=>{self.token=Some(token);Err((rc,self))}}}
+ }
+ impl<B:RingBackend> Drop for Payload<B>{fn drop(&mut self){if let Some(token)=self.token.take(){self.core.abandon(token);}}}
++
++impl<B:RingBackend> FixedIo<B>{
++ fn snapshot(&self)->FixedState{let f=self.core.state.borrow().fixed[self.index].expect("live fixed owner");assert_eq!(f.cookie,self.cookie);f}
++ /// Copy input before submission; never expose a mutable backing alias.
++ pub(crate) fn write_from(&mut self,bytes:&[u8])->Result<(),Error>{
++  let f=self.snapshot();if self.core.closing.get(){return Err(Error::Closing);}
++  if !f.write||f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}
++  if bytes.len()!=f.range.length as usize{return Err(Error::Geometry);}
++  unsafe{core::ptr::copy_nonoverlapping(bytes.as_ptr(),self.core.backend.buffer(self.index).as_ptr().add(f.range.offset as usize),bytes.len());}Ok(())
++ }
++ /// # Safety
++ /// Integrator activates the matching request record and releases the SQ tail
++ /// with no fallible work after this transition. No raw/second buffer user.
++ pub(crate) unsafe fn publish(&mut self)->Result<(),Error>{
++  if self.core.closing.get(){return Err(Error::Closing);}
++  let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();
++  if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.phase=FixedPhase::Active;Ok(())
++ }
++ /// Only successful terminal READ bytes, bounded by the actual completion.
++ pub(crate) fn bytes(&self)->Result<&[u8],Error>{let f=self.snapshot();
++  if f.write{return Err(Error::Busy);}let FixedPhase::Terminal(n)=f.phase else{return Err(Error::Busy)};
++  if n<0{return Err(Error::Backend(n as i64));}
++  Ok(unsafe{core::slice::from_raw_parts(self.core.backend.buffer(self.index).as_ptr().add(f.range.offset as usize),n as usize)})
++ }
++}
++impl<B:RingBackend> Drop for FixedIo<B>{fn drop(&mut self){
++ let abort={let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();assert_eq!(f.cookie,self.cookie);
++  if f.phase==FixedPhase::Active{f.abandoned=true;Some(f.scope)}else{s.fixed[self.index]=None;None}};
++ if let Some(scope)=abort{if !self.core.closed.get(){self.core.backend.abort_scope(scope);}}
++}}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs b/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs
+index 935873789..640c7c73e 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_composed_ring.rs
+@@ -6,8 +6,8 @@ mod paired_cq;mod request_book;
+ use ring_payload::*;
+ use service_abi::*;
+ use std::{cell::{Cell,UnsafeCell},ptr::NonNull,rc::Rc};
+-struct Probe{register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
+-impl Probe{fn new()->Rc<Self>{Rc::new(Self{register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
++struct Probe{aborts:Cell<usize>,last_abort:Cell<SlotRef>,register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
++impl Probe{fn new()->Rc<Self>{Rc::new(Self{aborts:Cell::new(0),last_abort:Cell::new(id(0,0)),register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
+ struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
+ impl Backing{fn new(p:Rc<Probe>)->Self{let mut bytes=[0;1024];for i in 0..128{bytes[i*8..i*8+8].fill(i as u8);}Self{bytes:Box::new(UnsafeCell::new(bytes)),p}}}
+ unsafe impl RingBackend for Backing{
+@@ -20,6 +20,7 @@ unsafe impl RingBackend for Backing{
+  fn return_buffer(&self,_:BufferReceipt)->i64{self.p.returns.set(self.p.returns.get()+1);self.p.rc.get()}
+  fn retire_pool(&self,r:SlotRef){let n=&self.p.pool_retires[r.slot as usize];n.set(n.get()+1);}
+  fn destroy_pool(&self,r:SlotRef)->i64{let rc=self.p.destroy_rc.get();if rc==0{let n=&self.p.destroyed[r.slot as usize];n.set(n.get()+1);}rc}
++ fn abort_scope(&self,scope:SlotRef){self.p.aborts.set(self.p.aborts.get()+1);self.p.last_abort.set(scope);}
+  fn begin_retire(&self){self.p.retires.set(self.p.retires.get()+1);}fn retired(&self)->bool{self.p.retired.get()}fn close(&self){self.p.closes.set(self.p.closes.get()+1);}
+ }
+ impl Drop for Backing{fn drop(&mut self){assert_eq!(self.p.closes.get(),1);self.p.freed.set(self.p.freed.get()+1);}}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.c b/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.c
+index 375a7bc00..14e9411f7 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.c
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.c
+@@ -4,19 +4,20 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdio.h>
+-struct probe{int64_t register_rc;struct t_loom_service_ref register_id;size_t registrations;int64_t rc,destroy_rc;size_t returns,pool_retires[64],destroyed[64],retires,closes,freed;int retired;};
++struct probe{size_t aborts;struct t_loom_service_ref last_abort;int64_t register_rc;struct t_loom_service_ref register_id;size_t registrations;int64_t rc,destroy_rc;size_t returns,pool_retires[64],destroyed[64],retires,closes,freed;int retired;};
+ struct backing{unsigned char bytes[1024];struct probe *p;};
+ static size_t count(void *b){(void)b;return 1;}static size_t length(void *b,size_t i){(void)b;(void)i;return 1024;}static const unsigned char *buffer(void *b,size_t i){(void)i;return ((struct backing *)b)->bytes;}
+ static int64_t ret(void *v,struct t_loom_service_buffer_receipt r){(void)r;struct probe *p=((struct backing *)v)->p;++p->returns;return p->rc;}
+ static void pool_retire(void *v,struct t_loom_service_ref r){++((struct backing *)v)->p->pool_retires[r.slot];}
+ static int64_t pool_destroy(void *v,struct t_loom_service_ref r){struct probe *p=((struct backing *)v)->p;if(!p->destroy_rc)++p->destroyed[r.slot];return p->destroy_rc;}
++static void abort_scope(void *v,struct t_loom_service_ref scope){struct probe *p=((struct backing *)v)->p;++p->aborts;p->last_abort=scope;}
+ static void retire(void *v){++((struct backing *)v)->p->retires;}static int retired(void *v){return ((struct backing *)v)->p->retired;}static void close_owner(void *v){++((struct backing *)v)->p->closes;}static void destroy(void *v){struct backing *b=v;assert(b->p->closes==1);++b->p->freed;free(b);}
+ static int watch_allocs,late_allocs,fail_alloc;
+ void *t_test_calloc(size_t n,size_t s){if(watch_allocs)++late_allocs;if(fail_alloc){fail_alloc=0;return NULL;}return calloc(n,s);}
+ static int64_t register_pool(void *v,const struct t_loom_service_pool_member *ranges,size_t n,struct t_loom_service_ref *out){
+  struct probe *p=((struct backing *)v)->p;assert(n&&ranges[0].length);++p->registrations;*out=p->register_id;watch_allocs=1;return p->register_rc;
+ }
+-static void fixture(struct probe *p,struct t_ring_owner **r,struct t_ring_client **c){struct backing *b=calloc(1,sizeof(*b));assert(b);b->p=p;for(unsigned i=0;i<128;++i)memset(b->bytes+8*i,i,8);struct t_ring_backend backend={b,count,length,buffer,ret,pool_retire,pool_destroy,retire,retired,close_owner,destroy,register_pool};assert(!t_ring_create(backend,r,c));}
++static void fixture(struct probe *p,struct t_ring_owner **r,struct t_ring_client **c){struct backing *b=calloc(1,sizeof(*b));assert(b);b->p=p;for(unsigned i=0;i<128;++i)memset(b->bytes+8*i,i,8);struct t_ring_backend backend={b,count,length,buffer,ret,pool_retire,pool_destroy,retire,retired,close_owner,destroy,register_pool,abort_scope};assert(!t_ring_create(backend,r,c));}
+ static struct t_loom_service_ref id(unsigned slot,uint64_t gen){return (struct t_loom_service_ref){slot,0,gen};}
+ static struct t_loom_service_pool_member range(uint64_t offset){return (struct t_loom_service_pool_member){0,0,offset,8};}
+ static struct t_loom_service_buffer_receipt receipt(unsigned slot,uint64_t gen,unsigned member,uint64_t lease){return (struct t_loom_service_buffer_receipt){.pool={slot,0,gen},.member=member,.lease=lease};}
+@@ -38,7 +39,8 @@ static void registration_tests(void){
+  p=(struct probe){.register_id={0,0,1}};fixture(&p,&r,&c);m=range(0);fail_alloc=1;assert(register_checked(c,&m,1,&out,&rc)==-12&&!out&&!p.registrations&&!t_ring_members(r)&&!p.closes);assert(!register_checked(c,&m,1,&a,&rc));t_ring_pool_drop(a);t_ring_client_drop(c);t_ring_owner_drop(r);assert(p.freed==1);
+  puts("C seven registration transaction scenarios PASS");
+ }
+-int main(void){registration_tests();struct probe p={0};struct t_ring_owner *r;struct t_ring_client *c;struct t_ring_pool *a,*b,*other;struct t_ring_payload *av,*bv,*out;fixture(&p,&r,&c);a=attach(c,1,0);b=attach(c,2,8);av=accept(a,1);bv=accept(b,2);view(av,0);view(bv,1);t_ring_pool_drop(a);assert(p.pool_retires[1]==1&&!p.retires&&!p.closes);assert(!t_ring_progress(r)&&t_ring_members(r)==2);view(bv,1);t_ring_abandon(av);assert(!t_ring_progress(r)&&p.destroyed[1]==1&&t_ring_members(r)==1);view(bv,1);t_ring_abandon(bv);t_ring_pool_drop(b);t_ring_progress(r);assert(!t_ring_members(r));t_ring_client_drop(c);p.retired=1;assert(t_ring_progress(r));t_ring_owner_drop(r);assert(p.freed==1);
++static void fixed_tests(void);
++int main(void){fixed_tests();registration_tests();struct probe p={0};struct t_ring_owner *r;struct t_ring_client *c;struct t_ring_pool *a,*b,*other;struct t_ring_payload *av,*bv,*out;fixture(&p,&r,&c);a=attach(c,1,0);b=attach(c,2,8);av=accept(a,1);bv=accept(b,2);view(av,0);view(bv,1);t_ring_pool_drop(a);assert(p.pool_retires[1]==1&&!p.retires&&!p.closes);assert(!t_ring_progress(r)&&t_ring_members(r)==2);view(bv,1);t_ring_abandon(av);assert(!t_ring_progress(r)&&p.destroyed[1]==1&&t_ring_members(r)==1);view(bv,1);t_ring_abandon(bv);t_ring_pool_drop(b);t_ring_progress(r);assert(!t_ring_members(r));t_ring_client_drop(c);p.retired=1;assert(t_ring_progress(r));t_ring_owner_drop(r);assert(p.freed==1);
+  p=(struct probe){0};fixture(&p,&r,&c);struct t_loom_service_pool_member aa[32],bb[32],m;for(unsigned i=0;i<32;++i){aa[i]=range(i*8);bb[i]=range((i+32)*8);}assert(!t_ring_attach(c,id(0,1),aa,32,&a));m=range(0);assert(t_ring_attach(c,id(1,1),&m,1,&other)==T_LEASE_GEOMETRY&&!other);assert(!t_ring_attach(c,id(1,1),bb,32,&b));assert(t_ring_members(r)==64);m=range(512);assert(t_ring_attach(c,id(2,1),&m,1,&other)==T_LEASE_BUSY&&!other);t_ring_pool_drop(a);t_ring_progress(r);assert(t_ring_members(r)==32);other=attach(c,2,512);assert(t_ring_members(r)==33);t_ring_pool_drop(other);t_ring_pool_drop(b);t_ring_client_drop(c);t_ring_owner_drop(r);assert(p.freed==1);
+  p=(struct probe){0};fixture(&p,&r,&c);a=attach(c,3,0);t_ring_pool_drop(a);p.destroy_rc=-11;t_ring_progress(r);assert(t_ring_members(r)==1);m=range(0);assert(t_ring_attach(c,id(4,1),&m,1,&other)==T_LEASE_GEOMETRY);m=range(8);assert(t_ring_attach(c,id(3,2),&m,1,&other)==T_LEASE_BUSY);p.destroy_rc=0;t_ring_progress(r);assert(!t_ring_members(r));assert(t_ring_attach(c,id(3,1),&m,1,&other)==T_LEASE_STALE);assert(!t_ring_attach(c,id(3,2),&m,1,&b));assert(t_ring_accept(b,8,4,receipt(3,1,0,1),&out)<0&&!out);assert(t_ring_accept(b,8,4,receipt(3,2,0,1),&bv)==1);view(bv,1);t_ring_abandon(bv);t_ring_pool_drop(b);t_ring_client_drop(c);t_ring_owner_drop(r);assert(p.freed==1);
+  p=(struct probe){.rc=-2};fixture(&p,&r,&c);assert(!t_ring_attach(c,id(0,1),aa,32,&a));assert(!t_ring_attach(c,id(1,1),bb,32,&b));for(unsigned i=0;i<32;++i){assert(t_ring_accept(a,8,4,receipt(0,1,i,i+1),&av)==1);t_ring_abandon(av);assert(t_ring_accept(b,8,4,receipt(1,1,i,i+1),&bv)==1);t_ring_abandon(bv);}assert(t_ring_pending(r)==64);t_ring_pool_drop(a);t_ring_pool_drop(b);size_t before=p.returns;t_ring_progress(r);assert(p.returns-before==64&&t_ring_members(r)==64&&!p.destroyed[0]&&!p.destroyed[1]);p.rc=0;t_ring_progress(r);assert(!t_ring_pending(r)&&!t_ring_members(r));t_ring_client_drop(c);p.retired=1;assert(t_ring_progress(r));t_ring_owner_drop(r);assert(p.freed==1);
+@@ -46,3 +48,15 @@ int main(void){registration_tests();struct probe p={0};struct t_ring_owner *r;st
+  p=(struct probe){0};fixture(&p,&r,&c);m=range(0);assert(!t_ring_attach(c,id(63,UINT64_MAX),&m,1,&a));t_ring_pool_drop(a);t_ring_progress(r);assert(t_ring_attach(c,id(63,1),&m,1,&other)==T_LEASE_STALE);assert(t_ring_attach(c,id(63,UINT64_MAX),&m,1,&other)==T_LEASE_STALE);t_ring_client_drop(c);t_ring_owner_drop(r);assert(p.freed==1);
+  p=(struct probe){0};fixture(&p,&r,&c);a=attach(c,0,0);av=accept(a,0);struct t_loom_service_buffer_receipt zero={0};assert(!t_ring_accept(a,0,0,zero,&out)&&!out);assert(t_ring_live(r)==1);p.rc=-2;assert(t_ring_return(av)==-2);view(av,0);assert(t_ring_live(r)==1);p.rc=1;assert(t_ring_return(av)==1);view(av,0);assert(t_ring_live(r)==1);p.rc=0;assert(!t_ring_return(av)&&!t_ring_live(r));t_ring_pool_drop(a);t_ring_progress(r);assert(!t_ring_members(r));t_ring_client_drop(c);t_ring_owner_drop(r);assert(p.freed==1);
+  puts("C full-ring seven shared ownership scenarios PASS");return 0;}
++
++static void fixed_tests(void){
++ struct probe p={0};struct t_ring_owner *r;struct t_ring_client *c;struct t_ring_fixed *f,*other;struct t_ring_pool *pool;const unsigned char *bytes;size_t n;
++ fixture(&p,&r,&c);assert(!t_ring_fixed_reserve(c,101,id(4,9),range(8),0,&f));assert(t_ring_fixed_bytes(f,&bytes,&n)<0&&!bytes&&!n);assert(t_ring_fixed_finish(r,101,8)<0);assert(!t_ring_fixed_publish(f));assert(t_ring_fixed_bytes(f,&bytes,&n)<0);assert(t_ring_fixed_finish(r,101,9)<0);assert(!t_ring_fixed_finish(r,101,3));assert(!t_ring_fixed_bytes(f,&bytes,&n)&&n==3&&bytes[0]==1);assert(t_ring_fixed_reserve(c,102,id(4,9),range(8),0,&other)<0);t_ring_client_drop(c);t_ring_owner_drop(r);assert(p.closes==1&&!p.freed);assert(!t_ring_fixed_bytes(f,&bytes,&n)&&n==3&&bytes[0]==1);t_ring_fixed_drop(f);assert(p.freed==1);
++ p=(struct probe){0};fixture(&p,&r,&c);assert(!t_ring_fixed_reserve(c,201,id(3,7),range(8),0,&f));assert(!t_ring_fixed_publish(f));t_ring_fixed_drop(f);assert(p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1);assert(!t_ring_progress(r)&&t_ring_fixed_count(r)==1);assert(t_ring_fixed_reserve(c,202,id(3,7),range(8),0,&other)<0);assert(t_ring_fixed_finish(r,999,-2)<0);assert(!t_ring_fixed_finish(r,201,-2)&&!t_ring_fixed_count(r));assert(!t_ring_fixed_reserve(c,202,id(3,7),range(8),0,&f));t_ring_fixed_drop(f);assert(p.aborts==1);t_ring_client_drop(c);t_ring_owner_drop(r);
++ p=(struct probe){0};fixture(&p,&r,&c);pool=attach(c,1,8);assert(t_ring_fixed_reserve(c,301,id(0,1),range(8),0,&f)<0);assert(!t_ring_fixed_reserve(c,301,id(0,1),range(0),0,&f));struct t_ring_pool *bad;struct t_loom_service_pool_member rr=range(0);int64_t rc;assert(t_ring_attach(c,id(2,1),&rr,1,&bad)<0);assert(t_ring_register_pool(c,&rr,1,&bad,&rc)<0);t_ring_pool_drop(pool);t_ring_progress(r);t_ring_fixed_drop(f);pool=attach(c,2,0);t_ring_pool_drop(pool);t_ring_client_drop(c);t_ring_owner_drop(r);
++ p=(struct probe){0};fixture(&p,&r,&c);assert(!t_ring_fixed_reserve(c,401,id(0,1),range(16),1,&f));unsigned char input[8];memset(input,3,8);assert(t_ring_fixed_write(f,input,7)<0);assert(!t_ring_fixed_write(f,input,8));assert(!t_ring_fixed_publish(f));memset(input,4,8);assert(t_ring_fixed_write(f,input,8)<0);assert(t_ring_fixed_bytes(f,&bytes,&n)<0);assert(t_ring_fixed_publish(f)<0);assert(t_ring_fixed_count(r)==1);assert(!t_ring_fixed_finish(r,401,-2));assert(t_ring_fixed_finish(r,401,0)<0);assert(t_ring_fixed_count(r)==1);t_ring_fixed_drop(f);pool=attach(c,1,16);struct t_ring_payload *v=accept(pool,1);view(v,3);t_ring_abandon(v);t_ring_pool_drop(pool);t_ring_client_drop(c);t_ring_owner_drop(r);
++ p=(struct probe){0};fixture(&p,&r,&c);assert(!t_ring_fixed_reserve(c,501,id(0,1),range(0),0,&f));assert(!t_ring_fixed_publish(f));t_ring_fixed_drop(f);t_ring_client_drop(c);assert(!t_ring_progress(r)&&t_ring_fixed_count(r)==1);p.retired=1;assert(t_ring_progress(r)&&!t_ring_fixed_count(r));t_ring_owner_drop(r);assert(p.freed==1);
++ p=(struct probe){0};fixture(&p,&r,&c);struct t_loom_service_pool_member invalid[]={range(0),range(0),range(0),range(0),range(0)};invalid[0].length=0;invalid[1].reserved=1;invalid[2].offset=UINT64_MAX;invalid[3].length=2048;invalid[4].buffer_index=1;for(unsigned i=0;i<5;++i)assert(t_ring_fixed_reserve(c,601,id(0,1),invalid[i],0,&f)<0);assert(t_ring_fixed_reserve(c,0,id(0,1),range(0),0,&f)<0);assert(!t_ring_fixed_reserve(c,601,id(0,1),range(0),0,&f));assert(!t_ring_fixed_publish(f));assert(!t_ring_fixed_finish(r,601,-14));assert(t_ring_fixed_bytes(f,&bytes,&n)==-14&&!bytes&&!n);t_ring_fixed_drop(f);assert(!t_ring_fixed_count(r));t_ring_client_drop(c);t_ring_owner_drop(r);
++ p=(struct probe){0};fixture(&p,&r,&c);assert(!t_ring_fixed_reserve(c,701,id(0,1),range(0),0,&f));t_ring_fixed_drop(f);assert(!p.aborts);assert(!t_ring_fixed_reserve(c,702,id(0,1),range(0),0,&f));assert(!t_ring_fixed_publish(f));t_ring_owner_drop(r);t_ring_fixed_drop(f);assert(!p.aborts&&p.closes==1);t_ring_client_drop(c);assert(p.freed==1);
++ puts("C seven fixed ownership scenarios PASS");
++}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs b/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs
+index 6bd37f682..65fb58bdc 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_ring_payload.rs
+@@ -5,8 +5,8 @@ mod ring_payload;
+ use ring_payload::*;
+ use service_abi::*;
+ use std::{cell::{Cell,UnsafeCell},ptr::NonNull,rc::Rc};
+-struct Probe{register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
+-impl Probe{fn new()->Rc<Self>{Rc::new(Self{register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
++struct Probe{aborts:Cell<usize>,last_abort:Cell<SlotRef>,register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
++impl Probe{fn new()->Rc<Self>{Rc::new(Self{aborts:Cell::new(0),last_abort:Cell::new(id(0,0)),register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
+ struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
+ impl Backing{fn new(p:Rc<Probe>)->Self{let mut bytes=[0;1024];for i in 0..128{bytes[i*8..i*8+8].fill(i as u8);}Self{bytes:Box::new(UnsafeCell::new(bytes)),p}}}
+ unsafe impl RingBackend for Backing{
+@@ -19,6 +19,7 @@ unsafe impl RingBackend for Backing{
+  fn return_buffer(&self,_:BufferReceipt)->i64{self.p.returns.set(self.p.returns.get()+1);self.p.rc.get()}
+  fn retire_pool(&self,r:SlotRef){let n=&self.p.pool_retires[r.slot as usize];n.set(n.get()+1);}
+  fn destroy_pool(&self,r:SlotRef)->i64{let rc=self.p.destroy_rc.get();if rc==0{let n=&self.p.destroyed[r.slot as usize];n.set(n.get()+1);}rc}
++ fn abort_scope(&self,scope:SlotRef){self.p.aborts.set(self.p.aborts.get()+1);self.p.last_abort.set(scope);}
+  fn begin_retire(&self){self.p.retires.set(self.p.retires.get()+1);}fn retired(&self)->bool{self.p.retired.get()}fn close(&self){self.p.closes.set(self.p.closes.get()+1);}
+ }
+ impl Drop for Backing{fn drop(&mut self){assert_eq!(self.p.closes.get(),1);self.p.freed.set(self.p.freed.get()+1);}}
+@@ -75,3 +76,41 @@ fn register(c:&RingClient<Backing>,ranges:&[PoolMember])->Result<Pool<Backing>,E
+ #[test]fn ledger_cannot_accept_unbound_or_rebind_after_return(){
+  use lease_ledger::*;let mut l=LeaseLedger::prepare(&[range(0)],&[1024]).unwrap();assert!(matches!(l.accept_read(8,4,receipt(0,1,0,1)),Err(LeaseError::State)));assert!(l.bind(id(64,1)).is_err());l.bind(id(0,1)).unwrap();let t=l.accept_read(8,4,receipt(0,1,0,1)).unwrap().unwrap();l.begin_return(&t).unwrap();l.finish_return(&t,0).unwrap();assert_eq!(l.outstanding(),0);assert_eq!(l.bind(id(1,2)),Err(LeaseError::State));
+ }
++
++#[test]fn fixed_read_owns_range_through_terminal_and_view(){
++ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(101,id(4,9),range(8),false).unwrap();assert!(f.bytes().is_err());
++ assert!(unsafe{r.finish_fixed(101,8)}.is_err());unsafe{f.publish().unwrap();}assert!(f.bytes().is_err());
++ assert!(unsafe{r.finish_fixed(101,9)}.is_err());assert_eq!(r.fixed_count(),1);unsafe{r.finish_fixed(101,3).unwrap();}
++ assert_eq!(f.bytes().unwrap(),&[1;3]);assert!(c.reserve_fixed(102,id(4,9),range(8),false).is_err());
++ drop(c);drop(r);assert_eq!(p.closes.get(),1);assert_eq!(p.freed.get(),0);assert_eq!(f.bytes().unwrap(),&[1;3]);drop(f);assert_eq!(p.freed.get(),1);
++}
++#[test]fn fixed_abandon_is_scope_cancel_not_refund(){
++ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(201,id(3,7),range(8),false).unwrap();unsafe{f.publish().unwrap();}drop(f);
++ assert_eq!(p.aborts.get(),1);assert_eq!(p.last_abort.get(),id(3,7));assert_eq!(r.fixed_count(),1);assert!(!r.progress());assert_eq!(r.fixed_count(),1);
++ assert!(c.reserve_fixed(202,id(3,7),range(8),false).is_err());assert!(unsafe{r.finish_fixed(999,-2)}.is_err());assert_eq!(r.fixed_count(),1);
++ unsafe{r.finish_fixed(201,-2).unwrap();}assert_eq!(r.fixed_count(),0);let f=c.reserve_fixed(202,id(3,7),range(8),false).unwrap();drop(f);assert_eq!(p.aborts.get(),1);
++}
++#[test]fn fixed_and_provided_exclude_overlaps_both_directions(){
++ let(_p,mut r,c)=fixture();let pool=attach(&c,1,8);assert!(c.reserve_fixed(301,id(0,1),range(8),false).is_err());
++ let f=c.reserve_fixed(301,id(0,1),range(0),false).unwrap();assert!(unsafe{c.attach_pool(id(2,1),&[range(0)])}.is_err());
++ assert!(c.register_pool(&[range(0)]).is_err());drop(pool);r.progress();drop(f);assert_eq!(r.fixed_count(),0);let _pool=attach(&c,2,0);
++}
++#[test]fn fixed_write_freezes_after_publish_and_error_preserves_owner(){
++ let(_p,mut r,c)=fixture();let mut f=c.reserve_fixed(401,id(0,1),range(16),true).unwrap();assert!(f.write_from(&[3;7]).is_err());f.write_from(&[3;8]).unwrap();
++ unsafe{f.publish().unwrap();}assert!(f.write_from(&[4;8]).is_err());assert!(f.bytes().is_err());assert!(unsafe{f.publish()}.is_err());
++ // A failed ENTER does not have a rollback API; reservation remains active.
++ assert_eq!(r.fixed_count(),1);unsafe{r.finish_fixed(401,-2).unwrap();}assert!(unsafe{r.finish_fixed(401,0)}.is_err());assert_eq!(r.fixed_count(),1);drop(f);assert_eq!(r.fixed_count(),0);
++ let pool=attach(&c,1,16);let a=accept(&pool,1);assert_eq!(a.bytes(),&[3;8]);drop(a);
++}
++#[test]fn fixed_retirement_reclaims_abandoned_only_after_proof(){
++ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(501,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();}drop(f);drop(c);assert!(!r.progress());assert_eq!(r.fixed_count(),1);
++ p.retired.set(true);assert!(r.progress());assert_eq!(r.fixed_count(),0);drop(r);assert_eq!(p.freed.get(),1);
++}
++#[test]fn fixed_bad_geometry_and_precise_error(){
++ let(_p,mut r,c)=fixture();for x in [PoolMember{length:0,..range(0)},PoolMember{reserved:1,..range(0)},PoolMember{offset:u64::MAX,..range(0)},PoolMember{length:2048,..range(0)},PoolMember{buffer_index:1,..range(0)}]{assert!(c.reserve_fixed(601,id(0,1),x,false).is_err());}
++ assert!(c.reserve_fixed(0,id(0,1),range(0),false).is_err());let mut f=c.reserve_fixed(601,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(601,-14).unwrap();}assert_eq!(f.bytes(),Err(Error::Backend(-14)));drop(f);assert_eq!(r.fixed_count(),0);
++}
++#[test]fn fixed_unpublished_and_closed_drop_do_not_abort(){
++ let(p,r,c)=fixture();let f=c.reserve_fixed(701,id(0,1),range(0),false).unwrap();drop(f);assert_eq!(p.aborts.get(),0);
++ let mut f=c.reserve_fixed(702,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();}drop(r);assert_eq!(p.closes.get(),1);drop(f);assert_eq!(p.aborts.get(),0);drop(c);assert_eq!(p.freed.get(),1);
++}

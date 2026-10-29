@@ -1,0 +1,38 @@
+CONNECT integration draft on fa7e6c5bc; canonical source frozen for current gate.
+
+This internal owner drives CONNECT only, not private user activation or general
+RPCs. Caller retains the prepared protocol object and serializes its final release
+against new API entry. The eventual ring executor must supply that entry/lifetime
+root; this module does not claim a syscall-accessible scope map or close queue.
+
+Before native allocation: reserve a terminal request and a second exact scope pin
+under Ll. A RESERVED scope with an occupied request is already claimed; reject a
+second CONNECT. Native preparation holds its own Loom reference and image charge.
+On error unwind request and scope pin before last protocol/Loom release.
+
+Publication validates exact scope, request, deadline and close latch under Ll;
+native publish then request admission/state commit occur in that same interval.
+All request admission predicates remain unchanged across native publish. Wake
+accept waiters only after unlock. A failed native publish leaves PREPARED rollback
+legal and invisible to the peer. No protocol bytes sent before publication.
+
+Only one driver visits a protocol object at once. It borrows the accepted request
+while unlocked in the client. Abort records first reason under Ll, closes scope
+admission, and tears transport down outside Ll. Local progress abort follows in
+the driver; a cancellation acknowledgement alone never sets RETIRED. READY and
+terminal CONNECT success commit together under Ll, rechecking the abort/close
+latch. A success already committed remains immutable when a later abort wins.
+
+Only this handshake is admitted to the client in this checkpoint. No general
+RPC/callback/buffer borrow may escape it. Thus after sole-driver progress_abort
+and zero users, local parser/TX quiescence is established, not inferred from a
+terminal CQE. RETIRED is published then. The storage survives CQ backpressure;
+release requires terminal delivery/discard, no driver/users and exact scope pin.
+Scope metadata remains RETIRED for explicit reap; no reused incarnation aliases.
+
+Next engine layer must own the lookup/list, kernel executor/retirement queue,
+ABORT/QUERY entry pins, fair readiness/deadline visits, creator enforcement and
+full request operations before private activation. This checkpoint cannot make
+ring close process those objects without that executor integration.
+
+October9 update: canonical CONNECT now installed and tested; earlier draft copies are historical. See reviewed-sources.json, self-review.txt and checkpoint-note.txt. Full matrix pending.

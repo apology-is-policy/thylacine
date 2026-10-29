@@ -11,6 +11,8 @@ code:
   - tools/check-v80-floor.py
   - tools/screendump.sh
   - tools/test-rust.sh
+  - tools/host-sanitizer-cc.py
+  - tools/host-tests/host-env/atomic_lse.h
   - kernel/test/test.c
   - kernel/test/test.h
 audit: none
@@ -35,9 +37,20 @@ them run on no machine at all.
 
 - `test.sh` → exit 0 iff the boot reached [[abi-boot-banner]] with no
   extinction, and every enforced post-boot gate passed.
+- `test.sh --private-async-qual` boots `build/kernel-private-async-qual`
+  instead of `build/kernel`. It refuses when that ELF is missing rather than
+  building it, so it never boots a stale default kernel under the
+  qualification name ([[sub-kernel-loom-bridge]]).
 - `smp-multiboot.sh <label> <cpus> <N> [sanitizer]` → exit 0 iff
   0 CORRUPTION, 0 EXTERNAL-KILL **and** 0 OTHER across N boots.
 - `ci-smp-gate.sh` → builds each kernel once, runs the matrix, aggregates.
+  Optional `SMP_GATE_MIN_FREE_MIB` checks available disk before and after each
+  build and before each matrix row, refusing with exit 3 below the floor. It is
+  an admission check, not a space reservation. Optional `SMP_GATE_CAPTURE_DIR`
+  must name a new directory: it retains each flavour's config/ELF/flat binary,
+  then the final shared ramfs, baked pool snapshot and paired keys before any
+  boot, with full SHA256s and source commit. Missing inputs or unequal keys
+  refuse the run. Neither option changes the matrix or its classifier.
 - `check-v80-floor.py` → exit non-zero if any tracked build input asks above
   ARMv8.0-A, or any shipped userspace binary carries an ungated LSE.
 - `test-rust.sh [crate...]` (`make test-rust`) → exit 0 iff no crate FAILs:
@@ -287,7 +300,11 @@ thing a gate looks for, since that absence is also what the corresponding
 regression looks like. The G-4 gate also moved to a SECOND QMP monitor
 (`THYLACINE_QMP_SOCK2`, #230): one chardev serves one client and the key-injector
 holds the first for the whole boot whenever its sentinel never arrives, so a
-shared socket made the two consumers ordering-dependent.
+shared socket made the two consumers ordering-dependent. When the gate applies
+(a passing boot, no `THYLACINE_NO_GPU`, `THYLACINE_NO_QMP` or
+`THYLACINE_GPU_GATE=0`) but cannot run -- no python3, no gate socket, QEMU
+gone -- the boot FAILS with "G-4 console gate could not run"; it used to pass
+unread, and a deleted socket looked exactly like that.
 
 **The DISTRO / CLADE arc gates are propagated into the exit status (#212/#232).**
 `check-arc-gates.sh` answers for the D-5 / L-6c arc chain and the three clade
@@ -341,6 +358,49 @@ run in order at boot, each printing `[test] <name> ... PASS` or a `FAIL:
 kernel test suite failed` before joey runs; `test.h` carries the assert macros), which prints `POLL-KNOB(...)` and fails a passing test that left one set
 (the POOL-PARKED pattern: a knob restored on a test's last line is restored
 only by a test that passes).
+
+**A kernel test's skip is gated, counted and reported (2026-10-22, vote 17).**
+A skipped test once counted as a pass, so a renamed probe or an unattached
+device turned a real test into a green no-op. The kernel now counts skips
+apart from passes ([[sub-substrate-kernel-suite]]), and after the banner
+`test.sh` reads every `[skip]` line. A line that is not one of the two gated
+shapes -- `thylacine.<kind>[ xN]: the launcher did not declare it`, or
+`/<file> not in ramfs, and neither is /<companion>` -- is an ungated skip, and
+the verdict fails on it. Each gated skip must then be explained by this
+script's own configuration, kind by kind: `virtio-net` by `THYLACINE_NO_NET=1`;
+`virtio-input` and `virtio-pci-input` by `THYLACINE_NO_INPUT=1`; `virtio-gpu`
+by `THYLACINE_NO_GPU=1` or a display that drops the MMIO GPU (console, vnc,
+egl-headless, dbus-gl, gpu); `virtio-blk` by neither `disk.img` nor `pool.img`;
+`smp` and `msi` by run-vm.sh's own `==> qemu:` line (one CPU; a GICv3 machine
+with `its=off`, or under KVM or hvf, where the launcher cannot know the ITS);
+the dlopen prover by a sysroot without `libc.so`; `virtio-rng` and
+`virtio-pci-rng` by `THYLACINE_NO_RNG=1` (2026-10-26: without RNDR that boot
+refuses userspace before the suite, so only an RNDR machine reaches the
+mirror with them skipped). A probe in an image with
+`/bin/joey`, and any kind the mirror does not name are never explained. An
+unexplained skip fails: the launcher dropped what this configuration attaches
+without declaring the drop. The rest are printed as NOT coverage, in the #212
+arc-gate discipline. Before the mirror runs, the count of readable skip lines
+must equal the suite's own "(K skipped)": a skip whose `[skip]` marker another
+CPU's output tore apart is still counted there, and a mismatch fails ("the
+kernel suite counted"). The mirror is a second route to the machine beside the
+launcher's declaration ([[sub-substrate-machine]]), so it is checked against
+it: `tools/test-skip-verdict.py` runs the real `run-vm.sh` under a stand-in
+QEMU that records its argv, for seventeen configurations (the pi's KVM with
+the host's GIC, and extras in QEMU's long option form, among them), and
+requires the two to agree on every kind; it requires the launcher to refuse,
+before QEMU starts, each extra argument that would attach a device it cannot
+declare; then it drives the block's refusals (ungated, torn, the
+old shape, an unknown kind, a missing machine line, a tally that disagrees),
+each with its acceptance one variable away. It runs a byte-identical copy of
+the launcher inside a scratch tree, because the launcher clears its QMP
+sockets under its own root and a boot in this checkout may be using them.
+`smp-multiboot.sh` labels the three new verdicts, and every post-banner verdict
+now has its arm (netd's three, the poll fail-safe, the refused clunk and the
+lost flush were labelled `pass` before); `test-smp-classify.sh` generates one
+fixture per fixed-string arm from the classifier itself and requires each to
+beat the PASS line, and builds the one regex arm's (`hwwatch`) from test.sh's
+own echo.
 
 **A fixture Proc a failing test left linked is released (2026-09-30).** A
 test that links a fabricated Proc under kproc and fails before its unlink
@@ -417,6 +477,47 @@ bypassed, and one that swallows them hides the warning that matters. The count
 is taken from cargo's per-crate footer, so a dependency's warnings are not
 charged to the crate that happened to rebuild it.
 
+### The sanitized C fixtures' compiler (`host-sanitizer-cc.py`)
+
+The `tools/test-*.py` drivers that build real kernel C on the host under
+ASan/UBSan take their compiler from `host-sanitizer-cc.py`. Apple clang's ASan
+runtime hangs at startup on macOS 26, before `main`, and the hang reads as a
+case timing out. An explicit `CC` always wins. Without one a sanitized fixture
+takes Homebrew LLVM (`LLVM_PREFIX`, default `/opt/homebrew/opt/llvm`); when that
+is absent the driver stops in its own state -- exit 3, `SANITIZER TOOLING: ...`
+-- rather than fall back to the toolchain that hangs. Before any case an empty
+sanitized program must build and exit 0 within 20 s, so a runtime that cannot
+start is reported as tooling, never as a case's result. The compiler's source,
+resolved path, version, sysroot and the probe's outcome go to the run's
+`compiler.txt`.
+
+The module also judges each case. UBSan recovers by default, so a run can print
+a sanitizer report and then the wanted assertion and exit 1, which a test of
+"exit status and wanted text" alone would count as the control's kill; and a
+clean run can exit 0 carrying a report. `check()` refuses any report line in
+either stream (`runtime error:`, `==N==ERROR:`/`WARNING:` from a sanitizer, a
+sanitizer `SUMMARY:`) before it reads the exit status, and the fixtures build
+with `-fno-sanitize-recover=all`, so a report also stops the run where it
+happened. The one case whose wanted kill IS the report (sqpoll-ticket's
+`overflow`) says so, and then the first report must name the wanted error.
+Run directly with `--logs DIR`, the module tests `check()` against real reports:
+a recoverable UBSan report before the wanted assertion and a report on a clean
+exit are refused, an ASan use-after-free after the wanted assertion is refused,
+and the assertion alone and a clean exit are accepted -- each refused control
+must also show the report, so the pattern is seen to match the runtime's own
+text. `build()` opens each build log with the compiler's argv, the environment
+that shapes it (`CC`, `CFLAGS`, `LLVM_PREFIX`, the sanitizer options) and the
+sha256 of every C input, the generated fixture source included. Four drivers
+(the loom-service nodes, pool-table, slots and fids fixtures) already demand
+an exact stderr, which a report breaks; the substring drivers call `check()`.
+
+A fixture compiles the actual body of what it exercises and of every callee
+those bodies reach; only environment primitives -- allocator, panic, hardware,
+scheduler -- are host doubles, named as such. `tools/host-tests/host-env/
+atomic_lse.h` stands in for `arch/arm64/atomic_lse.h` (the same primitives at
+the same orders, on `__atomic` builtins) for kernel sources whose headers reach
+it: `9p_session.c` does, through `mm/slub.h`, since the tag table grew.
+
 ## Data structures
 
 None persistent. `build/multiboot-fails/` accumulates captured logs. A label's
@@ -432,6 +533,33 @@ costs a rename. Each failing class writes BOTH streams
 (`$LABEL-$i-<CLASS>[-<token>].log` guest serial, `-harness.log` the harness side,
 the token being `test.sh`'s result), and arm-1 EXTERNAL-KILL appends its resolved
 sender record to the harness capture.
+
+**`SMP_KEEP_LOGS=1` keeps EVERY boot's logs, not only a non-PASS boot's**, in
+`build/multiboot-logs/$LABEL-$i[.log|-harness.log]`, with the same
+archive-never-delete treatment for a prior run of that label. Default off, so an
+ordinary gate run's disk profile is unchanged. It exists because the default
+captures only what the classifier rejects: every boot writes the same
+`build/test-boot.log`, so a PASSING boot's evidence is destroyed by the next
+boot, and a 50-boot matrix ends holding one serial log plus five row verdicts.
+That is enough to answer "did any boot corrupt?" and nothing else — a per-boot
+question about what a boot actually *exercised* ("did the D7 overlapping-login
+ladder run in boot 7 of `ubsan-smp8`?") is unanswerable after the fact, and the
+five PASS rows cannot answer it either, since a row's verdict is
+`corrupt==0 && extkill==0 && other==0` and says nothing about coverage. A reader
+of the kept logs owes them a denominator control: a label with fewer than N
+retained logs means the evidence is missing, and a clean reading taken off
+missing evidence is a gauge reading zero because it never started.
+
+**Nothing on this path is suppressed.** The fail-capture can afford
+`|| true` — its verdict does not depend on the copy landing — but a reader
+*counts* the kept logs, so a swallowed `mv` or `cp` leaves an earlier run's file
+under a current boot's name and satisfies that count with stale evidence, which
+is the masquerade the archiving exists to prevent. Every step therefore fails the
+label loudly: the archive `mv`, both `cp`s, and a post-condition asked of the
+directory rather than of `mv`'s status (the slot must be EMPTY before the first
+boot writes into it). Each kept file is then checked non-empty and NEWER than a
+per-run stamp file, so a survivor of an earlier run is rejected on a timestamp
+rather than on a return code.
 
 ## Concurrency
 

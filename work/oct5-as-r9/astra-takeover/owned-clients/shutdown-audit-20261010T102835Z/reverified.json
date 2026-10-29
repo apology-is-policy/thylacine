@@ -1,0 +1,25 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T10:29:27.781143+00:00",
+  "source_hashes": 13,
+  "commands": 15,
+  "current_source_and_snapshot_match": true,
+  "head_diff_match": true,
+  "raw_logs": {
+    "rust-version.log": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0.log": "5a92e4e646bdd8f8ee242ecc9680751d6c345ae87d238d9f71190eca9f064d36",
+    "rust-run-0.log": "4b22a1670028a812802e993f8f3a8264d3f0445f2c83fac980b49b3b68b5fe03",
+    "rust-build-2.log": "5a92e4e646bdd8f8ee242ecc9680751d6c345ae87d238d9f71190eca9f064d36",
+    "rust-run-2.log": "a59c33a674d1af548eb7c6f71c137fae5f2ba26b62915149655266e05dc6f3a8",
+    "no-clone-tasks-build.log": "005ff190f17e88f38681d2b24dff0c5f4bf26e475b79372d6b19619553a6279e",
+    "no-send-tasks-build.log": "fdd4f98ee00d1576a9ccab8748fa4bd56a96dd46e7a98eabc98dfe2f7a641bd1",
+    "valid-task-build.log": "fd914d97448fa7d88565124866e5b36de347b884100a0935b0d2bfe221cd92d1",
+    "valid-task-run.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-shutdown-wakeup-build.log": "fc6e7e68af1d7ddefec0c438b8c87d474c353d8f66b1915811d28e56ebef793e",
+    "lost-shutdown-wakeup-run.log": "03482866ee04e0274c73963b29feddbf428465f8a7ac25724ae76910bbcf47e1",
+    "missing-close-build.log": "d5b042e01a583b0733419647eb0646f815e0e0abe7ab4d74c2d4e0c96b1d12a3",
+    "missing-close-run.log": "8441f40d42863deaf816fc5d90b27e29952ff7dd58f0cb7016f0551cc2dc0bdb",
+    "early-reclaim-build.log": "4c4187caaaae08f8f5b8f04dc2387c251e3f16419959d1e21d1db0dae74e7939",
+    "early-reclaim-run.log": "27c3060049fa560a27ea2cc2a77cf8137f655c13e99394d009c2d507fb5d1c4c"
+  }
+}

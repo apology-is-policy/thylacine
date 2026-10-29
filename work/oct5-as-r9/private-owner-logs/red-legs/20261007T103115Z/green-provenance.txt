@@ -1,0 +1,7 @@
+leg      : green
+at       : 2026-10-07T10:32:15Z
+HEAD     : 2666645b7bcc94446dad7ea82d69c590cd2f6f67
+test.sh  : rc=0
+serial   : 208632 bytes, sha256 c26ee6c50fbd499349d31d5b402f5990597f49e8b7cf0c293f7496f3b719ed67
+burrow.c: c8f5a3b0ea54b4b5b197a34ca3bc7c786a6a396d
+loom.c: dcad40afc6ea7eea67df1a15885128bebdab3651

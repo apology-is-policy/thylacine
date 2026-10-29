@@ -302,6 +302,29 @@ structured client API the design rests on):
   submission is automatic; `ENTER` is used only to wake an idled poll-thread or
   to wait for completions (the zero-syscall steady state).
 
+### 8.2a Refusals (operator votes, 2026-10-13)
+
+No Loom syscall answers a bare -1 (ERRORS.md: -1 is `-T_E_PERM`). On the
+ordinary ring every refusal answers the errno the private route, or another
+handler, already gives for the same condition:
+
+| Condition | Answer |
+|---|---|
+| params block or a REGISTER array the kernel cannot read or write | `-T_E_FAULT` |
+| a descriptor (the ring's, or one in a HANDLES array) that names nothing, or names something that is not a Loom (ring) or a Spoor (array) | `-T_E_BADF` |
+| an unknown flag bit (SETUP, ENTER); entries 0, past `LOOM_MAX_ENTRIES` or not a power of two; nargs past the op's cap; an unknown op | `-T_E_INVAL` |
+| a buffer that does not resolve: length 0 or past 4 GiB, a wrapping range, an unmapped VA, memory that is not anonymous or not writable, a range across two VMAs | `-T_E_INVAL` |
+| a HANDLES entry whose 9P client cannot do a deadline receive, on an SQPOLL ring | `-T_E_OPNOTSUPP` |
+| the ring's own allocation (kernel heap or the user page pool), no VA gap for the ring, the per-address-space page cap, a mapping failure, the SQPOLL thread failing to start | `-T_E_NOMEM` |
+| the SQPOLL thread over the Proc's thread cap | `-T_E_AGAIN` |
+| a full handle table | `-T_E_MFILE` |
+| any argument with bits above its declared width (ERRORS.md principle 6) | `-T_E_BADF` for a descriptor, `-T_E_INVAL` otherwise |
+
+The params block is read before either route is chosen, so its `-T_E_FAULT`
+is the same on both. In an image built without the qualification lever, a
+private REGISTER op still answers `-T_E_OPNOTSUPP` before its descriptor is
+looked up.
+
 ### 8.3 Ring entries (design-level)
 
 - `loom_sqe` (fixed size, `_Static_assert`'d at impl): `{ u8 opcode; u8 flags
@@ -589,7 +612,11 @@ sleep with nothing left to wake it. A sibling thread's submit can likewise put
 an op on a client the waiter collected before it, between the waiter's client
 hooks and its CQ hook. Each ring keeps a generation, `drive_gen`, bumped under
 `l->lock` by the CQE post, by the completion's state update, and by every op
-that goes in flight (a submit's link, a re-arm claimed). The `ENTER`'s sleep and the kthread's in-flight park sample it at the
+that goes in flight (a submit's link, a re-arm claimed). Two CQE posters skip
+it, both private-ring only (`loom_private_post_terminal`,
+`loom_provided_deliver`): no `drive_gen` waiter runs on a private ring, whose
+`ENTER` is `loom_private_enter` and whose kthread parks on its own engine
+wait. The `ENTER`'s sleep and the kthread's in-flight park sample it at the
 loop top and sleep only if it has not moved, re-reading it under `l->lock`
 after the CQ hook is filed: a completion after that read flags the hook. The
 completion half predates the fan-in (OPEN-BUGS 2026-10-06 16:20Z); its window

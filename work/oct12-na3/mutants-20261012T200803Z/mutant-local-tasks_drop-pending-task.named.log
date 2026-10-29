@@ -1,0 +1,70 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 10 tests
+test tests::ring::task_capacity_precedes_factory_and_ids_are_owner_specific ... ok
+test tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot ... FAILED
+test tests::ring::task_completion_and_root_drop_release_owned_futures ... FAILED
+test tests::ring::task_dispatch_and_wake_have_no_internal_allocation ... ok
+test tests::ring::task_fixed_completion_wakes_and_result_stays_owned ... FAILED
+test tests::ring::task_fixed_future_cancel_retains_storage_until_terminal ... FAILED
+test tests::ring::task_pending_stays_quiet_until_woken ... FAILED
+test tests::ring::task_self_wake_survives_poll_and_is_bounded ... FAILED
+test tests::ring::task_unwind_detaches_owner_and_keeps_other_tasks ... ok
+test tests::ring::task_zero_budget_and_many_wakes_coalesce ... FAILED
+
+failures:
+
+---- tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot stdout ----
+
+thread 'tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot' (30940098) panicked at src/tests/ring.rs:2188:13:
+assertion failed: t.cancel(old)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::task_completion_and_root_drop_release_owned_futures stdout ----
+
+thread 'tests::ring::task_completion_and_root_drop_release_owned_futures' (30940099) panicked at src/tests/ring.rs:2228:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::task_fixed_completion_wakes_and_result_stays_owned stdout ----
+
+thread 'tests::ring::task_fixed_completion_wakes_and_result_stays_owned' (30940101) panicked at src/tests/ring.rs:2300:5:
+assertion failed: t.ready()
+
+---- tests::ring::task_fixed_future_cancel_retains_storage_until_terminal stdout ----
+
+thread 'tests::ring::task_fixed_future_cancel_retains_storage_until_terminal' (30940102) panicked at src/tests/ring.rs:2274:5:
+assertion failed: t.cancel(task)
+
+---- tests::ring::task_pending_stays_quiet_until_woken stdout ----
+
+thread 'tests::ring::task_pending_stays_quiet_until_woken' (30940103) panicked at src/tests/ring.rs:2158:5:
+assertion failed: t.ready()
+
+---- tests::ring::task_self_wake_survives_poll_and_is_bounded stdout ----
+
+thread 'tests::ring::task_self_wake_survives_poll_and_is_bounded' (30940104) panicked at src/tests/ring.rs:2173:5:
+assertion failed: t.ready()
+
+---- tests::ring::task_zero_budget_and_many_wakes_coalesce stdout ----
+
+thread 'tests::ring::task_zero_budget_and_many_wakes_coalesce' (30940106) panicked at src/tests/ring.rs:2215:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot
+    tests::ring::task_completion_and_root_drop_release_owned_futures
+    tests::ring::task_fixed_completion_wakes_and_result_stays_owned
+    tests::ring::task_fixed_future_cancel_retains_storage_until_terminal
+    tests::ring::task_pending_stays_quiet_until_woken
+    tests::ring::task_self_wake_survives_poll_and_is_bounded
+    tests::ring::task_zero_budget_and_many_wakes_coalesce
+
+test result: FAILED. 3 passed; 7 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

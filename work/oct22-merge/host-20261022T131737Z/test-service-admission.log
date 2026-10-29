@@ -1,0 +1,13 @@
+PASS clean: actual-source admission
+PASS wrong-image: old image cannot borrow replacement
+PASS dead-creator: zombie cannot admit
+PASS no-generation: target refuses replacement generation
+PASS slot-aba: target refuses same generation in another slot
+PASS publish-rebind: publication refuses replacement
+PASS raw-escape: strict target refuses raw byte mode
+PASS provider-charge: route charges consumer view
+PASS drop-groups: supplementary group retained
+PASS owner-fallthrough: owner-first permissions
+PASS no-teardown: cancel prepare tears local connection
+PASS poster-principal-uncaptured: both ends' principals stamped
+PASS principal-crossed: both ends' principals stamped

@@ -1,0 +1,11 @@
+--- control.c
++++ ready_root.c
+@@ -2562,7 +2562,7 @@
+ int loom_engine_ready_visit(struct Loom *l,u64 now) {
+     if(!l || !loom_is_private(l))return -T_E_INVAL;
+     // This root is independent of every operation the visit may consume.
+-    loom_ref(l);int rc=engine_ready_visit(l,now);loom_unref(l);return rc;
++    int rc=engine_ready_visit(l,now);return rc;
+ }
+ static int engine_close_visit(struct Loom *l) {
+     struct loom_service_protocol *p=NULL;struct loom_service_ref ref={0};bool handshake=false;

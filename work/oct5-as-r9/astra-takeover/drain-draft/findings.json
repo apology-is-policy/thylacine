@@ -1,0 +1,26 @@
+{
+  "owner": "astra",
+  "review": "single-agent self-review",
+  "findings": [
+    {
+      "id": "DRAIN-R1",
+      "state": "fixed-in-uninstalled-draft",
+      "problem": "Native IO action passes fresh time to client but does not freshly recheck operation deadline after older readiness selection; handshake-only client time does not enforce general request expiry.",
+      "fix": "Exclusive-driver fresh preflight checks scope/close latch and all active operation deadlines before bounded client IO; exact guard-removal mutant.",
+      "baseline": "work/oct5-as-r9/astra-takeover/drain-draft/controls-20261010T002900Z/control.log"
+    },
+    {
+      "id": "DRAIN-R2",
+      "state": "fixed-in-uninstalled-draft",
+      "problem": "General driver errors returned to existing executor loops would be treated as idle; fail closed on an unexpected negative action refusal after valid engine selection.",
+      "fix": "Engine treats internal negative action result as invariant failure; user-facing errors are already scope-latched or terminal, and valid shortage returns zero."
+    },
+    {
+      "id": "DRAIN-R3",
+      "state": "fixed-in-uninstalled-draft",
+      "problem": "Known CLUNK older-borrower shortage remained actionable during cancellation/whole close, causing repeated busy visits and an always-ready wait predicate.",
+      "fix": "Selector parks CANCEL and DISCARD until older FID borrows end; their actual return must wake the engine. Mutants independently remove each guard.",
+      "test_review": "Initial cancellation witness checked only visit return and missed a surviving mutant. Actual wait_arm immediate-work result now independently detects the defect; failed run preserved."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+--- control
++++ allow-close
+@@ -84,7 +84,7 @@
+         spin_lock(&l->lock);
+         // Close may win while resolution runs. Both provisional and live pools
+         // forbid rebinding; the old table remains intact on either refusal.
+-        if (l->service_closing) rc = -T_E_CANCELED;
++        if (l->service_closing && false) rc = -T_E_CANCELED;
+         else if (!loom_service_pools_empty(l->service_pools)) rc = -T_E_BUSY;
+         else {
+             for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {

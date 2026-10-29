@@ -1,0 +1,697 @@
+//! Real SrvConn backpressure proof, using the exact Halcyon stream pump and
+//! native adapter. Requires an explicitly conferred POST_SERVICE provincia.
+use crate::serviceio::NativeEndpoint;
+use crate::servicewire::{Dispatch, Handler, Interest, Stream};
+use ::alloc::{format, vec, vec::Vec};
+use libthyla_rs::{fs::File, handle::Rights, poll::AsFd, poll_worker::PollWorker, *};
+
+type Result<T = ()> = core::result::Result<T, &'static str>;
+fn check(ok: bool, why: &'static str) -> Result {
+    if ok {
+        Ok(())
+    } else {
+        Err(why)
+    }
+}
+fn file(fd: i64, step: &'static str) -> Result<File> {
+    if fd < 0 {
+        t_putstr(&format!("service-probe: setup {} returned {}\n", step, fd));
+        return Err(step);
+    }
+    Ok(unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) })
+}
+fn nonblock(f: &File) -> Result {
+    check(
+        unsafe { t_set_nonblock(f.as_raw_fd() as i64, true) } == 0,
+        "set nonblocking",
+    )
+}
+struct Response {
+    bytes: Vec<u8>,
+    seen: usize,
+}
+impl Handler for Response {
+    fn dispatch(&mut self, frame: &[u8]) -> core::result::Result<Dispatch, ()> {
+        if frame.len() != 7 || frame[4] as usize != self.seen {
+            return Err(());
+        }
+        self.bytes.fill(frame[4]);
+        let len = self.bytes.len() as u32;
+        self.bytes[..4].copy_from_slice(&len.to_le_bytes());
+        self.seen += 1;
+        Ok(Dispatch::Reply)
+    }
+    fn reply(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+fn drive(s: &mut Stream, fd: i64, h: &mut Response) -> Result {
+    check(
+        s.service(&mut NativeEndpoint(fd), h, u64::MAX),
+        "stream closed",
+    )
+}
+fn requests(f: &File, n: u8) -> Result {
+    let mut bytes = Vec::new();
+    for i in 0..n {
+        bytes.extend_from_slice(&[7, 0, 0, 0, i, 0, 0]);
+    }
+    check(
+        unsafe { t_write(f.as_raw_fd() as i64, bytes.as_ptr(), bytes.len()) } == bytes.len() as i64,
+        "request write",
+    )
+}
+fn read_some(f: &File, out: &mut Vec<u8>, max: usize) -> Result<usize> {
+    let mut buf = [0u8; 4096];
+    let n = unsafe { t_read(f.as_raw_fd() as i64, buf.as_mut_ptr(), max.min(buf.len())) };
+    if n == -11 {
+        return Ok(0);
+    }
+    if n <= 0 {
+        return Err("unexpected reply EOF/error");
+    }
+    out.extend_from_slice(&buf[..n as usize]);
+    Ok(n as usize)
+}
+fn poll(worker: &PollWorker, timeout: i32) -> Result<i64> {
+    let mut fd = TPollFd {
+        fd: worker.as_raw_fd(),
+        events: T_POLLIN,
+        revents: 0,
+    };
+    let n = unsafe { t_poll(&mut fd, 1, timeout) };
+    if n < 0 {
+        Err("worker poll")
+    } else {
+        Ok(n)
+    }
+}
+struct DeferredResponse {
+    bytes: Vec<u8>,
+    step: u8,
+}
+impl Handler for DeferredResponse {
+    fn dispatch(&mut self, frame: &[u8]) -> core::result::Result<Dispatch, ()> {
+        if frame.len() != 7 {
+            return Err(());
+        }
+        let action = match self.step {
+            0 => Dispatch::Park(1),
+            1 => Dispatch::Reply,
+            2 => Dispatch::Park(2),
+            3 => Dispatch::Cancel(2),
+            4 => Dispatch::Park(3),
+            _ => return Err(()),
+        };
+        self.step += 1;
+        self.bytes = if matches!(action, Dispatch::Park(_)) {
+            Vec::new()
+        } else {
+            frame.to_vec()
+        };
+        Ok(action)
+    }
+    fn reply(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+fn deferred_native(client: &File, server: &File) -> Result {
+    let mut stream = Stream::new();
+    let mut handler = DeferredResponse {
+        bytes: Vec::new(),
+        step: 0,
+    };
+    let mut bytes = Vec::new();
+    for step in 0..5 {
+        requests(client, 1)?;
+        check(
+            stream.service(
+                &mut NativeEndpoint(server.as_raw_fd() as i64),
+                &mut handler,
+                u64::MAX,
+            ),
+            "deferred dispatch",
+        )?;
+        let n = read_some(client, &mut bytes, 32)?;
+        check(
+            n == if step == 1 || step == 3 { 7 } else { 0 },
+            "parked reply leaked or flush stalled",
+        )?;
+        if step == 1 {
+            stream
+                .resume_reply(1, &mut handler, |h| {
+                    h.bytes = vec![7, 0, 0, 0, 0x42, 0, 0];
+                    Ok(())
+                })
+                .map_err(|_| "exact deferred resume")?;
+            check(
+                stream.service(
+                    &mut NativeEndpoint(server.as_raw_fd() as i64),
+                    &mut handler,
+                    u64::MAX,
+                ),
+                "deferred output",
+            )?;
+            bytes.clear();
+            check(
+                read_some(client, &mut bytes, 32)? == 7 && bytes == [7, 0, 0, 0, 0x42, 0, 0],
+                "deferred bytes",
+            )?;
+        }
+        if step == 3 || step == 4 {
+            if step == 4 {
+                check(stream.cancel_output(), "unwritten cancellation")?;
+            }
+            let mut called = false;
+            let old = if step == 3 { 2 } else { 3 };
+            check(
+                stream
+                    .resume_reply(old, &mut handler, |_| {
+                        called = true;
+                        Ok(())
+                    })
+                    .is_err()
+                    && !called,
+                "cancelled reply builder ran",
+            )?;
+        }
+        bytes.clear();
+    }
+    t_putstr(
+        "service-probe: deferred replies PASS -- park, progress, resume, flush, cancellation\n",
+    );
+    Ok(())
+}
+fn native() -> Result {
+    let root = file(
+        unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) },
+        "open srv root",
+    )?;
+    let name = format!("hi1-wire-{}", unsafe { t_getpid() });
+    let listener = file(
+        unsafe {
+            t_walk_create(
+                root.as_raw_fd() as i64,
+                name.as_ptr(),
+                name.len(),
+                T_OREAD,
+                T_WALK_CREATE_DMSRVBYTE,
+            )
+        },
+        "post byte service",
+    )?;
+    let path = format!("/srv/{}", name);
+    let mut pairs = Vec::new();
+    for _ in 0..2 {
+        let client = file(
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_ORDWR) },
+            "open byte client",
+        )?;
+        let server = file(
+            unsafe { t_srv_accept(listener.as_raw_fd() as i64) },
+            "accept client",
+        )?;
+        nonblock(&client)?;
+        nonblock(&server)?;
+        pairs.push((client, server));
+    }
+    let (other_client, other_server) = pairs.pop().unwrap();
+    let (client, server) = pairs.pop().unwrap();
+    let mut stream = Stream::new();
+    let mut reply = Response {
+        bytes: vec![0; 32768],
+        seen: 0,
+    };
+    requests(&client, 5)?;
+    // Two complete replies fill the 64 KiB default SrvConn ring. The third
+    // must remain retained. Each turn has its own bounded work deadline.
+    let limit = time::monotonic_ns() + 2_000_000_000;
+    while reply.seen < 3 && time::monotonic_ns() < limit {
+        drive(&mut stream, server.as_raw_fd() as i64, &mut reply)?;
+    }
+    check(
+        reply.seen == 3 && stream.interest() == Interest::Write,
+        "full ring did not retain third reply",
+    )?;
+    check(!stream.runnable(), "blocked reply is spuriously runnable")?;
+    let mut worker = PollWorker::new(2).map_err(|_| "worker start")?;
+    check(server.try_clone().is_err(), "srv alias contract changed")?;
+    let listener_id = worker
+        .register_owned(listener, T_POLLIN)
+        .map_err(|_| "own listener")?;
+    let blocked = worker
+        .register_owned(server, T_POLLOUT)
+        .map_err(|_| "watch blocked writer")?;
+    check(poll(&worker, 20)? == 0, "full reply ring writable")?;
+    // Same UI thread services another real connection while the first client
+    // refuses to read. No helper thread can hide a blocking pump here.
+    requests(&other_client, 1)?;
+    let mut other_stream = Stream::new();
+    let mut other_reply = Response {
+        bytes: vec![0; 7],
+        seen: 0,
+    };
+    drive(
+        &mut other_stream,
+        other_server.as_raw_fd() as i64,
+        &mut other_reply,
+    )?;
+    let mut other_out = Vec::new();
+    check(
+        read_some(&other_client, &mut other_out, 7)? == 7 && other_out == [7, 0, 0, 0, 0, 0, 0],
+        "other peer starved",
+    )?;
+    let mut out = Vec::new();
+    check(
+        read_some(&client, &mut out, 17)? == 17,
+        "open short-write credit",
+    )?;
+    check(poll(&worker, 1000)? == 1, "drain failed to wake writer")?;
+    check(
+        worker
+            .take_ready()
+            .map_err(|_| "take write ready")?
+            .iter()
+            .any(|r| r.watch == blocked),
+        "missing write notice",
+    )?;
+    worker
+        .with_fd(blocked, |fd| drive(&mut stream, fd as i64, &mut reply))
+        .map_err(|_| "borrow owned writer")??;
+    check(
+        reply.seen == 3 && stream.interest() == Interest::Write,
+        "short write lost retained reply",
+    )?;
+    worker
+        .rearm(blocked, T_POLLOUT)
+        .map_err(|_| "rearm blocked writer")?;
+    check(
+        poll(&worker, 20)? == 0,
+        "short write did not consume exact credit",
+    )?;
+    let limit = time::monotonic_ns() + 3_000_000_000;
+    while out.len() < 5 * 32768 && time::monotonic_ns() < limit {
+        read_some(&client, &mut out, 4096)?;
+        worker
+            .with_fd(blocked, |fd| drive(&mut stream, fd as i64, &mut reply))
+            .map_err(|_| "borrow owned writer")??;
+    }
+    check(
+        out.len() == 5 * 32768 && reply.seen == 5,
+        "reply drain incomplete or dispatch repeated",
+    )?;
+    for (i, frame) in out.chunks_exact(32768).enumerate() {
+        check(
+            frame[..4] == 32768u32.to_le_bytes() && frame[4..].iter().all(|b| *b == i as u8),
+            "reply byte loss/reorder",
+        )?;
+    }
+    check(
+        !stream.runnable() && stream.interest() == Interest::Read,
+        "drained stream still runnable",
+    )?;
+    worker.remove(blocked).map_err(|_| "remove writer")?;
+    check(
+        worker.with_fd(blocked, |_| ()).is_err(),
+        "retired IO token accepted",
+    )?;
+    worker.remove(listener_id).map_err(|_| "remove listener")?;
+    worker.shutdown().map_err(|_| "join worker")?;
+    let mut byte = 0;
+    check(
+        unsafe { t_read(client.as_raw_fd() as i64, &mut byte, 1) } == 0,
+        "owned server not closed at join",
+    )?;
+    deferred_native(&other_client, &other_server)?;
+    crate::admission_deadline::run()?;
+    // Handles close through their owners; the service itself is tombstoned
+    // only when this poster process exits. No system service is changed.
+    Ok(())
+}
+pub fn run() -> i64 {
+    match (|| {
+        let mut cmd = process::Command::new("/bin/kaua-term-probe");
+        cmd.arg("--service-transport");
+        let mut child = cmd.spawn().map_err(|_| "spawn transport child")?;
+        check(
+            child.wait().map_err(|_| "join transport child")?.success(),
+            "transport child exit",
+        )?;
+        media()
+    })() {
+        Ok(()) => {
+            t_putstr("service-probe: PASS -- real SrvConn stall, peer progress, short write, ordered replies, worker wake, actual media adapter\n");
+            0
+        }
+        Err(e) => {
+            t_putstr("service-probe: FAIL -- ");
+            t_putstr(e);
+            t_putstr("\n");
+            1
+        }
+    }
+}
+
+// The real per-user media adapter is compiled from its production source.
+// Two child clients use the kernel 9P client, not a fake protocol handler.
+struct Children(Vec<Option<process::Child>>);
+impl Drop for Children {
+    fn drop(&mut self) {
+        for c in self.0.iter_mut().flatten() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+fn route_lifetime(server: &mut crate::paneplace::PanePlaceServer) -> Result {
+    use libthyla_rs::io::Write;
+    check(server.register(10, 10), "lifetime route")?;
+    check(!server.register(10, 11), "live token retargeted")?;
+    check(!server.register(11, 10), "duplicate leaf")?;
+    let path = server.place_address(10);
+    let split = path[5..].find('/').ok_or("lifetime path")? + 5;
+    let root = file(unsafe {
+        t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), split, T_OREAD)
+    }, "lifetime root")?;
+    let sub = &path[split+1..];
+    let open = || file(unsafe {
+        t_open(root.as_raw_fd() as i64, sub.as_ptr(), sub.len(), T_ORDWR)
+    }, "lifetime place");
+    let mut old = open()?;
+    let mut header = inlinewire::PlaceHeader::argb(1, 1);
+    header.id = 10;
+    old.write_all(&header.pack()).map_err(|_| "lifetime partial header")?;
+    server.unregister_leaf(10);
+    check(server.register(10, 10), "lifetime replacement")?;
+    let mut buf = [0;32];
+    check(unsafe { t_pread(old.as_raw_fd() as i64, buf.as_mut_ptr(), buf.len(), 0) } == -2,
+        "old media fid read replacement")?;
+    check(unsafe { t_write(old.as_raw_fd() as i64, buf.as_ptr(), 4) } == -2,
+        "old upload reached replacement")?;
+    drop(old);
+    let mut image = header.pack().to_vec();
+    image.extend_from_slice(&0xff123456u32.to_le_bytes());
+    let mut fresh = open()?;
+    fresh.write_all(&image).map_err(|_| "replacement upload")?;
+    drop(fresh);
+    // Rwrite precedes UI drain; removal must discard that queued old lifetime.
+    server.unregister_leaf(10);
+    check(server.register(10, 10), "queued replacement")?;
+    check(server.take_completed().is_empty(), "queued image survived retirement")?;
+    let mut fresh = open()?;
+    fresh.write_all(&image).map_err(|_| "fresh lifetime upload")?;
+    let images = server.take_completed();
+    check(images.len() == 1 && images[0].leaf == 10 && images[0].argb == [0xff123456],
+        "fresh lifetime lost pixels")?;
+    server.unregister_leaf(10);
+    t_putstr("service-probe: route lifetimes PASS -- stale fid, partial upload, queued image, fresh replacement\n");
+    Ok(())
+}
+fn media() -> Result {
+    let user = format!("probe-{}", unsafe { t_getpid() });
+    let mut server =
+        crate::paneplace::PanePlaceServer::post(&user).map_err(|_| "post actual media adapter")?;
+    route_lifetime(&mut server)?;
+    let notes = notes::Notes::open_self().map_err(|_| "child notifications")?;
+    for _wave in 0..2 {
+        let mut children = Children(Vec::new());
+        for id in 1..=2u32 {
+            check(server.register(id as u128, id), "route capacity")?;
+            let mut cmd = process::Command::new("/bin/kaua-term-probe");
+            cmd.arg("--service-media-client")
+                .arg(server.place_address(id as u128))
+                .arg(format!("{}", id));
+            children
+                .0
+                .push(Some(cmd.spawn().map_err(|_| "spawn actual media client")?));
+        }
+        // Both clients must complete while the UI does not service transport
+        // or drain completions. This catches a regression to UI-owned parsing.
+        let idle_end = time::monotonic_ns() + 10_000_000_000;
+        for slot in &mut children.0 {
+            let child = slot.as_mut().unwrap();
+            loop {
+                if let Some(status) = child.try_wait().map_err(|_| "independent media reap")? {
+                    check(status.success(), "independent media client")?;
+                    break;
+                }
+                check(time::monotonic_ns() < idle_end, "media needs UI progress")?;
+                unsafe { t_poll(core::ptr::null_mut(), 0, 10); }
+            }
+            *slot = None;
+        }
+        let mut seen = [false; 2];
+        let deadline = time::monotonic_ns() + 10_000_000_000;
+        loop {
+            server
+                .service()
+                .map_err(|_| "actual media readiness failed")?;
+            for image in server.take_completed() {
+                check((1..=2).contains(&image.leaf), "wrong media leaf")?;
+                let i = image.leaf as usize - 1;
+                check(
+                    !seen[i] && image.id == image.leaf as u128 && image.w == 256 && image.h == 256,
+                    "media duplicate/id/dimensions",
+                )?;
+                check(
+                    image.argb.len() == 65536
+                        && image.argb.iter().all(|p| *p == 0xff123400 + image.leaf),
+                    "actual media bytes differ",
+                )?;
+                seen[i] = true;
+            }
+            for slot in &mut children.0 {
+                if let Some(c) = slot {
+                    if let Some(status) = c.try_wait().map_err(|_| "reap media client")? {
+                        *slot = None;
+                        check(status.success(), "media client exit")?;
+                    }
+                }
+            }
+            if children.0.iter().all(Option::is_none) {
+                break;
+            }
+            let now = time::monotonic_ns();
+            check(now < deadline, "actual media adapter deadline")?;
+            let mut fds = vec![TPollFd {
+                fd: notes.as_raw_fd(),
+                events: T_POLLIN,
+                revents: 0,
+            }];
+            server.push_fds(&mut fds);
+            check(fds.len() == 2, "media adapter exceeds one UI descriptor")?;
+            let timeout = if server.runnable() {
+                0
+            } else {
+                ((deadline - now) / 1_000_000).min(i32::MAX as u64) as i32 + 1
+            };
+            check(
+                unsafe { t_poll(fds.as_mut_ptr(), fds.len(), timeout) } >= 0,
+                "media poll",
+            )?;
+            while notes
+                .try_read()
+                .map_err(|_| "read child notification")?
+                .is_some()
+            {}
+        }
+        check(seen == [true, true], "missing routed image")?;
+        // Retire the completed clients through real notifications. Once quiet,
+        // the service itself supplies no timer wake; the next wave must reuse its
+        // bounded slots, not progressively lose capacity.
+        let end = time::monotonic_ns() + 2_000_000_000;
+        loop {
+            server.service().map_err(|_| "media cleanup readiness")?;
+            let mut fds = Vec::new();
+            server.push_fds(&mut fds);
+            check(fds.len() == 1, "quiet media descriptor count")?;
+            let rc = unsafe { t_poll(fds.as_mut_ptr(), fds.len(), 50) };
+            check(rc >= 0, "quiet media poll")?;
+            if rc == 0 {
+                break;
+            }
+            check(time::monotonic_ns() < end, "quiet media keeps waking")?;
+        }
+    }
+    Ok(())
+}
+pub fn media_client() -> i64 {
+    fn upload() -> Result {
+        use libthyla_rs::io::Write;
+        let path = env::args().nth(2).ok_or("media path")?;
+        let id = env::args().nth(3).ok_or("media id")?;
+        let id = core::str::from_utf8(id)
+            .map_err(|_| "id utf8")?
+            .parse::<u32>()
+            .map_err(|_| "id parse")?;
+        let path = core::str::from_utf8(path).map_err(|_| "path utf8")?;
+        // Match view's actual /srv protocol: open the service root first to
+        // instantiate its kernel 9P client, then walk the place path relative
+        // to that root. A flat namespace walk cannot cross an unopened service.
+        let split = path[5..].find('/').ok_or("service path shape")? + 5;
+        let root = file(
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), split, T_OREAD) },
+            "open media service root",
+        )?;
+        let sub = &path[split + 1..];
+        let mut f = file(
+            unsafe { t_open(root.as_raw_fd() as i64, sub.as_ptr(), sub.len(), T_OWRITE) },
+            "open media place",
+        )?;
+        let mut header = inlinewire::PlaceHeader::argb(256, 256);
+        header.id = id as u128;
+        f.write_all(&header.pack())
+            .map_err(|_| "write media header")?;
+        let pixel = (0xff123400u32 + id).to_le_bytes();
+        let mut chunk = [0u8; 4096];
+        for p in chunk.chunks_exact_mut(4) {
+            p.copy_from_slice(&pixel);
+        }
+        for _ in 0..64 {
+            f.write_all(&chunk).map_err(|_| "write media pixels")?;
+        }
+        Ok(())
+    }
+    match upload() {
+        Ok(()) => 0,
+        Err(e) => {
+            t_putstr("service-probe: media client: ");
+            t_putstr(e);
+            t_putstr("\n");
+            1
+        }
+    }
+}
+
+pub fn transport_child() -> i64 {
+    match native() {
+        Ok(()) => {
+            t_putstr("service-probe: transport checks passed\n");
+            0
+        }
+        Err(e) => {
+            t_putstr("service-probe: FAIL -- ");
+            t_putstr(e);
+            t_putstr("\n");
+            1
+        }
+    }
+}
+
+// Fill the actual media adapter with retained native 9P clients. A rejected
+// third attach must finish while BOTH admitted clients remain alive.
+pub fn capacity() -> i64 {
+    fn open_media(path: &str) -> Result<(File, File)> {
+        let split = path[5..].find('/').ok_or("capacity path")? + 5;
+        let root = file(
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), split, T_OREAD) },
+            "capacity root",
+        )?;
+        let sub = &path[split + 1..];
+        let media = file(
+            unsafe { t_open(root.as_raw_fd() as i64, sub.as_ptr(), sub.len(), T_ORDWR) },
+            "capacity media",
+        )?;
+        Ok((root, media))
+    }
+    fn reclaimed_media(path: &str) -> Result<(File, File)> {
+        // Closing a client does not synchronously run the independent server.
+        // Require bounded reclamation, not same-instruction slot reuse.
+        let deadline = time::monotonic_ns() + 1_500_000_000;
+        loop {
+            match open_media(path) {
+                Ok(pair) => return Ok(pair),
+                Err(_) if time::monotonic_ns() < deadline => unsafe {
+                    t_poll(core::ptr::null_mut(), 0, 10);
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    fn readable(media: &File) -> Result {
+        let mut bytes = [0u8; 64];
+        check(
+            unsafe { t_pread(media.as_raw_fd() as i64, bytes.as_mut_ptr(), bytes.len(), 0) } > 0,
+            "capacity damaged existing media",
+        )
+    }
+    let result = (|| {
+        let mut server =
+            crate::paneplace::PanePlaceServer::post(&format!("capacity-{}", unsafe { t_getpid() }))
+                .map_err(|_| "capacity post")?;
+        check(server.register(1, 1), "capacity register")?;
+        let path = server.place_address(1);
+        for wave in 0..3 {
+            t_putstr(&format!("service-capacity: wave {} fill\n", wave));
+            let mut held = Vec::new();
+            held.push(reclaimed_media(&path)?);
+            held.push(reclaimed_media(&path)?);
+            let split = path[5..].find('/').ok_or("capacity root path")? + 5;
+            let mut command = process::Command::new("/bin/kaua-term-probe");
+            command.arg("--service-capacity-excess").arg(&path[..split]);
+            let mut children = Children(vec![Some(command.spawn().map_err(|_| "capacity child")?)]);
+            let deadline = time::monotonic_ns() + 1_500_000_000;
+            let status = loop {
+                if let Some(status) = children.0[0]
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .map_err(|_| "capacity reap")?
+                {
+                    break Some(status);
+                }
+                if time::monotonic_ns() >= deadline {
+                    break None;
+                }
+                unsafe {
+                    t_poll(core::ptr::null_mut(), 0, 10);
+                }
+            };
+            if status.is_none() {
+                // Release the retained peers before cleanup so the pre-fix
+                // blocking attach can wake; the timeout is already a failure.
+                drop(held);
+                return Err("full adapter blocked excess attach");
+            }
+            children.0[0] = None;
+            check(
+                status.unwrap().success(),
+                "full adapter admitted excess attach",
+            )?;
+            t_putstr(&format!("service-capacity: wave {} refused\n", wave));
+            readable(&held[0].1)?;
+            readable(&held[1].1)?;
+            t_putstr(&format!("service-capacity: wave {} replace\n", wave));
+            drop(held.pop());
+            let replacement = reclaimed_media(&path)?;
+            readable(&replacement.1)?;
+            held.push(replacement);
+            t_putstr(&format!("service-capacity: wave {} reused\n", wave));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            t_putstr("service-capacity: PASS -- full refusal, live peers and reclamation\n");
+            0
+        }
+        Err(e) => {
+            t_putstr(&format!("service-capacity: FAIL -- {}\n", e));
+            1
+        }
+    }
+}
+pub fn capacity_excess() -> i64 {
+    let Some(path) = env::args().nth(2) else {
+        return 2;
+    };
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        0
+    } else {
+        unsafe {
+            t_close(fd);
+        }
+        1
+    }
+}

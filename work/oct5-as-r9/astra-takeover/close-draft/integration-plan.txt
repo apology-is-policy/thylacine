@@ -1,0 +1,32 @@
+Kernel integration refinement before implementation:
+1. Embed16-byte close_work in Loom (still one buddy page), global close queue
+   under existing retire lock. Start at actual handle-close with a caller ref,
+   latch through existing leaf exec function, take queue root under Q and wake
+   after unlock. Zero-ref enqueue calls a separate bare close notification.
+2. Retirer processes one close quantum plus one final-destroy item per iteration.
+   No Q lock across Ll, native progress, callbacks, free or wake. Finish DROP
+   means one loom_unref outside Q. PARKED nodes retain root with no runnable link.
+3. Distinguish quiet internal step/entry-put/collection from external callbacks.
+   Public CONNECT driver/teardown exit, constructor rollback and raw-owner release
+   notify; public indexed entry return/removal notify. Private retirement uses
+   quiet variants; these still wake the ordinary ring rendez but do not kick
+   their own close queue. No suppression of concurrent external RUNNING kicks.
+4. A close quantum selects one LIVE nonretired nonbusy owner, retaining its entry,
+   runs the actual CONNECT cancellation step, drops its internal entry pin, then
+   attempts quiescent consumer detach/discard/collection. Scan eligible work to
+   decide AGAIN; no eligible work ->WAIT on actual external prerequisite events.
+   No transport readiness needed for abort. Busy users/drivers/installer/fixed
+   and unindexed requests prevent complete; no duration or peer-based reclamation.
+5. Do not reap scope metadata from the close worker while a provisional FID
+   constructor may still hold it. Once protocol storage and requests are empty,
+   release the queue root; caller/borrow refs still retain the ring. Final
+   zero-ref cleanup removes unused FIDs first, then may reap genuinely RETIRED
+   scopes after checking live phase, zero pins and zero parent/reserved fields.
+   READY/ABORTING still fail closed. This preserves existing transaction lifetime
+   rather than deleting a caller's provisional reservation during close.
+6. fixed_release must keep fixed_count nonzero through physical buffer settlement.
+   Unlink its exact reservation before unlocked settlement but decrement count
+   only afterwards, then kick while its retained Loom ref remains. A new acquire
+   is refused after close. Existing overlap exclusion before close needs the
+   reservation left linked until settlement, or a separate finishing count;
+   choose a separate service_fixed_settling counter if unlink stays early.

@@ -1,0 +1,3 @@
+argv: /opt/homebrew/opt/llvm/bin/clang -std=c11 -Wall -Wextra -Werror -O1 -pthread /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/no-teardown.c -o /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/no-teardown -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g
+env: {}
+sha256: ed5e7f6abaaf60b9749308de8916930da8a69eb7d888b96404a98e18d9330684  /var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/service-admission-q0fm70ss/no-teardown.c

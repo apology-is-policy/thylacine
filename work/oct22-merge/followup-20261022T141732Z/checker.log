@@ -1,0 +1,5 @@
+PASS ubsan-then-assertion: rejected, report seen, rc 1
+PASS ubsan-on-clean-exit: rejected, report seen, rc 0
+PASS asan-after-assertion: rejected, report seen, rc -6
+PASS assertion-only: accepted, no report, rc 1
+PASS clean-only: accepted, no report, rc 0

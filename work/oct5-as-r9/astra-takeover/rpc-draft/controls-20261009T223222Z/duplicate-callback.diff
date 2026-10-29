@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ duplicate-callback.c
+@@ -66,7 +66,7 @@
+     // touch Ll, CQ, allocator, client APIs or the list from this boundary.
+     struct loom_service_operation *o=(void *)((u8 *)rpc-
+                                   __builtin_offsetof(struct loom_service_operation,rpc));
+-    if(o->phase!=LRPC_INFLIGHT || o->callback_seen) {
++    if(o->phase!=LRPC_INFLIGHT) {
+         o->capture_error=-T_E_IO;return;
+     }
+     o->capture_error=loom_private_reply_capture(&o->expect,status,reply,

@@ -1,0 +1,73 @@
+{
+  "inputs": {
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+    "kernel/include/thylacine/loom_service_pool_table.h": "c2327245ad5493c5620581b4d957e33d015debe5628790735f54e638929ce78e",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_pool_table_fixture.h": "ce0d9abe64fd5241a6414e9a9c0afca921379d52e44530b1a54ec1ac992205a8",
+    "tools/host-tests/loom-service-pool-table.c": "2d65350a123e8e723f046d556ee59dbbf501ae74ffc6d45c2503306f5275a420",
+    "tools/test-loom-service-pool-table.py": "31d6c3bb58a240f6312263d60a279e28776cd91de354bfb51800ba430a6ed539",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_pool.c": "a6af67d1926d8d91af25819a118492b56a81f7ce72a3c2cbce9e4195b7bd1f3f",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_pool.h": "843e5632ab09361ba451c5c21ec69591d42a4036e520391ecb9c3fcbc57c024c"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+      "binary_sha256": "0a3c561ba439d40927c929a7f7450f57d1230b90e2d6862f73d900e7bc561d4c"
+    },
+    {
+      "case": "prepare-leak",
+      "expected": "failed member prepare leaves no hidden slot or output",
+      "rc": 1,
+      "generated_sha256": "d85845d32cd1fe01ef333a483abbcdc9f6769f50d6d9092dd06ad59f5d6fb984",
+      "binary_sha256": "e1cebfe856b3612ff0c32f3fe53980f425adc3bc765b51c32401931792ca7349"
+    },
+    {
+      "case": "early-visible",
+      "expected": "provisional hidden but excludes extent",
+      "rc": 1,
+      "generated_sha256": "98b6881346bba2217b6f30ddd2c260962ac2d18a53848783073f9ade6b8ac76e",
+      "binary_sha256": "231ce96aec9ca17566fe8afb931f5554ca30aff2540c5019d97d8797c274d7ef"
+    },
+    {
+      "case": "rollback-members",
+      "expected": "rollback releases both exclusions",
+      "rc": 1,
+      "generated_sha256": "2bf7c3ed6b5bd345b5da4b3c43c05a851a1a345741f832245b6208cfb8654502",
+      "binary_sha256": "9f71a978e269dcea756d59e326d809d704338d8f96b2ca5280c030b611c6233f"
+    },
+    {
+      "case": "borrow-reap",
+      "expected": "borrow refusal preserves both ledgers",
+      "rc": 1,
+      "generated_sha256": "76fb8209fb5cdabe44962fce86f23c5ea3e76efedd9d2b8b5ac908a10d6be6cc",
+      "binary_sha256": "d464eafb2499720b4f421932d51495cd4e1367616a0e77765c717ee2ff91fa1a"
+    },
+    {
+      "case": "busy-reap",
+      "expected": "stream refusal preserves slot",
+      "rc": 1,
+      "generated_sha256": "62e76d731c7edd58bae1742ea711b6528e102e8429e5b0690f46169cf2445aec",
+      "binary_sha256": "fbc574040cdf3396e687ee0dede8e2d7cb43ed7617025ec8a55e57a1f2b9196c"
+    },
+    {
+      "case": "reap-slot",
+      "expected": "exact return permits both ledgers to reap",
+      "rc": 1,
+      "generated_sha256": "9b1e265ff4cc942e7b91dd93fd770d86afca7a1a14753d075d37e76cb2738a0f",
+      "binary_sha256": "6be3e289a385ef3b843bdd8dfaaf6a6419af4e0394f2bb617ffbc52abfa6eb60"
+    },
+    {
+      "case": "late-publish",
+      "expected": "close rejects joint publication without half commit",
+      "rc": 1,
+      "generated_sha256": "959e0d4653147271e6ac1b4fbb821943542f2f4719ae599a812a4476070b7696",
+      "binary_sha256": "8fa9210e27302dbb206c6a85394b19d3d3038cccc1ab1145751ca556b8ff7932"
+    }
+  ]
+}

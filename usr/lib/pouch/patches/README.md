@@ -48,28 +48,13 @@ exact awk filter that regenerates the syscall-table retarget.
 
 ## Status
 
-Three patches landed:
+`series` is the list of what has landed, in apply order. Each patch's opening
+lines (its preamble) say what it changes and why. Later entries also carry a
+`#` comment in `series`. This file names no patches, so it cannot go stale as
+the series grows. To measure the divergence the section above calls honest:
 
-- `0001-pouch-syscall-seam.patch` — sub-chunk 4 (`pouch-syscall-seam`).
-  Retargets musl's aarch64 syscall seam (`bits/syscall.h.in`,
-  `syscall_arch.h`, `syscall_ret.c`) to the Thylacine ABI: Thylacine
-  numbers for the eight 1:1 calls, a `0xFFFF` sentinel → `-ENOSYS` for the
-  rest, and the Thylacine `-1` → `errno` decode.
-- `0002-pouch-stdio-no-iovec.patch` — sub-chunk 4 (`pouch-syscall-seam`).
-  Replaces the `writev`/`readv`-based stdio backend ops
-  (`__stdio_write.c`, `__stdio_read.c`) with `SYS_write` / `SYS_read`.
-- `0003-pouch-mman.patch` — sub-chunk 7b (`pouch-mem`); retargeted to the
-  overcommit model at #321. Retargets musl's `mman/` lower half onto
-  Thylacine's anonymous-memory syscalls. `__NR_mmap` = 83 (=
-  `SYS_BURROW_ATTACH_LAZY`: demand-zero RW, no pages until first touch),
-  `__NR_munmap` = 38 (= `SYS_BURROW_DETACH`); `src/mman/mmap.c` and
-  `src/mman/munmap.c` rewritten to call them with the Thylacine shape.
-  File-backed `mmap` is
-  refused with `ENOSYS` by design (a mapped file cannot be 9P-network-
-  transparent; ARCHITECTURE.md §6.5). All other `mman/` calls (`madvise`,
-  `mprotect`, `mremap`, `mlock`, `msync`, `mincore`, ...) stay at the
-  `0xFFFF` sentinel → `ENOSYS`, which mallocng tolerates by design.
+    grep -vcE '^[[:space:]]*(#|$)' usr/lib/pouch/patches/series
 
-The boundary-line replacement continues across the remaining Phase 6 sub-
-chunks (`pouch-wait-addr` through `pouch-signals`). See
-`docs/POUCH-DESIGN.md §14`.
+Patch numbers are shared by every tree that edits this series. A gap in the
+numbering means a peer tree holds those numbers until it merges. Before taking
+a number, check the other active trees' `series` and agree it on yip.

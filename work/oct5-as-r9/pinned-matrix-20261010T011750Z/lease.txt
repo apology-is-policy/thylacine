@@ -1,0 +1,4 @@
+mac   HELD by you for 0s, 2.0h left
+        why: Astra rebuilt-kernel pinned-image five-row Mac matrix
+pi    FREE
+disk: 8.5 GiB available at /Users/northkillpd/projects/thylacine-astra

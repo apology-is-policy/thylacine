@@ -1,0 +1,1 @@
+Assertion failed: (t_lease_init(&b,pool(),r,2,sizes,1)==T_LEASE_GEOMETRY), function main, file test_lease_ledger.c, line 37.

@@ -1,4 +1,3 @@
-#include <thylacine/seat.h>
 // Process descriptor management (P2-A) + rfork/exits/wait lifecycle (P2-D).
 //
 // Per ARCHITECTURE.md §7.2 + §7.4 + §7.9. P2-A established the bare
@@ -36,9 +35,12 @@
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
+#include <thylacine/perm.h>
+#include <thylacine/pts.h>
 #include <thylacine/dtb.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
+#include <thylacine/seat.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/syscall.h>     // IM-1: SYS_CONSOLE_EPISODE_ARM / _END (the op ABI)
@@ -46,6 +48,7 @@
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vivarium.h>  // viv_sigtab_reset -- exec resets dispositions in place
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
@@ -58,19 +61,7 @@
 #include "../arch/arm64/uart.h"
 #include "../mm/phys.h"           // B-1a': capacity_pool_pages (the default budget)
 #include "../mm/slub.h"
-
-// Declared here rather than by including <thylacine/vivarium.h> ON PURPOSE.
-// `struct viv_sigtab` stays INCOMPLETE in this file (proc.h forward-declares
-// it), so proc.c can hold the pointer and hand it to vivarium.c but cannot
-// reach into the layout -- which is what keeps exec's disposition reset a
-// single call to the owning module instead of a field walk that drifts from it.
-// The three are the phenotype's fork/exec signal-state rule (ARCH 7.6, POSIX):
-// rfork copies the table (viv_sigtab_clone_into: the child gets its OWN
-// table, or NULL when the parent has none), execve resets CAUGHT rows only
-// (viv_sigtab_reset_caught: SIG_IGN survives), and the native full reset stays.
-void viv_sigtab_reset(struct viv_sigtab *tab);
-void viv_sigtab_reset_caught(struct viv_sigtab *tab);
-int  viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent);
+#include <thylacine/addrspace.h>
 
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
@@ -210,11 +201,15 @@ static spin_lock_t g_proc_table_lock = SPIN_LOCK_INIT;
 // true; NULL for a holder with no thread (early boot).
 static struct Thread *g_proc_table_holder;
 
+VISIBLE_IF_KERNEL_TESTS
+u32 proc_default_page_budget(void);
+
 // Initialize a freshly-allocated Proc descriptor. Caller has already
 // passed KP_ZERO to kmem_cache_alloc, so all fields are zero/NULL on
 // entry; this only sets the non-zero-default values.
 static void proc_init_fields(struct Proc *p, int pid) {
     p->magic = PROC_MAGIC;
+    spin_lock_init(&p->srv_post_lock);
     p->pid   = pid;
     // PTY-1a: a parentless Proc is its own session + group leader (sid =
     // pgid = pid). rfork_internal overwrites both with the parent's (a
@@ -363,6 +358,7 @@ void proc_publish_init(struct Proc *p) {
     if (dup) extinction("proc_publish_init: init already published");
 }
 
+#ifdef KERNEL_TESTS
 // Lock-free accessor (tests, diagnostics). Acquire pairs with the
 // publish/clear store-release; NULL means "init not up" (pre-joey boot,
 // or init died -- both fall back to kproc as the orphan-adopter).
@@ -373,11 +369,12 @@ struct Proc *proc_init_proc(void) {
 struct Proc *proc_alloc(void) {
     return proc_alloc_in(NULL, proc_default_page_budget());
 }
+#endif // KERNEL_TESTS
 
 // B-1a' (ARCH 6.5 "Capacity, and the I-32 default"; proc.h): both figures are
 // the user pool. Two names because they are two decisions -- what a Proc
 // starts with, and what a spawn may raise it to -- that happen to coincide.
-u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
+VISIBLE_IF_KERNEL_TESTS u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
 u32 proc_page_budget_hard_max(void) { return capacity_pool_pages(); }
 u32 proc_thread_budget_hard_max(void) { return capacity_pool_pages() / THREAD_POOL_PAGES; }
 u32 proc_default_thread_budget(void) {
@@ -408,22 +405,24 @@ bool proc_id_space_spent(bool exempt) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; absent from the header): replace the
-// id counter, returning the old value, so a test can park it at the end of
-// the space and restore it afterwards.
-u64 proc_id_counter_swap_for_test(u64 v);
+// Test hook: replace the id counter, returning the old value, so a test can
+// park it at the end of the space and restore it afterwards.
 u64 proc_id_counter_swap_for_test(u64 v) {
     return __atomic_exchange_n(&g_next_id, v, __ATOMIC_RELAXED);
 }
 #endif
 
+VISIBLE_IF_KERNEL_TESTS
+void proc_free(struct Proc *p);
 static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int id,
                                   bool exempt);
 
+#ifdef KERNEL_TESTS
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     return proc_alloc_id(share, page_budget, 0,
                          proc_resource_exempt(current_thread()->proc));
 }
+#endif
 
 // `id` 0 draws the pid from the id space, as a TCB creator's draw when
 // `exempt`; PROC_ID_INIT is init's, taken once.
@@ -476,8 +475,10 @@ static struct Proc *proc_alloc_id(struct AddrSpace *share, u32 page_budget, int 
     // as->context_id, so one space is one ASID however many Procs hold it, and
     // I-31 needs nothing new.
     if (share) {
-        addrspace_ref(share);
-        p->as = share;
+        // Private-ring guard and this owner reservation use the same AS lock.
+        // A check of owner_count before allocation would race a ring setup.
+        // On refusal leave as NULL for the ordinary unpublished rollback below.
+        if (addrspace_try_ref(share)) p->as = share;
     } else {
         // I-32 (A): seed the new space's enforced cap from the CALLER's
         // authorization, passed in rather than read off the half-built Proc.
@@ -699,6 +700,7 @@ int addrspace_quiesce_mapped_devices(struct AddrSpace *as) {
     return reset;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int proc_quiesce_owned_devices(struct Proc *p) {
     if (!p) return 0;
     int reset = quiesce_fd_devices(p->handles);
@@ -744,22 +746,19 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // addrspace_unref therefore repeats it before the drain frees anything; this
     // call stays for what must be quiet before this Proc's own handles close, since
     // a DMA buffer held only by a handle frees at that close.
-    if (addrspace_ref_count(p->as) == 1)
+    if (addrspace_owner_count(p->as) == 1)
         reset += addrspace_quiesce_mapped_devices(p->as);
     return reset;
 }
 
 #ifdef KERNEL_TESTS
 // Devices reset by exec's walk (a), summed over every exec, and the stamp of its
-// latest run (the *_for_test convention: extern-declared by the harness).
-u64 addrspace_teardown_stamp(void);
+// latest run.
 static u64 g_exec_device_resets;
 static u64 g_exec_walk_a_seq;
-u64 proc_exec_device_resets_for_test(void);
 u64 proc_exec_device_resets_for_test(void) {
     return __atomic_load_n(&g_exec_device_resets, __ATOMIC_ACQUIRE);
 }
-u64 proc_exec_walk_a_seq_for_test(void);
 u64 proc_exec_walk_a_seq_for_test(void) {
     return __atomic_load_n(&g_exec_walk_a_seq, __ATOMIC_ACQUIRE);
 }
@@ -780,6 +779,7 @@ static void addrspace_record_holder(struct AddrSpace *as, const struct Proc *p) 
                       __ATOMIC_RELAXED);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void proc_free(struct Proc *p) {
     if (!p)                       extinction("proc_free(NULL)");
     // Magic check catches double-free and corrupt-Proc passes. SLUB's
@@ -814,6 +814,7 @@ void proc_free(struct Proc *p) {
     // quiesce + NULL the table); this does real work only for the direct
     // `state=ZOMBIE; proc_free()` orphan/rollback paths whose table is
     // still intact (round-2 F4).
+    srv_proc_exit_notify(p); // also covers construction/rollback frees
     proc_quiesce_owned_devices(p);
 
     // Every proc_free that does not follow a reap frees a Proc that was never
@@ -919,11 +920,12 @@ void proc_free(struct Proc *p) {
     p->sigtab = NULL;
 
     // VIVARIUM V-5: release the per-Proc Linux socket table, same discipline.
-    // A socket's ctl/data Spoors live in the handle table, and the table's own
-    // cached readiness Spoors (NP-5) were released with it at exit
-    // (proc_close_handles_at_exit). On the direct `state=ZOMBIE; proc_free()`
-    // paths that never ran that close, any still cached are clunked here, with
-    // the same Tclunk the handle_table_free above sends there.
+    // A socket's ctl/data Spoors live in the handle table, and the Spoors the
+    // rows hold -- the readiness cache (NP-5) and each socket()-born row's ctl
+    // identity -- were released with it at exit (proc_close_handles_at_exit).
+    // On the direct `state=ZOMBIE; proc_free()` paths that never ran that close,
+    // any still held are clunked here, with the same Tclunk the
+    // handle_table_free above sends there.
     viv_socktab_free(p->socktab);
     p->socktab = NULL;
 
@@ -936,7 +938,9 @@ void proc_free(struct Proc *p) {
 }
 
 u64 proc_total_created(void)   { return __atomic_load_n(&g_proc_created, __ATOMIC_RELAXED); }
+#ifdef KERNEL_TESTS
 u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATOMIC_RELAXED); }
+#endif // KERNEL_TESTS
 
 // =============================================================================
 // P4-C: Proc lookup for devproc (by pid + iterate-all).
@@ -1058,6 +1062,7 @@ int proc_setsid(struct Proc *p) {
         proc_table_lock_release(s);
         return -T_E_ACCES;              // POSIX EPERM: already a group leader
     }
+    pts_interaction_invalidate_locked(p, false);
     p->sid  = (u32)p->pid;
     p->pgid = (u32)p->pid;
     proc_table_lock_release(s);
@@ -1104,6 +1109,7 @@ int proc_setpgid(struct Proc *self, int pid, int pgid) {
             return -T_E_ACCES;          // POSIX EPERM: no such group in session
         }
     }
+    pts_interaction_invalidate_locked(target, false);
     target->pgid = want;
     proc_table_lock_release(s);
     return 0;
@@ -1320,6 +1326,7 @@ void proc_page_uncharge(struct Proc *p, u32 npages) {
     addrspace_uncharge_pages(p->as, npages);
 }
 
+#ifdef KERNEL_TESTS
 bool proc_vma_charge(struct Proc *p) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
     return addrspace_charge_vma(p->as, proc_resource_exempt(p));
@@ -1329,6 +1336,7 @@ void proc_vma_uncharge(struct Proc *p) {
     if (!p || !p->as) return;         // no address space: nothing to uncharge
     addrspace_uncharge_vma(p->as);
 }
+#endif // KERNEL_TESTS
 
 bool proc_shared_map_charge(struct Proc *p, u32 npages) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
@@ -1412,6 +1420,58 @@ void proc_sqpoll_uncharge(struct Proc *p) {
     proc_threads_unlock(p, s);
 }
 
+// Private rings may retire after creator exec/reap. Resolve by permanent
+// stripes only under the process-table lock; no saved Proc address is read.
+// Ticket consumption and decrement share that lock, including duplicate release.
+struct sqpoll_ticket_ctx {
+    u64 stripes;
+    const struct AddrSpace *as;
+    bool release;
+    bool charged;
+};
+static int sqpoll_ticket_cb(struct Proc *p, void *arg) {
+    struct sqpoll_ticket_ctx *c = arg;
+    if (p->stripes != c->stripes) return 0;
+    // The worker count, the live count it is admitted beside and the group
+    // claim are all written under the Proc's thread lock, which nests inside
+    // the table lock this walk holds.
+    irq_state_t s = proc_threads_lock(p);
+    if (c->release) {
+        // An exec changes as, not the Proc's worker count. Zombie still has a
+        // ledger; a fully reaped creator simply does not appear in the walk.
+        if (p->loom_sqpoll_count > 0) p->loom_sqpoll_count--;
+    } else if (p->state == PROC_STATE_ALIVE &&
+               __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL &&
+               p->as == c->as && p->loom_sqpoll_count < 0x7fffffff &&
+               proc_thread_room_locked(p)) {
+        p->loom_sqpoll_count++;
+        c->charged = true;
+    }
+    proc_threads_unlock(p, s);
+    return 1;
+}
+bool proc_sqpoll_ticket_charge(u64 stripes, const struct AddrSpace *as,
+                               struct ProcSqpollTicket *ticket) {
+    if (!stripes || !as || !ticket) return false;
+    irq_state_t s = proc_table_lock_acquire();
+    struct sqpoll_ticket_ctx c = { stripes, as, false, false };
+    if (!ticket->stripes) {
+        proc_for_each_walk(kproc(), sqpoll_ticket_cb, &c);
+        if (c.charged) ticket->stripes = stripes;
+    }
+    proc_table_lock_release(s);
+    return c.charged;
+}
+void proc_sqpoll_ticket_release(struct ProcSqpollTicket *ticket) {
+    if (!ticket) return;
+    irq_state_t s = proc_table_lock_acquire();
+    struct sqpoll_ticket_ctx c = { ticket->stripes, NULL, true, false };
+    ticket->stripes = 0;
+    if (c.stripes) proc_for_each_walk(kproc(), sqpoll_ticket_cb, &c);
+    proc_table_lock_release(s);
+}
+
+VISIBLE_IF_KERNEL_TESTS
 bool proc_child_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;
@@ -2183,6 +2243,7 @@ void proc_mark_console_attached(struct Proc *p) {
 // Atomic AND -- the bit is multi-writer (see proc_mark_console_attached). A
 // no-op on a NULL/corrupt Proc (fail-closed). The caller pins owner lifetime
 // (proc_console_sak holds g_proc_table_lock with the owner ALIVE-checked).
+VISIBLE_IF_KERNEL_TESTS
 void proc_revoke_console_attached(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CONSOLE_ATTACHED, __ATOMIC_RELAXED);
@@ -2264,6 +2325,7 @@ bool proc_is_console_owner(const struct Proc *p) {
 // PURE (no globals) so the gate logic is unit-testable. owner_sid==0 means "no
 // owner" (e.g. post-SAK, which sets g_console_owner=NULL) -> never a match, so a
 // session-less (sid 0) caller never spuriously matches a no-owner console.
+VISIBLE_IF_KERNEL_TESTS
 bool console_session_match(u32 owner_sid, u32 caller_sid) {
     return owner_sid != 0u && owner_sid == caller_sid;
 }
@@ -2325,14 +2387,6 @@ void proc_set_console_trusted(struct Proc *p) {
     proc_table_lock_release(s);
 }
 
-bool proc_is_console_trusted(const struct Proc *p) {
-    if (!p) return false;
-    irq_state_t s = proc_table_lock_acquire();
-    bool yes = (g_console_trusted_proc == p);
-    proc_table_lock_release(s);
-    return yes;
-}
-
 // g_console_renderer is the single bound console RENDERER (G-4, the R2-F6
 // third console role): the Proc holding the /dev/consdrain + /dev/consfeed
 // pair (Aurora). Same lifetime discipline as g_console_owner: protected by
@@ -2381,6 +2435,14 @@ bool proc_is_console_renderer(const struct Proc *p) {
     return yes;
 }
 
+bool proc_console_renderer_held(void) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool held = (g_console_renderer != NULL);
+    proc_table_lock_release(s);
+    return held;
+}
+
+#ifdef KERNEL_TESTS
 struct Proc *proc_test_console_renderer(void) {
     irq_state_t s = proc_table_lock_acquire();
     struct Proc *r = g_console_renderer;
@@ -2400,6 +2462,7 @@ void proc_test_clear_console_renderer(void) {
     g_console_renderer = NULL;
     proc_table_lock_release(s);
 }
+#endif
 
 // Post the `interrupt` note (Ctrl-C) to the current console owner. Runs in the
 // console_mgr kthread's process context. Reads g_console_owner + posts under
@@ -2707,7 +2770,6 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
 // Kernel-only fixture posture, compiled out of production. The test runner
 // restores -1 BEFORE launching userspace; no syscall can change this setting.
 static int g_test_serial_sak = -1;
-int proc_test_serial_sak(int posture);
 int proc_test_serial_sak(int posture) {
     return __atomic_exchange_n(&g_test_serial_sak, posture, __ATOMIC_ACQ_REL);
 }
@@ -2721,37 +2783,7 @@ static bool serial_sak_configured(void) {
     int fixture = __atomic_load_n(&g_test_serial_sak, __ATOMIC_ACQUIRE);
     if (fixture >= 0) return fixture != 0;
 #endif
-    struct dtb_node_entry node, prop;
-    u32 root_cursor = 0;
-    const char chosen[] = "chosen", bootargs[] = "bootargs";
-    const char token[] = "thylacine.serial-sak=1";
-    while (dtb_node_iter(DTB_NODE_ROOT, &root_cursor, &node)) {
-        if (!node.is_node || node.namelen != sizeof(chosen) - 1) continue;
-        u32 i = 0;
-        while (i < node.namelen && node.name[i] == chosen[i]) i++;
-        if (i != node.namelen) continue;
-        u32 cursor = 0;
-        while (dtb_node_iter(node.off, &cursor, &prop)) {
-            if (prop.is_node || prop.namelen != sizeof(bootargs) - 1) continue;
-            i = 0;
-            while (i < prop.namelen && prop.name[i] == bootargs[i]) i++;
-            if (i != prop.namelen) continue;
-            // Require a complete whitespace-delimited token, not a substring
-            // such as serial-sak=10 or another parameter's value.
-            for (u32 at = 0; at < prop.datalen && prop.data[at]; ) {
-                while (at < prop.datalen && (prop.data[at] == ' ' || prop.data[at] == '\t')) at++;
-                u32 start = at;
-                while (at < prop.datalen && prop.data[at] && prop.data[at] != ' ' && prop.data[at] != '\t') at++;
-                if (at - start == sizeof(token) - 1) {
-                    i = 0;
-                    while (i < sizeof(token) - 1 && prop.data[start + i] == (u8)token[i]) i++;
-                    if (i == sizeof(token) - 1) return true;
-                }
-            }
-            return false;
-        }
-    }
-    return false;
+    return dtb_bootargs_has_token("thylacine.serial-sak=1");
 }
 
 bool proc_console_sak(void) {
@@ -2761,14 +2793,12 @@ bool proc_console_sak(void) {
 }
 
 #ifdef KERNEL_TESTS
-void proc_test_seat_reset(void);
 void proc_test_seat_reset(void) {
     irq_state_t lock = proc_table_lock_acquire();
     seat_zero(&g_seat, sizeof(g_seat));
     proc_table_lock_release(lock);
 }
 // The deadlines are 5 s and 90 s of wall clock; a test cannot wait them out.
-void proc_test_seat_expire(void);
 void proc_test_seat_expire(void) {
     irq_state_t lock = proc_table_lock_acquire();
     g_seat.deadline = 0;
@@ -2866,7 +2896,8 @@ void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
     // I-2 publication bound: a child published after the check carries caps
     // bounded by the parent this join already weighed, so it widens nothing the
     // check admitted.
-    int refs = addrspace_ref_count(p->as);
+    // Kernel-only retirement pins retain storage, never a competing mapper.
+    int refs = addrspace_owner_count(p->as);
     if (refs <= 1) return;
 
     struct proc_image_walk w = { .target = p, .out = out, .zombies = 0, .bits = 0 };
@@ -2895,11 +2926,14 @@ static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
         __atomic_fetch_or(&q->proc_flags, w->bits, __ATOMIC_RELAXED);
 }
 
-void proc_image_stamp_locked(struct Proc *p, u32 bits) {
+// OR `bits` into `p` AND into every other mapper of its address space (zombies
+// included) -- a restriction on the image binds every door to it. Caller holds
+// g_proc_table_lock.
+static void proc_image_stamp_locked(struct Proc *p, u32 bits) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_image_stamp_locked: NULL or corrupted Proc");
     __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
-    if (!p->as || addrspace_ref_count(p->as) <= 1) return;
+    if (!p->as || addrspace_owner_count(p->as) <= 1) return;
     struct proc_image_walk w = { .target = p, .out = NULL, .zombies = 0, .bits = bits };
     proc_image_visit(proc_image_stamp_one, &w);
 }
@@ -3182,6 +3216,7 @@ int proc_console_episode(struct Proc *p, u32 op) {
     return rc;
 }
 
+#ifdef KERNEL_TESTS
 struct Proc *proc_test_console_owner_pre_sak(void) {
     irq_state_t s = proc_table_lock_acquire();
     struct Proc *o = g_console_owner_pre_sak;
@@ -3204,6 +3239,7 @@ struct Proc *proc_test_console_owner(void) {
     proc_table_lock_release(s);
     return o;
 }
+#endif
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
@@ -3217,6 +3253,17 @@ struct Proc *proc_test_console_owner(void) {
 // discipline as console-attachment: kernel-stamped, never cleared, never
 // propagated by rfork. specs/corvus.tla pins it as MarkMayPost gating
 // PostService.
+
+void proc_mark_session_registry(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC || p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_session_registry: invalid Proc");
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SESSION_REGISTRY, __ATOMIC_RELAXED);
+}
+
+bool proc_may_create_srv_registry(const struct Proc *p) {
+    return p && p->magic == PROC_MAGIC &&
+        (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SESSION_REGISTRY);
+}
 
 void proc_mark_may_post_service(struct Proc *p) {
     if (!p)                    extinction("proc_mark_may_post_service(NULL)");
@@ -3519,17 +3566,15 @@ enum { CAUGHT_DESIGNATED, CAUGHT_SETTLED, CAUGHT_STALE };
 #define CAUGHT_REPICKS 4u
 
 #ifdef KERNEL_TESTS
-// The *_for_test convention: the next `n` designations in `p` go stale, as when
+// Test hook: the next `n` designations in `p` go stale, as when
 // each pick enters a wait that holds between the pick and the re-check. Returns
 // what the last count left unconsumed; (NULL, 0) resets.
 static struct Proc *g_caught_stale_proc;
 static u32          g_caught_stale_left;
-u32 caught_force_stale_for_test(struct Proc *p, u32 n);
 u32 caught_force_stale_for_test(struct Proc *p, u32 n) {
     __atomic_store_n(&g_caught_stale_proc, p, __ATOMIC_RELEASE);
     return __atomic_exchange_n(&g_caught_stale_left, n, __ATOMIC_ACQ_REL);
 }
-u32 caught_repicks_for_test(void);
 u32 caught_repicks_for_test(void) { return CAUGHT_REPICKS; }
 static bool caught_forced_stale(const struct Proc *p) {
     if (__atomic_load_n(&g_caught_stale_proc, __ATOMIC_ACQUIRE) != p) return false;
@@ -3730,12 +3775,42 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
     return true;
 }
 
-// proc_caps_by_stripes — caps-only wrapper over the richer snapshot. Keeps
-// the existing SYS_SRV_PEER + spec-mapped API (and its NULL-out rejection;
-// specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
-bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
-    if (!caps_out) return false;
-    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL, NULL, NULL);
+// AS-2 admission identity. As with peer_snapshot_cb, no Proc pointer escapes
+// the table walk. Exec swaps p->as under this same lock; an old ring cannot
+// capture the successor image even though exec preserves the Proc's stripes.
+bool proc_service_identity_snapshot(const struct Proc *p,
+                                    struct ProcServiceIdentity *out) {
+    if (!out) return false;
+    *out = (struct ProcServiceIdentity){0};
+    if (!p || !proc_stripes(p)) return false;
+    perm_identity_from_proc(p, &out->access);
+    out->stripes = proc_stripes(p);
+    out->pid = p->pid;
+    out->console_attached = proc_is_console_attached(p);
+    return true;
+}
+
+struct service_snapshot_ctx {
+    u64 stripes;
+    const struct AddrSpace *as;
+    struct ProcServiceIdentity *out;
+    bool found;
+};
+static int service_snapshot_cb(struct Proc *p, void *arg) {
+    struct service_snapshot_ctx *c = arg;
+    if (p->state != PROC_STATE_ALIVE || p->stripes != c->stripes || p->as != c->as)
+        return 0;
+    c->found = proc_service_identity_snapshot(p, c->out);
+    return c->found ? 1 : 0;
+}
+bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
+                                      struct ProcServiceIdentity *out) {
+    if (!out) return false;
+    *out = (struct ProcServiceIdentity){0};
+    if (!stripes || !as) return false;
+    struct service_snapshot_ctx c = { stripes, as, out, false };
+    proc_for_each(service_snapshot_cb, &c);
+    return c.found;
 }
 
 // A-1a: proc_apply_identity — the single audited identity mutation site.
@@ -3861,6 +3936,7 @@ int proc_become_legate_locked(struct Proc *p, u64 caps_to_or, u32 session_id,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
 // For callers that do NOT already hold g_proc_table_lock. The clearance redeem
 // is not one of them: it takes the lifecycle lock itself, before the grant
 // table, and calls the _locked form above.
@@ -3872,6 +3948,7 @@ int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
     proc_table_lock_release(s);
     return rc;
 }
+#endif // KERNEL_TESTS
 
 // Teardown walk context + callback. The callback group-terminates every Proc
 // carrying `scope_id` except `except` (the legate root on its own exit, which
@@ -3919,6 +3996,7 @@ static int legate_teardown_cb(struct Proc *m, void *arg) {
 // PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED proc_for_each_walk;
 // proc_for_each would re-take it -> deadlock). The flag read pairs (ACQUIRE) with
 // proc_become_legate's RELEASE store; legate_scope_id is its coherent companion.
+VISIBLE_IF_KERNEL_TESTS
 void proc_legate_teardown_if_root(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_LEGATE_ROOT))
@@ -3971,7 +4049,12 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     return 0;   // visit every Proc
 }
 
-void proc_session_hangup_if_leader(struct Proc *p) {
+// arm-6 (IDENTITY-DESIGN §9.9.1) -- if `p` leads its own session (sid == pid)
+// armed with PROC_FLAG_SESSION_HANGUP, group-terminate every OTHER ALIVE Proc
+// sharing its sid. The session-lifecycle sibling of the legate teardown above
+// (same chokepoint, same held-lock contract, NOT I-26-gated). A non-armed Proc
+// or an armed non-leader is a no-op. PRECONDITION: caller holds g_proc_table_lock.
+static void proc_session_hangup_if_leader(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SESSION_HANGUP))
         return;
@@ -4128,6 +4211,7 @@ static void proc_orphan_rule_locked(struct Proc *dying);
 
 // The parent's side of p's exit (proc.h). Everything here runs UNDER
 // g_proc_table_lock, which keeps the parent alive through it.
+VISIBLE_IF_KERNEL_TESTS
 void proc_exit_notify_parent_locked(struct Proc *p) {
     struct Proc *par = p->parent;
     if (!par) return;
@@ -4151,6 +4235,8 @@ void proc_exit_notify_parent_locked(struct Proc *p) {
     proc_caught_note_wake(par);
 }
 
+static void proc_birth_hold_orphan_rule_locked(struct Proc *p);
+
 // Internal: common Proc-ZOMBIE transition body shared by exits() and
 // thread_exit_self(). MUST be called UNDER g_proc_table_lock. The Proc
 // must be ALIVE; transitions to ZOMBIE, captures exit_msg/exit_status,
@@ -4167,6 +4253,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
     // The departure record, under the lock every image join reads it under, and
     // before any reap can unlink p out of the joins' traversal.
     addrspace_record_holder(p->as, p);
+    pts_interaction_invalidate_locked(p, true);
 
     // A-4a (I-25): if p is a legate ROOT, tear down its scope as it dies. Placed
     // at this chokepoint (not in exits() alone) so the sweep fires on EVERY death
@@ -4346,23 +4433,23 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         handle_table_free(p->handles);
         p->handles = NULL;
         // The Linux socket rows go with the fds they describe, and with them the
-        // readiness Spoors the rows cache (NP-5): each holds a netd fid, which a
-        // zombie must not pin until its parent reaps it -- the reason the handle
-        // table itself closes here. Inside exit_close_active for the same
+        // Spoors the rows hold (NP-5's readiness cache, the ctl identity): each
+        // holds a netd fid, which a zombie must not pin until its parent reaps
+        // it -- the reason the handle table itself closes here. Inside exit_close_active for the same
         // close-time Tclunk. NULL-safe (a native Proc has no table).
         viv_socktab_reset(__atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE));
         closer->exit_close_active = false;
     }
 }
 
-// Test hook (the *_for_test convention; deliberately absent from the header):
-// the at-exit close, driven on a Proc a test built and never ran. The closer
+#ifdef KERNEL_TESTS
+// Test hook: the at-exit close, driven on a Proc a test built and never ran. The closer
 // flag lands on the calling test thread and is cleared before return, as at a
 // real exit.
-void proc_close_handles_at_exit_for_test(struct Proc *p);
 void proc_close_handles_at_exit_for_test(struct Proc *p) {
     proc_close_handles_at_exit(p);
 }
+#endif
 
 // The window between a last thread's commit to exit and its final close: a
 // kill landing there must find the close marked (ARCH 7.9.1 part B). A test
@@ -4372,7 +4459,6 @@ void proc_close_handles_at_exit_for_test(struct Proc *p) {
 static void (*g_exit_close_test_window)(void);
 static struct Thread *g_exit_close_test_owner;
 
-void proc_exit_close_test_set_window_hook(void (*fn)(void));
 void proc_exit_close_test_set_window_hook(void (*fn)(void)) {
     __atomic_store_n(&g_exit_close_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
     __atomic_store_n(&g_exit_close_test_window, fn, __ATOMIC_RELEASE);
@@ -4394,7 +4480,6 @@ static inline void exit_close_test_window(void) {}
 static void (*g_exit_tail_test_hook)(void);
 static struct Thread *g_exit_tail_test_owner;
 
-void proc_exit_tail_test_set_hook(void (*fn)(void));
 void proc_exit_tail_test_set_hook(void (*fn)(void)) {
     __atomic_store_n(&g_exit_tail_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
     __atomic_store_n(&g_exit_tail_test_hook, fn, __ATOMIC_RELEASE);
@@ -5255,22 +5340,20 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     self->cons_frozen_unwound = false;
 }
 
-// Test hook (the *_for_test convention; deliberately absent from the header --
-// the harness extern-declares it and there is no production caller). The
-// precondition is unenforced here and therefore stated: `p` must have no live
+#ifdef KERNEL_TESTS
+// Test hook. The precondition is unenforced here and therefore stated: `p` must have no live
 // thread but `t` -- exec establishes that (proc_exec_claim, re-checked under
 // g_proc_table_lock at the swap); the table is written without a lock, so
 // driving this on a RUNNING Proc would interleave a whole-table reset with that
 // Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
 // scheduled.
-void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno);
 void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno) {
     proc_exec_drop_image_state(p, t, pheno);
 }
+#endif
 
 #ifdef KERNEL_TESTS
 static u64 g_exec_peer_waits;
-u64 proc_exec_peer_waits_for_test(void);
 u64 proc_exec_peer_waits_for_test(void) {
     return __atomic_load_n(&g_exec_peer_waits, __ATOMIC_ACQUIRE);
 }
@@ -5341,6 +5424,13 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
             proc_table_lock_release(s);
             extinction("proc_exec_replace: a peer thread appeared");
         }
+        pts_interaction_invalidate_locked(p, true);
+        // Latch every private ring shut before the image it was admitted against
+        // stops being this Proc's. Infallible and leaf-only: the descriptors are
+        // removed, and their waiters woken, by handle_close_on_exec outside this
+        // lock -- nothing here may sleep or fail, because the swap below cannot
+        // be unwound.
+        handle_private_exec_latch(p);
         old   = p->as;
         addrspace_record_holder(old, p);
         p->as = nas;
@@ -5824,6 +5914,9 @@ void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp) {
     ctx->sp   = sp;      // SP_EL0
 }
 
+VISIBLE_IF_KERNEL_TESTS
+void proc_birth_hold_mark_parked_locked(struct Proc *p);
+
 void el0_birth_park(struct exception_context *ctx) {
     // The #713 guard, for the tail's reason: userland_enter_held masked before
     // entering the birth tail, which runs masked to KERNEL_EXIT; the notes leg
@@ -6129,6 +6222,7 @@ void proc_birth_hold_release_locked(struct Proc *p) {
     proc_birth_hold_set_locked(p, BIRTH_HOLD_NONE);
 }
 
+VISIBLE_IF_KERNEL_TESTS
 void proc_birth_hold_mark_parked_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (__atomic_load_n(&p->debug_birth_hold, __ATOMIC_RELAXED) != BIRTH_HOLD_UNBORN)
@@ -6136,7 +6230,7 @@ void proc_birth_hold_mark_parked_locked(struct Proc *p) {
     proc_birth_hold_set_locked(p, BIRTH_HOLD_PARKED);
 }
 
-void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
+static void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     for (struct Proc *c = p->children; c; c = c->sibling) {
         if (c->state != PROC_STATE_ALIVE) continue;
@@ -6633,6 +6727,7 @@ static int child_wait_ready_cond(void *arg) {
 //
 // Caller holds g_proc_table_lock: `state` and `as` are both written under it,
 // and the list walk that produced `child` needs it anyway.
+VISIBLE_IF_KERNEL_TESTS
 bool vfork_child_released(const struct Proc *parent, const struct Proc *child) {
     if (!parent || parent->magic != PROC_MAGIC)
         extinction("vfork_child_released: bad parent");
@@ -6693,10 +6788,9 @@ static void vfork_await_release(struct Proc *p, int child_pid) {
 }
 
 #ifdef KERNEL_TESTS
-// Test hook (the *_for_test convention; absent from the header): the vfork
-// parent's park, which only a user fork reaches, taken by a kernel-entry
-// thread of the Proc under test for a child it made with RFPROC|RFMEM.
-void vfork_await_release_for_test(struct Proc *p, int child_pid);
+// Test hook: the vfork parent's park, which only a user fork reaches, taken by
+// a kernel-entry thread of the Proc under test for a child it made with
+// RFPROC|RFMEM.
 void vfork_await_release_for_test(struct Proc *p, int child_pid) {
     vfork_await_release(p, child_pid);
 }
@@ -6710,6 +6804,7 @@ void vfork_await_release_for_test(struct Proc *p, int child_pid) {
 // death wakes it through proc_become_zombie_locked as it does for vfork.
 // Not-found counts as released for vfork_child_released's reason: hanging a
 // parent that cannot recover is the worse of the two dispositions.
+VISIBLE_IF_KERNEL_TESTS
 bool spawn_birth_released(const struct Proc *parent, const struct Proc *child) {
     if (!parent || parent->magic != PROC_MAGIC)
         extinction("spawn_birth_released: bad parent");
@@ -6945,23 +7040,25 @@ out:
     return ret;
 }
 
+#ifdef KERNEL_TESTS
 // wait_pid — reap ANY zombie child, blocking. The pervasive (any,
 // blocking) case; thin wrapper over wait_pid_for. Plan 9 wait(2) shape.
 int wait_pid(int *status_out) {
     return wait_pid_for(-1, 0, status_out);
 }
+#endif // KERNEL_TESTS
 
 // =============================================================================
-// Test support — NOT a production API; deliberately absent from proc.h.
+// Test support: the process-table fixtures, compiled only with the tests.
 // =============================================================================
 //
 // A production Proc is spliced into the kproc-rooted process table by
 // rfork (proc_link_child); a Proc the in-kernel test harness allocates
 // directly with proc_alloc is not. proc_for_each / proc_find_by_pid only
-// see linked Procs, so a test exercising proc_caps_by_stripes against a
-// bare proc_alloc'd Proc must link it first. The harness extern-declares
-// these; they have no production caller.
+// see linked Procs, so a test exercising proc_peer_snapshot_by_stripes against a
+// bare proc_alloc'd Proc must link it first.
 
+#ifdef KERNEL_TESTS
 // proc_test_link — splice `p` in as a child of kproc.
 void proc_test_link(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC)
@@ -7043,7 +7140,6 @@ void proc_test_unlink(struct Proc *p) {
 // marked child of kproc, its subtree with it, and return how many (the first
 // `max` pids land in `pids`). The memory stays allocated, threads and all: the
 // failed test may have left pointers to it anywhere.
-u32 proc_test_release_leaked(int *pids, u32 max);
 u32 proc_test_release_leaked(int *pids, u32 max) {
     u32 n = 0;
     struct Proc *kp = kproc();
@@ -7075,4 +7171,31 @@ u32 proc_test_release_leaked(int *pids, u32 max) {
 void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
     struct legate_teardown_ctx tctx = { .scope_id = scope_id, .except = except };
     proc_for_each(legate_teardown_cb, &tctx);
+}
+#endif
+
+
+// HI-1: a fresh process lookup and pts comparison share ONE lifecycle hold.
+// Iterative parent/sibling traversal uses O(1) stack at arbitrary fork depth.
+// Returned pointers are borrowed only within that hold, never retained by pts.
+struct Proc *proc_pts_live_locked(u64 stripes) {
+    if (!stripes) return NULL;
+    struct Proc *root = kproc();
+    for (struct Proc *q = root; q;) {
+        if (q->state == PROC_STATE_ALIVE && proc_stripes(q) == stripes) return q;
+        if (q->children) { q = q->children; continue; }
+        while (q != root && !q->sibling) q = q->parent;
+        if (q == root) break;
+        q = q->sibling;
+    }
+    return NULL;
+}
+
+s64 proc_pts_interaction(struct Proc *p, u64 op, struct pts_interaction_call *call) {
+    if (!p || !call) return -T_E_INVAL;
+    irq_state_t irq = proc_table_lock_acquire();
+    s64 result = proc_pts_live_locked(proc_stripes(p)) == p
+        ? pts_interaction_locked(p, op, call) : -T_E_NOENT;
+    proc_table_lock_release(irq);
+    return result;
 }

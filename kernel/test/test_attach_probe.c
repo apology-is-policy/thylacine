@@ -69,8 +69,6 @@
 
 #include <thylacine/9p_wire.h>
 
-void test_attach_probe_round_trip(void);
-
 // attach-probe ≈ 15 KiB at the current libt + inline-stub footprint.
 // 32 KiB cap matches the /pipe-probe headroom.
 #define ATTACH_PROBE_BLOB_MAX 32768
@@ -380,11 +378,8 @@ void test_attach_probe_round_trip(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("bin/attach-probe", &cpio_blob, &size);
-    if (rc != 0) {
-        uart_puts("    [skip] /bin/attach-probe not in ramfs (build with: tools/build.sh all)\n");
-        return;
-    }
+    int rc = test_probe_lookup("bin/attach-probe", &cpio_blob, &size);
+    if (rc != 0) return;
 
     TEST_ASSERT(size <= ATTACH_PROBE_BLOB_MAX,
                 "attach-probe binary too large for static buffer");

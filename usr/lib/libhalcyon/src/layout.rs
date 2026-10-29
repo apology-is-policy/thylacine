@@ -40,6 +40,9 @@ use crate::carve::DEFAULT_WEIGHT;
 /// naming the hazard does not prevent it; one definition does.
 pub const MAX_WORKSPACES: usize = 9;
 
+/// Shared pane-tree and interaction-controller capacity (containers count too).
+pub const MAX_PANES: usize = 32;
+
 /// The format's first line (exact match required): v1, every weight default.
 pub const FMT_HEADER: &str = "halcyon-layout v1";
 /// The v2 header: rows may carry ` w=<weight>` (HALCYON-INSTRUMENT 5.3).

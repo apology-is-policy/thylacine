@@ -1,0 +1,11 @@
+--- control
++++ parent-before-child
+@@ -253,7 +253,7 @@
+ static void loom_private_nodes_destroy(struct Loom *l) {
+     if (!l->service_nodes || !l->service_slots)
+         extinction("private Loom lost node storage");
+-    const u32 kinds[2] = { LOOM_SERVICE_FID, LOOM_SERVICE_SCOPE };
++    const u32 kinds[2] = { LOOM_SERVICE_SCOPE, LOOM_SERVICE_FID };
+     for (u32 pass = 0; pass < 2; ++pass) {
+         for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+             struct loom_service_slot *s = &l->service_slots->slots[i];

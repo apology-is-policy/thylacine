@@ -1,0 +1,14 @@
+2026-10-21T18:20:29Z  occurs self-check: a true count passes, a false one fails
+2026-10-21T18:20:29Z  verdict self-check: PASS, a FAIL's message and an absent test read as such
+2026-10-21T18:20:29Z  probes_hash self-check: equal files agree, a changed byte differs, a missing program refuses
+2026-10-21T18:20:29Z  HEAD 72298812e3c167fabfce5169a0a43c5ecf811c8c, clean
+2026-10-21T18:20:29Z  expected tests (derived from test.c): 1901; named: 12
+2026-10-21T18:20:29Z  stratum /Users/northkillpd/projects/stratum/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc; tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla' (self-check: a wrong set refuses); no untracked build input
+2026-10-21T18:20:30Z  go fork /Users/northkillpd/projects/go-thylacine-pin-a6567ba at a6567baeaa716811783031fdf543477fdcd1707d, clean
+2026-10-21T18:20:30Z  disk pre: 10331 MiB free (floor 8192)
+2026-10-21T18:21:21Z  disk post-control-build: 10312 MiB free (floor 8192)
+2026-10-21T18:21:21Z  control kernel e00782c305f01566545625925b6fc4c118138d67518b5da891be378130aeb774; programs 9ec47e678c2d71108ea033ac45e7984fa6f4a24975ffaba0405517342e610345
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/ramfs-src/bin/stratumd
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/pouch/stratumd-cmake/src/cmd/stratumd/stratumd
+42d0f1d421a759b75b032d7ff3ac2781c42b1fdd8593d211e68af731ce61df38  build/pouch/progs/stratumd
+2026-10-21T18:21:30Z  exit 143

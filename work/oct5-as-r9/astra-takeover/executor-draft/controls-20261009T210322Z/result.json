@@ -1,0 +1,229 @@
+{
+  "results": [
+    {
+      "tag": "control",
+      "case": 0,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 1,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 2,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 3,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 4,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 5,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 6,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 7,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 8,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 9,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 10,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 11,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 12,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "control",
+      "case": 13,
+      "rc": 0,
+      "source_sha256": "ac0603db790a76ae6cb57b47d608e77b87bcd3599f7c714ebf7d3930dee384d7",
+      "log_sha256": "4690ddd8722d3ccc0f890174bcfc1928ea80431e2a2e8b839ae033fa201f27bf"
+    },
+    {
+      "tag": "omit-pin-return-wake",
+      "case": 12,
+      "rc": 11,
+      "source_sha256": "339a0789331bf58af36790981c7d8413d9cfbd502b1b3000cdefba3a1b993911",
+      "log_sha256": "62609ce0049a0a35d9d8c01d45d33b504cf225be8fe49d1ef2443cfd4a6ee864"
+    },
+    {
+      "tag": "omit-close-return-wake",
+      "case": 13,
+      "rc": 11,
+      "source_sha256": "89f349d6797c2ceae8eaf26472e779d4d1e1b43ad23149227aeb0f88acd9e384",
+      "log_sha256": "62609ce0049a0a35d9d8c01d45d33b504cf225be8fe49d1ef2443cfd4a6ee864"
+    },
+    {
+      "tag": "omit-change",
+      "case": 3,
+      "rc": 11,
+      "source_sha256": "8594650f9ccb038248df5e47e7aaae805e0b185413f16eead2199770e7b8aee6",
+      "log_sha256": "a9b67f8440feba577b6d61303605f68a351c6bd5264603ba521a11da45208ba6"
+    },
+    {
+      "tag": "wrong-nearest-deadline",
+      "case": 9,
+      "rc": 11,
+      "source_sha256": "643ac17d95d9d0fb5db881b14cb5a1f555014c9df5acdde2f266a18465262100",
+      "log_sha256": "ed04c0a8fd4caf9c68164c0d787a88bb0f3b9b41074248e38844607c943e65a4"
+    },
+    {
+      "tag": "ignore-native-ready",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "beb6be8d60662afe9ba5d15f29a0d020b14bcd2733feb6568aae25fc558aab6c",
+      "log_sha256": "87afe7d7f80d650f4f29120eb494eb6a15757b0a9bfe7e5eec85296bb71b6b27"
+    },
+    {
+      "tag": "wrong-direction",
+      "case": 1,
+      "rc": 11,
+      "source_sha256": "6fc6984387ded988b65fd25c881521c3929200a686767708bc198400b1a7dcd0",
+      "log_sha256": "3c92576291a3c86cbee12405ad8972388bb52c2b4ef0961ff2287466f9278b96"
+    },
+    {
+      "tag": "omit-register",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "15e9d6f78f05abb03d13ca020e892e96b353986229a0150fd86d46e16bbf64f6",
+      "log_sha256": "a9b67f8440feba577b6d61303605f68a351c6bd5264603ba521a11da45208ba6"
+    },
+    {
+      "tag": "omit-flag",
+      "case": 2,
+      "rc": 11,
+      "source_sha256": "b30bd8c46f144ac77e285be3f60c378c357498423b67644a0789843d32acf899",
+      "log_sha256": "6685cd3e03ca0e61a2c3f3f3e150b5f446f1e6f8551aa52eb0f9a474d13b6a78"
+    },
+    {
+      "tag": "omit-cq-drain",
+      "case": 6,
+      "rc": 11,
+      "source_sha256": "ed688a38b484a6b5ff34c2216a2b204e65b01d5d1f70ab03d3b5df6b8f85303c",
+      "log_sha256": "978557cceee8ae302d211e9bbdfed4c7f91ec2dc5a9f458bd583538ca3c105ac"
+    },
+    {
+      "tag": "ignore-busy",
+      "case": 7,
+      "rc": 11,
+      "source_sha256": "6676f2ef7be2ee5abf557bfe9625e8e50c89fcc446925257662f1550f02ffd6c",
+      "log_sha256": "9c3d861a9226eb45c6e801726872a1090ab3ce1cc2e35cfb5653e481077d503e"
+    },
+    {
+      "tag": "ignore-teardown-user",
+      "case": 10,
+      "rc": 11,
+      "source_sha256": "af89188e41390715ccc03d342ca33b878387e7dff5822713d9550f046bd4c3ba",
+      "log_sha256": "9c3d861a9226eb45c6e801726872a1090ab3ce1cc2e35cfb5653e481077d503e"
+    },
+    {
+      "tag": "drop-deadline",
+      "case": 5,
+      "rc": 11,
+      "source_sha256": "0d5506b703a263e8382671c9612aae33fa0adb83b3e311daee24e13d07316567",
+      "log_sha256": "aa04cf41a94cb7f3f4eb51a1193a40a6a5ffb104eeb73516d855c802ee672bae"
+    },
+    {
+      "tag": "reset-deadline",
+      "case": 5,
+      "rc": 11,
+      "source_sha256": "742327872f89e05d7aeae2f0bf6da5da771ce62ae48023b1485caa9d091268fd",
+      "log_sha256": "aa04cf41a94cb7f3f4eb51a1193a40a6a5ffb104eeb73516d855c802ee672bae"
+    },
+    {
+      "tag": "skip-timeout",
+      "case": 5,
+      "rc": 11,
+      "source_sha256": "aba498f5491e5a2a0a3914f2d143e368a5941552867940c24528c73c92e53fde",
+      "log_sha256": "e1d5ab38594930ae045d51cabf2ed95377b8189c4a59c48138e8e0b35eacb7ac"
+    },
+    {
+      "tag": "ignore-cq-room",
+      "case": 6,
+      "rc": 11,
+      "source_sha256": "4859cbb6c43e37a7ecc20eb01df3f27e6b2968433dc444d322bac59d533cee91",
+      "log_sha256": "afeaa5d1ff9815aed60fec1e15d28c6ef7e660ae9d968ed3c842b2c0f699f19b"
+    },
+    {
+      "tag": "skip-unhook",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "ba7810ce71716998a6c50b0c03d39ffc7d24ee6606f16e7e4e9fee852b866471",
+      "log_sha256": "2eaed8943816e67d1d8bb957cdce49870fbc3ea89c6add12ead635469d814a89"
+    },
+    {
+      "tag": "allow-second-wait",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "42059cad7d577cd81451169a7256316e1edb1c5a486d4f48bd537df5bba12f0e",
+      "log_sha256": "fc8ab00389bac8b152e939ca1a137b1b6739ce1f39c418e339a39c22157e6a32"
+    }
+  ],
+  "inputs": {
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/kernel/loom_service_engine.c": "ff499a7542071e5d8f0bab8df37f48edd8ad1afbf714318366c7467881901cd0",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/kernel/include/thylacine/loom_service_engine.h": "25a1f1d999e5e0f219ac2d58100c045db16922780178582d9883c1a0f9eb3942",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/readiness.inc": "4b3c298a4a9921a16ff0b72f431f46025a846100c3cc921b2159a19bb591b0fa",
+    "/Users/northkillpd/projects/thylacine-corona/kernel/loom_service_connect.c": "25271654cfa54db4bb53104ce76b455c232050a2d59b8aafc21ef5b71e53cb73",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/control.py": "5116ed05f8eedf3978a1ad56ad3c8d18f7e740a8624c3a7c44bebd1467fac4a4"
+  },
+  "limits": "Actual draft readiness/index and canonical CONNECT/ledgers; sequential checked native/poll/scheduler doubles. Not native or SMP qualification; worker start/join not yet implemented."
+}

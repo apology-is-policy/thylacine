@@ -37,6 +37,7 @@ extern const u32               halls_symtab_count;
 extern const struct halls_sym  halls_symtab[];
 extern const char              halls_symtab_names[];
 
+#ifdef KERNEL_TESTS
 // Pure lookup over an EXPLICIT table (unit-testable). `tab` MUST be sorted
 // ascending by `.off`, `count` entries; `names` is the NUL-separated blob;
 // `base` is the link VA the offsets are relative to. Returns the name of the
@@ -48,7 +49,18 @@ const char *halls_symbolize_table(const struct halls_sym *tab, u32 count,
                                   const char *names, u64 base,
                                   u64 link_va, u64 *out_off);
 
-// Wrapper over the linked-in global table.
+// halls_symbolize_table for a RETURN address: the name is that of the call
+// (the instruction before `link_ra`), while *out_off stays the return
+// address's own offset from that name, so name + off == link_ra.
+const char *halls_symbolize_return_table(const struct halls_sym *tab, u32 count,
+                                         const char *names, u64 base,
+                                         u64 link_ra, u64 *out_off);
+#endif // KERNEL_TESTS
+
+// Wrappers over the linked-in global table. A return address goes through
+// halls_symbolize_return: when its call is a function's last instruction (a
+// noreturn callee), the address itself is the NEXT function's first byte.
 const char *halls_symbolize(u64 link_va, u64 *out_off);
+const char *halls_symbolize_return(u64 link_ra, u64 *out_off);
 
 #endif  // THYLACINE_HALLS_SYMTAB_H

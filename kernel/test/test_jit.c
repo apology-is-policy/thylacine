@@ -38,22 +38,13 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
-// The _for_proc inners (non-static cores in kernel/syscall.c) -- the kernel
-// tests drive these directly on a fresh proc_alloc'd Proc, exactly as the
-// burrow-attach tests do, so no EL0 thread context is needed.
+// The tests drive the _for_proc cores (kernel/syscall.c) directly on a fresh
+// proc_alloc'd Proc, exactly as the burrow-attach tests do, so no EL0 thread
+// context is needed.
 // sys_jit_create_REGION is the mechanism (kernel out-pointers); the _for_proc
 // wrapper adds only the user copy-out, which a kproc-context test cannot
 // exercise (any address it can pass is a kernel VA, correctly refused by
 // sys_validate_user_buf). The copy-out arm is proven by the in-guest prover.
-s64 sys_jit_create_region(struct Proc *p, u64 length_raw, u64 *out_w, u64 *out_x);
-s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
-                                 u64 length_raw, u64 *out_exec);
-s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va);
-s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
-s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length);
-s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
-s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
-s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 // What the address space is charged for MEMORY: its count less the page-table
 // pages the faults built, which the I-32 count also carries (a table lives
@@ -1192,10 +1183,8 @@ void test_jit_space_sync_targets(void) {
     unsigned np = 0;
     for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS && np < SS_LEGS; c++)
         if (c != self && g_cpu_alive[c]) cpu[np++] = c;
-    if (np == 0) {
-        uart_puts("  jit.space_sync_targets: one CPU, so no leg ran\n");
+    if (!test_requires(np > 0, "thylacine.smp", 0, true, "no peer CPU is alive"))
         return;
-    }
 
     __atomic_store_n(&g_ss_stop, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_ss_hold_req, 0u, __ATOMIC_RELEASE);

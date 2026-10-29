@@ -1,0 +1,30 @@
+2026-10-22T14:17:32Z  HEAD 5b09462a5069aafd9592012e3d74454826f297f1, clean
+2026-10-22T14:17:32Z  START checker: python3 -I tools/host-sanitizer-cc.py --logs work/oct22-merge/followup-20261022T141732Z/checker
+2026-10-22T14:17:36Z  END checker rc=0
+2026-10-22T14:17:36Z  START service-admission: python3 -I tools/test-service-admission.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/service-admission
+2026-10-22T14:17:41Z  END service-admission rc=0
+2026-10-22T14:17:41Z  START service-admission-san: python3 -I tools/test-service-admission.py --sanitize --mutants --logs work/oct22-merge/followup-20261022T141732Z/service-admission-san
+2026-10-22T14:17:50Z  END service-admission-san rc=0
+2026-10-22T14:17:50Z  START addrspace-lifetime: python3 -I tools/test-addrspace-lifetime.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/addrspace-lifetime
+2026-10-22T14:17:59Z  END addrspace-lifetime rc=0
+2026-10-22T14:17:59Z  START addrspace-lifetime-san: python3 -I tools/test-addrspace-lifetime.py --sanitize --mutants --logs work/oct22-merge/followup-20261022T141732Z/addrspace-lifetime-san
+2026-10-22T14:18:12Z  END addrspace-lifetime-san rc=0
+2026-10-22T14:18:12Z  START 9p-client-progress: python3 -I tools/test-9p-client-progress.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/9p-client-progress
+2026-10-22T14:18:23Z  END 9p-client-progress rc=0
+2026-10-22T14:18:23Z  START 9p-client-progress-san: python3 -I tools/test-9p-client-progress.py --sanitize --mutants --logs work/oct22-merge/followup-20261022T141732Z/9p-client-progress-san
+2026-10-22T14:18:44Z  END 9p-client-progress-san rc=0
+2026-10-22T14:18:44Z  START 9p-progress: python3 -I tools/test-9p-progress.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/9p-progress
+2026-10-22T14:18:54Z  END 9p-progress rc=0
+2026-10-22T14:18:54Z  START 9p-progress-san: python3 -I tools/test-9p-progress.py --sanitize --mutants --logs work/oct22-merge/followup-20261022T141732Z/9p-progress-san
+2026-10-22T14:19:13Z  END 9p-progress-san rc=0
+2026-10-22T14:19:13Z  START loom-service-pool: python3 -I tools/test-loom-service-pool.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/loom-service-pool
+2026-10-22T14:19:18Z  END loom-service-pool rc=0
+2026-10-22T14:19:18Z  START loom-service-pool-san: python3 -I tools/test-loom-service-pool.py --sanitize --mutants --logs work/oct22-merge/followup-20261022T141732Z/loom-service-pool-san
+2026-10-22T14:19:26Z  END loom-service-pool-san rc=0
+2026-10-22T14:19:26Z  START loom-receipts: python3 -I tools/test-loom-receipts.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/loom-receipts
+2026-10-22T14:19:44Z  END loom-receipts rc=0
+2026-10-22T14:19:44Z  START sqpoll-ticket: python3 -I tools/test-sqpoll-ticket.py --mutants --logs work/oct22-merge/followup-20261022T141732Z/sqpoll-ticket
+2026-10-22T14:19:49Z  END sqpoll-ticket rc=0
+2026-10-22T14:19:49Z  START selector-controls: sh work/oct22-merge/selector-controls.sh
+2026-10-22T14:20:16Z  END selector-controls rc=0
+2026-10-22T14:20:16Z  ALL FOLLOW-UP LEGS PASS at 5b09462a5069aafd9592012e3d74454826f297f1

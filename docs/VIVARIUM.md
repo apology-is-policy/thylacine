@@ -537,8 +537,12 @@ the diorama rests on (§6.2): a reformatter, never a new authority.
 
 The socket fd is the `ctl` fd from `socket()` until `connect()`, and the `data` fd
 afterwards. `connect` performs that swap **in place**, via a new
-`handle_replace(p, fd, kind, rights, obj)` primitive — `handle_dup` cannot serve,
-because it allocates a *new* slot and the guest is holding a specific number.
+`handle_replace(p, fd, expect, kind, rights, obj)` primitive — `handle_dup` cannot
+serve, because it allocates a *new* slot and the guest is holding a specific
+number. `expect` is the `ctl` Spoor connect took before it slept: the swap
+happens only while the number still names it, so a peer thread that closed the
+socket during the handshake and reused the number keeps its own file
+(2026-10-14).
 
 Three properties make the swap correct, each measured in §4.1.1:
 
@@ -583,6 +587,20 @@ kernel object the handle names, so every install carries its state by constructi
 that round: the socket arms split Linux's two "no socket here" errnos — a CLOSED fd is
 `EBADF` (the fd lookup fails first), a live non-socket fd is `ENOTSOCK` (`viv_sock_row`);
 every row-less fd answered `ENOTSOCK` before.
+
+**The verb arms no longer cross that gap (17:09Z, 2026-10-19).** The arms that write netd
+a ctl verb — connect's dial, listen's announce, the datagram sendto's re-dial — read the
+row by number and then the fd's slot by number, and `dup3` installs before it drops the
+old row, so a peer thread's `dup3` between the two left the socket's row over a slot that
+held a file, and the verb went into the file. Each socket()-born row now carries its ctl
+Spoor's identity (`viv_socktab.ctl[]`, one reference the row owns; NULL once the fd is
+data), copied with a reference by the fork copy and the alias, and each verb arm proves
+the Spoor it pinned is that one before it writes (`ENOTSOCK` otherwise, `EBADF` for a
+closed number). connect's swap and its CONNECTED transition run in one handle-table hold
+(`handle_replace_hooked`), so the check never refuses a peer's legitimate verb while the
+fd moves to data, and the transition lands on a row a peer re-made with the same identity
+(a dup dup3'd back onto the number). The arms that open a /net file by path from the
+row's `N` (`accept`, `recvmsg`) still trust the row, so for them the F2 gap above stands.
 
 It is unavoidable, and the alternatives were measured rather than assumed:
 
@@ -1929,7 +1947,7 @@ five qualify:
 
 | Linux | tier | why |
 |---|---|---|
-| `read` 63 → `SYS_READ` 9 | **T1** | args identical in order, width, meaning |
+| `read` 63 → `SYS_READ` 9 | **T1** | args identical in order and meaning; `unsigned int fd` is narrowed as Linux narrows it (2026-10-13: the native handler refuses a word that does not fit, ERRORS.md principle 6) |
 | `write` 64 → `SYS_WRITE` 10 | **T1** | ditto |
 | `close` 57 → `SYS_CLOSE` 11 | **T1** | ditto |
 | `lseek` 62 → `SYS_LSEEK` 51 | **T1** | `T_SEEK_*` are 0/1/2, so are Linux's `SEEK_*` — the enumerations coincide, so there is nothing to map |

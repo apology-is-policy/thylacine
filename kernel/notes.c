@@ -31,6 +31,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/visibility.h>
 #include <thylacine/vivarium.h>     // V-6b: the Linux signal disposition decode
 
 #include "../arch/arm64/timer.h"
@@ -170,6 +171,7 @@ static int notes_name_to_bit(const char *name) {
 }
 
 // #15: the note's default action. Contract in <thylacine/notes.h>.
+VISIBLE_IF_KERNEL_TESTS
 enum note_default notes_default_action(const char *name) {
     if (!name) return NOTE_DFL_TERMINATE;
     for (u32 i = 0; i < NOTE_NUM_KNOWN; i++) {
@@ -281,10 +283,6 @@ bool notes_name_user_postable(const char *name) {
     return notes_name_to_bit(name) >= 0;
 }
 
-// R4-F4 audit close: notes_name_is_kill is now declared in the public
-// header (`<thylacine/notes.h>`) -- the prior forward decl block here
-// and the function-local extern decls in syscall.c are removed.
-
 // F10 audit close: return the canonical string-literal pointer for a
 // supported note name. The literal lives for the program's lifetime
 // (read-only data section), so it's safe to capture by reference into
@@ -317,7 +315,8 @@ static void notes_name_copy(char *dst, const char *src) {
 // Lifecycle.
 // ---------------------------------------------------------------------------
 
-void notes_queue_init(struct NoteQueue *q) {
+// Initialize a NoteQueue in place, for notes_queue_alloc.
+static void notes_queue_init(struct NoteQueue *q) {
     spin_lock_init(&q->lock);
     q->head = 0;
     q->tail = 0;
@@ -451,26 +450,23 @@ static u32 notes_name_terminate_latch(const char *name) {
     return 0;
 }
 
-// Test support (the burrow_*_for_test convention). Deliberately absent from
-// the header: the harness extern-declares it, and there is no production
-// caller. It exists so the #15 table test can assert that the EL0-tail
-// uncaught arm and the NDFLT arm read the SAME `dfl` column -- the two used to
-// be independent lists, and a future edit that re-splits them fails there.
-u32 notes_name_terminate_latch_for_test(const char *name);
+#ifdef KERNEL_TESTS
+// Test support: lets the #15 table test assert that the EL0-tail uncaught arm
+// and the NDFLT arm read the SAME `dfl` column -- the two used to be
+// independent lists, and a future edit that re-splits them fails there.
 u32 notes_name_terminate_latch_for_test(const char *name) {
     return notes_name_terminate_latch(name);
 }
 
 // The note-table test walks both tables through these, so a row added to either
 // is checked without anyone extending a list. NULL past the last row.
-const char *notes_known_name_for_test(u32 i);
 const char *notes_known_name_for_test(u32 i) {
     return i < NOTE_NUM_KNOWN ? g_known_notes[i].name : NULL;
 }
-const char *notes_snare_death_name_for_test(u32 i);
 const char *notes_snare_death_name_for_test(u32 i) {
     return i < NOTE_NUM_SNARE_DEATHS ? g_snare_deaths[i].name : NULL;
 }
+#endif
 
 // V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
 // below answers that for a native Proc, and answers it WRONG for a phenotyped
@@ -803,6 +799,7 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
 // have registered and parked. Cannot fail at v1.0 since the caller just
 // popped (so there is a free slot). Pre-decrement head with wrap; the new
 // entry is the next dequeue.
+VISIBLE_IF_KERNEL_TESTS
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n) {
     if (!q || !n) return -1;
     if (q->count >= NOTE_QUEUE_DEPTH) {
@@ -934,6 +931,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
     return 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
     if (!p || !p->notes || !out) return 0;
     struct NoteQueue *q = p->notes;
@@ -1065,7 +1063,6 @@ void notes_post_pipe(struct Proc *writer) {
 // kill-name predicate (used by the EL0-return-tail dispatch).
 // ---------------------------------------------------------------------------
 
-int notes_name_is_kill(const char *name);
 int notes_name_is_kill(const char *name) {
     return notes_name_eq(name, NOTE_NAME_KILL);
 }
@@ -1135,19 +1132,20 @@ static const char *notes_terminate_pending_name_locked(struct Proc *p,
     return NULL;
 }
 
+#ifdef KERNEL_TESTS
 // LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate this
 // Proc at the EL0-return tail? True iff (a) no async handler is registered (a
 // handler catches interrupt via the async-delivery path), (b) the Proc is not
 // self-managing (has not opened its notes fd -- a self-managing Proc consumes
 // its own notes via devnotes_read), and (c) a deliverable interrupt (queued
 // AND unmasked for `t`) is present. Pure decision; no side effects. The
-// dispatcher calls this under q->lock and, on true, drops the lock + calls
-// exits(NOTE_NAME_INTERRUPT). Non-static + header-declared so the unit test
-// exercises the full decision without driving the noreturn exits(). Caller
-// MUST hold p->notes->lock.
+// dispatcher asks notes_terminate_note_name_locked (below), which this wraps;
+// the tests ask here, without driving the noreturn exits(). Caller MUST hold
+// p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
     return notes_terminate_note_name_locked(p, t) != NULL;
 }
+#endif // KERNEL_TESTS
 
 // PTY-1b: the name-returning generalization (interrupt + tty:quit +
 // tty:hup). Same gates as the historical interrupt-only decision: a
@@ -1157,6 +1155,7 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
 // passes the returned canonical name to exits() so the exit_msg reports
 // WHICH signal terminated the Proc. The per-note disposition (a phenotype
 // sigtab handler or SIG_IGN for THAT name) is applied inside the scan.
+VISIBLE_IF_KERNEL_TESTS
 const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
     if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return NULL;
@@ -1198,6 +1197,7 @@ static int notes_stop_pending_idx_locked(struct Proc *p, struct Thread *t) {
     return -1;
 }
 
+#ifdef KERNEL_TESTS
 static const char *notes_stop_pending_name_locked(struct Proc *p,
                                                   struct Thread *t) {
     int idx = notes_stop_pending_idx_locked(p, t);
@@ -1220,14 +1220,14 @@ static const char *notes_stop_pending_name_locked(struct Proc *p,
 // locked: a phenotyped Proc keeps its disposition in the sigtab. It is
 // applied per note INSIDE the scan (see notes_stop_pending_idx_locked).
 //
-// Non-static + header-declared for the same reason as the terminate twin --
-// the dispatcher takes no Thread argument (it reads current_thread()), so a
-// unit test can only drive this decision directly.
+// The tests drive this decision directly, as they do the terminate twin: the
+// dispatcher takes no Thread argument (it reads current_thread()).
 const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
     if (proc_is_self_managing_notes(p)) return NULL;
     return notes_stop_pending_name_locked(p, t);
 }
+#endif // KERNEL_TESTS
 
 // The dispatcher's stop consumer: decide and consume in ONE call, sharing the
 // peek's index scan so the note that decides the stop is the note that goes.
@@ -1235,7 +1235,7 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
 // The general notes_dequeue_locked is deliberately NOT used here: it is
 // class-blind, so it pops the queue head whenever the head is not the note the
 // stop decision was about. See notes_stop_pending_idx_locked's comment for
-// what that cost. Non-static so a unit test can put a second note in the ring
+// what that cost. Visible to the tests, so one can put a second note in the ring
 // and prove the right one goes -- the defect is invisible on a one-note queue,
 // which is every queue any prior test built.
 //
@@ -1244,6 +1244,7 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
 // answering identically or the tests that drive it would be verifying a
 // disposition production does not apply. Side-by-side is what makes that
 // diffable by eye.
+VISIBLE_IF_KERNEL_TESTS
 int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
                               struct Note *out) {
     if (!p || !p->notes || !out) return 0;
@@ -1474,6 +1475,7 @@ void notes_fault_dying_latch(struct Thread *t) {
 // pending by construction: a caught bit is armed ONLY for a caught note, which
 // the terminate arm refuses -- so no note ever sets both a terminate latch and
 // a caught bit, and death (checked FIRST at every sleep site) always wins.
+VISIBLE_IF_KERNEL_TESTS
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
     if (t->exit_close_active || t->kthread_join_active) return false;
@@ -1505,6 +1507,7 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
 }
 
+VISIBLE_IF_KERNEL_TESTS
 bool thread_caught_note_claim(struct Thread *t) {
     if (!thread_caught_note_deliverable(t)) return false;
     struct Proc *p = t->proc;
@@ -2201,7 +2204,6 @@ static void notes_release_claims(struct Thread *t) {
 // passes over the queue afresh, as Linux's get_signal parks in do_signal_stop
 // and loops. One budget bounds every pass and every discard, so a flooded queue
 // cannot hold the masked tail.
-void notes_deliver_at_el0_return(struct exception_context *ctx);
 void notes_deliver_at_el0_return(struct exception_context *ctx) {
     u32 passes = 0;
     while (notes_deliver_tail(ctx, &passes)) {
@@ -2215,9 +2217,10 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
                        "KERNEL_EXIT, which inherits its mask (#713)");
 }
 
+#ifdef KERNEL_TESTS
 // Test hook: the release a claimant's tail makes, for a Thread with no tail.
-void notes_release_claims_for_test(struct Thread *t);
 void notes_release_claims_for_test(struct Thread *t) { notes_release_claims(t); }
+#endif
 
 // ---------------------------------------------------------------------------
 // SYS_NOTED restore + default-action helpers (called from kernel/syscall.c).
@@ -2227,7 +2230,6 @@ void notes_release_claims_for_test(struct Thread *t) { notes_release_claims(t); 
 // Returns 0 on success, -1 if the Thread is not in a handler. The caller
 // (sys_noted_handler) supplies ctx; on success ctx is rewritten with the
 // pre-handler user state.
-int notes_noted_restore(struct exception_context *ctx, struct Thread *t);
 int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
     if (!ctx || !t) return -1;
     if (!t->in_handler) return -1;
@@ -2272,7 +2274,6 @@ int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
 // disposition re-queues it -- matching the no-handler stop path, whose own
 // test asserts the default stop leaves zero susp notes pending. A stale susp
 // surviving a later cont would re-suspend a resumed program.
-int notes_noted_default(struct exception_context *ctx, struct Thread *t);
 int notes_noted_default(struct exception_context *ctx, struct Thread *t) {
     if (!ctx || !t || !t->in_handler) {
         // Caller validated in_handler; reaching here is a programmer bug.

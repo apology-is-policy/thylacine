@@ -1,0 +1,56 @@
+
+running 7 tests
+test local_pool_and_payload_release_share_noncallback_signal ... ok
+test local_native_retirement_requires_explicit_event_not_busy_spin ... FAILED
+test local_result_drop_schedules_retirement_without_new_cq ... FAILED
+test local_pulse_drop_and_bounded_progress_do_not_allocate ... FAILED
+test local_terminal_cq_signals_even_without_registered_waker ... FAILED
+test local_last_future_drop_schedules_after_closing_poll ... FAILED
+test local_zero_partial_budget_and_coalesced_events_preserve_sweep ... FAILED
+
+failures:
+
+---- local_native_retirement_requires_explicit_event_not_busy_spin stdout ----
+
+thread 'local_native_retirement_requires_explicit_event_not_busy_spin' (22472223) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T091022Z/mutant-busy-self-reschedule/test_local_progress.rs:231:128:
+assertion failed: !e.needs_progress()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- local_result_drop_schedules_retirement_without_new_cq stdout ----
+
+thread 'local_result_drop_schedules_retirement_without_new_cq' (22472226) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T091022Z/mutant-busy-self-reschedule/test_local_progress.rs:225:397:
+assertion failed: !e.needs_progress()
+
+---- local_pulse_drop_and_bounded_progress_do_not_allocate stdout ----
+
+thread 'local_pulse_drop_and_bounded_progress_do_not_allocate' (22472225) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T091022Z/mutant-busy-self-reschedule/test_local_progress.rs:243:146:
+assertion failed: !e.needs_progress()
+
+---- local_terminal_cq_signals_even_without_registered_waker stdout ----
+
+thread 'local_terminal_cq_signals_even_without_registered_waker' (22472227) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T091022Z/mutant-busy-self-reschedule/test_local_progress.rs:237:216:
+assertion failed: !e.needs_progress()
+
+---- local_last_future_drop_schedules_after_closing_poll stdout ----
+
+thread 'local_last_future_drop_schedules_after_closing_poll' (22472222) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T091022Z/mutant-busy-self-reschedule/test_local_progress.rs:228:364:
+assertion failed: !e.needs_progress()
+
+---- local_zero_partial_budget_and_coalesced_events_preserve_sweep stdout ----
+
+thread 'local_zero_partial_budget_and_coalesced_events_preserve_sweep' (22472228) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T091022Z/mutant-busy-self-reschedule/test_local_progress.rs:234:480:
+assertion `left == right` failed
+  left: true
+ right: false
+
+
+failures:
+    local_last_future_drop_schedules_after_closing_poll
+    local_native_retirement_requires_explicit_event_not_busy_spin
+    local_pulse_drop_and_bounded_progress_do_not_allocate
+    local_result_drop_schedules_retirement_without_new_cq
+    local_terminal_cq_signals_even_without_registered_waker
+    local_zero_partial_budget_and_coalesced_events_preserve_sweep
+
+test result: FAILED. 1 passed; 6 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+

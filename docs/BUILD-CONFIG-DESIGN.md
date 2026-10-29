@@ -108,8 +108,6 @@ BUILD_TYPE=debug          # debug | release
 TESTS=n                   # in-kernel test suite      -> -DKERNEL_TESTS
 BOOT_PROBES=n             # joey boot-test ladder     -> -DTHYLA_BOOT_PROBES
 DEV_ACCOUNTS=y            # bake dev login accounts   -> -DTHYLA_DEV_ACCOUNTS  (see 4.5)
-HARDENING_FULL=y
-KASLR=y
 SANITIZE=none             # none | ubsan | asan
 TICKLESS=y
 CHUNK_GOROOT=y            # -> THYLACINE_BAKE_GOROOT
@@ -141,7 +139,10 @@ config-file comments are generated from, and any future full TUI would reuse —
 it once, in the schema.
 
 - **compile-shape** — `BUILD_TYPE`, `TESTS`, `BOOT_PROBES`, `DEV_ACCOUNTS`,
-  `HARDENING_FULL`, `KASLR`, `SANITIZE`, `TICKLESS`.
+  `SANITIZE`, `TICKLESS`, `PRIVATE_ASYNC_QUAL`. KASLR (I-16) and the hardening
+  flags are not symbols: every image has both. `HARDENING_FULL` and `KASLR` were
+  symbols nothing applied, retired 2026-10-27 by operator vote; a profile that
+  still names one loads with an unknown-symbol warning and the line is ignored.
 - **bake-content** — `CHUNK_GOROOT`, `CHUNK_CLADE` (+`CHUNK_STORM`), `CHUNK_CHASE_W2`,
   `CHUNK_ALPINE`, `CHUNK_QUAKE`, `CHUNK_AURORA_CFG`; since DX-8 (2026-09-05)
   `CHUNK_DOSBOX`, `CHUNK_DUKE3D`, `CHUNK_TOMBRAIDER` and the choice
@@ -223,14 +224,14 @@ delivered by orthogonalization.
 
 ### 4.4 Fragment composition + precedence
 
-Overlays live in `configs/fragments/*.config` (e.g. `kaslr.config`,
-`hardening-full.config`, `chunk-go.config`). `build.sh --config production --with
-kaslr --with chunk-go` composes them.
+Overlays live in `configs/fragments/*.config` (e.g. `ubsan.config`,
+`release.config`, `chunk-go.config`). `build.sh --config dev --with
+release --with chunk-go` composes them.
 
 **Precedence (last writer wins):**
 ```
 built-in defaults  <  preset (--config)  <  fragments (--with, in order)  <
-explicit CLI (--set KEY=VAL, and legacy sugar --kaslr/--hardening-full/...)
+explicit CLI (--set KEY=VAL, and legacy sugar --release/--no-tickless/...)
 ```
 
 ### 4.5 Account decoupling (folded in per the vote)
@@ -460,3 +461,13 @@ untouched by this arc. git-on-viv remains the active mission; this is the detour
   yet. Next: the configurator core (lane 2), account decoupling folded in (lane 3),
   the wizard (lane 4), the manifest + forage (lane 5). The account-gate move is
   audit-bearing at impl.
+
+## Native interaction qualification option (October 3)
+
+`HALCYON_INTERACTION_QUALIFICATION` is a display-group bool, default `n`.
+`--set HALCYON_INTERACTION_QUALIFICATION=y` opts into the native HIN1 adapter;
+its legacy environment shim is `THYLACINE_INTERACTION_QUALIFICATION=1`.
+The build maps it to the nondefault `halcyond/interaction-qualification` Cargo
+feature and logs the choice. Normal builds retain media-only discovery and two
+media connections. This is a development qualification option while HI1-R24
+capacity and failure checks remain outstanding; it does not enable modal UI.

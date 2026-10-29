@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "pid": 74515,
+  "state": "verified-then-parked-unapplied",
+  "source": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+  "diff_sha256": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+  "run": "work/oct5-as-r9/astra-takeover/native-sq-reuse/smoke-20261010T065006Z",
+  "next": "Do not rerun/apply: operator parked SQ reuse subchunk for Corona. See native-sq-reuse/PARKED.md; active kernel source restored, built artifacts still patched.",
+  "phase": "ubsan8",
+  "minimum_free_mib": 9944,
+  "free_mib": 9954,
+  "rc": 0,
+  "finished_utc": "2026-10-10T06:54:43.043383+00:00"
+}

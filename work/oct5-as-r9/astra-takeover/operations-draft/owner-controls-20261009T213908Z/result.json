@@ -1,0 +1,46 @@
+{
+  "source_sha256": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+  "cases": [
+    {
+      "case": "clean",
+      "rc": 0
+    },
+    {
+      "case": "erase-removal-barrier",
+      "rc": -6
+    },
+    {
+      "case": "duplicate-owner",
+      "rc": -6
+    },
+    {
+      "case": "late-owner",
+      "rc": -6
+    },
+    {
+      "case": "forget-hold",
+      "rc": -6
+    },
+    {
+      "case": "forget-drop",
+      "rc": -6
+    },
+    {
+      "case": "double-drop",
+      "rc": -6
+    },
+    {
+      "case": "active-drop",
+      "rc": -6
+    },
+    {
+      "case": "borrowed-drop",
+      "rc": -6
+    },
+    {
+      "case": "stale-identity",
+      "rc": -6
+    }
+  ],
+  "limits": "Request-ledger physical owner flag only; actual charged RPC allocation/free and native integration unimplemented."
+}

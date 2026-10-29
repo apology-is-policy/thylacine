@@ -1,0 +1,25 @@
+{
+  "owner": "astra",
+  "source_files": 7,
+  "command_records": 17,
+  "logs": {
+    "clang-version": "317c2c7c562ce9acb2c712c2fbcaaf7da6f4502b839213e835fe114f158f790e",
+    "sanitized-payload_owner.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanitized-lease_ledger.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanitized-link": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanitized-run": "764155c30dad987e55391f816c515234c8347f3af9b5334f9ccc4d2d3f86ff3b",
+    "ndebug-payload_owner.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ndebug-lease_ledger.c-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ndebug-link": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ndebug-run": "764155c30dad987e55391f816c515234c8347f3af9b5334f9ccc4d2d3f86ff3b",
+    "live-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-run": "2ccad8a558a3c1fdf145b7bec27e4ba50a654e1043cdfa14c2d631a54406c8fe",
+    "lost-return-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-return-run": "577e9e7d79b34aba9c9ae9279fb754ead3d0fc0dcc80a58d1a85c17b023053c1",
+    "wrong-range-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "wrong-range-run": "85f1660c67365672b410fd24c4ad9556f7948922fc4c972060ba82c29c6ee2b1",
+    "failed-success-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-success-run": "3e3a85f6c5ef1e4e37f9257bacbe8ba6807efadadae40a6b61ece01c9cccf575"
+  },
+  "limits": "Uninstalled C opaque payload core; simulated backend, not native ring/controller integration"
+}

@@ -1,0 +1,16 @@
+test-loom-client: /Users/northkillpd/projects/thylacine-corona/work/oct15-na4c/run-20261015T025736Z
+  sanitized: test_lease_ledger PASS
+  sanitized: test_paired_cq PASS
+  sanitized: test_owned_mapping PASS
+  sanitized: test_request_book PASS
+  sanitized: test_ring_payload PASS
+  sanitized: test_composed_ring PASS
+  sanitized: test_fixed_requests PASS
+  sanitized: test_deadlines PASS
+  sanitized: test_retirement_executor PASS
+  sanitized: test_retirement_timers PASS
+  sanitized: test_fatal PASS
+/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/tests/loom_client/sim_kernel.c:568:109: error: missing field 'alloc' initializer [-Werror,-Wmissing-field-initializers]
+  568 |         for (uint32_t i = 0; i < nargs; ++i) s->buffers[i] = (struct sim_region){ table[i].va, table[i].len };
+      |                                                                                                             ^
+1 error generated.

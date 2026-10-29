@@ -15,6 +15,7 @@
 
 #include "kaslr.h"
 #include "mmu.h"
+#include "sections.h"
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev (spoor->dev->read) for the FILE fault arm
 #include <thylacine/dma_handle.h>    // WEAVE-SKEIN: kobj_dma_pa_at for the DMA fault arm
@@ -36,12 +37,6 @@
 #ifdef KERNEL_TESTS
 void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
 #endif
-
-// Linker symbols — boot stack guard region + kernel image bounds.
-extern char _boot_stack_guard[];
-extern char _boot_stack_bottom[];
-extern char _kernel_start[];
-extern char _kernel_end[];
 
 // #806: per-CPU re-entrancy guard for the kernel-fault dispatch. A fault
 // taken WHILE handling a kernel fault (classically a wild current_thread()
@@ -346,6 +341,14 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
                              (uintptr_t)fi->vaddr);
     }
 
+    // 5.5. Alignment fault (kernel-mode). An unaligned access to Device
+    //      memory always takes one, and before the MMU every access is to
+    //      Device memory: a misaligned field read in pre-MMU C lands here.
+    if (!fi->from_user && fi->is_alignment) {
+        extinction_with_addr("unhandled kernel alignment fault",
+                             (uintptr_t)fi->vaddr);
+    }
+
     // 6. User-mode fault — demand paging via the VMA tree (P3-Dc).
     //
     //    Routes through `userland_demand_page` which performs vma_lookup,
@@ -592,10 +595,10 @@ static enum fault_result demand_page_locked(struct Proc *p,
         // (charged once), and each alias installs its leaf at its OWN vma->prot
         // (RW for the writer, RX for the exec alias). No PTE is ever W AND X
         // because no VMA is: vma_alloc refuses the pair, and this arm adds no
-        // code-specific install that could bypass it (make_user_pte_l3 would
-        // encode W|X faithfully if asked). A CODE mapping is never VMA_FLAG_COW
-        // (addrspace_clone refuses CODE), so the copy-on-write branch below is
-        // ANON_LAZY's alone.
+        // code-specific install that could bypass it (make_user_pte_l3's own
+        // check is a backstop that extincts, not the gate). A CODE mapping is
+        // never VMA_FLAG_COW (addrspace_clone refuses CODE), so the copy-on-write
+        // branch below is ANON_LAZY's alone.
         //
         // Overcommit / I-32 (ARCH §6.5; SYS_BURROW_ATTACH_LAZY): demand-ZERO. The
         // page is allocated, zero-filled, and installed RW/XN on first touch. The
@@ -811,7 +814,7 @@ if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
 // the vma_lock coverage the proc.h comment explicitly defers to "the
 // pouch-threads sub-chunk ... the page-fault vma_lookup reader" -- which the
 // threads lift never wired up. Pre-fix, the unlocked reader raced a sibling
-// thread's SYS_BURROW_DETACH (vma_remove + free_pages, under vma_lock): the
+// thread's SYS_BURROW_DETACH (vma_remove_in + free_pages, under vma_lock): the
 // walker could follow a half-unlinked list to a freed VMA and install a leaf
 // PTE aliasing a buddy page already recycled into kernel (or another Proc's)
 // memory -> a wild/kernel pointer in the faulting Proc's address space (the

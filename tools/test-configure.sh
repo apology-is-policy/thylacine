@@ -54,22 +54,20 @@ echo "== test-configure =="
 assert_eq "$(bc_index_of BUILD_TYPE)"   0 "schema: BUILD_TYPE is first"
 assert_eq "$(bc_get BOOT_PROBES)"       n "schema: BOOT_PROBES default n"
 assert_eq "$(bc_get DEV_ACCOUNTS)"      y "schema: DEV_ACCOUNTS default y"
-assert_eq "$(bc_get KASLR)"             n "schema: KASLR default n"
+assert_eq "$(bc_get TESTS)"             n "schema: TESTS default n"
 assert_eq "$(bc_get CHUNK_GOROOT)"      y "schema: CHUNK_GOROOT default y"
 
 # --- 1. seed fidelity (non-interactive --from) -------------------------------
-# production differs from bare defaults on BUILD_TYPE/KASLR/HARDENING_FULL, so a
-# wizard that ignored --from would write the default (debug/n/n) and fail these.
+# production differs from bare defaults on BUILD_TYPE, so a wizard that ignored
+# --from would write the default (debug) and fail this.
 run --defaults --from production seed1 >/dev/null 2>&1
 assert_eq "$(cfg_val "$TMP/seed1.config" BUILD_TYPE)"     release "1 seed: BUILD_TYPE=release"
-assert_eq "$(cfg_val "$TMP/seed1.config" KASLR)"          y       "1 seed: KASLR=y"
-assert_eq "$(cfg_val "$TMP/seed1.config" HARDENING_FULL)" y       "1 seed: HARDENING_FULL=y"
 
 # --- 2. input honoring (interactive) -----------------------------------------
-# custom base, then Enter-accept up to KASLR, answer KASLR=y (default is n). A
+# custom base, then Enter-accept up to TESTS, answer TESTS=y (default is n). A
 # wizard that dropped stdin writes n.
-{ echo 4; nblank "$(bc_index_of KASLR)"; echo y; } | run --name in2 >/dev/null 2>&1
-assert_eq "$(cfg_val "$TMP/in2.config" KASLR)" y "2 input: interactive KASLR=y honored (default n)"
+{ echo 4; nblank "$(bc_index_of TESTS)"; echo y; } | run --name in2 >/dev/null 2>&1
+assert_eq "$(cfg_val "$TMP/in2.config" TESTS)" y "2 input: interactive TESTS=y honored (default n)"
 
 # --- 3. live constraint: BOOT_PROBES=y announces + pins DEV_ACCOUNTS ----------
 out3="$({ echo 4; nblank "$(bc_index_of BOOT_PROBES)"; echo y; } | run --name c3 2>&1)"
@@ -107,10 +105,10 @@ if run --defaults >/dev/null 2>&1; then bad "6 usage: --defaults with no name sh
 if run --defaults --from nosuchpreset zzz >/dev/null 2>&1; then bad "7 usage: unknown --from preset should exit nonzero"; else ok "7 usage: unknown --from preset is rejected"; fi
 
 # --- 8. --edit loads an existing profile as the seed -------------------------
-# seed1 (from case 1) carries KASLR=y; editing it and accepting all must preserve
-# that. A wizard that ignored --edit would write bare defaults (KASLR=n).
+# seed1 (from case 1) carries BUILD_TYPE=release; editing it and accepting all must
+# preserve that. A wizard that ignored --edit would write bare defaults (debug).
 run --defaults --edit seed1 edit8 >/dev/null 2>&1
-assert_eq "$(cfg_val "$TMP/edit8.config" KASLR)" y "8 edit: --edit loads the profile (KASLR=y preserved)"
+assert_eq "$(cfg_val "$TMP/edit8.config" BUILD_TYPE)" release "8 edit: --edit loads the profile (BUILD_TYPE=release preserved)"
 
 # --- 9. isolation: the real configs/ is untouched by any run above -----------
 real_after="$(ls "$REPO_ROOT"/configs/ | sort)"

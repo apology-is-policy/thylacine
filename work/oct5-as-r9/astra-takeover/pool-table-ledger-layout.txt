@@ -1,0 +1,39 @@
+build/kernel/thylacine.elf:	file format elf64-littleaarch64
+
+0x0003903e: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_declaration	(true)
+
+0x00041497: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_byte_size	(0x1c08)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_pool_table.h")
+              DW_AT_decl_line	(7)
+
+0x00047fd2: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_byte_size	(0x1c08)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_pool_table.h")
+              DW_AT_decl_line	(7)
+
+0x00054c22: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_declaration	(true)
+
+0x000cad26: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_declaration	(true)
+
+0x001a3d58: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_declaration	(true)
+
+0x001e7fa5: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_declaration	(true)
+
+0x00233468: DW_TAG_structure_type
+              DW_AT_name	("loom_service_pool_table")
+              DW_AT_byte_size	(0x1c08)
+              DW_AT_decl_file	("/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom_service_pool_table.h")
+              DW_AT_decl_line	(7)

@@ -1,0 +1,11 @@
+{
+  "kernel/loom_service_connect.c": "685a2ba680518e18c05ccab38dfbc06e703e803c2dfc883d4628b175bc0f360b",
+  "kernel/include/thylacine/loom_service_connect.h": "866b5dcc4d4f7debd73c63ac5920d5676aaffe54345a0e13860a602ae220f894",
+  "kernel/loom_service_protocol.c": "5ba0172dbfaa2792eaa52f21870dd6f49d48962b8be5e8367d7af8916ef52d87",
+  "kernel/include/thylacine/loom_service_protocol.h": "2d5e77a2fc58c9af9ba773368ac82d6a0eb1419cc2202dc57eba7cf1ce1b4771",
+  "kernel/loom_service_requests.c": "a0e5c1d3233b4aec381aa6a95060a7ac6e56207bd33dadda18866969ade57a0a",
+  "kernel/include/thylacine/loom_service_requests.h": "4bbbc5e568241c581643c3f16196f3456d5e2486b4909ffdb2b6bb7a505b4d87",
+  "kernel/test/test_loom.c": "44910eb4428a2f65a7731ecc1783abc543685b7534e905aa1df0ec7f096ab7e4",
+  "kernel/test/test.c": "a05337b5b47a2bf06c0973f1f9737c1ac1b738b275ed01fe15629227ce5eba38",
+  "kernel/CMakeLists.txt": "9e8bc375254946dd633e1663bc123965ff9f75c89c1521aecd373bc0f78ba7c2"
+}

@@ -1,0 +1,11 @@
+--- control.c
++++ budget.c
+@@ -2778,7 +2778,7 @@
+     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+     __atomic_fetch_and(&h->flags,~(u32)LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+     loom_private_close_changed(l);
+-    if(budget>l->sq_entries)budget=l->sq_entries;
++    /* fault: unbounded caller budget */
+     u32 consumed=0;
+     for(u32 i=0;i<budget;++i) {
+         struct loom_sqe copy;

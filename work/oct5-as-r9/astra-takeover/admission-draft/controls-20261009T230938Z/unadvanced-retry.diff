@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ unadvanced-retry.c
+@@ -83,7 +83,7 @@
+     struct loom_service_request *r=rpc_record(o);
+     if(!r)return -T_E_NOENT;
+     if(!o->protocol->driving || o->phase!=LRPC_INFLIGHT || !o->callback_seen ||
+-       o->capture_error || o->rpc.sending || !o->advanced || o->action!=LPROGRAM_NEXT ||
++       o->capture_error || o->rpc.sending || false ||
+        r->phase!=LREQ_ACTIVE || r->borrows!=1)
+         return -T_E_BUSY;
+     int rc=rpc_ready(o);if(rc)return rc;

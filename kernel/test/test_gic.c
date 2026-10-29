@@ -129,7 +129,6 @@ void test_gic_irq_barrier(void) {
 }
 
 #include "../../arch/arm64/gic_its.h"
-void test_gic_its_commands(void);
 void test_gic_its_commands(void) {
     TEST_ASSERT(gic_its_test_command_ring(), "ITS ring wrap, saturation, stalled/invalid reader and timeout");
 }

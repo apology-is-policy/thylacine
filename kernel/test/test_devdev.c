@@ -21,20 +21,6 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-void test_devdev_bestiary_smoke(void);
-void test_devdev_attach_returns_dir(void);
-void test_devdev_walk_to_each_leaf(void);
-void test_devdev_walk_unknown_misses(void);
-void test_devdev_walk_pts_dir(void);
-void test_devdev_trivial_leaves(void);
-void test_devdev_stat_native_leaves(void);      // CL-4 merge: all-leaf shapes
-void test_devdev_cons_gate(void);
-void test_devdev_consctl_renderer_mint(void);   // #55
-void test_devdev_winsize_leaf(void);            // #55
-void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
-void test_devdev_drain_walk_off_opened_dev_no_disarm(void); // the unprivileged route to H9
-void test_devdev_spawn_unbump_runs_close(void);       // shed r4 F1 / H6: an unwind's last drop closes
-
 // =============================================================================
 // Helpers.
 // =============================================================================
@@ -681,7 +667,6 @@ void test_devdev_drain_walk_off_opened_dev_no_disarm(void) {
 // Every other leaf, and the directory itself, answers devdev's own 'd'.
 void test_devdev_fd_devclass(void) {
     // H-4d: the whole-Spoor classifier (the syscall's body; kernel/syscall.c).
-    extern int spoor_devclass(struct Spoor *c);
     TEST_EXPECT_EQ((long)spoor_devclass(NULL), (long)'-', "NULL classifies as devnone");
 
     struct Spoor *cons = walk_to("cons");
@@ -801,8 +786,6 @@ void test_devdev_beacon_leaf(void) {
 // unwinds all go through sys_spawn_unbump_fds now; this drives it with the
 // interleaving staged by hand: the bump, the handle's own close, then the
 // unwind -- whose drop must run devdev_close and disarm.
-extern void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
-
 void test_devdev_spawn_unbump_runs_close(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");

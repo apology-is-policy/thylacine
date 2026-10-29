@@ -1,0 +1,51 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_admission.c": "d1be069a19bca05dc8390226ef362bfe414c4f5883d7e98de4b789d67a4de438",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_requests.c": "f72d55aa0370092ecce32f93065f972f5783853f8d2c0db4e13c2768b61e605e",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_operation.c": "03f2953a13484e0b2c9f535a3dec1f799b3d0293fde6e2a852a562ece8d618a6",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_rpc.c": "9d26e0371fc7abab936710ca193517f001aef48ca763da6e450e3cd7b2156ed7",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/9p_client.c": "4df62993f945b9a62ea9edefa1082c79cc5ffd791b3ee8a0ad578525b70a1cfe",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_retirement.c": "03db8f3e115cfd691b568b36adc12f1333cdbfe87ad00ffd8c387e6065c0358d",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_provided.c": "19a6c370c0b7653463998a38f6d9f8118d47cda01288f313b402891f1761b58a",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_io.c": "bc30a868c29f1ede1988da4ffff2883a442afed82d69f07ec62ef4389bab63ba",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_rpc.h": "ac57d3c6651e7579f8adc823614314e9ac94a42320112cf63cd2b64bae9a3e0d",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_operation.h": "8d47a0168f24e8f3cf9f245b67915c65fc5fe0cfaf3539292245b64d330b86a5",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_retirement.h": "0e281b71e202e63233309f3a1f42028858109001863f964191995d74f2248868",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_provided.h": "8a432edb3459adc19aea13d17906a87d3f72f5d2092ca95d831157ffa9ebdce6",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_protocol.h": "baffbf92ba331d0dec270f48d3cacb3025fe9431244af398caafb1e95e7f5f49",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/kernel/include/thylacine/loom_service_requests.h": "30dd3c98627837daf3106a706c2e5d958e47dc8ec237c11bb6d5c551ad140dc2",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/fixture.c": "30604a6967846e83413db469c2e22b5e20c38136283f3ec2e0f69f71a74ea040",
+    "work/oct5-as-r9/astra-takeover/retirement-draft/run-controls.py": "6db05b0f3fe1115189eddf8d50d6f91983277108ded88949e6bb18edcedaa925",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom.c": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+    "kernel/loom_service_decode.c": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "e9a2a8b9356596c8933c2e798be2552827e3f04dfe79ff78261131b3ecb56f4d",
+      "binary_sha256": "db82f708681d22605c2e7e2ecc1d81985db4faf7f45035101ba91917a9ce611a"
+    }
+  ],
+  "limits": "Synthetic parsed dispatch replies; no real submit/wire. Actual CQ/receipt publication, pool/slot/request/FID ledger, capture and program transitions. Registration physical pins are fixture boundaries. Whole-ring pending discard and real READY driver remain pending. Real data headers and actual SQE preparation, fixed helper, constructor, FID allocator and ledger/program code. Host address translation, allocation, Proc snapshot, refs/wake/engine and physical backing drop boundaries. No wire dispatch; admitted destructor is manual fixture cleanup. No native frontend/driver/close/concurrency proof."
+}

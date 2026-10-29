@@ -1,0 +1,247 @@
+summary iters=4000 alias=23 double_free=11 guard=0 zone=446/512 dup=0
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Read of size 4 at 0x000104964068 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:168 (pre-lock-b057de8eb:arm64+0x1000017e8)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x1000017e8)
+
+  Previous write of size 4 at 0x000104964068 by thread T1:
+    #0 mag_alloc pre-lock-b057de8eb.c:127 (pre-lock-b057de8eb:arm64+0x10000144c)
+    #1 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x10000144c)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x100008068)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:168 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x000104964068 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:169 (pre-lock-b057de8eb:arm64+0x100001838)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x100001838)
+
+  Previous write of size 4 at 0x000104964068 by thread T1:
+    #0 mag_free pre-lock-b057de8eb.c:158 (pre-lock-b057de8eb:arm64+0x100001530)
+    #1 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x100001530)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x100008068)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:169 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Read of size 8 at 0x0001049640e0 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:169 (pre-lock-b057de8eb:arm64+0x100001848)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x100001848)
+
+  Previous write of size 8 at 0x0001049640e0 by thread T1:
+    #0 mag_free pre-lock-b057de8eb.c:158 (pre-lock-b057de8eb:arm64+0x10000153c)
+    #1 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x10000153c)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x1000080e0)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:169 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x000104964068 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:169 (pre-lock-b057de8eb:arm64+0x100001838)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x100001838)
+
+  Previous write of size 4 at 0x000104964068 by thread T1:
+    #0 mag_drain pre-lock-b057de8eb.c:100 (pre-lock-b057de8eb:arm64+0x10000160c)
+    #1 mag_free pre-lock-b057de8eb.c:156 (pre-lock-b057de8eb:arm64+0x10000160c)
+    #2 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x10000160c)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x100008068)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:169 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x00010496956c by thread T1:
+    #0 mag_free pre-lock-b057de8eb.c:148 (pre-lock-b057de8eb:arm64+0x100001558)
+    #1 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x100001558)
+
+  Previous write of size 4 at 0x00010496956c by thread T3:
+    #0 mag_alloc pre-lock-b057de8eb.c:133 (pre-lock-b057de8eb:arm64+0x100001470)
+    #1 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x100001470)
+
+  Location is global 'g_pages' at 0x0001049655b8 (pre-lock-b057de8eb+0x10000d56c)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+  Thread T3 (tid=64799194, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:148 in mag_free
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x0001049690ec by thread T2:
+    #0 mag_free pre-lock-b057de8eb.c:148 (pre-lock-b057de8eb:arm64+0x100001558)
+    #1 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x100001558)
+
+  Previous write of size 4 at 0x0001049690ec by thread T1:
+    #0 mag_free pre-lock-b057de8eb.c:148 (pre-lock-b057de8eb:arm64+0x100001558)
+    #1 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x100001558)
+
+  Location is global 'g_pages' at 0x0001049655b8 (pre-lock-b057de8eb+0x10000d0ec)
+
+  Thread T2 (tid=64799193, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:148 in mag_free
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x0001049692f0 by thread T1:
+    #0 mag_alloc pre-lock-b057de8eb.c:134 (pre-lock-b057de8eb:arm64+0x100001480)
+    #1 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x100001480)
+
+  Previous write of size 4 at 0x0001049692f0 by thread T3:
+    #0 mag_alloc pre-lock-b057de8eb.c:134 (pre-lock-b057de8eb:arm64+0x100001480)
+    #1 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x100001480)
+
+  Location is global 'g_pages' at 0x0001049655b8 (pre-lock-b057de8eb+0x10000d2f0)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+  Thread T3 (tid=64799194, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:134 in mag_alloc
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x000104964068 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:169 (pre-lock-b057de8eb:arm64+0x100001838)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x100001838)
+
+  Previous write of size 4 at 0x000104964068 by thread T1:
+    #0 mag_alloc pre-lock-b057de8eb.c:127 (pre-lock-b057de8eb:arm64+0x10000144c)
+    #1 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x10000144c)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x100008068)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:169 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 8 at 0x000104964070 by thread T1:
+    #0 mag_refill pre-lock-b057de8eb.c:93 (pre-lock-b057de8eb:arm64+0x10000141c)
+    #1 mag_alloc pre-lock-b057de8eb.c:121 (pre-lock-b057de8eb:arm64+0x10000141c)
+    #2 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x10000141c)
+
+  Previous read of size 8 at 0x000104964070 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:169 (pre-lock-b057de8eb:arm64+0x100001848)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x100001848)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x100008070)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:93 in mag_refill
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Write of size 4 at 0x000104964068 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:169 (pre-lock-b057de8eb:arm64+0x100001838)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x100001838)
+
+  Previous write of size 4 at 0x000104964068 by thread T1:
+    #0 mag_refill pre-lock-b057de8eb.c:93 (pre-lock-b057de8eb:arm64+0x10000140c)
+    #1 mag_alloc pre-lock-b057de8eb.c:121 (pre-lock-b057de8eb:arm64+0x10000140c)
+    #2 owner pre-lock-b057de8eb.c:184 (pre-lock-b057de8eb:arm64+0x10000140c)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x100008068)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T1 (tid=64799192, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:169 in magazines_drain_all
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=51652)
+  Read of size 4 at 0x0001049641b8 by thread T4:
+    #0 magazines_drain_all pre-lock-b057de8eb.c:168 (pre-lock-b057de8eb:arm64+0x1000017e8)
+    #1 drainer pre-lock-b057de8eb.c:196 (pre-lock-b057de8eb:arm64+0x1000017e8)
+
+  Previous write of size 4 at 0x0001049641b8 by thread T2:
+    #0 mag_free pre-lock-b057de8eb.c:158 (pre-lock-b057de8eb:arm64+0x100001530)
+    #1 owner pre-lock-b057de8eb.c:190 (pre-lock-b057de8eb:arm64+0x100001530)
+
+  Location is global 'g_percpu' at 0x000104964028 (pre-lock-b057de8eb+0x1000081b8)
+
+  Thread T4 (tid=64799195, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:206 (pre-lock-b057de8eb:arm64+0x100000f48)
+
+  Thread T2 (tid=64799193, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64+0x31d84)
+    #1 main pre-lock-b057de8eb.c:205 (pre-lock-b057de8eb:arm64+0x100000f1c)
+
+SUMMARY: ThreadSanitizer: data race pre-lock-b057de8eb.c:168 in magazines_drain_all
+==================
+ThreadSanitizer: reported 11 warnings

@@ -16,8 +16,12 @@ target_link_libraries(joey PRIVATE t)
 # #61 (RW-11 R4-F2): when THYLA_BOOT_PROBES is ON (default) compile joey's
 # boot-test probe ladder; OFF yields the lean production init (no probes). The
 # option is declared in the parent usr/CMakeLists.txt.
+option(THYLA_D7_HOLD_LOGINS "Test-only: retain two pipe logins for the three-user Haul scenario" OFF)
 if(THYLA_BOOT_PROBES)
     target_compile_definitions(joey PRIVATE THYLA_BOOT_PROBES)
+    if(THYLA_D7_HOLD_LOGINS)
+        target_compile_definitions(joey PRIVATE THYLA_D7_HOLD_LOGINS=1)
+    endif()
 endif()
 
 # BUILD-CONFIG-DESIGN.md 4.5: DEV_ACCOUNTS is the account-provisioning axis, split from

@@ -353,6 +353,21 @@ tombstones its services + drains backlogs is reached through the listener handle
 (handle-release vs. an intrusive registry list) is a 3a impl decision; either way
 it is registry-scoped and audited in 3a.
 
+D7 activation now implements the factory and private MREPL view described in
+`docs/SRV-SESSION-REGISTRY-DESIGN.md`. Each posting Proc retains every registry
+it used, and death drains those memberships independently of its namespace.
+Resident routes preserve D8; connections charge the requesting view. This
+supersedes the historical D7/A-5b implementation gap below. See the interaction
+status for measured acceptance and the paired Stratum dependency.
+
+D7 completion was ratified on October 1, 2026 in
+`docs/SRV-SESSION-REGISTRY-DESIGN.md`: syscall 127 (134 since vote 13, 2026-10-19),
+dedicated spawn role bit 10,
+fixed resident routes, a posting-membership lifetime ledger, and charged session
+resource domains. The factory replaces login's inherited `/srv` before auth;
+the selected-registry authority still lives in the namespace. Implementation
+status and measured limits belong in `HALCYON-INTERACTION-STATUS.md`.
+
 ### 5.2 `open(/srv/<name>)` = connect (Q1 = two-step explicit attach)
 
 `devsrv_open` (today a stub) performs the connect: resolve the service in the

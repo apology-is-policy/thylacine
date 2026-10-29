@@ -1,0 +1,9 @@
+--- kernel/loom_service_program.c
++++ result.c
+@@ -64,5 +64,5 @@
+         return LPROGRAM_NEXT;
+     }
+     if(p->wire.kind!=p->operation)return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+-    return program_end(p,r->result,LPROGRAM_TERMINAL);
++    return program_end(p,0,LPROGRAM_TERMINAL);
+ }

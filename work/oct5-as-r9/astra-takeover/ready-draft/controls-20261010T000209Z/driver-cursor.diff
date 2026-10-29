@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -21,7 +21,7 @@
+                                               struct loom_ready_selection *pick) {
+     struct loom_ready_interest a={0};
+     *pick=(struct loom_ready_selection){0};
+-    if(!p || !p->owner || !p->indexed || !p->connect_bound || p->driving || p->users)
++    if(!p || !p->owner || !p->indexed || !p->connect_bound || p->users)
+         return a;
+     struct Loom *l=p->owner;
+     // A locally retired scope may retain CQ-backpressured pool/result owners.

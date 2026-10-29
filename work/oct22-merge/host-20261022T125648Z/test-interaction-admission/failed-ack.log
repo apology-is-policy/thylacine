@@ -1,0 +1,18 @@
+
+running 1 test
+test failed_replacement_revokes_old_context ... FAILED
+
+failures:
+
+---- failed_replacement_revokes_old_context stdout ----
+
+thread 'failed_replacement_revokes_old_context' (68191203) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct22-merge/host-20261022T125648Z/test-interaction-admission/failed-ack.rs:368:5:
+assertion failed: !check(&mut c, p)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    failed_replacement_revokes_old_context
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+

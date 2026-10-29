@@ -1,0 +1,11 @@
+--- control
++++ omit-receipt
+@@ -35,7 +35,7 @@
+     cq[idx] = (struct loom_cqe){ .user_data=user_data, .result=result };
+     if (l->receipt_size) {
+         struct loom_service_buffer_receipt *receipts = (void *)(l->ring_kva+l->receipt_off);
+-        receipts[idx] = (struct loom_service_buffer_receipt){0};
++        (void)receipts;
+     }
+     // No abort check here: a terminal committed before abort stays truthful.
+     // Copy, mark delivered, and publish the tail under one lock interval.

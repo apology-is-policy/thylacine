@@ -1,0 +1,11 @@
+--- control.c
++++ fresh-rearm.c
+@@ -1661,7 +1661,7 @@
+     case LREADY_DELIVER:
+         rc=loom_provided_deliver(o);return rc?rc:1;
+     case LREADY_REARM:
+-        spin_lock(&l->lock);rc=loom_rpc_rearm_read_locked(o,timer_now_ns());spin_unlock(&l->lock);
++        spin_lock(&l->lock);rc=loom_rpc_rearm_read_locked(o,0);spin_unlock(&l->lock);
+         return rc?action_abort(p,rc):1;
+     case LREADY_POST:
+         rc=loom_retirement_post_terminal(o);return rc?rc:1;

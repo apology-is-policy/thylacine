@@ -27,6 +27,11 @@
 #ifndef THYLACINE_LOOM_H
 #define THYLACINE_LOOM_H
 
+#include <thylacine/loom_service_abi.h>
+#include <thylacine/loom_service_close_queue.h> // reserved AS-0 surface; not enabled
+#include <thylacine/loom_service_requests.h>
+#include <thylacine/loom_service_engine.h>
+#include <thylacine/loom_service_pool.h> // canonical internal extent
 #include <thylacine/handle.h>     // rights_t
 #include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
 #include <thylacine/rendez.h>     // struct Rendez (the Loom-4c SQPOLL park)
@@ -36,6 +41,14 @@
 struct Burrow;
 struct Spoor;
 struct Proc;
+struct AddrSpace;
+struct loom_pool;
+struct loom_pool_bank;
+struct loom_slot_table;
+struct loom_service_pool_table;
+struct loom_service_target_table;
+struct loom_service_node_table;
+struct SrvServiceTarget;
 struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
 struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in kernel/loom.c)
 
@@ -392,6 +405,8 @@ struct loom_reg_buffer {
     u32            _pad;
 };
 
+#include <thylacine/loom_service_fixed.h>
+
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
@@ -401,8 +416,10 @@ struct Loom {
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
     // #130: the I-32 charge ledger. `owner`/`owner_pid` are the Proc
     // SYS_LOOM_SETUP charged (see loom_owner_live for why the pointer is safe
-    // and why the pid backstops it). All three are set once at setup and never
-    // mutated -- a Loom cannot change hands.
+    // and why the pid backstops it). All three are set once at setup -- in the
+    // as->lock hold that charges and maps the ring, before anything can fail
+    // after it -- and never mutated: a Loom cannot change hands. A private ring
+    // never binds them (its charge is recorded on its ring at creation).
     //
     // #132: `ring_pages` is now INFORMATIONAL ONLY. The settle amount comes from
     // the Burrow's own charge record (burrow_unref_settled), because a pin this
@@ -417,11 +434,11 @@ struct Loom {
     // against -- the creating Proc, read LIVE at each submit (so a legate's caps
     // count only while its scope holds them). Stamped by SYS_LOOM_SETUP right
     // after loom_create, BEFORE the handle publishes, so no submit can precede
-    // it; `owner` cannot serve, since it binds LAST for the #130 ledger and a
-    // sibling thread may ENTER in between. Sound without a ref for the reason
-    // sqpoll_owner is: KObj_Loom is non-transferable, so every submitter is a
-    // thread of this Proc. Validated at use (magic + pid) like `owner`; NULL
-    // (a kernel-internal Loom) fails those ops closed.
+    // it. Not `owner`: that names who PAID, a ledger fact, and an authority must
+    // not be read off a ledger. Sound without a ref: KObj_Loom is
+    // non-transferable, so every submitter is a thread of this Proc. Validated
+    // at use (magic + pid) like `owner`; NULL (a kernel-internal Loom) fails
+    // those ops closed.
     struct Proc         *ident;
     int                  ident_pid;
     // Geometry (immutable after loom_create). Mirrors loom_params.
@@ -435,12 +452,35 @@ struct Loom {
     u32 sqe_size;
     u32 cqe_size;
     u32 ring_size;
+    u32 receipt_off;  // optional paired32-byte CQ receipts; zero for legacy rings
+    u32 receipt_size;
+    // Non-NULL only for internally admitted private owners. Immutable until
+    // retirement; the exact image pin outlives both the creator and the fd, so
+    // the refund at retirement names an AddrSpace and never a Proc pointer.
+    struct AddrSpace *service_as;
+    // Private-only, one separately charged buddy page; identity/borrow ledger.
+    struct loom_slot_table *service_slots;
+    struct loom_service_pool_table *service_pools;
+    struct loom_service_target_table *service_targets;
+    struct loom_service_node_table *service_nodes; // separately charged buddy page
+    struct loom_service_engine *service_engine; // separately charged buddy page
+    struct loom_request_table service_requests; // CQ-sized precharged terminal storage
+    struct loom_private_fixed *service_fixed; // exact accepted fixed extents, under lock
+    u32 service_fixed_settling; // physical drops outside Ll, still local borrows
+    u32 service_fixed_count; // bounded by existing CQ terminal-obligation capacity
+    u64 service_creator;
+    u32 service_metadata_pages;
+    bool service_closing;              // serialized with result commit by lock
+    u64 service_close_visits; // Q-locked diagnostic, never a reclamation deadline
+    struct loom_close_work service_close_work; // Q-locked; one root until DONE
+    struct Loom *service_retire_next;  // preadmitted last-reference queue link
     // Kernel-PRIVATE authoritative completion-queue tail (under `lock`). The
     // shared `loom_ring_hdr.cq_tail` is a userspace-READABLE mirror; loom_post_cqe
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
     // from the shared header (which userspace can corrupt -> an OOB kernel write).
     u32 cq_tail;
-    // Bumped under `lock` (loom_drive_moved_locked) by every CQE post, every
+    // Bumped under `lock` (loom_drive_moved_locked) by every CQE post on a
+    // public ring (a private ring has no drive_gen waiter), every
     // completion's state update (a re-arm flagged, a chain result, an op
     // terminal) and every op that goes in flight (a submit's link, a re-arm
     // claimed). A waiter that read it before driving the ring and finds it
@@ -542,22 +582,11 @@ struct Loom {
     struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
     struct Rendez           sqpoll_join;     // the JOINER sleeps here; woken by the kthread's terminal
     // The fid-lift audit F1 charge: the kthread counts against the CREATING
-    // Proc's thread budget. `sqpoll_owner` is lifetime-safe without a ref:
-    // KObj_Loom is I-5 non-transferable, so the creator's handle is the only
-    // handle and loom_free runs at the latest during the creator's own
-    // handle-close-at-exit -- always before proc_free. `sqpoll_charged` keys
-    // the uncharge (set iff the charge succeeded, whether or not the kthread
-    // then started), so every unwind path settles the budget exactly once.
-    //
-    // That argument is still believed, and is no longer TRUSTED at the use --
-    // loom_free validates before the decrement, mirroring what #130 did for
-    // the page ledger. The two pointers below and `owner` above must stay
-    // SEPARATE: they bind at opposite ends of setup on purpose (`owner` last,
-    // after the final failure path, so rollbacks cannot be double-refunded;
-    // `sqpoll_owner` first, at the charge, because rollbacks deliberately do
-    // not settle it). Merging them to remove the duplication breaks one of the
-    // two ledgers; so does moving either binding toward the other.
-    struct Proc            *sqpoll_owner;
+    // Proc's thread budget, settled against `owner` -- which setup binds with
+    // the ring's page charge, BEFORE it can take this one, so a charged thread
+    // always has a payer. `sqpoll_charged` keys the uncharge (set iff the
+    // charge succeeded, whether or not the kthread then started), so every
+    // unwind path settles the budget exactly once, in loom_free.
     bool                    sqpoll_charged;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
@@ -581,6 +610,89 @@ _Static_assert(__builtin_offsetof(struct Loom, magic) == 0,
 // Returns NULL on bad args / OOM. `exempt` is the creator's I-32 exemption:
 // the ring is a user allocation, refused past the user pool unless exempt.
 struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt);
+#ifdef KERNEL_TESTS
+// Internal layout constructor for the private service owner. Geometry only:
+// no identity, charge, mapping, authority or public setup-feature activation.
+struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt);
+
+
+// Internal empty private owner; public setup remains disabled. Captures the
+// caller's live, exclusively owned image and reserves all base storage charges.
+// Caller retains p and its image throughout construction. No scopes, registered
+// buffers or worker are admitted until their private engine is qualified.
+struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts);
+#endif // KERNEL_TESTS
+// The same, reporting a refusal: -EINVAL (geometry/Proc), -EBUSY (address space
+// shared, or its private-ring guard count exhausted), -ENOMEM (budget or
+// allocation), -EAGAIN (the retirer is not up yet). *why is 0 on success.
+struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receipts,
+                                     int *why);
+#ifdef KERNEL_TESTS
+// One-shot test seam: the next loom_create_private treats its ring layout
+// allocation as failed. Sound only while the in-kernel fixture is that
+// function's sole caller; rescope it before any concurrent or engine caller.
+void loom_private_layout_fault_arm_for_test(void);
+void loom_private_layout_fault_disarm_for_test(void);
+bool loom_private_layout_fault_armed_for_test(void);
+// Refuse the slot page instead; same sole-caller restriction and consumed even
+// on an early refusal, before charge or allocation.
+void loom_private_slots_fault_arm_for_test(void);
+void loom_private_slots_fault_disarm_for_test(void);
+bool loom_private_slots_fault_armed_for_test(void);
+void loom_private_pools_fault_arm_for_test(void);
+void loom_private_pools_fault_disarm_for_test(void);
+bool loom_private_pools_fault_armed_for_test(void);
+void loom_private_targets_fault_arm_for_test(void);
+void loom_private_targets_fault_disarm_for_test(void);
+bool loom_private_targets_fault_armed_for_test(void);
+void loom_private_engine_fault_arm_for_test(void);
+void loom_private_engine_fault_disarm_for_test(void);
+bool loom_private_engine_fault_armed_for_test(void);
+void loom_private_requests_fault_arm_for_test(void);
+void loom_private_requests_fault_disarm_for_test(void);
+bool loom_private_requests_fault_armed_for_test(void);
+void loom_private_nodes_fault_arm_for_test(void);
+void loom_private_nodes_fault_disarm_for_test(void);
+bool loom_private_nodes_fault_armed_for_test(void);
+// One-shot keyed to the arming thread: that thread's next loom_create_layout
+// treats its ring Burrow as refused AFTER allocating the Loom metadata, and
+// arms the large-kfree watch on that metadata.
+void loom_layout_ring_fault_arm_for_test(void);
+void loom_layout_ring_fault_disarm_for_test(void);
+bool loom_layout_ring_fault_armed_for_test(void);
+#endif
+void loom_handle_closed(struct Loom *l);
+// External close prerequisite changed; caller retains l, no outer locks.
+// Call only AFTER ending the physical borrow; internal close puts are quiet.
+void loom_private_close_changed(struct Loom *l);
+// Publish sq_head past one consumed position, after its index and SQE are copied.
+// Caller holds l->lock.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h);
+#ifdef KERNEL_TESTS
+// Runs under l->lock right after sq_head is published; shared ring memory only.
+void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
+// Runs in a setup the moment its handle is installed: where a sibling thread's
+// close of the new fd can land.
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
+// Runs in an ordinary setup right after the ring is mapped and the lock that
+// mapped it dropped: where a sibling thread can first reach the mapping.
+void loom_setup_mapped_hook_for_test(void (*hook)(struct Proc *, u64));
+void loom_setup_mapped_for_test(struct Proc *p, u64 ring_va);
+// Deterministic unlocked owner-boundary interleavings, test builds only.
+void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32));
+void loom_private_close_boundary_for_test(struct Loom *, u32);
+u32 loom_private_close_observe_for_test(struct Loom *, u64 *visits);
+#endif
+void loom_exec_latch(struct Loom *l); // leaf only; caller retains the table owner
+bool loom_is_private(const struct Loom *l);
+void loom_retire_init(void);
+void loom_retirer_main(void);
+#ifdef KERNEL_TESTS
+u64 loom_private_retired(void);
+u64 loom_private_created(void);
+#endif // KERNEL_TESTS
+
 
 // Refcount. loom_unref's last drop clunks every registered Spoor and
 // burrow_unref's the ring (releasing the kernel's handle_count; the user
@@ -612,9 +724,74 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // range invalid / OOB / non-anon / not writable / n out of range) NOTHING is
 // changed and every Burrow ref taken so far is rolled back. Returns 0 /
 // -T_E_INVAL.
+// Internal only: retained private Loom + creator Proc in its stable syscall
+// image, immutable kernel input. Resolves/pins ANON RW buffers; no usercopy.
+// Public setup/register and private I/O activation remain disabled.
+int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+                                  const struct loom_buf_reg *bufs, u32 n);
+// Internal provided-buffer owner front-end. Prepare takes an immutable complete
+// kernel record and requires the same stable creator-image contract above.
+// Publish/rollback/reap are retained-Loom kernel-owner continuations; user-facing
+// authority/copyout dispatch is not enabled. Never mix these pin-owning pools
+// with raw ledger-only reservations. No fixed-I/O private engine is enabled;
+// request/CQ admission and protocol integration are still required before activation.
+int loom_private_pool_prepare(struct Loom *, struct Proc *,
+                              const struct loom_service_pool_create *,
+                              struct loom_service_ref *);
+int loom_private_pool_publish(struct Loom *, struct loom_service_ref);
+int loom_private_pool_rollback(struct Loom *, struct loom_service_ref);
+int loom_private_pool_reap(struct Loom *, struct loom_service_ref);
+// Internal fixed-buffer reservation: immutable kernel member snapshot, retained
+// Loom and creator Proc in its stable syscall image, as for private registration.
+// Caller has precharged a request and must
+// reserve its terminal obligation before making it runnable. The zeroed node
+// stays alive through held/running/cancelled local users; release only after
+// those users end. These APIs never dispatch or publish a completion.
+int loom_private_fixed_acquire(struct Loom *, struct Proc *,
+                               const struct loom_service_pool_member *,
+                               struct loom_private_fixed *);
+int loom_private_fixed_release(struct Loom *, struct loom_private_fixed *);
+// Internal SCOPE/FID metadata transactions, not activated register handlers.
+// Input is a kernel snapshot. Caller retains l and its stable creator syscall
+// image through prepare/copyout/publish-or-rollback; these functions do not add
+// a reference. Failed prepare leaves output untouched. Publish rechecks close
+// and a FID's exact READY parent. Rollback/reap progress after close; only unused
+// RESERVED nodes can use this reap, never active or retired protocol objects.
+int loom_private_node_prepare(struct Loom *, struct Proc *,
+                              const struct loom_service_reserve *, struct loom_service_ref *);
+int loom_private_node_publish(struct Loom *, struct loom_service_ref);
+int loom_private_node_rollback(struct Loom *, struct loom_service_ref);
+int loom_private_node_reap_unused(struct Loom *, struct loom_service_ref);
+// A walked FID, once retired (loom_fid_reap_retired); its scope stays pinned until then.
+int loom_private_fid_reap(struct Loom *, struct loom_service_ref);
+
+// Internal target registration: complete immutable kernel record, retained owner
+// and creator in its stable syscall image. Resolves the actual registry_fd via
+// handle_get; navigation is not connect authority. No syscall activation.
+int loom_private_target_prepare(struct Loom *, struct Proc *,
+                                const struct loom_service_target *, struct loom_service_ref *);
+// Continuations retain the Loom across usercopy and every publish/remove call.
+int loom_private_target_publish(struct Loom *, struct loom_service_ref);
+int loom_private_target_rollback(struct Loom *, struct loom_service_ref);
+int loom_private_target_reap(struct Loom *, struct loom_service_ref);
+// Borrow only a published target. Success retains its slot and Loom until put;
+// the pointer is immutable during the borrow. Caller owns exactly one put per
+// get and never reuses a borrowed pointer after put. Future CONNECT must still
+// capture the actual caller and use devsrv_service_prepare's admission checks.
+int loom_private_target_get(struct Loom *, struct loom_service_ref,
+                            const struct SrvServiceTarget **);
+int loom_private_target_put(struct Loom *, struct loom_service_ref);
+
+
+
+// Post a committed non-pooled final terminal atomically with its delivery state.
+// Caller retains l; CQ full returns AGAIN without consuming the obligation.
+int loom_private_post_terminal(struct Loom *, struct loom_request_ref);
+
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 
+#ifdef KERNEL_TESTS
 // Post one completion into the CQ ring (the POST_CQE front-end's terminal
 // action; Loom-2b). Writes a loom_cqe {user_data, result, flags} at the kernel
 // cq_tail and publishes the bump with a release store (so a user-side
@@ -636,29 +813,38 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
 // pipe.c producer precedent) and does NOT sleep or re-enter p9_client_*, so it
 // composes with the c->lock the async-completion path holds (the seam contract).
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
+#endif // KERNEL_TESTS
+
 
 // KT-1.5: the KObj_Loom .poll hook (poll_scan_one's KOBJ_LOOM arm). Registers
 // pw on l->cq_waiters + reports POLLIN iff a CQE is ready. See loom.c.
 short loom_poll(struct Loom *l, short events, struct poll_waiter *pw);
 
+#ifdef KERNEL_TESTS
 // Diagnostics (tests).
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);
 
 // Tests: hold every SQPOLL kthread before its terminal until released.
 void loom_sqpoll_hold_exit_for_test(bool hold);
+#endif // KERNEL_TESTS
 
 // Loom-4c: the SQPOLL poll-thread entry + its lifecycle (LOOM.md 8.6). The
 // kthread is a kproc() thread (the console_mgr precedent) that drains the SQ +
 // drives the elected reader. loom_start_sqpoll spawns + readies it, charged to
-// the user pool as l->sqpoll_owner's thread (set first; -1 if unset, or if the
-// pool refuses), and sets l->sqpoll on success; loom_free joins it.
+// the user pool as `owner`'s thread (the Proc whose setup starts it, read only
+// inside the create), and sets l->sqpoll on success; loom_free joins it.
 // loom_sqpoll_main is the kthread body (noreturn -- it exits via the EXITING
 // terminal handshake, never returns to its caller). Both touch only the
 // still-allocated `struct Loom`.
-void loom_sqpoll_main(void *arg);
-int  loom_start_sqpoll(struct Loom *l);
+int  loom_start_sqpoll(struct Loom *l, struct Proc *owner);
+// Internal private executor admission. Caller retains l across the entire call.
+// Charges the creator's thread budget by permanent-stripes ticket and the
+// executor's kernel memory to `owner`, which must be that creator (its stripes)
+// and stay allocated across the call: setup passes the calling Proc.
+int loom_private_start_executor(struct Loom *l, struct Proc *owner);
 
+#ifdef KERNEL_TESTS
 // Test knob: a nonzero value caps a fan-in waiter's client set below
 // LOOM_MAX_REG_HANDLES, so a test can drive the partial set's timed rescan
 // with two clients. 0 in production.
@@ -676,27 +862,46 @@ extern volatile u32 g_loom_fanin_test_stalled;
 // KObj_Loom handle in p, fills `*out` + `*out_fd`. `flags` accepts
 // LOOM_SETUP_SQPOLL (Loom-4c: spawns the poll-thread before the handle is
 // returned); other LOOM_SETUP_* bits reject until their sub-chunk lands.
-// Returns 0 on success, -1 on bad args / OOM / handle-table-full / SQPOLL
-// spawn failure (rolling back the map + the Loom -- which joins any spawned
-// kthread -- on any failure).
+// Returns 0 on success, else a negated errno (-EINVAL, -ENOMEM, -EAGAIN at the
+// thread cap, -EMFILE), rolling back the map + the Loom -- which joins any
+// spawned kthread -- on any failure.
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd);
-// Undo a successful setup whose params never reached the caller: close the
-// handle, then detach the ring through the charge-settling path -- after the
-// close that detach can be the ring's final drop.
-void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size);
+// The same, also handing the caller a reference of its own on the new Loom
+// (*out_l, on success only): a sibling thread can close the published fd at
+// once, and the reference is what keeps the Loom -- and its identity -- for
+// the caller's rollback. The caller drops it, or passes it to the rollback.
+int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
+                                 struct loom_params *out, hidx_t *out_fd,
+                                 struct Loom **out_l);
+#endif // KERNEL_TESTS
+// Detach the ring mapping a setup made, through the charge-settling core, only
+// while the mapping at ring_va is still exactly l's ring; true if it did.
+// Caller holds a reference on l.
+bool sys_loom_ring_detach(struct Proc *p, struct Loom *l, u64 ring_va, u32 ring_size);
+#ifdef KERNEL_TESTS
+// Undo a successful held setup (legacy or private) whose params never reached
+// the caller: close fd only while it still names l, detach only l's own ring
+// mapping, then drop the caller's reference -- which can be the Loom's last,
+// whose final drop of the ring settles its charge. Consumes that reference.
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, struct Loom *l,
+                             u64 ring_va, u32 ring_size);
 
 // Testable register inner. Resolves the `n` fds in `fds[]` (each must be a
 // KOBJ_SPOOR handle in p) into the ring at `loom_fd`'s registered-handle table.
-// Returns 0 / -1.
+// Returns 0 / -1, -EBADF for a `loom_fd` that names no ring, or -EOPNOTSUPP on
+// a private ring (it names targets instead).
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n);
 
 // Loom-6: testable register inner for LOOM_REGISTER_BUFFERS. Resolves the `n`
 // VA ranges in `bufs[]` (each within one anon RW VMA of `p`) into `loom_fd`'s
-// registered-buffer table via loom_register_buffers. Returns 0 / -1.
+// registered-buffer table via loom_register_buffers. Returns 0 / -1, or -EBADF
+// for a `loom_fd` that names no ring; a private ring routes to its private
+// registration and returns that call's errno.
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n);
+#endif // KERNEL_TESTS
 
 // Loom-3 batch-enter core. Consume up to `to_submit` SQEs from the SQ index ring
 // (in SQ-index order), copy each to kernel memory (ring TOCTOU), and dispatch:
@@ -729,10 +934,12 @@ void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
 void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
 #endif
 
+#ifdef KERNEL_TESTS
 // Testable enter inner. Resolves `loom_fd` -> KObj_Loom in `p` (holding a loom
 // ref for the call), runs loom_enter, and returns its result. -1 on a bad fd /
 // wrong kind. The SVC handler is a thin current_thread() wrapper.
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
                             u32 min_complete, u32 flags);
+#endif // KERNEL_TESTS
 
 #endif // THYLACINE_LOOM_H

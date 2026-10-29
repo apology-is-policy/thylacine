@@ -1,0 +1,11 @@
+
+running 6 tests
+test bounded_members_and_lease_wrap ... ok
+test final_and_out_of_order_return_preserve_earlier_payload ... ok
+test geometry_is_checked_before_any_receipt ... ok
+test malformed_receipts_do_not_mutate_ownership ... ok
+test stale_and_failed_returns_cannot_recycle ... ok
+test owner_namespace_prevents_cross_ring_token_return ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,36 @@
+Astra single-agent self-review, October 10. Not an independent audit.
+
+Reviewed immutable shared SQ copying, exact creator image/identity, fixed private
+geometry and bounded hostile tail/index handling. Consumer claim under Ll reserves
+one precharged refusal cell before advancing head; no allocation or constructor
+under Ll. Concurrent frontend cannot claim while preparation is in progress or a
+refusal remains. Preparation/publish rechecks fresh deadline and authority through
+actual IO helpers. Successful publication transfers owner: frontend never touches
+it again. Failed preparation/publish finishes physical rollback before clearing
+submitting; whole close parks until that transition and blocks future claims.
+
+Refusal CQ publication holds Ll, zeroes stale receipt, clears the cell and release
+publishes the tail once. Full CQ retains the scalar result/correlation without
+scope pointers or borrowed payloads. Zero-budget creator ENTER kick wakes the
+register/recheck predicate; no worker borrowing of the creator Proc. Engine final
+empty/discard excludes pending frontend claims. Whole close drops only settled
+scalar refusal then follows actual operation drain. Fixed engine size3664B stays
+within its already charged4096B page; no quota or ABI enlargement.
+
+FRONT-R1 found by self-review: priority retained refusals could preempt every
+runnable scope visit. Baseline reproduced; final 65-participant round robin and
+64-scope close cursor normalization pass exact removal mutant and close boundary.
+All13 named fault variants detected, including the earlier exact invariant for
+pending reservation removal. 3674 cumulative ASan/UBSan checks pass (3125 prior
+return/drain assertions included). Real ARM64 frontend/engine/layout objects pass
+without libc dependency; engine3664/node64/table4096/owner920 bytes. Existing
+lifecycle models2clean/14counterexamples pass but do not model this refusal cell
+or prove C/native SMP scheduling. Raw failed fixture/build runs remain preserved.
+
+This layer remains uninstalled and internal. Public private ENTER stays disabled.
+Host constructor error tests validate CONNECT scalar routing only: successful real
+CONNECT construction/adoption still needs combined qualification. Native IO,
+poll/wake, refs, backing/allocation and final protocol destruction are controlled
+boundaries. No native or full Mac claim applies to this source. Canonical kernel
+remains97d495; the previous50/50 Mac run qualifies only f719ee4a. No Main landing,
+private async/clipboard activation or128MiB protection removal.

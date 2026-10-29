@@ -384,6 +384,15 @@ not derivable from the primitives: a fourth stop source would have to make it
 afresh, exactly as the self-stop did when it chose freshness-plus-orphan over
 the gate.
 
+## Process membership versus cleanup lifetime (AS-2a)
+
+Kernel descriptor pins are not Procs and never join a session or process group.
+The AddrSpace owner/total split in [[sub-kernel-addrspace]] leaves job-control
+membership, stop ownership, wait reports and orphan decisions on their existing
+Proc-table paths. An ownerless accounting descriptor can outlive reaping without
+creating a live group member. The fresh CPU1 boot includes the existing job-control
+tests; this prerequisite makes no new stop-protocol or graphical qualification.
+
 ## Provenance
 
 [[arc-pty]] sub-chunks PTY-1e (the report latches and the wait selectors) and
@@ -490,3 +499,52 @@ paths, or the first line of the ZOMBIE transition, which now records the
 departing holder in its space before the legate teardown and the orphan rule run.
 None touches sessions, process groups, the group note fan, the terminal seam or
 the job-control stop.
+## Interaction epochs on membership changes
+
+Successful setsid/setpgid invalidates any nomination of the changing process
+before publishing new sid/pgid, under lifecycle then pts. Successful terminal
+ACQUIRE/SET_FG also advances the pts epoch, including redundant calls. These
+operations never wait for compositor acknowledgement. Interaction CHECK samples
+membership and epoch together; the ordinary signal/foreground snapshot behavior
+is unchanged. See [[sub-kernel-pts]].
+
+## AS-2b admission (October 4)
+
+Private service identity capture uses the existing process-table walk lock and
+returns values only. It does not change foreground groups, signals or stopping.
+Exact address-space matching distinguishes an exec successor from the creator
+image even when stripes remains unchanged. No new sharing guard is active yet.
+
+## Private ring sharing and fork exclusion
+
+RFMEM's proc_alloc_in path now refuses while the source AS has a private-ring
+guard. Admission is serialized with setup under the AS lock, not a racy owner
+count precheck. Ordinary fork omits tagged ring VMAs; job-control semantics stay
+unchanged. Private mode is still unavailable to userspace.
+
+## Private worker budget lifetime
+
+ProcSqpollTicket serializes its charge/refund under the existing lifecycle lock,
+without a signal, wake, allocation or scheduler callback. Admission uses the
+ordinary thread-plus-SQPOLL limit and refuses a group already terminating. The
+private owner must invoke it outside Loom/protocol locks. This does not alter
+job-control ownership or stop/resume behavior; see [[sub-kernel-proc]].
+
+## 2026-10-07: flagged by co-tenancy, nothing owed (AS-R9)
+
+`kernel/proc.c` moved +6 lines since this dossier's date and `quaestor stale`
+flagged it, as it flags every owner of that file -- churn is measured per FILE,
+not per surface ([[chg-2026-08-15-stale-by-cotenancy]], which recorded the same
+disposition for this surface once before).
+
+The entire delta is ONE hunk: `handle_private_exec_latch(p)` plus its five-line
+comment inside `proc_exec_replace`. Checked by bounded token count against this
+dossier's own material rather than by eye:
+
+    proc_exec_replace        1 mention, in this dossier's own 2026-08-16 co-tenancy entry -- not in its material
+    handle_private_exec_latch / private_exec   0
+    close_on_exec                              0
+
+The single hit is this dossier's own prior record of the same disposition, which is the third time the same file has flagged it. Sessions, process groups, the group note fan, the terminal seam and the job-control stop are all untouched by the hunk. The fact is owed by [[sub-kernel-proc]], which owns
+`proc_exec_replace`, and it is recorded there. Dated current rather than left
+flagged, so the next session does not redo this check.
