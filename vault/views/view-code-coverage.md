@@ -67,7 +67,7 @@ units — see [[sub-substrate-gates]] and its siblings.
 <!-- generated:begin -->
 **549 owned · 46 unowned · 595 files (92% owned) · ~11886 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **78 files, ~38875 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~38874 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|

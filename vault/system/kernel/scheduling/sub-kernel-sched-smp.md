@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9, inv-i48]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, spec-thread-reap, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -53,8 +53,10 @@ between two steps of a sequence that reads, in source, like a single act.
    — two handoffs parked in the *CPU's* slot, not the thread's.
 3. `cpu_switch_context(&prev->ctx, &next->ctx)`.
 4. Whoever resumes on this CPU — either a thread returning from its own
-   `sched()`, or a fresh thread arriving at `thread_trampoline` and
-   calling `sched_finish_task_switch` — reads *that CPU's* two handoff
+   `sched()`, or a fresh thread arriving at `thread_trampoline` (or, for a
+   user thread's first switch-in, `thread_user_trampoline` in the vector
+   file since thread-model C7) and calling `sched_finish_task_switch` —
+   reads *that CPU's* two handoff
    slots, RELEASE-clears `prev->on_cpu`, and releases the lock.
 5. If `prev` was an exited user thread, that same resume path frees it
    (`sched_resume_tail`, [[inv-i48]]), still with interrupts masked.

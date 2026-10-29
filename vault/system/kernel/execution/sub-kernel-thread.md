@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i32, inv-i44, inv-i48]
 validated-by: [gate-smp, spec-thread-reap]
 locks: [lock-proc-threads, lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -28,8 +28,8 @@ default), which several guards rely on.
 | Constructor | Runs at | First switch-in lands at | kstack |
 |---|---|---|---|
 | `thread_create` / `thread_create_with_arg` | EL1 | `thread_trampoline` → `blr entry` | own 32 KiB alloc |
-| `thread_create_user` | EL0 | `thread_user_trampoline` → `eret` | own 32 KiB alloc |
-| `thread_create_forked` | EL0 | `thread_fork_trampoline` → the shared exception return | own 32 KiB alloc |
+| `thread_create_user` | EL0 | `thread_user_trampoline` → the EL0-return tail over a fresh frame | own 32 KiB alloc |
+| `thread_create_forked` | EL0 | `thread_user_trampoline` → the EL0-return tail over the parent's frame | own 32 KiB alloc |
 | `thread_create_kthread_for` | EL1 (in kproc) | `thread_trampoline` → `blr entry` | own 32 KiB alloc, charged to `owner` |
 | `thread_init` (kthread) / `thread_init_per_cpu_idle` | EL1 | never (born RUNNING) | none — the boot stack |
 | `thread_create_bootcpu_idle` | EL1 | `thread_trampoline` | none — a dedicated BSS stack |
@@ -121,21 +121,35 @@ block; only tests call it, since the cache is a fixed slice of the reserve.
 
 **First-switch-in.** There is no "initial save". Each constructor lays out
 `ctx` so `cpu_switch_context`'s `ret` lands at a trampoline: `ctx.lr` is the
-trampoline, `ctx.sp` the stack top, and the callee-saved slots carry the
-arguments (`x20` = arg, `x21` = entry for the EL1 form; `x19`/`x20`/`x21`/`x22`
-= user sp/arg/entry/tls for the EL0 form). `ctx.ttbr0` is baked to the
+trampoline and `ctx.sp` the stack top. An EL1 thread's callee-saved slots carry
+its arguments (`x20` = arg, `x21` = entry). An EL0 thread carries none: its
+`ctx.sp` is a first exception frame at the top of its kernel stack, which holds
+everything its first entry needs, and `ctx.tpidr_el0` is its TLS pointer, which
+the switch-in loads (below). `ctx.ttbr0` is baked to the
 **kernel** TTBR0 (ASID 0) at create — not the Proc's — because the rolling
 ASID is not known until switch time; the context-switch pre-hook installs
 the real value. Baking the kernel root means a hypothetical missing-pre-hook
 path faults *safely* instead of aliasing ASID 0 onto a user page table.
 
-### The fourth shape restores a frame instead of building one
+### The two EL0 shapes build a frame; the fork restores one
 
-Every other constructor *composes* a starting context: pick a trampoline, stuff
-the callee-saved slots with arguments, let the trampoline assemble a world. The
-forked one is the inverse. It receives the parent's live exception frame and
-reproduces it, because the child is not starting — it is **continuing the
-parent's C frame**, at the same instruction, with the same condition flags.
+Both EL0 constructors build a first exception frame at the top of the thread's
+fresh kernel stack, the address the exception entry would have used, and both
+first switch-ins land in one trampoline, `thread_user_trampoline`, which
+releases the switch's run-tree lock and takes the EL0-return tail over the frame
+([[sub-kernel-exception]], thread-model C7). So a thread's first EL0 instruction
+is reached as every later one is: a thread spawned or forked into a stopped Proc
+parks before it, one born into a dying group dies, and a pending note is met.
+Until C7 the spawned thread's trampoline `eret`ed straight from registers and
+ran EL0 code before any of that could act.
+
+The spawned thread's frame is **fresh**: `el0_birth_frame_init` zeroes every
+field, then writes the entry as the return address, EL0 with interrupts clear as
+the saved state and the user stack as SP_EL0, and the constructor puts the
+argument in x0. The forked one is the inverse. It receives the parent's live
+exception frame and reproduces it, because the child is not starting — it is
+**continuing the parent's C frame**, at the same instruction, with the same
+condition flags.
 
 The decision is a **pure function** of (destination, source, child stack), split
 out deliberately so it is reachable by a test with no Proc in existence. It is
@@ -157,20 +171,24 @@ assignment of this size compiles to a memory-copy call that a freestanding
 kernel does not link.
 
 **The frame is carved at the exact address the exception entry path would have
-chosen** — the top of the child's own fresh kernel stack, less one frame. That
-address is the whole trick: it lets the trampoline hand the child to the
-**shared, audited exception-return** rather than open-coding a second return to
-user mode. The return path's loads are stack-relative and its final adjustment
+chosen** — the top of the child's own fresh kernel stack, less one frame
+(`thread_first_frame`, shared by both shapes). That address is the whole trick:
+it lets the trampoline hand the thread to the **shared, audited EL0-return tail
+and exception return** rather than open-coding a second return to user mode. The return path's loads are stack-relative and its final adjustment
 lands precisely on the stack top, exactly as from any other return. Alignment is
 *asserted* rather than assumed, because a misaligned stack pointer at the return
 faults at kernel level with the frame half-restored.
 
-**The absence of a register-zeroing sweep is the correctness argument.** The
-ordinary user-thread trampoline scrubs the general registers so a fresh thread
-cannot inherit kernel residue. This one deliberately does not, and the inversion
-is exact: the child is resuming its parent's userspace frame, so scrubbing would
-break the fork rather than harden it. Two trampolines, opposite dispositions on
-the same question, each right for its own case.
+**Zeroing is the frame builders' disagreement, not the trampolines'.** The
+exception return loads every register from the frame, so whatever a frame holds
+crosses into EL0. The fresh frame is zeroed first, so a spawned thread inherits
+no kernel residue -- the guarantee the deleted register sweep in the old spawn
+trampoline gave. The fork's is deliberately not zeroed, and the inversion is
+exact: the child is resuming its parent's userspace frame, so clearing it would
+break the fork rather than harden it. Since C7 there is one trampoline, and the
+two builders hold opposite dispositions on the same question, each right for
+its own case. TPIDR_EL0 is not in the frame: both constructors program it into
+`ctx` verbatim, and the switch-in loads it.
 
 **Floating-point state comes from the live registers, not the caller's saved
 context.** The caller is *running*, so its saved context holds whatever it had at
@@ -459,9 +477,13 @@ at the bottom of the deepest syscall chain (ARCH 8.12).
   layout, in another file, whose purpose is the entry/exit ABI: an added field
   trips it and forces the author to update the assembly. Nothing routes them
   here. The completeness is real and the guard is incidental.
-- **The two user trampolines must keep disagreeing about register scrubbing.**
-  Fresh-thread zeroes, forked does not. Making them consistent breaks whichever
-  one is changed.
+- **The two frame builders must keep disagreeing about zeroing.**
+  `el0_birth_frame_init` zeroes every field before it writes its own; the fork
+  copy reproduces the parent's. A fresh frame that stopped zeroing would leak
+  kernel residue through the exception return; a fork that zeroed would break.
+- **An EL0 thread's first switch-in must take the EL0-return tail.** A
+  trampoline that `eret`ed on its own would run EL0 code before a stop, a death
+  or a note could act ([[spec-debug-stop]] `BUGGY_SPAWN_AT_EL0`).
 - **Floating-point for a fork must come from the live registers.** The caller's
   saved context is stale precisely because the caller is running.
 - **The forked frame must stay at the top-of-stack address the entry path would
@@ -520,3 +542,10 @@ create ([[seam-exited-threads-wait-for-a-create]], closed).
 Thread-model C6 (2026-10-27): one id space (a main thread's tid is the pid;
 exec moves it), the pool charge (`thread_new`, `THREAD_POOL_PAGES`,
 `thread_create_kthread_for`) and the reaper's early return of it.
+
+Thread-model C7 (2026-10-28): one first entry. `thread_alloc_user` builds a
+fresh first frame (`thread_first_frame` + `el0_birth_frame_init`, x0 = arg) and
+`thread_alloc_forked` the parent's, and both first switch-ins land in
+`thread_user_trampoline` in the vector file, which takes the EL0-return tail;
+`thread_fork_trampoline` and the spawn trampoline's register sweep in
+`context.S` are deleted. Witness: `first_entry.spawn_into_stop_parks`.
