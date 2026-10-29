@@ -1256,9 +1256,6 @@ void test_first_entry_clone_inherits_the_mask(void) {
         msg[0] = '\0';
         if (c)
             reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
-        uart_puts(masked ? "    fe-clone masked: " : "    fe-clone control: ");
-        uart_puts(msg);
-        uart_puts("\n");
         TEST_ASSERT(pid > 0 && c != NULL, "rfork made the cloning Proc");
         TEST_ASSERT(known && tid > 0, "the clone returned a tid");
         TEST_EXPECT_EQ(reaped, pid, "the cloning Proc was reaped");
