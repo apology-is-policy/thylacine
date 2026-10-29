@@ -612,6 +612,13 @@ int  p9_client_statfs(struct p9_client *c, u32 fid,
                        struct p9_statfs *out_statfs);
 int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 
+// Tlock / Tgetlock (B-3h, ARCH 9.6.11). A conflict is *status ==
+// P9_LOCK_BLOCKED, not an error: the server never waits.
+int  p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
+                    u64 start, u64 length, u8 *status);
+int  p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
+                       u64 start, u64 length, struct p9_getlock *out);
+
 // =============================================================================
 // Weft operations (Weft-6; NET-THROUGHPUT.md section 6).
 // =============================================================================

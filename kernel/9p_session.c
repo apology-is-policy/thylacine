@@ -844,6 +844,40 @@ int p9_session_send_fsync(struct p9_session *s,
     return rc;
 }
 
+// The lock's proc_id and client_id: Stratum's owner is the fid alone, so the
+// kernel sends neither a pid nor a node name (they would only be advisory).
+int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
+                         u32 fid, u8 type, u32 flags, u64 start, u64 length) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    int t = alloc_tag(s, false);
+    if (t < 0) return -1;
+    int rc = p9_build_tlock(out, cap, (u16)t, fid, type, flags, start, length,
+                            0, NULL, 0);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TLOCK, fid, fid);
+    return rc;
+}
+
+int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
+                            u32 fid, u8 type, u64 start, u64 length) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    int t = alloc_tag(s, false);
+    if (t < 0) return -1;
+    int rc = p9_build_tgetlock(out, cap, (u16)t, fid, type, start, length,
+                               0, NULL, 0);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TGETLOCK, fid, fid);
+    return rc;
+}
+
 // =============================================================================
 // Send: mutation family. All ops require state OPEN + fid_bound on the
 // targeting fid. Trename is fid-exclusive (server-side identity mutation);
@@ -1398,6 +1432,16 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
     } else if (op->kind == P9_TFSYNC) {
         u16 tag_check;
         rc = p9_parse_rfsync(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TLOCK) {
+        u16 tag_check;
+        rc = p9_parse_rlock(rmsg, len, &tag_check, &out->lock_status);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TGETLOCK) {
+        u16 tag_check;
+        rc = p9_parse_rgetlock(rmsg, len, &tag_check, &out->getlock);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
     } else if (op->kind == P9_TSYMLINK) {

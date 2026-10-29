@@ -2360,6 +2360,52 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     return 0;
 }
 
+// Tlock: a byte-range lock on `fid` (B-3h). *status gets the server's
+// P9_LOCK_* answer; a conflict is a status (BLOCKED), not an error. Returns 0
+// or a negative errno (an Rlerror, or the transport's).
+int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
+                   u64 start, u64 length, u8 *status) {
+    if (!c || !status) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
+    int len = p9_session_send_lock(&c->session, c->out_buf, c->out_buf_cap,
+                                   fid, type, flags, start, length);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    *status = r.lock_status;
+    spin_unlock(&c->lock);
+    return 0;
+}
+
+// Tgetlock: would a lock on `fid` be granted? *out is the server's answer.
+int p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
+                      u64 start, u64 length, struct p9_getlock *out) {
+    if (!c || !out) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int te = client_await_tag_locked(c);
+    if (te != 0) CLIENT_UNLOCK_RET(c, te);
+    int len = p9_session_send_getlock(&c->session, c->out_buf,
+                                      c->out_buf_cap, fid, type, start, length);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    *out = r.getlock;
+    spin_unlock(&c->lock);
+    return 0;
+}
+
 // =============================================================================
 // Weft operations (Weft-6).
 // =============================================================================

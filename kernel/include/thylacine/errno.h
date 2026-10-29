@@ -354,6 +354,23 @@
 // the connect verb was accepted. POSIX: ECONNREFUSED.
 #define T_E_CONNREFUSED 111
 
+// ---------------------------------------------------------------------------
+// File locks (B-3h, ARCH 9.6.11; operator votes 34-35, 2026-10-29).
+//
+// No lock can be had for a reason that is not another owner's lock:
+// SYS_FILE_LOCK on a file whose Dev serves no locks, a Proc whose lock
+// table is full (I-32), or a server that answered its lock with
+// ERROR/GRACE or at its own bound. POSIX: ENOLCK.
+#define T_E_NOLCK      37
+
+// Stale file handle: the file a descriptor names can no longer be reached
+// to act on it. Kernel-originated for a fidless cached open (FID-LIFECYCLE
+// 3.3) whose re-walk no longer reaches the same qid.path and generation
+// (renamed away, unlinked or replaced). Signed off with PX-22's ESTALE
+// (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value.
+// POSIX: ESTALE.
+#define T_E_STALE      116
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -376,6 +393,8 @@ _Static_assert(T_E_CONNABORTED    == 103, "T_E_CONNABORTED ABI pin (POSIX ECONNA
 _Static_assert(T_E_ISCONN         == 106, "T_E_ISCONN ABI pin (POSIX EISCONN)");
 _Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)");
 _Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
+_Static_assert(T_E_NOLCK          == 37,  "T_E_NOLCK ABI pin (POSIX ENOLCK)");
+_Static_assert(T_E_STALE          == 116, "T_E_STALE ABI pin (POSIX ESTALE)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");

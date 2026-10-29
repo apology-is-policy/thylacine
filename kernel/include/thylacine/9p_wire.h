@@ -38,11 +38,13 @@
 //       Tmkdir     / Rmkdir     (72 / 73)
 //       Trenameat  / Rrenameat  (74 / 75)
 //       Tunlinkat  / Runlinkat  (76 / 77)
+//   - Lock family (B-3h):
+//       Tlock      / Rlock      (52 / 53)
+//       Tgetlock   / Rgetlock   (54 / 55)
 //   - Rlerror parse (7) — every R-message can be replaced by Rlerror.
 //
 // OUT OF P5-WIRE-MUTATION (deferred to follow-up chunks):
 //
-//   - Lock family: Tlock / Tgetlock.
 //   - Xattr family: Txattrwalk / Txattrcreate.
 //   - Stratum extensions: Tsync / Treflink / Tbind / Tunbind.
 //
@@ -646,6 +648,46 @@ int p9_build_tfsync(u8 *out, size_t cap, u16 tag, u32 fid, u32 datasync);
 
 // Rfsync parse: header-only (no body).
 int p9_parse_rfsync(const u8 *in, size_t len, u16 *tag);
+
+// Tlock / Rlock and Tgetlock / Rgetlock (9P2000.L; B-3h, ARCH 9.6.11).
+//
+//   Tlock body:    [fid: u32][type: u8][flags: u32][start: u64][length: u64]
+//                  [proc_id: u32][client_id: str]
+//   Rlock body:    [status: u8]
+//   Tgetlock body: [fid: u32][type: u8][start: u64][length: u64]
+//                  [proc_id: u32][client_id: str]
+//   Rgetlock body: [type: u8][start: u64][length: u64][proc_id: u32]
+//                  [client_id: str]
+//
+// length 0 = to the end of the file. A server never waits: a conflict
+// answers status BLOCKED, and the client retries.
+#define P9_LOCK_TYPE_RDLCK   0u
+#define P9_LOCK_TYPE_WRLCK   1u
+#define P9_LOCK_TYPE_UNLCK   2u
+#define P9_LOCK_FLAGS_BLOCK  1u
+#define P9_LOCK_SUCCESS      0u
+#define P9_LOCK_BLOCKED      1u
+#define P9_LOCK_ERROR        2u
+#define P9_LOCK_GRACE        3u
+
+// Rgetlock, parsed. client_id is validated and dropped: it names the
+// server's idea of the holder, which no caller here reads.
+struct p9_getlock {
+    u8  type;
+    u64 start;
+    u64 length;
+    u32 proc_id;
+};
+
+int p9_build_tlock(u8 *out, size_t cap, u16 tag, u32 fid, u8 type,
+                   u32 flags, u64 start, u64 length, u32 proc_id,
+                   const u8 *client_id, size_t client_id_len);
+int p9_parse_rlock(const u8 *in, size_t len, u16 *tag, u8 *status);
+int p9_build_tgetlock(u8 *out, size_t cap, u16 tag, u32 fid, u8 type,
+                      u64 start, u64 length, u32 proc_id,
+                      const u8 *client_id, size_t client_id_len);
+int p9_parse_rgetlock(const u8 *in, size_t len, u16 *tag,
+                      struct p9_getlock *out);
 
 // =============================================================================
 // Mutation family (P5-wire-mutation extension).

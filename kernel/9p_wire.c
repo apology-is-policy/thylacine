@@ -65,6 +65,10 @@ _Static_assert(P9_TSTATFS  == 8,                "Tstatfs type drift");
 _Static_assert(P9_RSTATFS  == P9_TSTATFS + 1,   "Rstatfs type drift");
 _Static_assert(P9_TFSYNC   == 50,               "Tfsync type drift");
 _Static_assert(P9_RFSYNC   == P9_TFSYNC + 1,    "Rfsync type drift");
+_Static_assert(P9_TLOCK    == 52,               "Tlock type drift");
+_Static_assert(P9_RLOCK    == P9_TLOCK + 1,     "Rlock type drift");
+_Static_assert(P9_TGETLOCK == 54,               "Tgetlock type drift");
+_Static_assert(P9_RGETLOCK == P9_TGETLOCK + 1,  "Rgetlock type drift");
 // Mutation family (P5-wire-mutation):
 _Static_assert(P9_TSYMLINK   == 16,               "Tsymlink type drift");
 _Static_assert(P9_RSYMLINK   == P9_TSYMLINK + 1,  "Rsymlink type drift");
@@ -945,6 +949,86 @@ int p9_parse_rfsync(const u8 *in, size_t len, u16 *tag) {
     int hdr = validate_rmsg_header(in, len, P9_RFSYNC, tag);
     if (hdr < 0) return -1;
     if ((size_t)hdr != len) return -1;       // Rfsync has no body
+    return 0;
+}
+
+// Tlock body: [fid: u32][type: u8][flags: u32][start: u64][length: u64]
+//             [proc_id: u32][client_id: str]
+int p9_build_tlock(u8 *out, size_t cap, u16 tag, u32 fid, u8 type,
+                   u32 flags, u64 start, u64 length, u32 proc_id,
+                   const u8 *client_id, size_t client_id_len) {
+    if (client_id_len > P9_NAME_MAX || (client_id_len && !client_id)) return -1;
+    size_t total = P9_HDR_LEN + 4 + 1 + 4 + 8 + 8 + 4 + 2 + client_id_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TLOCK, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u8 (out + off, cap - off, type);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, flags);   if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, start);   if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, length);  if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, proc_id); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, client_id, client_id_len);
+    if (rc < 0) return -1;
+    off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rlock(const u8 *in, size_t len, u16 *tag, u8 *status) {
+    if (!tag || !status) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RLOCK, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    int rc = p9_unpack_u8(in + off, len - off, status);
+    if (rc < 0) return -1;
+    off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+// Tgetlock body: [fid: u32][type: u8][start: u64][length: u64]
+//                [proc_id: u32][client_id: str]
+int p9_build_tgetlock(u8 *out, size_t cap, u16 tag, u32 fid, u8 type,
+                      u64 start, u64 length, u32 proc_id,
+                      const u8 *client_id, size_t client_id_len) {
+    if (client_id_len > P9_NAME_MAX || (client_id_len && !client_id)) return -1;
+    size_t total = P9_HDR_LEN + 4 + 1 + 8 + 8 + 4 + 2 + client_id_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TGETLOCK, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u8 (out + off, cap - off, type);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, start);   if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, length);  if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, proc_id); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, client_id, client_id_len);
+    if (rc < 0) return -1;
+    off += (size_t)rc;
+    return (int)off;
+}
+
+// Rgetlock body: [type: u8][start: u64][length: u64][proc_id: u32]
+//                [client_id: str]
+int p9_parse_rgetlock(const u8 *in, size_t len, u16 *tag,
+                      struct p9_getlock *out) {
+    if (!tag || !out) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RGETLOCK, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc;
+    rc = p9_unpack_u8 (in + off, rem, &out->type);    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->start);   if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->length);  if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out->proc_id); if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    const u8 *cid;
+    u16 cid_len;
+    rc = p9_unpack_str(in + off, rem, &cid, &cid_len);
+    if (rc < 0) return -1;
+    off += (size_t)rc;
+    if (off != len) return -1;
     return 0;
 }
 

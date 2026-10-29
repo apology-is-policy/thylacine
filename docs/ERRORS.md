@@ -94,6 +94,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path), and the answer to a syscall number the kernel does not know (operator vote 2026-10-22, `dec-2026-10-22-unknown-syscall-enosys`; kernels before it answered a bare -1, see "Unknown syscall numbers") |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
+| `T_E_NOLCK`     | 37    | `ENOLCK`     | No lock available for a reason other than another owner's lock: `SYS_FILE_LOCK` on a file whose Dev serves no locks, a Proc whose lock table is full (I-32), or a server that answered ERROR/GRACE or hit its own bound (B-3h, ARCH 9.6.11; operator votes 34-35, 2026-10-29) |
 | `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. THREE emitters share the code. Two are the resolver's, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead. (3) SYS_MOUNT refuses a mount that would close a cycle in the mount graph, I-3 (operator vote 2026-10-19; "Mount and unmount" below) |
 | `T_E_NOTSOCK`   | 88    | `ENOTSOCK`   | Not a socket: a socket call names an fd with no socktab entry (a plain file, or a socket whose entry was dropped) |
 | `T_E_PROTONOSUPPORT` | 93 | `EPROTONOSUPPORT` | Protocol not supported: a `SOCK_*` type or `IPPROTO_*` the `/net` tree has no directory for |
@@ -104,6 +105,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_ISCONN`    | 106   | `EISCONN`    | Already connected: a second `connect()` on a connected socket |
 | `T_E_NOTCONN`   | 107   | `ENOTCONN`   | Not connected: `getpeername()` / `shutdown()` on a socket that never connected |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
+| `T_E_STALE`     | 116   | `ESTALE`     | Stale file handle: a fidless cached open's re-walk no longer reaches the same `qid.path` and generation, so `SYS_FILE_LOCK` cannot name its file (B-3h). Signed off with PX-22 (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value |
 | `T_E_CONNREFUSED` | 111 | `ECONNREFUSED` | Connection refused: netd rejected the dial, or the data open failed after the connect verb was accepted |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
