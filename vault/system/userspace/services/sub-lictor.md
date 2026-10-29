@@ -141,7 +141,8 @@ fails closed rather than wrapping or using an incompatible high-bit namespace.
 
 The synchronous deadline reports its own margin: each new slowest synchronous
 command past 50 ms is said, and once a deadline has latched the engine dead, a
-synchronous chain the device retires afterwards is said once with its delay,
+synchronous chain the device retires afterwards is said once, with the delay
+at which the serve loop saw it (an upper bound: the loop looks once a pass),
 which tells a late device from one that never completes.
 
 A test-mode lever reproduces the dead-engine state on demand.

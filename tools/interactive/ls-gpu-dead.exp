@@ -38,29 +38,58 @@ expect {
     timeout { lc_fail "the compositor's ctl never answered, before any latch (30s)" }
 }
 
-# One fid, two writes: the mint rebinds the fid onto the new surface's ctl,
-# and an interactive cat writes each console line as it reads it, so both
-# verbs ride that fid and no surface id has to be learned (ut redirects no
-# brace block and duplicates no fd).
+# The surface ids in a plain listing, read up to the tag that ends it. A
+# surface minted and never created is retired when its ctl clunks, so the
+# create rides an echo of its own and the destroy needs the id the create
+# made: a diff of two listings (ut redirects no brace block and duplicates
+# no fd, so one fid cannot carry both verbs).
+proc gd_surfaces {tag} {
+    global timeout
+    lc_send "ls --color=never --beacon=never /dev/tapestry/surface; echo $tag"
+    set timeout 30
+    expect {
+        -re "\n$tag" {}
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction listing surfaces ($tag)" }
+        timeout { lc_fail "the surface listing never ended ($tag, 30s)" }
+        eof { lc_fail "unexpected EOF listing surfaces ($tag)" }
+    }
+    set buf $expect_out(buffer)
+    regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $buf "" buf
+    set ids {}
+    foreach line [split [string map [list "\r" "\n"] $buf] "\n"] {
+        if {[regexp {^\s*([0-9]+)/?\s*$} $line -> n]} { lappend ids $n }
+    }
+    return $ids
+}
+
+set before [gd_surfaces surfaces-before]
+lc_send "echo 'create 97 89' > /dev/tapestry/surface/new"
+set after [gd_surfaces surfaces-after]
+set made {}
+foreach n $after {
+    if {[lsearch -exact $before $n] < 0} { lappend made $n }
+}
+if {[llength $made] != 1} {
+    lc_fail "the create made [llength $made] new surfaces (before: $before; after: $after), want exactly one"
+}
+set sid [lindex $made 0]
+lc_step "the create made surface $sid at the lever's size"
+
 set latched 0
 set late 0
-lc_send "cat > /dev/tapestry/surface/new"
-sleep 1
-lc_send "create 97 89"
-sleep 1
-lc_send "destroy"
+lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl; echo destroy-returned"
 set timeout 60
 expect {
     -ex "gpu command never retired (INJECTED by test-latch-dead)" {
         set latched 1
         lc_step "lictor latched the engine dead at the retirement"
     }
+    -re {\ndestroy-returned} { lc_fail "the destroy returned with no injected latch -- did the create make a 97x89 resource?" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the destroy" }
     timeout { lc_fail "no injected latch within 60s of the destroy -- did the create make a 97x89 resource?" }
 }
-# Before the fix the destroy's write is still blocked inside cat, so this
-# end-of-file and the sentinel after it are never read.
-lc_raw_send "\x04" "Ctrl-D"
-lc_send "echo destroy-returned"
+# Before the fix the destroy's write parks in lictor for good, so its echo
+# never finishes and the sentinel behind it never prints.
 expect {
     -ex "gpu synchronous chain retired" {
         set late 1

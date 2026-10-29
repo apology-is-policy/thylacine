@@ -4364,13 +4364,6 @@ impl Gpu {
         self.ctrl.fenced_held()
     }
 
-    /// Fenced slots currently allocatable. Read-only, and the ONLY thing that
-    /// can tell a departed client's slots came back from a client that
-    /// silently stranded them: `ctxs` deliberately excludes `retiring`
-    /// contexts, so a ctx wedged forever and a ctx that finished cleanly read
-    /// identically there -- round-5 F5's trap, one level down. (Round-7 F7:
-    /// fenced_held's insertion had stolen this doc AND the cfg gate below,
-    /// leaving this fn silently un-gated.)
     /// The latch lever's shot: a harmless display query whose wait reports
     /// the deadline passed, so the engine latches dead with that chain still
     /// in flight, exactly as a slow device leaves it.
@@ -4380,6 +4373,13 @@ impl Gpu {
         let _ = self.query_display_info();
     }
 
+    /// Fenced slots currently allocatable. Read-only, and the ONLY thing that
+    /// can tell a departed client's slots came back from a client that
+    /// silently stranded them: `ctxs` deliberately excludes `retiring`
+    /// contexts, so a ctx wedged forever and a ctx that finished cleanly read
+    /// identically there -- round-5 F5's trap, one level down. (Round-7 F7:
+    /// fenced_held's insertion had stolen this doc AND the cfg gate below,
+    /// leaving this fn silently un-gated.)
     #[cfg(feature = "test-mode")]
     pub fn test_fenced_free(&self) -> u32 {
         // The CLIENT pool (C-6): the reserved slot is never a client's, so a
