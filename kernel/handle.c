@@ -427,9 +427,9 @@ void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
 // The per-slot walk: one slot per lock hold, so no sync runs under the lock.
 // A slot closed or reused mid-walk is either seen or not; a descriptor of the
 // file opened during the walk was opened after the event that asked for it.
-static void lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) {
+static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) {
     struct Dev *d = owner->dev;
-    if (!d || !d->lock_sync || !d->lock_same_file) return;
+    if (!d || !d->lock_sync || !d->lock_same_file) return 0;
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         struct Spoor *sp = NULL;
         spin_lock(&t->lock);
@@ -443,15 +443,19 @@ static void lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how)
         }
         spin_unlock(&t->lock);
         if (sp) {
-            (void)d->lock_sync(sp, how);
+            int rc = d->lock_sync(sp, how);
             spoor_clunk(sp);
+            // A release lands what it can. A take that cannot have an open of
+            // its file read the server is refused.
+            if (rc != 0 && how == DEV_LOCK_SYNC_ACQUIRE) return rc;
         }
     }
+    return 0;
 }
 
-void handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how) {
-    if (!owner) return;
-    lock_sync_table(proc_handles_or_extinct(p), owner, how);
+int handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how) {
+    if (!owner) return 0;
+    return lock_sync_table(proc_handles_or_extinct(p), owner, how);
 }
 
 u32 handle_lock_owner_count(struct Proc *p) {
@@ -505,7 +509,7 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
 
     struct Dev *d = owner->dev;
     if (d->lock_sync) (void)d->lock_sync(c, DEV_LOCK_SYNC_RELEASE);
-    lock_sync_table(t, owner, DEV_LOCK_SYNC_RELEASE);
+    (void)lock_sync_table(t, owner, DEV_LOCK_SYNC_RELEASE);
     // A refusal (a dying thread cannot send) still removes the entry below, and
     // its clunk releases every lock the fid held.
     (void)d->lock(owner, SYS_FILE_LOCK_UN, 0, 0, NULL);

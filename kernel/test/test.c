@@ -728,6 +728,7 @@ void test_filelock_proc_test_owner(void);
 void test_filelock_fork_exec_dup_teardown(void);
 void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
+void test_filelock_acquire_syncs(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -2057,6 +2058,8 @@ void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
 void test_dev9p_lock_cached_open_refuses(void);
 void test_dev9p_lock_ident_generation(void);
+void test_dev9p_cached_open_lock(void);
+void test_dev9p_cached_open_loom(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -3045,6 +3048,7 @@ struct test_case g_tests[] = {
     { "filelock.fork_exec_dup_teardown", test_filelock_fork_exec_dup_teardown, false, NULL },
     { "filelock.stale_entry_retired", test_filelock_stale_entry_retired, false, NULL },
     { "filelock.reused_number", test_filelock_reused_number, false, NULL },
+    { "filelock.acquire_syncs", test_filelock_acquire_syncs, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
@@ -4599,6 +4603,8 @@ struct test_case g_tests[] = {
     { "dev9p.lock_owner_never_parks",  test_dev9p_lock_owner_never_parks,  false, NULL },
     { "dev9p.lock_cached_open_refuses", test_dev9p_lock_cached_open_refuses, false, NULL },
     { "dev9p.lock_ident_generation",   test_dev9p_lock_ident_generation,   false, NULL },
+    { "dev9p.cached_open_lock",        test_dev9p_cached_open_lock,        false, NULL },
+    { "dev9p.cached_open_loom",        test_dev9p_cached_open_loom,        false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },

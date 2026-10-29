@@ -163,17 +163,22 @@ struct dev9p_priv {
     // __atomic-acquire; dev9p_close reads it plainly (it runs at the LAST ref, so
     // no concurrent mapper exists).
     struct weft_binding      *weft;
-    // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): the
-    // fidless open's per-open state. cached_open == true implies fid == P9_NOFID
-    // + fid_owned == false; co_buf holds the [0, co_size) content snapshot taken
+    // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): an
+    // open served from a snapshot. co_buf holds the [0, co_size) content taken
     // at open (NULL iff co_size == 0 -- the empty-file open), immutable for the
-    // Spoor's lifetime (reads copy out with no lock); co_stat is the open-time
-    // metadata (serves fstat -- the same close-to-open discipline as the attr
-    // cache). dev9p_close frees co_buf + uncharges the global budget.
+    // Spoor's lifetime (reads copy out with no lock); dev9p_close frees it and
+    // uncharges the global budget. A strict client's cached open keeps its
+    // revalidating walk's fid, never opened, in `fid` (fid_owned; operator vote
+    // 20): fstat, a wstat and a lock address it. A loose client's has no fid,
+    // and co_stat, the open-time metadata, serves its fstat. co_rfid stays
+    // P9_NOFID until the open must read what the server holds (a lock's
+    // DEV_LOCK_SYNC_ACQUIRE, a Loom registration): then a clone of `fid`,
+    // opened for reading, is installed once (CAS), and reads go through it.
     bool                      cached_open;
     u8                       *co_buf;
     u64                       co_size;
     struct t_stat             co_stat;
+    u32                       co_rfid;
     // F1 write-behind (LARDER-DESIGN section 12): the per-open-file append-run
     // staging state. wb_lock is a PURE LEAF (only byte copies + state reads
     // under it -- wire I/O never; nothing else is ever acquired under it).

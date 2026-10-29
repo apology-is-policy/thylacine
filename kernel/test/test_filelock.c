@@ -32,6 +32,7 @@ void test_filelock_proc_test_owner(void);
 void test_filelock_fork_exec_dup_teardown(void);
 void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
+void test_filelock_acquire_syncs(void);
 
 // -----------------------------------------------------------------------------
 // The fake Dev.
@@ -59,9 +60,15 @@ static u32            g_lk_last_type;
 static u64            g_lk_last_start, g_lk_last_len;
 static bool           g_lk_last_test;
 static u32            g_lk_un_seq;         // seq of the last unlock
-static u32            g_lk_sync_n;         // .lock_sync calls
+static u32            g_lk_sync_n;         // .lock_sync(RELEASE) calls
 static u32            g_lk_sync_last_seq;
 static struct Spoor  *g_lk_synced[8];
+static u32            g_lk_acq_n;          // .lock_sync(ACQUIRE) calls
+static u32            g_lk_acq_last_seq;
+static struct Spoor  *g_lk_acquired[8];
+static struct Spoor  *g_lk_acq_fail;       // .lock_sync(ACQUIRE) on this Spoor fails
+static int            g_lk_acq_fail_rc;
+static u32            g_lk_take_seq;       // seq of the last take that reached .lock
 static hidx_t         g_lk_close_fd = -1;  // close this fd inside the next .lock
 static u8             g_lk_owner_tag;      // aux of a minted owner
 static struct Spoor  *g_lk_stale;          // .lock on this Spoor answers ESTALE
@@ -84,6 +91,10 @@ static void lk_reset(void) {
     g_lk_last_test = false;
     g_lk_un_seq = g_lk_sync_n = g_lk_sync_last_seq = 0;
     for (u32 i = 0; i < 8; i++) g_lk_synced[i] = NULL;
+    g_lk_acq_n = g_lk_acq_last_seq = g_lk_take_seq = 0;
+    for (u32 i = 0; i < 8; i++) g_lk_acquired[i] = NULL;
+    g_lk_acq_fail = NULL;
+    g_lk_acq_fail_rc = 0;
     g_lk_close_fd = -1;
     g_lk_stale = NULL;
     g_lk_stale_path = 0;
@@ -132,6 +143,7 @@ static int lk_lock(struct Spoor *c, u32 type, u64 start, u64 len,
                    struct t_file_lock *test) {
     g_lk_calls++;
     g_lk_seq++;
+    if (!test && type != SYS_FILE_LOCK_UN) g_lk_take_seq = g_lk_seq;
     if (g_lk_close_fd >= 0) {       // a peer thread's close lands mid-call
         hidx_t fd = g_lk_close_fd;
         g_lk_close_fd = -1;
@@ -216,8 +228,13 @@ static int lk_ident(struct Spoor *c) {
 }
 
 static int lk_sync(struct Spoor *c, u32 how) {
-    (void)how;
     g_lk_seq++;
+    if (how == DEV_LOCK_SYNC_ACQUIRE) {
+        if (g_lk_acq_n < 8) g_lk_acquired[g_lk_acq_n] = c;
+        g_lk_acq_n++;
+        g_lk_acq_last_seq = g_lk_seq;
+        return c == g_lk_acq_fail ? g_lk_acq_fail_rc : 0;
+    }
     if (g_lk_sync_n < 8) g_lk_synced[g_lk_sync_n] = c;
     g_lk_sync_n++;
     g_lk_sync_last_seq = g_lk_seq;
@@ -256,6 +273,17 @@ static bool lk_synced(struct Spoor *c) {
     for (u32 i = 0; i < 8 && i < g_lk_sync_n; i++)
         if (g_lk_synced[i] == c) return true;
     return false;
+}
+
+static bool lk_acquired(struct Spoor *c) {
+    for (u32 i = 0; i < 8 && i < g_lk_acq_n; i++)
+        if (g_lk_acquired[i] == c) return true;
+    return false;
+}
+
+static void lk_acq_reset(void) {
+    g_lk_acq_n = g_lk_acq_last_seq = g_lk_take_seq = 0;
+    for (u32 i = 0; i < 8; i++) g_lk_acquired[i] = NULL;
 }
 
 // -----------------------------------------------------------------------------
@@ -844,4 +872,70 @@ void test_filelock_reused_number(void) {
     else test_fail("filelock: fixture allocation failed");
     g_lk_dead = NULL;
     lk_teardown(&f, 7);
+}
+
+// -----------------------------------------------------------------------------
+// Before a take: every open of the file reads what the server holds.
+// -----------------------------------------------------------------------------
+
+// Before every take, for either owner, the call has each open of the file the
+// Proc holds read what the server holds (Dev.lock_sync ACQUIRE: dev9p's cached
+// opens leave their snapshots), so the lock covers what any of them reads. A
+// test and an unlock never ask. An open that cannot comply refuses the take
+// with its errno: no lock reaches the server, and a Proc take spends no slot.
+static void acquire_syncs_body(struct lk_fix *f, int a, int b, int o, int o2) {
+    const u64 W = SYS_FILE_LOCK_WR, R = SYS_FILE_LOCK_RD, U = SYS_FILE_LOCK_UN;
+    const u64 P = SYS_FILE_LOCK_PROC;
+    TEST_EXPECT_EQ(lk_call(f, a, W, 0, 4), (s64)0, "an open-file take");
+    TEST_ASSERT(lk_acquired(f->sp[a]) && lk_acquired(f->sp[b]),
+                "has every open of the file read the server");
+    TEST_ASSERT(!lk_acquired(f->sp[o]) && !lk_acquired(f->sp[o2]), "and no other file's");
+    TEST_ASSERT(g_lk_take_seq != 0 && g_lk_acq_last_seq < g_lk_take_seq,
+                "before the take is sent");
+    TEST_EXPECT_EQ(lk_call(f, a, U, 0, 4), (s64)0, "its unlock");
+    lk_acq_reset();
+    u32 calls = g_lk_calls;
+    TEST_EXPECT_EQ(lk_call(f, b, R | SYS_FILE_LOCK_TEST, 0, 4), -(s64)T_E_FAULT,
+                   "a test (its answer faults on kproc's empty user half)");
+    TEST_EXPECT_EQ(lk_call(f, b, U | P, 0, 4), (s64)0, "a Proc unlock of nothing");
+    TEST_EXPECT_EQ(g_lk_calls, calls + 1u, "the test reached the Dev");
+    TEST_EXPECT_EQ(g_lk_acq_n, 0u, "neither a test nor an unlock asks");
+
+    TEST_EXPECT_EQ(lk_call(f, b, R | P, 0, 4), (s64)0, "a Proc take");
+    TEST_ASSERT(lk_acquired(f->sp[a]) && lk_acquired(f->sp[b]) &&
+                !lk_acquired(f->sp[o]) && !lk_acquired(f->sp[o2]),
+                "has every open of that file, and only that file, read the server");
+    TEST_ASSERT(g_lk_take_seq != 0 && g_lk_acq_last_seq < g_lk_take_seq,
+                "before the take is sent");
+    TEST_EXPECT_EQ(lk_call(f, b, U | P, 0, 4), (s64)0, "its unlock");
+
+    // File 8 has no entry yet. Its second open cannot comply.
+    g_lk_acq_fail    = f->sp[o2];
+    g_lk_acq_fail_rc = -T_E_IO;
+    u32 entries = handle_lock_owner_count(f->p);
+    calls = g_lk_calls;
+    TEST_EXPECT_EQ(lk_call(f, o, W, 0, 0), -(s64)T_E_IO,
+                   "an open that cannot read the server refuses an open-file take");
+    TEST_EXPECT_EQ(lk_call(f, o, W | P, 0, 0), -(s64)T_E_IO, "and a Proc take");
+    TEST_EXPECT_EQ(g_lk_calls, calls, "neither reached the server");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), entries,
+                   "the refused Proc take spent no slot");
+    // The control, one variable away: the same takes once that open complies.
+    g_lk_acq_fail = NULL;
+    TEST_EXPECT_EQ(lk_call(f, o, W, 0, 0), (s64)0, "the open-file take, once it complies");
+    TEST_EXPECT_EQ(lk_call(f, o, U, 0, 0), (s64)0, "its unlock");
+    TEST_EXPECT_EQ(lk_call(f, o, W | P, 0, 0), (s64)0, "the Proc take");
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), entries + 1u, "spends its slot");
+}
+
+void test_filelock_acquire_syncs(void) {
+    struct lk_fix f;
+    lk_fix_init(&f);
+    int a  = lk_open(&f, &g_lk_dev, 7, RW);
+    int b  = lk_open(&f, &g_lk_dev, 7, RIGHT_READ);
+    int o  = lk_open(&f, &g_lk_dev, 8, RW);
+    int o2 = lk_open(&f, &g_lk_dev, 8, RIGHT_READ);
+    if (a >= 0 && b >= 0 && o >= 0 && o2 >= 0) acquire_syncs_body(&f, a, b, o, o2);
+    else test_fail("filelock: fixture allocation failed");
+    lk_teardown(&f, 8);
 }

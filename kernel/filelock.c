@@ -43,13 +43,37 @@ static int file_lock_backoff(u64 ns) {
     return (ts == TSLEEP_NOTEINTR || ts == TSLEEP_INTR) ? -T_E_INTR : 0;
 }
 
+// Before a take, every open of the file the Proc holds reads what the server
+// holds from now on (dev9p: a cached open leaves its snapshot), so the lock
+// covers what is read through any of them. c goes first: its descriptor may
+// have left the table. The open-file owner learns its file first, as an
+// entry's get does, so an open of a dead file sharing its number is left alone.
+static int file_lock_acquire_sync(struct Proc *p, struct Spoor *c,
+                                  struct Spoor *owner) {
+    struct Dev *d = c->dev;
+    if (!d->lock_sync) return 0;
+    if (owner == c && d->lock_ident) {
+        int ir = d->lock_ident(c);
+        if (ir != 0) return ir;
+    }
+    int rc = d->lock_sync(c, DEV_LOCK_SYNC_ACQUIRE);
+    if (rc != 0) return rc;
+    return handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_ACQUIRE);
+}
+
 // One attempt, as the owner the op names. Never waits.
 static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
                           bool proc_owner, u64 start, u64 len,
                           struct t_file_lock *test) {
-    if (!proc_owner) return c->dev->lock(c, type, start, len, test);
-
     bool take = !test && type != SYS_FILE_LOCK_UN;
+    if (!proc_owner) {
+        if (take) {
+            int sr = file_lock_acquire_sync(p, c, c);
+            if (sr != 0) return sr;
+        }
+        return c->dev->lock(c, type, start, len, test);
+    }
+
     for (int tries = 0; ; tries++) {
         struct Spoor *owner = NULL;
         int rc = handle_lock_owner_get(p, c, /*mint=*/take, &owner);
@@ -68,7 +92,14 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
             return rc;
         }
         if (type == SYS_FILE_LOCK_UN && !test)
-            handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
+            (void)handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
+        if (take) {
+            int sr = file_lock_acquire_sync(p, c, owner);
+            if (sr != 0) {
+                handle_lock_owner_put(p, owner, false);
+                return sr;
+            }
+        }
         rc = owner->dev->lock(owner, type, start, len, test);
         if (rc == -T_E_STALE && tries == 0) {
             // The entry's file has died, and its number may now name c's file

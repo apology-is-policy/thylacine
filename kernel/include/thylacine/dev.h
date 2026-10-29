@@ -47,6 +47,7 @@ struct t_file_lock; // <thylacine/syscall.h>; SYS_FILE_LOCK's TEST answer
 
 // Dev.lock_sync's `how`.
 #define DEV_LOCK_SYNC_RELEASE 1u
+#define DEV_LOCK_SYNC_ACQUIRE 2u
 
 // Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
 // non-9P Devs and the resolver need no wire header; dev9p _Static_asserts
@@ -382,7 +383,10 @@ struct Dev {
     //     under the handle-table spinlock: it must not block. It may answer by
     //     what the two Spoors already know of their files.
     //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
-    //     before a lock on its file is dropped.
+    //     before a lock on its file is dropped. DEV_LOCK_SYNC_ACQUIRE: from now
+    //     on c reads what the server holds (dev9p: a cached open leaves its
+    //     snapshot); asked before a take on c's file, and a failure refuses
+    //     the take.
     //   lock_ident(c) -- learn what lock_same_file needs to tell c's file from
     //     a file that has since taken its number (dev9p: the inode generation,
     //     asked of the server once per Spoor). 0, or -T_E_STALE when c's file
