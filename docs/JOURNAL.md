@@ -29,7 +29,7 @@ needed the operator.
 joey. lsp-probe's goodbye gave each server 10 s to answer `shutdown`, take
 `exit` and leave; clangd+headers took longer on the Pi, the probe failed
 "stdout still open after exit", and go8e-2 took the boot down
-(`work/oct28-quarry/run2/warp-quake.log:8519-8530`). Code *(pending)*.
+(`work/oct28-quarry/run2/warp-quake.log:8519-8530`). Code eb8e8b807.
 
 **How it got in.** The bound was verified on gopls only. Every image my gates
 booted for vote 27 lacked clangd, and lsp-probe prints "clangd+headers absent
@@ -160,11 +160,42 @@ header comment b3 rewrote); the five code hunks apply unchanged. Main gave
 corona 0064 (yip 0269), and a version rebased onto b3's 0063 is in
 `work/oct28-envc/b3-merge/` for the merge.
 
+**After the close (2026-10-28T23:00Z-10-29T02:10Z).** An image trap, three commits, and
+the Pi legs, which waited on the goodbye fix (the 2026-10-29 entry above).
+
+- **The image I synced could not pass the gate.** The first glquake virgl
+  run (22:49Z, `work/oct28-envc/pi-quake.log`) booted the default image,
+  the Halcyon session, and failed at login: `lc_login` waits for `Thylacine
+  textual shell` on serial, and in a session image `ut` prints it inside a
+  tile (the session came up whole: halcyond's tile, `ut: pts session ok`).
+  GATES.md already says shell-driving gates need `--config ci`; my resume
+  note had said the default image was fine. Nothing in `warp-host.sh`
+  refuses a session image, so a run costs twenty minutes before it says
+  anything (enqueued, OPEN-BUGS 23:14Z). The `go-threads` fatal in the same
+  log is joey's deliberate 256-budget leg ("go-threads OK"), not a defect.
+- **fd0692af2: pouch 0051 -> 0064.** See above; main resolved yip 0269.
+- **a48a5f051: the pouch patches README** named three patches; the series
+  holds 51. It now points at `series` and each patch's preamble, gives the
+  count command, and states the shared-numbering rule the collision taught.
+- **12ef45a8c: quarry hands the driver through `Command::env`.** Its
+  write-own-`/env`, spawn, restore dance is gone. A `:paced` leg now
+  removes an inherited `SDL_THYLACINE_NOPACE`, which would otherwise have
+  run it unpaced under a "PACED" line. Build + suite 2120/2120.
+- **The Pi legs, once the goodbye fix let a clade image boot (01:49-02:10Z,
+  thyla-pi KVM, a clade `--config ci` image of the fix's pre-audit build).**
+  glq-virgl: `GLQ-VIRGL RENDERER: virgl (V3D 4.2.14.0)`, 33.8 fps,
+  `GLQ-VIRGL PASS`, `LS-CI PASS: glq-virgl`. Mesa picks virgl only when
+  `GALLIUM_DRIVER` is `virpipe` or `virgl` in the game's own environment (mesa
+  patch 0006) and otherwise renders in software, so the renderer line is the
+  proof that the launcher's `setenv` plus `posix_spawn(environ)` carried it.
+  quarry-bench: the hw-gl row's backend is `virgl`, the llvmpipe row's
+  `llvmpipe (LLVM 22.1.8, 128 bits)`, the sw row software, so each leg's
+  driver reached its child through `Command::env`
+  (`work/oct29-clangd-bye/pi2-*`).
+
 **Still open.** env-b: the Go fork sends `ProcAttr.Env`, once main, b3 and
-aux-3 carry bit 2. The glquake virgl run on thyla-pi, which is the end-to-end
-proof that `GALLIUM_DRIVER` reaches the game through `environ`. quarry still
-sets its driver through its own `/env` where `Command::env` now would (P3),
-and the pouch patches README is stale (P3), both in OPEN-BUGS 21:09Z.
+aux-3 carry bit 2. The rp5/rp6/rp7 wrappers' first run (glq-bench,
+glq-decomp, glq-wedge-probe).
 
 ## 2026-10-28 -- the go that orphaned a go was a go the environment never reached (corona)
 

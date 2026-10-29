@@ -2749,12 +2749,18 @@ the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e
   the checker's series scan (F2); the errno wording and the kernel's T_E values held by the checker (F3).
 - **Enqueued / next.** env-b; the glquake virgl run on thyla-pi (`GALLIUM_DRIVER` reaching the game end to end); the
   wrappers' first run on a `/clade` bake; OPEN-BUGS 21:09Z P3s (quarry's driver via `Command::env`; the stale pouch patches README).
+- **After the close (2026-10-29).** fd0692af2 renumbered the patch 0051 -> 0064 (b3 holds 0051-0063); a48a5f051 points
+  the pouch patches README at `series`; 12ef45a8c hands quarry's driver and pace flag to `Command::env`. The Pi legs ran
+  once the lsp-probe goodbye fix let a clade image boot (thyla-pi KVM, clade `--config ci`, logs
+  `work/oct29-clangd-bye/pi2-*`): glq-virgl `GLQ-VIRGL RENDERER: virgl (V3D 4.2.14.0)` + `LS-CI PASS: glq-virgl` (Mesa
+  selects virgl only on `GALLIUM_DRIVER` in the game's own environment, so the launcher's `environ` carried it);
+  quarry-bench rows hw-gl `virgl`, llvmpipe `llvmpipe`, sw software. Still owed: the rp5/rp6/rp7 wrappers' first run.
 
 ## lsp-probe's goodbye spends the session's budget (P1 fix) -- 2026-10-29
 
 Closes OPEN-BUGS 2026-10-29T00:33Z (P1, my own regression from 6443f1874, vote 27): every `/clade`-baked boot of this
 branch on thyla-pi extincted at joey, because lsp-probe's goodbye had a 10 s bound of its own and clangd+headers' exit
-there runs longer. Code *(pending)*.
+there runs longer. Code eb8e8b807.
 
 - **Measured first.** A private instrumented probe (goodbye bound 120 s, printing when `shutdown` was answered and when
   stdout closed): under HVF clangd+headers answered at 0 ms and exited with status 0 at 914 ms; on thyla-pi's KVM it
