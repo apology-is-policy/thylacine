@@ -348,8 +348,8 @@ pub const T_CACHE_WC: u64       = 1; // Normal Non-Cacheable (write-combining)
 pub const T_CACHE_UNCACHED: u64 = 2; // Normal Non-Cacheable (host non-coherent)
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
-// SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
-// served at L-3b; RFPROC alone needs copy-on-write (L-4) and is refused.
+// SYS_RFORK flags (kernel/include/thylacine/proc.h). SYS_RFORK serves RFPROC
+// (a copy-on-write fork, L-5) and RFPROC|RFMEM and refuses every other word.
 pub const T_RFPROC: u64               = 0x0001;
 pub const T_RFMEM: u64                = 0x0002;
 // Overcommit memory model (#321): reserve cheaply, commit on first touch,
