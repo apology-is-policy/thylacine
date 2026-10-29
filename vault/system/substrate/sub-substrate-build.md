@@ -29,7 +29,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -113,6 +113,19 @@ skips, and the lines after it apply. On the command line an unknown `--set`
 symbol, an unknown flag or a missing `--with` fragment stops the build.
 `test-build-config.sh` pins the stale-profile load and that every shipped
 preset and fragment loads without a warning.
+
+A legacy `THYLACINE_*` variable the caller already set wins over the config
+(the D-b transition shim), and `bc_export` writes the value it honoured back
+into the config, so `build/.config` records what the later stages read: a
+`THYLACINE_BAKE_CLADE=1` bake records `CHUNK_CLADE = y` over the preset's `n`.
+A bool's `1`/`0` reads back as `y`/`n`, and any other value is recorded as
+itself. Until 2026-10-29 the record kept the overridden value. The record says
+what was asked for, not what landed: a clade bake with no staged toolchain is
+skipped with a warning, and populate's "payloads verified PRESENT" line is the
+content truth. `configure.sh` writes profiles through the same emitter but
+never exports, so a profile records the user's choices, not the shell's. And
+`--show-config` still writes `build/.config` before it exits, whether or not an
+image was built from it (OPEN-BUGS 2026-10-29T02:30Z).
 
 The lever selects a kernel, never a ramfs. `build/ramfs.cpio` is shared by every
 kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,

@@ -280,7 +280,7 @@ bc_export() {
             buildtype) printf -v "$target" '%s' "$([[ "$val" == release ]] && echo Release || echo Debug)" ;;
             sanitize)  printf -v "$target" '%s' "$([[ "$val" == none ]] && echo "" || echo "$val")" ;;
             def)       extra_cmake_args+=("-D${target}=$(bc__onoff "$val")") ;;
-            env)       bc__export_env "$target" "$(bc__envval "$val")" ;;
+            env)       bc__export_env "$target" "$(bc__envval "$val")" "$name" "${BC_TYPE[$i]}" ;;
             want)      [[ "$val" == y ]] && export "$target"=1 || export "$target"=0 ;;
         esac
     done
@@ -293,11 +293,27 @@ bc__envval()    { case "$1" in y) echo 1 ;; n) echo 0 ;; *) echo "$1" ;; esac; }
 # D-b transition shim: if the caller already set a legacy THYLACINE_* env var, HONOR
 # it (do not clobber); otherwise export the config's value. So build-everything.sh's
 # pre-set THYLACINE_BAKE_* (e.g. its clade-staged detection) still wins during the
-# transition. eval-based existence test for bash 3.2 (no ${!name+x} composition).
+# transition. An honoured value is also written back to SYM, because build/.config
+# must name what the later stages read, not the value they ignored.
+# eval-based existence test for bash 3.2 (no ${!name+x} composition).
 bc__export_env() {
-    local name="$1" cfgval="$2" isset
+    local name="$1" cfgval="$2" sym="$3" type="$4" isset cur
     eval "isset=\"\${$name+set}\""
-    [[ "$isset" == set ]] || eval "export $name=\"\$cfgval\""
+    if [[ "$isset" == set ]]; then
+        eval "cur=\"\$$name\""
+        bc__set_raw "$sym" "$(bc__envval_back "$type" "$cur")"
+    else
+        eval "export $name=\"\$cfgval\""
+    fi
+}
+# The inverse of bc__envval for a recorded value: a bool reads 1/0 back as y/n; any
+# other value is kept raw, so a caller's malformed setting shows as itself.
+bc__envval_back() {
+    if [[ "$1" == bool ]]; then
+        case "$2" in 1) echo y ;; 0) echo n ;; *) echo "$2" ;; esac
+    else
+        echo "$2"
+    fi
 }
 # --sanitize=undefined is the legacy spelling of ubsan (both -> the schema's ubsan).
 bc__san_alias() { case "$1" in undefined) echo ubsan ;; *) echo "$1" ;; esac; }

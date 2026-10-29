@@ -12,6 +12,8 @@
 #   T-export:          the map from clean symbols onto build.sh's heterogeneous
 #                      knobs (incl. the TICKLESS->no_tickless INVERSION and the
 #                      DEV_ACCOUNTS CMake def); a wrong mapping fails here.
+#   T-emit-honored:    build/.config must record an honoured legacy env var;
+#                      drop bc__export_env's write-back and it fails.
 set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -129,6 +131,23 @@ export THYLACINE_BAKE_CLADE=1                       # production sets CLADE=n (-
 bc_reset; bc_apply_preset production; bc_export
 eq "honor pre-set THYLACINE_BAKE_CLADE" "${THYLACINE_BAKE_CLADE:-}" "1"
 unset THYLACINE_BAKE_CLADE
+
+echo "== T-emit-honored: build/.config records the honoured value, not the one it overrode =="
+# Fails without bc__export_env's write-back: the shim honoured the var while the
+# record kept the preset's n (a CLADE=1 bake once wrote 'CHUNK_CLADE = n').
+emitted() { sed -n "s/^$1 *= *\([^ ]*\).*/\1/p" "$2"; }
+tmp="$(mktemp)"
+export THYLACINE_BAKE_CLADE=1
+bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export; bc_emit_config "$tmp"
+eq "emit an honoured bool (1 -> y)" "$(emitted CHUNK_CLADE "$tmp")" "y"
+export THYLACINE_BAKE_CLADE=yes
+bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export; bc_emit_config "$tmp"
+eq "emit a malformed honoured value as itself" "$(emitted CHUNK_CLADE "$tmp")" "yes"
+unset THYLACINE_BAKE_CLADE
+bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export; bc_emit_config "$tmp"
+eq "emit with no var set (control): the preset's n" "$(emitted CHUNK_CLADE "$tmp")" "n"
+unset THYLACINE_BAKE_CLADE
+rm -f "$tmp"
 
 echo "== emit: build/.config is written + grouped =="
 tmp="$(mktemp)"; bc_reset; bc_apply_preset dev; bc_resolve 2>/dev/null; bc_emit_config "$tmp"
