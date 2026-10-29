@@ -179,8 +179,33 @@ checks. Tapestry holds only the normal broker role. Grants remain held until
 acknowledged restoration; owner failure cancels them before redemption. A failed
 episode (a deadline, a refused device step, a malformed frame) cancels its grant
 and then RECOVERS: the owner restores normal output and the kernel returns the
-seat to normal, releasing nothing. A seat failure never closes a serial episode
--- it closes only the episode the seat itself opened. The
+seat to normal, releasing nothing. The owner restores normal output whenever it
+*began* to displace it, not only when the takeover completed: a takeover that
+fails part-way may already have disabled outputs or bound the trusted image. A
+seat failure never closes a serial episode -- it closes only the episode the
+seat itself opened.
+
+**A device that can never quiesce again** (operator vote 30, 2026-10-29). If the
+GPU engine dies (GPU-DESIGN §4.5.15) during an episode, normal output can never
+be restored, and nothing can redraw the glass. The owner still ends the
+episode, without the device:
+- an episode that reached restoration fails first, so the kernel cancels its
+  grant and a failed device never commits authority;
+- RESTORED from FAILED then returns the seat to normal, releasing nothing. A
+  serial BREAK, which the kernel refuses into a failed graphical episode, works
+  again, and the compositor's requests are refused at once instead of parking.
+- If the takeover had begun, a frozen trusted frame (possibly the prompt) may
+  stay on the glass for the rest of the boot. Keystrokes typed into it must
+  reach no one, so the owner withholds keyboard and pointer input from the
+  compositor for the rest of the boot.
+
+The display is lost for the boot either way. Rejected:
+- keeping the seat failed for the boot, which loses the serial recovery medium
+  as well;
+- giving input back, which lets any client that can hang the host GPU for 30 s
+  receive a password typed into a frozen trusted prompt.
+
+The
 current backend uses the neutral field because private workspace capture is not
 implemented. Serial authorization requires `thylacine.serial-sak=1`; the QEMU dev
 launcher selects it unless `THYLACINE_SERIAL_SAK=0`.

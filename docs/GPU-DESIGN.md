@@ -2590,7 +2590,14 @@ block the serve loop, and seat input with it. Neither was taken.
     refuses it with its pins kept;
   - the 30 s park bound.
   A stall is not unreachable quiescence. It is the one non-quiescent state
-  that comes back by itself.
+  that comes back by itself. A seat episode that meets a stall waits for it
+  too. Its restoration is refused until the engine revives, or until the
+  engine dies, at which point the episode ends without the device
+  (TRUSTED-PATH §7, vote 30).
+- **Restoring a scanout needs only the control queue's quiescence.** A late
+  cursor chain can touch only a cursor plane, and a cursor queue that is not
+  idle already keeps any later takeover out. So a poisoned cursor queue on a
+  live engine does not cost the display.
 - **An unknown outcome keeps what it named.** A stalled command may have
   executed, so every guest resource it named stays referenced:
   - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
