@@ -22,11 +22,12 @@ guard pages) is a seam, not an open bug; finding it again is finding
 [[seam-pouch-guard-pages]].
 
 <!-- generated:begin -->
-4 closed findings on [[sub-pouch-thread]] — do NOT re-report
+5 closed findings on [[sub-pouch-thread]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
 - [[fnd-pouchb0-r1-f3]] [P2] the 0033 "device-side pin" compares libc's literals with the prover's own copy of them, never with the kernel (fixed) — Fixed: the prover parses the `stack` row of `/proc/<pid>/maps` (exactly one such row or it refuses) and compares; the five sentences corrected.
+- [[fnd-thread-c7-r2-f2]] [P3] The pouch mask leg read the TLS shadow only (fixed)
 - [[fnd-threads9b-r1-f1]] [P1] pthread_cond_timedwait with a >1h timeout spins at 100% CPU (fixed)
 - [[fnd-threads9b-r1-f2]] [P1] pthread stack guard pages are silently disabled (documented) — Documented, not fixed — the real fix needs a kernel syscall that can flip
 - [[fnd-threads9b-r1-f5]] [P2] The build's seam-check list was not extended for the round's four new syscall numbers (fixed)

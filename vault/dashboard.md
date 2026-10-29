@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 82
+## Open seams: 83
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -62,6 +62,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-cwg-parenthetical-refuted]] (sub-kernel-boot-sequence)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
+- [[seam-dirent-type-is-qid-type]] (sub-kernel-devproc)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)

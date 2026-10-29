@@ -55,6 +55,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
 | [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
+| [[seam-dirent-type-is-qid-type]] | open | sub-kernel-devproc | fnd-thread-c7-r1-f5 | OPEN-BUGS 2026-10-29T09:22:54Z |
 | [[seam-dtb-blob-internally-trusted]] | open | sub-kernel-dtb | chg-2026-08-02-boot-sweep |  |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
