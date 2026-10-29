@@ -3596,6 +3596,12 @@ void test_dev9p_cached_open(void) {
     TEST_EXPECT_EQ((s64)dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL), 0ll,
                    "a wstat on a cached-open fd succeeds");
     TEST_EXPECT_EQ((u64)g_setattr_fid, (u64)cp->fid, "on the kept fid");
+    // The wstat dropped the leaf's attrs: fstat asks the server through the
+    // kept fid, and reports the snapshot's size, which the reads serve.
+    u32 ga0 = g_tgetattr_seen;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fstat after the wstat");
+    TEST_EXPECT_EQ(g_tgetattr_seen, ga0 + 1u, "asks the server");
+    TEST_EXPECT_EQ(st.size, 0x200ull, "with the snapshot's size, not the server's 0x100");
     TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync no-ops 0 (read-only fd)");
     TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
     TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");

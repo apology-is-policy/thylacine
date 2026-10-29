@@ -933,12 +933,23 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr,
 // connection's principal (A-3 completes per-user attribution). Unlike the .stat slot (the Plan 9 wire-stat,
 // still deferred), this is the metadata source the kernel rwx layer (A-2d) and
 // SYS_FSTAT consume. P9_GETATTR_BASIC covers mode/uid/gid/size/times/nlink.
+// A cached open whose reads still serve its snapshot reports the snapshot's
+// size and version, so a reader sized by fstat reads exactly what is there.
+// The rest is the file's own, so a wstat through the open shows in it.
+static void co_patch_stat(const struct dev9p_priv *p, struct t_stat *out) {
+    if (!p->cached_open || __atomic_load_n(&p->co_rfid, __ATOMIC_ACQUIRE) != P9_NOFID)
+        return;
+    out->size     = p->co_size;
+    out->qid_vers = p->co_stat.qid_vers;
+}
+
 static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     struct dev9p_priv *p = priv_of(c);
     if (!p || !out) return -1;
     // FID-LIFECYCLE cached-open: a loose one has no fid to Tgetattr, so its
     // fstat serves the open-time stat (the attr cache's close-to-open
-    // discipline). One that kept its walk's fid asks as any open does.
+    // discipline). One that kept its walk's fid asks as any open does, with
+    // its snapshot's size while reads serve that (co_patch_stat).
     if (p->cached_open && p->fid == P9_NOFID) {
         *out = p->co_stat;
         return 0;
@@ -958,6 +969,7 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     u64 seq0 = 0;
     if (cacheable && larder_attr_serve(l, key, out, &seq0)) {
         wb_patch_stat_size(p, out);
+        co_patch_stat(p, out);
         return 0;
     }
     struct p9_attr attr;
@@ -995,6 +1007,7 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     if (cacheable)
         larder_attr_install(l, seq0, key, attr.qid.version, out);
     wb_patch_stat_size(p, out);
+    co_patch_stat(p, out);
     return 0;
 }
 
