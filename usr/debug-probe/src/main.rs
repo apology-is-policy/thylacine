@@ -38,6 +38,12 @@
 //      that meets a terminating note fails with ESRCH (`spin`); and a step that
 //      meets a note with a handler stops at its first instruction, the stepped
 //      instruction not yet run (`spin-caught`).
+//   9. THE PER-THREAD FILES (DEBUG-FS-DESIGN 5h): a child with several
+//      threads, the newest of which has exited (`threads`), stopped. Its
+//      thread directory lists exactly the live threads, the exited one has no
+//      files, each thread's regs report that thread's own frame, and `step
+//      <tid>` moves the named thread alone, which the Proc-level regs then
+//      report.
 //
 // joey spawns + reaps + asserts exit 0 + the "debug-probe: PASS" marker, so any
 // failure gates the boot. On any failure path the child is `killgrp`'d so it can
@@ -52,7 +58,8 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use alloc::format;
-use libthyla_rs::fs::{File, OpenOptions};
+use alloc::vec::Vec;
+use libthyla_rs::fs::{self, File, OpenOptions};
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::notes::{self, NoteTarget};
 use libthyla_rs::process::{Child, Command, Stdio};
@@ -64,6 +71,8 @@ const SENTINEL_REG: u64 = 0xDEB0_DEB0;
 const SENTINEL_MEM: u64 = 0xDEB0_0001_CAFE_0001;
 const SENTINEL_SPIN: u64 = 0xDEB0_0003_CAFE_0003;
 const SENTINEL_CAUGHT: u64 = 0xDEB0_0004_CAFE_0004;
+const SENTINEL_THREADS: u64 = 0xDEB0_0005_CAFE_0005;
+const THREADS_SPIN: usize = 2;
 
 // t_user_regs byte offsets (the /proc/<pid>/regs ABI, syscall.h).
 const R_X20: usize = 20 * 8;
@@ -810,6 +819,174 @@ fn tail_flow(mode: &str, leg: fn(&Child) -> Result<(), &'static str>, ok: &str) 
     t_putstr(ok);
 }
 
+// One thread's registers, through its own file under /proc/<pid>/thread/.
+fn thread_regs(pid: i32, tid: i32, what: &'static str) -> Result<[u8; REGS_LEN], &'static str> {
+    let f = File::open(&format!("/proc/{}/thread/{}/regs", pid, tid)).map_err(|_| what)?;
+    let mut r = [0u8; REGS_LEN];
+    read_exact_at(f.as_raw_fd() as i64, 0, &mut r).map_err(|_| what)?;
+    Ok(r)
+}
+
+fn parse_tid(name: &str) -> Option<i32> {
+    if name.is_empty() || name.len() > 10 || !name.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut v: i64 = 0;
+    for b in name.bytes() {
+        v = v * 10 + (b - b'0') as i64;
+    }
+    if v > i32::MAX as i64 { None } else { Some(v as i32) }
+}
+
+// The per-thread leg (DEBUG-FS-DESIGN 5h; the thread-model review's C7 gate:
+// a target with several threads whose newest has exited).
+fn threads_leg(child: &Child) -> Result<(), &'static str> {
+    let pid = child.pid();
+    let mut ctl = OpenOptions::new()
+        .write(true)
+        .open(&format!("/proc/{}/ctl", pid))
+        .map_err(|_| "debug-probe: FAIL -- threads: open ctl\n")?;
+    let regs_f = File::open(&format!("/proc/{}/regs", pid)).map_err(|_| "debug-probe: FAIL -- threads: open regs\n")?;
+    let mem_f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&format!("/proc/{}/mem", pid))
+        .map_err(|_| "debug-probe: FAIL -- threads: open mem\n")?;
+    ctl.write_all(b"attach").map_err(|_| "debug-probe: FAIL -- threads: attach\n")?;
+
+    // Stop until main is in its loop with the newest thread gone and every
+    // spinner is in its own loop. With no breakpoint or step yet, the
+    // Proc-level regs report main. The tids are the spawned threads', the
+    // newest last; one id space, so the main thread's tid is the pid and each
+    // spawn draws a larger id.
+    let mut regs = [0u8; REGS_LEN];
+    let mut region = 0u64;
+    let mut tids = [0i32; THREADS_SPIN + 1];
+    let mut ready = false;
+    for _ in 0..80 {
+        ctl.write_all(b"stop").map_err(|_| "debug-probe: FAIL -- threads: stop\n")?;
+        if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() {
+            return Err("debug-probe: FAIL -- threads: read regs\n");
+        }
+        if u64_le(&regs, R_X20) == SENTINEL_THREADS && u64_le(&regs, R_X22) == 0 {
+            region = u64_le(&regs, R_X21);
+            match read_u64_at(&mem_f, region, "debug-probe: FAIL -- threads: read the ready word\n")? {
+                1 => {
+                    let mut prev = pid;
+                    for (i, t) in tids.iter_mut().enumerate() {
+                        *t = read_u64_at(&mem_f, region + 8 * (2 + i as u64), "debug-probe: FAIL -- threads: read a tid\n")? as i32;
+                        if *t <= prev {
+                            return Err("debug-probe: FAIL -- threads: the tids do not rise past the pid\n");
+                        }
+                        prev = *t;
+                    }
+                    let mut spinning = true;
+                    for &tid in tids[..THREADS_SPIN].iter() {
+                        let r = thread_regs(pid, tid, "debug-probe: FAIL -- threads: read a spinner's regs\n")?;
+                        spinning &= u64_le(&r, R_X20) == SENTINEL_THREADS;
+                    }
+                    if spinning {
+                        ready = true;
+                        break;
+                    }
+                }
+                2 => return Err("debug-probe: FAIL -- threads: the child could not spawn its threads or join the newest\n"),
+                _ => {}
+            }
+        }
+        ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- threads: start(retry)\n")?;
+        let _ = sleep(Duration::from_millis(10));
+    }
+    if !ready {
+        return Err("debug-probe: FAIL -- threads: the child never reached its loops with the newest thread gone\n");
+    }
+    let newest = tids[THREADS_SPIN];
+
+    // The listing is exactly the live threads, ascending: main, then each
+    // spinner. The exited newest is not in it and has no files.
+    let mut listed: Vec<i32> = Vec::new();
+    for ent in fs::read_dir(&format!("/proc/{}/thread", pid))
+        .map_err(|_| "debug-probe: FAIL -- threads: list the thread directory\n")?
+    {
+        let ent = ent.map_err(|_| "debug-probe: FAIL -- threads: read the thread directory\n")?;
+        listed.push(parse_tid(ent.file_name()).ok_or("debug-probe: FAIL -- threads: a thread entry is not a tid\n")?);
+    }
+    let mut want: Vec<i32> = Vec::new();
+    want.push(pid);
+    want.extend_from_slice(&tids[..THREADS_SPIN]);
+    if listed != want {
+        return Err("debug-probe: FAIL -- threads: the thread directory does not list exactly the live threads in order\n");
+    }
+    if File::open(&format!("/proc/{}/thread/{}/regs", pid, newest)).is_ok() {
+        return Err("debug-probe: FAIL -- threads: the exited thread's regs opened\n");
+    }
+
+    // Each live thread's file reports that thread's own frame (x22 is its
+    // index), on its own kernel stack.
+    let mut before = [[0u8; REGS_LEN]; THREADS_SPIN + 1];
+    for (k, &tid) in want.iter().enumerate() {
+        let r = thread_regs(pid, tid, "debug-probe: FAIL -- threads: read a thread's regs\n")?;
+        if u64_le(&r, R_X20) != SENTINEL_THREADS || u64_le(&r, R_X21) != region {
+            return Err("debug-probe: FAIL -- threads: a thread's regs are not this child's loop\n");
+        }
+        if u64_le(&r, R_X22) != k as u64 {
+            return Err("debug-probe: FAIL -- threads: a thread's regs report another thread\n");
+        }
+        let pc = u64_le(&r, R_PC);
+        if pc == 0 || pc >= USER_VA_LIMIT || u64_le(&r, R_PSTATE) & 0xf != 0 {
+            return Err("debug-probe: FAIL -- threads: a thread's frame is not an EL0t frame\n");
+        }
+        before[k] = r;
+        let kf = File::open(&format!("/proc/{}/thread/{}/kstack", pid, tid))
+            .map_err(|_| "debug-probe: FAIL -- threads: open a thread's kstack\n")?;
+        let mut kbuf = [0u8; 64];
+        let kn = unsafe { t_pread(kf.as_raw_fd() as i64, kbuf.as_mut_ptr(), kbuf.len(), 0) };
+        if kn < 2 || kbuf[0] != b'#' || kbuf[1] != b'0' {
+            return Err("debug-probe: FAIL -- threads: a thread's kstack does not start at frame #0\n");
+        }
+    }
+
+    // `step <tid>`: the named thread runs one instruction and no other moves;
+    // the step's stop then focuses it, so the Proc-level regs report it.
+    let sk = THREADS_SPIN;
+    ctl.write_all(format!("step {}", want[sk]).as_bytes())
+        .map_err(|_| "debug-probe: FAIL -- threads: step <tid>\n")?;
+    for (k, &tid) in want.iter().enumerate() {
+        let r = thread_regs(pid, tid, "debug-probe: FAIL -- threads: read a thread's regs after the step\n")?;
+        let moved = u64_le(&r, R_PC) != u64_le(&before[k], R_PC);
+        if k == sk && !moved {
+            return Err("debug-probe: FAIL -- threads: the stepped thread did not move\n");
+        }
+        if k != sk && (moved || u64_le(&r, R_X23) != u64_le(&before[k], R_X23)) {
+            return Err("debug-probe: FAIL -- threads: a thread the step did not name moved\n");
+        }
+    }
+    if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() || u64_le(&regs, R_X22) != sk as u64 {
+        return Err("debug-probe: FAIL -- threads: the Proc-level regs do not report the stepped thread\n");
+    }
+    if ctl.write_all(format!("step {}", newest).as_bytes()).is_ok() {
+        return Err("debug-probe: FAIL -- threads: a step naming the exited thread was accepted\n");
+    }
+
+    let one: u64 = 1;
+    if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&one as *const u64) as *const u8, 8, (region + 8) as i64) } != 8 {
+        return Err("debug-probe: FAIL -- threads: write the exit flag via mem\n");
+    }
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- threads: start\n")?;
+    for _ in 0..WP_POLL_TRIES {
+        let mut st: i32 = 0;
+        let r = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+        if r == pid as i64 {
+            return if st == 0 { Ok(()) } else { Err("debug-probe: FAIL -- threads: the child exited nonzero\n") };
+        }
+        if r < 0 {
+            return Err("debug-probe: FAIL -- threads: the wait for the child was refused\n");
+        }
+        let _ = sleep(Duration::from_millis(WP_POLL_MS));
+    }
+    Err("debug-probe: FAIL -- threads: the started child never exited\n")
+}
+
 // The runtime address of debug-child's first instruction, from its ELF header.
 fn debug_child_entry() -> Result<u64, &'static str> {
     let f = File::open("/bin/debug-child").map_err(|_| "debug-probe: FAIL -- held: open /bin/debug-child\n")?;
@@ -1019,6 +1196,8 @@ pub extern "C" fn rs_main() -> i64 {
               "debug-probe: death-step ok (a step that met a terminating note failed with ESRCH)\n");
     tail_flow("spin-caught", step_meets_handler,
               "debug-probe: caught-step ok (a step that met a handler stopped at its first instruction)\n");
+    tail_flow("threads", threads_leg,
+              "debug-probe: threads ok (the live threads listed, the exited one absent, each thread's own regs, step <tid> moved it alone)\n");
     if let Err(msg) = held_flow() {
         fail(msg);
     }

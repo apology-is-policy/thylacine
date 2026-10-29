@@ -37,6 +37,15 @@
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
+//   * `debug-child threads` (DEBUG-FS-DESIGN 5h) spawns THREADS_SPIN threads
+//     that spin beside main, then one more, the newest, which exits at once.
+//     Main joins the newest through its clear-tid word, so the kernel has
+//     committed its exit, then sets region[0] = 1 (2 if a spawn or the join
+//     failed) and spins too. Every spinner holds SENTINEL_THREADS in x20, the
+//     region in x21 and its index in x22 (main 0, then 1..); x23 counts its
+//     loop and changes only in the loop's first instruction. region[1] is the
+//     debugger's exit flag, and region[2..] the spawned threads' tids, the
+//     newest last.
 //
 // debug-probe guarantees termination (it writes the flags + `start`, or `killgrp`
 // on any failure path), so both loops are deliberately unbounded -- the parent
@@ -50,8 +59,11 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::Write;
+use libthyla_rs::thread;
 use libthyla_rs::{t_exits, t_write};
 
 // MUST match debug-probe.
@@ -65,6 +77,9 @@ const WATCH_VALUE: u64 = 0xDEB0_0002_CAFE_0002;
 const SENTINEL_SPIN: u64 = 0xDEB0_0003_CAFE_0003;
 // Caught mode's.
 const SENTINEL_CAUGHT: u64 = 0xDEB0_0004_CAFE_0004;
+// Threads mode's, and its spinners besides main.
+const SENTINEL_THREADS: u64 = 0xDEB0_0005_CAFE_0005;
+const THREADS_SPIN: usize = 2;
 
 // The 8a-2b breakpoint landmark: debug-probe arms a HW breakpoint at this
 // function's entry (its VA is pinned in x22 during the park loop, so the debugger
@@ -213,6 +228,68 @@ fn spin_note(ptr: *mut u64) -> ! {
     unsafe { t_exits(0) }
 }
 
+// Threads mode (DEBUG-FS-DESIGN 5h). Each thread's frame names it in x22, so a
+// debugger reading one thread's registers can tell which thread it got; the
+// newest thread's exit leaves a tid that must have no files.
+const THREAD_STACK: usize = 16384;
+
+#[repr(C, align(16))]
+struct ThreadStacks([[u8; THREAD_STACK]; THREADS_SPIN + 1]);
+
+static mut THREAD_STACKS: ThreadStacks = ThreadStacks([[0; THREAD_STACK]; THREADS_SPIN + 1]);
+static mut THREADS_REGION: [u64; 3 + THREADS_SPIN] = [0; 3 + THREADS_SPIN];
+// The kernel clears it when the newest thread's exit commits.
+static NEWEST_TID_WORD: AtomicU32 = AtomicU32::new(0);
+
+fn threads_spin(region: *mut u64, index: u64) {
+    unsafe {
+        core::arch::asm!(
+            "mov x23, #0",
+            "2:",
+            "add x23, x23, #1",
+            "ldr x10, [x21, #8]",  // region[1]: the debugger's exit flag
+            "cbz x10, 2b",
+            in("x20") SENTINEL_THREADS,
+            in("x21") region,
+            in("x22") index,
+            out("x10") _,
+            out("x23") _,
+        );
+    }
+}
+
+extern "C" fn threads_entry(index: u64) -> ! {
+    if index as usize > THREADS_SPIN {
+        thread::set_tid_address(&NEWEST_TID_WORD);
+        thread::exit_self();
+    }
+    threads_spin(core::ptr::addr_of_mut!(THREADS_REGION) as *mut u64, index);
+    thread::exit_self();
+}
+
+fn threads() -> ! {
+    let region = core::ptr::addr_of_mut!(THREADS_REGION) as *mut u64;
+    let stacks = core::ptr::addr_of_mut!(THREAD_STACKS) as *mut u8;
+    NEWEST_TID_WORD.store(u32::MAX, Ordering::Release);
+    let mut ok = true;
+    for index in 1..=THREADS_SPIN + 1 {
+        // SAFETY: each thread gets its own stack, whose top is 16-aligned; the
+        // entry takes one u64 and never returns.
+        let top = unsafe { stacks.add(index * THREAD_STACK) } as u64;
+        match unsafe { thread::spawn_raw((threads_entry as extern "C" fn(u64) -> !) as usize as u64, top, index as u64, 0) } {
+            Ok(tid) => unsafe { core::ptr::write_volatile(region.add(1 + index), tid as u64) },
+            Err(_) => ok = false,
+        }
+    }
+    if ok && thread::join_tid(&NEWEST_TID_WORD, u32::MAX, Some(Duration::from_secs(10))).is_err() {
+        ok = false;
+    }
+    unsafe { core::ptr::write_volatile(region, if ok { 1 } else { 2 }) };
+    threads_spin(region, 0);
+    yield_now();
+    unsafe { t_exits(0) }
+}
+
 // Dirty mode's file and bytes. MUST match jc-probe.
 const DIRTY_PATH: &str = "/debug-child-dirty";
 const DIRTY_PAYLOAD: &[u8] = b"staged by debug-child, flushed by its exit close\n";
@@ -274,6 +351,9 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"spin-note"[..]) {
         spin_note(ptr);
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"threads"[..]) {
+        threads();
     }
     let bp = (bp_landmark as extern "C" fn()) as usize as u64;
 
