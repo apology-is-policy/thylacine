@@ -4,7 +4,7 @@ type: chg
 title: "b3 backports the spawn environment tail (env-a + env-c); the child is born with no environment"
 date: 2026-10-29
 arc: arc-boosty
-commits: []
+commits: ["3db0e350d"]
 touched:
   - sub-kernel-syscall-abi
   - sub-kernel-syscall-dispatch
