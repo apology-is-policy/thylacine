@@ -22,6 +22,222 @@ needed the operator.
 
 
 ---
+## 2026-10-29 -- an image gate, the hang behind it, and a GPU stall that takes no verdict (corona)
+
+The trap (OPEN-BUGS 2026-10-28T23:14Z) cost me two Pi runs on 10-28: `warp-host.sh quake` on a default image booted
+for ~20 minutes and failed at lc_login as "shell never came up after auth", and on a `--config ci` image baked without
+`THYLACINE_BAKE_CLADE=1` it failed 900 s after the launcher had already said "not reachable (is the clade pool
+mounted?)". Both verdicts named the wrong cause.
+
+**Which record.** The 23:14Z note said "sync records the image's session mode (build.sh's config)". Reading
+populate changed that. The session lever is a file populate writes INTO THE POOL (`/lib/halcyon/session`), and
+`/clade` is pool content too. `build/.config` is written at the START of a build, so it is intent: a failed build,
+`PRESERVE=1` (which skips the mint and populate) or a `--show-config` leaves it describing a pool that is not there.
+`build/pool-contents` is rewritten by the mint and given its `payloads=` line only after populate has stat-verified
+each payload in the pool, and PRESERVE keeps it with its pool. So the gate reads `pool-contents`, and populate
+records `SESSION` as one more verified payload under the session arm's own predicate. `.config` still travels, for
+the reader. The `lc_pool_has` comment already carried this lesson from ls-jsc: ask what the mint decided, never a
+stage.
+
+**Where the check lives.** I put it in lib.exp (`lc_require_image`), called by each scenario after it sources lib.exp,
+not in warp-host.sh, so it holds however the scenario is started, including by hand on the Pi. The declaration is per
+script, and that is a guard pinned to a name, so `warp-host.sh lint` (run by sync) derives the set from the scripts:
+anything that calls `lc_login` must declare `{shell ...}`. Two backstops ask the guest, not a record. `lc_login`
+fails at once on login's own session line, which covers a record written before `SESSION` existed and the
+interactive fleet. The three launcher users fail on the launcher's line.
+
+**Found on the way.** The sync's hand-kept list of uncommitted files had never carried `vkq-venus.exp`, `gfx_fp.py`
+or `screendump.sh`; it now asks git. The records ship after the pool, with the old copies removed first, because a
+failed `sync_pool` keeps the OLD pool. A record shipped first would then describe a pool that never arrived. And an
+`ssh` inside a `while read` loop drains the loop's input; `-n` and `</dev/null` fix it. `test-interactive.sh` still
+counts an image mismatch as a guest failure and retries it; enqueued (OPEN-BUGS 02:58Z).
+
+**Evidence.** Checker 24/24 and 18 red over a HEAD-tree copy; T-show-writes-nothing red with HEAD's build.sh;
+default build + suite 2120/2120, whose real record lists SESSION and is refused for `shell`. On thyla-pi, against a
+doctored copy of the synced record: SESSION refused in 47 s, no CLADE in 46 s, record restored byte-equal. The 46-47 s is
+the pool copy before the check.
+
+**Audit.** Fable 5.1, 0/0/1/6, all fixed in 583fc81a0. The P2 was a window I had not looked for: sync shipped the
+records minutes after it chose the pool, so a bake finishing mid-sync could pair an old pool with a new record. sync
+now snapshots the records at its start, fingerprints every shipped artifact before and after the pool, and ships the
+snapshot only if nothing changed. One P3 explained the 46-47 s: the pool copy ran before the check. The check now runs
+first, and on the Pi the same two refusals took 0 s each. Another P3 asked whether lint proved the declaration's
+position or only its presence. Writing the order mutant for it caught a `pipefail` grep in the lint itself.
+
+**The hunt that preempted the close.** The Pi chain's glq-decomp gl leg failed with the game unable to reach
+/srv/tapestry, and I first filed it as rp6 or my env-c change (OPEN-BUGS 03:38Z). The scenario's own earlier
+`cat /dev/tapestry/ctl` had already failed before rp6 ran, so tapestryd had hung at bring-up: I had blamed the code
+under test without reading the lines in front of it. Reclassified at 03:54Z. The mechanism, read in code and matching
+both Pi logs (p-decomp-gl.log at boot, p-wedge.log at runtime): a synchronous GPU command that misses lictor's 500 ms
+deadline latches `ctrl.dead`; lictor's serve loop parked a retirement until `all_work_retired()`, which a dead engine
+never reaches; tapestryd's proxy reads the reply with no deadline; so one slow command hung the compositor for the boot.
+
+**The fix and its witness.** `gpu_api::admit` (646d54262) runs a retirement on a dead engine at once so
+`Device::execute` refuses it with every pin kept. The guest witness `ls-gpu-dead` needed a test lever,
+`thylacine.test-latch-dead`, which makes lictor latch through a harmless display query at the first retirement of a
+97x89 resource. Two attempts died on ut mechanics before reaching it: ut has no redirect on a brace block, and a surface
+minted but never created is retired when its ctl clunks. It then went green, red with the dead arm removed, and green
+again (3663aa474). The Fable round (3b9036180, 0/1/1/4) found that the escape was too narrow. A cursor queue poisoned
+on the same 500 ms deadline is permanent non-quiescence with the engine alive (P1). A fenced slot the host never
+retires parks a retirement with no bound (P2). So `admit` now escapes on `quiescence_unreachable()`, and a retirement
+parked 30 s (compile-time equal to the fenced abandonment bound) is admitted whatever the cause. The bound would have
+masked a missing unreachable arm inside the witness's 60 s wait, so the post-latch wait is 15 s, and the witness goes
+red with that arm removed (05:26Z).
+
+**What made the device "slow".** Measured on thyla-pi (work/oct29-warp-image/meas/: a QMP round-trip pinger on a third
+monitor, vmstat, and a /proc sampler of every QEMU thread's state, wchan and syscall; each tool's SIGSTOP control
+discriminates). Leg 1: QMP unanswered for 5886 ms right after login, host 97-98% idle, guest CPU 0, no I/O, and the
+guest's console output for those 9 s arrived in one burst. Leg 2 reproduced the latch: "never retired (6 stale wakes
+over 500 ms)", then "synchronous chain retired 1 ms after its deadline latched the engine dead". The device was fine.
+QEMU's main thread had sat 5538 ms in futex_do_wait while one vCPU thread looped in clock_nanosleep outside KVM_RUN,
+which is PL011's blocking chardev write napping under the big lock. On Linux, lc_boot's default serial transport is a
+pty (lib.exp:565). When expect stops reading while it types long lines (whose redraw output is quadratic in their
+length), the pty fills, and QEMU freezes every device behind the console. This is #125's mechanism, which the socket
+transport defeats on Darwin. The A/B changed only that: over the socket the same leg peaked at 31 ms with no latch, and an strace of the napping vCPU during a pty stall showed the loop itself, `writev(1, "1", 1) = -1 EAGAIN` and a 100 us nap, repeated (78bb82c24). The host freeze was ours. What stays open is the guest's half: a 500 ms latch that is permanent turns any host freeze into a lost display, which is a GPU-DESIGN question, not a harness one.
+
+**Vote 29: the latch becomes two-stage.** The hunt left one question that was the guest's: a 500 ms
+latch that is permanent turns any host freeze into a lost display. Heritage does not latch (Linux
+virtio-gpu has no ctrlq timeout; TDR and drm_sched recover), and the operator chose a two-stage
+latch (vote 29, 06:26Z). The scripture went first (8eb6e103f, GPU-DESIGN 4.5.15):
+- STALLED at the deadline: the command fails with an unknown outcome, the chain stays
+  outstanding, submissions are refused and retirements park;
+- REVIVE on the late retirement through the ordinary drain;
+- DEAD at 30 s.
+
+Writing it out forced the consequences a permanent latch never had to answer:
+- A stalled bind may execute later, so its resource is condemned.
+- Bring-up waits out the full bound, since there is no loop to keep live. Otherwise a stall at
+  boot would read as a device refusal and cost 3D.
+- The cursor plane's control-queue steps must not poison the cursor lane on a stall. A pointer
+  shape change uploads through the control queue, so a freeze during one would otherwise make
+  quiescence permanently unreachable.
+
+**The hole the self-audit found.** Every builder wrote the shared request region and only then
+called submit, which refused. The device reads a chain's request when it processes it, so a request
+staged over an outstanding chain runs in place of the published one. That was true of the old latch
+too: a frozen device that resumed would have run whatever was staged last. A stall holds the window
+open for seconds. Every builder now stages through one accessor that refuses (`Gpu::req`). The same
+pass found that a stalled `CtxAttachResourceProbe` leaves the ledger without a link the device may
+still make. It now records the link when the stall counter moved across the call.
+
+**Witness.** ls-gpu-dead now runs two legs in one boot. Leg 1 revives: the late chain was seen
+0 ms after the deadline, and the parked retirement completed with its pins released. Leg 2 dies: the
+engine went dead at 30009 ms and the retirement was refused with its pins kept. Both mutants went red for their own reasons: with no revival, revived=0; with no death, dead=0 and only the park bound refused. The clean tree passed twice, with deaths at 30009 and 30004 ms, and the WIP commit is 194677025. The Fable round came back 0/0/1/4. Its P2 was the same class the design names, a refusal before publish treated as an unknown outcome, but in the other direction. A mint during a stall reaped parked hostmem rings and consumed their tokens before the refused unmap, so the extents leaked. The P3s were a stalled condemned-drain dropping unrefs whose owners had been told Ok, refusals with known outcomes keeping pins and ids, a lever shot that a real stall refuses still arming its hold, and scripture claiming every request fails at once when retirements park. All were fixed in the close.
+
+**Vote 30: the seat on a dead device.** Vote 29 left one park with no end. If the engine dies
+while the trusted scanout is up, `Device::restore` can never run, because it needs every chain
+retired. So the failed seat retried forever. The kernel stayed FAILED, every compositor request
+parked (admit's escapes are phase-0 only), and the kernel refused the serial BREAK into the failed
+graphical episode (proc.c `proc_console_sak_from`: "a serial BREAK cannot redirect a live/failed
+graphical episode"). Reading the kernel side settled the options:
+- RESTORED from FAILED releases nothing;
+- the quiesce deadline is 5 s, exclusive 90 s, restoring 5 s;
+- staying FAILED for the boot would lose serial recovery too.
+
+The operator chose "seat back, input withheld" (vote 30). The seat goes NORMAL without the device,
+and if the takeover had begun, input never reaches the compositor again, because a frozen trusted
+prompt may still be on the glass. Rejected: giving input back, which any client able to hang the
+host GPU for 30 s could use to read a password typed into the frozen prompt.
+
+**What reading for the vote found.** `Screen::activate` disables the outputs, binds the trusted image
+and flushes. The seat marked itself active only after all three, so a takeover that failed part-way
+went back to NORMAL with no restore (OPEN-BUGS 08:39Z). That was true before vote 29, and a stall
+makes it likelier. Restoration is now owed from the moment a takeover begins (`Seat.displaced`).
+Restore's gate also dropped the cursor lane (`Gpu::controlq_retired`), so a poisoned cursor queue on a
+live engine no longer costs the display.
+
+**Witness.** `ls-graphical-sak-dead` fires the two-shot lever at takeovers, both legs in one boot.
+- Leg 1 stalls between exclusion and bind with a chain the device retires. The engine revived 0 ms after its deadline, the kernel closed the seat "(scanout displaced)", lictor said "normal scanout restored", and only then did the seat recover.
+- Leg 2 stalls under the trusted scanout with the retirement withheld. The engine died at 30005 ms, the seat recovered saying its display was lost, and the first key typed after that drew "input withheld from the compositor" while the shell stayed silent. The scenario took 118 s.
+- Mutants, each red on all three attempts for its own reason:
+  - restore only after a completed takeover: "part-way: the seat went back to normal with no restore";
+  - no withholding: "a key typed after the display was lost reached the shell". This proves the negative half discriminates too, since the shell does receive keys on a dead engine.
+  - the old retry-forever arm: "dead=1 returned=0 and no recovery".
+- `ls-graphical-sak-recover` still passes on the same image (WIP 9c6b55e04).
+
+**The audit.** The Fable round came back 0/1/0/2 (close 3450b72af). Its P1 was a regression I had written. Phase 3 cleared `displaced` before the kernel acknowledged RESTORED, while `active` cleared only after it. If the kernel refused RESTORED, which it does when a grantee exits between GRANT and the commit (a window the grantee's own process can aim at), `active` stayed true. The next episode then skipped exclusion and the trusted bind, and acknowledged VISIBLE for a frame on no scanout. That is the textbook spoof I-27 exists to stop. The old code had cleared `active` in the FAILED arm unconditionally, and I had narrowed that clear to `displaced`. The fix ties the two flags to the events they name:
+- `active` (now the generation whose trusted scanout is up) clears when the restore completes;
+- `displaced` clears only when the kernel acknowledges RESTORED.
+The P3s were a GPU-DESIGN sentence that said an episode waits for a stall when in fact it fails at once, and a gate with no witness. The close adds two legs to the same boot: a held cursor stall inside exclusion (the restore must go through on the control queue alone), and a refused RESTORED (lictor must rebind again, and the next takeover must activate afresh). On the close tree all four legs pass in 124 s: the cursor revived 107 ms after its release, the refused RESTORED was followed by a second restore, leg 2 activated afresh at generation 4, and the engine died at 30005 ms. `ls-graphical-sak-recover` and the plain-ci `ls-gpu-dead` also pass. The F1 mutant (the WIP's return logic) goes red with "the seat returned without rebinding", and the F3 mutant (restore gated on `all_work_retired`) with "restored=0".
+
+**29b: a stall takes no composition verdict.** Vote 29 left a cost on tapestryd's side. During a stall
+every request fails at once, and the composition health tick fails closed, so one stall met by a health step
+latched GPU composition off for the boot (OPEN-BUGS 06:39Z). The fix is the reading the latch needed: a failure is
+weighed against the engine state it left. Every broker reply now carries the engine state and a monotone stall
+count, and `failure_cause` decides:
+- a stall begun during the tick, or still standing, means some outcome is unknown, so the tick takes no verdict, the
+  present goes to the CPU, and the next tick issues a fresh copy;
+- a dead engine latches, said as the engine's death;
+- anything else is the context's own failure, as before.
+
+**What I had wrong going in.** The resume note said `rpc_client::call` dropped the Stats on an error reply, and that
+this was the gap. Reading `Device::execute` showed it was not the latch's cause: a health step's device failure
+comes back as an Ok envelope carrying an inner Err (`result.put`), so its Stats were adopted all along. The dropped
+Stats were real only for request-level errors, a failed check or a refused retirement. The client now keeps them
+anyway. The commit says which half was which.
+
+**The lever had to change shape.** The existing shots mark a stall with the chain still outstanding, and revival then
+waits on a pump that races the compositor's next request. A witness aimed at one health step would have been a
+race. The new shot (`TestStallNext`, one per armed boot) lets the next synchronous command retire first, and only
+then reports its deadline missed. The serve loop pumps before it takes another request, so the stall's length is
+known and nothing races the device.
+
+**Witness.** The chain lands while composed-screen's probe stages run, and an expect waiting for it would discard
+their lines. So `composed-stall-verdict.py` reads the transcript after the run, asking only the causal order. That
+order is: armed, aimed, then injected; injected before the no-verdict and before the revival, which race each other;
+both before the verification. The mutant leg (the old rule: a stall latches) went red on the latch line and
+the missing no-verdict line, the checker's first real-log red.
+
+**The bring-up mutants found a hole in the checker.** Without the bring-up retry (M1), the run went red at the
+compositor ctx create. With the convention attempt's retry unwired (M2), it went red at that attempt, and the
+probe settled slot S on the CPU. The checker did not say so: its CPU-class rule ran only when the chain before it
+held, and on M2 the chain had already broken. 65e3bf9ed searches for the class from the armed line on, whatever the
+chain did; replayed on M2's log, it fails on "S CPU" as well. A rule gated behind another check is never asked on
+the run that should trip it.
+
+**Green.** The clade ci image of 65e3bf9ed verified on thyla-pi: both bring-up stalls retried, the health stall
+took no verdict, the engine revived 1 ms past its deadline, GPU composition never latched, 9/9 pixels.
+composed-screen passed 9/9 on both legs with no lever line and no real stall in the unarmed run, tri verified, and
+the default build passed the suite at 2120/2120.
+
+**What the mutant run also said, and what it did not mean.** The same mutant run failed the scenario's own tab-strip
+probe: `(800,2) = #cec4b6`, want `#3a3a44`, with `composed gpu 5 cpu 47`. I filed it as a post-latch chrome bug
+(OPEN-BUGS 11:08Z), because the latch had put the screen on the CPU path just before. Before hunting it I looked for a
+transcript of that probe from before the latch existed. main's b3e worktree had one from 2026-09-16, and it failed
+the same probe on both legs: the GL leg with GPU composition on throughout (`composed gpu 40 cpu 0`) and the plain
+CPU leg. #cec4b6 is the right pixel, the Daylight theme's inactive header (`theme.rs:306`). Daylight moved the
+strip's colours on 2026-09-01 and updated `ls-gfx-panes.exp` but not `composed-screen.exp`, so composed-screen had
+been red on every path for two months, and the 29b gate, which requires its PASS, could never have passed. The
+scenario now reads both colours from `DAYLIGHT_THEME` instead of transcribing them. The lesson: before calling a
+red "post-X", find a pre-X transcript of the same probe.
+
+**A real stall, during the close.** The F1 mutant run (the late check never fires, so lictor must say the shot was
+LOST, and did, at :9481) also carried a stall nobody injected: a 501 ms `SUBMIT_3D_SYNC` during the boot-time
+blit-convention probe (q3-stall-mutant.log:8395). The prober read the failed attempt as an answer, tried the two
+mirrored variants, and settled `S CPU`: scaled slot blits on the CPU for the boot. That is the 06:39Z class in
+bring-up, so 29b's rule was not yet true. It went into the close: `Comp::stall_retried` re-runs each one-shot
+bring-up step a stall failed. Writing it voided a proof elsewhere: the comment at `WARP_VENUS_CTX_BASE` bounded the
+convention probe's throwaway ids by "about a dozen" attempts, and a standing stall's retries would have walked them
+into the venus band (e31af80f9).
+
+**Audit.** Two Fable 5.1 rounds. Round 1 (c554af390), 0/0/0/2: the stall shot was not bound to its command, so a
+refusal or a real deadline miss left it for whatever synchronous command came next; and the attach-time health
+copy's stall went uncounted. Round 2 (9fb2511a1, with the bring-up retry), 0/0/1/4. The P2 was a construction I had
+reasoned past: the convention attempt's cleanup destroy runs inside the retried step, and during a standing stall
+it parks. lictor revives, refuses the destroy, and the reply reads Live with the count unchanged, so `stall_retried`
+took a stalled try for the device's answer and the class went to the CPU anyway. e31af80f9 had already stopped that
+destroy unless the create stalled; the general fix is that a step begun on a stalled engine counts as stalled
+whatever its reply says. Lesson: a cleanup that parks inside a step can launder a stall's revival into "Live, same
+count". Round 2 also asked for the venus-band guard to be derived from the retry bound rather than written by
+hand: the span is now ATTEMPTS x (1 + retries), statically asserted. The reviewer had not seen e31af80f9, and its
+F5 reached the same spot from the other side.
+
+**Also this stretch: 02:58Z.** test-interactive.sh knew guest, INFRA and HARNESS, so a scenario on the wrong image
+(now refused at once by the image gate) was retried three times and summed as a guest regression. lib.exp's refusal
+and lc_login's session arm now write an `IMAGE:` marker, and the wrapper stops retrying at it. Through the real
+wrapper with scratch scenarios, HEAD's wrapper took 3 attempts and counted "1 guest"; the fix takes 1 attempt and
+counts "1 IMAGE". The image-gate host test now asks for the marker, with 8 legs red on HEAD's lib.exp (663f76855).
+
 ## 2026-10-29 -- the goodbye bound measured the host, not a hang (corona)
 
 **What it closes.** OPEN-BUGS 2026-10-29T00:33Z, a P1 I introduced in 6443f1874
