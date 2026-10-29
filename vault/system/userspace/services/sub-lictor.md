@@ -40,6 +40,7 @@ code:
   - tools/interactive/ls-graphical-sak.exp
   - tools/interactive/ls-graphical-sak-states.exp
   - tools/interactive/ls-graphical-sak-recover.exp
+  - tools/interactive/ls-graphical-sak-dead.exp
   - usr/lictor/src/rpc_client.rs
   - usr/lictor/src/skein.rs
   - usr/lictor/src/wire.rs
@@ -241,8 +242,28 @@ scrubbed the key queue, so Lictor shows the failure notice for 1.5 s, waits
 for every key to come up, rebinds the last normal presentation and reports
 RESTORED; the kernel returns the seat to normal and releases nothing. Normal
 broker requests park through a failure exactly as through an episode, so the
-compositor never sees an error for a display that is about to return. A
-refused restore (work still in flight, a dead device) is retried every pass.
+compositor never sees an error for a display that is about to return.
+Restoration is owed from the moment a takeover begins (`Seat.displaced`, set
+before `exclude_all_outputs`), not only once it completes: a takeover that
+fails part-way may already have disabled outputs or bound the trusted image.
+`Device::restore` needs only the control queue's quiescence
+(`Gpu::controlq_retired`), so a cursor queue poisoned on a live engine does not
+cost the display. A restore refused by a stalled engine is retried every
+pass until the engine revives or dies.
+
+A dead engine can restore nothing, so the seat goes back without its display
+(TRUSTED-PATH section 7, operator vote 30):
+- an episode that reached restoration fails first, so the grant is cancelled;
+- RESTORED from FAILED then returns the seat to normal, so the serial SAK works
+  again and the compositor's requests are refused at once instead of parking;
+- if the takeover had begun, a frozen trusted frame may stay on the glass, so
+  `Seat.withheld` keeps every later keyboard and pointer event from the
+  compositor for the rest of the boot. The first such event says
+  `input withheld from the compositor`.
+
+Until 2026-10-29 the restore was retried forever: every compositor request
+parked for good and the kernel refused the serial BREAK into the failed
+episode.
 Before 2026-09-21 a failure was terminal and reachable by benign timing: a
 chord held past the 5 s quiesce deadline left the display dark until both seat
 processes died.
@@ -324,7 +345,8 @@ inherits the seat. The ledger validates a request before it reserves an id, so
 a refused request leaves no reservation behind. A dead engine refuses every
 retirement (its pins stay) and fails every command that would reach the ring;
 queries the broker answers from its own state still answer, and seat traffic
-still flows.
+still flows. An episode it interrupts returns the seat without its display
+and withholds input for the rest of the boot (see the recovery above).
 
 ## Performance
 
@@ -339,7 +361,15 @@ wrong-key and Escape paths, all entered with the primary Ctrl-Alt-F10 chord; `ls
 adds real expiry and the five-failure lockout at the 800x720 minimum; and
 `ls-graphical-sak-recover` holds the chord past the quiesce deadline, requires
 the failure notice, the recovery with nothing conferred, a live workspace and
-then a full conferral on the recovered seat. Ordinary test descendants are refused trusted-seat
+then a full conferral on the recovered seat. `ls-graphical-sak-dead` fires the
+two-shot `test-latch-dead` lever at trusted takeovers (`Device::test_latch_seat_shot`).
+The first stalls the engine between disabling the outputs and binding the
+trusted image, and the device retires it, so the takeover fails part-way and
+lictor must say `normal scanout restored` before the seat recovers, and typing
+must reach the shell. The second stalls it under the trusted scanout with the
+retirement withheld, so the engine dies at 30 s. The seat must recover with
+its display lost, and a key typed afterwards must draw lictor's
+`input withheld` line, while the shell stays silent. Ordinary test descendants are refused trusted-seat
 operations and GPU claims at every stage. The run disables serial authorization.
 Broader accelerated/backend and SMP verification remains in progress. Host tests exercise framing,
 semantic validation, ownership/retirement, keymaps and rendering rejection.

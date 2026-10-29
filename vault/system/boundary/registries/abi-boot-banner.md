@@ -21,6 +21,7 @@ mirrors:
   - "tools/interactive/ls-graphical-sak-states.exp"
   - "tools/interactive/ls-graphical-sak-recover.exp"
   - "tools/interactive/ls-gpu-dead.exp (EXTINCTION: only -- the dead-engine witness)"
+  - "tools/interactive/ls-graphical-sak-dead.exp (EXTINCTION: only -- the dead-engine seat witness)"
   - "tools/interactive/git-shell.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"
   - tools/interactive/pci-net-load.exp

@@ -119,8 +119,10 @@ impl Device {
     /// Used only after kernel END. Ordinary admission remains closed while a
     /// complete previous normal frame is rebound and flushed. The compositor
     /// must also observe the changed seat epoch and repaint after it resumes.
+    /// Only the control queue need be quiet (GPU-DESIGN 4.5.15), so a cursor
+    /// queue poisoned on a live engine does not cost the display.
     pub fn restore(&mut self) -> Result<(), Error> {
-        if !self.gpu.all_work_retired() { return Err(Error::Hardware); }
+        if !self.gpu.controlq_retired() { return Err(Error::Hardware); }
         match self.presentation {
             Presentation::None => self.gpu.set_scanout(0, 0, 0),
             Presentation::Image { resource, width, height } => {
@@ -154,6 +156,17 @@ impl Device {
             }
             _ => {}
         }
+    }
+    /// The same lever, fired by a trusted takeover instead of a retirement:
+    /// `Some(false)` for the first shot (the device retires the chain),
+    /// `Some(true)` for the second (its retirement is withheld).
+    #[cfg(feature = "test-mode")]
+    pub fn test_latch_seat_shot(&mut self) -> Option<bool> {
+        if self.test_latch_shots == 0 { return None; }
+        let hold = self.test_latch_shots == 1;
+        self.test_latch_shots -= 1;
+        self.test_latch_targets.clear();
+        Some(hold)
     }
     #[cfg(feature = "test-mode")]
     fn test_latch_mark(&mut self, resource_id: u32, w: u32, h: u32) {

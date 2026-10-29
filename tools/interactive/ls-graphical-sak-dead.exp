@@ -1,0 +1,184 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-dead -- a trusted takeover that fails part-way, and one
+# whose GPU engine dies under the trusted scanout (TRUSTED-PATH section 7,
+# operator vote 30).
+#
+# THYLACINE_TEST_LATCH_DEAD=1 puts thylacine.test-latch-dead on the kernel
+# command line: tapestryd arms lictor's two-shot lever, and with no 97x89
+# surface retiring in a session both shots go to trusted takeovers.
+#
+# Leg 1 (part-way): shot 1 stalls the engine after the outputs are disabled
+# and before the trusted image is bound, and the device retires the chain.
+# The takeover fails with the outputs already dark. lictor must restore
+# normal output once the engine revives -- until 2026-10-29 it restored only
+# after a completed takeover, so this seat went back to normal with no
+# restore (OPEN-BUGS 08:39Z) -- and typing must reach the shell again.
+#
+# Leg 2 (dead): shot 2 stalls the engine with the trusted scanout up and its
+# chain's retirement withheld, so the engine dies 30 s later. Until vote 30
+# the failed seat retried its restore forever: every compositor request
+# parked for good and the serial SAK was refused (OPEN-BUGS 04:20Z). The seat
+# must come back without its display, and a key typed afterwards must reach
+# no one, because a frozen trusted frame may still be on the glass. lictor's
+# own line proves the withholding gate fired; the shell's silence alone would
+# be satisfied by a compositor that had simply stopped.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_TEST_LATCH_DEAD) 1
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_require_image {SESSION}
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc witness {stage} {
+    type "caps-probe --seat-$stage\n"
+    global timeout
+    set timeout 30
+    expect {
+        -ex "seat-probe: PASS $stage (endpoint denied; GPU denied; DAC verified)" { lc_step "typing reaches the shell ($stage)" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "seat $stage" }
+        timeout { lc_fail "no authority witness ($stage) -- typing did not reach the shell" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+# The positive control for leg 2's silence: the same keys reach the shell.
+witness baseline
+
+# ---- leg 1: a takeover that fails part-way ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "INJECTED by test-latch-dead, retirement withheld" {
+        lc_fail "part-way: the first takeover withheld its retirement -- the lever fired out of order"
+    }
+    -ex "INJECTED by test-latch-dead) -- engine stalled" {
+        lc_step "part-way: lictor stalled the engine inside the takeover"
+    }
+    -ex "lictor: trusted scanout active" { lc_fail "part-way: the takeover completed -- no shot fired inside it (was the lever armed?)" }
+    -re {EXTINCTION:} { lc_extinction_fail "first takeover" }
+    timeout { lc_fail "part-way: no injected stall within 30s of the chord (was the lever armed?)" }
+}
+set revived 0
+set restored 0
+expect {
+    -ex "lictor: trusted scanout active" { lc_fail "part-way: the takeover completed although its engine had stalled" }
+    -re {input withheld|engine dead} { lc_fail "part-way: the engine died or input was withheld on a stall the device retired" }
+    -re {gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
+        set revived 1
+        exp_continue
+    }
+    -re {lictor: normal scanout restored generation=[0-9]+} {
+        set restored 1
+        lc_step "part-way: lictor restored normal output after the failed takeover"
+        exp_continue
+    }
+    -ex "lictor: trusted seat recovered; nothing was conferred" {
+        if {!$restored} {
+            lc_fail "part-way: the seat went back to normal with no restore of the outputs it had disabled"
+        }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "after the first takeover" }
+    timeout { lc_fail "part-way: within 30s: revived=$revived restored=$restored and no recovery" }
+}
+if {!$revived} { lc_fail "part-way: the seat restored, but lictor never said the engine revived -- which path ran it?" }
+after 1500
+witness restored
+
+# ---- leg 2: the engine dies under the trusted scanout ----
+key "ctrl+alt+f10"
+set timeout 30
+expect {
+    -ex "lictor: trusted scanout active" { lc_step "dead: the trusted scanout is up" }
+    -re {EXTINCTION:} { lc_extinction_fail "second takeover" }
+    timeout { lc_fail "dead: no takeover within 30s of the chord" }
+}
+expect {
+    -ex "INJECTED by test-latch-dead, retirement withheld" { lc_step "dead: lictor stalled the engine with the chain's retirement withheld" }
+    -ex "INJECTED by test-latch-dead) -- engine stalled" { lc_fail "dead: the second shot did not withhold its retirement" }
+    -re {EXTINCTION:} { lc_extinction_fail "second shot" }
+    timeout { lc_fail "dead: no injected stall within 30s of the takeover" }
+}
+set dead 0
+set returned 0
+set timeout 60
+expect {
+    -re {engine revived|lictor: normal scanout restored} {
+        lc_fail "dead: the engine revived or the scanout was restored although the chain's retirement was withheld"
+    }
+    -re {gpu engine stalled [0-9]+ ms without a retirement -- engine dead} {
+        set dead 1
+        lc_step "dead: the stall outlived the abandonment bound and the engine died"
+        exp_continue
+    }
+    -re {GPU engine dead with normal output displaced -- the seat returns without its display; input withheld for the rest of the boot generation=[0-9]+} {
+        set returned 1
+        exp_continue
+    }
+    -ex "lictor: trusted seat recovered; nothing was conferred" {
+        if {!$returned} { lc_fail "dead: the seat recovered without saying its display was lost" }
+        lc_step "dead: the seat is normal again, nothing conferred, its display lost"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "after the engine died" }
+    timeout { lc_fail "dead: within 60s: dead=$dead returned=$returned and no recovery (the failed seat is still retrying its restore)" }
+}
+if {!$dead} { lc_fail "dead: the seat returned without its display, but lictor never said the engine died" }
+
+# A key typed now must reach no one. lictor's line is the gate firing; a
+# seat-probe PASS is a key that reached the shell through the compositor.
+type "caps-probe --seat-denied\n"
+set withheld 0
+set timeout 15
+expect {
+    -ex "lictor: input withheld from the compositor (display lost in a trusted episode)" {
+        set withheld 1
+        exp_continue
+    }
+    -ex "seat-probe: PASS denied" { lc_fail "dead: a key typed after the display was lost reached the shell" }
+    -re {EXTINCTION:} { lc_extinction_fail "after typing into a lost display" }
+    timeout {}
+}
+if {!$withheld} { lc_fail "dead: lictor never withheld the keys typed after the display was lost" }
+lc_pass "graphical SAK dead: a part-way takeover restores normal output; a dead engine returns the seat without its display and withholds input"
+lc_quit

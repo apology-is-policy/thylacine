@@ -45,6 +45,10 @@ pub struct Screen {
     pixels: usize,
     active: bool,
     raster: Raster,
+    /// Stall the engine between disabling the outputs and binding the trusted
+    /// image: a takeover that fails part-way (the test-latch-dead lever).
+    #[cfg(feature = "test-mode")]
+    pub test_stall_after_exclusion: bool,
     // Once attached these pins survive every error. The owning service must
     // reset/drop Gpu before dropping Screen, including on an unwinding exit.
     _backing: Vec<Dma>,
@@ -77,7 +81,8 @@ impl Screen {
             core::mem::forget(backing);
             return Err(Error::Hardware);
         }
-        Ok(Self { width, height, pixels, active: false, raster, _backing: backing })
+        Ok(Self { width, height, pixels, active: false, raster, _backing: backing,
+            #[cfg(feature = "test-mode")] test_stall_after_exclusion: false })
     }
     pub fn paint(&mut self, gpu: &mut Gpu, model: &Model, masked: usize,
                  backdrop: Option<&[u32]>) -> Result<(), Error> {
@@ -93,7 +98,11 @@ impl Screen {
         Ok(())
     }
     pub fn activate(&mut self, gpu: &mut Gpu) -> Result<(), Error> {
+        #[cfg(feature = "test-mode")]
+        let stall = core::mem::take(&mut self.test_stall_after_exclusion);
         gpu.exclude_all_outputs()?;
+        #[cfg(feature = "test-mode")]
+        if stall { gpu.test_latch_now(false); }
         gpu.set_scanout(RESOURCE, self.width, self.height)?;
         gpu.flush(RESOURCE, 0, 0, self.width, self.height)?;
         self.active = true;
@@ -101,8 +110,9 @@ impl Screen {
     }
     pub fn deactivated(&mut self) {
         self.active = false;
-        // Restoration has completed on the device. Erase the private staging
-        // pixels; a later episode must paint a fresh complete semantic frame.
+        // The device restored normal output, or its engine died and can show
+        // nothing again. Erase the private staging pixels; a later episode
+        // must paint a fresh complete semantic frame.
         unsafe {
             for i in 0..self.pixels { core::ptr::write_volatile((BASE as *mut u32).add(i), 0); }
         }

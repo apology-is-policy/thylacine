@@ -27,6 +27,14 @@ pub struct Seat {
     masked: u32,
     model: Model,
     failed_since: Option<libthyla_rs::time::Instant>,
+    /// A takeover began, so normal output may not be showing: owed a restore
+    /// until the device completes one or its engine dies.
+    displaced: bool,
+    /// The engine died with the normal output displaced. A trusted frame may
+    /// stay frozen on the glass, so input never reaches the compositor again
+    /// this boot (TRUSTED-PATH section 7, vote 30).
+    withheld: bool,
+    withheld_said: bool,
 }
 /// How long the failure notice stays up before normal output returns.
 const FAILURE_NOTICE_MS: u128 = 1500;
@@ -55,7 +63,11 @@ impl Seat {
                     if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; }
                     else { self.phase = m.phase; self.generation = m.generation; }
                 }
-                if self.phase == 0 {
+                if self.phase == 0 && self.withheld {
+                    if !core::mem::replace(&mut self.withheld_said, true) {
+                        super::diagnostic("lictor: input withheld from the compositor (display lost in a trusted episode)\n");
+                    }
+                } else if self.phase == 0 {
                     if input.events.len() < 256 { input.events.push((event.etype, event.code, event.value)); }
                     else {
                         // Losing a release could stick a key. Drop the batch
@@ -87,10 +99,21 @@ impl Seat {
                 if !device.gpu.all_work_retired() { return; }
                 if !self.active {
                     self.model = Model { notice: b"Preparing the trusted path.".to_vec(), ..Model::default() };
-                    if screen.paint(&mut device.gpu, &self.model, 0, None).is_err()
-                        || screen.activate(&mut device.gpu).is_err() { self.fail("private scanout activation"); return; }
+                    if screen.paint(&mut device.gpu, &self.model, 0, None).is_err() {
+                        self.fail("private scanout activation"); return;
+                    }
+                    #[cfg(feature = "test-mode")]
+                    let shot = device.test_latch_seat_shot();
+                    #[cfg(feature = "test-mode")]
+                    { screen.test_stall_after_exclusion = shot == Some(false); }
+                    // A takeover that fails part-way may already have disabled
+                    // outputs or bound the trusted image.
+                    self.displaced = true;
+                    if screen.activate(&mut device.gpu).is_err() { self.fail("private scanout activation"); return; }
                     self.active = true; self.sequence = 0; self.masked = 0;
                     super::diagnostic(&alloc::format!("lictor: trusted scanout active generation={}\n", self.generation));
+                    #[cfg(feature = "test-mode")]
+                    if shot == Some(true) { device.gpu.test_latch_now(true); }
                 }
                 if released && self.quiescence.ready(self.generation) {
                     self.mods = Mods::default();
@@ -117,6 +140,7 @@ impl Seat {
                 if !released { return; }
                 if device.restore().is_err() { self.fail("normal scanout restoration"); return; }
                 screen.deactivated();
+                self.displaced = false;
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
                 if ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
                 self.phase = m.phase; self.active = false;
@@ -125,12 +149,13 @@ impl Seat {
                 // The kernel already cancelled any grant and scrubbed the key
                 // queue, so what is left is giving the workspace back. Say
                 // what happened first, then restore and tell the kernel; a
-                // refused restore (work still in flight, a dead device) is
-                // retried every pass and confers nothing in the meantime.
+                // refused restore (a stalled engine) is retried every pass and
+                // confers nothing in the meantime. A dead engine can restore
+                // nothing, so the seat goes back without its display.
                 for input in inputs.iter_mut() { input.events.clear(); }
                 let since = *self.failed_since.get_or_insert_with(|| {
                     super::diagnostic(&alloc::format!("lictor: kernel closed trusted seat (scanout {})\n",
-                        if self.active { "private" } else { "normal" }));
+                        if self.active { "private" } else if self.displaced { "displaced" } else { "normal" }));
                     if self.active {
                         let model = Model { state: State::Failed, ..Model::default() };
                         let _ = screen.paint(&mut device.gpu, &model, 0, None);
@@ -138,10 +163,24 @@ impl Seat {
                     libthyla_rs::time::Instant::now()
                 });
                 if !released || (self.active && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
-                if self.active {
-                    if device.restore().is_err() { return; }
+                if self.displaced {
+                    if device.gpu.engine_dead() {
+                        // Nothing can redraw the glass, and keys typed into a
+                        // frozen trusted frame must reach no one.
+                        self.withheld = true;
+                        super::diagnostic(&alloc::format!(
+                            "lictor: GPU engine dead with normal output displaced -- the seat returns \
+                             without its display; input withheld for the rest of the boot generation={}\n",
+                            self.generation));
+                    } else if device.restore().is_err() {
+                        return;
+                    } else {
+                        super::diagnostic(&alloc::format!(
+                            "lictor: normal scanout restored generation={}\n", self.generation));
+                    }
                     screen.deactivated();
                     self.active = false;
+                    self.displaced = false;
                 }
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
                 if ep::call(ep::RESTORED, &mut m).is_ok() {

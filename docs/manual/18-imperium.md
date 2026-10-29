@@ -75,6 +75,13 @@ released. Holding the attention keys for more than five seconds is the usual
 cause. The pending request is cancelled and must be issued again. The key prompt
 is never moved into an ordinary terminal.
 
+If the graphics device stops responding during an episode, the display cannot
+return for the rest of the boot. The trusted dialog, or whatever the screen last
+showed, may stay frozen. Keys typed after that go nowhere. They never reach the
+workspace, so no program can read a key typed into a frozen prompt. The serial
+console reports `lictor: input withheld from the compositor`. Use a serial
+recovery session, or restart the machine.
+
 The current QEMU backend uses a neutral dark background during authorization.
 The workspace is suspended from display and input while its panes remain alive.
 A blurred workspace snapshot is not yet provided by this backend.

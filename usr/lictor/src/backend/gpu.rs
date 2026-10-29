@@ -4613,7 +4613,14 @@ impl Gpu {
     /// An abandoned fence is still device work until a late used entry retires
     /// it. Counting only the public in-flight counter would lose that case.
     pub fn all_work_retired(&self) -> bool {
-        self.cursor.queue.idle() && !self.ctrl.dead && !self.ctrl.sync_pending && !self.ctrl.sync2_pending
+        self.cursor.queue.idle() && self.controlq_retired()
+    }
+
+    /// The control queue's share of `all_work_retired`, which is all that
+    /// rebinding a normal scanout needs: a late cursor chain can touch only a
+    /// cursor plane, and a busy cursor queue keeps every later takeover out.
+    pub fn controlq_retired(&self) -> bool {
+        !self.ctrl.dead && !self.ctrl.sync_pending && !self.ctrl.sync2_pending
             && self.ctrl.fslots.iter().all(Option::is_none)
             && self.ctrl.fslot_poisoned.iter().all(|poisoned| !poisoned)
     }
