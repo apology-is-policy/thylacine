@@ -260,6 +260,12 @@ the caller's Proc).
   half -- main catches SIGINT, blocks and raises it so it queues, makes and joins
   a thread, and unblocks; the handler must run on main, where a newborn the
   kernel started unmasked would have taken it at its first entry.
+- **C11 `thrd_create` works since 0066 (2026-10-29).** Until then `start_c11()`
+  never registered `&__thread_list_lock` as clear_child_tid (0004 re-armed that
+  handoff in `start()` only, having replaced musl's `CLONE_CHILD_CLEARTID`
+  clone), so a C11 thread exited holding the thread-list lock and `thrd_join`,
+  and every later thread create, waited forever. `mask-c11` found it by hanging
+  C7's phase f boot; it had passed as "patched but untested" since 0004.
 
 ## Provenance
 
