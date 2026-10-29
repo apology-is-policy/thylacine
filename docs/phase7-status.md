@@ -2789,7 +2789,7 @@ there runs longer. Code eb8e8b807.
 ## The Warp scenarios refuse an image they cannot run (P3 tooling) -- 2026-10-29
 
 Closes OPEN-BUGS 2026-10-28T23:14Z, 2026-10-29T02:30Z and 02:58Z. Code 583fc81a0 and 663f76855 (WIP), audit close
-*(pending)*.
+5f85ae0f7.
 
 - **The trap.** A Warp scenario booted on the wrong image ran for its whole budget, then failed naming the wrong
   cause. The default image (HALCYON_SESSION=y bakes `/lib/halcyon/session` into the pool) reached login and timed out
@@ -2894,7 +2894,7 @@ Scripture 2dfd36521 (TRUSTED-PATH 7, GPU-DESIGN 4.5.15), code 9c6b55e04, audit c
 
 ## A GPU stall takes no composition verdict (29b) -- 2026-10-29
 
-Code c554af390, 9fb2511a1, e31af80f9, 0ece92257 (WIP), audit close *(pending)*. Closes OPEN-BUGS 2026-10-29T06:39Z: under
+Code c554af390, 9fb2511a1, e31af80f9, 0ece92257 (WIP), audit close 701bb3920. Closes OPEN-BUGS 2026-10-29T06:39Z: under
 vote 29 every request during a stall fails at once, so one stall met by a composition health step latched GPU
 composition off for the boot. Also closes 11:39Z, the same class at bring-up.
 
