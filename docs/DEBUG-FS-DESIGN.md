@@ -2427,16 +2427,22 @@ steps the focus, else main, as before; `step <tid>` steps the named thread, unde
 the same conditions (the writer holds the debug slot, the Proc is fully stopped)
 and with the same result: the thread runs one instruction, its EC 0x32 re-stops
 the Proc through `proc_debug_fault_stop`, and the stepped thread becomes the
-focus, so the Proc-level files then report it. A tid that names no live thread
-of the Proc refuses the write. The thread-model review (THREAD-MODEL-REVIEW-FABLE
+focus, so the Proc-level files then report it. As with the operand-less step,
+the resume is the Proc's: every parked thread runs until that re-stop, and only
+the named thread is single-stepped. Its step-over of a breakpoint at its PC is
+its own (the breakpoint is loaded disabled for that thread alone), so no other
+thread passes the breakpoint unseen. A tid that names no live thread of the
+Proc refuses the write. The thread-model review (THREAD-MODEL-REVIEW-FABLE
 6.4) listed a per-thread `ctl`; this design has none. The debug slot is owned by
 the open Proc-level `ctl` file (§7.2: `debug_owner` is that Spoor, released when it
 closes), and every run-control verb checks that its writer is that file. A
 per-thread `ctl` is a different open file and could not show that it belongs to
 the slot's owner. Giving it a slot of its own would admit a second debugger;
 tying it to the first would need a second ownership mechanism beside the one
-§7.2 audited. Linux has the same shape: `PTRACE_SINGLESTEP` names a tid, on the
-tracer's single attachment to the process.
+§7.2 audited. Linux names the thread the same way: `PTRACE_SINGLESTEP` takes a
+tid, on the tracer's single attachment to the process. There the other threads
+stay stopped while one steps; here the step resumes the Proc, as GDB's default
+stepping does.
 
 **Qids.** The Proc-level encoding is unchanged, `(pid << 32) | kind`, with one new
 kind for the `thread` directory. A per-thread object's path is

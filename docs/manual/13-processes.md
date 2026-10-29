@@ -213,9 +213,11 @@ its stack is not being changed under the read.
 
 A debugger steps one thread by writing `step <tid>` to the process's `ctl`;
 `step` alone steps the thread that stopped the process, else the main thread.
-The stepped thread runs
-one instruction, the process stops again, and the process-level files then
-describe that thread. There is no per-thread `ctl`. The open `ctl` file of the
+The stepped thread runs one instruction, the process stops again, and the
+process-level files then describe that thread. The process's other threads run
+as well until it stops; only the named thread is held to one instruction. A
+breakpoint at the stepped thread's position is lifted for that thread alone, so
+no other thread can run past it unseen. There is no per-thread `ctl`. The open `ctl` file of the
 debugger that attached is what owns the debugging session, and a second control
 file could not show that it belongs to the same debugger, so stopping and
 starting apply to the whole process and a single thread is chosen only by the

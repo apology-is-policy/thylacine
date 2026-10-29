@@ -42,8 +42,8 @@
 //      threads, the newest of which has exited (`threads`), stopped. Its
 //      thread directory lists exactly the live threads, the exited one has no
 //      files, each thread's regs report that thread's own frame, and `step
-//      <tid>` moves the named thread alone, which the Proc-level regs then
-//      report.
+//      <tid>` runs the named thread one instruction, after which the
+//      Proc-level regs report it.
 //
 // joey spawns + reaps + asserts exit 0 + the "debug-probe: PASS" marker, so any
 // failure gates the boot. On any failure path the child is `killgrp`'d so it can
@@ -946,20 +946,19 @@ fn threads_leg(child: &Child) -> Result<(), &'static str> {
         }
     }
 
-    // `step <tid>`: the named thread runs one instruction and no other moves;
-    // the step's stop then focuses it, so the Proc-level regs report it.
+    // `step <tid>`: the named thread runs exactly one instruction of its loop
+    // -- from the add (x23 + 1) or the ldr to the next instruction, or from the
+    // cbz back to the add -- and the step's stop focuses it, so the Proc-level
+    // regs report it. The step resumes the whole Proc and only the named thread
+    // is single-stepped, so the other threads run until that stop.
     let sk = THREADS_SPIN;
+    let (pc0, n0) = (u64_le(&before[sk], R_PC), u64_le(&before[sk], R_X23));
     ctl.write_all(format!("step {}", want[sk]).as_bytes())
         .map_err(|_| "debug-probe: FAIL -- threads: step <tid>\n")?;
-    for (k, &tid) in want.iter().enumerate() {
-        let r = thread_regs(pid, tid, "debug-probe: FAIL -- threads: read a thread's regs after the step\n")?;
-        let moved = u64_le(&r, R_PC) != u64_le(&before[k], R_PC);
-        if k == sk && !moved {
-            return Err("debug-probe: FAIL -- threads: the stepped thread did not move\n");
-        }
-        if k != sk && (moved || u64_le(&r, R_X23) != u64_le(&before[k], R_X23)) {
-            return Err("debug-probe: FAIL -- threads: a thread the step did not name moved\n");
-        }
+    let r = thread_regs(pid, want[sk], "debug-probe: FAIL -- threads: read the stepped thread's regs\n")?;
+    let (pc1, n1) = (u64_le(&r, R_PC), u64_le(&r, R_X23));
+    if !((pc1 == pc0 + 4 && (n1 == n0 || n1 == n0 + 1)) || (pc1 + 8 == pc0 && n1 == n0)) {
+        return Err("debug-probe: FAIL -- threads: the stepped thread did not run exactly one instruction\n");
     }
     if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() || u64_le(&regs, R_X22) != sk as u64 {
         return Err("debug-probe: FAIL -- threads: the Proc-level regs do not report the stepped thread\n");
@@ -1197,7 +1196,7 @@ pub extern "C" fn rs_main() -> i64 {
     tail_flow("spin-caught", step_meets_handler,
               "debug-probe: caught-step ok (a step that met a handler stopped at its first instruction)\n");
     tail_flow("threads", threads_leg,
-              "debug-probe: threads ok (the live threads listed, the exited one absent, each thread's own regs, step <tid> moved it alone)\n");
+              "debug-probe: threads ok (the live threads listed, the exited one absent, each thread's own regs, step <tid> ran it one instruction)\n");
     if let Err(msg) = held_flow() {
         fail(msg);
     }
