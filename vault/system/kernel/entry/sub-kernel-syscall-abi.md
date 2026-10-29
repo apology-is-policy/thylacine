@@ -21,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Session registry factory ABI
 
@@ -85,9 +85,11 @@ hand). The authority to raise it, `SPAWN_PERM_MAY_RAISE_THREAD_BUDGET` (bit
 10), is in `SPAWN_PERM_ALL` and, like bit 4, mirrored in neither library: no
 native caller confers it. What the tail does is
 [[sub-kernel-syscall-dispatch]]'s (ARCH 7.3.5).
-`SPAWN_EXT_ENV` (bit 2, 2026-10-28, [[dec-2026-10-28-spawn-env]]) announces a
+`SPAWN_EXT_ENV` (bit 2, 2026-10-28, [[dec-2026-10-28-spawn-env]], restated in
+[[dec-2026-10-29-spawn-env-r2]]) announces a
 `struct sys_spawn_ext_env` after the cwd and thread tails whose bits are set,
-else at +104: `env_va` (u64; may be 0 when the length is), `env_len` (u32,
+else at +104 (a static assert in `kernel/syscall.c` pins that offset to those
+two lower tails): `env_va` (u64; may be 0 when the length is), `env_len` (u32,
 0..`SYS_SPAWN_ENV_DATA_MAX`, 32768 bytes, past it `T_E_2BIG`) and `env_flags`
 (u32, must be 0), 16 bytes. The block is the argv packing, NUL-terminated
 `NAME=VALUE` records, and it is the child's whole environment: nothing of the

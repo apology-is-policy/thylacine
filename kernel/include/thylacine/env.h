@@ -8,9 +8,10 @@
 // A table of name->value pairs surfaced as the per-Proc /env directory (devenv,
 // dc='E'). A program reads its environment from /env, never from an envp: write
 // /env/NAME to set, read /env/NAME to get, readdir /env to list. A spawned child
-// inherits a COPY via env_clone_into (the Plan 9 default-copy-on-rfork, like
-// territory_clone), unless its spawner names a different environment in the
-// SPAWN_EXT_ENV tail (env_from_block, env_install). The reserved RFENVG (share
+// inherits a COPY via env_clone_into (like territory_clone), unless its
+// spawner names a different environment in the SPAWN_EXT_ENV tail: then the
+// child is forked with none (RFCENVG) and adopts the one the spawner built
+// (env_from_block, env_install). The reserved RFENVG (share
 // semantics) stays deferred, so ref is always 1 at v1.0.
 //
 // The Env is lazily allocated (a Proc with no environment carries env == NULL,
@@ -129,14 +130,22 @@ long env_render_environ(struct Proc *p, s64 off, void *buf, long n);
 // refuse), -T_E_2BIG (a value past ENV_VALUE_MAX, a name past ENV_MAX_ENTRIES)
 // or -T_E_NOMEM. The caller bounds len (EXEC_ENV_DATA_MAX).
 //
-// env_install hands `fresh` to p, consuming it. p's own group, when it has one,
-// is emptied and refilled in place under its lock, never freed or swapped: a
-// cross-Proc devproc reader may hold it. Call it only before p's first EL0
-// instruction (the spawn thunk), when no peer thread of p can mutate the group.
+// env_install hands `fresh` to p, consuming it. A tail spawn's child is forked
+// with no group (RFCENVG) and adopts `fresh` as its own. A Proc that already
+// has one has it emptied and refilled in place under its lock, never freed or
+// swapped: a cross-Proc devproc reader may hold it. Call it only before p's
+// first EL0 instruction (the spawn thunk), when no peer thread of p can mutate
+// the group.
 //
 // env_discard frees a detached Env that was never installed (NULL-tolerant).
 struct Env *env_from_block(const char *block, u32 len, int *err);
 void env_install(struct Proc *p, struct Env *fresh);
 void env_discard(struct Env *e);
+
+#ifdef KERNEL_TESTS
+// Envs allocated and not yet freed, every kind counted (a Proc's group, a
+// detached one).
+u64 env_live_count(void);
+#endif // KERNEL_TESTS
 
 #endif /* THYLACINE_ENV_H */

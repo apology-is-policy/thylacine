@@ -19,7 +19,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -176,7 +176,12 @@ it) — readdirs `/env`, reads each value, and builds its own `"NAME=value"`
 vector for `__environ`. Fail-soft: a missing `/env` leaves `__environ` as the
 projected `envp`, which holds the same variables. `/env` stays the source of
 truth. A later `setenv` mutates only this in-process copy, and it reaches a
-child only through the `envp` the child is spawned with.
+child only through the `envp` the child is spawned with. A variable whose name
+holds `=` or whose value holds a NUL is left out of the copy, as exec leaves it
+out of every envp: `NAME=VALUE` cannot carry it, and spawning with `environ`
+would otherwise hand the child a different variable. `tools/test-pouch-env-init.py`
+runs the series' own `__pouch_env_init` over a mocked `/env` and holds both
+skips; each of its two mutants drops one and fails only that skip's cases.
 
 **`posix_spawn` sends `envp` (env-c, 2026-10-28).** It packs `envp` the way
 it packs `argv`, as NUL-terminated records, and always announces the tail, so
@@ -295,7 +300,8 @@ slot count, because many opens can target the same bounded slot.
 bad ELF / OOM / a listed fd not a Spoor — collapsed at v1.0); `E2BIG`
 for argv overflow; `EMFILE` for fd-list overflow and for pipe failure.
 A refused env tail returns the kernel's errno as it is: `EINVAL` for a record
-with no `=`, an empty name, a name of 64 bytes or more, or a `/` in a name;
+with no `=`, an empty name, a name of 64 bytes or more, a `/` in a name, or
+a name that is `.` or `..`;
 `E2BIG` for a value past 4096 bytes or a 65th name; `EFAULT`; `ENOMEM`. Pouch
 refuses a block past 32 KiB with `E2BIG` before the call. These are the
 kernel's negative T_E values, which docs/ERRORS.md defines as the Linux

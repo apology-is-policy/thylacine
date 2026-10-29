@@ -107,7 +107,9 @@ struct PreparedStdio {
 // The base is the caller's LIVE /env, listed and read variable by variable (no
 // /proc needed: /env is the process's own), unless `env_clear` was called. A
 // key that is empty or holds '=' or a NUL, or a value holding a NUL, cannot be
-// encoded and is refused here rather than sent mangled.
+// encoded and is refused here rather than sent mangled. From the base, such a
+// variable is left out, as is a name that is not UTF-8 (the listing names it
+// lossily, so its open misses) and one removed while it is read.
 fn env_block(plan: &EnvPlan) -> Result<Vec<u8>> {
     let mut vars: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     if !plan.clear {
@@ -121,19 +123,22 @@ fn env_block(plan: &EnvPlan) -> Result<Vec<u8>> {
                 Err(Error::NotFound) => continue, // unset since the listing
                 Err(e) => return Err(e),
             };
-            let mut val: Vec<u8> = Vec::new();
-            let mut chunk = [0u8; 1024];
-            loop {
-                let n = f.read(&mut chunk)?;
-                if n == 0 {
-                    break;
-                }
-                val.extend_from_slice(&chunk[..n]);
-            }
-            if val.contains(&0) {
+            // One read takes the whole value under one hold of the group's
+            // lock: a second read could meet a writer's replacement and send
+            // the child half of each.
+            let mut buf = [0u8; crate::env::ENV_VALUE_BUF];
+            let n = match f.read(&mut buf) {
+                Ok(n) => n,
+                // An entry removed after the open reads as a bare -1 through
+                // the handle that names it (devenv has no errno for it yet):
+                // unset since the listing, like NotFound.
+                Err(Error::Io) => continue,
+                Err(e) => return Err(e),
+            };
+            if buf[..n].contains(&0) {
                 continue; // the flat form cannot carry it
             }
-            vars.push((name.into_bytes(), val));
+            vars.push((name.into_bytes(), buf[..n].to_vec()));
         }
     }
     for (key, val) in &plan.ops {
@@ -494,7 +499,8 @@ impl Command {
     /// Set `key` to `val` in the child's environment. The caller's own
     /// environment is untouched. A key that is empty or holds `=` or a NUL, or
     /// a value holding a NUL, fails `spawn` with `InvalidArgument`; a key `/env`
-    /// refuses (one holding `/`, or 64 bytes or more) fails it in the kernel.
+    /// refuses (one holding `/`, `.` or `..`, or 64 bytes or more) fails it in
+    /// the kernel.
     pub fn env(&mut self, key: impl Into<String>, val: impl Into<String>) -> &mut Command {
         self.env_plan().ops.push((key.into(), Some(val.into())));
         self

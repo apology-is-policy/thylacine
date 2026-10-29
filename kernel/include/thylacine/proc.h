@@ -1899,10 +1899,12 @@ int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask);
 
-// The birth hold (DEBUG-FS-DESIGN 5f): rfork_with_caps(RFPROC, ...) whose child
+// The birth hold (DEBUG-FS-DESIGN 5f): rfork_with_caps(flags, ...) whose child
 // is published already marked BIRTH_HOLD_UNBORN. The SPAWN_DEBUG_HELD spawn's
-// fork. Same return contract as rfork_with_caps.
-int rfork_spawn_held(void (*entry)(void *), void *arg, caps_t caps_mask);
+// fork; `flags` is RFPROC, or RFPROC|RFCENVG. Same return contract as
+// rfork_with_caps.
+int rfork_spawn_held(unsigned flags, void (*entry)(void *), void *arg,
+                     caps_t caps_mask);
 
 // rfork_with_caps(RFPROC, ...) for init: the child takes PROC_ID_INIT as its
 // pid, so init is pid 1 however many kernel threads boot started before it
@@ -1924,10 +1926,12 @@ void spawn_await_birth(struct Proc *p, int child_pid);
 bool spawn_birth_released(const struct Proc *parent, const struct Proc *child);
 #endif // KERNEL_TESTS
 
-// rfork flags. Per ARCH §7.4. RFPROC and RFMEM implemented; the rest extinct.
+// rfork flags. Per ARCH §7.4. RFPROC, RFMEM and the kernel-internal RFCENVG
+// implemented; the rest extinct.
 //
-// Note the POLARITY, which diverges from Plan 9 deliberately: here set == SHARE,
-// uniformly, whereas Plan 9 reads RFFDG/RFNAMEG as "give me a copy". Under this
+// Note the POLARITY, which diverges from Plan 9 deliberately: here set == SHARE
+// for every sharing flag, whereas Plan 9 reads RFFDG/RFNAMEG as "give me a copy".
+// RFCENVG alone asks for less than a copy: an empty group, as Plan 9's does. Under this
 // polarity `RFPROC|RFMEM` with RFFDG clear is exactly the posix_spawn child --
 // new pid, shared memory, copied descriptors.
 #define RFPROC      0x0001    // create a new Proc (always required)
@@ -1939,6 +1943,12 @@ bool spawn_birth_released(const struct Proc *parent, const struct Proc *child);
 #define RFNOWAIT    0x0040    // detach from parent's children list (future)
 #define RFREND      0x0080    // share rendezvous space (future Phase 5)
 #define RFENVG      0x0100    // share environment (future P2-G)
+// RFCENVG: the child starts with NO environment group instead of a copy of
+// the parent's (Plan 9's clean-group flag). Kernel-internal: only a spawn whose
+// SPAWN_EXT_ENV tail names the child's environment sets it, so the spawner's
+// environment is never the child's, even before the thunk installs the named
+// one. SYS_RFORK refuses it like every flag but RFPROC and RFMEM.
+#define RFCENVG     0x0200
 
 // P2-D: exits — terminate the calling process.
 //

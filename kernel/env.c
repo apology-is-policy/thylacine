@@ -6,7 +6,9 @@
 // `ref` is always 1 at v1.0 -- the field is the forward hook + the territory_-
 // unref-shaped double-free guard). It is allocated lazily on the first set
 // (env_lazy's CAS closes the peer-thread alloc race), deep-copied on spawn
-// (env_clone_into), and freed at proc_free (env_free). Names are inline; each
+// (env_clone_into) or built from a spawn's SPAWN_EXT_ENV tail and adopted by a
+// child forked without one (env_from_block, env_install), and freed at proc_free
+// (env_free). Names are inline; each
 // value is kmalloc'd individually, so the struct stays modest and a long value
 // never needs a large contiguous allocation.
 
@@ -25,9 +27,19 @@
 // Allocation + teardown of the struct itself.
 // =============================================================================
 
+// Every Env is made by env_alloc and freed by env_destroy, so this is exact.
+static u64 g_env_live;
+
+#ifdef KERNEL_TESTS
+u64 env_live_count(void) {
+    return __atomic_load_n(&g_env_live, __ATOMIC_RELAXED);
+}
+#endif // KERNEL_TESTS
+
 static struct Env *env_alloc(void) {
     struct Env *e = (struct Env *)kmalloc(sizeof(struct Env), KP_ZERO);
     if (!e) return NULL;
+    __atomic_add_fetch(&g_env_live, 1, __ATOMIC_RELAXED);
     spin_lock_init(&e->lock);
     __atomic_store_n(&e->ref, 1, __ATOMIC_RELAXED);
     // A fresh device number per Env (V-4b-5). Ids are per-Env and restart at 1,
@@ -55,6 +67,7 @@ static void env_destroy(struct Env *e) {
         }
     }
     kfree(e);
+    __atomic_sub_fetch(&g_env_live, 1, __ATOMIC_RELAXED);
 }
 
 // Lazily install p->env on the first mutation. The CAS closes the race where two
@@ -112,8 +125,12 @@ static int find_free_locked(struct Env *e) {
 // A valid env var name is a single non-empty component that fits with a NUL and
 // carries no '/' or embedded NUL (the resolver passes a single component, but
 // devenv re-validates: a hostile direct caller must not smuggle a separator).
+// "." and ".." are refused too: every create and unlink refuses them before
+// devenv, and a walk resolves them, so such an entry could never be reached.
 static bool name_valid(const char *name, u32 name_len) {
     if (name_len == 0 || name_len >= ENV_NAME_MAX) return false;
+    if (name[0] == '.' && (name_len == 1 || (name_len == 2 && name[1] == '.')))
+        return false;
     for (u32 i = 0; i < name_len; i++) {
         if (name[i] == '\0' || name[i] == '/') return false;
     }
@@ -308,7 +325,8 @@ bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
 // environment is a char*[] of NUL-terminated "NAME=VALUE" strings, so the
 // encoding cannot carry a '=' inside a NAME (the first '=' IS the separator) or
 // a NUL inside a VALUE (the NUL IS the terminator). Thylacine's /env is looser:
-// name_valid rejects only NUL and '/', and a value is raw bytes.
+// name_valid admits a '=' (it refuses only NUL, '/', "." and ".."), and a
+// value is raw bytes.
 //
 // An unencodable entry is therefore SKIPPED rather than emitted, because emitting
 // it raw would not truncate the answer, it would CORRUPT it: a '=' in the name

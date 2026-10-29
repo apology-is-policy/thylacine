@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Session factory handoff
 
@@ -154,8 +154,8 @@ runs:
 - a repeated name arrives once, with the later value;
 - the tail is read at +120 after a cwd tail, +112 after a thread tail and +128
   after both, and the cwd still lands.
-Refused, with no child: a record with no `=` (-22), a `/` in a name (-22), an
-unterminated block (-22), a value past 4096 bytes (-7), a length past 32768
+Refused, with no child: a record with no `=` (-22), a `/` in a name (-22), the
+name `..` (-22), an unterminated block (-22), a value past 4096 bytes (-7), a length past 32768
 (-7), a NULL pointer with a length (-14), a nonzero `env_flags` (-1) and the
 next unknown `ext_flags` bit (-1). joey's own environment is checked unchanged.
 Boot-fatal. Both probes derive the next unknown bit from libt's

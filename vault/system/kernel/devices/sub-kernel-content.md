@@ -23,7 +23,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -172,23 +172,28 @@ same-process (no gate, and say why) or cross-process (carry the gate). **What is
 forbidden is a caller that does neither** — which is a stronger obligation than
 the original, not a relaxation of it.
 
-**A spawner can name its child's environment, and the child's group is then
-refilled in place, never replaced** (2026-10-28, [[dec-2026-10-28-spawn-env]]).
+**A spawner can name its child's environment, and the child is born with none
+and adopts the one built for it** (2026-10-28, [[dec-2026-10-28-spawn-env]],
+restated in [[dec-2026-10-29-spawn-env-r2]]).
 The spawn record's environment tail ([[sub-kernel-syscall-abi]]) carries
 NUL-terminated `NAME=VALUE` records, the same shape exec projects. The spawner
 builds a detached environment from them with `env_from_block` before any child
 exists, so a refusal makes none: a record with no `=` or a name the
-environment's own create would refuse is `T_E_INVAL`, a value past 4096 bytes or
+environment's own create would refuse (empty, too long, holding a `/`, or `.` or
+`..`, which a walk resolves and no create or unlink reaches) is `T_E_INVAL`, a value past 4096 bytes or
 a 65th name `T_E_2BIG`. The first `=` ends a name. A later record for a name
 replaces the earlier value in the earlier slot, which is what writing the file
 twice does, so a repeat is never a second entry and never counts against the
 ceiling.
 
-The child's thunk hands the built group over with `env_install`, before exec
-projects it and before the child's first instruction. A child with no group
-adopts it by compare-and-exchange. A child that has one -- rfork's copy of its
-spawner's -- has that group emptied and refilled under its own lock, and the new
-entries take ids from that group's counter, past every id it issued. **Swapping
+A spawn with the tail forks its child with `RFCENVG`, so the child is born with
+no group: never a copy of its spawner's, which a cross-process environment read
+could otherwise see until the thunk ran. The child's thunk hands the built group
+over with `env_install`, before exec projects it and before the child's first
+instruction; a child with no group adopts it by compare-and-exchange. A process
+that already has a group has it emptied and refilled under its own lock instead,
+the new entries taking ids from that group's counter, past every id it issued;
+no spawn reaches that branch now. **Swapping
 the pointer would have been the simpler code and a use-after-free:** the
 introspection device's flat-block read loads a process's group with no reference
 and then takes its lock, so a reader that loaded the copy just before a swap

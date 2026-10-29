@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-28
+updated: 2026-10-29
 ---
 ## Session registry factory
 
@@ -565,7 +565,8 @@ budget at once. Regressions: `spawn_cwd.thread_budget_resolves`
 the `sys_spawn_full_argv.*` validate legs (`kernel/test/test_sys_spawn_full_argv.c`); joey's `probe_thread_budget`
 ([[sub-stratum-boot]]) drives the real ABI, both tails included.
 
-**The spawn's environment tail (2026-10-28, [[dec-2026-10-28-spawn-env]]).**
+**The spawn's environment tail (2026-10-28, [[dec-2026-10-28-spawn-env]], restated in
+[[dec-2026-10-29-spawn-env-r2]]).**
 When `ext_flags` carries `SPAWN_EXT_ENV`, the handler reads the 16-byte
 `sys_spawn_ext_env` tail at the record's address + 104 plus the cwd tail's 16
 and the thread tail's 8 when their bits are set. It checks the fields before it
@@ -579,14 +580,20 @@ check and the use. The gate site is now `sys_spawn_full_argv_env_for_proc`
 environment). After every gate and the cwd it builds the child's environment
 with `env_from_block` ([[sub-kernel-content]]), so a malformed block fails the
 spawn with that errno before any child exists. The body hands the built group
-to the child in the spawn args; a refused spawn returns it to the gate site,
-which frees it. The thunk installs it first, before the cwd and before
+to the child in the spawn args and forks with `RFCENVG`, so the child is born
+with no environment rather than a copy of the spawner's; a refused spawn
+returns the group to the gate site, which frees it. A static assert pins the
+offset arithmetic to the cwd and thread tails, so a tail on another lower bit
+fails the build until the handler counts it. The thunk installs it first, before the cwd and before
 `exec_setup_from_spoor` projects `/env` onto the new stack: an install cannot
 fail, and once it has run the group is the child's and is freed with it on
 every exit below. The spawner's own environment never changes. Regressions:
-`spawn_env.*` (`kernel/test/test_spawn_env.c`: the parse and its refusals, the
-in-place refill, a held child's environment against the block, the inherit
-control and an empty block, and refused spawns that make no child); the
+`spawn_env.*` (`kernel/test/test_spawn_env.c`: the parse and its refusals, `.`
+and `..` among them against `.a` and `...`, the in-place refill, a held child's
+environment against the block with its first id 1 (born empty, not a refilled
+copy), the inherit control and an empty block, refused spawns that make no
+child, and a spawn of a missing program whose built group the live Env count
+sees freed); the
 `sys_spawn_full_argv.validate_req` leg for the new bit; joey's
 `probe_spawn_env` ([[sub-stratum-boot]]) drives the real ABI, the tail after
 each earlier tail included.

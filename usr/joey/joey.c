@@ -5288,11 +5288,12 @@ static int probe_spawn_env(void) {
     }
 
     // (e) Refusals, each one variable away from leg (a): no '=', a '/' in a
-    //     name, an unterminated block, a value one byte past ENV_PROBE_VALUE,
+    //     name, the name "..", an unterminated block, a value one byte past ENV_PROBE_VALUE,
     //     a length past the data bound, a bad pointer, a flag bit, and the
     //     lowest ext bit no tail claims.
     static const char noeq[] = "PE_A\0";
     static const char slash[] = "PE/A=1\0";
+    static const char dotdot[] = "..=1\0";
     static const char unterm[] = "PE_A=1";
     senv_big[0] = 'B'; senv_big[1] = '=';
     for (unsigned int i = 0; i < ENV_PROBE_VALUE + 1u; i++) senv_big[2 + i] = 'v';
@@ -5300,14 +5301,15 @@ static int probe_spawn_env(void) {
     const unsigned int known = T_SPAWN_EXT_FLAGS_ALL;
     long r_eq  = senv_spawn(T_SPAWN_EXT_ENV, 0u, noeq, sizeof(noeq) - 1, 0u);
     long r_sl  = senv_spawn(T_SPAWN_EXT_ENV, 0u, slash, sizeof(slash) - 1, 0u);
+    long r_dd  = senv_spawn(T_SPAWN_EXT_ENV, 0u, dotdot, sizeof(dotdot) - 1, 0u);
     long r_un  = senv_spawn(T_SPAWN_EXT_ENV, 0u, unterm, sizeof(unterm) - 1, 0u);
     long r_val = senv_spawn(T_SPAWN_EXT_ENV, 0u, senv_big, ENV_PROBE_VALUE + 4u, 0u);
     long r_len = senv_spawn(T_SPAWN_EXT_ENV, 0u, blk, T_SYS_SPAWN_ENV_DATA_MAX + 1u, 0u);
     long r_ptr = senv_spawn(T_SPAWN_EXT_ENV, 0u, (const char *)0, 8u, 0u);
     long r_fl  = senv_spawn(T_SPAWN_EXT_ENV, 0u, blk, sizeof(blk) - 1, 1u);
     long r_bit = senv_spawn(T_SPAWN_EXT_ENV | (~known & (known + 1u)), 0u, blk, sizeof(blk) - 1, 0u);
-    long refused[8] = { r_eq, r_sl, r_un, r_val, r_len, r_ptr, r_fl, r_bit };
-    for (int i = 0; i < 8; i++)
+    long refused[9] = { r_eq, r_sl, r_dd, r_un, r_val, r_len, r_ptr, r_fl, r_bit };
+    for (int i = 0; i < 9; i++)
         if (refused[i] > 0 && !scwd_kill_reap(refused[i])) unreaped++;
 
     long ma = senv_environ(t_getpid(), got, sizeof(got));
@@ -5316,7 +5318,7 @@ static int probe_spawn_env(void) {
     if (edir >= 0) (void)t_close(edir);
 
     if (!marked || ml <= 0 || !a_ok || !p_ok || !pcombo_ok || pe <= 0 || ge != 0 || !d_ok || !combo_ok ||
-        r_eq != -22 || r_sl != -22 || r_un != -22 || r_val != -7 || r_len != -7 ||
+        r_eq != -22 || r_sl != -22 || r_dd != -22 || r_un != -22 || r_val != -7 || r_len != -7 ||
         r_ptr != -14 || r_fl != -1 || r_bit != -1 || !mine_kept || un != 0 || unreaped) {
         t_putstr("joey: spawn-env probe FAILED marked=");
         t_putstr(marked ? "yes" : "no");
@@ -5333,6 +5335,8 @@ static int probe_spawn_env(void) {
         t_putstr(itoa_dec(r_eq, nb, sizeof(nb)));
         t_putstr(" slash=");
         t_putstr(itoa_dec(r_sl, nb, sizeof(nb)));
+        t_putstr(" dotdot=");
+        t_putstr(itoa_dec(r_dd, nb, sizeof(nb)));
         t_putstr(" unterm=");
         t_putstr(itoa_dec(r_un, nb, sizeof(nb)));
         t_putstr(" value=");
@@ -5353,7 +5357,7 @@ static int probe_spawn_env(void) {
         t_putstr("\n");
         return -1;
     }
-    t_putstr("joey: probe spawn-env OK (block exact, inherit without the bit behind every tail combination, empty, repeat, after each earlier tail; 8 refusals)\n");
+    t_putstr("joey: probe spawn-env OK (block exact, inherit without the bit behind every tail combination, empty, repeat, after each earlier tail; 9 refusals)\n");
     return 0;
 }
 

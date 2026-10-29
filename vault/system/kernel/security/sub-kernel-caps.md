@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Registry creation is a role, not an Imperium capability
 
@@ -189,8 +189,9 @@ still applies, so I-2's monotonic reduction holds on the phenotype path exactly
 as on the native one.
 
 `rfork_spawn_held`, the fork behind a `SPAWN_DEBUG_HELD` spawn (2026-09-29,
-[[sub-kernel-birth-hold]]), is `RFPROC` through the same `rfork_internal` with
-the same carve. Only the birth-hold mark differs. The ask weighs no capability,
+[[sub-kernel-birth-hold]]), is `RFPROC` (with the kernel-internal `RFCENVG` when
+the spawn names the child's environment, which touches no capability) through
+the same `rfork_internal` with the same carve. Only the birth-hold mark differs. The ask weighs no capability,
 deliberately: it restricts the spawner's own child and grants nothing over it.
 Reading or controlling the held child still takes an attach through the
 [[inv-i39]] gate, cover included, so the flag cannot be used to reach a Proc

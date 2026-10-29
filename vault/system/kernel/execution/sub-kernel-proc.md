@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Session posting ownership
 
@@ -103,11 +103,11 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | Surface | Shape |
 |---|---|
 | `proc_alloc_in` / `proc_free` | allocate a KP_ZERO'd Proc with a pid drawn from the id space + stripes + pgtable + handle table + note queue (static in production: `rfork_internal` is its one caller; `proc_alloc` is the tests' wrapper); free one that is ZOMBIE with no threads and no children |
-| `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
+| `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**, except the kernel-internal `RFCENVG` on either: the child starts with no environment group instead of a copy of the parent's, set only by a spawn whose `SPAWN_EXT_ENV` tail names the child's environment ([[sub-kernel-content]]); `SYS_RFORK` refuses it. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
 | `rfork_init` | `RFPROC` taking `PROC_ID_INIT` (1), init's pid, exactly once; a second call extincts. joey's start ([[sub-kernel-joey]]) |
 | `proc_id_alloc` / `proc_id_space_spent` | the one id space pids and tids draw from (thread-model C6, ARCH 7.3.4): a 64-bit counter seeded at 2 (0 is kproc's and its boot thread's, 1 is init's); a draw past `PROC_ID_LAST` (2^31 - 1) answers -1, a user's past `PROC_ID_USER_LAST` (the last 2^20 ids are the TCB's, vote 10), and a refused draw leaves the counter unmoved; nothing is reused |
 | `proc_spawn_thread_budget_resolve` | the spawn's thread budget (ARCH 7.3.5): 0 inherits the parent's; past `proc_thread_budget_hard_max()` refused; at or below the parent's own allowed; above it only with `PROC_FLAG_MAY_RAISE_THREAD_BUDGET`. 0 means refused |
-| `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
+| `rfork_spawn_held` | `rfork_with_caps` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]); it takes the same flag word, `RFPROC` or `RFPROC\|RFCENVG` |
 | `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG`; `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux `wait4` |

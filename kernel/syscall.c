@@ -10011,6 +10011,13 @@ struct spawn_full_argv_args {
 // The tail admits only environments exec can project onto a new image's stack.
 _Static_assert(SYS_SPAWN_ENV_DATA_MAX == EXEC_ENV_DATA_MAX,
                "SYS_SPAWN_ENV_DATA_MAX must equal exec's EXEC_ENV_DATA_MAX");
+// The handler finds the env tail past the cwd and thread tails; a tail on
+// another lower bit moves it, and a merge that brings one must add its size
+// there.
+_Static_assert((SPAWN_EXT_FLAGS_ALL & (SPAWN_EXT_ENV - 1u)) ==
+                   (SPAWN_EXT_CWD | SPAWN_EXT_THREADS),
+               "a tail below SPAWN_EXT_ENV: add its size to the env tail's offset "
+               "in sys_spawn_full_argv_handler");
 
 __attribute__((noreturn))
 static void sys_spawn_full_argv_thunk(void *arg) {
@@ -10351,9 +10358,12 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         sa->rights[i] = bumped_rights[i];
     }
 
+    // A named environment: the child is born with none (RFCENVG), never with a
+    // copy of the spawner's, and the thunk adopts `env` as its group.
+    unsigned rf = RFPROC | (env ? (unsigned)RFCENVG : 0u);
     int pid = held
-        ? rfork_spawn_held(sys_spawn_full_argv_thunk, sa, cap_mask)
-        : rfork_with_caps(RFPROC, sys_spawn_full_argv_thunk, sa, cap_mask);
+        ? rfork_spawn_held(rf, sys_spawn_full_argv_thunk, sa, cap_mask)
+        : rfork_with_caps(rf, sys_spawn_full_argv_thunk, sa, cap_mask);
     if (pid < 0) {
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);

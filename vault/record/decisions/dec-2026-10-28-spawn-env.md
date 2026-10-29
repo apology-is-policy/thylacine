@@ -3,10 +3,11 @@ id: dec-2026-10-28-spawn-env
 type: dec
 title: "A spawn may give its child a different environment, in a record tail"
 date: 2026-10-28
-status: standing
+status: superseded
 decided-by: user-vote
 affects: [sub-kernel-syscall-abi, sub-kernel-syscall-dispatch, sub-kernel-content, sub-libthyla-rs, sub-pouch-process]
 created: 2026-10-28
+superseded-by: dec-2026-10-29-spawn-env-r2
 ---
 ## Fork
 

@@ -1578,7 +1578,10 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // extinct: each shares a different per-Proc structure and each arrives with
     // its own reasoning rather than inheriting approval from this one. RFPROC is
     // not optional (there is no rfork that creates nothing).
-    if (flags != RFPROC && flags != (RFPROC | RFMEM)) {
+    // RFCENVG rides on either: it changes only what the child's environment
+    // starts as.
+    unsigned shape = flags & ~(unsigned)RFCENVG;
+    if (shape != RFPROC && shape != (RFPROC | RFMEM)) {
         extinction("rfork: only RFPROC and RFPROC|RFMEM are supported");
     }
     // LINEAGE L-3b: exactly one of the two child shapes. `entry` runs the child
@@ -1852,8 +1855,9 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // spawned child inherits $GOROOT etc. exactly as it inherits the namespace.
     // A NULL parent->env leaves child->env NULL. On OOM, child->env stays NULL,
     // so the proc_free rollback's env_free is a clean no-op (mirrors the
-    // allowance_clone_into discipline above).
-    if (env_clone_into(child, parent) != 0) {
+    // allowance_clone_into discipline above). RFCENVG copies nothing: the
+    // spawn that set it installs the child's whole environment in its thunk.
+    if (!(flags & RFCENVG) && env_clone_into(child, parent) != 0) {
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;
@@ -2119,7 +2123,7 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // left this address space, by exec or by death.
     //
     // Why this is not a flag. Every RF* bit answers "what does the CHILD get?"
-    // and the word's polarity says set == share; suspending the PARENT answers
+    // and the word's polarity says set == share (RFCENVG: set == empty); suspending the PARENT answers
     // a different question entirely, so a bit there would be a category error
     // and would cost the word the one property that makes it readable. Keying
     // on RFMEM instead is not an arbitrary coupling: RFMEM is EXACTLY the
@@ -2175,8 +2179,9 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
     return rfork_internal(flags, entry, arg, caps_mask, NULL, false, false);
 }
 
-int rfork_spawn_held(void (*entry)(void *), void *arg, caps_t caps_mask) {
-    return rfork_internal(RFPROC, entry, arg, caps_mask, NULL, true, false);
+int rfork_spawn_held(unsigned flags, void (*entry)(void *), void *arg,
+                     caps_t caps_mask) {
+    return rfork_internal(flags, entry, arg, caps_mask, NULL, true, false);
 }
 
 int rfork_init(void (*entry)(void *), void *arg, caps_t caps_mask) {

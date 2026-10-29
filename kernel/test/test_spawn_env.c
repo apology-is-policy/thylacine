@@ -120,6 +120,17 @@ void test_spawn_env_block_parse(void) {
     static const char slash[] = "A/B=1\0";
     TEST_EXPECT_EQ(se_parse_render(slash, sizeof(slash) - 1, &err, out), -1L, "'/' in a name refused");
     TEST_EXPECT_EQ(err, -(int)T_E_INVAL, "'/' in a name -> EINVAL");
+    // The dot names /env can never serve (a walk resolves them; create and
+    // unlink refuse them), against ".a" and "...", which it can.
+    static const char dots_ok[] = ".a=1\0...=2\0";
+    n = se_parse_render(dots_ok, sizeof(dots_ok) - 1, &err, out);
+    TEST_EXPECT_EQ(n, (long)sizeof(dots_ok) - 1, "\".a\" and \"...\" are names");
+    static const char dot[] = ".=1\0";
+    TEST_EXPECT_EQ(se_parse_render(dot, sizeof(dot) - 1, &err, out), -1L, "\".\" refused");
+    TEST_EXPECT_EQ(err, -(int)T_E_INVAL, "\".\" -> EINVAL");
+    static const char dotdot[] = "..=1\0";
+    TEST_EXPECT_EQ(se_parse_render(dotdot, sizeof(dotdot) - 1, &err, out), -1L, "\"..\" refused");
+    TEST_EXPECT_EQ(err, -(int)T_E_INVAL, "\"..\" -> EINVAL");
     static const char unterm[] = "A=1";
     TEST_EXPECT_EQ(se_parse_render(unterm, sizeof(unterm) - 1, &err, out), -1L, "unterminated refused");
     TEST_EXPECT_EQ(err, -(int)T_E_INVAL, "unterminated -> EINVAL");
@@ -231,11 +242,16 @@ void test_spawn_env_install_refills(void) {
 // A held spawn of /bin/hello with an environment tail (env_set false: none). The
 // child parks before its first instruction, after its thunk installed the group
 // and exec projected it.
-static int se_spawn_held(bool env_set, const char *blk, u32 len) {
+static int se_spawn_path(const char *path, size_t path_len, bool env_set,
+                         const char *blk, u32 len) {
     return sys_spawn_full_argv_env_for_proc(current_thread()->proc,
-            "/bin/hello", 10, NULL, 0u, 0u, NULL, 0u, CAP_NONE, 0u,
+            path, path_len, NULL, 0u, 0u, NULL, 0u, CAP_NONE, 0u,
             false, 0u, 0u, NULL, 0u, NULL, 0u, 0u, SPAWN_DEBUG_HELD,
             NULL, 0u, 0u, env_set, blk, len);
+}
+
+static int se_spawn_held(bool env_set, const char *blk, u32 len) {
+    return se_spawn_path("/bin/hello", 10, env_set, blk, len);
 }
 
 // The held child's environment rendered into out; -1 when it is gone.
@@ -325,6 +341,11 @@ void test_spawn_env_child_gets_block(void) {
     int p_blk = se_spawn_held(true, blk, sizeof(blk) - 1);
     long n_blk = se_child_env(p_blk, c_blk);
     long fn_blk = se_child_frame(p_blk, f_blk);
+    // The child adopted the group the spawner built: its ids start at 1. A copy
+    // refilled in place would count on from the spawner's ids (past
+    // SE_SPAWNER's), and until the thunk ran it held the spawner's environment.
+    struct Proc *c_blkp = (p_blk > 0) ? proc_find_by_pid(p_blk) : NULL;
+    u64 id_blk = c_blkp ? env_lookup(c_blkp, "SE_A", 4) : 0;
     int r_blk = se_release_and_reap(p_blk);
 
     int p_inh = se_spawn_held(false, NULL, 0u);
@@ -350,6 +371,8 @@ void test_spawn_env_child_gets_block(void) {
     TEST_EXPECT_EQ(n_blk, (long)sizeof(blk) - 1, "the child's environment is the block's size");
     TEST_ASSERT(n_blk > 0 && se_bytes_eq(c_blk, blk, n_blk),
                 "and exactly the block: nothing of the spawner's carried over");
+    TEST_EXPECT_EQ(id_blk, 1ull,
+                   "the child's group is the built one, born empty (RFCENVG), not a refilled copy");
     // The frame: exec projected the group the thunk had already installed. The
     // inheriting child's frame is the control that the read sees a frame's
     // environment at all.
@@ -394,9 +417,24 @@ void test_spawn_env_refusals(void) {
     int ok       = se_spawn_held(true, tiny, sizeof(tiny) - 1);
     int r_ok     = se_release_and_reap(ok);
 
+    // A valid block whose spawn fails after the group is built (no such
+    // program): the group is freed with the refusal. Kernel tests run before
+    // userspace, and a reap frees the child's group before its wait returns,
+    // so nothing else makes or frees an Env meanwhile. The premise: the count
+    // sees a built group and its free.
+    int eerr = 0;
+    u64 live0 = env_live_count();
+    struct Env *probe = env_from_block(tiny, sizeof(tiny) - 1, &eerr);
+    u64 live1 = env_live_count();
+    env_discard(probe);
+    u64 live2 = env_live_count();
+    u64 live_before = env_live_count();
+    int r_noexe  = se_spawn_path("/bin/se-no-such", 15, true, tiny, sizeof(tiny) - 1);
+    u64 live_after = env_live_count();
+
     int leaked = 0;
-    int refused[4] = { r_noeq, r_slash, r_unterm, r_big };
-    for (int i = 0; i < 4; i++)
+    int refused[5] = { r_noeq, r_slash, r_unterm, r_big, r_noexe };
+    for (int i = 0; i < 5; i++)
         if (refused[i] > 0) { (void)se_release_and_reap(refused[i]); leaked++; }
 
     long ma = env_render_environ(self, 0, mine_after, SE_RENDER_MAX);
@@ -409,6 +447,10 @@ void test_spawn_env_refusals(void) {
     TEST_EXPECT_EQ(r_big, -(int)T_E_2BIG, "a block past SYS_SPAWN_ENV_DATA_MAX fails with E2BIG");
     TEST_ASSERT(ok > 0, "the control: the same block at its length spawns");
     TEST_EXPECT_EQ(r_ok, ok, "the control child was reaped");
+    TEST_ASSERT(probe != NULL && live1 == live0 + 1 && live2 == live0,
+                "premise: the live count sees a built group and its discard");
+    TEST_ASSERT(r_noexe < 0, "a valid block for a program that does not exist makes no child");
+    TEST_EXPECT_EQ(live_after, live_before, "the group built for a spawn that then failed is freed");
     TEST_EXPECT_EQ(leaked, 0, "no refused spawn left a child to reap");
     TEST_ASSERT(ma == ml && se_bytes_eq(mine_after, mine, ml),
                 "no spawn, refused or not, changed the spawner's environment");

@@ -51,7 +51,7 @@ Files:
  	lsm2_fn *stage2 = libc_start_main_stage2;
 --- a/src/env/_pouch_env.c	1970-01-01 01:00:00
 +++ b/src/env/_pouch_env.c	2026-07-23 19:21:42
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,106 @@
 +/* pouch boundary-line: populate `__environ` from the Thylacine /env device
 + * (Clade CL-1b-0). The environment lives in the per-Proc /env Dev (the Plan 9
 + * Egrp idiom -- a variable is the file /env/NAME), which exec also projects
@@ -117,6 +117,9 @@ Files:
 +		if (name[0] == 0) continue;
 +		size_t nl = strlen(name);
 +		if (nl == 0 || nl >= PGENV_NAME_MAX) continue;
++		/* NAME=VALUE cannot carry a '=' in a name or a NUL in a value: such a
++		 * variable is left out, as exec leaves it out of an envp. */
++		if (memchr(name, '=', nl)) continue;
 +		if (n >= PGENV_MAX_VARS) break;
 +
 +		/* Build /env/NAME and read the value. */
@@ -126,7 +129,7 @@ Files:
 +		if (vfd < 0) continue;          /* removed between readdir + open -> skip */
 +		long vl = read_value(vfd, val, sizeof val);
 +		close(vfd);
-+		if (vl < 0) continue;
++		if (vl < 0 || memchr(val, 0, (size_t)vl)) continue;
 +
 +		/* Compose "NAME=value" (NUL-terminated). */
 +		char *entry = malloc(nl + 1 + (size_t)vl + 1);
