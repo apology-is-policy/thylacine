@@ -1214,6 +1214,10 @@ pub(crate) const COMPOSITOR_CTX: u32 = lictor::limits::COMPOSITOR_CTX;
 /// point; latching COMPOSITOR_CTX would take GPU composition down before it
 /// began. Destroyed after each attempt; never re-minted.
 const CONV_PROBE_CTX_BASE: u32 = COMPOSITOR_CTX + 1;
+/// The ids one convention probe may spend (`conv_attempt_once` refuses past
+/// it): sixteen attempts, each retried at most `BRINGUP_STALL_RETRIES` times
+/// after a stall, with room to spare.
+const CONV_PROBE_CTX_SPAN: u32 = 128;
 
 /// V-3b-1c-2 (Model B): the per-client VENUS device-ctx ids -- `WARP_VENUS_CTX_BASE
 /// + slot`, one per warp slot (`0..MAX_WARP_CTXS`). A dedicated band chosen to
@@ -1222,17 +1226,17 @@ const CONV_PROBE_CTX_BASE: u32 = COMPOSITOR_CTX + 1;
 /// `COMPOSITOR_CTX` (0x100) itself, and the conv-probe throwaways
 /// (`CONV_PROBE_CTX_BASE + seq`). The GUARANTEE against the conv range is
 /// STRUCTURAL: `seq` is a function-local counter reset per `comp_measure_conventions`
-/// run and bumped once per bring-up blit attempt (~a dozen), so conv ids stay near
-/// `0x101..0x110` -- far below this 0x200 base, with the +64 gap in the assert as
-/// wide margin. (The `debug_assert` in `conv_attempt` is a DEBUG-build belt only --
-/// `[profile.release]` compiles it out of the shipped daemon, so it is not the
-/// witness in production; the structural bound is.) The venus ctxs are also lazily
+/// run, spent only by a create that made (or a stall may have made) a context, and
+/// `conv_attempt_once` refuses an attempt past `CONV_PROBE_CTX_SPAN`, which the
+/// assert below keeps under this base. (The `debug_assert` in `conv_attempt_once` is
+/// a DEBUG-build belt only -- `[profile.release]` compiles it out of the shipped
+/// daemon; the span check is the bound in production.) The venus ctxs are also lazily
 /// minted at client ring-mint time, long after the conv throwaways are destroyed,
 /// so the separation is temporal as well as numeric.
 const WARP_VENUS_CTX_BASE: u32 = 0x200;
 const _: () = assert!(
     WARP_VENUS_CTX_BASE > COMPOSITOR_CTX
-        && (WARP_VENUS_CTX_BASE as usize) > (COMPOSITOR_CTX as usize) + 64
+        && CONV_PROBE_CTX_BASE + CONV_PROBE_CTX_SPAN <= WARP_VENUS_CTX_BASE
         && MAX_WARP_CTXS < 0x100,
     "venus ctx band must clear COMPOSITOR_CTX + the conv-probe range and not wrap"
 );
@@ -4355,21 +4359,29 @@ impl Comp {
     where
         F: Fn(&mut Self, u32) -> Result<(), Error>,
     {
-        let ctx = CONV_PROBE_CTX_BASE + *seq;
         // The conv throwaways must never climb into the venus ctx band
-        // (V-3b-1c-2); if this ever fires the WARP_VENUS_CTX_BASE gap is too
-        // small and the two families could alias.
+        // (V-3b-1c-2): past the span the attempt fails closed.
+        if *seq >= CONV_PROBE_CTX_SPAN {
+            return None;
+        }
+        let ctx = CONV_PROBE_CTX_BASE + *seq;
         debug_assert!(
             ctx < WARP_VENUS_CTX_BASE,
             "conv probe ctx climbed into the venus band"
         );
-        *seq += 1;
+        let stalls = self.gpu.stalls;
         if self.gpu.ctx_create(ctx, b"tapestry-conv").is_err() {
-            // A create a stall failed may exist host-side; one the device
-            // refused is unknown to lictor, which refuses this harmlessly.
-            let _ = self.gpu.ctx_destroy(ctx);
+            // A create a stall failed may exist host-side (lictor keeps its
+            // reservation): spend the id and destroy it. One refused before
+            // the device, or by it, made nothing, so its id is tried again --
+            // a standing stall's retries must not walk the band.
+            if self.gpu.stalls != stalls || self.gpu.engine == Engine::Dead {
+                *seq += 1;
+                let _ = self.gpu.ctx_destroy(ctx);
+            }
             return None;
         }
+        *seq += 1;
         let ok = self.gpu.ctx_attach_resource(ctx, p.slot_res).is_ok()
             && self.gpu.ctx_attach_resource(ctx, p.bo_res).is_ok()
             && self.gpu.ctx_attach_resource(ctx, p.scr_res).is_ok();

@@ -3320,7 +3320,11 @@ runs once and used to fail for the boot:
 - the compositor context's create (`ensure_comp_ctx`);
 - the comp-attach witness pair and the comp-health pair;
 - the blit-convention probe build, its seed transfer and each convention
-  attempt (`conv_attempt`, on a fresh throwaway context each time).
+  attempt (`conv_attempt`). Each attempt runs on a throwaway context, and an id
+  is spent only by a create that made a context or that a stall may have made
+  one with. So a standing stall's refused tries reuse one id. Past
+  `CONV_PROBE_CTX_SPAN` (128) ids the attempt fails closed, and a static assert
+  keeps that span under the venus band.
 A step that a stall failed runs again. While the stall stands it retries every
 `STALL_POLL_MS` (50), since the broker answers revived or dead within 30 s.
 After a stall that began and revived inside the step, it retries at most
