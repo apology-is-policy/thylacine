@@ -145,6 +145,18 @@ never appears as contiguous bytes and is unmatchable. Scenarios assert on
 output tokens that cannot appear in the input anyway — a `tr a-z A-Z`
 upper-cased token, a `cat:` stderr prefix.
 
+**The serial console rides the socket on every host.** Until 2026-10-29 only
+macOS did; Linux spawned QEMU on expect's pty, the serial's only buffer, which
+expect drains only inside an `expect`. While a scenario typed long lines (the
+editor's redraw output grows with the square of the line) the pty filled,
+PL011's blocking write napped under QEMU's big lock, and every device froze
+with the console -- the #125 mechanism below, which nothing confines to one
+host. Measured on thyla-pi under KVM: pty legs left QMP unanswered for 5.9 s
+and 5.5 s, the main thread in a futex while a vCPU napped outside KVM_RUN, and
+the frozen virtio-gpu made lictor latch a healthy engine dead; the same leg
+over the socket peaked at 31 ms, the bridge reporting no stall.
+`LS_CI_TRANSPORT=pty` keeps the direct spawn for A/B work only.
+
 **The relay is `serial-bridge.py`, never `nc`, and it spools.** Two distinct
 bugs wore one symptom here:
 

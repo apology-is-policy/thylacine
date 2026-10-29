@@ -560,11 +560,20 @@ proc lc_boot {} {
     # console (incl. the qemu monitor mux) rides a UNIX SOCKET, bridged into
     # the expect pty by serial-bridge.py -- a bounded-park pump whose periodic
     # re-entry level-checks the pty, immune to lost wakeups by construction.
-    # LS_CI_TRANSPORT=pty forces the direct spawn (Linux CI / A-B debugging);
-    # LS_CI_TRANSPORT=sock forces the bridge anywhere.
+    #
+    # Linux takes the socket too (2026-10-29). A pty is the serial's only
+    # buffer there, and expect drains it only inside an `expect`: while a
+    # scenario types long lines (the editor's redraw output is quadratic in
+    # line length) the pty fills, PL011's blocking write naps under QEMU's
+    # big lock, and every device freezes with the console -- #125's
+    # mechanism, which nothing about it confines to macOS. MEASURED on
+    # thyla-pi (KVM): pty legs left QMP unanswered 5.9 s and 5.5 s, the main
+    # thread in a futex while a vCPU napped outside KVM_RUN, and the frozen
+    # virtio-gpu latched lictor's engine dead on a healthy device; the same
+    # leg over the socket peaked at 31 ms with the bridge reporting no stall.
+    # LS_CI_TRANSPORT=pty forces the direct spawn (A-B debugging only).
     set transport [expr {[info exists ::env(LS_CI_TRANSPORT)] \
-        ? $::env(LS_CI_TRANSPORT) \
-        : ([string equal $::tcl_platform(os) "Darwin"] ? "sock" : "pty")}]
+        ? $::env(LS_CI_TRANSPORT) : "sock"}]
     if {$transport eq "sock"} {
         set sock /tmp/thyla-serial-[pid].sock
         # Global: lc_vm_infra_check reads it on failure to tell a VM that never
