@@ -2503,10 +2503,16 @@ authority can neither list it nor walk to a tid, while its owner and a
 `CAP_DEBUG` holder can; with the Proc stopped, each thread's `regs` reads that
 thread's frame, including when the newest thread has exited (the thread-model
 review's C7 gate), and a write lands in the named thread's frame only; `step
-<tid>` arms the named thread and no other, refuses a tid that is not the Proc's,
-and the fire focuses it; a file whose thread has gone reads as not found; the
-root, pid and tid directories list completely and resume from their cookies. Each
-is run red first.
+<tid>` arms the named thread and no other and refuses a tid that is not the
+Proc's; once a thread has gone, its open `regs` and `kstack` read as not found
+and its open directory lists as not found; a thread's object refuses a control
+verb, even one forged from the qids the walk does make; the root, pid and tid
+directories list completely and resume from their cookies. Each is run red
+first. The kernel fixture parks no thread a resume can wake, so the step's fire
+and the focus it sets are witnessed elsewhere: by `specs/debug_step.tla`, and in
+the guest by the debug-probe `threads` leg, which steps one thread of a
+multi-thread target whose newest thread has exited and reads the Proc-level
+`regs` as that thread.
 
 **Scope.** `kernel/devproc.c` (the walk, the qid encoding, the per-thread
 readers and the step operand, `readdir`, the stat modes) and the manual's

@@ -337,9 +337,17 @@ void test_devproc_thread_files_name_their_thread(void) {
     if (wn) spoor_unref(wn);
 
     // (f) B leaves the Proc: its open file reads as not found and stats as gone,
-    //     and the listing drops it; A's file still reads.
+    //     its open kstack and its directory answer not found too, and the listing
+    //     drops it; A's file still reads.
     struct t_stat st;
     int stat_before = rb ? devproc.stat_native(rb, &st) : -2;
+    static char ks[128];
+    static u8 dbuf[256];
+    struct Spoor *kb_s = dt_open(f.pid, f.tb, "kstack", 0);
+    struct Spoor *bd   = dt_open(f.pid, f.tb, NULL, 0);
+    long ks_before = kb_s ? devproc.read(kb_s, ks, (long)sizeof(ks), 0) : -2;
+    bool ks_frame  = ks_before > 1 && ks[0] == '#' && ks[1] == '0';
+    long bd_before = bd ? devproc.readdir(bd, dbuf, (long)sizeof(dbuf), 0) : -2;
     irq_state_t ts = proc_threads_lock(f.tgt);
     g_dt_x.next_in_proc = &g_dt_a;
     proc_threads_unlock(f.tgt, ts);
@@ -347,10 +355,39 @@ void test_devproc_thread_files_name_their_thread(void) {
     long rc_gone = dt_read_pc(rb, &pc_gone);
     long rc_a2   = dt_read_pc(ra, &pc_a2);
     int stat_after = rb ? devproc.stat_native(rb, &st) : -2;
+    long ks_gone = kb_s ? devproc.read(kb_s, ks, (long)sizeof(ks), 0) : -2;
+    long bd_gone = bd ? devproc.readdir(bd, dbuf, (long)sizeof(dbuf), 0) : -2;
+    if (kb_s) spoor_clunk(kb_s);
+    if (bd) spoor_clunk(bd);
     td = dt_open(f.pid, -1, NULL, 0);
     int nlist2 = td ? dt_list(td, 256, ents, 8, &inc) : -2;
     if (td) spoor_clunk(td);
     bool relisted = nlist2 == 1 && dt_streq(ents[0].name, sa);
+
+    // (g) A thread's object writes only its register files. The walk makes no
+    //     thread ctl, so one is forged from the qids the walk did make: A's
+    //     kregs, given the Proc-level ctl's kind. Through it the slot owner's
+    //     `start` is refused; through the real ctl, one variable away, it lands.
+    struct Spoor *pctl = dt_open_pidfile(f.pid, "ctl", 1);
+    struct Spoor *fx   = dt_open(f.pid, f.ta, "kregs", 0);
+    long w_forged = -2, w_real = -2;
+    u32 stop_after_forged = 0, stop_after_real = 1;
+    if (pctl && fx && ra && rp) {
+        u64 tid_flag = (ra->qid.path ^ rp->qid.path) & 0xffffffffull;
+        fx->qid.path = (ra->qid.path & ~0xffffffffull) | tid_flag |
+                       (pctl->qid.path & 0xffffffffull);
+        f.tgt->debug_stop_req = 1;
+        f.tgt->debug_owner = fx;
+        w_forged = devproc.write(fx, "start", 5, 0);
+        stop_after_forged = f.tgt->debug_stop_req;
+        f.tgt->debug_owner = pctl;
+        w_real = devproc.write(pctl, "start", 5, 0);
+        stop_after_real = f.tgt->debug_stop_req;
+        f.tgt->debug_stop_req = 1;
+    }
+    f.tgt->debug_owner = NULL;
+    if (fx) spoor_clunk(fx);
+    if (pctl) spoor_clunk(pctl);
 
     if (ra) spoor_clunk(ra);
     if (rb) spoor_clunk(rb);
@@ -384,6 +421,14 @@ void test_devproc_thread_files_name_their_thread(void) {
     TEST_EXPECT_EQ(rc_a2, (long)sizeof(struct t_user_regs), "main's file still reads");
     TEST_EXPECT_EQ(pc_a2, 0xA0000ull, "and still reads main's frame");
     TEST_ASSERT(relisted, "the listing drops the departed thread");
+    TEST_ASSERT(ks_frame, "the newer thread's kstack reads its frames while it is the Proc's");
+    TEST_ASSERT(bd_before > 0, "its directory lists its files while it is the Proc's");
+    TEST_EXPECT_EQ(ks_gone, (long)-1, "once it has left, its open kstack reads as not found");
+    TEST_EXPECT_EQ(bd_gone, (long)-1, "and its open directory lists as not found");
+    TEST_EXPECT_EQ(w_real, (long)5, "the slot owner's start through the Proc's ctl lands");
+    TEST_EXPECT_EQ(stop_after_real, 0u, "and resumes the Proc");
+    TEST_EXPECT_EQ(w_forged, (long)-1, "a ctl verb through a thread's object is refused");
+    TEST_EXPECT_EQ(stop_after_forged, 1u, "and leaves the Proc stopped");
 }
 
 // =============================================================================

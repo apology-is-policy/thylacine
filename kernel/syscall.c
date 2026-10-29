@@ -5503,6 +5503,15 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     // (I-31).
     struct Thread *nt = thread_alloc_forked(p, ctx, child_sp, child_tls);
     if (!nt) return proc_id_space_spent(proc_resource_exempt(p)) ? -(s64)T_E_AGAIN : -(s64)T_E_NOMEM;
+    // POSIX: a new thread starts with its creator's signal mask. musl blocks
+    // every signal across the clone and the child restores its own mask as its
+    // first act; a mask that did not cross here would let a note every thread
+    // blocks reach the child at its first entry, whose tail delivers notes
+    // before that restore runs. Only the mask crosses: the child runs on a stack
+    // of its own, not inside a handler, so the handler snapshot a fork copies
+    // stays behind. Written before the admit links the thread, so no reader
+    // races the plain store; owner-written thereafter.
+    nt->note_mask = cur->note_mask;
     if (!proc_thread_admit(p, nt)) {
         thread_free_unlinked(nt);
         return -(s64)T_E_AGAIN;

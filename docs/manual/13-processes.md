@@ -107,15 +107,16 @@ catch it waiting. The process need not be stopped, and the read does not
 disturb it. A holder of `CAP_DEBUG` or `CAP_HOSTOWNER` also sees each frame's
 address.
 
-The thread listing is open to the process's owner and to holders of
-`CAP_HOSTOWNER` or `CAP_DEBUG`. Anyone else is refused with `permission denied`,
-and a thread directory they name answers `no such file or namespace entry`, as
-a thread that does not exist answers everyone. Reading `kstack` needs the
-authority to debug the process: its owner, while holding every capability the
-process holds, or a holder of `CAP_DEBUG` or `CAP_HOSTOWNER`. No one may read
-the stack of a process that has made itself untraceable, such as the login
-session. A thread that exits leaves the listing, and a `kstack` opened before
-it exited then fails with `I/O error`.
+The thread listing is open to the process's owner, to holders of
+`CAP_HOSTOWNER`, and to a holder of `CAP_DEBUG` for any process it could debug,
+which excludes a process that has made itself untraceable. Anyone else is
+refused with `permission denied`, and a thread directory they name answers
+`no such file or namespace entry`, as a thread that does not exist answers
+everyone. Reading `kstack` needs the authority to debug the process: its owner,
+while holding every capability the process holds, or a holder of `CAP_DEBUG` or
+`CAP_HOSTOWNER`. No one may read the stack of a process that has made itself
+untraceable, such as the login session. A thread that exits leaves the listing,
+and a `kstack` opened before it exited then fails with `I/O error`.
 
 Each thread directory also holds `regs`, `fpregs` and `kregs`, the thread's
 registers. They answer only while a debugger holds the process stopped, and are
