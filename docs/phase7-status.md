@@ -1412,6 +1412,32 @@ table still reaches its caller as ENOENT (dev9p_walk drops the server's error; O
 2026-10-08). The cost of a paste into nora in a tile
 is unmeasured.
 
+## Thread-model C7a: the debug focus falls back to main, never the newest thread — 2026-10-21
+
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`; the Fable report
+`docs/THREAD-MODEL-REVIEW-FABLE.md` F-4, P2, I-39). No operator decision needed. Squashed from aux-3-c7a as 4e4c686ed;
+the `set_tid_address` documentation correction is f273fe493.
+
+- **F-4 [P2] a manual stop read the newest thread.** With no breakpoint/step focus (a manual `stop` or an attach),
+  `devproc_focus_thread` returned `target->threads`, the head of a head-inserted list -- the NEWEST thread. An exited
+  thread stays there, EXITING, until a live peer reaps it (`proc_reap_exited_threads`), so in a stopped target it stays
+  for the whole stop while `devproc_all_threads_parked` skips it. `regs` / `fpregs` / `kregs` then read -1, and `step`
+  armed the exiting thread (the step walk has no EXITING gate): the step never fired and the whole-Proc resume let
+  the target run free. Now the focus counts only while it is a live in-list thread; otherwise main, the oldest thread
+  not exiting (`proc_main_thread_locked`, which `caught_pick` now shares); NULL when every thread is exiting, which
+  every caller refuses.
+- **Docs.** "TID==PID" was false in five places (the head is the newest thread; tids come from one kernel-wide
+  counter). The ARCHITECTURE.md `set_tid_address` row and the syscall.h comment also said the tid pointer is ignored
+  and the call never fails; both now describe the shipped call (own commit, f273fe493).
+- **Tests.** The focus-selection leg of `devproc.debug_stop_start_resume` covers eight arms (NULL, live focus, focus
+  on main, foreign, newest exited, focus exited, main exited, all exited); `devproc.debug_regs` leg (c) reads, writes
+  and follows an exited focus through `/proc/<pid>/regs`. Red three ways: red1 (the pre-fix selector) 2022/2024, failing `focus NULL -> main` and the F-4 regs read; red2 (an EXITING focus kept) 2022/2024, failing both exited-focus legs; red3 (the fallback is the newest live thread) 2023/2024, failing `focus NULL -> main` only.
+- **Audit.** Fable 5.1 r1 (cross-family): 0 P0 / 0 P1 / 0 P2 / 3 P3, all closed (memory
+  `audit_thread_c7a_closed_list.md`): F1 the build_regs/format_kstack EXITING clauses are unreachable through the
+  selector -- labelled defense in depth, witnesses re-credited on the ARCH 25.4 and AUDIT-TRIGGERS debug rows; F2 the
+  remaining "head" claims; F3 the specs re-run.
+- **Posture.** ci suite 2024/2024 on f8c3bdb2b, green and regreen with the ELF byte-identical; SMP matrix 50/50 PASS, 0 corruption (default smp1/4/8 + UBSan smp4/8, N=10, 17:22-18:14Z 2026-10-21); caught_target, debug_stop and debug_step every cfg as claimed (caught_target clean at 613245 distinct states, debug_step at 146).
+
 ## Thread-model C2: the kernel stack cache; guard toggles invalidate by address — 2026-10-20
 
 The second chunk of the thread-model overhaul (`docs/thread-model-review.html`; the Fable report

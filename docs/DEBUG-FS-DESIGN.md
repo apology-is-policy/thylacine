@@ -988,7 +988,8 @@ surfaced. It delivers two things and defers a third (all three user-voted
    `/proc/<pid>/stack` + Plan 9 model**: reading a *settled* (`on_cpu==false`)
    thread's kernel stack is a **read-only inspection**, distinct from and strictly
    weaker than a debug-stop — no execution control, no user-memory access. So
-   `/proc/<pid>/kstack` reads the head thread's kernel fp-chain whenever it is
+   `/proc/<pid>/kstack` reads the focus thread's (else main's; 5c.7) kernel
+   fp-chain whenever it is
    settled (parked on **any** rendez — the pipe rendez, the torpor rendez, the
    debug rendez), **without requiring `debug_stop_req`**. "Why is this thread
    hung" becomes a `cat /proc/<pid>/kstack` — the single most useful debug
@@ -1011,11 +1012,11 @@ must not weaken memory-safety. It does not:
   pins the target *reachable*; `wait_pid` UNLINKS the ZOMBIE from the table under
   `g_proc_table_lock` (`proc_unlink_child`) BEFORE the lock-free `thread_free`, so
   no reachable target's Thread can be freed under the read — ALIVE or
-  ZOMBIE-unreaped alike (a reachable ZOMBIE's head is `THREAD_EXITING`, atomically
-  under the lock, so `devproc_format_kstack` returns 0). The load-bearing pin is
-  the unlink-before-free ordering, not "ALIVE" per se. (v1.0 reads the head thread;
-  per-tid — which would walk a non-head thread — is v1.x and MUST preserve this
-  ordering. Holotype F2.)
+  ZOMBIE-unreaped alike (every thread of a reachable ZOMBIE is `THREAD_EXITING`,
+  marked under the lock, so `devproc_focus_thread` returns NULL and the read is
+  empty). The load-bearing pin is the unlink-before-free ordering, not "ALIVE"
+  per se. (v1.0 reads one thread, the focus else main; per-tid — which would walk
+  any thread — is v1.x and MUST preserve this ordering. Holotype F2.)
 - **Bounded walk** — `halls_walk_kernel_frames` gates every deref to the thread's
   own usable kstack `[base+guard, base+size)` + `fp+16 <= hi`. A thread that
   *wakes and runs* mid-walk (a wake takes the rendez/rq locks, NOT
@@ -1074,8 +1075,8 @@ runs on the owner axis and asserts the zeroes.
 
 ### 5b.3 v1.x seams
 
-- **Per-tid inspect** (`/proc/<pid>/thread/<tid>/kstack`) — 8b reads the head
-  thread; the specific blocked M of a multi-thread Go proc is v1.x.
+- **Per-tid inspect** (`/proc/<pid>/thread/<tid>/kstack`) — 8b reads one
+  thread (the focus, else main); the specific blocked M of a multi-thread Go proc is v1.x.
 - **The user frames of a *hung* thread** — the full `user + kernel` unified stack
   of a thread blocked mid-syscall needs the user `regs`/`mem` of a non-stopped
   thread, a larger (and genuinely racier) relaxation the vote deliberately did not
@@ -1240,9 +1241,9 @@ between-syscalls stale value is never observed and a non-debugged Proc never rea
 its own. No new field. Verified 16/16 smp8 boots.
 
 Corollary seam (pre-existing, unchanged by #88): a `step` on a detour-parked
-(syscall-blocked) HEAD thread now reads a valid PC but arms `SPSR.SS` in a frame the
-detour-resume does not `eret` from, so the single-step is ineffective — the head is
-in a syscall, not at an EL0 instruction. This was already broken (NULL trapframe)
+(syscall-blocked) thread — the focus, else main — now reads a valid PC but arms
+`SPSR.SS` in a frame the detour-resume does not `eret` from, so the single-step is
+ineffective — the thread is in a syscall, not at an EL0 instruction. This was already broken (NULL trapframe)
 before #88; the per-thread `/proc/<pid>/thread/<tid>/` step is its v1.x home.
 
 **#89 (fixed in 8c-3, as-built).** The elected 9P-reader role (the #841
@@ -1399,7 +1400,7 @@ died (`seam-90-hung-server`, closed).
 *fully-stoppable*. But the FIRST `continue` past a `break` on a real Go target
 exposed a deeper gap the whole 8a/8b/8c-2 design carried silently: the debug-fs
 (`devproc_build_regs`/`apply_regs` + the step verb + the 8b `kstack`) read only
-the **head** thread (`target->threads`, TID==PID). A hardware breakpoint on a
+the **head** thread (`target->threads`, the newest thread). A hardware breakpoint on a
 multi-M Go target fires on whichever M runs the migrated goroutine — **not** the
 head — so `/proc/regs` reported the head M's PC (not the bp), the debugger
 (Ambush/Delve) could not attribute the stop (`FindBreakpoint(pc)` missed →
@@ -1411,16 +1412,17 @@ exercised this — its bp fires on its only thread, which *is* the head.
 
 **The fix (Option A, user-voted): the debug-fs FOCUSES the stop-triggering
 thread.** `struct Proc.debug_focus_thread` (proc.h, @328) is the M whose frame the
-debug-fs reports; `NULL` = head (the manual-stop / attach default). Every `bp` /
+debug-fs reports; `NULL` = main (the manual-stop / attach default; the head until
+F-4, below). Every `bp` /
 `step` / `wp` EC fire routes through **one** path — `proc_debug_fault_stop`, from
 `hwdebug_{breakpoint,singlestep,watchpoint}_from_el0` — so setting it there to
 `current_thread()` (under `g_proc_table_lock`) focuses the firing M uniformly, and
 a `step` re-focuses on its own EC 0x32 (which re-enters `fault_stop`).
 `proc_debug_resume` clears it. `devproc_focus_thread(target)` validates the
-pointer is still a thread of `target` (else head) under the lock; the four read
+pointer is still a live thread of `target` (else main) under the lock; the four read
 sites use it, so regs + kregs (`tpidr_el0` → Delve's goroutine recovery) + kstack
 + step report the firing M **coherently**. A single-threaded target has
-`current_thread()` == head, so 8a-2b + attach + the 8b settled-thread kstack are
+`current_thread()` == its only thread, so 8a-2b + attach + the 8b settled-thread kstack are
 byte-behaviour-unchanged.
 
 **Soundness.** No UAF — the load-bearing reason is the **`g_proc_table_lock`
@@ -1433,7 +1435,7 @@ settled kstack drops the fully-stopped gate, so it is not the net). The
 fully-stopped gate is an *additional* property of the mem/regs/kregs/step readers.
 A set focus is always `current_thread()` of the debugged Proc — guarded at the
 store (`ct->proc == p`, #95-audit F2); any stale/mismatched pointer falls back to
-head. The set (`fault_stop`, under the lock) / clear (`resume`, `__atomic`) / read
+main. The set (`fault_stop`, under the lock) / clear (`resume`, `__atomic`) / read
 (the 4 walk_cbs, under the lock) are consistent. **No new §28 invariant** — I-39 holds
 (it only refines *which* stopped thread's frame crosses, gated identically);
 `debug_stop.tla` + `debug_step.tla` are frame-reporting-agnostic and unchanged
@@ -1443,6 +1445,25 @@ bt/print at a HW bp on a multi-M Go target; it loops 8199× without the fix) +
 1138/1138 + boot OK + the SMP gate. This unblocks 8c-4. As-built:
 `docs/reference/134-debug-fs.md` (the "8c-2 #95" section); closed list
 `memory/audit_8c2_95_closed_list.md`.
+
+**Refinement (thread-model C7a, 2026-10-21; the Fable thread-model review's F-4):
+the fallback is main, never the head.** `p->threads` is head-inserted, so the head
+is the *newest* thread, not the oldest, and its tid is not the pid (tids come from
+one kernel-wide counter). A thread that has exited stays at the head, EXITING,
+until a live peer reaps it (`proc_reap_exited_threads`) -- in a stopped target,
+for the whole stop, and `devproc_all_threads_parked` skips it. Taking the head
+made a manual stop of a Go target whose newest M had exited read `regs` /
+`fpregs` / `kregs` as -1, and made `step` arm the dying thread: the step never
+fired and the resume let the target run free. So `devproc_focus_thread` now
+returns the focus only while it is a live thread of the target, else **main** --
+the oldest thread not exiting (`proc_main_thread_locked`, the same definition
+the caught-note pick uses; Linux's `/proc/<pid>/` is likewise the thread-group
+leader) -- and NULL when every thread is exiting, which every caller refuses.
+Neither arm returns an EXITING thread, because `apply_regs` and `step` have no
+EXITING gate of their own. The per-thread `/proc/<pid>/thread/<tid>/` layer, which
+lets the debugger choose, remains v1.x. Regressions: the focus-selection leg of
+`devproc.debug_stop_start_resume` (every arm) and the F-4 leg of `devproc.debug_regs` (read, write and an exited
+focus through the real regs path).
 
 ---
 
