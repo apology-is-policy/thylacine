@@ -2785,3 +2785,36 @@ there runs longer. Code eb8e8b807.
   nora's `END_GRACE` was sized on gopls); F7 this section and the journal entry.
 - **Lesson.** A bound verified only on the servers the image carried is unverified: every gate before this ran with
   clangd absent, and the skip read as green.
+
+## The Warp scenarios refuse an image they cannot run (P3 tooling) -- 2026-10-29
+
+Closes OPEN-BUGS 2026-10-28T23:14Z, 2026-10-29T02:30Z and 02:58Z. Code 583fc81a0 and 663f76855 (WIP), audit close
+*(pending)*.
+
+- **The trap.** A Warp scenario booted on the wrong image ran for its whole budget, then failed naming the wrong
+  cause. The default image (HALCYON_SESSION=y bakes `/lib/halcyon/session` into the pool) reached login and timed out
+  as "shell never came up after auth" about 20 min in. A `--config ci` image without `THYLACINE_BAKE_CLADE=1` got the
+  launcher's "not reachable (is the clade pool mounted?)" and failed 900 s later as "no composed-entry line".
+- **The guards.** `lc_require_image {needs}` (lib.exp) reads `build/pool-contents`, populate's verified record of the
+  pool, and refuses before the boot and before the per-attempt pool copy, naming the lever. Populate records
+  `SESSION`, `GLQUAKE` and `VIRGLPROVE` as verified payloads under their own arms' predicates. `lc_login` fails at
+  once on login's `session compositor (halcyond) spawned` line. The three scenarios that launch through
+  `/bin/tyr-glquake` fail on its not-reachable line. All 16 Warp scenarios declare their image, and `warp-host.sh
+  lint`, which sync runs first, refuses one that logs in without declaring `shell` before `lc_boot`. sync snapshots
+  the records at its start, fingerprints every shipped artifact before and after the pool, and ships the snapshot
+  only if nothing changed. Uncommitted `tools/` files travel by asking git. build.sh writes `.config` via
+  `.config.part`, so `--show-config` and a failed build leave the last good record.
+- **An image refusal is not a guest failure.** test-interactive.sh retried a refused scenario three times and counted
+  it as a guest regression. The refusal and `lc_login`'s session arm now write an `IMAGE:` marker; the wrapper stops
+  at it and counts it apart (663f76855).
+- **Verification.** `tools/test-warp-image-gate.py` 31/31, 18 of them red over a HEAD-tree copy; T-show-writes-nothing
+  red with HEAD's build.sh. Default build + suite `tests: 2120/2120 PASS`; the real record lists `SESSION` and is
+  refused for `shell`. The clade ci record lists `CLADE GLQUAKE VIRGLPROVE` and no `SESSION`. On thyla-pi, against a
+  doctored copy of the synced record, restored byte-equal: the record doctored to list `SESSION` refused warp-prove (`this pool boots the Halcyon
+  session`), and the one stripped of `VIRGLPROVE` refused virgl-prove (`this pool has no VIRGLPROVE payload`), each at
+  once (0 s, rc 1). Before the check moved above the copy, each
+  refusal took 46-47 s.
+- **Audit.** Fable 5.1, 0/0/1/6, all fixed. P2: sync shipped the records minutes after it chose the pool, so a bake
+  mid-sync could pair an old pool with a new record. P3s: CLADE did not imply the launcher's payloads; the checker's
+  census saw only `lc_send` literals; lint proved presence, not position; the git list ran unguarded and dropped
+  renames; a failed build rewrote `.config`; the pool copy preceded the refusal.
