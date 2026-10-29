@@ -284,6 +284,20 @@ pub fn admit(request: &Request, phase: u32, quiescent: bool, unreachable: bool, 
 /// bound every fenced chain already carries (backend gpu.rs asserts the two
 /// equal), past which the device's own abandonment has given up on it too.
 pub const PARK_BOUND_MS: u64 = 30_000;
+/// What a stalled engine (or cursor lane) becomes at a completion pump
+/// (GPU-DESIGN 4.5.15): a chain that has retired revives it however late,
+/// and one still outstanding at the abandonment bound kills it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stall { Holding, Revived, Dead }
+pub fn stall_verdict(outstanding: bool, stalled_ms: u64) -> Stall {
+    if !outstanding {
+        Stall::Revived
+    } else if stalled_ms >= PARK_BOUND_MS {
+        Stall::Dead
+    } else {
+        Stall::Holding
+    }
+}
 impl Wire for Request {
     fn put(&self, out: &mut Vec<u8>) {
         1u16.put(out);
@@ -511,6 +525,21 @@ mod admission_tests {
                 }
             }
         }
+    }
+    #[test]
+    fn a_retired_chain_revives_the_engine_however_late() {
+        // The device proved it is done with the buffers; the clock's verdict
+        // is only for a chain that never comes back.
+        for ms in [0, PARK_BOUND_MS - 1, PARK_BOUND_MS, u64::MAX] {
+            assert_eq!(stall_verdict(false, ms), Stall::Revived, "retired at {ms} ms");
+        }
+    }
+    #[test]
+    fn an_outstanding_chain_holds_the_stall_until_the_bound_then_dies() {
+        assert_eq!(stall_verdict(true, 0), Stall::Holding);
+        assert_eq!(stall_verdict(true, PARK_BOUND_MS - 1), Stall::Holding);
+        assert_eq!(stall_verdict(true, PARK_BOUND_MS), Stall::Dead);
+        assert_eq!(stall_verdict(true, u64::MAX), Stall::Dead);
     }
     #[test]
     fn seat_traffic_and_ordinary_work_run_regardless_of_quiescence() {

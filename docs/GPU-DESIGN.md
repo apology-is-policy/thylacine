@@ -2561,7 +2561,15 @@ block the serve loop, and seat input with it. Neither was taken.
   every new submission:
   - synchronous ones, because they would reuse the outstanding chain's
     descriptors and response buffer. This is the #31 hazard made structural:
-    no synchronous chain is published while one is outstanding.
+    no synchronous chain is published while one is outstanding. The refusal
+    has to come before the command is even *staged*. The device reads a
+    published chain's request only when it processes the chain, and a stall
+    defers that, so a request staged over an outstanding chain and then
+    refused would still run, in place of the command that was published.
+    Every builder therefore stages through one accessor (`Gpu::req`), which
+    refuses while a synchronous chain is outstanding. The permanent latch had
+    the same hole: a frozen device that later resumed ran whatever was staged
+    last.
   - fenced ones, with the retryable `E_AGAIN`, since the device is behind,
     not gone.
   - cursor commands.

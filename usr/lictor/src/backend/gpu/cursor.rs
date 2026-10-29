@@ -15,9 +15,15 @@ pub(super) struct Plane {
     pub(super) queue: crate::cursor_queue::Queue,
     backing: Option<Dma>,
     ready: bool,
+    created: bool,
+    attached: bool,
     uploaded: bool,
     image: Option<(Shape, u16)>,
     visible: bool,
+    /// The outstanding chain missed its deadline (GPU-DESIGN 4.5.15): the
+    /// completion pump retires it late, or poisons the lane at
+    /// FENCE_ABANDON_MS.
+    stalled: Option<Instant>,
 }
 impl Plane {
     pub(super) fn new(notify: u64) -> Self {
@@ -26,9 +32,12 @@ impl Plane {
             queue: Default::default(),
             backing: None,
             ready: false,
+            created: false,
+            attached: false,
             uploaded: false,
             image: None,
             visible: false,
+            stalled: None,
         }
     }
 }
@@ -65,7 +74,7 @@ impl Gpu {
         hot: (u32, u32),
         update: bool,
     ) -> Result<(), Error> {
-        if self.ctrl.dead || !self.cursor.queue.idle() {
+        if self.ctrl.refusing() || !self.cursor.queue.idle() {
             return Err(Error::Hardware);
         }
         self.cursor_storage()?;
@@ -116,36 +125,28 @@ impl Gpu {
         // Both queues share the device loop. A synchronous GPU readback can
         // hold that loop beyond the ordinary command bound; keep the larger
         // deadline even when the completion pump retires the readback first.
-        let mut deadline_ms = if self.ctrl.readback_in_flight() {
+        let mut deadline_ms = if self.ctrl.readback_in_flight() || !self.ctrl.serving {
             FENCE_ABANDON_MS
         } else {
             SUBMIT_DEADLINE_MS
         };
         loop {
-            let used = self.ring_va + CURSOR_USED_OFF;
-            let index = unsafe { r16(used + 2) };
-            virtio_rmb();
-            if index != self.cursor.queue.retired {
-                let entry = used + 4 + u64::from(self.cursor.queue.retired % CURSORQ_SIZE) * 8;
-                let (head, len, ok) = unsafe {
-                    (
-                        r32(entry),
-                        r32(entry + 4),
-                        r32(REPLY) == VIRTIO_GPU_RESP_OK_NODATA,
-                    )
-                };
-                return self
-                    .cursor
-                    .queue
-                    .complete(index, head, len, ok)
-                    .map_err(|_| Error::Hardware);
+            if let Some(result) = self.cursor_retire() {
+                return result.map_err(|_| Error::Hardware);
             }
             if self.ctrl.readback_in_flight() {
                 deadline_ms = FENCE_ABANDON_MS;
             }
-            if since.elapsed().as_millis() >= u128::from(deadline_ms)
-                || self.ctrl.service_completions(1_000_000).is_err()
-            {
+            let missed = since.elapsed().as_millis() >= u128::from(deadline_ms);
+            if missed && deadline_ms < FENCE_ABANDON_MS {
+                self.cursor.stalled = Some(Instant::now());
+                say!(
+                    "lictor: cursor chain missed its {} ms deadline -- cursor queue stalled until it retires",
+                    deadline_ms
+                );
+                return Err(Error::Hardware);
+            }
+            if missed || self.ctrl.service_completions(1_000_000).is_err() {
                 self.cursor.queue.poison();
                 say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable");
                 return Err(Error::Hardware);
@@ -153,32 +154,91 @@ impl Gpu {
         }
     }
 
+    /// Retire the outstanding chain if its used entry has arrived: None while
+    /// it has not; a malformed entry poisons the lane (`Queue::complete`).
+    fn cursor_retire(&mut self) -> Option<Result<(), ()>> {
+        let used = self.ring_va + CURSOR_USED_OFF;
+        let index = unsafe { r16(used + 2) };
+        virtio_rmb();
+        if index == self.cursor.queue.retired {
+            return None;
+        }
+        let entry = used + 4 + u64::from(self.cursor.queue.retired % CURSORQ_SIZE) * 8;
+        let (head, len, ok) = unsafe {
+            (
+                r32(entry),
+                r32(entry + 4),
+                r32(REPLY) == VIRTIO_GPU_RESP_OK_NODATA,
+            )
+        };
+        Some(self.cursor.queue.complete(index, head, len, ok))
+    }
+
+    /// The completion pump's half of a cursor stall: a late retirement
+    /// revives the lane, one outstanding FENCE_ABANDON_MS poisons it.
+    pub(super) fn cursor_settle(&mut self) {
+        let Some(t0) = self.cursor.stalled else { return };
+        let ms = t0.elapsed().as_millis() as u64;
+        match self.cursor_retire() {
+            Some(Ok(())) => {
+                self.cursor.stalled = None;
+                say!("lictor: cursor chain retired {} ms after its deadline -- cursor queue revived", ms);
+            }
+            Some(Err(())) => {
+                self.cursor.stalled = None;
+                say!("lictor: cursor queue failed; backing retained, trusted takeover unavailable");
+            }
+            None if crate::gpu_api::stall_verdict(true, ms) == crate::gpu_api::Stall::Dead => {
+                self.cursor.stalled = None;
+                self.cursor.queue.poison();
+                say!("lictor: cursor chain never retired in {} ms -- cursor queue dead", ms);
+            }
+            None => {}
+        }
+    }
+
     fn cursor_prepare(&mut self) -> Result<(), Error> {
-        if self.ctrl.dead || !self.cursor.queue.idle() {
+        if self.ctrl.refusing() || !self.cursor.queue.idle() {
             return Err(Error::Hardware);
         }
         self.cursor_storage()?;
         if !self.cursor.ready {
             // Store ownership before any hardware submission. On failure the
             // allocation survives; never retry a possibly-created resource ID.
+            // A step that stalled is taken as done: the device retires it
+            // before the engine revives, and repeating it would collide with
+            // the id or the backing it made. A wrong guess fails a later step.
             let pa = self.cursor.backing.as_ref().unwrap().paddr();
-            if self.resource_create_2d(RESOURCE, 64, 64).is_err()
-                || self
-                    .attach_backing(
-                        RESOURCE,
-                        &[Seg {
-                            pa,
-                            len: IMAGE_BYTES as u64,
-                        }],
-                    )
-                    .is_err()
-            {
-                self.cursor.queue.poison();
-                return Err(Error::Hardware);
+            if !self.cursor.created {
+                let stalls = self.ctrl.stalls;
+                let result = self.resource_create_2d(RESOURCE, 64, 64);
+                self.cursor.created = result.is_ok() || self.ctrl.stalls != stalls;
+                if result.is_err() {
+                    self.cursor_step_failed(stalls);
+                    return Err(Error::Hardware);
+                }
+            }
+            if !self.cursor.attached {
+                let stalls = self.ctrl.stalls;
+                let result = self.attach_backing(RESOURCE, &[Seg { pa, len: IMAGE_BYTES as u64 }]);
+                self.cursor.attached = result.is_ok() || self.ctrl.stalls != stalls;
+                if result.is_err() {
+                    self.cursor_step_failed(stalls);
+                    return Err(Error::Hardware);
+                }
             }
             self.cursor.ready = true;
         }
         Ok(())
+    }
+
+    /// A controlq step on the plane that stalled is not the lane's failure:
+    /// the stall holds quiescence until the device retires it (GPU-DESIGN
+    /// 4.5.15). Any other failure poisons the lane.
+    fn cursor_step_failed(&mut self, stalls: u32) {
+        if self.ctrl.stalls == stalls {
+            self.cursor.queue.poison();
+        }
     }
 
     pub fn cursor(
@@ -211,8 +271,9 @@ impl Gpu {
             }
             dsb_sy();
             // transfer() verifies the echoed controlq fence before returning.
+            let stalls = self.ctrl.stalls;
             if self.transfer(RESOURCE, 0, 0, 0, 64, 64).is_err() {
-                self.cursor.queue.poison();
+                self.cursor_step_failed(stalls);
                 return Err(Error::Hardware);
             }
             self.cursor.image = Some((shape, scale));
@@ -233,8 +294,9 @@ impl Gpu {
                 core::ptr::write_bytes(BASE as *mut u8, 0, IMAGE_BYTES);
             }
             dsb_sy();
+            let stalls = self.ctrl.stalls;
             if self.transfer(RESOURCE, 0, 0, 0, 64, 64).is_err() {
-                self.cursor.queue.poison();
+                self.cursor_step_failed(stalls);
                 return Err(Error::Hardware);
             }
             self.cursor.image = None;

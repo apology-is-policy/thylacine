@@ -125,9 +125,9 @@ A retirement (detach or unref of a resource, destroy of a context, detach of a
 context's resource, retire or drop of a host ring) runs only once every
 outstanding chain has really retired; until then the loop leaves it parked
 (`gpu_api::admit`, asked of each pending request). A park must end: an episode
-ends and in-flight chains retire, but some quiescence never comes back. A dead
-engine and a cursor queue poisoned until device reset
-(`Gpu::quiescence_unreachable`) admit a retirement at once; a chain the device
+ends, in-flight chains retire, and a stalled engine revives or dies (below), but
+some quiescence never comes back. A dead engine and a cursor queue poisoned
+until device reset (`Gpu::quiescence_unreachable`) admit a retirement at once; a chain the device
 may never retire (a poisoned fenced slot) is bounded by the clock instead, so a
 retirement parked `PARK_BOUND_MS` (30 s, asserted equal to the fenced
 abandonment bound) is admitted whatever the cause. Either way `Device::execute`
@@ -144,28 +144,57 @@ command that missed the synchronous deadline took the display away for the
 rest of the boot, measured twice on thyla-pi (a boot-time blit probe, and a
 runtime console transfer).
 
+The synchronous deadline is a two-stage latch (GPU-DESIGN 4.5.15, operator
+vote 29). A chain that sees 500 ms of stale wakes STALLS the engine:
+- the command fails with an unknown outcome;
+- its chain stays outstanding and nothing is abandoned;
+- every new submission is refused (synchronous ones would reuse the
+  outstanding chain's buffers; fenced ones get the retryable `Again`;
+  cursor commands too). For a synchronous command the refusal comes before
+  it is staged: every builder takes the request region from `Gpu::req`,
+  which refuses while a synchronous chain is outstanding, because the device
+  reads a chain's request only when it processes the chain and would
+  otherwise run the staged bytes as the published command;
+- the serve loop stays live, and a retirement parks.
+
+The completion pump settles a stall (`settle_stall`, decided by the
+host-tested `gpu_api::stall_verdict`). A late retirement, drained by the
+ordinary path, revives the engine, and the parked retirement then runs. A chain
+still outstanding after 30 s latches the engine dead, permanently. The stall
+counter tells a caller whether its command stalled, and a stalled bind
+condemns its resource, because the display may name it once the device
+catches up. Bring-up (`Gpu::probe`, `Screen::new`, before
+`Gpu::begin_serving`) waits out the full 30 s instead: there is no loop to
+keep live.
+
 The GPU command machinery remains in the trusted service. Its synchronous and
 asynchronous commands share one monotone fence sequence. Synchronous responses
 must return the requested fence; queue acceptance alone is insufficient for
 trusted takeover. Legacy Virgl callbacks bound the sequence to 32 bits; exhaustion
 fails closed rather than wrapping or using an incompatible high-bit namespace.
 
-The synchronous deadline reports its own margin: each new slowest synchronous
-command past 50 ms is said, and once a deadline has latched the engine dead, a
-synchronous chain the device retires afterwards is said once, with the delay
-at which the serve loop saw it (an upper bound: the loop looks once a pass),
-which tells a late device from one that never completes.
+The synchronous deadline reports its own margin. Each new slowest synchronous
+command past 50 ms is said. A stall is said when it begins, and so is its end:
+a revival, with how long after the deadline the serve loop saw the chain retire
+(an upper bound, since the loop looks once a pass), or a death. A chain the
+device retires after a death is also said once. Together these tell a late
+device from one that never completes.
 
-A test-mode lever reproduces the dead-engine state on demand.
+A test-mode lever reproduces both ends of a stall on demand.
 `thylacine.test-latch-dead` on the kernel command line
 (`THYLACINE_TEST_LATCH_DEAD=1` to `tools/run-vm.sh`) makes tapestryd arm the
 broker with `TestArmLatch` once it serves, and its global ctl says
 `test-latch-dead armed` once the broker has taken it. `Device` then marks each
-resource created at 97 by 89 and, at the first retirement of one,
-latches the engine through a harmless display query whose wait reports its
-deadline passed, exactly the state a slow command leaves. Only the designated
-compositor reaches the broker, and only the booting operator sets the token.
-`tools/interactive/ls-gpu-dead.exp` is the gate.
+resource created at 97 by 89. At a retirement of one, it stalls the engine
+through a harmless display query whose wait reports its deadline passed,
+exactly the state a slow command leaves. The lever has two shots, and each one
+forgets the marks made before it:
+- on the first shot the chain retires, so the engine revives and the retirement
+  completes, said with its pins released;
+- on the second shot the chain's retirement is withheld, so the engine dies at
+  30 s and the retirement is refused.
+Only the designated compositor reaches the broker, and only the booting
+operator sets the token. `tools/interactive/ls-gpu-dead.exp` is the gate.
 
 ### Episode
 
@@ -178,8 +207,17 @@ standard normal pointer shapes, scale and position from the authenticated
 compositor. Private cursor DMA never enters the normal object ledger. Before
 trusted scanout every cursor plane receives a transparent image followed by a
 hide, with each queue retirement checked. The transparent replacement also
-clears display listeners that ignore visibility updates. A failed cursor queue
-retains its backing until GPU reset and prevents trusted acknowledgement.
+clears display listeners that ignore visibility updates. A cursor chain that
+misses its deadline stalls the lane, exactly as the controlq stalls:
+- the queue is not idle, so cursor commands are refused and quiescence waits;
+- the completion pump retires the chain late (`cursor_settle`), with the same
+  validation an on-time chain gets;
+- a malformed entry, or a chain outstanding for 30 s, fails the queue.
+A controlq step on the plane that stalled (the image upload, the plane's
+one-time create and attach) is not the lane's failure, since the controlq's own
+stall holds quiescence. A stalled create or attach is taken as done, because
+repeating it would collide with what it made. A failed cursor queue retains its
+backing until GPU reset and prevents trusted acknowledgement.
 Cursor waits share controlq's sticky allowance for an outstanding GPU readback;
 the two queues share the device loop, so a delayed readback is not itself proof
 of a dead cursor queue. Input latency under that load remains a runtime gate.
@@ -354,13 +392,13 @@ ordinary guest test client, never a source of trusted authority.
 
 ## Caveats
 
-OPEN (2026-10-29): the synchronous deadline is 500 ms for every command but a
-readback, and its latch is permanent, so a device that is merely busy for
-longer -- GPU-DESIGN's #31 class, met on thyla-pi by a 2D transfer during a
-16.7 s serve pass -- still costs the GPU for the boot; the compositor now
-survives it, but the display does not. And a seat episode never returns to
-normal while quiescence is unreachable or a chain is never retired (a restore
-and the trusted takeover both need it), so it parks ordinary requests for good.
+OPEN (2026-10-29): a stall costs tapestryd GPU composition for the boot.
+Every request during a stall fails at once, and the compositor's health tick
+fails closed and latches GPU composition off, so CPU composition carries on
+(OPEN-BUGS 2026-10-29T06:39Z). And a seat episode never returns to normal
+while quiescence is unreachable or a chain is never retired, because a restore
+and the trusted takeover both need quiescence, so it parks ordinary requests
+for good. A stall now ends by itself within 30 s; a dead engine does not.
 
 The current backend is QEMU virtio GPU/input with a neutral backdrop. Pi DMA,
 controller ownership and display conformance require separate qualification.

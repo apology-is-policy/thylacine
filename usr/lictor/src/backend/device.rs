@@ -30,19 +30,26 @@ pub struct Device {
     owner: u64,
     pub presentation: Presentation,
     refused_retirements: u64,
+    /// Latch lever shots left: 2 = the revive shot is next, 1 = the hold.
     #[cfg(feature = "test-mode")]
-    test_latch_armed: bool,
+    test_latch_shots: u8,
     #[cfg(feature = "test-mode")]
     test_latch_targets: Vec<u32>,
+    /// Resources whose retirement fired a shot: their completed retirement
+    /// is said, the witness's proof that the retirement ran.
+    #[cfg(feature = "test-mode")]
+    test_latch_fired: Vec<u32>,
 }
 impl Device {
     pub fn new(mut gpu: Gpu, owner: u64) -> Result<Self, Error> {
         gpu.enable_retirement_journal();
+        gpu.begin_serving();
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
             refused_retirements: 0,
-            #[cfg(feature = "test-mode")] test_latch_armed: false,
-            #[cfg(feature = "test-mode")] test_latch_targets: Vec::new() })
+            #[cfg(feature = "test-mode")] test_latch_shots: 0,
+            #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
+            #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
     pub fn bind_owner(&mut self, owner: u64) -> bool {
         if owner == 0 || (self.owner != 0 && self.owner != owner) { return false; }
@@ -83,6 +90,12 @@ impl Device {
                 let resource = r.resource;
                 self.backings.retain(|b| b.resource != resource);
                 self.retiring.swap_remove(i);
+                #[cfg(feature = "test-mode")]
+                if let Some(k) = self.test_latch_fired.iter().position(|&f| f == resource) {
+                    self.test_latch_fired.swap_remove(k);
+                    crate::backend::diagnostic(&alloc::format!(
+                        "lictor: latch-lever resource {} retired after its stall (pins released)\n", resource));
+                }
             } else { i += 1; }
         }
     }
@@ -105,26 +118,30 @@ impl Device {
         }
     }
     /// The armed latch lever, asked of each pending request before the server
-    /// admits it: the first retirement of a resource created at
-    /// `TEST_LATCH_SIZE` latches the engine dead -- the state a command that
-    /// missed its synchronous deadline leaves, met by a retirement exactly
-    /// when the park would decide it.
+    /// admits it: a retirement of a resource created at `TEST_LATCH_SIZE`
+    /// stalls the engine -- the state a command that missed its synchronous
+    /// deadline leaves, met by a retirement exactly when the park decides it.
+    /// The first shot's chain retires (revival); the second's is withheld
+    /// (death). Each shot forgets the marks before it, so the next one needs
+    /// a resource created after it.
     #[cfg(feature = "test-mode")]
     pub fn test_latch_consider(&mut self, request: &Request) {
-        if !self.test_latch_armed { return; }
+        if self.test_latch_shots == 0 { return; }
         match *request {
             Request::DetachBacking { resource_id } | Request::ResourceUnref { resource_id }
                 if self.test_latch_targets.contains(&resource_id) => {
-                self.test_latch_armed = false;
+                let hold = self.test_latch_shots == 1;
+                self.test_latch_shots -= 1;
                 self.test_latch_targets.clear();
-                self.gpu.test_latch_now();
+                self.test_latch_fired.push(resource_id);
+                self.gpu.test_latch_now(hold);
             }
             _ => {}
         }
     }
     #[cfg(feature = "test-mode")]
     fn test_latch_mark(&mut self, resource_id: u32, w: u32, h: u32) {
-        if self.test_latch_armed && (w, h) == TEST_LATCH_SIZE
+        if self.test_latch_shots > 0 && (w, h) == TEST_LATCH_SIZE
             && !self.test_latch_targets.contains(&resource_id)
             && self.test_latch_targets.len() < TEST_LATCH_TARGETS {
             self.test_latch_targets.push(resource_id);
@@ -358,8 +375,13 @@ impl Device {
             Request::CtxAttachResourceProbe { ctx_id, resource_id } => {
                 self.check(resource_id, Kind::Resource)?;
                 self.check(ctx_id, Kind::Context)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_attach_resource_probe(ctx_id, resource_id);
-                if matches!(result, Ok(0x1100)) { self.objects.attach(self.owner, ctx_id, resource_id).map_err(|_| Error::BadField)?; }
+                // A stalled attach may still link the resource, and an unref
+                // must then wait for the detach like any linked one.
+                if matches!(result, Ok(0x1100)) || self.gpu.stalls() != stalls {
+                    self.objects.attach(self.owner, ctx_id, resource_id).map_err(|_| Error::BadField)?;
+                }
                 result.put(&mut out);
             }
             Request::Transfer { resource_id, offset, x, y, w, h } => {
@@ -467,7 +489,7 @@ impl Device {
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestArmLatch => {
-                #[cfg(feature = "test-mode")] { self.test_latch_armed = true; ().put(&mut out); }
+                #[cfg(feature = "test-mode")] { self.test_latch_shots = 2; ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::CompSlotState => {

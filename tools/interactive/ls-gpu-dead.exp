@@ -1,25 +1,35 @@
 #!/usr/bin/env expect
-# ls-gpu-dead -- the compositor rides out a dead GPU engine.
+# ls-gpu-dead -- the compositor rides out a stalled GPU engine, and a dead one.
 #
-# A GPU command that misses lictor's synchronous deadline latches the engine
-# dead for the rest of the boot. Until 2026-10-29 the compositor's next
-# retirement (a surface's detach or unref, a context destroy) then parked in
-# lictor forever -- a dead engine is never quiescent -- and tapestryd blocked
-# on the reply for good, so one slow command took the display away for the
-# whole boot (measured twice on thyla-pi; OPEN-BUGS 2026-10-29T03:54Z).
+# A GPU command that misses lictor's 500 ms synchronous deadline STALLS the
+# engine: the command fails, submissions are refused, and a retirement (a
+# surface's detach or unref) parks. The engine revives when the late chain
+# retires and dies when none has retired after 30 s (GPU-DESIGN 4.5.15).
+# Until 2026-10-29 the first miss latched the engine dead for the boot and the
+# next retirement parked forever, hanging the compositor (OPEN-BUGS
+# 2026-10-29T03:54Z); then a dead engine refused at once, but a healthy device
+# behind a host stall still lost the display (vote 29).
 #
 # THYLACINE_TEST_LATCH_DEAD=1 puts thylacine.test-latch-dead on the kernel
-# command line: tapestryd arms lictor, and lictor latches exactly as that
-# deadline does, through a synchronous query, at the first retirement of a
-# resource created at the lever's size (97x89) -- so no boot probe's
-# retirement fires it. A surface created and destroyed from the shell does.
+# command line: tapestryd arms lictor's two-shot lever, which stalls the
+# engine through a synchronous query at a retirement of a resource created at
+# the lever's size (97x89), so no boot probe's retirement fires it. The first
+# shot's chain retires normally; the second's retirement is withheld.
 #
-# PASS needs all of: the lever armed (the compositor's ctl says the broker
-# took it); the injected latch; lictor's refusal of the retirement; the
-# destroy write answered without error; the compositor answering its ctl
-# afterwards; and the abandoned query seen to retire late (the instrument
-# that tells a slow device from one that never completes, given here its
-# positive control).
+# Leg 1 (revive) needs: the injected stall; the engine revived by the late
+# chain (the instrument that tells a slow device from a dead one); the parked
+# retirement run to completion, its pins released; no refusal. Leg 2 (dead),
+# on a surface created after the revival (so the engine took new work), needs:
+# the injected stall with its retirement withheld; the engine declared dead;
+# the retirement refused with its pins kept. The compositor must answer its
+# ctl before and after. The destroy write is answered either way -- the
+# compositor degrades rather than failing the shell -- so only lictor's own
+# lines tell the legs apart.
+#
+# What leg 2 cannot show: the retirement parks a few ms before the stall
+# begins, so the 30 s park bound admits it at about the moment the engine
+# dies, and the unreachable-quiescence arm is not what answers it here. The
+# host tests pin that arm (gpu_api admission_tests).
 #
 # Runs under HVF on the ci image. Any GPU device will do: the park is the
 # broker's, not the renderer's.
@@ -38,10 +48,10 @@ set timeout 30
 lc_send "cat /dev/tapestry/ctl; echo ctl-before"
 expect {
     -re {display [0-9]+ [0-9]+[^\n]*\n(.|\n)*test-latch-dead armed[^\n]*\n(.|\n)*\nctl-before} {
-        lc_step "the compositor answers before the latch, with the lever armed"
+        lc_step "the compositor answers before the stall, with the lever armed"
     }
     -re {\nctl-before} { lc_fail "the compositor's ctl carries no display line or no armed lever (did the broker refuse the arm?)" }
-    timeout { lc_fail "the compositor's ctl never answered, before any latch (30s)" }
+    timeout { lc_fail "the compositor's ctl never answered, before any stall (30s)" }
 }
 
 # The surface ids in a plain listing, read up to the tag that ends it. A
@@ -68,73 +78,126 @@ proc gd_surfaces {tag} {
     return $ids
 }
 
-set before [gd_surfaces surfaces-before]
-lc_send "echo 'create 97 89' > /dev/tapestry/surface/new"
-set after [gd_surfaces surfaces-after]
-set made {}
-foreach n $after {
-    if {[lsearch -exact $before $n] < 0} { lappend made $n }
+# Create one surface at the lever's size; return its id.
+proc gd_create {leg} {
+    set before [gd_surfaces surfaces-before-$leg]
+    lc_send "echo 'create 97 89' > /dev/tapestry/surface/new"
+    set after [gd_surfaces surfaces-after-$leg]
+    set made {}
+    foreach n $after {
+        if {[lsearch -exact $before $n] < 0} { lappend made $n }
+    }
+    if {[llength $made] != 1} {
+        lc_fail "$leg: the create made [llength $made] new surfaces (before: $before; after: $after), want exactly one"
+    }
+    return [lindex $made 0]
 }
-if {[llength $made] != 1} {
-    lc_fail "the create made [llength $made] new surfaces (before: $before; after: $after), want exactly one"
-}
-set sid [lindex $made 0]
-lc_step "the create made surface $sid at the lever's size"
 
-set late 0
-set refused 0
-set ok 0
-lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl && echo destroy-ok; echo destroy-returned"
+# ---- leg 1: a stall the device recovers from ----
+set sid [gd_create revive]
+lc_step "revive: the create made surface $sid at the lever's size"
+lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl && echo destroy-ok-1; echo destroy-returned-1"
 set timeout 60
 expect {
-    -ex "gpu command never retired (INJECTED by test-latch-dead)" {
-        lc_step "lictor latched the engine dead at the retirement"
+    -ex "INJECTED by test-latch-dead, retirement withheld" {
+        lc_fail "revive: the first shot withheld its retirement -- the lever fired out of order"
     }
-    -re {\ndestroy-returned} { lc_fail "the destroy returned with no injected latch -- did the create make a 97x89 resource?" }
-    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the destroy" }
-    timeout { lc_fail "no injected latch within 60s of the destroy -- did the create make a 97x89 resource?" }
+    -ex "INJECTED by test-latch-dead) -- engine stalled" {
+        lc_step "revive: lictor stalled the engine at the retirement"
+    }
+    -re {\ndestroy-returned-1} { lc_fail "revive: the destroy returned with no injected stall -- did the create make a 97x89 resource?" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the first destroy" }
+    timeout { lc_fail "revive: no injected stall within 60s of the destroy -- did the create make a 97x89 resource?" }
 }
-# Before the fix the destroy's write parks in lictor for good, so its echo
-# never finishes and neither sentinel behind it prints. The wait is well
-# under lictor's 30 s park bound: a dead engine must refuse at once, and a
-# refusal that only the bound produced is the unreachable arm missing.
+# The chain retires within milliseconds, so the parked retirement runs at
+# once. 15 s is well under the 30 s park bound: a retirement only the bound
+# answered would be refused, which is the revival missing.
+set revived 0
+set retired 0
+set returned 0
 set timeout 15
 expect {
-    -ex "gpu synchronous chain retired" {
-        set late 1
-        lc_step "the abandoned query retired late (instrument control)"
+    -ex "lictor: retirement refused on a non-quiescent engine" {
+        lc_fail "revive: lictor refused the retirement -- the engine never revived"
+    }
+    -re {gpu synchronous chain retired [0-9]+ ms after its deadline -- engine revived} {
+        set revived 1
+        lc_step "revive: the late chain retired and the engine revived"
         exp_continue
+    }
+    -re "latch-lever resource \[0-9\]+ retired after its stall \\(pins released\\)" {
+        set retired 1
+        lc_step "revive: the parked retirement ran to completion, its pins released"
+        if {!$returned} { exp_continue }
+    }
+    -re {\ndestroy-returned-1} {
+        set returned 1
+        if {!$retired} { exp_continue }
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after the first stall" }
+    timeout { lc_fail "revive: within 15s of the stall: revived=$revived retired=$retired returned=$returned (a retirement still parked, or the compositor hung)" }
+}
+if {!$revived} {
+    lc_fail "revive: the retirement completed but lictor never said the engine revived -- which path ran it?"
+}
+lc_step "revive: the destroy write was answered"
+
+# ---- leg 2: a stall that never ends ----
+set sid [gd_create dead]
+lc_step "dead: the revived engine took new work (surface $sid created)"
+lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl && echo destroy-ok-2; echo destroy-returned-2"
+set timeout 60
+expect {
+    -ex "INJECTED by test-latch-dead, retirement withheld" {
+        lc_step "dead: lictor stalled the engine with the chain's retirement withheld"
+    }
+    -ex "INJECTED by test-latch-dead) -- engine stalled" {
+        lc_fail "dead: the second shot did not withhold its retirement"
+    }
+    -re {\ndestroy-returned-2} { lc_fail "dead: the destroy returned with no injected stall" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the second destroy" }
+    timeout { lc_fail "dead: no injected stall within 60s of the destroy" }
+}
+set withheld 0
+set dead 0
+set refused 0
+set returned 0
+set timeout 45
+expect {
+    -ex "retirement WITHHELD (test-latch-dead hold)" {
+        set withheld 1
+        exp_continue
+    }
+    -re {engine revived} { lc_fail "dead: the engine revived although its chain's retirement was withheld" }
+    -re "latch-lever resource \[0-9\]+ retired after its stall" {
+        lc_fail "dead: a retirement completed on an engine whose chain never retired"
+    }
+    -re {gpu engine stalled [0-9]+ ms without a retirement -- engine dead} {
+        set dead 1
+        lc_step "dead: the stall outlived the abandonment bound and the engine died"
+        if {!($refused && $returned)} { exp_continue }
     }
     -ex "lictor: retirement refused on a non-quiescent engine" {
         set refused 1
-        lc_step "lictor refused the retirement rather than parking it"
-        exp_continue
+        lc_step "dead: lictor refused the retirement, its pins kept"
+        if {!($dead && $returned)} { exp_continue }
     }
-    -re {\ndestroy-ok} { set ok 1; exp_continue }
-    -re {\ndestroy-returned} {
-        if {!$ok} { lc_fail "the destroy write returned an error after the latch" }
-        lc_step "the destroy write was answered"
+    -re {\ndestroy-returned-2} {
+        set returned 1
+        if {!($dead && $refused)} { exp_continue }
     }
-    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after the latch" }
-    timeout { lc_fail "the compositor hung on a dead engine: the destroy write did not return within 15s of the latch (a park the 30s bound would end late, or never)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after the second stall" }
+    timeout { lc_fail "dead: within 45s of the stall: withheld=$withheld dead=$dead refused=$refused returned=$returned" }
 }
-if {!$refused} {
-    lc_fail "the destroy returned but lictor never said it refused the retirement -- which path answered it?"
+if {!$withheld} {
+    lc_fail "dead: the engine died but the withheld retirement was never seen -- did the chain retire at all?"
 }
 
 set timeout 30
 lc_send "cat /dev/tapestry/ctl; echo ctl-after"
 expect {
-    -ex "gpu synchronous chain retired" {
-        set late 1
-        lc_step "the abandoned query retired late (instrument control)"
-        exp_continue
-    }
     -re {display [0-9]+ [0-9]+[^\n]*\n(.|\n)*ctl-after} { lc_step "the compositor still answers its ctl" }
     -re {\nctl-after} { lc_fail "the ctl read returned without its display line" }
-    timeout { lc_fail "the compositor stopped answering its ctl after the latch (30s)" }
+    timeout { lc_fail "the compositor stopped answering its ctl after the engine died (30s)" }
 }
-if {!$late} {
-    lc_fail "the abandoned query was never seen to retire -- the late-retire instrument is blind"
-}
-lc_pass "gpu-dead: a dead engine refuses the compositor's retirement, which degrades instead of hanging"
+lc_pass "gpu-dead: a stalled engine revives and finishes the parked retirement; a dead one refuses it, and the compositor degrades instead of hanging"

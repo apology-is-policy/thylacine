@@ -451,8 +451,8 @@ const GPU_RESP_DISPLAY_INFO_LEN: u32 = GPU_CTRL_HDR_LEN + GPU_MAX_SCANOUTS * GPU
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-// Wall-clock bound on the STALE-WAKE regime before the submit is declared
-// wedged (the G-5 F1 close). Anchored LAZILY at the first stale wake -- so the
+// Wall-clock bound on the STALE-WAKE regime before the engine is declared
+// STALLED (the G-5 F1 close; GPU-DESIGN 4.5.15 made the verdict recoverable). Anchored LAZILY at the first stale wake -- so the
 // deadline trips on EVENT-ful non-progress: >= this many ms of wakes (an
 // interrupt-ish train from host window resizes / re-latched levels, OR the
 // GPU_IRQ_WAIT_TIMEOUT_NS re-poll below) with used.idx never retiring our
@@ -472,7 +472,7 @@ const SUBMIT_DEADLINE_MS: u64 = 500;
 const SLOW_SYNC_MS: u64 = 50;
 // F-A1 (C): the per-wait timeout that paces the stale-wake re-poll. Short vs
 // SUBMIT_DEADLINE_MS so several drains (each a chance to catch a lost
-// completion) run before the engine is declared dead. A healthy present
+// completion) run before the engine is declared stalled. A healthy present
 // returns on the real IRQ in microseconds -- this fires only when a completion
 // is late or its interrupt was lost, so its cost is paid only off the normal path.
 const GPU_IRQ_WAIT_TIMEOUT_NS: u64 = 100_000_000; // 100 ms
@@ -488,7 +488,8 @@ const USED_SPIN_PER_WAKE: u32 = 65536;
 // the engine dead (a fence legitimately takes as long as its GL work, and
 // a false dead-latch costs the console: #31). It bounds only OUR
 // bookkeeping: 30 s is orders above any real GL job, so reaching it means
-// the host renderer hung (the GPU-DESIGN section 9.2 accepted risk).
+// the host renderer hung (the GPU-DESIGN section 9.2 accepted risk). A
+// synchronous chain stalled this long is the one thing that does declare it.
 const FENCE_ABANDON_MS: u64 = 30_000;
 // A retirement the broker parks gives up at the same bound (gpu_api::admit).
 const _: () = assert!(crate::gpu_api::PARK_BOUND_MS == FENCE_ABANDON_MS);
@@ -891,22 +892,37 @@ struct Controlq {
     avail_idx: u16,
     /// Count of used entries consumed.
     used_seen: u16,
-    /// Latched on any submit/ring failure: after one, no ring cursor can
-    /// be trusted against the device's consumption, so every later submit
-    /// would read a freshly-zeroed response buffer as resp_type=0x0 (the
-    /// #31 cascade). Fail fast + honestly instead.
+    /// Latched on a ring failure, or on a stall that outlived
+    /// FENCE_ABANDON_MS: no ring cursor can then be trusted against the
+    /// device's consumption, so every later submit would read a
+    /// freshly-zeroed response buffer as resp_type=0x0 (the #31 cascade).
+    /// Fail fast + honestly instead.
     dead: bool,
     /// The synchronous deadline's own measurement: the slowest synchronous
     /// command that still retired (said at each new high past
-    /// SLOW_SYNC_MS), and, once a deadline latched `dead`, when and against
+    /// SLOW_SYNC_MS), and, once a stall latched `dead`, when and against
     /// which used.idx -- so a chain that retires after it is said once,
     /// telling a late device from one that never completes.
     sync_slowest_ms: u64,
     latched: Option<(Instant, u16)>,
+    /// A synchronous chain missed its deadline and has not retired
+    /// (GPU-DESIGN 4.5.15): every submission is refused until it does, and
+    /// one outstanding FENCE_ABANDON_MS latches `dead`.
+    stalled: Option<Instant>,
+    /// Stalls begun, monotone: compared across one command, it says whether
+    /// that command's outcome is unknown.
+    stalls: u32,
+    /// The serve loop exists. Before it (bring-up) nothing needs to stay
+    /// live, so a synchronous command waits out FENCE_ABANDON_MS instead of
+    /// stalling at SUBMIT_DEADLINE_MS.
+    serving: bool,
     /// The latch lever (`Device::test_latch_consider`): the next
-    /// synchronous wait reports its deadline passed.
+    /// synchronous wait reports its deadline passed, and with
+    /// `test_stall_hold` the stalled chain's retirement is withheld.
     #[cfg(feature = "test-mode")]
     test_latch_next: bool,
+    #[cfg(feature = "test-mode")]
+    test_stall_hold: bool,
     /// The fenced lane (virgl only; 0 = absent): slot i owns descriptor
     /// pair (2+2i, 3+2i), its request buffer at flane_va + i*FREQ_LEN and
     /// its response header at flane_va + FRESP_OFF + i*FRESP_STRIDE.
@@ -1155,6 +1171,13 @@ impl Controlq {
                     self.dead = true;
                     return sync_retired;
                 }
+                // The hold lever models a chain that never retires: the
+                // entry is consumed, the chain stays outstanding.
+                #[cfg(feature = "test-mode")]
+                if self.stalled.is_some() && core::mem::take(&mut self.test_stall_hold) {
+                    say!("lictor: gpu synchronous chain retirement WITHHELD (test-latch-dead hold)");
+                    continue;
+                }
                 self.sync_pending = false;
                 sync_retired = true;
                 continue;
@@ -1338,7 +1361,43 @@ impl Controlq {
             self.abandon_all("interrupt service failed");
             return;
         }
+        self.settle_stall();
+        if self.dead {
+            self.abandon_all("engine dead");
+            return;
+        }
         self.reap_abandoned();
+    }
+
+    /// A stall ends one of two ways (GPU-DESIGN 4.5.15): the drain above
+    /// retired the outstanding chain through the ordinary path (revival), or
+    /// it has been outstanding FENCE_ABANDON_MS (death, permanent).
+    fn settle_stall(&mut self) {
+        let Some(t0) = self.stalled else { return };
+        let ms = t0.elapsed().as_millis() as u64;
+        match crate::gpu_api::stall_verdict(self.sync_pending || self.sync2_pending, ms) {
+            crate::gpu_api::Stall::Revived => {
+                self.stalled = None;
+                say!("lictor: gpu synchronous chain retired {} ms after its deadline -- engine revived", ms);
+            }
+            crate::gpu_api::Stall::Dead => {
+                self.stalled = None;
+                self.latched = Some((Instant::now(), self.used_seen));
+                self.dead = true;
+                say!("lictor: gpu engine stalled {} ms without a retirement -- engine dead", ms);
+            }
+            crate::gpu_api::Stall::Holding => {}
+        }
+    }
+
+    fn stall(&mut self) {
+        self.stalled = Some(Instant::now());
+        self.stalls = self.stalls.wrapping_add(1);
+    }
+
+    /// Dead, or stalled behind a chain that has not retired: no submission.
+    fn refusing(&self) -> bool {
+        self.dead || self.stalled.is_some()
     }
 
     /// Release every occupied fenced slot as abandoned (poisoning both the
@@ -1394,7 +1453,7 @@ impl Controlq {
     /// the slot's flane buffer) and return WITHOUT waiting: its retirement
     /// arrives via drain()'s entry attribution.
     fn submit_fenced(&mut self, slot: usize, req_len: u32, tag: FenceTag) -> Result<(), ()> {
-        if self.dead || self.flane_va == 0 || self.fslots[slot].is_some() {
+        if self.refusing() || self.flane_va == 0 || self.fslots[slot].is_some() {
             return Err(());
         }
         let resp_off = FRESP_OFF + (slot as u64) * FRESP_STRIDE;
@@ -1463,7 +1522,7 @@ impl Controlq {
     /// chain(s) retire. The caller has already written descriptors, set the
     /// pending flag(s), and published.
     fn wait_sync_done(&mut self, both: bool) -> Result<(), ()> {
-        let mut deadline_ms = if self.readback_in_flight() {
+        let mut deadline_ms = if self.readback_in_flight() || !self.serving {
             FENCE_ABANDON_MS
         } else {
             SUBMIT_DEADLINE_MS
@@ -1474,9 +1533,11 @@ impl Controlq {
         let began = Instant::now();
         #[cfg(feature = "test-mode")]
         if core::mem::take(&mut self.test_latch_next) {
-            say!("lictor: gpu command never retired (INJECTED by test-latch-dead)");
-            self.latched = Some((Instant::now(), self.used_seen));
-            self.dead = true;
+            say!(
+                "lictor: gpu synchronous command missed its deadline (INJECTED by test-latch-dead{}) -- engine stalled",
+                if self.test_stall_hold { ", retirement withheld" } else { "" }
+            );
+            self.stall();
             return Err(());
         }
         'wait: loop {
@@ -1515,13 +1576,24 @@ impl Controlq {
             }
             let t0 = *stale_since.get_or_insert_with(Instant::now);
             if t0.elapsed().as_millis() as u64 >= deadline_ms {
-                say!(
-                    "tapestryd: gpu command never retired ({} stale wakes over {} ms)",
-                    wakes,
-                    deadline_ms
-                );
-                self.latched = Some((Instant::now(), self.used_seen));
-                self.dead = true;
+                // A deadline already at the abandonment bound has spent the
+                // whole of it: that chain is dead, not stalled.
+                if deadline_ms >= FENCE_ABANDON_MS {
+                    say!(
+                        "tapestryd: gpu command never retired ({} stale wakes over {} ms) -- engine dead",
+                        wakes,
+                        deadline_ms
+                    );
+                    self.latched = Some((Instant::now(), self.used_seen));
+                    self.dead = true;
+                } else {
+                    say!(
+                        "lictor: gpu synchronous command missed its {} ms deadline ({} stale wakes) -- engine stalled, submissions refused until it retires",
+                        deadline_ms,
+                        wakes
+                    );
+                    self.stall();
+                }
                 return Err(());
             }
         }
@@ -1590,7 +1662,9 @@ impl Controlq {
     }
 
     fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
-        if self.dead {
+        // An outstanding synchronous chain still owns the descriptors and the
+        // response buffer this would reuse (#31; a stall leaves one).
+        if self.refusing() || self.sync_pending || self.sync2_pending {
             return Err(());
         }
         // At the hazard, not in a comment: a resp overrun is the DEVICE
@@ -1639,7 +1713,7 @@ impl Controlq {
         req2_len: u32,
         resp2_len: u32,
     ) -> Result<(u32, u32), ()> {
-        if self.dead {
+        if self.refusing() || self.sync_pending || self.sync2_pending {
             return Err(());
         }
         // At the hazard (round-10 F2): req1 past the carve corrupts the
@@ -2073,8 +2147,13 @@ impl Gpu {
                 dead: false,
                 sync_slowest_ms: 0,
                 latched: None,
+                stalled: None,
+                stalls: 0,
+                serving: false,
                 #[cfg(feature = "test-mode")]
                 test_latch_next: false,
+                #[cfg(feature = "test-mode")]
+                test_stall_hold: false,
                 flane_va: if flane.is_some() { flane_va } else { 0 },
                 flane_pa,
                 fslots: [None; FENCED_SLOTS],
@@ -2616,7 +2695,7 @@ impl Gpu {
 
     /// GET_CAPSET_INFO for one index -> (capset_id, max_version, max_size).
     fn get_capset_info(&mut self, index: u32) -> Result<(u32, u32, u32), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_CAPSET_INFO);
             w32(req_va + 24, index);
@@ -2654,7 +2733,7 @@ impl Gpu {
         size: u32,
     ) -> Result<alloc::vec::Vec<u8>, Error> {
         let take = size.min(RESP_REGION_LEN - GPU_CTRL_HDR_LEN);
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_CAPSET);
             w32(req_va + 24, id);
@@ -2736,9 +2815,13 @@ impl Gpu {
     /// descriptor): the selftest checks resp TYPES, not payloads.
     #[cfg(feature = "test-mode")]
     pub fn pair_protocol_selftest(&mut self) {
+        let (Ok(req_va), Ok(req2_va)) = (self.req(REQ_OFF), self.req(REQ2_OFF)) else {
+            say!("tapestryd: gpu pair selftest skipped (a synchronous chain is outstanding)");
+            return;
+        };
         unsafe {
-            write_ctrl_hdr(self.ring_va + REQ_OFF, VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
-            write_ctrl_hdr(self.ring_va + REQ2_OFF, VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+            write_ctrl_hdr(req2_va, VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
         };
         match self.ctrl.submit_pair_and_wait(
             GPU_CTRL_HDR_LEN,
@@ -2769,7 +2852,7 @@ impl Gpu {
         if !self.edid {
             return Ok(None);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_EDID);
             w32(req_va + 24, 0); // scanout 0
@@ -2804,7 +2887,8 @@ impl Gpu {
     /// re-probe (the boot path adopts via read_display_info above).
     /// Ok(None) = scanout 0 absent or absurd (the caller fails soft).
     pub fn query_display_info(&mut self) -> Result<Option<(u32, u32)>, Error> {
-        unsafe { write_ctrl_hdr(self.ring_va + REQ_OFF, VIRTIO_GPU_CMD_GET_DISPLAY_INFO) };
+        let req_va = self.req(REQ_OFF)?;
+        unsafe { write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_DISPLAY_INFO) };
         self.ctrl.step(
             "GET_DISPLAY_INFO",
             GPU_CTRL_HDR_LEN,
@@ -2826,7 +2910,7 @@ impl Gpu {
     }
 
     pub fn resource_create_2d(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D);
             w32(req_va + 24, resource_id);
@@ -2871,7 +2955,7 @@ impl Gpu {
             return Err(Error::Hardware);
         }
 
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
             w32(req_va + 24, resource_id);
@@ -2893,7 +2977,7 @@ impl Gpu {
 
 
     pub fn detach_backing(&mut self, resource_id: u32) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING);
             w32(req_va + 24, resource_id);
@@ -2933,8 +3017,9 @@ impl Gpu {
         // records no id, so nothing knows WHICH ids the display still names
         // -- an unrecorded unref here is LEAKED, permanently and honestly
         // (nothing re-issues it later). Over-deferral is the safe direction.
-        // Structurally unreachable while condemned_n <= 1; kept for the day
-        // the bound changes.
+        // Unreachable unless GPU_CONDEMNED_MAX entries pile up between
+        // accepted binds: each accepted bind drains, and only a refused
+        // unbind or a stalled bind (GPU-DESIGN 4.5.15) adds one.
         if self.condemned_overflowed {
             return Ok(());
         }
@@ -3048,7 +3133,7 @@ impl Gpu {
         }
         self.cmd_seq = self.cmd_seq.wrapping_add(1);
         self.last_unref_seq = self.cmd_seq;
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_UNREF);
             w32(req_va + 24, resource_id);
@@ -3093,7 +3178,7 @@ impl Gpu {
         if !self.blob {
             return Err(Error::Hardware);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB);
             w32(req_va + 24, resource_id);
@@ -3145,7 +3230,7 @@ impl Gpu {
         if !self.blob {
             return Err(Error::Hardware);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB, ctx_id);
             w32(req_va + 24, resource_id);
@@ -3179,7 +3264,7 @@ impl Gpu {
         if !self.blob {
             return Err(Error::Hardware);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB);
             w32(req_va + 24, resource_id);
@@ -3210,7 +3295,7 @@ impl Gpu {
         if !self.blob {
             return Err(Error::Hardware);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB);
             w32(req_va + 24, resource_id);
@@ -3481,7 +3566,7 @@ impl Gpu {
         if capset_id != 0 && !self.ctxinit {
             return Err(Error::Hardware);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         let nlen = debug_name.len().min(63);
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_CREATE, ctx_id);
@@ -3503,7 +3588,7 @@ impl Gpu {
     }
 
     pub fn ctx_destroy(&mut self, ctx_id: u32) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe { write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DESTROY, ctx_id) };
         self.ctrl.step(
             "CTX_DESTROY",
@@ -3517,7 +3602,7 @@ impl Gpu {
     /// streams to the resources attached to the submitting ctx -- the
     /// host-side half of the I-45 exposure bound.
     pub fn ctx_attach_resource(&mut self, ctx_id: u32, resource_id: u32) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id);
             w32(req_va + 24, resource_id);
@@ -3532,7 +3617,7 @@ impl Gpu {
     }
 
     pub fn ctx_detach_resource(&mut self, ctx_id: u32, resource_id: u32) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id);
             w32(req_va + 24, resource_id);
@@ -3566,7 +3651,7 @@ impl Gpu {
         nr_samples: u32,
         flags: u32,
     ) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D);
             w32(req_va + 24, resource_id);
@@ -3594,7 +3679,7 @@ impl Gpu {
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
         self.cmd_seq = self.cmd_seq.wrapping_add(1);
         self.last_scanout_seq = self.cmd_seq;
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT);
             write_rect(req_va + 24, 0, 0, w, h);
@@ -3611,6 +3696,7 @@ impl Gpu {
             self.injected_refusal = true;
             return Err(Error::Hardware);
         }
+        let stalls = self.ctrl.stalls;
         let r = self.ctrl.step(
             "SET_SCANOUT",
             GPU_CTRL_HDR_LEN + 24,
@@ -3619,8 +3705,19 @@ impl Gpu {
         );
         if r.is_ok() {
             self.drain_condemned(resource_id);
+        } else {
+            self.condemn_if_stalled(resource_id, stalls);
         }
         r
+    }
+
+    /// A bind whose deadline passed may still execute: once the device
+    /// catches up the display may name `resource_id`, so its free waits for
+    /// a later accepted bind, as a refused unbind's does (GPU-DESIGN 4.5.15).
+    fn condemn_if_stalled(&mut self, resource_id: u32, stalls: u32) {
+        if self.ctrl.stalls != stalls {
+            self.condemn(resource_id);
+        }
     }
 
     /// SET_SCANOUT_BLOB, returning the RAW resp_type rather than stepping
@@ -3643,10 +3740,16 @@ impl Gpu {
         format: u32,
         stride: u32,
     ) -> Result<u32, ()> {
-        let req_va = self.ring_va + REQ_OFF;
+        let Ok(req_va) = self.req(REQ_OFF) else { return Err(()) };
         unsafe { write_scanout_blob_req(req_va, resource_id, w, h, format, stride) };
-        self.ctrl
-            .submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN)
+        let stalls = self.ctrl.stalls;
+        let r = self
+            .ctrl
+            .submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN);
+        if r.is_err() {
+            self.condemn_if_stalled(resource_id, stalls);
+        }
+        r
     }
 
     /// W-3c: the Direct arm's bind -- scanout 0 shows the presentable's blob
@@ -3673,7 +3776,8 @@ impl Gpu {
                 // let the park list grow past one and made the overflow arm
                 // reachable at W-3c-2, where `present-to <surface> img <n>`
                 // makes blob binds client-driven and repeatable. Draining on
-                // both keeps `condemned_n <= 1` structural.
+                // both keeps the list short: between accepted binds it grows
+                // only by a refused unbind or a stalled bind.
                 self.drain_condemned(resource_id);
                 Ok(())
             }
@@ -3698,12 +3802,13 @@ impl Gpu {
         format: u32,
         stride: u32,
     ) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
-        let req2_va = self.ring_va + REQ2_OFF;
+        let req_va = self.req(REQ_OFF)?;
+        let req2_va = self.req(REQ2_OFF)?;
         unsafe {
             write_scanout_blob_req(req_va, resource_id, w, h, format, stride);
             write_flush_req(req2_va, resource_id, 0, 0, w, h);
         };
+        let stalls = self.ctrl.stalls;
         match self.ctrl.submit_pair_and_wait(
             GPU_CTRL_HDR_LEN + 72,
             GPU_CTRL_HDR_LEN,
@@ -3720,7 +3825,10 @@ impl Gpu {
                 Ok(())
             }
             Ok(_) => Err(Error::Hardware),
-            Err(()) => Err(Error::Hardware),
+            Err(()) => {
+                self.condemn_if_stalled(resource_id, stalls);
+                Err(Error::Hardware)
+            }
         }
     }
 
@@ -3778,7 +3886,7 @@ impl Gpu {
     /// a resource created under a DIFFERENT device ctx?). Same Err(()) split
     /// as set_scanout_blob_probe.
     pub fn ctx_attach_resource_probe(&mut self, ctx_id: u32, resource_id: u32) -> Result<u32, ()> {
-        let req_va = self.ring_va + REQ_OFF;
+        let Ok(req_va) = self.req(REQ_OFF) else { return Err(()) };
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id);
             w32(req_va + 24, resource_id);
@@ -3801,7 +3909,7 @@ impl Gpu {
         w: u32,
         h: u32,
     ) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe { write_transfer_req(req_va, resource_id, offset, x, y, w, h) };
         self.ctrl.step(
             "TRANSFER",
@@ -3812,7 +3920,7 @@ impl Gpu {
     }
 
     pub fn flush(&mut self, resource_id: u32, x: u32, y: u32, w: u32, h: u32) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe { write_flush_req(req_va, resource_id, x, y, w, h) };
         self.ctrl.step(
             "FLUSH",
@@ -3836,8 +3944,8 @@ impl Gpu {
         w: u32,
         h: u32,
     ) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
-        let req2_va = self.ring_va + REQ2_OFF;
+        let req_va = self.req(REQ_OFF)?;
+        let req2_va = self.req(REQ2_OFF)?;
         unsafe {
             write_transfer_req(req_va, resource_id, offset, x, y, w, h);
             write_flush_req(req2_va, resource_id, x, y, w, h);
@@ -3866,6 +3974,10 @@ impl Gpu {
         if self.ctrl.flane_va == 0 || self.ctrl.dead {
             return Err(FencedErr::Dead);
         }
+        // Behind, not gone (GPU-DESIGN 4.5.15).
+        if self.ctrl.stalled.is_some() {
+            return Err(FencedErr::Again);
+        }
         if (GPU_CTRL_HDR_LEN as u64) + extra > FREQ_LEN {
             return Err(FencedErr::TooBig);
         }
@@ -3888,6 +4000,9 @@ impl Gpu {
     fn fenced_begin_comp(&mut self) -> Result<usize, FencedErr> {
         if self.ctrl.flane_va == 0 || self.ctrl.dead {
             return Err(FencedErr::Dead);
+        }
+        if self.ctrl.stalled.is_some() {
+            return Err(FencedErr::Again);
         }
         self.ctrl.alloc_comp_slot().ok_or(FencedErr::Again)
     }
@@ -3991,7 +4106,7 @@ impl Gpu {
         if (GPU_CTRL_HDR_LEN as usize) + 8 + stream.len() > REQ_REGION_LEN as usize {
             return Err(Error::Hardware);
         }
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id);
             w32(req_va + 24, stream.len() as u32);
@@ -4039,7 +4154,7 @@ impl Gpu {
         offset: u64,
         stride: u32,
     ) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, ctx_id);
             w32(req_va + 24, x); // box.x
@@ -4227,7 +4342,7 @@ impl Gpu {
         offset: u64,
         stride: u32,
     ) -> Result<(), Error> {
-        let req_va = self.ring_va + REQ_OFF;
+        let req_va = self.req(REQ_OFF)?;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, ctx_id);
             w32(req_va + 24, x); // box.x
@@ -4259,6 +4374,24 @@ impl Gpu {
     /// The serve loop's non-blocking completion pump (Warp-2d).
     pub fn poll_completions(&mut self) {
         self.ctrl.poll_completions();
+        self.cursor_settle();
+    }
+
+    /// The synchronous request region, to stage the next command in. Refused
+    /// while a synchronous chain is outstanding: the device reads a chain's
+    /// request only when it processes it, which a stall defers, so staging
+    /// over it would have the device run the new bytes as the old command.
+    fn req(&self, offset: u64) -> Result<u64, Error> {
+        if self.ctrl.refusing() || self.ctrl.sync_pending || self.ctrl.sync2_pending {
+            return Err(Error::Hardware);
+        }
+        Ok(self.ring_va + offset)
+    }
+
+    /// Bring-up is over: from here a missed synchronous deadline stalls the
+    /// engine instead of waiting out FENCE_ABANDON_MS (GPU-DESIGN 4.5.15).
+    pub fn begin_serving(&mut self) {
+        self.ctrl.serving = true;
     }
 
     /// Take the drained fence completions (the server posts each on its
@@ -4367,12 +4500,18 @@ impl Gpu {
     }
 
     /// The latch lever's shot: a harmless display query whose wait reports
-    /// the deadline passed, so the engine latches dead with that chain still
-    /// in flight, exactly as a slow device leaves it.
+    /// the deadline passed, so the engine stalls with that chain still in
+    /// flight, exactly as a slow device leaves it. `hold` withholds the
+    /// chain's retirement, so the stall runs on to death.
     #[cfg(feature = "test-mode")]
-    pub fn test_latch_now(&mut self) {
+    pub fn test_latch_now(&mut self, hold: bool) {
         self.ctrl.test_latch_next = true;
+        self.ctrl.test_stall_hold = hold;
         let _ = self.query_display_info();
+        self.ctrl.test_latch_next = false;
+        if self.ctrl.stalled.is_none() {
+            self.ctrl.test_stall_hold = false;
+        }
     }
 
     /// Fenced slots currently allocatable. Read-only, and the ONLY thing that
@@ -4462,7 +4601,7 @@ impl Gpu {
         if outputs == 0 || outputs > 16 { return Err(Error::Hardware); }
         for output in 0..outputs {
             self.cursor_hide_output(output)?;
-            let req = self.ring_va + REQ_OFF;
+            let req = self.req(REQ_OFF)?;
             unsafe {
                 write_ctrl_hdr(req, VIRTIO_GPU_CMD_SET_SCANOUT);
                 write_rect(req + 24, 0, 0, 0, 0);
@@ -4477,6 +4616,12 @@ impl Gpu {
 
     pub fn engine_dead(&self) -> bool {
         self.ctrl.dead
+    }
+
+    /// Stalls begun so far: compared across one command, a change means that
+    /// command's outcome is unknown (GPU-DESIGN 4.5.15).
+    pub fn stalls(&self) -> u32 {
+        self.ctrl.stalls
     }
 
     /// Quiescence that can never come back: a latched engine, or a cursor
