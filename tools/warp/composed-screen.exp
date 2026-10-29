@@ -409,6 +409,28 @@ proc want_stage {pattern nvars stage} {
         eof { lc_fail "qemu exited before $stage on $dev" }
     }
 }
+# The tab strip paints the Daylight theme's header (an inactive segment) and
+# ember (the active, focused one). Read from the theme source, not
+# transcribed, so a palette change cannot strand these two probes.
+proc daylight_hex {field} {
+    global repo
+    set path [file join $repo usr/lib/libhalcyon/src/theme.rs]
+    if {[catch {open $path} fh]} {
+        lc_fail "cannot read $path for the Daylight $field colour"
+    }
+    set src [read $fh]
+    close $fh
+    set at [string first "const DAYLIGHT_THEME: Theme = Theme \{" $src]
+    set end [expr {$at < 0 ? -1 : [string first "\n\};" $src $at]}]
+    if {$end < 0 || ![regexp "\n    $field: 0xFF(\[0-9A-Fa-f_\]+)," [string range $src $at $end] -> hex]} {
+        lc_fail "no top-level $field colour in DAYLIGHT_THEME ($path)"
+    }
+    return [string tolower [string map {_ {}} $hex]]
+}
+set strip_inactive [daylight_hex header]
+set strip_focused [daylight_hex ember]
+lc_step "tab strip colours from DAYLIGHT_THEME: header #$strip_inactive, ember #$strip_focused"
+
 want_stage {battery: stage1 centers (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "stage1"
 lassign $out ax ay bx by
 want_probe $ax $ay ff0000 "stage1 A (letterbox, red)"
@@ -423,8 +445,8 @@ want_probe $tx $ty 00ff00 "multirect-v top (green)"
 want_probe $ux $uy ffff00 "multirect-v bottom (yellow)"
 want_stage {battery: tabbed ready (\d+) (\d+) (\d+)[\r\n]} 3 "tabbed"
 lassign $out sy sax sbx
-want_probe $sax $sy 3a3a44 "tab strip A (border)"
-want_probe $sbx $sy 7a9ecc "tab strip B (focus)"
+want_probe $sax $sy $strip_inactive "tab strip A (inactive header)"
+want_probe $sbx $sy $strip_focused "tab strip B (active, focused: ember)"
 want_stage {battery: tab-cycled ready (\d+) (\d+)[\r\n]} 2 "tab-cycled"
 lassign $out cx cy
 want_probe $cx $cy ff0000 "tab-cycled A revealed (red)"

@@ -202,16 +202,24 @@ forgets the marks made before it:
   completes, said with its pins released;
 - on the second shot the chain's retirement is withheld, so the engine dies at
   30 s and the retirement is refused.
-The same arming gives the compositor one stall shot to aim
-(`Request::TestStallNext`, refused once spent). The next synchronous command
-retires, then reports its deadline missed (`Gpu::test_stall_next`), so the next
-pump revives the engine before the serve loop takes another request: a stall of
-known length, with no race against the device. tapestryd aims it at a
+The same arming gives the compositor three stall shots to aim
+(`Request::TestStallNext`, refused once spent). Each makes the next synchronous
+command retire, then report its deadline missed (`Gpu::test_stall_next`),
+said as `INJECTED stall shot of test-latch-dead`, a token distinct from the
+retirement shots' so a scenario waiting on one cannot match the other. The pump
+at the end of that same request (`Device::execute`'s trailing reap) revives the
+engine, so the reply already reads `Engine::Live` with the stall count moved: a
+stall of known length, with no race against the device, carried to the
+compositor by the count alone. The shot rides exactly the next synchronous
+submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
+before its chain retired spends it and says `stall shot LOST`, rather than
+leaving it armed for whoever sends next. tapestryd aims them at the
+compositor context's create, at one blit-convention attempt, and at a
 composition health step once GPU composition runs.
 Only the designated compositor reaches the broker, and only the booting
 operator sets the token. `tools/interactive/ls-gpu-dead.exp` is the gate for
 the retirement shots, and `tools/warp-host.sh composed-stall` (the GL host) for
-the health-step shot.
+the stall shots.
 
 ### Episode
 

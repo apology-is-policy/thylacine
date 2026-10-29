@@ -2650,17 +2650,35 @@ the same way, and its skip line names the cause. A stall that meets that copy
 still costs the generation its GPU path, because the import is not retried
 (OPEN-BUGS 2026-10-29T10:39Z).
 
+Bring-up is read the same way. Its steps run once, and each failure used to
+last the boot. Those steps are the compositor context's create, the witness and
+health pairs, the blit-convention probe, its seed transfer and each convention
+attempt. So a step that a stall failed runs again. While the stall stands it
+retries every 50 ms, since the broker answers revived or dead within 30 s. After
+a stall that began and revived inside the step, it retries at most three times.
+The context's retry destroys first, because a create that a stall failed may
+have run host-side. A dead engine, or a failure the device answered, ends the
+step as before. This was measured on the GL host: a real 501 ms stall during the
+convention probe cost scaled slot blits their GPU path for the boot (OPEN-BUGS
+2026-10-29T11:39Z).
+
 **Witness.** `ls-gpu-dead` arms a two-shot lever (`thylacine.test-latch-dead`).
 On the first marked retirement it injects a deadline miss whose chain the
 device then retires: the engine revives and the destroy succeeds. On the
 second it injects one whose retirement is withheld: the engine dies at 30 s
 and the destroy is refused, its pins kept. The same lever gives the compositor
-one stall shot to aim (`TestStallNext`). The next synchronous command retires,
-then reports its deadline missed, so the next pump revives the engine before
-the broker takes another request. tapestryd aims it at a health step once GPU
-composition runs, and `tools/warp-host.sh composed-stall` (the GL host) asks
-that the step takes no verdict, the engine revives, and the next copy verifies
-the context, with no latch.
+three stall shots to aim (`TestStallNext`). Each makes the next synchronous
+command retire, then report its deadline missed. The broker's pump at the end of that same
+request revives the engine, so the reply already reads live with the stall
+count moved: the count, not the engine state, is what tells the compositor its
+step met a stall. A command that is refused, or ends before its chain retires,
+spends the shot and says `stall shot LOST`, so the shot never lands on a later
+command. tapestryd aims them at the compositor context's create, at one
+blit-convention attempt, and at a health step once GPU composition runs.
+`tools/warp-host.sh composed-stall` (the GL host) asks that each bring-up step
+retries and succeeds, with no blit class left to the CPU, and that the health
+step takes no verdict, the engine revives, and the next copy verifies the
+context, with no latch.
 
 ## 5. Placement — where the server lives, per backend
 

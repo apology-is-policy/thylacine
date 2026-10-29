@@ -127,7 +127,7 @@ const PRESENT_BURST_MIN: u32 = 4;
 use tapestryd::chords::{ChordAction, Chords};
 use libhalcyon::scale;
 use libhalcyon::theme::Metrics;
-use crate::gpu::{failure_cause, FailureCause, FenceTag, FencedErr, Gpu};
+use crate::gpu::{failure_cause, Engine, FailureCause, FenceTag, FencedErr, Gpu};
 use tapestryd::pane::{self, rect_union, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
 
@@ -1317,6 +1317,13 @@ const CONV_ROWS: usize = 16;
 /// verdict lags a latch by at most two periods (`comp_health_tick`).
 const HEALTH_PERIOD: u64 = 4;
 
+/// A bring-up step a GPU stall failed runs again (`Comp::stall_retried`):
+/// while the stall stands it waits STALL_POLL_MS between tries (the broker
+/// answers revived or dead within 30 s); a stall begun and revived inside
+/// the step is retried at most this many times.
+const BRINGUP_STALL_RETRIES: u32 = 3;
+const STALL_POLL_MS: u64 = 50;
+
 /// One composition op (Warp-C C-3): the surface-space source rect and the
 /// screen-space destination rect it lands on, source-agnostic -- the same
 /// geometry drives the CPU copy and the GPU blit, so the two paths place
@@ -1687,10 +1694,16 @@ pub struct Comp {
     /// The lever's health-step stall has been asked for (once per boot).
     #[cfg(feature = "test-mode")]
     test_stall_aimed: bool,
-    /// A health step met a GPU stall and no verdict has been taken since.
+    /// The lever's bring-up stalls (the compositor ctx create, one
+    /// blit-convention attempt) have been asked for, once each per boot.
+    #[cfg(feature = "test-mode")]
+    test_stall_ctx_aimed: bool,
+    #[cfg(feature = "test-mode")]
+    test_stall_conv_aimed: bool,
+    /// A health copy met a GPU stall and no copy has verified since.
     comp_health_unknown: bool,
-    /// Health steps that met a GPU stall, monotone (`composed-gpu-stalls` in
-    /// the global ctl).
+    /// Health copies (the per-tick step or the attach-time copy) that met a
+    /// GPU stall, monotone (`composed-gpu-stalls` in the global ctl).
     comp_health_stalls: u32,
     /// A latch asked for a structural repaint; `frame_tick` performs it.
     comp_repaint_pending: bool,
@@ -2565,6 +2578,10 @@ impl Comp {
             test_latch_armed: false,
             #[cfg(feature = "test-mode")]
             test_stall_aimed: false,
+            #[cfg(feature = "test-mode")]
+            test_stall_ctx_aimed: false,
+            #[cfg(feature = "test-mode")]
+            test_stall_conv_aimed: false,
             comp_health_unknown: false,
             comp_health_stalls: 0,
             comp_repaint_pending: false,
@@ -3341,13 +3358,33 @@ impl Comp {
         self.comp_verify_pending = false;
         let stalls = self.gpu.stalls;
         if self.comp_health_issue() && self.comp_health_read() {
+            self.comp_health_verified();
             return Ok(());
         }
         Err(match failure_cause(stalls, self.gpu.stalls, self.gpu.engine) {
-            FailureCause::Stall => "a GPU stall met the health copy",
+            FailureCause::Stall => {
+                self.comp_health_no_verdict();
+                "a GPU stall met the health copy"
+            }
             FailureCause::EngineDead => "GPU engine dead",
             FailureCause::Answer => "compositor ctx unhealthy",
         })
+    }
+
+    /// A health copy a GPU stall left unknown: counted, said once per run of
+    /// unknowns, and the next copy that completes decides.
+    fn comp_health_no_verdict(&mut self) {
+        self.comp_health_stalls = self.comp_health_stalls.wrapping_add(1);
+        if !core::mem::replace(&mut self.comp_health_unknown, true) {
+            say!("tapestryd: composition health step met a GPU stall -- no verdict, re-verifying");
+        }
+    }
+
+    /// A health copy completed and read back the mark.
+    fn comp_health_verified(&mut self) {
+        if core::mem::take(&mut self.comp_health_unknown) {
+            say!("tapestryd: compositor ctx verified after a GPU stall -- GPU composition stays ON");
+        }
     }
 
     /// The ISSUE half of the health copy: repaint the mark, poison the
@@ -3943,7 +3980,7 @@ impl Comp {
     /// not anticipate it; anything the decode cannot place fails CLOSED for
     /// that class.
     fn comp_measure_conventions(&mut self) -> Option<BlitConv> {
-        let p = self.conv_probe_build()?;
+        let p = self.stall_retried("blit-convention probe build", |c| c.conv_probe_build())?;
         let mut seq = 0u32;
         let r = self.conv_measure(&p, &mut seq);
         self.conv_probe_undo(p);
@@ -3972,7 +4009,10 @@ impl Comp {
                 core::ptr::write_volatile((p.bo_va as *mut u32).add(i), u[i]);
             }
         }
-        if self.gpu.transfer(p.slot_res, 0, 0, 0, 1, 4).is_err() {
+        let seeded = self.stall_retried("blit-convention seed", |c| {
+            c.gpu.transfer(p.slot_res, 0, 0, 0, 1, 4).ok()
+        });
+        if seeded.is_none() {
             say!("tapestryd: blit-conv: slot seed transfer failed");
             return None;
         }
@@ -4016,6 +4056,10 @@ impl Comp {
         let cls = if scaled { "S" } else { "U" };
         let mult: usize = if scaled { 2 } else { 1 };
         let mut found: Option<ClassConv> = None;
+        #[cfg(feature = "test-mode")]
+        if !bo && scaled {
+            self.test_stall_bringup(true);
+        }
         for variant in [BlitVariant::Plain, BlitVariant::SrcNeg, BlitVariant::DstNeg] {
             let dh = 2 * mult as u32;
             let words = Self::conv_words(p.scr_res, src_res, variant, false, false, 4, 0, 2, 1, dh);
@@ -4298,10 +4342,18 @@ impl Comp {
     /// the target's guest rows back, destroy the context. `None` = a
     /// device-level failure of the scaffolding, never a verdict about the
     /// request (a refused request reads as an untouched -- all-zero --
-    /// target, which the decode reports as "no clean run").
+    /// target, which the decode reports as "no clean run"); one a stall
+    /// caused is tried again on a fresh context.
     fn conv_attempt<F>(&mut self, p: &ConvProbe, seq: &mut u32, body: F) -> Option<[u32; CONV_ROWS]>
     where
-        F: FnOnce(&mut Self, u32) -> Result<(), Error>,
+        F: Fn(&mut Self, u32) -> Result<(), Error>,
+    {
+        self.stall_retried("blit-convention attempt", |c| c.conv_attempt_once(p, seq, &body))
+    }
+
+    fn conv_attempt_once<F>(&mut self, p: &ConvProbe, seq: &mut u32, body: &F) -> Option<[u32; CONV_ROWS]>
+    where
+        F: Fn(&mut Self, u32) -> Result<(), Error>,
     {
         let ctx = CONV_PROBE_CTX_BASE + *seq;
         // The conv throwaways must never climb into the venus ctx band
@@ -4313,6 +4365,9 @@ impl Comp {
         );
         *seq += 1;
         if self.gpu.ctx_create(ctx, b"tapestry-conv").is_err() {
+            // A create a stall failed may exist host-side; one the device
+            // refused is unknown to lictor, which refuses this harmlessly.
+            let _ = self.gpu.ctx_destroy(ctx);
             return None;
         }
         let ok = self.gpu.ctx_attach_resource(ctx, p.slot_res).is_ok()
@@ -4805,6 +4860,8 @@ impl Comp {
     /// context: that tick takes no verdict, its present is composed by the
     /// CPU, and the next tick issues a fresh copy.
     fn comp_health_tick(&mut self) -> bool {
+        // A second present in a tick rides the first one's verdict, a
+        // no-verdict tick's included: within the two-period lag above.
         if self.comp_verify_tick == self.tick {
             return true;
         }
@@ -4837,19 +4894,14 @@ impl Comp {
         }
         self.cost_add(Cost::Health, t0);
         if ok {
-            if verified && core::mem::take(&mut self.comp_health_unknown) {
-                say!("tapestryd: compositor ctx verified after a GPU stall -- GPU composition stays ON");
+            if verified {
+                self.comp_health_verified();
             }
             return true;
         }
         // A failure leaves nothing pending, so the next tick issues afresh.
         match failure_cause(stalls, self.gpu.stalls, self.gpu.engine) {
-            FailureCause::Stall => {
-                self.comp_health_stalls = self.comp_health_stalls.wrapping_add(1);
-                if !core::mem::replace(&mut self.comp_health_unknown, true) {
-                    say!("tapestryd: composition health step met a GPU stall -- no verdict, re-verifying");
-                }
-            }
+            FailureCause::Stall => self.comp_health_no_verdict(),
             FailureCause::EngineDead => self.comp_gpu_latch("the GPU engine is dead"),
             FailureCause::Answer => {
                 self.comp_gpu_latch("compositor ctx latched: health copy failed after a composition blit")
@@ -4870,6 +4922,62 @@ impl Comp {
             say!("tapestryd: test-latch-dead: the next health step retires past its deadline");
         } else {
             say!("tapestryd: test-latch-dead: health-step stall REFUSED by the broker");
+        }
+    }
+
+    /// The lever's bring-up halves: the compositor ctx's create (`conv`
+    /// false) and one blit-convention attempt each retire past their
+    /// deadline, once per boot.
+    #[cfg(feature = "test-mode")]
+    fn test_stall_bringup(&mut self, conv: bool) {
+        if !self.test_latch_armed {
+            return;
+        }
+        let (aimed, what) = if conv {
+            (&mut self.test_stall_conv_aimed, "the next blit-convention attempt")
+        } else {
+            (&mut self.test_stall_ctx_aimed, "the compositor ctx create")
+        };
+        if core::mem::replace(aimed, true) {
+            return;
+        }
+        if self.gpu.test_stall_next() {
+            say!("tapestryd: test-latch-dead: {} retires past its deadline", what);
+        } else {
+            say!("tapestryd: test-latch-dead: {} stall REFUSED by the broker", what);
+        }
+    }
+
+    /// Bring-up runs once, so a step a GPU stall failed is run again rather
+    /// than read as the host's answer (GPU-DESIGN 4.5.15): the step must
+    /// leave nothing behind when it fails. A dead engine, or a failure the
+    /// device answered, ends it as before.
+    fn stall_retried<T>(&mut self, what: &str, mut step: impl FnMut(&mut Self) -> Option<T>) -> Option<T> {
+        let mut said = false;
+        let mut revived = 0;
+        loop {
+            let stalls = self.gpu.stalls;
+            if let Some(v) = step(self) {
+                if said {
+                    say!("tapestryd: {} verified after a GPU stall", what);
+                }
+                return Some(v);
+            }
+            if failure_cause(stalls, self.gpu.stalls, self.gpu.engine) != FailureCause::Stall {
+                return None;
+            }
+            if self.gpu.engine == Engine::Stalled {
+                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(STALL_POLL_MS));
+            } else {
+                revived += 1;
+                if revived > BRINGUP_STALL_RETRIES {
+                    say!("tapestryd: {} met a GPU stall on every try -- failing closed", what);
+                    return None;
+                }
+            }
+            if !core::mem::replace(&mut said, true) {
+                say!("tapestryd: {} met a GPU stall -- no verdict, retrying", what);
+            }
         }
     }
 
@@ -5608,7 +5716,8 @@ impl Comp {
             // tears). Printing the anchor first keeps the timing the anchor
             // had; the armed line is a record, and a witnessed import
             // implies it anyway.
-            self.comp_probe = self.warp_probe_build(COMPOSITOR_CTX);
+            self.comp_probe =
+                self.stall_retried("comp-attach witness build", |c| c.warp_probe_build(COMPOSITOR_CTX));
             match self.comp_probe.as_ref() {
                 Some(p) => say!(
                     "tapestryd: comp-attach witness armed (probe res {},{})",
@@ -5653,7 +5762,8 @@ impl Comp {
             // `warp_hprobe_build`), after the anchors like everything else
             // that costs round trips.
             if self.comp_conv.is_some() {
-                self.comp_hprobe = self.warp_hprobe_build(COMPOSITOR_CTX);
+                self.comp_hprobe =
+                    self.stall_retried("comp-health pair build", |c| c.warp_hprobe_build(COMPOSITOR_CTX));
                 match self.comp_hprobe.as_ref() {
                     Some(p) => say!(
                         "tapestryd: comp-health verify on buffer pair (res {},{}), period {} ticks",
@@ -5681,7 +5791,19 @@ impl Comp {
         if !self.gpu.virgl {
             return false;
         }
-        if self.gpu.ctx_create(COMPOSITOR_CTX, b"tapestry").is_err() {
+        // A create a stall failed may have run host-side (lictor keeps its
+        // reservation), so a retry destroys first and never meets its own
+        // context; a destroy of a context never made is refused, harmlessly.
+        let mut again = false;
+        let made = self.stall_retried("compositor ctx create", |c| {
+            #[cfg(feature = "test-mode")]
+            c.test_stall_bringup(false);
+            if core::mem::replace(&mut again, true) {
+                let _ = c.gpu.ctx_destroy(COMPOSITOR_CTX);
+            }
+            c.gpu.ctx_create(COMPOSITOR_CTX, b"tapestry").ok()
+        });
+        if made.is_none() {
             say!("tapestryd: compositor ctx create failed -- staying on the CPU composed path");
             return false;
         }

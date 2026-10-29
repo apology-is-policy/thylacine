@@ -927,6 +927,10 @@ struct Controlq {
     /// sees its chain retire, then reports the deadline missed.
     #[cfg(feature = "test-mode")]
     test_stall_late: bool,
+    /// The shot, moved onto the one submission that took it; any exit but
+    /// the late check spends it (`Controlq::stall_shot_bound`).
+    #[cfg(feature = "test-mode")]
+    test_stall_riding: bool,
     /// The fenced lane (virgl only; 0 = absent): slot i owns descriptor
     /// pair (2+2i, 3+2i), its request buffer at flane_va + i*FREQ_LEN and
     /// its response header at flane_va + FRESP_OFF + i*FRESP_STRIDE.
@@ -1617,8 +1621,8 @@ impl Controlq {
         // The chain has retired, so the next pump revives the engine before
         // the serve loop takes another request: a stall of known length.
         #[cfg(feature = "test-mode")]
-        if drained.is_ok() && core::mem::take(&mut self.test_stall_late) {
-            say!("lictor: gpu synchronous command retired past its deadline (INJECTED by test-latch-dead) -- engine stalled");
+        if drained.is_ok() && core::mem::take(&mut self.test_stall_riding) {
+            say!("lictor: gpu synchronous command retired past its deadline (INJECTED stall shot of test-latch-dead) -- engine stalled");
             self.stall();
             return Err(());
         }
@@ -1674,7 +1678,30 @@ impl Controlq {
         Ok(())
     }
 
+    /// The stall lever's shot rides the next synchronous submission and no
+    /// other: refused, unfenced, or ended before its chain retired, it is
+    /// spent and said, never left armed for whatever command comes next.
+    fn stall_shot_bound<T>(
+        &mut self,
+        submit: impl FnOnce(&mut Self) -> Result<T, ()>,
+    ) -> Result<T, ()> {
+        #[cfg(feature = "test-mode")]
+        {
+            self.test_stall_riding = core::mem::take(&mut self.test_stall_late);
+        }
+        let result = submit(self);
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.test_stall_riding) {
+            say!("lictor: stall shot LOST -- its command was refused or ended before its chain retired");
+        }
+        result
+    }
+
     fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
+        self.stall_shot_bound(|q| q.submit_one(req_len, resp_len))
+    }
+
+    fn submit_one(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
         // An outstanding synchronous chain still owns the descriptors and the
         // response buffer this would reuse (#31; a stall leaves one).
         if self.refusing() || self.sync_pending || self.sync2_pending {
@@ -1720,6 +1747,16 @@ impl Controlq {
     /// second exactly as in the sequential form; both replies are read
     /// before returning, so nothing outlives the call.
     fn submit_pair_and_wait(
+        &mut self,
+        req1_len: u32,
+        resp1_len: u32,
+        req2_len: u32,
+        resp2_len: u32,
+    ) -> Result<(u32, u32), ()> {
+        self.stall_shot_bound(|q| q.submit_pair(req1_len, resp1_len, req2_len, resp2_len))
+    }
+
+    fn submit_pair(
         &mut self,
         req1_len: u32,
         resp1_len: u32,
@@ -2169,6 +2206,8 @@ impl Gpu {
                 test_stall_hold: false,
                 #[cfg(feature = "test-mode")]
                 test_stall_late: false,
+                #[cfg(feature = "test-mode")]
+                test_stall_riding: false,
                 flane_va: if flane.is_some() { flane_va } else { 0 },
                 flane_pa,
                 fslots: [None; FENCED_SLOTS],
@@ -4540,7 +4579,8 @@ impl Gpu {
 
     /// The stall lever's shot: the next synchronous command, whoever sends
     /// it, retires and then reports its deadline missed. Its outcome is
-    /// unknown to its caller exactly as a late retirement leaves it.
+    /// unknown to its caller exactly as a late retirement leaves it; a
+    /// command that never gets that far spends the shot and says so.
     #[cfg(feature = "test-mode")]
     pub fn test_stall_next(&mut self) {
         self.ctrl.test_stall_late = true;

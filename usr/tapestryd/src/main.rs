@@ -428,6 +428,19 @@ impl Driver for Tapestryd {
             }
         };
 
+        // Armed before any bring-up GPU step, so two of its stall shots can
+        // be aimed at bring-up (the compositor ctx create, a blit-convention
+        // attempt) and the third at a composition health step.
+        #[cfg(feature = "test-mode")]
+        if latch_dead_declared() {
+            if self.comp.gpu.test_arm_latch() {
+                self.comp.test_latch_armed = true;
+                say!("tapestryd: test-latch-dead armed (the engine stalls when a 97x89 surface retires, at the compositor ctx create, at one blit-convention attempt, and at one health step once GPU composition runs)");
+            } else {
+                say!("tapestryd: test-latch-dead arm REFUSED by the broker");
+            }
+        }
+
         // V-3b-1c-2a: prove the server host3d-ring path (venus-gated,
         // self-skipping) as bring-up evidence, before READY like the gpu probes.
         self.comp.warp_host3d_selftest();
@@ -467,16 +480,6 @@ impl Driver for Tapestryd {
             self.comp.gpu.width,
             self.comp.gpu.height
         );
-        #[cfg(feature = "test-mode")]
-        if latch_dead_declared() {
-            if self.comp.gpu.test_arm_latch() {
-                self.comp.test_latch_armed = true;
-                say!("tapestryd: test-latch-dead armed (the engine stalls when a 97x89 surface retires, and at one health step once GPU composition runs)");
-            } else {
-                say!("tapestryd: test-latch-dead arm REFUSED by the broker");
-            }
-        }
-
         let mut conns: Vec<Conn> = Vec::new();
         let mut raw_events: Vec<RawInputEvent> = Vec::new();
 

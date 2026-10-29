@@ -3299,7 +3299,7 @@ included) and reads a failure against them with `failure_cause`
   such tick says `composition health step met a GPU stall -- no verdict,
   re-verifying`; the first verified read after it says `compositor ctx
   verified after a GPU stall -- GPU composition stays ON`. The global ctl's
-  `composed-gpu-stalls N` counts the ticks that met a stall;
+  `composed-gpu-stalls N` counts the health copies that met a stall;
 - the engine is dead: the latch, said as `the GPU engine is dead`;
 - otherwise the latch, as before (`compositor ctx latched: health copy failed
   after a composition blit`).
@@ -3309,14 +3309,40 @@ stalled is never read, because its tick failed and nothing stayed pending. A
 copy submitted on time and read after an unrelated stall executed before the
 read, because the readback waits on it. The synchronous copy that witnesses a
 surface import (`comp_ctx_health`) reads its failure the same way, and its
-SKIPPED line names the cause, but the import is not retried, so a stall that
-meets it costs that generation its GPU path (OPEN-BUGS 2026-10-29T10:39Z).
+SKIPPED line names the cause. It shares the tick's bookkeeping
+(`comp_health_no_verdict`, `comp_health_verified`): its stall is counted and
+leaves the outcome unknown, and its success is a verification. The import is
+not retried, though, so a stall that meets it costs that generation its GPU
+path (OPEN-BUGS 2026-10-29T10:39Z).
+
+Bring-up gets the same reading through `stall_retried`. Each of these steps
+runs once and used to fail for the boot:
+- the compositor context's create (`ensure_comp_ctx`);
+- the comp-attach witness pair and the comp-health pair;
+- the blit-convention probe build, its seed transfer and each convention
+  attempt (`conv_attempt`, on a fresh throwaway context each time).
+A step that a stall failed runs again. While the stall stands it retries every
+`STALL_POLL_MS` (50), since the broker answers revived or dead within 30 s.
+After a stall that began and revived inside the step, it retries at most
+`BRINGUP_STALL_RETRIES` (3) times, then fails closed. The first stall says
+`<step> met a GPU stall -- no verdict, retrying`, and the success after it says
+`<step> verified after a GPU stall`. The context's retry destroys before it
+re-creates, because lictor keeps the reservation of a create a stall failed.
+So does a convention attempt whose throwaway create failed. Every retried step
+already rolls back fully on failure. This was measured on the GL host: a real
+501 ms stall met the `slot S plain` probe step, and the prober settled `S CPU`
+for the boot (OPEN-BUGS 2026-10-29T11:39Z).
 
 The witness is `tools/warp-host.sh composed-stall` on the GL host: the GL leg
-of `composed-screen.exp` with `thylacine.test-latch-dead`. Once GPU
-composition runs, tapestryd aims the broker's one stall shot
-(`Gpu::test_stall_next`) at the next health issue, whose first command then
-retires past its deadline. `tools/warp/composed-stall-verdict.py` asks the
-transcript for the causal chain (aimed, injected, no verdict, revived,
-verified) with no latch line, and the scenario's 9/9 pixels through the 3D
-screen.
+of `composed-screen.exp` with `thylacine.test-latch-dead`, armed now before
+any bring-up GPU step. tapestryd aims the broker's three stall shots
+(`Gpu::test_stall_next`): at the compositor ctx create, at the `slot S`
+convention class's first attempt, and, once GPU composition runs, at the next
+health issue, whose first command then retires past its deadline. The broker revives the engine inside that same
+request, so the reply reads live and the moved stall count alone carries the
+stall; a shot its command never fired says `stall shot LOST`, which the
+checker forbids. `tools/warp/composed-stall-verdict.py` asks the
+transcript for each bring-up leg (aimed, injected, retried, verified), for a
+conventions line with no CPU class, and for the health-step chain (aimed,
+injected, no verdict, revived, verified), with no latch line, and the
+scenario's 9/9 pixels through the 3D screen.

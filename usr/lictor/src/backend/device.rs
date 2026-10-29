@@ -565,7 +565,7 @@ impl Device {
             }
             Request::TestArmLatch => {
                 #[cfg(feature = "test-mode")] {
-                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 1;
+                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 3;
                     ().put(&mut out);
                 }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
