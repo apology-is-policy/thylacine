@@ -127,7 +127,7 @@ const PRESENT_BURST_MIN: u32 = 4;
 use tapestryd::chords::{ChordAction, Chords};
 use libhalcyon::scale;
 use libhalcyon::theme::Metrics;
-use crate::gpu::{FenceTag, FencedErr, Gpu};
+use crate::gpu::{failure_cause, FailureCause, FenceTag, FencedErr, Gpu};
 use tapestryd::pane::{self, rect_union, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
 
@@ -1684,6 +1684,14 @@ pub struct Comp {
     /// ctl, so a witness asks the state rather than racing a boot line).
     #[cfg(feature = "test-mode")]
     pub test_latch_armed: bool,
+    /// The lever's health-step stall has been asked for (once per boot).
+    #[cfg(feature = "test-mode")]
+    test_stall_aimed: bool,
+    /// A health step met a GPU stall and no verdict has been taken since.
+    comp_health_unknown: bool,
+    /// Health steps that met a GPU stall, monotone (`composed-gpu-stalls` in
+    /// the global ctl).
+    comp_health_stalls: u32,
     /// A latch asked for a structural repaint; `frame_tick` performs it.
     comp_repaint_pending: bool,
     /// The tick the compositor context's health was last attended to: at
@@ -2555,6 +2563,10 @@ impl Comp {
             comp_gpu_dead: false,
             #[cfg(feature = "test-mode")]
             test_latch_armed: false,
+            #[cfg(feature = "test-mode")]
+            test_stall_aimed: false,
+            comp_health_unknown: false,
+            comp_health_stalls: 0,
             comp_repaint_pending: false,
             comp_verify_tick: u64::MAX,
             comp_verify_pending: false,
@@ -3257,13 +3269,14 @@ impl Comp {
             );
             return false;
         }
-        if !self.comp_ctx_health() {
+        if let Err(why) = self.comp_ctx_health() {
             self.comp_attach_refused += 1;
             say!(
-                "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (compositor ctx unhealthy)",
+                "tapestryd: comp-attach surface {} res {}..{}: SKIPPED ({})",
                 n,
                 r0,
-                rl
+                rl,
+                why
             );
             return false;
         }
@@ -3320,11 +3333,21 @@ impl Comp {
     /// context executed a command buffer just now. A latched context (a
     /// prior ILLEGAL_RESOURCE, 4.5.4a) drops the copy silently and the
     /// poison survives.
-    fn comp_ctx_health(&mut self) -> bool {
+    /// The error names the cause for the caller's skip line: only a failure
+    /// the device answered says the context is unhealthy.
+    fn comp_ctx_health(&mut self) -> Result<(), &'static str> {
         // A deferred verify in flight is superseded: this synchronous copy
         // overwrites the pair it was going to read (`comp_health_tick`).
         self.comp_verify_pending = false;
-        self.comp_health_issue() && self.comp_health_read()
+        let stalls = self.gpu.stalls;
+        if self.comp_health_issue() && self.comp_health_read() {
+            return Ok(());
+        }
+        Err(match failure_cause(stalls, self.gpu.stalls, self.gpu.engine) {
+            FailureCause::Stall => "a GPU stall met the health copy",
+            FailureCause::EngineDead => "GPU engine dead",
+            FailureCause::Answer => "compositor ctx unhealthy",
+        })
     }
 
     /// The ISSUE half of the health copy: repaint the mark, poison the
@@ -3661,11 +3684,11 @@ impl Comp {
             );
             return;
         }
-        if !self.comp_ctx_health() {
+        if let Err(why) = self.comp_ctx_health() {
             self.comp_attach_refused += 1;
             say!(
-                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (compositor ctx unhealthy)",
-                ctx_pub, bo_pub, res_id, sn
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED ({})",
+                ctx_pub, bo_pub, res_id, sn, why
             );
             return;
         }
@@ -4776,23 +4799,32 @@ impl Comp {
     /// for that long, then the CPU path heals them) -- freeze-and-report on
     /// a ~130 ms clock instead of a 16 ms one, and the compositor's context
     /// latches only on our own defect or a host reset, never by a client's
-    /// hand (contexts are separate). Fail closed: an errored step is a latch.
+    /// hand (contexts are separate). Fail closed: an errored step is a latch
+    /// -- unless a GPU stall overlapped the tick (GPU-DESIGN 4.5.15), which
+    /// leaves some step's outcome unknown and so says nothing about the
+    /// context: that tick takes no verdict, its present is composed by the
+    /// CPU, and the next tick issues a fresh copy.
     fn comp_health_tick(&mut self) -> bool {
         if self.comp_verify_tick == self.tick {
             return true;
         }
         self.comp_verify_tick = self.tick;
         let t0 = Instant::now();
+        let stalls = self.gpu.stalls;
         let mut ok = true;
+        let mut verified = false;
         let due = self.comp_verify_pending
             && self.tick.wrapping_sub(self.comp_verify_issue_tick) >= HEALTH_PERIOD;
         if due {
             self.comp_verify_pending = false;
             let t1 = Instant::now();
             ok = self.comp_health_read();
+            verified = ok;
             self.cost_add(Cost::HealthRead, t1);
         }
         if ok && !self.comp_verify_pending {
+            #[cfg(feature = "test-mode")]
+            self.test_stall_health_step();
             let t1 = Instant::now();
             let issued = self.comp_health_issue();
             self.cost_add(Cost::HealthIssue, t1);
@@ -4805,10 +4837,40 @@ impl Comp {
         }
         self.cost_add(Cost::Health, t0);
         if ok {
+            if verified && core::mem::take(&mut self.comp_health_unknown) {
+                say!("tapestryd: compositor ctx verified after a GPU stall -- GPU composition stays ON");
+            }
             return true;
         }
-        self.comp_gpu_latch("health copy failed after a composition blit");
+        // A failure leaves nothing pending, so the next tick issues afresh.
+        match failure_cause(stalls, self.gpu.stalls, self.gpu.engine) {
+            FailureCause::Stall => {
+                self.comp_health_stalls = self.comp_health_stalls.wrapping_add(1);
+                if !core::mem::replace(&mut self.comp_health_unknown, true) {
+                    say!("tapestryd: composition health step met a GPU stall -- no verdict, re-verifying");
+                }
+            }
+            FailureCause::EngineDead => self.comp_gpu_latch("the GPU engine is dead"),
+            FailureCause::Answer => {
+                self.comp_gpu_latch("compositor ctx latched: health copy failed after a composition blit")
+            }
+        }
         false
+    }
+
+    /// The lever's compositor half: once GPU composition runs, the next
+    /// health step's first command retires past its deadline.
+    #[cfg(feature = "test-mode")]
+    fn test_stall_health_step(&mut self) {
+        if !self.test_latch_armed || self.test_stall_aimed || self.composed_gpu == 0 {
+            return;
+        }
+        self.test_stall_aimed = true;
+        if self.gpu.test_stall_next() {
+            say!("tapestryd: test-latch-dead: the next health step retires past its deadline");
+        } else {
+            say!("tapestryd: test-latch-dead: health-step stall REFUSED by the broker");
+        }
     }
 
     /// One-shot per surface: the first present the GPU composed says so.
@@ -4889,9 +4951,9 @@ impl Comp {
         Ok(())
     }
 
-    /// The compositor context stopped executing after a composition blit:
-    /// GPU composition goes OFF, sticky, and the screen is repainted
-    /// structurally (chrome + the CONFIGURE fan) so every pane heals through
+    /// The compositor context stopped executing after a composition blit, or
+    /// the engine died: GPU composition goes OFF, sticky, and the screen is
+    /// repainted structurally (chrome + the CONFIGURE fan) so every pane heals through
     /// the CPU path. Freeze-and-report, never freeze-and-lie (4.5.4b).
     fn comp_gpu_latch(&mut self, why: &str) {
         if self.comp_gpu_dead {
@@ -4899,7 +4961,7 @@ impl Comp {
         }
         self.comp_gpu_dead = true;
         say!(
-            "tapestryd: composed pixels = CPU (compositor ctx latched: {}) -- GPU composition OFF, sticky",
+            "tapestryd: composed pixels = CPU ({}) -- GPU composition OFF, sticky",
             why
         );
         // A structural repaint at the next tick (`frame_tick`): the geometry
@@ -16582,8 +16644,11 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "composed gpu {} cpu {}\ncomposed-gpu-dead {}\n",
-                    comp.composed_gpu, comp.composed_cpu, comp.comp_gpu_dead as u32
+                    "composed gpu {} cpu {}\ncomposed-gpu-dead {}\ncomposed-gpu-stalls {}\n",
+                    comp.composed_gpu,
+                    comp.composed_cpu,
+                    comp.comp_gpu_dead as u32,
+                    comp.comp_health_stalls
                 ),
             );
             #[cfg(feature = "test-mode")]

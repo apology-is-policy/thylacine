@@ -20,7 +20,7 @@ pub struct InputDev { client: RefCell<Client>, index: u32, abs: bool, rel: bool,
 impl InputDev {
     pub fn probe(index: u32, _bar: u64, _dma: u64) -> Result<Self, Error> {
         let mut client = Client::connect()?;
-        let (_, info): (_, Option<(bool, bool, u32, u32)>) = client.call(Request::InputInfo { index })?;
+        let info: Option<(bool, bool, u32, u32)> = client.call(Request::InputInfo { index })?;
         let (abs, rel, x, y) = info.ok_or(Error::NoSuchResource)?;
         Ok(Self { client: RefCell::new(client), index, abs, rel, x, y })
     }
@@ -28,8 +28,8 @@ impl InputDev {
     pub fn supports_rel(&self) -> bool { self.rel }
     pub fn abs_max(&self, axis: u8) -> u32 { if axis == 0 { self.x } else { self.y } }
     pub fn drain(&mut self, mut f: impl FnMut(RawInputEvent)) {
-        let events: Result<(_, Vec<(u16, u16, u32)>), _> = self.client.borrow_mut().call(Request::InputDrain { index: self.index });
-        if let Ok((_, events)) = events {
+        let events: Result<Vec<(u16, u16, u32)>, _> = self.client.borrow_mut().call(Request::InputDrain { index: self.index });
+        if let Ok(events) = events {
             for (etype, code, value) in events { f(RawInputEvent { etype, code, value }); }
         }
     }

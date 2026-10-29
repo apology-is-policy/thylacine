@@ -164,7 +164,15 @@ ordinary path, revives the engine, and the parked retirement then runs. A chain
 still outstanding after 30 s latches the engine dead, permanently. The stall
 counter tells a caller whether its command stalled, and a stalled bind
 condemns its resource, because the display may name it once the device
-catches up. Bring-up (`Gpu::probe`, `Screen::new`, before
+catches up. Every reply carries the engine state (live, stalled, dead) and the
+stall count in its `Stats`, an error reply included. The client keeps the last
+one (`rpc_client::Client::stats`), and the GPU proxy adopts it on every reply,
+so a caller reads a failed step against the state it left. The host-tested
+`gpu_api::failure_cause` decides what such a failure says: a stall begun inside
+the span, or one still standing, leaves some outcome unknown; a dead engine
+outranks every stall; otherwise the device answered. tapestryd's composition
+health tick takes no verdict from a stall that way ([[sub-tapestryd]]).
+Bring-up (`Gpu::probe`, `Screen::new`, before
 `Gpu::begin_serving`) waits out the full 30 s instead: there is no loop to
 keep live.
 
@@ -194,8 +202,16 @@ forgets the marks made before it:
   completes, said with its pins released;
 - on the second shot the chain's retirement is withheld, so the engine dies at
   30 s and the retirement is refused.
+The same arming gives the compositor one stall shot to aim
+(`Request::TestStallNext`, refused once spent). The next synchronous command
+retires, then reports its deadline missed (`Gpu::test_stall_next`), so the next
+pump revives the engine before the serve loop takes another request: a stall of
+known length, with no race against the device. tapestryd aims it at a
+composition health step once GPU composition runs.
 Only the designated compositor reaches the broker, and only the booting
-operator sets the token. `tools/interactive/ls-gpu-dead.exp` is the gate.
+operator sets the token. `tools/interactive/ls-gpu-dead.exp` is the gate for
+the retirement shots, and `tools/warp-host.sh composed-stall` (the GL host) for
+the health-step shot.
 
 ### Episode
 
@@ -432,14 +448,13 @@ ordinary guest test client, never a source of trusted authority.
 
 ## Caveats
 
-OPEN (2026-10-29): a stall costs tapestryd GPU composition for the boot.
-During a stall every request other than a retirement fails at once, and the
-compositor's health tick fails closed and latches GPU composition off, so CPU
-composition carries on (OPEN-BUGS 2026-10-29T06:39Z). A retirement parks, and
-the compositor blocks on its reply for the stall, up to the 30 s bound. And a seat episode never returns to normal
-while quiescence is unreachable or a chain is never retired, because a restore
-and the trusted takeover both need quiescence, so it parks ordinary requests
-for good. A stall now ends by itself within 30 s; a dead engine does not.
+During a stall every request other than a retirement fails at once, so the
+present path skips frames. A retirement parks, and the compositor blocks on its
+reply for the stall, up to the 30 s bound. A stall that meets the synchronous
+health copy of a surface import costs that generation its GPU path, because the
+import is not retried (OPEN-BUGS 2026-10-29T10:39Z). A stall ends by itself
+within 30 s; a dead engine does not, and a seat episode on it returns without
+its display (above).
 
 The current backend is QEMU virtio GPU/input with a neutral backdrop. Pi DMA,
 controller ownership and display conformance require separate qualification.

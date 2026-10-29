@@ -291,9 +291,10 @@ fn declared_scale() -> Option<u16> {
 }
 
 /// Test lever: `thylacine.test-latch-dead` on the kernel command line arms
-/// lictor to latch the engine dead when a 97x89 surface retires -- the state a
-/// GPU command missing its synchronous deadline leaves -- so a gate can watch
-/// the compositor ride it out. Per boot, and set by whoever boots the machine.
+/// lictor to stall the engine when a 97x89 surface retires, at trusted
+/// takeovers, and at one composition health step -- the state a GPU command
+/// missing its synchronous deadline leaves -- so a gate can watch the
+/// compositor ride it out. Per boot, and set by whoever boots the machine.
 #[cfg(feature = "test-mode")]
 fn latch_dead_declared() -> bool {
     // SAFETY: SVC wrappers over a path literal and an owned buffer.
@@ -470,7 +471,7 @@ impl Driver for Tapestryd {
         if latch_dead_declared() {
             if self.comp.gpu.test_arm_latch() {
                 self.comp.test_latch_armed = true;
-                say!("tapestryd: test-latch-dead armed (the engine latches dead when a 97x89 surface retires)");
+                say!("tapestryd: test-latch-dead armed (the engine stalls when a 97x89 surface retires, and at one health step once GPU composition runs)");
             } else {
                 say!("tapestryd: test-latch-dead arm REFUSED by the broker");
             }

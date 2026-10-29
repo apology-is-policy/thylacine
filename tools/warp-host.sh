@@ -13,6 +13,8 @@
 #   tools/warp-host.sh venus-verdict <ctl.log> <tst.log>  # just the verdict (no boots) -- what tools/test-venus-verdict.sh sabotages
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh composed  # Warp-C C-2b + C-2c + C-3 gate: the composed screen's arm + the witnessed imports + the composed pixels read back, GL vs 2D (both legs)
+#   tools/warp-host.sh composed-stall  # GPU-DESIGN 4.5.15: GPU composition survives a stall met by its health step (GL leg, test-latch-dead armed)
+#   tools/warp-host.sh composed-stall-verdict <log>  # just the verdict (no boot)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
 #   tools/warp-host.sh readback  # Warp-C C-6 gate: the compositor readback arm is fenced + deferred under a deep queue (+ the F2b measurement)
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
@@ -755,6 +757,23 @@ composed)
         exit 1
     fi
     echo "C-2b/C-2c/C-3 COMPOSED-SCREEN GATE: VERIFIED (3D screen + witnessed imports + 9/9 exact readback pixels on GL, 2D + no import + 9/9 exact buffer pixels without -- discriminates)"
+    ;;
+composed-stall)
+    # GPU-DESIGN 4.5.15: a stall says nothing about the compositor's context,
+    # so a health step that meets one takes no verdict. The GL leg of
+    # composed-screen with test-latch-dead armed: once GPU composition runs,
+    # tapestryd aims the lever's one health-step stall (that step's command
+    # retires past its deadline) and the next copy must verify the context.
+    # The scenario's own PASS (9/9 pixels via the 3D screen) rides along; the
+    # `composed` verb, unarmed, is the control that prints none of the chain.
+    out="$REPO_ROOT/build/warp-composed-stall.log"
+    ssh "$HOST" "cd $RREPO && ${RENV}THYLACINE_GPU_DEV=virtio-gpu-gl-pci THYLACINE_TEST_LATCH_DEAD=1 expect tools/warp/composed-screen.exp" |
+        tee "$out" || true
+    echo "== composed-stall verdict =="
+    python3 "$REPO_ROOT/tools/warp/composed-stall-verdict.py" "$out"
+    ;;
+composed-stall-verdict)
+    python3 "$REPO_ROOT/tools/warp/composed-stall-verdict.py" "${2:?usage: composed-stall-verdict <log>}"
     ;;
 prove)
     out="$REPO_ROOT/build/warp-prove.log"

@@ -42,6 +42,9 @@ pub struct Device {
     /// Seat shots left, one per trusted takeover (`test_latch_seat_shot`).
     #[cfg(feature = "test-mode")]
     test_seat_shots: u8,
+    /// Stall shots left for the compositor to aim (`Request::TestStallNext`).
+    #[cfg(feature = "test-mode")]
+    test_stall_shots: u8,
 }
 /// How the lever breaks a trusted takeover's return, in firing order.
 #[cfg(feature = "test-mode")]
@@ -66,6 +69,7 @@ impl Device {
             refused_retirements: 0,
             #[cfg(feature = "test-mode")] test_latch_shots: 0,
             #[cfg(feature = "test-mode")] test_seat_shots: 0,
+            #[cfg(feature = "test-mode")] test_stall_shots: 0,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new(),
             #[cfg(feature = "test-mode")] test_latch_fired: Vec::new() })
     }
@@ -560,7 +564,18 @@ impl Device {
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::TestArmLatch => {
-                #[cfg(feature = "test-mode")] { self.test_latch_shots = 2; self.test_seat_shots = 4; ().put(&mut out); }
+                #[cfg(feature = "test-mode")] {
+                    self.test_latch_shots = 2; self.test_seat_shots = 4; self.test_stall_shots = 1;
+                    ().put(&mut out);
+                }
+                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestStallNext => {
+                #[cfg(feature = "test-mode")] {
+                    let armed = self.test_stall_shots > 0;
+                    if armed { self.test_stall_shots -= 1; self.gpu.test_stall_next(); }
+                    armed.put(&mut out);
+                }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::CompSlotState => {

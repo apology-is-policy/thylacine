@@ -2630,17 +2630,37 @@ other than a retirement fails at once, and the present path skips frames. A
 retirement parks, and tapestryd's proxy reads its reply with no deadline, so
 the compositor's own loop blocks on it until the engine revives, dies, or the
 30 s park bound is reached. That cost is the price of keeping every pin until
-the device has retired the chain. Its composition health tick fails closed (§4.5.12), and
-latches GPU composition OFF, sticky. Until that tick learns to tell a stall
-from a context latch, a stall can cost GPU composition for the boot while CPU
-composition carries on. That fix is owed in tapestryd (OPEN-BUGS 2026-10-29
-06:39Z).
+the device has retired the chain.
+
+**A stall takes no composition verdict.** The composition health tick
+(§4.5.12) fails closed: a failed step latches GPU composition OFF, sticky. A
+stall says nothing about the compositor's context, though, so a step that met
+one must not decide it. Every broker reply carries the engine state (live,
+stalled, dead) and the monotone stall count, an error reply included, and the
+proxy adopts them on every reply. The tick reads its failure against them
+(`gpu_api::failure_cause`):
+- a stall began during the tick, or the engine is still stalled: some step's
+  outcome is unknown, so the tick takes no verdict. That present is composed by
+  the CPU and the next tick issues a fresh copy;
+- the engine is dead: GPU composition goes OFF, said as the engine's death;
+- otherwise the device answered every step, and the failure is the context's
+  own: the latch, as before.
+The synchronous health copy that witnesses a surface import reads its failure
+the same way, and its skip line names the cause. A stall that meets that copy
+still costs the generation its GPU path, because the import is not retried
+(OPEN-BUGS 2026-10-29T10:39Z).
 
 **Witness.** `ls-gpu-dead` arms a two-shot lever (`thylacine.test-latch-dead`).
 On the first marked retirement it injects a deadline miss whose chain the
 device then retires: the engine revives and the destroy succeeds. On the
 second it injects one whose retirement is withheld: the engine dies at 30 s
-and the destroy is refused, its pins kept.
+and the destroy is refused, its pins kept. The same lever gives the compositor
+one stall shot to aim (`TestStallNext`). The next synchronous command retires,
+then reports its deadline missed, so the next pump revives the engine before
+the broker takes another request. tapestryd aims it at a health step once GPU
+composition runs, and `tools/warp-host.sh composed-stall` (the GL host) asks
+that the step takes no verdict, the engine revives, and the next copy verifies
+the context, with no latch.
 
 ## 5. Placement — where the server lives, per backend
 

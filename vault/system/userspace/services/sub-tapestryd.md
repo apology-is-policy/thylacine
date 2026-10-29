@@ -1001,11 +1001,12 @@ mutual-authority witness is owed at H-4b-3's restore tool;
 for production, and both variants compile. One test lever rides the kernel
 command line instead of the ctl, because it is global and permanent:
 `thylacine.test-latch-dead` makes tapestryd, once it serves, arm the broker
-to latch the GPU engine dead when a 97x89 surface retires; the global ctl
+to stall the GPU engine when a 97x89 surface retires; the global ctl
 says `test-latch-dead armed` only once the broker has accepted it, and
 `tools/interactive/ls-gpu-dead.exp` asks that state, then watches the compositor survive a
 dead engine -- the retirement refused, the ctl still answered
-([[sub-lictor]]). The battery and its expect
+([[sub-lictor]]). The same arming lets tapestryd aim one stall at a
+composition health step (below). The battery and its expect
 scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)
 are UNOWNED -- their reference lives in `docs/reference/139-tapestryd.md`
 (the gate paragraph); the coverage sweep is
@@ -3278,3 +3279,44 @@ a notice already delivered, is the ring's hint ([[sub-libtapestry]],
 [[sub-halcyond]]). The arm has not yet fired on the device -- on the manual
 chunk's run 14 the client hint carried every notice -- and `server.rs` has no
 host harness, so it is verified by reading (the chunk's round 5).
+
+## A GPU stall takes no composition verdict (2026-10-29, GPU-DESIGN 4.5.15)
+
+The composition health tick (`comp_health_tick`, GPU-DESIGN 4.5.12) fails
+closed: an errored step latches GPU composition OFF for the boot. Since vote
+29 a GPU command that misses its 500 ms deadline stalls the engine, and every
+request during the stall fails at once, so a stall used to cost GPU
+composition for the boot although it says nothing about the compositor's
+context (OPEN-BUGS 2026-10-29T06:39Z).
+
+The tick now snapshots the stall count the proxy last adopted (`Gpu::stalls`,
+with `Gpu::engine`, both from the broker's per-reply `Stats`, an error reply
+included) and reads a failure against them with `failure_cause`
+([[sub-lictor]]):
+- a stall began during the tick, or the engine is still stalled: no verdict.
+  The tick returns false, so that present is composed by the CPU, and since a
+  failure leaves nothing pending the next tick issues a fresh copy. The first
+  such tick says `composition health step met a GPU stall -- no verdict,
+  re-verifying`; the first verified read after it says `compositor ctx
+  verified after a GPU stall -- GPU composition stays ON`. The global ctl's
+  `composed-gpu-stalls N` counts the ticks that met a stall;
+- the engine is dead: the latch, said as `the GPU engine is dead`;
+- otherwise the latch, as before (`compositor ctx latched: health copy failed
+  after a composition blit`).
+
+A verdict read after a stall is still sound. A copy whose own submission
+stalled is never read, because its tick failed and nothing stayed pending. A
+copy submitted on time and read after an unrelated stall executed before the
+read, because the readback waits on it. The synchronous copy that witnesses a
+surface import (`comp_ctx_health`) reads its failure the same way, and its
+SKIPPED line names the cause, but the import is not retried, so a stall that
+meets it costs that generation its GPU path (OPEN-BUGS 2026-10-29T10:39Z).
+
+The witness is `tools/warp-host.sh composed-stall` on the GL host: the GL leg
+of `composed-screen.exp` with `thylacine.test-latch-dead`. Once GPU
+composition runs, tapestryd aims the broker's one stall shot
+(`Gpu::test_stall_next`) at the next health issue, whose first command then
+retires past its deadline. `tools/warp/composed-stall-verdict.py` asks the
+transcript for the causal chain (aimed, injected, no verdict, revived,
+verified) with no latch line, and the scenario's 9/9 pixels through the 3D
+screen.

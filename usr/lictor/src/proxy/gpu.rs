@@ -6,7 +6,7 @@ use libdriver::Error;
 use libthyla_rs::{t_open, t_close, t_weft_map, t_burrow_detach, t_weft_share,
     t_weft_unshare, T_WALK_OPEN_FROM_ROOT, T_OREAD};
 use crate::{rpc_client::Client, gpu_api::{Info, Stats, Request, BufferRef, RingInfo}, wire::Wire};
-pub use crate::gpu_api::{HostRing, FenceTag, FenceVindication, FencedErr};
+pub use crate::gpu_api::{HostRing, FenceTag, FenceVindication, FencedErr, Engine, FailureCause, failure_cause};
 pub const PAGE_SIZE: u64 = 4096;
 pub const RING_DMA_SIZE: usize = 8192;
 pub const FENCED_SLOTS: usize = 16;
@@ -36,6 +36,8 @@ pub struct Gpu {
     pub last_scanout_seq: u64,
     pub last_unref_seq: u64,
     pub condemned_lost: u32,
+    pub engine: Engine,
+    pub stalls: u32,
     pub num_capsets: u32,
     pub capset_blob: alloc::vec::Vec<u8>,
     pub capset_id: u32,
@@ -45,7 +47,8 @@ pub struct Gpu {
 impl Gpu {
     pub fn probe(_bar: u64, _ring: u64, _flane: u64, _blob_probe: u64) -> Result<Self, Error> {
         let mut client = Client::connect()?;
-        let (_, info): (_, Info) = client.call(Request::Info).map_err(|e| { let _ = libthyla_rs::t_putstr(&alloc::format!("lictor client: Info {:?}\n", e)); e })?;
+        let info: Info = client.call(Request::Info).map_err(|e| { let _ = libthyla_rs::t_putstr(&alloc::format!("lictor client: Info {:?}\n", e)); e })?;
+        let stats = client.stats();
         Ok(Self { client: RefCell::new(client),
             width: info.width,
             height: info.height,
@@ -58,6 +61,8 @@ impl Gpu {
             last_scanout_seq: info.last_scanout_seq,
             last_unref_seq: info.last_unref_seq,
             condemned_lost: info.condemned_lost,
+            engine: stats.engine,
+            stalls: stats.stalls,
             num_capsets: info.num_capsets,
             capset_blob: info.capset_blob,
             capset_id: info.capset_id,
@@ -65,16 +70,20 @@ impl Gpu {
             venus_capset_blob: info.venus_capset_blob,
         })
     }
+    /// Adopts the reply's Stats on an error too: a failed step is read
+    /// against the engine state it left (`gpu_api::failure_cause`).
     fn invoke<R: Wire>(&mut self, request: Request) -> Result<R, Error> {
-        let (stats, value) = self.client.borrow_mut().call(request)?;
-        self.adopt(stats); Ok(value)
+        let result = self.client.borrow_mut().call(request);
+        let stats = self.client.borrow().stats();
+        self.adopt(stats); result
     }
     fn query<R: Wire>(&self, request: Request) -> Result<R, Error> {
-        self.client.borrow_mut().call(request).map(|(_, v)| v)
+        self.client.borrow_mut().call(request)
     }
     fn adopt(&mut self, s: Stats) {
         self.cmd_seq = s.cmd_seq; self.last_scanout_seq = s.last_scanout_seq;
         self.last_unref_seq = s.last_unref_seq; self.condemned_lost = s.condemned_lost;
+        self.engine = s.engine; self.stalls = s.stalls;
     }
     pub fn sync_stream_max() -> usize { 0x500 - 32 }
     pub fn seat_state(&self) -> Result<(u64, u32), Error> { self.query(Request::SeatState) }
@@ -273,6 +282,10 @@ impl Gpu {
     #[cfg(feature = "test-mode")]
     pub fn test_arm_latch(&mut self) -> bool {
         self.invoke::<()>(Request::TestArmLatch).is_ok()
+    }
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_next(&mut self) -> bool {
+        self.invoke(Request::TestStallNext).unwrap_or(false)
     }
     #[cfg(feature = "test-mode")]
     pub fn test_abandoned_total(&self) -> u32 {

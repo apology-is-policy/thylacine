@@ -242,6 +242,10 @@ pub enum Request {
     /// Test lever: the engine latches dead, as its synchronous deadline
     /// would, at the next retirement the compositor asks for.
     TestArmLatch,
+    /// Test lever, one shot per armed boot: the next synchronous command
+    /// retires, then reports its deadline missed (a stall the next pump
+    /// revives).
+    TestStallNext,
     FencedHeld,
     TestFencedFree,
     CompSlotState,
@@ -296,6 +300,39 @@ pub fn stall_verdict(outstanding: bool, stalled_ms: u64) -> Stall {
         Stall::Dead
     } else {
         Stall::Holding
+    }
+}
+/// The control queue's engine as a reply left it (GPU-DESIGN 4.5.15).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Engine { #[default] Live, Stalled, Dead }
+impl Wire for Engine {
+    fn put(&self, out: &mut Vec<u8>) {
+        match self { Self::Live => 0u8, Self::Stalled => 1, Self::Dead => 2 }.put(out);
+    }
+    fn get(r: &mut Reader<'_>) -> Result<Self, Malformed> {
+        Ok(match u8::get(r)? { 0 => Self::Live, 1 => Self::Stalled, 2 => Self::Dead,
+            _ => return Err(Malformed) })
+    }
+}
+/// What a failed span of synchronous steps says about the work it carried.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FailureCause {
+    /// A stall began inside the span, or the engine is still stalled: some
+    /// step's outcome is unknown, so the failure says nothing about the work.
+    Stall,
+    /// Nothing will run again this boot.
+    EngineDead,
+    /// The device answered every step: the failure is the work's own.
+    Answer,
+}
+/// `stalls_before` is the count adopted before the span's first step; the
+/// count is monotone and wraps, so any change at all means a stall began.
+pub fn failure_cause(stalls_before: u32, stalls_after: u32, engine: Engine) -> FailureCause {
+    match engine {
+        Engine::Dead => FailureCause::EngineDead,
+        Engine::Stalled => FailureCause::Stall,
+        Engine::Live if stalls_after != stalls_before => FailureCause::Stall,
+        Engine::Live => FailureCause::Answer,
     }
 }
 impl Wire for Request {
@@ -357,6 +394,7 @@ impl Wire for Request {
             Self::TestHoldCtxDied { ctx_pub } => { 53u16.put(out); ctx_pub.put(out); },
             Self::TestAbandonedTotal => { 54u16.put(out); },
             Self::TestArmLatch => { 67u16.put(out); },
+            Self::TestStallNext => { 68u16.put(out); },
             Self::FencedHeld => { 55u16.put(out); },
             Self::TestFencedFree => { 56u16.put(out); },
             Self::CompSlotState => { 57u16.put(out); },
@@ -429,6 +467,7 @@ impl Wire for Request {
             53 => Self::TestHoldCtxDied { ctx_pub: <u32>::get(r)? },
             54 => Self::TestAbandonedTotal,
             67 => Self::TestArmLatch,
+            68 => Self::TestStallNext,
             55 => Self::FencedHeld,
             56 => Self::TestFencedFree,
             57 => Self::CompSlotState,
@@ -446,17 +485,21 @@ impl Wire for Request {
     }
 }
 
-#[derive(Default)]
+/// Every reply carries these, an error reply included: a caller reads a
+/// failed step against the engine state it left (`failure_cause`).
+#[derive(Default, Clone, Copy)]
 pub struct Stats {
     pub cmd_seq: u64, pub last_scanout_seq: u64, pub last_unref_seq: u64,
-    pub condemned_lost: u32,
+    pub condemned_lost: u32, pub engine: Engine, pub stalls: u32,
 }
-record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32 });
+record!(Stats { cmd_seq: u64, last_scanout_seq: u64, last_unref_seq: u64, condemned_lost: u32,
+    engine: Engine, stalls: u32 });
 #[cfg(feature = "backend")]
 impl From<&crate::backend::gpu::Gpu> for Stats {
     fn from(g: &crate::backend::gpu::Gpu) -> Self {
         Self { cmd_seq: g.cmd_seq, last_scanout_seq: g.last_scanout_seq,
-            last_unref_seq: g.last_unref_seq, condemned_lost: g.condemned_lost }
+            last_unref_seq: g.last_unref_seq, condemned_lost: g.condemned_lost,
+            engine: g.engine(), stalls: g.stalls() }
     }
 }
 /// A host allocation's description. The mapping arrives through authenticated
@@ -477,7 +520,7 @@ mod admission_tests {
         vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
             Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
             Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
-            Request::TestArmLatch]
+            Request::TestArmLatch, Request::TestStallNext]
     }
     fn seat() -> Vec<Request> {
         vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
@@ -542,6 +585,28 @@ mod admission_tests {
         assert_eq!(stall_verdict(true, u64::MAX), Stall::Dead);
     }
     #[test]
+    fn a_failure_on_a_live_engine_with_no_stall_is_the_works_own() {
+        for n in [0, 7, u32::MAX] {
+            assert_eq!(failure_cause(n, n, Engine::Live), FailureCause::Answer, "stalls {n}");
+        }
+    }
+    #[test]
+    fn a_stall_begun_inside_the_span_leaves_the_outcome_unknown_even_once_revived() {
+        assert_eq!(failure_cause(0, 1, Engine::Live), FailureCause::Stall);
+        assert_eq!(failure_cause(u32::MAX, 0, Engine::Live), FailureCause::Stall, "the count wraps");
+        assert_eq!(failure_cause(3, 4, Engine::Stalled), FailureCause::Stall);
+    }
+    #[test]
+    fn a_step_refused_by_a_stall_begun_before_the_span_is_unknown_too() {
+        assert_eq!(failure_cause(5, 5, Engine::Stalled), FailureCause::Stall);
+    }
+    #[test]
+    fn a_dead_engine_outranks_every_stall() {
+        for (before, after) in [(0, 0), (0, 1), (u32::MAX, 0)] {
+            assert_eq!(failure_cause(before, after, Engine::Dead), FailureCause::EngineDead);
+        }
+    }
+    #[test]
     fn seat_traffic_and_ordinary_work_run_regardless_of_quiescence() {
         for (quiescent, unreachable) in [(false, false), (true, false), (false, true), (true, true)] {
             for r in ordinary() { assert!(admit(&r, 0, quiescent, unreachable, 0), "{r:?}"); }
@@ -572,6 +637,26 @@ mod cursor_wire_tests {
         let mut r = Reader::new(&bytes).unwrap();
         assert!(matches!(Request::get(&mut r).unwrap(), Request::TestArmLatch));
         r.finish().unwrap();
+    }
+    #[test]
+    fn the_stall_lever_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::TestStallNext.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 68, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestStallNext));
+        r.finish().unwrap();
+    }
+    #[test]
+    fn stats_carry_the_engine_and_refuse_an_unknown_state() {
+        let mut bytes = Vec::new();
+        Stats { engine: Engine::Stalled, stalls: 0x0403_0201, ..Stats::default() }.put(&mut bytes);
+        assert_eq!(&bytes[bytes.len() - 5..], [1, 1, 2, 3, 4]);
+        let s = Stats::get(&mut Reader::new(&bytes).unwrap()).unwrap();
+        assert_eq!((s.engine, s.stalls), (Engine::Stalled, 0x0403_0201));
+        let at = bytes.len() - 5;
+        bytes[at] = 3;
+        assert!(Stats::get(&mut Reader::new(&bytes).unwrap()).is_err());
     }
     #[test]
     fn cursor_record_is_exact_and_rejects_truncation_and_bad_bool() {

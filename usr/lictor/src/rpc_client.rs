@@ -3,7 +3,7 @@ use alloc::{vec, vec::Vec};
 use libdriver::Error;
 use libthyla_rs::{t_open, t_close, t_read, t_write, T_WALK_OPEN_FROM_ROOT, T_OREAD, T_ORDWR};
 use crate::{framing, gpu_api::{Request, Stats}, wire::{Reader, Wire, MAX_PACKET}};
-pub struct Client { fd: i64, sequence: u64, failed: bool }
+pub struct Client { fd: i64, sequence: u64, failed: bool, stats: Stats }
 impl Client {
     pub fn connect() -> Result<Self, Error> {
         let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/lictor".as_ptr(), 11, T_OREAD) };
@@ -11,27 +11,29 @@ impl Client {
         let fd = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_ORDWR) };
         unsafe { t_close(root); }
         if fd < 0 { let _ = libthyla_rs::t_putstr(&alloc::format!("lictor client: open ctl {}\n", fd)); return Err(Error::Hardware); }
-        Ok(Self { fd, sequence: 0, failed: false })
+        Ok(Self { fd, sequence: 0, failed: false, stats: Stats::default() })
     }
     pub fn failed(&self) -> bool { self.failed }
-    pub fn call<R: Wire>(&mut self, request: Request) -> Result<(Stats, R), Error> {
+    /// The broker's state as of the last reply, an error reply included.
+    pub fn stats(&self) -> Stats { self.stats }
+    pub fn call<R: Wire>(&mut self, request: Request) -> Result<R, Error> {
         if self.failed { return Err(Error::Hardware); }
         match self.exchange(request) {
-            Ok((stats, result)) => {
+            Ok(result) => {
                 let bytes = result?;
                 let mut r = match Reader::new(&bytes) {
                     Ok(r) => r, Err(_) => { self.failed = true; return Err(Error::BadField); }
                 };
                 let value = R::get(&mut r).and_then(|v| { r.finish()?; Ok(v) });
                 match value {
-                    Ok(v) => Ok((stats, v)),
+                    Ok(v) => Ok(v),
                     Err(_) => { self.failed = true; Err(Error::BadField) }
                 }
             }
             Err(e) => { self.failed = true; Err(e) }
         }
     }
-    fn exchange(&mut self, request: Request) -> Result<(Stats, Result<Vec<u8>, Error>), Error> {
+    fn exchange(&mut self, request: Request) -> Result<Result<Vec<u8>, Error>, Error> {
         let sequence = self.sequence.checked_add(1).ok_or(Error::Hardware)?;
         let mut payload = Vec::new(); request.put(&mut payload);
         let packet = framing::encode(sequence, &payload).map_err(|_| Error::BadField)?;
@@ -52,7 +54,8 @@ impl Client {
         let result = <Result<Vec<u8>, Error>>::get(&mut r).map_err(|_| Error::BadField)?;
         r.finish().map_err(|_| Error::BadField)?;
         self.sequence = sequence;
-        Ok((stats, result))
+        self.stats = stats;
+        Ok(result)
     }
     fn read_exact(&self, mut bytes: &mut [u8]) -> Result<(), Error> {
         while !bytes.is_empty() {

@@ -923,6 +923,10 @@ struct Controlq {
     test_latch_next: bool,
     #[cfg(feature = "test-mode")]
     test_stall_hold: bool,
+    /// The stall lever (`Gpu::test_stall_next`): the next synchronous wait
+    /// sees its chain retire, then reports the deadline missed.
+    #[cfg(feature = "test-mode")]
+    test_stall_late: bool,
     /// The fenced lane (virgl only; 0 = absent): slot i owns descriptor
     /// pair (2+2i, 3+2i), its request buffer at flane_va + i*FREQ_LEN and
     /// its response header at flane_va + FRESP_OFF + i*FRESP_STRIDE.
@@ -1609,7 +1613,16 @@ impl Controlq {
 
         // A spin may retire the chain before consuming its notification.
         // Take one bounded pass; later serve-loop passes finish any cooldown.
-        self.service_completions(1)
+        let drained = self.service_completions(1);
+        // The chain has retired, so the next pump revives the engine before
+        // the serve loop takes another request: a stall of known length.
+        #[cfg(feature = "test-mode")]
+        if drained.is_ok() && core::mem::take(&mut self.test_stall_late) {
+            say!("lictor: gpu synchronous command retired past its deadline (INJECTED by test-latch-dead) -- engine stalled");
+            self.stall();
+            return Err(());
+        }
+        drained
     }
 
     /// The device holds no chain at all: no tagged fence, no abandoned chain
@@ -2154,6 +2167,8 @@ impl Gpu {
                 test_latch_next: false,
                 #[cfg(feature = "test-mode")]
                 test_stall_hold: false,
+                #[cfg(feature = "test-mode")]
+                test_stall_late: false,
                 flane_va: if flane.is_some() { flane_va } else { 0 },
                 flane_pa,
                 fslots: [None; FENCED_SLOTS],
@@ -4523,6 +4538,14 @@ impl Gpu {
         self.ctrl.fenced_held()
     }
 
+    /// The stall lever's shot: the next synchronous command, whoever sends
+    /// it, retires and then reports its deadline missed. Its outcome is
+    /// unknown to its caller exactly as a late retirement leaves it.
+    #[cfg(feature = "test-mode")]
+    pub fn test_stall_next(&mut self) {
+        self.ctrl.test_stall_late = true;
+    }
+
     /// The latch lever's shot: a harmless display query whose wait reports
     /// the deadline passed, so the engine stalls with that chain still in
     /// flight, exactly as a slow device leaves it. `hold` withholds the
@@ -4652,6 +4675,16 @@ impl Gpu {
 
     pub fn engine_dead(&self) -> bool {
         self.ctrl.dead
+    }
+
+    pub fn engine(&self) -> crate::gpu_api::Engine {
+        if self.ctrl.dead {
+            crate::gpu_api::Engine::Dead
+        } else if self.ctrl.stalled.is_some() {
+            crate::gpu_api::Engine::Stalled
+        } else {
+            crate::gpu_api::Engine::Live
+        }
     }
 
     /// Stalls begun so far: compared across one command, a change means that

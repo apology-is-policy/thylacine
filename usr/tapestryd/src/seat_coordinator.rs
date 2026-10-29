@@ -504,7 +504,7 @@ impl Conn {
 }
 fn run(shared: &Shared, control: &Control) -> Result<()> {
     let mut seat = Client::connect().map_err(|_| Error::Io)?;
-    let (_, state): (_, (u64, u32)) = seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
+    let state: (u64, u32) = seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
     shared
         .table
         .lock()
@@ -545,8 +545,7 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
         if control.stopping() {
             return Ok(());
         }
-        let (_, state): (_, (u64, u32)) =
-            seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
+        let state: (u64, u32) = seat.call(SeatRequest::SeatState).map_err(|_| Error::Io)?;
         shared
             .table
             .lock()
@@ -589,7 +588,7 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
         let aggregate = shared.table.lock().aggregate();
         if let Some(generation) = aggregate {
             if acknowledged != Some(generation) {
-                let (_, accepted): (_, bool) = seat
+                let accepted: bool = seat
                     .call(SeatRequest::SeatQuiesced { generation })
                     .map_err(|_| Error::Io)?;
                 if accepted {
