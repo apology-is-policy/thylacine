@@ -2842,6 +2842,111 @@ The spec keeps these honest by construction: `specs/territory_shed.tla` states `
 
 **Not done here, recorded.** (i) *The exact union seed* (audit round 2, F3): seed the sources of the entries keyed **at** the point (`mount_key_eq`; `dc`-alone for a per-walker point) and keep exactly those entries, instead of the point's whole instance. It sheds the #80 residue for a union-rooted container too. No in-tree consumer has a union root, so the coarser seed costs nothing today; the tightening must land in `TrueStart` and `Seeds` together with the code, as two separately written operators. (ii) A container should not inherit its host's table at all. `viv` chroots into a bundle directory on the *same* Stratum session as the host root, so the conservative rule keeps every host entry keyed in that session (unreachable from inside the bundle, but the kernel cannot know). The Fuchsia-shaped fix — a spawn-time *clean* Territory that the runner populates — is the follow-on; it also removes the host's mounts from the container's `/proc/<pid>/ns`.
 
+#### 9.6.11 File locks: 9P byte-range locks (B-3h)
+
+Decided by operator votes 34 and 35 (2026-10-29,
+`dec-2026-10-29-b3h-file-locks`), on top of `dec-2026-10-14-b3-sqlite-9p-locks`.
+A file lock is a byte-range lock held by the file server: the kernel forwards
+it as 9P2000.L `Tlock`/`Tgetlock` and keeps no lock table of its own. Plan 9
+has no byte-range locks, so the semantics are Linux's, and the wire is
+9P2000.L's.
+
+**The call.** `SYS_FILE_LOCK = 137` (x0 `fd`, x1 `op`, x2 `start`, x3 `len`,
+x4 `out`). `op` holds the type (`LOCK_RD` 0, `LOCK_WR` 1, `LOCK_UN` 2) and three
+bits: `LOCK_WAIT` (0x10), `LOCK_TEST` (0x20) and `LOCK_PROC` (0x40). Any other
+bit answers `EINVAL`. `len` 0 means to the end of the file, as in `struct
+flock`; a range that would pass 2^64 answers `EINVAL`. `LOCK_WR` needs a
+descriptor open for writing and `LOCK_RD` one open for reading (`EBADF`), as
+POSIX asks. TEST asks for neither. The answer is 0 or `-EAGAIN` (held by another
+owner), `-ENOLCK`, `-EBADF`, `-EINVAL` or `-EINTR`. A file whose Dev serves no
+locks answers `ENOLCK`, as Linux's NFS does without its lock daemon. In v1.0
+only dev9p serves them.
+
+**Two owners.** A lock belongs to exactly one owner, and two owners conflict
+when their ranges overlap and either lock is a write lock.
+- **The open file** (no `LOCK_PROC`). The lock is taken on the Spoor's own fid,
+  so it is Stratum's per-fid owner: Linux's open-file-description (OFD)
+  semantics. A dup, an inherited descriptor or a passed handle names the same
+  open file and shares its locks. They last until that open file's last close,
+  which clunks the fid. `flock` and `F_OFD_*` use this owner, and so do native
+  programs by default.
+- **The Proc** (`LOCK_PROC`). This is POSIX `F_SETLK`. Linux's POSIX owner is
+  the descriptor table, and here the descriptor table is the Proc's handle
+  table. For each file it locks, the Proc holds one extra fid, clone-walked from
+  the descriptor that took the lock, and the lock is taken on that fid. The
+  fids are kept with the handle table: the Proc's threads share them, rfork does
+  not copy them (the child starts with none), and exec keeps them. Closing any
+  of the Proc's descriptors on that file drops all of them. So does the handle
+  table's teardown at exit. "That file" means the same 9P session, `qid.path`
+  and inode generation. The same file reached through two sessions is two files
+  here, an edge Linux has no counterpart for. The table is bounded per Proc
+  (I-32); past the bound a new file answers `ENOLCK`.
+
+**Waiting.** Stratum never waits. A conflict answers BLOCKED, and 9P2000.L
+leaves the retry to the client. Without `LOCK_WAIT` the call answers `EAGAIN`.
+With it, the kernel retries with a bounded backoff, and a note ends the wait
+with `EINTR` (the wait is marked interruptible, section 8.8.3, whose Linux list already
+names `F_SETLKW`); a kill unwinds it as it unwinds every sleep (8.8.1). Neither Stratum nor the kernel detects deadlock, so a waiting lock
+never answers `EDEADLK`. Linux's OFD locks do not detect it either.
+
+**Testing.** `LOCK_TEST` sends `Tgetlock` and changes nothing. If the lock
+would be granted, it writes `LOCK_UN` to `out`. If not, it writes the first
+conflicting lock's type and range: `out = { u8 type; u64 start; u64 len; s32 pid
+}`, with `pid` -1, because an owner here is not a process. That matches Linux's
+answer for an OFD lock.
+
+**The server's table follows POSIX ranges.** A lock request by an owner that
+already holds part of the range replaces that part atomically: an upgrade, a
+downgrade, or a split. An unlock trims and splits the owner's locks, and
+`Rgetlock` reports the conflicting lock itself. The table is bounded, and past
+the bound a request answers `ENOLCK`. Stratum's B-3h change makes it so. Before
+it, a same-owner overlap stacked and an unlock matched only an exact range,
+which SQLite's EXCLUSIVE-to-SHARED downgrade and its two-byte PENDING+RESERVED
+unlock both trip over.
+
+**Lock-to-unlock consistency.** dev9p caches what it read: the Larder's pages
+and attributes, a cached open's snapshot (FID-LIFECYCLE 3.3) and an open file's
+write-behind run (LARDER-DESIGN 12). A lock holder must see the last holder's
+writes, as with NFS and Linux's v9fs, so:
+- **Taking a lock** drops this file's Larder attributes and pages, so the next
+  read goes to the server. An affected open stops serving its snapshot: the
+  locking open for an open-file lock, or every open of the file in the Proc's
+  table for a Proc lock. A cached open has no fid, and an open needs one to
+  lock. It re-walks the run that minted it from the walk start it keeps, and
+  accepts the result only if it reaches the same `qid.path` and generation. If
+  the file was renamed away, unlinked or replaced, the lock answers `ESTALE`
+  and binds nothing, and the fd's reads keep serving its snapshot.
+- **Releasing a lock** flushes the write-behind run first: the open's own run
+  for an open-file lock, or the run of every open of the file in the Proc's
+  table for a Proc lock. This applies to an unlock and to the close that drops
+  a lock, and the release is sent after the flush returns.
+
+**Pouch.**
+- `fcntl` `F_SETLK`, `F_SETLKW` and `F_GETLK` use the Proc owner.
+  `F_OFD_SETLK`, `F_OFD_SETLKW` and `F_OFD_GETLK` use the open file (`l_pid`
+  must be 0).
+- `l_whence` is resolved in Pouch: `SEEK_CUR` from the descriptor's offset,
+  `SEEK_END` from `fstat`. A negative `l_len` is normalised. Both are read when
+  the call is made, which advisory locking tolerates.
+- `flock` takes a whole-file lock on the open file and waits unless `LOCK_NB`
+  is given; a conflict answers `EWOULDBLOCK`.
+- Every kind of lock goes to one server table, so `flock` and `fcntl` locks
+  interact. Linux's NFS client behaves the same; Linux's local filesystems
+  keep them apart.
+- Vivarium's `fcntl` lock family still answers ENOSYS; it can reuse this call.
+
+**Invariant posture.** No new section-28 invariant. It composes:
+- **I-11**: a lock fid's identity is stable for its owner's life.
+- **I-32**: the Proc table is bounded and fails clean with `ENOLCK`.
+- **I-9**: the wait loop parks interruptibly and loses no note.
+- **I-38**: lock-to-unlock consistency strengthens close-to-open; it never
+  weakens it.
+- **I-33**: a cached open's re-walk follows the names it kept only as a hint,
+  checked by `qid.path` and generation, never trusted.
+
+The call, the owner table, the dev9p lock path and the Stratum table are
+audit-bearing (`docs/AUDIT-TRIGGERS.md`, row added with the code).
+
 ### 9.7 The per-Proc environment group (`/env`, G15)
 
 Each Proc carries an **environment group** — a ref-counted table of name→value pairs, surfaced as a per-Proc `/env` directory. This is the Plan 9 `Egrp` / `devenv` idiom, and it is the v1.0 answer to **environment variables (G15)**: in Thylacine's native ABI the environment is a *namespace object*, not a syscall argument — written and read as files. (A spawner may name its child's environment in a spawn-record tail, below, and exec projects `/env` onto a new image's stack as its `envp`; `/env` stays the environment's one home.)

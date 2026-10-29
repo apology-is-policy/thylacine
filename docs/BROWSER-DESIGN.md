@@ -458,6 +458,13 @@ upstream layout (`/etc/fonts`, `/usr/share/fontconfig`), and `/lib/font` holds
 the vendored DejaVu Sans Condensed and IBM Plex Sans plus DejaVu Sans, Serif
 and Sans Mono (`dec-2026-10-21-fontconfig-layout-dejavu`).
 
+Decided 2026-10-29 (operator votes 34 and 35, B-3h): one lock call,
+`SYS_FILE_LOCK(fd, op, start, len, out)`, names its owner -- the open file
+(`flock`, `F_OFD_*`, native programs) or the Proc's descriptor table (POSIX
+`F_SETLK`, through one extra fid per Proc and file) -- and the server's lock
+table takes POSIX range semantics (`dec-2026-10-29-b3h-file-locks`; ARCH
+9.6.11).
+
 **P4. Rust `std` for Thylacine.** Needed by: Servo, Ladybird, Gecko,
 SpiderMonkey. A `target_family = "unix"` target over the Pouch libc: a
 `rustc_target` spec, a `libc` crate module (the larger half), `std::os::thylacine`,
@@ -871,7 +878,7 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-3f | FreeType without HarfBuzz (to break the cycle), HarfBuzz over it and ICU, then FreeType again with HarfBuzz, as distributions build it; through meson. | FreeType's meson tests on the device (5, issue-1441 with HarfBuzz among them) and HarfBuzz's 76 compiled ones; skipped and listed: its GLib suites (`test/api`, `test/shape`, `test/subset`, which need `hb-shape` and `hb-subset`, built only with GLib) and five Python checks of its source tree (`dec-2026-10-14-b3-test-bar`) |
 | B-3f' | kernel + Pouch (before B-3g, which scans font trees; voted 2026-10-20, `dec-2026-10-20-native-lstat-readlink`): the native `SYS_READLINK` (135) and `SYS_LSTAT` (136) over the phenotype's cores; Pouch's `lstat`, `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlink` on them, `open`'s `O_NOFOLLOW`, `O_PATH` and `O_DIRECTORY`, and `lchmod` refusing a link. Audit-bearing. | kernel tests; a Pouch census on real links in the pool (live, dangling, to a directory, a loop), each leg RED on the old libc, and the legs the kernel serves RED on a sabotaged kernel (the suite cannot see the handlers' glue: kernel tests have no user half); audit closed |
 | B-3g | fontconfig 2.18 with libxml2; host gperf; Pouch `link`/`linkat` answer `EPERM` (voted 2026-10-21); upstream layout (`/etc/fonts`, `/usr/share/fontconfig`), no system cache; `/lib/font` = DejaVu (Sans, Sans Condensed, Serif, Sans Mono) + IBM Plex Sans. | fc-match against the fixed font set (sans-serif, serif, monospace each a real face); fontconfig's compiled C tests under Pouch, its pytest suite listed as skipped; the `link` leg RED on the old libc |
-| B-3h | kernel + Pouch: the 9P `Tlock`/`Tgetlock` client and a native lock call; Pouch `fcntl` `F_SETLK`/`F_SETLKW`/`F_GETLK` and `flock`. Audit-bearing. | kernel tests against Stratum's lock table; two Procs contending, each RED once; audit closed |
+| B-3h | Stratum's lock table takes POSIX ranges; kernel: the 9P `Tlock`/`Tgetlock` client, `SYS_FILE_LOCK` with both owners (votes 34 and 35, ARCH 9.6.11) and lock-to-unlock consistency in dev9p; Pouch `fcntl` `F_SETLK`/`F_SETLKW`/`F_GETLK`, `F_OFD_*` and `flock`. Audit-bearing. | kernel tests against Stratum's lock table; two Procs contending, each RED once; audit closed |
 | B-3i | SQLite in EXCLUSIVE locking mode on the unix VFS over B-3h's locks. | fuzzcheck, mptest, speedtest1 |
 | B-3j | OpenSSL 3.5 LTS; CPU features through `getauxval`. | its compiled C tests with their data (evp_test) |
 | B-3k | Pouch: a socket's number becomes a kernel descriptor (B-3b's dup onto it), the table past eight sockets; `select()`/`FD_SET` on sockets. Audit-bearing. | `pouch-hello-sockets` legs: 64 sockets, `select` on one; audit closed |
