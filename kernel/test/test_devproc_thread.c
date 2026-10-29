@@ -128,23 +128,28 @@ struct dt_ent {
     u8   qtype;
 };
 
+// The most entries one readdir call of the last dt_list returned.
+static int g_dt_list_max_run;
+
 // List directory `c` through readdir in runs of at most `chunk` bytes, resuming
 // from each run's last cookie as SYS_READDIR does. Returns the entry count (the
 // first `max` are kept), or the first negative return. *increasing says every
 // cookie exceeded the one before it.
 static int dt_list(struct Spoor *c, long chunk, struct dt_ent *ents, int max,
                    bool *increasing) {
-    u8 buf[256];
+    static u8 buf[1024];
     if (chunk > (long)sizeof(buf)) chunk = (long)sizeof(buf);
     s64 off = 0;
     int n = 0;
     u64 last = 0;
     *increasing = true;
+    g_dt_list_max_run = 0;
     for (int pass = 0; pass < 4096; pass++) {
         long got = devproc.readdir(c, buf, chunk, off);
         if (got < 0)  return (int)got;
         if (got == 0) return n;
         long pos = 0;
+        int run = 0;
         while (pos + 24 <= got) {
             u32 nlen = (u32)buf[pos + 22] | ((u32)buf[pos + 23] << 8);
             if (pos + 24 + (long)nlen > got) break;
@@ -165,8 +170,10 @@ static int dt_list(struct Spoor *c, long chunk, struct dt_ent *ents, int max,
                 ents[n].qtype  = buf[pos];
             }
             n++;
+            run++;
             pos += 24 + (long)nlen;
         }
+        if (run > g_dt_list_max_run) g_dt_list_max_run = run;
         off = (s64)last;
     }
     return -999;   // never reached its end
@@ -595,6 +602,22 @@ void test_devproc_readdir_lists_every_dir(void) {
         if (dt_streq(ents[i].name, nm)) root_tgt++;
     }
     long tiny = root ? devproc.readdir(root, ents, 10, 0) : -2;   // no entry fits in 10 bytes
+
+    // (a2) The root again in runs large enough that one call carries on past a
+    //      pass's batch, the continuation the one-entry runs above never reach.
+    bool big_inc = false;
+    int nbig = root ? dt_list(root, 1024, ents, 512, &big_inc) : -2;
+    int big_run = g_dt_list_max_run;
+    int big_hits = 0, big_kproc = 0, big_tgt = 0;
+    for (int i = 0; i < nbig && i < 512; i++) {
+        for (int j = 0; j < nextra; j++) {
+            dt_udec(nm, (u64)extra[j]->pid);
+            if (dt_streq(ents[i].name, nm)) big_hits++;
+        }
+        if (dt_streq(ents[i].name, "0")) big_kproc++;
+        dt_udec(nm, (u64)f.pid);
+        if (dt_streq(ents[i].name, nm)) big_tgt++;
+    }
     if (root) spoor_unref(root);
 
     // (b) The pid directory: its files in table order, then thread/.
@@ -664,6 +687,11 @@ void test_devproc_readdir_lists_every_dir(void) {
     TEST_EXPECT_EQ(root_kproc, 1, "kproc is listed once");
     TEST_EXPECT_EQ(root_tgt, 1, "the target is listed once");
     TEST_EXPECT_EQ(tiny, (long)-1, "a buffer no entry fits is refused");
+    TEST_ASSERT(big_run > 16, "one large run carried on past a pass's batch of 16");
+    TEST_ASSERT(big_inc, "the large runs' cookies only increase");
+    TEST_EXPECT_EQ(big_hits, nextra, "in large runs every extra Proc is listed exactly once");
+    TEST_EXPECT_EQ(big_kproc, 1, "in large runs kproc is listed once");
+    TEST_EXPECT_EQ(big_tgt, 1, "in large runs the target is listed once");
     TEST_ASSERT(pid_ok, "the pid directory lists its files in order, then thread/");
     TEST_ASSERT(pid_inc, "the pid directory's cookies only increase");
     TEST_EXPECT_EQ(past, (long)0, "a cookie past the last entry ends the listing");
