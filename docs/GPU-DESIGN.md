@@ -2529,6 +2529,101 @@ here, at the read gate (`gl_adoption`, the exact bound) and at the door
 (`wbo_create`, keyed on the one format whose bytes-per-texel can be asserted —
 a general floor would reject legitimate compressed textures).
 
+#### 4.5.15 The synchronous deadline is a two-stage latch: STALLED, then DEAD (decided 2026-10-29, operator vote 29)
+
+**What it replaces.** A synchronous chain that saw `SUBMIT_DEADLINE_MS`
+(500 ms) of stale wakes latched `Controlq.dead`, permanently (§4.5.13 widens
+the deadline to `FENCE_ABANDON_MS` while a readback is in flight). The latch
+answers the #31 cascade: a late completion writing a response buffer that the
+next command has already reused. Because it was permanent, any host stall past
+500 ms cost the display for the boot. It was measured on thyla-pi on
+2026-10-29: QEMU's main loop froze for 5.4-5.9 s behind a full console pty (a
+harness defect, fixed by the socket transport), lictor latched, and the
+abandoned chain retired 1 ms later on a healthy device. Any host freeze does
+the same, whether a loaded KVM host, a stopped QEMU or a live migration. The
+cursor queue carried the same 500 ms deadline with a permanent poison.
+
+**Heritage.** Plan 9 has no GPU; devdraw is software. Linux virtio-gpu never
+declares its device dead: its control-queue waits have no timeout, and the
+display-info wait gives up after 5 s and carries on. Windows TDR (detect at
+2 s, reset, recover) and drm_sched's `timedout_job` both recover after a
+timeout, and neither latches. A TDR-style device reset would force tapestryd
+to rebuild every resource. Waiting 30 s on every synchronous command would
+block the serve loop, and seat input with it. Neither was taken.
+
+**The rule.**
+
+- **STALLED at the deadline.** The command whose chain missed the deadline
+  fails, and its outcome is *unknown*, because the device may still execute
+  it. Its chain stays outstanding (`sync_pending`, and `sync2_pending` for a
+  batched pair, remain set). Nothing is abandoned, and the serve loop stays
+  live, so seat input keeps pumping. While the engine is stalled it refuses
+  every new submission:
+  - synchronous ones, because they would reuse the outstanding chain's
+    descriptors and response buffer. This is the #31 hazard made structural:
+    no synchronous chain is published while one is outstanding.
+  - fenced ones, with the retryable `E_AGAIN`, since the device is behind,
+    not gone.
+  - cursor commands.
+- **REVIVE when the chain retires.** The serve loop's completion pump drains
+  the used ring as it always does. The late id-0 or `SYNC2_HEAD` entry goes
+  through the ordinary path, which clears its pending flag. Once no synchronous
+  chain is outstanding the engine is live again, and it says how late the chain
+  was. The late response lands in a buffer no command has reused, and nothing
+  reads it.
+- **DEAD at `FENCE_ABANDON_MS` without a retirement.** A stall that lasts the
+  fenced lane's own abandonment bound (30 s) means a dead device. The latch is
+  then the old one: permanent, with every fenced slot released as abandoned.
+- **Retirements park while stalled.** `all_work_retired` is false during a
+  stall, because the chain is outstanding, so the broker parks a retirement.
+  The park ends in one of three ways:
+  - revival, after which the retirement runs;
+  - death, after which `quiescence_unreachable` admits it and `execute`
+    refuses it with its pins kept;
+  - the 30 s park bound.
+  A stall is not unreachable quiescence. It is the one non-quiescent state
+  that comes back by itself.
+- **An unknown outcome keeps what it named.** A stalled command may have
+  executed, so every guest resource it named stays referenced:
+  - a stalled ATTACH keeps its pins, as `Device::attach` already does for any
+    error;
+  - a stalled DETACH or UNREF releases nothing;
+  - a stalled CREATE consumes its id, because the reservation precedes the
+    command and is never undone;
+  - a stalled hostmem MAP or UNMAP leaks its extent (`mint_host3d_ring`,
+    `drop_host3d_ring`).
+  A stalled SET_SCANOUT is the case a permanent latch never had to answer: once
+  the device catches up, the display may name the resource the bind carried, so
+  that resource is *condemned*. Its free is then deferred to the next accepted
+  bind, exactly as a refused unbind's is. The price is a leak per stall, the
+  same posture as an abandoned fence.
+- **Before the serve loop, the deadline is `FENCE_ABANDON_MS`.** STALLED
+  exists to keep the serve loop live. lictor's own bring-up (`Gpu::probe`,
+  `Screen::new`) runs before any loop, seat or client exists, so a bring-up
+  command waits out the full bound. A slow device at boot is ridden through,
+  and a dead one fails bring-up at 30 s. Without this, a stall at boot would
+  read as a device refusal and cost 3D for the boot.
+- **The cursor queue follows the same two stages.** A missed deadline leaves
+  its chain outstanding, so the queue is not idle: cursor commands are refused
+  and `all_work_retired` is false. The completion pump retires the chain when
+  its used entry arrives, with the validation an on-time completion gets, and a
+  malformed entry still poisons the queue. A chain outstanding for
+  `FENCE_ABANDON_MS` poisons it permanently, as before.
+
+**What a stall costs tapestryd.** Every request tapestryd makes during a stall
+fails at once, so tapestryd stays responsive and the present path skips
+frames. Its composition health tick fails closed, though (§4.5.12), and
+latches GPU composition OFF, sticky. Until that tick learns to tell a stall
+from a context latch, a stall can cost GPU composition for the boot while CPU
+composition carries on. That fix is owed in tapestryd (OPEN-BUGS 2026-10-29
+06:39Z).
+
+**Witness.** `ls-gpu-dead` arms a two-shot lever (`thylacine.test-latch-dead`).
+On the first marked retirement it injects a deadline miss whose chain the
+device then retires: the engine revives and the destroy succeeds. On the
+second it injects one whose retirement is withheld: the engine dies at 30 s
+and the destroy is refused, its pins kept.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:
