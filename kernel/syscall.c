@@ -26,6 +26,7 @@
 #include <thylacine/env.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
+#include <thylacine/filelock.h>
 #include <thylacine/handle.h>
 #include <thylacine/image.h>           // D-3: the FILE mmap arm shares exec's Image cache
 #include <thylacine/irqfwd.h>
@@ -16945,6 +16946,14 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_lstat_handler(ctx->regs[0],   // path_va
                                               ctx->regs[1],   // path_len
                                               ctx->regs[2]);  // stat_va
+        return;
+
+    case SYS_FILE_LOCK:
+        ctx->regs[0] = (u64)sys_file_lock_handler(ctx->regs[0],   // fd
+                                                  ctx->regs[1],   // op
+                                                  ctx->regs[2],   // start
+                                                  ctx->regs[3],   // len
+                                                  ctx->regs[4]);  // out_va
         return;
 
     case SYS_GETUID:

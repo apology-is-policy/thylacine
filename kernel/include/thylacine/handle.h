@@ -164,7 +164,7 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 // clean-refusal I-32 semantics; measured on thyla-pi KVM, the lift (with
 // the session-fid and tapestryd-fid lifts) took GLQuake from a 2323-OOM
 // dispatch-wedge storm at 0.6 fps to a zero-refusal 44.7 fps run. Table =
-// 8 + bitmap + 24*1024 ~= 24.7 KiB, kmalloc-backed via alloc_pages
+// 8 + bitmap + lock owners + 24*1024 ~= 26.1 KiB, kmalloc-backed via alloc_pages
 // (handle.c) -- far past SLUB_MAX_OBJECT_SIZE either way. The growable
 // table (a two-level fdtable keyed by hidx_t, the Linux model) remains
 // the v1.x design once a Proc needs >> 1024; it touches the #844
@@ -184,10 +184,35 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 //
 // NOT IN struct Handle, also because that struct has no slack: 8 + 4 + 4 + 8 is
 // exactly the 24 its _Static_assert pins. A u32 there grows it to 32, taking the
-// table from 24712 to 32904 bytes -- across the order-3 alloc_pages boundary
+// table from 26760 to 34952 bytes -- across the order-3 alloc_pages boundary
 // into order-4, doubling the physical allocation to carry one bit per slot.
 // The bitmap costs 128 bytes total.
 #define HANDLE_CLOEXEC_WORDS ((PROC_HANDLE_MAX + 63) / 64)
+
+// B-3h (ARCH 9.6.11): the Proc owner of SYS_FILE_LOCK_PROC locks. Linux's POSIX
+// lock owner is the descriptor table, so the entries live with this table: one
+// per file the Proc has locked, each an UNOPENED Spoor naming that file with its
+// own server-side owner (Dev.lock_owner). Threads share them; rfork copies none
+// (the child's table starts empty); exec keeps them. A close of any descriptor
+// naming the file lands the file's staged writes, unlocks the whole file through
+// the entry, and drops the entry unless a lock call is using it. Bounded (I-32):
+// a new file past the bound answers -T_E_NOLCK.
+//
+// `users` counts lock calls between handle_lock_owner_get and _put. Only a close
+// (or the table's teardown) removes an entry, and a close removes it only when
+// no call is using it: the server orders the close's unlock against an in-flight
+// call's request, so either order is a true history (the close before the
+// request, or the request before the close), and an entry left behind holds
+// nothing a later close or the teardown will not drop.
+#define PROC_LOCK_OWNER_MAX 128
+
+struct Spoor;
+
+struct lock_owner_ent {
+    struct Spoor *spoor;    // ref-held by the table; NULL = free
+    u32           users;
+    u32           granted;  // a lock was ever granted on it (else it holds none)
+};
 
 struct HandleTable {
     // #844: serializes all slot ops (alloc / close / get / dup) -- the Plan 9
@@ -201,16 +226,23 @@ struct HandleTable {
     //
     // The lock covers `cloexec` too: the flag is read and written by the same
     // peer threads that race over the slots, so it takes the same protection.
+    //
+    // It covers the lock-owner entries as well, for the same reason.
     spin_lock_t   lock;
-    u32           _pad_lock;
+    u32           nlockowners;   // live entries: lockowners[0, nlockowners)
     u64           cloexec[HANDLE_CLOEXEC_WORDS];
+    struct lock_owner_ent lockowners[PROC_LOCK_OWNER_MAX];
     struct Handle slots[PROC_HANDLE_MAX];
 };
 
+_Static_assert(sizeof(struct lock_owner_ent) == 16, "lock_owner_ent: 16 bytes");
 _Static_assert(sizeof(struct HandleTable) ==
-                   8 + 8 * HANDLE_CLOEXEC_WORDS + 24 * PROC_HANDLE_MAX,
-               "HandleTable size pinned at 8 (lock + pad) + the cloexec bitmap "
-               "+ PROC_HANDLE_MAX * sizeof(Handle)");
+                   8 + 8 * HANDLE_CLOEXEC_WORDS + 16 * PROC_LOCK_OWNER_MAX +
+                   24 * PROC_HANDLE_MAX,
+               "HandleTable size pinned at 8 (lock + count) + the cloexec bitmap "
+               "+ the lock owners + PROC_HANDLE_MAX * sizeof(Handle)");
+_Static_assert(sizeof(struct HandleTable) <= 32768,
+               "the table stays one order-3 allocation");
 _Static_assert(HANDLE_CLOEXEC_WORDS * 64 >= PROC_HANDLE_MAX,
                "the cloexec bitmap must cover every slot -- a short bitmap "
                "would silently drop the flag on the high slots");
@@ -504,6 +536,28 @@ struct handle_status {
     bool nonblock;
 };
 int handle_get_status(struct Proc *p, hidx_t h, struct handle_status *out);
+
+// B-3h (ARCH 9.6.11): the Proc owner's entries (struct lock_owner_ent above).
+//
+// handle_lock_owner_get -- find the Proc's lock owner for c's file and mark it
+// in use; with `mint`, create it through c's Dev when there is none (outside the
+// table lock; a peer's racing insert is adopted). 0 with *out ref-held, or with
+// *out NULL when there is none and `mint` is false; -T_E_NOLCK when c's Dev
+// serves no locks or the table is full; else the mint's errno. Every 0 with a
+// non-NULL *out pairs with exactly one handle_lock_owner_put, whose `granted`
+// says the call's lock was taken. An entry no call ever took a lock on holds
+// none, so the put that leaves it unused removes it: a slot is spent only on
+// an owner that has locked something.
+int  handle_lock_owner_get(struct Proc *p, struct Spoor *c, bool mint,
+                           struct Spoor **out);
+void handle_lock_owner_put(struct Proc *p, struct Spoor *owner, bool granted);
+
+// Run Dev.lock_sync(how) on every Spoor in p's table that names owner's file.
+// May sleep; takes no lock across a sync.
+void handle_lock_sync_file(struct Proc *p, struct Spoor *owner, u32 how);
+
+// Diagnostics: p's live lock-owner entries.
+u32  handle_lock_owner_count(struct Proc *p);
 
 // #151: close every handle whose close-on-exec flag is set. Returns the number
 // closed. Called from execve AFTER the commit point, for two reasons that pull

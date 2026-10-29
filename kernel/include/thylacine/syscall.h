@@ -2599,6 +2599,22 @@ enum {
     //   unwritable stat_va.
     SYS_LSTAT = 136,
 
+    // SYS_FILE_LOCK(fd, op, start, len, out_va) -> 0 / -errno
+    //   A byte-range lock held by the file's server (ARCH 9.6.11; operator
+    //   votes 34-35). op = a type (SYS_FILE_LOCK_RD / _WR / _UN) | _WAIT |
+    //   _TEST | _PROC; any other bit, or type 3, is -T_E_INVAL. len 0 runs to
+    //   the end of the file; a range past 2^64 is -T_E_INVAL. _PROC makes the
+    //   Proc the owner (POSIX F_SETLK); without it the open file is (OFD,
+    //   flock). _WR needs a descriptor open for writing and _RD one open for
+    //   reading (-T_E_BADF); _UN and _TEST need neither. -T_E_AGAIN when
+    //   another owner holds a conflicting lock; _WAIT retries until it does
+    //   not, and a caught note ends the wait with -T_E_INTR where the caller's
+    //   waits are note-interruptible (ARCH 8.8.3). _TEST changes nothing and
+    //   writes a struct t_file_lock to out_va (-T_E_FAULT if it cannot); a
+    //   test of _UN is -T_E_INVAL. -T_E_NOLCK when the file's Dev serves no
+    //   locks, the server refuses, or the Proc's owner table is full.
+    SYS_FILE_LOCK = 137,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2637,6 +2653,45 @@ _Static_assert(((SYS_HANDLE_CLOSE_ON_EXEC | SYS_HANDLE_DUP_LOWEST) &
                 (SYS_HANDLE_STATUS_OMODE_MASK | SYS_HANDLE_STATUS_NONBLOCK |
                  SYS_HANDLE_STATUS_APPEND)) == 0,
                "the status bits never overlap a flag DUP_TO or SET accepts");
+
+// SYS_FILE_LOCK's op word (x1): the lock type in the low bits, three flags
+// above it. The type values and the TEST answer's are 9P2000.L's
+// (P9_LOCK_TYPE_*), so they cross the wire unchanged. ABI: mirrored by
+// libthyla-rs and Pouch.
+#define SYS_FILE_LOCK_RD        0u
+#define SYS_FILE_LOCK_WR        1u
+#define SYS_FILE_LOCK_UN        2u
+#define SYS_FILE_LOCK_TYPE_MASK 0xfu
+#define SYS_FILE_LOCK_WAIT      0x10u
+#define SYS_FILE_LOCK_TEST      0x20u
+#define SYS_FILE_LOCK_PROC      0x40u
+#define SYS_FILE_LOCK_FLAGS_ALL (SYS_FILE_LOCK_WAIT | SYS_FILE_LOCK_TEST | \
+                                 SYS_FILE_LOCK_PROC)
+_Static_assert(SYS_FILE_LOCK_RD == 0u && SYS_FILE_LOCK_WR == 1u &&
+               SYS_FILE_LOCK_UN == 2u && SYS_FILE_LOCK_WAIT == 0x10u &&
+               SYS_FILE_LOCK_TEST == 0x20u && SYS_FILE_LOCK_PROC == 0x40u,
+               "file lock op ABI: mirrored by libthyla-rs and Pouch");
+_Static_assert((SYS_FILE_LOCK_FLAGS_ALL & SYS_FILE_LOCK_TYPE_MASK) == 0,
+               "no flag overlaps the type field");
+
+// SYS_FILE_LOCK's TEST answer: type SYS_FILE_LOCK_UN when the lock would be
+// granted (start and len then echo the request), else the first conflicting
+// lock's type and range (len 0 = to the end of the file). pid is always -1:
+// an owner here is an open file or a Proc's table, never a process id, which
+// is Linux's answer for an OFD lock.
+struct t_file_lock {
+    u8  type;
+    u8  _pad0[7];
+    u64 start;
+    u64 len;
+    s32 pid;
+    u32 _pad1;
+};
+_Static_assert(sizeof(struct t_file_lock) == 32, "t_file_lock ABI: size");
+_Static_assert(__builtin_offsetof(struct t_file_lock, type)  == 0,  "t_file_lock ABI: type@0");
+_Static_assert(__builtin_offsetof(struct t_file_lock, start) == 8,  "t_file_lock ABI: start@8");
+_Static_assert(__builtin_offsetof(struct t_file_lock, len)   == 16, "t_file_lock ABI: len@16");
+_Static_assert(__builtin_offsetof(struct t_file_lock, pid)   == 24, "t_file_lock ABI: pid@24");
 
 // SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
 // T_CONSOLE_EPISODE_* and docs/ERRORS.md.

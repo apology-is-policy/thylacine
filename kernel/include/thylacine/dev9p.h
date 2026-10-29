@@ -105,6 +105,10 @@ struct dev9p_priv {
     // that misbehaved once is clunked at close, never re-served.
     u64                fid_gen;
     bool               fid_suspect;
+    // B-3h: this fid is a Proc lock owner (dev9p_lock_owner), so it may carry
+    // server-side locks: its close clunks it, and never parks it in the
+    // dir-fid cache, where a later consumer would inherit the locks.
+    bool               fid_locks;
     // #99 (#102 errno-loss): the last dev9p_create failure's real errno, in the
     // syscall passthrough range (e.g. -T_E_EXIST on a racing/duplicate create).
     // Transient create-path state: born 0 (kzalloc), set by dev9p_create on a

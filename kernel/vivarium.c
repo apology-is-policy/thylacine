@@ -43,12 +43,20 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is rt_sigtimedwait
-// (137); execve (221) is the newest. If the ceiling ever rises past one of
+// rather than by a per-number one. The lowest such number is rt_sigqueueinfo
+// (138); execve (221) is the newest. If the ceiling ever rises past one of
 // these, the build stops and the reader is forced back to the argument instead
 // of inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RT_SIGTIMEDWAIT > VIV_NATIVE_CEILING,
-               "rt_sigtimedwait's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_RT_SIGQUEUEINFO > VIV_NATIVE_CEILING,
+               "rt_sigqueueinfo's collision argument is the ceiling one");
+// Linux rt_sigtimedwait (137) collides with SYS_FILE_LOCK (votes 34-35). Its
+// row is VIV_ENOSYS, and viv_linux_dispatch returns before the native switch
+// for every row that is not TRANSLATED, so a Linux Proc never reaches the
+// native lock call -- test_vivarium pins the verdict. A native program
+// mis-declared as Linux loses its locks to ENOSYS, which takes nothing. A change
+// of the row to TRANSLATED must re-argue this.
+_Static_assert(VIV_LINUX_RT_SIGTIMEDWAIT == SYS_FILE_LOCK,
+               "revisit rt_sigtimedwait / FILE_LOCK collision on renumber");
 // Linux rt_sigprocmask (135) collides with SYS_READLINK, and rt_sigpending
 // (136) with SYS_LSTAT (vote 2026-10-20). rt_sigprocmask's row is VIV_TIER2
 // (vivarium_sigprocmask_decide and its shell) and rt_sigpending's VIV_ENOSYS;

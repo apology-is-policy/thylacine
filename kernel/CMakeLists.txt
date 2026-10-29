@@ -59,6 +59,7 @@ set(KERNEL_SRCS
     ../mm/phys.c
     ../mm/slub.c
     territory.c
+    filelock.c
     handle.c
     burrow.c
     pagemap.c
@@ -151,6 +152,7 @@ set(KERNEL_TEST_SRCS
     test/test_territory.c
     test/test_territory_mount.c
     test/test_territory_chroot.c
+    test/test_filelock.c
     test/test_handle.c
     test/test_burrow.c
     test/test_image.c

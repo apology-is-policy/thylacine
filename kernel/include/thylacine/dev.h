@@ -43,6 +43,10 @@ struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on
 struct poll_snap;   // <thylacine/poll.h>; a remote fd's snapshot slot (.poll_snapshot)
 struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
 struct t_timespec;  // <thylacine/syscall.h>; a SYS_WSTAT time
+struct t_file_lock; // <thylacine/syscall.h>; SYS_FILE_LOCK's TEST answer
+
+// Dev.lock_sync's `how`.
+#define DEV_LOCK_SYNC_RELEASE 1u
 
 // Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
 // non-9P Devs and the resolver need no wire header; dev9p _Static_asserts
@@ -358,6 +362,31 @@ struct Dev {
     // (DISTRO 4.6). Read lock-free, so the answer must be fixed before c's
     // session published. NULL-permitted: a NULL slot is never remote.
     bool           (*remote)(struct Spoor *c);
+
+    // File locks (B-3h; ARCH 9.6.11). The lock state lives in the file's
+    // server; these slots only forward to it. All four are NULL-permitted
+    // together: a Dev with no .lock answers SYS_FILE_LOCK -T_E_NOLCK. Each
+    // returns 0 or a specific -T_E_* (a server errno bounded first, the
+    // dev9p_wire_errno discipline).
+    //   lock(c, type, start, len, test) -- act as the owner c names: take
+    //     (SYS_FILE_LOCK_RD / _WR) or drop (_UN) the range on c's own fid, or,
+    //     with `test` non-NULL, ask without changing anything and fill *test.
+    //     Never waits: a conflict is -T_E_AGAIN, and the caller retries. A
+    //     granted take leaves c reading what the server holds (lock-to-unlock
+    //     consistency); a drop sends only after c's staged writes land.
+    //   lock_owner(c, err) -- mint an UNOPENED Spoor naming c's file with its
+    //     own server-side owner (dev9p: a zero-name clone of c's fid). It is
+    //     never published as a descriptor; only the Proc owner table holds
+    //     it. NULL with *err set on failure.
+    //   lock_same_file(a, b) -- do a and b name one file of one server? Called
+    //     under the handle-table spinlock: it must not block.
+    //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
+    //     before a lock on its file is dropped.
+    int            (*lock)(struct Spoor *c, u32 type, u64 start, u64 len,
+                           struct t_file_lock *test);
+    struct Spoor  *(*lock_owner)(struct Spoor *c, int *err);
+    bool           (*lock_same_file)(struct Spoor *a, struct Spoor *b);
+    int            (*lock_sync)(struct Spoor *c, u32 how);
 
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)

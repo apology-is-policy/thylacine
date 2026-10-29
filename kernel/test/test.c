@@ -716,6 +716,16 @@ void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_symlink_reads(void);
 void test_syscall_fstat_errnos(void);
+void test_filelock_refusals(void);
+void test_filelock_file_owner(void);
+void test_filelock_proc_owner(void);
+void test_filelock_close_drops(void);
+void test_filelock_wait(void);
+void test_filelock_failed_take_spends_no_slot(void);
+void test_filelock_bound(void);
+void test_filelock_close_mid_call(void);
+void test_filelock_proc_test_owner(void);
+void test_filelock_fork_exec_dup_teardown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -3010,6 +3020,16 @@ struct test_case g_tests[] = {
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_symlink_reads", test_syscall_dispatch_symlink_reads, false, NULL },
     { "syscall.fstat_errnos",          test_syscall_fstat_errnos,          false, NULL },
+    { "filelock.refusals", test_filelock_refusals, false, NULL },
+    { "filelock.file_owner", test_filelock_file_owner, false, NULL },
+    { "filelock.proc_owner", test_filelock_proc_owner, false, NULL },
+    { "filelock.close_drops", test_filelock_close_drops, false, NULL },
+    { "filelock.wait", test_filelock_wait, false, NULL },
+    { "filelock.failed_take_spends_no_slot", test_filelock_failed_take_spends_no_slot, false, NULL },
+    { "filelock.bound", test_filelock_bound, false, NULL },
+    { "filelock.close_mid_call", test_filelock_close_mid_call, false, NULL },
+    { "filelock.proc_test_owner", test_filelock_proc_test_owner, false, NULL },
+    { "filelock.fork_exec_dup_teardown", test_filelock_fork_exec_dup_teardown, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },

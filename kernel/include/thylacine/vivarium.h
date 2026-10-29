@@ -624,7 +624,12 @@ enum {
 // before the native switch, and each now argues its number on its own
 // (vivarium.c). The lowest row still argued by the ceiling is rt_sigtimedwait
 // (137), a VIV_ENOSYS row.
-#define VIV_NATIVE_CEILING 136
+//
+// Votes 34-35 (2026-10-29, dec-2026-10-29-b3h-file-locks) append SYS_FILE_LOCK
+// at 137, rt_sigtimedwait's number: a VIV_ENOSYS row consumed before the native
+// switch, which now argues its number on its own (vivarium.c). The lowest row
+// still argued by the ceiling is rt_sigqueueinfo (138), a VIV_ENOSYS row.
+#define VIV_NATIVE_CEILING 137
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

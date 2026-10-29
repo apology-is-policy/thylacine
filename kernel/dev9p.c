@@ -1884,7 +1884,7 @@ static int dev9p_close(struct Spoor *c) {
         // (if any) is clunked OUTSIDE the table lock.
         bool parked = false;
         if ((c->flag & COPEN) == 0 && (c->qid.type & QTDIR) &&
-            !p->fid_suspect &&
+            !p->fid_suspect && !p->fid_locks &&
             __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
             !larder_qid_staled_since(&p->client->larder, p->fid_gen,
                                      c->qid.path)) {
@@ -2221,6 +2221,125 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
 // byte stream into buf at the Spoor's offset; the caller advances `off` (the
 // SYS_READDIR handler passes c->offset and bumps it). Mirrors dev9p_read's
 // count/offset clamping.
+// =============================================================================
+// B-3h file locks (ARCH 9.6.11). The server's table holds every lock; these
+// forward to it as Tlock / Tgetlock and keep the client's caches honest around
+// them (lock-to-unlock consistency).
+// =============================================================================
+
+_Static_assert(SYS_FILE_LOCK_RD == P9_LOCK_TYPE_RDLCK &&
+               SYS_FILE_LOCK_WR == P9_LOCK_TYPE_WRLCK &&
+               SYS_FILE_LOCK_UN == P9_LOCK_TYPE_UNLCK,
+               "the SYS_FILE_LOCK types cross the wire unchanged");
+
+// A server that does not serve Tlock answers ENOSYS or EOPNOTSUPP: it has no
+// lock for us, which is ENOLCK (as NFS without its lock daemon).
+static int lock_wire_errno(int rc) {
+    rc = dev9p_wire_errno(rc);
+    if (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) return -T_E_NOLCK;
+    return rc;
+}
+
+// Land c's staged writes (its write-behind run, and a run another thread is
+// flushing) so that a lock released after this returns covers them. A close
+// that may not wait skips it: its run goes to a closer with its clunk.
+static int dev9p_lock_sync(struct Spoor *c, u32 how) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || how != DEV_LOCK_SYNC_RELEASE) return 0;
+    if (!p->wb_eligible || !close_may_wait()) return 0;
+    int rc = 0;
+    spin_lock(&p->wb_lock);
+    if (p->wb_len || p->wb_flushers)
+        rc = wb_flush_locked(p, c->qid.path);
+    spin_unlock(&p->wb_lock);
+    return rc;
+}
+
+static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
+                      struct t_file_lock *test) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -T_E_NOLCK;
+    // A cached open has no fid to lock on.
+    if (p->cached_open || p->fid == P9_NOFID) return -T_E_NOLCK;
+
+    if (test) {
+        struct p9_getlock gl;
+        int rc = p9_client_getlock(p->client, p->fid, (u8)type, start, len, &gl);
+        if (rc != 0) return lock_wire_errno(rc);
+        if (gl.type == P9_LOCK_TYPE_UNLCK) {
+            test->type  = SYS_FILE_LOCK_UN;
+            test->start = start;
+            test->len   = len;
+        } else if (gl.type == P9_LOCK_TYPE_RDLCK || gl.type == P9_LOCK_TYPE_WRLCK) {
+            test->type  = gl.type;
+            test->start = gl.start;
+            test->len   = gl.length;
+        } else {
+            return -T_E_IO;    // no such lock type: the server is not speaking 9P2000.L
+        }
+        test->pid = -1;
+        return 0;
+    }
+
+    if (type == SYS_FILE_LOCK_UN)
+        (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
+
+    u8 status = P9_LOCK_ERROR;
+    int rc = p9_client_lock(p->client, p->fid, (u8)type, 0, start, len, &status);
+    if (rc != 0) return lock_wire_errno(rc);
+    if (status == P9_LOCK_BLOCKED && type != SYS_FILE_LOCK_UN) return -T_E_AGAIN;
+    if (status != P9_LOCK_SUCCESS) return -T_E_NOLCK;   // ERROR, GRACE, or no status 9P defines
+
+    if (type != SYS_FILE_LOCK_UN) {
+        // The last holder's writes are on the server: read them from there.
+        // The invalidates log this qid, so a fill already in flight from before
+        // the grant is dropped rather than installed after it.
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+    }
+    return 0;
+}
+
+// A second owner on c's file: a zero-name clone of c's fid (the server admits
+// the clone of an open fid; ARCH 9.6.11). Unopened, never published.
+static struct Spoor *dev9p_lock_owner(struct Spoor *c, int *err) {
+    *err = -T_E_NOLCK;
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || p->cached_open || p->fid == P9_NOFID) return NULL;
+
+    struct Spoor *nc = spoor_clone(c);
+    if (!nc) return NULL;
+    struct dev9p_priv *np = NULL;
+    u32 nf = p9_client_alloc_fid(p->client);
+    if (nf != P9_NOFID) {
+        u16 nwqid = 0;
+        struct p9_qid qids[P9_MAX_WALK];
+        int rc = p9_client_walk(p->client, p->fid, nf, 0, NULL, NULL, &nwqid, qids);
+        if (rc == 0) {
+            np = priv_alloc(p->client, nf, /*fid_owned=*/true, p->attached_owner);
+            if (!np) dev9p_clunk_fid(p->client, p->attached_owner, nf);
+        } else if (rc == -P9_E_INTR) {
+            *err = -T_E_INTR;
+        }
+    }
+    if (!np) {
+        nc->aux = NULL;    // still c's shallow copy: never close through it
+        spoor_unref(nc);
+        return NULL;
+    }
+    np->fid_locks = true;
+    nc->aux = np;
+    return nc;
+}
+
+// One file of one server: the same session and qid.path. Two live fids naming
+// one qid.path name one incarnation (the server keeps a node a fid names).
+static bool dev9p_lock_same_file(struct Spoor *a, struct Spoor *b) {
+    struct dev9p_priv *pa = priv_of(a);
+    struct dev9p_priv *pb = priv_of(b);
+    return pa && pb && pa->client == pb->client && a->qid.path == b->qid.path;
+}
+
 static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
@@ -2576,6 +2695,10 @@ struct Dev dev9p = {
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,
     .readlink = dev9p_readlink,   // D-1: Treadlink (the resolver's expansion RPC)
+    .lock           = dev9p_lock,             // B-3h: Tlock / Tgetlock
+    .lock_owner     = dev9p_lock_owner,
+    .lock_same_file = dev9p_lock_same_file,
+    .lock_sync      = dev9p_lock_sync,
     .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
 
     .remove   = dev9p_remove,
