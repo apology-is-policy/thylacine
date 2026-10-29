@@ -35,10 +35,10 @@
 //   first_entry.exec_into_stop_parks   an exec'd image whose Proc has a stop
 //                                      pending parks at its entry on a fresh
 //                                      frame; with no stop it runs
-//   first_entry.clone_inherits_the_mask
-//                                      a cloned thread starts with its
-//                                      creator's note mask, so a note every
-//                                      thread masks stays queued past its
+//   first_entry.newborn_inherits_the_mask
+//                                      a thread from either spawn arm starts
+//                                      with its creator's note mask, so a note
+//                                      every thread masks stays queued past its
 //                                      first entry; unmasked, it takes it there
 //
 // The devproc half (stop converts, start and detach release, the implicit
@@ -84,7 +84,7 @@ void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
 void test_first_entry_spawn_into_stop_parks(void);
 void test_first_entry_exec_into_stop_parks(void);
-void test_first_entry_clone_inherits_the_mask(void);
+void test_first_entry_newborn_inherits_the_mask(void);
 
 // Not a mark value: a child that never ran must not read as NONE (0), or every
 // "born NONE" control would pass on a child that did nothing.
@@ -1211,42 +1211,54 @@ void test_first_entry_exec_into_stop_parks(void) {
 }
 
 // =============================================================================
-// first_entry.clone_inherits_the_mask
+// first_entry.newborn_inherits_the_mask
 // =============================================================================
 //
-// A thread cloned through the phenotype starts with its creator's note mask, so
-// a note every thread masks stays queued past the newborn's first entry, whose
-// tail would otherwise deliver it before the newborn's first instruction. The
-// creator masks interrupt and posts it to its own Proc, where it queues; the
-// clone's frame enters at the unmapped FE_USER_ENTRY. A newborn that kept the
-// mask reaches EL0 and faults there; one that did not takes the interrupt at its
-// first entry. The control, one variable away, leaves the creator unmasked: the
-// newborn takes the same note, so the first entry does deliver.
+// A new thread starts with its creator's note mask, from either spawn arm -- the
+// native SYS_THREAD_SPAWN and the phenotype's clone -- so a note every thread
+// masks stays queued past the newborn's first entry, whose tail would otherwise
+// deliver it before the newborn's first instruction. The creator masks
+// interrupt and posts it to its own Proc, where it queues; the newborn enters at
+// the unmapped FE_USER_ENTRY. A newborn that kept the mask reaches EL0 and
+// faults there; one that did not takes the interrupt at its first entry. The
+// control, one variable away, leaves the creator unmasked: the newborn takes the
+// same note, so the first entry does deliver.
 
-static void fe_clone_main(void *arg) {
+#define FE_MASKED 1u
+#define FE_CLONE  2u
+
+static void fe_newborn_main(void *arg) {
+    u32 how = (u32)(uintptr_t)arg;
     struct Thread *self = current_thread();
     struct Proc *p = self->proc;
-    if (arg)
+    if (how & FE_MASKED)
         self->note_mask = 1u << NOTE_BIT_INTERRUPT;
     if (notes_post(p, "interrupt", 0u, NULL, true) != 0)
         exits("fe-post");
-    struct exception_context ctx;
-    for (size_t i = 0; i < sizeof(ctx); i++) ((u8 *)&ctx)[i] = 0;
-    ctx.elr = FE_USER_ENTRY;
-    u64 args[5] = { 0, FE_USER_SP, 0, 0, 0 };
-    s64 tid = viv_clone_thread_for_test(&ctx, args);
+    s64 tid;
+    if (how & FE_CLONE) {
+        struct exception_context ctx;
+        for (size_t i = 0; i < sizeof(ctx); i++) ((u8 *)&ctx)[i] = 0;
+        ctx.elr = FE_USER_ENTRY;
+        u64 args[5] = { 0, FE_USER_SP, 0, 0, 0 };
+        tid = viv_clone_thread_for_test(&ctx, args);
+    } else {
+        tid = sys_thread_spawn_for_test(FE_USER_ENTRY, FE_USER_SP, 0, 0, 0);
+    }
     __atomic_store_n(&g_fe_tid, tid, __ATOMIC_RELEASE);
     if (tid <= 0)
-        exits("fe-clone");
+        exits("fe-newborn");
     while (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL)
         sched();
     thread_exit_self();
 }
 
-void test_first_entry_clone_inherits_the_mask(void) {
-    for (int masked = 0; masked < 2; masked++) {
+void test_first_entry_newborn_inherits_the_mask(void) {
+    for (u32 how = 0; how < 4; how++) {
+        bool masked = (how & FE_MASKED) != 0;
+        bool clone  = (how & FE_CLONE) != 0;
         __atomic_store_n(&g_fe_tid, 0, __ATOMIC_RELEASE);
-        int pid = rfork(RFPROC, fe_clone_main, masked ? (void *)1 : NULL);
+        int pid = rfork(RFPROC, fe_newborn_main, (void *)(uintptr_t)how);
         struct Proc *c = (pid > 0) ? proc_find_by_pid(pid) : NULL;
         bool known = c && bh_wait(fe_tid_known, NULL, BH_BUDGET_NS);
         s64 tid = __atomic_load_n(&g_fe_tid, __ATOMIC_ACQUIRE);
@@ -1256,17 +1268,25 @@ void test_first_entry_clone_inherits_the_mask(void) {
         msg[0] = '\0';
         if (c)
             reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
-        TEST_ASSERT(pid > 0 && c != NULL, "rfork made the cloning Proc");
-        TEST_ASSERT(known && tid > 0, "the clone returned a tid");
-        TEST_EXPECT_EQ(reaped, pid, "the cloning Proc was reaped");
+        TEST_ASSERT(pid > 0 && c != NULL, "rfork made the spawning Proc");
+        TEST_ASSERT(known && tid > 0, "the spawn returned a tid");
+        TEST_EXPECT_EQ(reaped, pid, "the spawning Proc was reaped");
         TEST_ASSERT(!killed, "the Proc ended without the fallback kill");
-        if (masked)
+        if (masked && clone)
             TEST_ASSERT(fe_has_prefix(msg, "snare:"),
-                "the newborn kept its creator's mask: the interrupt stayed queued "
-                "and the newborn reached EL0, where its first fetch faults");
+                "a clone kept its creator's mask: the interrupt stayed queued and "
+                "the clone reached EL0, where its first fetch faults");
+        else if (masked)
+            TEST_ASSERT(fe_has_prefix(msg, "snare:"),
+                "a native spawn kept its creator's mask: the interrupt stayed "
+                "queued and the thread reached EL0, where its first fetch faults");
+        else if (clone)
+            TEST_ASSERT(bh_str_eq(msg, "interrupt"),
+                "with its creator unmasked the clone took the queued interrupt at "
+                "its first entry");
         else
             TEST_ASSERT(bh_str_eq(msg, "interrupt"),
-                "with its creator unmasked the newborn took the queued interrupt "
-                "at its first entry");
+                "with its creator unmasked the native thread took the queued "
+                "interrupt at its first entry");
     }
 }

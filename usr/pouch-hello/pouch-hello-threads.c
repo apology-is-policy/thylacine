@@ -60,6 +60,12 @@
 // thread cap, one after another: a joined thread that stayed counted refuses a
 // user's create at the cap, and joey's run (the system principal, which the cap
 // exempts) sees it only in the count.
+//
+// mask: a new thread starts with its creator's signal mask (POSIX). The kernel
+// starts the thread with the mask pthread_create blocked across the spawn, and
+// the thread's start restores its creator's own (patch 0065). A thread made while
+// main blocks SIGINT reads SIGINT blocked; the control, one variable away, is a
+// thread made while SIGINT is open, which reads it open.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -67,6 +73,7 @@
 #include "pouch-census.h"
 #include <stdint.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,6 +101,28 @@ static void *churn_worker(void *arg) {
 }
 
 // The kernel's `threads:` line of this Proc's /proc/<pid>/status; -1 when absent.
+static void *mask_worker(void *arg) {
+    sigset_t cur;
+    sigemptyset(&cur);
+    *(int *)arg = pthread_sigmask(SIG_BLOCK, NULL, &cur) == 0 ? sigismember(&cur, SIGINT) : -1;
+    return NULL;
+}
+
+// What a thread made with SIGINT blocked (or open) sees of SIGINT: 1 blocked,
+// 0 open, negative on a failed call. Main's own mask is restored after.
+static int mask_seen(int block) {
+    sigset_t one, old;
+    sigemptyset(&one);
+    sigaddset(&one, SIGINT);
+    if (pthread_sigmask(block ? SIG_BLOCK : SIG_UNBLOCK, &one, &old) != 0) return -2;
+    int seen = -3;
+    pthread_t t;
+    if (pthread_create(&t, NULL, mask_worker, &seen) != 0 || pthread_join(t, NULL) != 0)
+        seen = -4;
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return seen;
+}
+
 static long status_threads(void) {
     char path[64], line[128];
     long n = -1;
@@ -376,6 +405,17 @@ int main(void) {
     }
     printf("pouch-hello-threads: join-churn: %u workers started and joined one after another, %ld still counted (1..%ld) OK\n",
            CHURN_THREADS, left, ncpu);
+    {
+        int blocked = mask_seen(1);
+        int open = mask_seen(0);
+        if (blocked != 1 || open != 0) {
+            printf("pouch-hello-threads: mask: a thread made with SIGINT blocked reads %d, with it open %d, want 1 and 0 (FAILED)\n",
+                   blocked, open);
+            fflush(stdout);
+            return 21;
+        }
+        printf("pouch-hello-threads: mask: a new thread starts with its creator's mask OK\n");
+    }
     printf("pouch-hello-threads: ok (%u workers, mutex-protected counter, joined)\n",
            NTHREADS);
     /* The census is what joey matches: a stale binary prints the old marker. */

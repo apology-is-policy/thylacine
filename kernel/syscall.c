@@ -5354,6 +5354,12 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
 
     struct Thread *nt = thread_alloc_user(p, entry_va, sp_va, arg_va, tls_va);
     if (!nt) return proc_id_space_spent(proc_resource_exempt(p)) ? -T_E_AGAIN : -T_E_NOMEM;
+    // A new thread starts with its creator's note mask (POSIX pthread_create;
+    // ARCH 7.6.2), as a clone does. A note every thread masks stays queued, and
+    // the first entry's tail delivers notes before the entry's first
+    // instruction, so a thread born unmasked would take it before it could mask
+    // itself. Written before the admit links the thread; owner-written after.
+    nt->note_mask = t->note_mask;
     // The gate (ARCH 7.3.1): the claim and the cap again, and the link, in one
     // threads_lock hold -- so the cap is exact and no thread joins a group
     // whose claim is set (specs/thread_reap.tla Admit).

@@ -3667,14 +3667,10 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     // A native Proc resets note_mask to 0 at exec, so a plain SET is correct. The
     // libt (C) _start carries the identical mask for C-native bins.
     //
-    // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
-    // does NOT inherit it (the kernel rfork rule), so a thread started via
-    // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
-    // latch on a closed-pipe write. A spawned thread that writes pipes (or
-    // stderr, which a shell may hand over as a pipe nobody reads) masks
-    // NOTE_BIT_PIPE itself: haul does at each relay pump's entry, and the Go
-    // runtime per-M in minit. The other spawners are benchmarks and torture
-    // tests over sockets or CPU/memory.
+    // SCOPE: note_mask is per-thread, and a thread started via thread::spawn_raw
+    // starts with its creator's mask (ARCH 7.6.2), so every thread main makes, and
+    // every thread they make, inherits this mask too. A thread that wants
+    // pipe-death unmasks NOTE_BIT_PIPE itself.
     let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }

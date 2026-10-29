@@ -456,7 +456,6 @@ fn kernel_ended(c2s_rd: i64) -> bool {
 /// them on the wire -- as-is when plain, or as one AEAD record each when the
 /// channel is secured.
 extern "C" fn pump_up(arg: u64) {
-    mask_pipe_note();
     // SAFETY: `arg` is the leaked Box handed to spawn_raw below, and this
     // thread is its only reader for the rest of the process's life.
     let ctx = unsafe { &mut *(arg as *mut UpCtx) };
@@ -492,7 +491,6 @@ extern "C" fn pump_up(arg: u64) {
 /// server -> kernel. Takes R-messages off the wire and writes them into the
 /// kernel's pipe, decrypting first when the channel is secured.
 extern "C" fn pump_down(arg: u64) {
-    mask_pipe_note();
     // SAFETY: as pump_up.
     let ctx = unsafe { &mut *(arg as *mut DownCtx) };
     let mut buf: Vec<u8> = Vec::new();
@@ -574,18 +572,6 @@ fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> In {
         return In::Refused;
     }
     In::Message(n)
-}
-
-/// A pump's writes to a closed pipe come back as EPIPE, never as the `pipe`
-/// note's default death. libthyla-rs masks the note on the MAIN thread only (the
-/// mask is per-thread and spawn_raw does not inherit it), and a pump writes
-/// both pipes and, through `tell`, stderr -- which `ut` hands a command as a
-/// pipe nobody reads when it has no console to give. Unmasked, one diagnostic
-/// there would kill haul before its main thread could report on the console.
-fn mask_pipe_note() {
-    let _ = unsafe {
-        libthyla_rs::t_note_mask(1u64 << libthyla_rs::T_NOTE_BIT_PIPE, core::ptr::null_mut())
-    };
 }
 
 /// A pump context, bound to the one entry point allowed to receive it.

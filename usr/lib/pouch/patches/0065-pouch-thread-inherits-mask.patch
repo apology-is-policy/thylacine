@@ -1,0 +1,59 @@
+pouch boundary-line patch 0065 - a new thread starts with its creator's signal mask (thread-model C7, operator vote 2026-10-29).
+
+POSIX: "The signal mask of the new thread shall be inherited from the
+creating thread." musl's pthread_create blocks every application signal
+across the spawn (__block_app_sigs) and saves the caller's previous mask
+in args->sig_mask; the new thread was to restore it as its first act with
+SYS_rt_sigprocmask, which the 0001 seam retargets to the 0xFFFF ENOSYS
+sentinel. So every pouch thread ran with an empty mask whatever its
+creator had blocked -- the "v1.0 documented limitation" 0007 recorded.
+
+The kernel now starts a SYS_THREAD_SPAWN thread with its creator's note
+mask, which here is the all-blocked set __block_app_sigs installed: no
+note reaches the newborn before it runs (the kernel delivers notes on
+every first entry, before the first instruction). This patch makes the
+first act work:
+
+  src/thread/pthread_create.c    start() restores args->sig_mask through
+      __restore_sigs (0007's SYS_NOTE_MASK path, which also sets the
+      per-thread shadow), and start_c11() does the same: upstream's C11
+      start never restores the mask, which on Linux leaves a thrd_create
+      thread with every application signal blocked; glibc and QNX give a
+      C11 thread its creator's mask, and so does pouch.
+  src/internal/_pouch_signal.h    0007's limitation bullet goes.
+
+The witness is pouch-hello-threads `mask`: main blocks SIGINT, and a new
+thread reads SIGINT blocked through pthread_sigmask.
+
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -56,10 +56,6 @@
+  *   - SIGINT and SIGTERM share "interrupt" — last-registered-wins for
+  *     mixed sigaction calls. A program registering BOTH gets the SIGINT
+  *     handler preferred (defense-in-depth in the bootstrap dispatcher).
+- *   - Child threads spawned via pthread_create start with note_mask=0;
+- *     parent thread's mask does NOT propagate. POSIX says inheritance;
+- *     v1.0 documented limitation. Programs that need POSIX-correct
+- *     inheritance set the child's mask in the entry function manually.
+  *   - sigsetjmp/siglongjmp do NOT preserve signal masks (the
+  *     sigsetjmp_tail.c path still hits the SYS_rt_sigprocmask = 0xFFFF
+  *     sentinel → -ENOSYS). v1.x extension.
+--- a/src/thread/pthread_create.c
++++ b/src/thread/pthread_create.c
+@@ -240,7 +240,7 @@
+ 			for (;;) __syscall(SYS_thread_exit);
+ 		}
+ 	}
+-	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, &args->sig_mask, 0, _NSIG/8);
++	__restore_sigs(&args->sig_mask);
+ 	__pthread_exit(args->start_func(args->start_arg));
+ 	return 0;
+ }
+@@ -249,6 +249,7 @@
+ {
+ 	struct start_args *args = p;
+ 	int (*start)(void*) = (int(*)(void*)) args->start_func;
++	__restore_sigs(&args->sig_mask);
+ 	__pthread_exit((void *)(uintptr_t)start(args->start_arg));
+ 	return 0;
+ }

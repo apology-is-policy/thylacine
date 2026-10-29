@@ -124,7 +124,12 @@ so an impossible return cannot fall off the end into adjacent `.text`.
 `__pouch_sigtab[_NSIG]` — per-Proc dispositions (POSIX semantics).
 `__pouch_note_mask_shadow` — a `__thread` shadow of the kernel's
 per-Thread note mask, needed for `SIG_BLOCK`/`SIG_UNBLOCK`
-read-modify-write; pouch is its sole writer.
+read-modify-write; pouch is its sole writer. A new thread's shadow starts at
+zero (TLS) while the kernel starts the thread with its creator's mask, which
+`pthread_create` has set to every supported note across the spawn; the two
+agree again at the thread's first act, `start()`/`start_c11()` restoring the
+creator's own mask through `__restore_sigs` (0065). No note can run a handler
+in that window, since every one is blocked.
 
 ## Concurrency
 
@@ -204,7 +209,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   additive within the tty family, which shares one bit (reading back a mask
   containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).
   SIGINT and SIGTERM stopped aliasing at 0049.
-- No mask inheritance across `pthread_create` (the child starts at 0).
 - `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
   defers them, and a later real handler sees them retroactively.
 - `siglongjmp` does not restore masks; `sigaltstack` / `sigpending` /
@@ -221,4 +225,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
 self-post sentinel; [[adt-signals13b-r1]] DIRTY 2 P1 + 6 P2 →
 [[adt-signals13b-r2]] CLEAN) → [[chg-2026-07-18-pty3]] (the tty family) →
 gcpark-b (2026-10-12: the patch prose for `abort()` and the dropped
-`__abort_lock` interlock; deaths by note report their signal).
+`__abort_lock` interlock; deaths by note report their signal) → thread-model
+C7 (2026-10-29, operator vote: 0065, a new thread starts with its creator's
+mask; the kernel half is `SYS_THREAD_SPAWN` inheriting `note_mask`).

@@ -169,3 +169,6 @@
 # 0050 (signal chunk S-3): raise()/kill(self) of SIGSEGV/SIGBUS/SIGILL/SIGFPE post
 # the snare to self and die of that signal; kill() reads ESRCH/EPERM, not EIO.
 0050-pouch-self-fault-signals-errnos.patch
+# 0065 (thread-model C7, vote 2026-10-29): a new thread starts with its creator's
+# signal mask -- start() and start_c11() restore it via __restore_sigs.
+0065-pouch-thread-inherits-mask.patch

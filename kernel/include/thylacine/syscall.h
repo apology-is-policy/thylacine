@@ -780,10 +780,10 @@ enum {
     // -- the spawn still succeeds and the tid is returned in x0 -- mirroring
     // the exit-time clear_child_tid store's discipline.
     //
-    // The new Thread inherits no user state from the caller — the entry
-    // function is the responsible adult. fd inheritance is implicit
-    // (single handle table per Proc); register state is the four parked
-    // args + zeros.
+    // The new Thread inherits no user state from the caller but its note
+    // mask (POSIX pthread_create; ARCH 7.6.2) -- the entry function is the
+    // responsible adult. fd inheritance is implicit (single handle table per
+    // Proc); register state is the four parked args + zeros.
     SYS_THREAD_SPAWN = 41,   // arg: entry_va, sp_va, arg, tls_va, ptid_va
 
     // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
@@ -923,7 +923,9 @@ enum {
     //   x0 = new_mask         the new mask (bit set = defer that note)
     //   x1 = old_mask_out_va  user-VA pointer to a u64; the previous mask
     //                          is written there if old_mask_out_va != 0
-    // The mask is per-Thread (POSIX pthread_sigmask semantics).
+    // The mask is per-Thread (POSIX pthread_sigmask semantics). A new thread
+    // starts with its creator's mask (SYS_THREAD_SPAWN and the phenotype's
+    // clone); a native exec clears it.
     // Unsupported bits are tolerated (set but unused) so future supported-
     // note additions don't break old userspace that wrote a wider mask.
     //
