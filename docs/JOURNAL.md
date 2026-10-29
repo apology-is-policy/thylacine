@@ -22,6 +22,42 @@ needed the operator.
 
 
 ---
+## 2026-10-29 (aux, Opus 5.5 1M) -- thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
+
+The overhaul's last chunk, run across three compactions. C7b routes every first entry to EL0 through the shared
+return tail; C7c adds `/proc/<pid>/thread/<tid>/`, `step <tid>` and a listable `/proc`. Landing: aux-3 at the
+landing commit after 86d1eccaf, GitHub.
+
+**What the sabotages caught in my own tests.** Ten sabotages (S1-S10) each had to turn a named test red. S5 did
+not: the exec first-entry test passed on a kernel whose exec path skipped the tail, because `/hello` is
+demand-paged -- its first fetch faults, and that fault's own return parks the thread exactly where a correct first
+entry would. The test now reads the entry page in first (d159e3024), and S5 went red. The readdir test never
+crossed a batch inside one call (4d2c3b15e). And the new debug-probe leg asserted that `step <tid>` holds the other
+threads; it does not, and never has -- a step resumes the Proc and only the named thread single-steps, which is
+sound because the breakpoint step-over is per thread. The leg now asserts one instruction and the focus.
+
+**The audit's P1 became an ABI vote.** Fable r1 (0/1/0/4) found the Linux clone did not copy the creator's mask;
+C7b had made that a deterministic misdelivery. Fixing it raised the native arm: native threads started unmasked by
+documented contract, and a `pipe` note queued while every thread masked it was taken by the next newborn -- the Go
+runtime met it at every new M (its minit calls getpid before masking), haul's pumps since C7b. I asked; the
+operator voted inherit (V5). pouch 0065 makes a new thread restore its creator's mask (its old restore was an
+ENOSYS sentinel); haul's own masking went.
+
+**Round 2 and the hang it led to.** Fable r2 (0/0/0/3) said the pouch `mask` leg read only pouch's TLS shadow. The
+two legs I added for it found a real bug at the next boot: `mask-c11` hung, because a C11 `thrd_create` thread
+never registered clear_child_tid -- pouch 0004 re-armed that in `start()` only -- so `thrd_join` waited forever.
+It had passed as "patched but untested" since 0004 (pouch 0066). I stopped phase e's SMP gate on purpose, since
+the new legs run in every boot it makes; it ran once, on the final tip: 50/50, 0 corruption.
+
+**What I got wrong.** I committed the r2 fixes claiming the kernel ELF would stay byte-identical because the
+comment edits kept every line count; phase f's hash differed, cause not established. One commit body claimed a
+dossier was co-staged when the script had stopped before staging it (86d1eccaf corrects it). And my first
+`mask-queued` red-first plan used S15, which cannot work: a failed kernel test extincts the boot before joey runs,
+so S18 also unregisters the kernel twin.
+
+Evidence: `~/projects/aux-gate/c7/runs/summary.txt` (phases a-f2); memory design_thread_c7.md and
+audit_thread_c7_closed_list.md.
+
 ## 2026-10-28 (aux, Opus 5.5 1M) -- the poll chunk: hook walks bounded, and none under its owner's lock
 
 **The ask.** Vote 11 sequenced the hook-list bound after C6; votes 12 (bound the span, not the count) and 13 (move every

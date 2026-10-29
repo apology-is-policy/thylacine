@@ -126,6 +126,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-29 [[chg-2026-10-29-thread-model-c7-close]] — Thread-model C7 close: round 2, the C11 join fix, the final gates
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7]] — Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 - 2026-10-28 [[chg-2026-10-28-poll-hook-walks]] — Hook walks are batched, and none runs under its owner's lock (poll chunk, votes 12 + 13)
 - 2026-10-22 [[chg-2026-10-22-thread-cap-live]] — The thread cap charges live threads (thread-model C1, vote 7)
@@ -133,5 +134,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
 - 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
 - 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
-- 2026-10-20 [[chg-2026-10-20-thread-model-c0]] — Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse
 <!-- generated:end -->

@@ -2603,3 +2603,43 @@ it after C6. It closes OPEN-BUGS 10-27 15:42Z (nothing capped the hooks on one `
   (their hooks are the Proc's own threads); `SPAWN_PERM_ALL` lacks the alias assert `PROC_FLAGS_ALL` has (corona,
   yip 0263); corona's `sqpoll_ticket_cb` takes the table lock raw and converts at the next join.
 
+
+## Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask — 2026-10-29
+
+The last chunk of the thread-model overhaul (`docs/thread-model-review.html`: F-7, decision 6). Operator votes
+2026-10-29: no per-thread ctl (`step <tid>` on the Proc ctl), readdir in C7, `..` from a pid file to its pid
+directory, and V5 -- a new thread starts with its creator's note mask. In the reap tree on aux-3-c7, then
+aux-3-c7-probe.
+
+- **C7-0, the poll chunk's residue** (f1e4d76f7). `poll.dedupe_keeps_the_earlier_hook` and
+  `poll.dev9p_poll_lock_defers_its_walks` witness what the poll chunk argued, each shown red; `SPAWN_PERM_ALL` gains
+  its disjointness assert. Closes the poll section's three "still open" items and `seam-poll-dedupe-direction-test`.
+- **C7b, one first entry** (988472ce7 spec, 37b4dbefa, 9149924eb, d159e3024). Every first entry to EL0 -- spawned,
+  forked, exec'd, held -- builds a frame and takes `.Lel0_return`; `KERNEL_EXIT` is the only `eret` to EL0, and a
+  thread born into a stop parks before its first instruction. `debug_stop.tla` spawns a thread mid-run
+  (NoEL0BornStopped; `debug_stop_spawn` pinned at 24485 states, `debug_stop_buggy_spawn_at_el0` violates). The exec
+  test's first version could not fail -- `/hello` is demand-paged, so its first fetch faulted and the fault's own
+  tail parked it where a correct first entry would -- and now reads the entry page in first.
+- **C7c, per-thread /proc** (b8e953c5c design, 3a6ee5461, 19b2b1372 manual, 4d2c3b15e, 04e52eccb, febb30c17).
+  `/proc/<pid>/thread/<tid>/{regs,fpregs,kregs,kstack}`, `step <tid>`, and a listable `/proc` (seam-932's devproc
+  half). The in-guest gate: debug-probe's `threads` leg on a multi-thread child whose newest thread has exited. A
+  step resumes the whole Proc and only the named thread single-steps (GDB's default; the step-over is per thread) --
+  the probe first asserted peers stood still and was wrong.
+- **Audit r1** (Fable 5.1, start == end; 4d2c3b15e): 0 P0 / 1 P1 / 0 P2 / 4 P3 (d0d2ae434). F1: the clone did not
+  copy the creator's mask, which C7b made a deterministic misdelivery -> fixed, and vote V5 extended it to native
+  `SYS_THREAD_SPAWN` (4f9c067f1; pouch 0065; haul's pumps inherit; ARCH 7.6.2). F2 departed-thread and forged-ctl
+  legs; F3/F4 docs (F4's kstack-sealed half withdrawn); F5 pre-existing, `seam-dirent-type-is-qid-type`.
+- **Audit r2** (Fable 5.1, start == end; be384162f..4f9c067f1): 0/0/0/3, all fixed (e4c26c631): the note_mask
+  contract comments, two guest legs (`mask-c11`, `mask-queued`), 5h's errno.
+- **Found by the gates, fixed.** Phase f's green boot hung in the new `mask-c11` leg: a C11 `thrd_create` thread
+  never registered clear_child_tid, so `thrd_join` waited forever -- pre-existing since pouch 0004 ("patched but
+  untested"); pouch 0066 (4c5a7c57b).
+- **Gates on 86d1eccaf (phase f2).** Suite 2077/0, green and regreen (ELF identical); the probe's threads leg and
+  the three pouch mask legs pass; S18 and S17 red on their guest legs. Phase e (4f9c067f1, same kernel code bar
+  comments): S11, S15, S12, S13, S14 red on their targets, S16 red. Phase d: S1-S10 red, every debug_stop cfg as
+  claimed, debug_step re-run as claimed, check-production PASS. SMP gate default-smp1/4/8 + ubsan-smp4/8 each 10/10,
+  0 corruption.
+- **Still open, owned.** `seam-dirent-type-is-qid-type`; Ambush does not yet read the per-thread layer; the shared
+  Go fork's minit comment says native spawn does not inherit (comment only, with the fork's next move); phase f's
+  green kernel ELF hash differed from phase e's although the kernel diff was line-neutral comments (cause not
+  established; nothing rests on it).
