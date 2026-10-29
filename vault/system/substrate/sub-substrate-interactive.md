@@ -238,16 +238,20 @@ and only the guest's own state at that instant separates a real regression from 
 timing miss. Same discipline as `vm-at-fail`, one layer in: `vm-at-fail` records
 THAT the guest was alive; the probe asks it WHY.
 
-**Four outcomes, and three of them are not the guest.**
+**Five outcomes, and four of them are not the guest.**
 
 | Outcome | Counts as | Meaning |
 |---|---|---|
 | guest FAIL | red | all attempts failed, no harness fingerprint — a real regression |
 | INFRA-FAIL | red | the VM never started; QEMU's own words recorded under `INFRA:` |
 | HARNESS-FAIL | red | every attempt cut by the relay losing its reader while the VM was ALIVE (#60) |
+| IMAGE-FAIL | red | this image cannot run the scenario: `lc_refuse` (lc_require_image) or lc_login's session arm wrote `IMAGE:`; never retried |
 | SKIP (77) | not a result | the scenario declined; retrying cannot change it |
 
-INFRA and HARNESS still make the gate **RED**: "the scenario's remaining
+An `IMAGE:` marker stops the retries at the attempt that wrote it: the same
+image refuses the scenario every time, so a retry would only burn a boot and
+three would be summed as a guest regression (OPEN-BUGS 2026-10-29T02:58Z).
+INFRA, HARNESS and IMAGE still make the gate **RED**: "the scenario's remaining
 legs never ran, so coverage was LOST. It is only attributed honestly."
 Requiring EVERY attempt to carry the fingerprint is what keeps HARNESS from
 failing open — one timeout, EXTINCTION, or genuine qemu exit among the
@@ -413,7 +417,7 @@ the in-kernel harness cannot type either.
 
 Every non-pass prints the steps file, a transcript tail, and the path to
 every attempt's preserved evidence. The summary line breaks the count into
-guest / INFRA / HARNESS and states plainly that only the guest failures say
+guest / INFRA / HARNESS / IMAGE and states plainly that only the guest failures say
 anything about Thylacine.
 
 A shell gate booted on a Halcyon-session image fails at login and names the

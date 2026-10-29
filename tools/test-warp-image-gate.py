@@ -17,6 +17,7 @@ guards stop that, and each runs here with its acceptance one variable away:
     not-reachable line, matched against the launcher's own source.
 """
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
@@ -38,9 +39,19 @@ def check(name, ok, detail=""):
         fails += 1
 
 
-def expect(script, timeout=60):
-    p = subprocess.run(["expect", "-c", script], capture_output=True, text=True, timeout=timeout)
+def expect(script, timeout=60, steps=None):
+    env = dict(os.environ)
+    env.pop("LS_CI_STEPS", None)
+    if steps is not None:
+        steps.write_text("")
+        env["LS_CI_STEPS"] = str(steps)
+    p = subprocess.run(["expect", "-c", script], capture_output=True, text=True, timeout=timeout, env=env)
     return p.returncode, p.stdout + p.stderr
+
+
+def image_marked(steps):
+    """test-interactive.sh keys on this marker: no retry, not a guest failure."""
+    return any(line.startswith("IMAGE:") for line in steps.read_text().splitlines())
 
 
 def require_image(scratch):
@@ -75,23 +86,26 @@ def require_image(scratch):
             rec.unlink(missing_ok=True)
         else:
             rec.write_text(body)
-        rc, out = expect(f'source {{{lib}}}; lc_require_image {{{needs}}}; puts IMAGE-OK')
+        steps = scratch / "steps"
+        rc, out = expect(f'source {{{lib}}}; lc_require_image {{{needs}}}; puts IMAGE-OK', steps=steps)
+        marked = image_marked(steps)
         if refused:
             check(name, rc == 1 and "LS-CI FAIL: image refused:" in out and token in out
-                  and "IMAGE-OK" not in out, f"rc={rc} out={out.strip()[-200:]}")
+                  and "IMAGE-OK" not in out and marked, f"rc={rc} marked={marked} out={out.strip()[-200:]}")
         else:
-            check(name, rc == 0 and token in out and "refused" not in out, f"rc={rc} out={out.strip()[-200:]}")
+            check(name, rc == 0 and token in out and "refused" not in out and not marked,
+                  f"rc={rc} marked={marked} out={out.strip()[-200:]}")
 
 
 def login_arm(scratch):
     print("== lc_login: login's session-compositor line fails at once ==")
     lib = scratch / "tools/interactive/lib.exp"
-    for name, after_auth, ok_token, bad_token in [
+    for name, after_auth, ok_token, bad_token, want_marked in [
         ("a session image fails naming the lever",
          r"\033]7770;aurora;reset;systemlogin: session compositor (halcyond) spawned\n",
-         "LS-CI FAIL: this image boots the Halcyon session", "LOGIN-OK"),
+         "LS-CI FAIL: this image boots the Halcyon session", "LOGIN-OK", True),
         ("a shell image logs in (control)", r"ut v0.9-dev -- Thylacine textual shell\n",
-         "LOGIN-OK", "LS-CI FAIL"),
+         "LOGIN-OK", "LS-CI FAIL", False),
     ]:
         fake = scratch / "console.sh"
         fake.write_text("printf 'Thylacine login: '; read u; printf 'password: '; read p\n"
@@ -100,9 +114,12 @@ def login_arm(scratch):
         # through the arm must beat it by far.
         t = f'source {{{lib}}}; set ::lc_boot_timeout 20; spawn sh {{{fake}}}; ' \
             'set t0 [clock seconds]; lc_login michael pw; puts "LOGIN-OK [expr {[clock seconds] - $t0}]s"'
-        rc, out = expect(t)
+        steps = scratch / "steps"
+        rc, out = expect(t, steps=steps)
         quick = "never came up" not in out
-        check(name, ok_token in out and bad_token not in out and quick, f"rc={rc} out={out.strip()[-240:]}")
+        marked = image_marked(steps)
+        check(name, ok_token in out and bad_token not in out and quick and marked == want_marked,
+              f"rc={rc} marked={marked} out={out.strip()[-240:]}")
 
 
 def lint(scratch):

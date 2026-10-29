@@ -152,9 +152,11 @@ proc lc_require_image {needs} {
 }
 
 # A refusal before any VM exists: none of lc_fail's VM evidence applies, and its
-# infra check would misreport "the VM never started" as the cause.
+# infra check would misreport "the VM never started" as the cause. The IMAGE:
+# marker tells test-interactive.sh that no retry can change the verdict.
 proc lc_refuse {msg} {
     lc_step "REFUSED: $msg"
+    lc_step "IMAGE: $msg"
     send_user "\nLS-CI FAIL: image refused: $msg\n"
     exit 1
 }
@@ -887,7 +889,10 @@ proc lc_login {user pass} {
     lc_raw_send "$pass\r" "login password"
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
-        -ex "login: session compositor (halcyond) spawned" { lc_fail "this image boots the Halcyon session (HALCYON_SESSION=y): login started halcyond, and no shell comes to the serial console -- a shell gate needs tools/build.sh kernel --config ci" }
+        -ex "login: session compositor (halcyond) spawned" {
+            lc_step "IMAGE: login started halcyond (HALCYON_SESSION=y) -- a shell gate needs tools/build.sh kernel --config ci"
+            lc_fail "this image boots the Halcyon session (HALCYON_SESSION=y): login started halcyond, and no shell comes to the serial console -- a shell gate needs tools/build.sh kernel --config ci"
+        }
         -ex "login incorrect"         { lc_fail "auth rejected for $user -- the credential is known-good, so suspect #233 FIRST: a byte that reaches the console between login's password prompt and its noecho consctl flip is echoed AND then discarded by the flip's TCSAFLUSH line-reset, truncating the passphrase. Look for an echoed character immediately after 'password: ' in the preserved log; that is the fingerprint. Fixed by ordering (mode set BEFORE the prompt) -- a recurrence means the window reopened." }
         -re {EXTINCTION:}             { lc_extinction_fail "extinction during login/provision" }
         timeout                       { lc_fail "shell never came up after auth (login/provision stall?)" }

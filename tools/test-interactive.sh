@@ -562,6 +562,12 @@ run_one_scenario() {
         cp "$transcript" "$BUILD_DIR/ls-ci-$name.attempt$attempt.log" 2>/dev/null || true
         cp "$steps" "$BUILD_DIR/ls-ci-$name.attempt$attempt.steps" 2>/dev/null || true
         echo "    attempt $attempt/$attempts FAILED [${att_dur}s] (rc=$rc; evidence: ls-ci-$name.attempt$attempt.{log,steps})" >&2
+        # The image cannot run this scenario (lib.exp's IMAGE: marker): the
+        # same image refuses it every time, so a retry only burns a boot.
+        if grep -qa "^IMAGE:" "$steps" 2>/dev/null; then
+            echo "    not retrying: this image cannot run the scenario, and every attempt would say so" >&2
+            break
+        fi
         [[ $attempt -lt $attempts ]] && echo "    retrying (an unexplained early exit -- see the preserved evidence; a retry is NOT a diagnosis)..." >&2
     done
     # The TOTAL row is not the sum of this scenario's attempt rows: it also
@@ -579,6 +585,16 @@ run_one_scenario() {
     if [[ $passed -eq 1 ]]; then echo PASS > "$slot/verdict"; return 0; fi
     echo FAIL > "$slot/verdict"
     if [[ $passed -ne 1 ]]; then
+        # An image that cannot run the scenario (a session pool under a shell
+        # gate, a payload not baked) says nothing about the guest either. The
+        # gate stays RED -- the coverage was not taken -- but is not a guest
+        # regression.
+        if grep -qa "^IMAGE:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps "$steps" 2>/dev/null; then
+            echo "    IMAGE-FAIL: $name -- this image cannot run the scenario; re-bake, this is NOT a guest regression:" >&2
+            grep -ha "^IMAGE:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps "$steps" 2>/dev/null | sort -u | sed 's/^/        /' >&2
+            echo IMAGE > "$slot/verdict"
+            return 0
+        fi
         # An attempt whose VM never STARTED says nothing about the guest, and
         # calling it "a real regression" is failing open (#74). lib.exp records
         # QEMU's own refusal under an INFRA: marker; surface that verdict
@@ -736,6 +752,7 @@ done
 fails=0
 infra_fails=0
 harness_fails=0
+image_fails=0
 skips=0
 missing=""
 for scen in "${scenarios[@]}"; do
@@ -746,6 +763,7 @@ for scen in "${scenarios[@]}"; do
         SKIP)    skips=$((skips + 1)) ;;
         INFRA)   infra_fails=$((infra_fails + 1)); fails=$((fails + 1)) ;;
         HARNESS) harness_fails=$((harness_fails + 1)); fails=$((fails + 1)) ;;
+        IMAGE)   image_fails=$((image_fails + 1)); fails=$((fails + 1)) ;;
         FAIL)    fails=$((fails + 1)) ;;
         # A scenario whose subshell died before writing a verdict (OOM-killed,
         # crashed, killed by hand) has NO result -- and counting "no result" as
@@ -815,12 +833,13 @@ if [[ -s "$TIMINGS" ]]; then
 fi
 
 if [[ $fails -gt 0 ]]; then
-    guest_fails=$((fails - infra_fails - harness_fails))
+    guest_fails=$((fails - infra_fails - harness_fails - image_fails))
     echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed" \
-         "($guest_fails guest, $infra_fails INFRA [VM never started], $harness_fails HARNESS [#60 relay cut, VM alive])." >&2
-    if [[ $infra_fails -gt 0 || $harness_fails -gt 0 ]]; then
+         "($guest_fails guest, $infra_fails INFRA [VM never started], $harness_fails HARNESS [#60 relay cut, VM alive]," \
+         "$image_fails IMAGE [this image cannot run it])." >&2
+    if [[ $infra_fails -gt 0 || $harness_fails -gt 0 || $image_fails -gt 0 ]]; then
         echo "    Only the $guest_fails guest failure(s) say anything about Thylacine;" \
-             "the rest are environment/harness faults that LOST coverage -- re-run or fix the harness." >&2
+             "the rest LOST coverage to the environment, the harness or the image -- re-run, fix the harness, or re-bake." >&2
     fi
     [[ $skips -gt 0 ]] && echo "    ($skips scenario(s) SKIPPED -- a missing optional host artifact, not a guest result)" >&2
     exit 1
