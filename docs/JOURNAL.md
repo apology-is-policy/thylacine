@@ -22,6 +22,64 @@ needed the operator.
 
 
 ---
+## 2026-10-29 -- the goodbye bound measured the host, not a hang (corona)
+
+**What it closes.** OPEN-BUGS 2026-10-29T00:33Z, a P1 I introduced in 6443f1874
+(vote 27): every `/clade`-baked boot of this branch on thyla-pi extincted at
+joey. lsp-probe's goodbye gave each server 10 s to answer `shutdown`, take
+`exit` and leave; clangd+headers took longer on the Pi, the probe failed
+"stdout still open after exit", and go8e-2 took the boot down
+(`work/oct28-quarry/run2/warp-quake.log:8519-8530`). Code *(pending)*.
+
+**How it got in.** The bound was verified on gopls only. Every image my gates
+booted for vote 27 lacked clangd, and lsp-probe prints "clangd+headers absent
+-- skipping" for that case, which read as green. The first clade boot found it
+while I was running env-c's glquake leg on the Pi. **A bound verified only on
+the servers the image carried is unverified.**
+
+**Measured before choosing.** Hang or slow? A private probe (goodbye bound
+120 s, printing when `shutdown` was answered and when stdout closed) on a
+clade default image, one boot per host:
+
+| host | clangd+headers session | answered | stdout EOF | exit (status 0) |
+|---|---|---|---|---|
+| Mac HVF | 1113 ms | 0 ms | 913 ms | 914 ms |
+| thyla-pi KVM | 10178 ms | 2 ms | 11216 ms | 11220 ms |
+
+gopls's goodbye was about 1 s on both. TCG sessions alone run 16.8-46.8 s
+(16 b3 boots). So clangd answers at once, and its exit costs about what its
+session did. A fixed bound measures the host.
+
+**The fix, and two rejected.** The goodbye now spends what is left of the
+session's 240 s budget, so joey's 800 s bound on the whole probe ("3 x 240 +
+margin") stays honest. A separate 240 s budget would break that sizing.
+nora's 30 s `END_GRACE` is the UX bound at which nora kills a slow server;
+TCG crosses it.
+
+**What the audit caught (Fable 5.1, 0/0/2/5).**
+- F1: my dossier said TCG sessions run 17-21 s. I had read that range off a
+  census piped through `head -40`, and the four slowest (35-47 s) were past
+  the cut. **A range read off a truncated listing is a guess about its tail.**
+- F2: the new budget-expiry failure and the goodbye heartbeat had never
+  fired. A private no-exit mutant then showed heartbeats at 21 s, 41 s, and
+  so on to 221 s, then `FAIL [gopls] -- stdout still open after exit when the
+  session budget ran out, 241030ms into the goodbye`, then EXTINCTION.
+- Fixed P3s: budget failures say how far into the goodbye they came; the exit
+  wait drains stderr; the heartbeat no longer prints a 5 s-spaced pair.
+- Enqueued P3 (OPEN-BUGS 01:53Z): nora's 30 s grace was sized on gopls, and
+  clangd on TCG will likely be killed at it. That costs a wait, not a leak.
+
+**Verification.** Mac, clade default image (`work/oct29-clangd-bye/`):
+post-audit suite 2120/2120, CL-4/CL-7b/CL-5 PASS, lsp-probe PASS (`f-*`).
+thyla-pi, pre-audit build: clangd+headers' goodbye 11421 ms with lsp-probe
+PASS, against run 2's red at 10 s. thyla-pi, post-audit build (the tree being committed; smoke boot 02:14Z):
+clangd+headers' goodbye 11476 ms, clangd 9556, gopls 1024, lsp-probe PASS, boot OK
+(`pi3-smoke-boot.log`).
+
+**Still open.** OPEN-BUGS 00:42Z: `build/.config` misrecords bake options set
+through a `THYLACINE_*` environment variable, and that blocks the Warp
+image-trap fix (23:14Z).
+
 ## 2026-10-28 -- pouch's posix_spawn stops dropping envp (corona)
 
 **What it closes.** seam-pouch-spawn-envp, pouch's third of OPEN-BUGS

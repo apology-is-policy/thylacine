@@ -2749,3 +2749,33 @@ the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e
   the checker's series scan (F2); the errno wording and the kernel's T_E values held by the checker (F3).
 - **Enqueued / next.** env-b; the glquake virgl run on thyla-pi (`GALLIUM_DRIVER` reaching the game end to end); the
   wrappers' first run on a `/clade` bake; OPEN-BUGS 21:09Z P3s (quarry's driver via `Command::env`; the stale pouch patches README).
+
+## lsp-probe's goodbye spends the session's budget (P1 fix) -- 2026-10-29
+
+Closes OPEN-BUGS 2026-10-29T00:33Z (P1, my own regression from 6443f1874, vote 27): every `/clade`-baked boot of this
+branch on thyla-pi extincted at joey, because lsp-probe's goodbye had a 10 s bound of its own and clangd+headers' exit
+there runs longer. Code *(pending)*.
+
+- **Measured first.** A private instrumented probe (goodbye bound 120 s, printing when `shutdown` was answered and when
+  stdout closed): under HVF clangd+headers answered at 0 ms and exited with status 0 at 914 ms; on thyla-pi's KVM it
+  answered at 2 ms and exited at 11220 ms (clangd 9125 ms, gopls 1035 ms). Under TCG the clangd+headers session alone
+  runs 16.8-46.8 s (16 boots). Not a hang: clangd's exit costs about what its session did, more when it was short.
+- **The fix.** `GOODBYE_MS` is gone; `goodbye` takes the session's start and fails only once the session's `BUDGET_MS`
+  (240 s) is spent, so joey's 800 s bound on the whole probe ("3 x 240 + margin") still holds. A goodbye heartbeat
+  every 20 s; a budget failure says how far into the goodbye it came; the exit wait drains stderr.
+- **Rejected.** A separate 240 s goodbye budget (3 x 480 s passes joey's bound, which could then fire before the probe
+  names the hung server); nora's `END_GRACE` of 30 s (a UX bound at which nora kills a slow server; a TCG session runs up to 47 s).
+- **Verification.** Mac, the committed tree (02:01-02:05Z): clade default build + suite, `tests: 2120/2120 PASS`,
+  CL-4/CL-7b/CL-5 PASS, `lsp-probe: PASS` with clangd+headers' goodbye at 935 ms (`work/oct29-clangd-bye/f-*`); the
+  pre-audit build likewise (01:37-01:44Z, 905 ms). The
+  discriminating host is thyla-pi: the old bound red in run 2 (`work/oct28-quarry/run2/warp-quake.log:8519`), this fix
+  green in glq-virgl's boot (pre-audit build, clangd+headers 11421 ms) and in a smoke boot of the post-audit build, the
+  committed tree (11476 ms, `pi3-smoke-boot.log`). Red witness: a private no-exit mutant prints the goodbye heartbeat
+  at 21 s to 221 s, then `FAIL [gopls] -- stdout still open after exit when the session budget ran out, 241030ms into
+  the goodbye` and the boot extincts, the probe's own reason inside joey's 800 s.
+- **Audit.** Fable 5.1 round 1 (start == end), 0/0/2/5, clean. F1 the dossier's TCG range came from a census cut by
+  `head` (16.8-46.8 s measured, fixed); F2 the budget failure and heartbeat had never fired (the red run above); F3-F5
+  fixed (how far into the goodbye; the exit wait drains stderr; heartbeat cadence); F6 enqueued (OPEN-BUGS 01:53Z,
+  nora's `END_GRACE` was sized on gopls); F7 this section and the journal entry.
+- **Lesson.** A bound verified only on the servers the image carried is unverified: every gate before this ran with
+  clangd absent, and the skip read as green.

@@ -149,8 +149,13 @@ back to back and killed gopls at once, which orphaned its running `go` to init.
 escalation cannot be one) or `disconnect` after each of five quits, and fails on
 the kernel's `proc: orphan ... (parent ... name="gopls"` line. After a disconnect
 gopls took up to 7.6 s on TCG to finish its own shutdown and exit. And
-`lsp-probe` requires gopls to answer `shutdown` and exit by itself with status 0
-on every boot ([[sub-parley]]).
+`lsp-probe` requires every baked server to answer `shutdown` and exit by itself
+with status 0 on every boot ([[sub-parley]]). The thirty seconds were sized on
+gopls. clangd answers at once, but its exit takes about as long as its session
+did: 11.2 s with headers on thyla-pi, and under TCG, where the session alone
+runs 17-47 s, a quit with a C++ buffer open can end clangd by `grace`. That
+costs the wait, not a leak: nora runs clangd bare, without `--query-driver`, so
+it has no child to orphan (OPEN-BUGS 2026-10-29T01:53Z).
 
 The debugger is ended differently, because killing it first strands its
 debuggee. `:kill`, a `:debug` over a live session, and quitting the editor all

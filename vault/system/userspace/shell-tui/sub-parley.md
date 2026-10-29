@@ -219,10 +219,19 @@ probes exist to close that gap against a real peer.
   `workspace.configuration` and no dynamic registration, so gopls has nothing to
   ask and the `Action::Send` arm is wired-but-unexercised on purpose. It then
   ends the session the way nora's exit does: `shutdown`, its answer, `exit`.
-  gopls must close its stdout and then exit by itself with status 0 within ten
-  seconds; it exits 1 on an `exit` that arrives before `shutdown` completed.
-  Until 2026-10-28 the probe sent the two back to back and killed gopls at
-  once, the shape that orphaned nora's `go list` (see [[sub-nora-host]]).
+  Each server must close its stdout and then exit by itself with status 0
+  before the session's own 240 s budget runs out; gopls exits 1 on an `exit`
+  that arrives before `shutdown` completed. The goodbye has no bound of its
+  own because clangd's exit costs about what its session did, or more when the
+  session was short (with headers: 1.1 s then 0.9 s under HVF, 10.2 s then
+  11.2 s on thyla-pi's KVM; without: 0.23 s then 0.84 s under HVF, 7.9 s then
+  9.1 s on the Pi), and the session alone runs 17-47 s under TCG (16 boots,
+  August 2026, `-smp 4`). A fixed bound measures the host, not a hang: the
+  10 s one it had from 2026-10-28 extincted every clade boot on the Pi. The
+  goodbye prints a heartbeat every 20 s, and a budget failure says how far
+  into the goodbye it came, so a session that spent the budget first does not
+  read as the server's fault. Until 2026-10-28 the probe sent the two back to back and killed gopls
+  at once, the shape that orphaned nora's `go list` (see [[sub-nora-host]]).
 
 - **`dap-probe` — the live Ambush round-trip.** The only prior end-to-end DAP
   proof (`ambush dap-selftest`) ran *in-process* over a Go `net.Pipe`, never

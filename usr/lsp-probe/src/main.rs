@@ -258,6 +258,12 @@ enum Phase {
 /// covers that plus the handshake and the type-check. clangd has no such
 /// external step but pages in a 44 MB binary, so it shares the budget rather
 /// than getting a guessed-tighter one.
+///
+/// The goodbye spends the same budget, because clangd's exit costs about what
+/// its session did and so scales with the host the same way: with headers,
+/// 1.1 s then 0.9 s under HVF, 10.2 s then 11.2 s on thyla-pi's KVM. A fixed
+/// bound of its own would make host speed boot-fatal. One deadline per session
+/// also keeps joey's bound on the whole probe, sized at sessions x this, honest.
 const BUDGET_MS: u64 = 240_000;
 /// One poll wait. Short enough that the heartbeat below stays useful.
 const POLL_MS: u32 = 5_000;
@@ -265,10 +271,6 @@ const POLL_MS: u32 = 5_000;
 /// hang in the boot log -- the difference between "waiting" and "wedged" should
 /// never have to be guessed.
 const HEARTBEAT_MS: u64 = 20_000;
-/// How long the goodbye may take: the answer to `shutdown`, then the exit. The
-/// probe says goodbye after its diagnostic, so gopls's first workspace load,
-/// which `shutdown` would otherwise queue behind, is over.
-const GOODBYE_MS: u64 = 10_000;
 /// Between checks that the server has exited once its stdout closed. An exit
 /// is not a pollable event, and gopls closes stdout before it returns.
 const EXIT_NAP_MS: u64 = 5;
@@ -530,7 +532,7 @@ fn run_session(spec: &ProbeSpec) {
                                     t_putstr("MiB");
                                 }
                                 t_putstr(")\n");
-                                goodbye(spec, &mut cl, &mut srv, &mut mux);
+                                goodbye(spec, &mut cl, &mut srv, &mut mux, start);
                                 return;
                             }
                         }
@@ -735,9 +737,12 @@ fn dispatch(
 }
 
 /// The goodbye nora's exit runs: `shutdown`, its answer, `exit`, then the
-/// server must close its stdout and exit by itself with status 0 within
-/// `GOODBYE_MS`. gopls exits 1 on an `exit` that arrives before `shutdown`.
-fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut Mux) {
+/// server must close its stdout and exit by itself with status 0 before the
+/// session that began at `start` runs out of `BUDGET_MS`. The probe says
+/// goodbye after its diagnostic, so gopls's first workspace load, which
+/// `shutdown` would otherwise queue behind, is over. gopls exits 1 on an
+/// `exit` that arrives before `shutdown`.
+fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut Mux, start: Instant) {
     let t0 = Instant::now();
     let bye = cl.shutdown();
     if srv.send(&bye).is_err() {
@@ -745,10 +750,12 @@ fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut M
     }
     let mut answered = false;
     let mut err_open = true;
+    let mut next_hb = HEARTBEAT_MS;
     'out: loop {
-        if t0.elapsed().as_millis() as u64 > GOODBYE_MS {
-            end_failed(spec, srv, if answered { "stdout still open after exit" } else { "no answer to shutdown" });
+        if start.elapsed().as_millis() as u64 > BUDGET_MS {
+            budget_spent(spec, srv, t0, if answered { "stdout still open after exit" } else { "no answer to shutdown" });
         }
+        goodbye_heartbeat(spec, t0, &mut next_hb, if answered { "answered, stdout open" } else { "awaiting the answer" });
         // A closed pipe polls readable forever, so stderr leaves the set at EOF.
         let err_fd = if err_open { srv.stderr_fd() } else { -1 };
         let fds = [(srv.stdout_fd(), TAG_OUT), (err_fd, TAG_ERR)];
@@ -818,11 +825,54 @@ fn goodbye(spec: &ProbeSpec, cl: &mut lsp::Client, srv: &mut Server, mux: &mut M
             Ok(None) => {}
             Err(_) => end_failed(spec, srv, "try_wait"),
         }
-        if t0.elapsed().as_millis() as u64 > GOODBYE_MS {
-            end_failed(spec, srv, "the server closed its stdout but did not exit");
+        if start.elapsed().as_millis() as u64 > BUDGET_MS {
+            budget_spent(spec, srv, t0, "the server closed its stdout but did not exit");
         }
-        let _ = time::sleep(Duration::from_millis(EXIT_NAP_MS));
+        goodbye_heartbeat(spec, t0, &mut next_hb, "stdout closed, awaiting the exit");
+        // gopls closes stdout before it shuts down and can still log: a stderr
+        // pipe nobody reads fills and stops it short of its exit.
+        if err_open {
+            match mux.poll(&[(srv.stderr_fd(), TAG_ERR)], PollTimeout::Millis(EXIT_NAP_MS as u32)) {
+                Ok(r) if !r.is_empty() => err_open = matches!(srv.drain_stderr(), Ok(false)),
+                Ok(_) => {}
+                Err(_) => end_failed(spec, srv, "mux.poll (exit wait)"),
+            }
+        } else {
+            let _ = time::sleep(Duration::from_millis(EXIT_NAP_MS));
+        }
     }
+}
+
+/// The session budget ran out inside the goodbye. Says how far into it, so a
+/// session that had already spent the budget does not read as the server's.
+fn budget_spent(spec: &ProbeSpec, srv: &mut Server, t0: Instant, what: &str) -> ! {
+    let _ = srv.kill();
+    let _ = srv.wait();
+    t_putstr("lsp-probe: FAIL [");
+    t_putstr(spec.name);
+    t_putstr("] -- ");
+    t_putstr(what);
+    t_putstr(" when the session budget ran out, ");
+    print_u32(t0.elapsed().as_millis() as u32);
+    t_putstr("ms into the goodbye\n");
+    unsafe { t_exits(1) }
+}
+
+/// The session loop's heartbeat, for a goodbye that may now take as long as a
+/// session: a slow exit and a wedged one must read differently in the boot log.
+fn goodbye_heartbeat(spec: &ProbeSpec, t0: Instant, next_hb: &mut u64, state: &str) {
+    let waited = t0.elapsed().as_millis() as u64;
+    if waited < *next_hb {
+        return;
+    }
+    *next_hb += HEARTBEAT_MS;
+    t_putstr("lsp-probe: [");
+    t_putstr(spec.name);
+    t_putstr("] goodbye waiting (");
+    print_u32((waited / 1000) as u32);
+    t_putstr("s, ");
+    t_putstr(state);
+    t_putstr(")\n");
 }
 
 /// Kill and reap the server, then fail: unlike `fail`, the server here is the
