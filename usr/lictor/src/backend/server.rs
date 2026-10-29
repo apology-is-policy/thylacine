@@ -2,6 +2,7 @@
 //! Authentication happens at accept using the kernel's live peer snapshot.
 use alloc::{vec, vec::Vec};
 use libthyla_rs::{ninep as p9, t_close, t_read, t_write, t_weft_share, t_weft_unshare, T_POLLIN, T_POLLOUT, T_POLLHUP};
+use libthyla_rs::time::Instant;
 use crate::{framing::{self, Transaction}, gpu_api::{Request, Stats}, wire::{Reader, Wire}};
 use super::device::Device;
 const MSIZE: usize = 8192;
@@ -20,6 +21,7 @@ pub struct Conn {
     fids: Vec<Fid>,
     transaction: Transaction,
     pub pending: Option<(u64, Request)>,
+    pending_at: Option<Instant>,
     reply: Vec<u8>,
     read_at: usize,
     parked: Option<(u16, u32)>,
@@ -29,11 +31,18 @@ pub struct Conn {
 impl Conn {
     pub fn new(fd: i64) -> Self {
         Self { fd, incoming: Vec::new(), outgoing: Vec::new(), sent: 0, fids: Vec::new(),
-            transaction: Transaction::default(), pending: None, reply: Vec::new(), read_at: 0,
+            transaction: Transaction::default(), pending: None, pending_at: None, reply: Vec::new(), read_at: 0,
             parked: None, alive: true, msize: MSIZE }
     }
     pub fn events(&self) -> i16 { if self.outgoing.is_empty() { T_POLLIN } else { T_POLLOUT } }
     pub fn alive(&self) -> bool { self.alive }
+    /// How long the pending request has waited for admission.
+    pub fn parked_ms(&self) -> u64 {
+        match (&self.pending, self.pending_at) {
+            (Some(_), Some(at)) => at.elapsed().as_millis() as u64,
+            _ => 0,
+        }
+    }
     pub fn io(&mut self, revents: i16) {
         if revents & T_POLLHUP != 0 { self.alive = false; return; }
         if revents & T_POLLOUT != 0 && !self.outgoing.is_empty() {
@@ -162,6 +171,7 @@ impl Conn {
                     let request = Request::get(&mut r).map_err(|_| ())?;
                     r.finish().map_err(|_| ())?;
                     self.pending = Some((sequence, request));
+                    self.pending_at = Some(Instant::now());
                 }
                 p9::build_rwrite(out, tag, a.data.len() as u32)?
             }

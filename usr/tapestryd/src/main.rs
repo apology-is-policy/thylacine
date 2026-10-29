@@ -468,8 +468,12 @@ impl Driver for Tapestryd {
         );
         #[cfg(feature = "test-mode")]
         if latch_dead_declared() {
-            self.comp.gpu.test_arm_latch();
-            say!("tapestryd: test-latch-dead armed (the engine latches dead when a 97x89 surface retires)");
+            if self.comp.gpu.test_arm_latch() {
+                self.comp.test_latch_armed = true;
+                say!("tapestryd: test-latch-dead armed (the engine latches dead when a 97x89 surface retires)");
+            } else {
+                say!("tapestryd: test-latch-dead arm REFUSED by the broker");
+            }
         }
 
         let mut conns: Vec<Conn> = Vec::new();

@@ -29,6 +29,7 @@ pub struct Device {
     rings: Vec<HostRing>,
     owner: u64,
     pub presentation: Presentation,
+    refused_retirements: u64,
     #[cfg(feature = "test-mode")]
     test_latch_armed: bool,
     #[cfg(feature = "test-mode")]
@@ -39,6 +40,7 @@ impl Device {
         gpu.enable_retirement_journal();
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
             retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
+            refused_retirements: 0,
             #[cfg(feature = "test-mode")] test_latch_armed: false,
             #[cfg(feature = "test-mode")] test_latch_targets: Vec::new() })
     }
@@ -103,20 +105,14 @@ impl Device {
         }
     }
     /// The armed latch lever, asked of each pending request before the server
-    /// admits it: a resource created at `TEST_LATCH_SIZE` becomes a target,
-    /// and the first retirement of a target latches the engine dead -- the
-    /// state a command that missed its synchronous deadline leaves, met by a
-    /// retirement exactly when the park would decide it.
+    /// admits it: the first retirement of a resource created at
+    /// `TEST_LATCH_SIZE` latches the engine dead -- the state a command that
+    /// missed its synchronous deadline leaves, met by a retirement exactly
+    /// when the park would decide it.
     #[cfg(feature = "test-mode")]
     pub fn test_latch_consider(&mut self, request: &Request) {
         if !self.test_latch_armed { return; }
         match *request {
-            Request::ResourceCreate2d { resource_id, w, h } if (w, h) == TEST_LATCH_SIZE => {
-                if !self.test_latch_targets.contains(&resource_id)
-                    && self.test_latch_targets.len() < TEST_LATCH_TARGETS {
-                    self.test_latch_targets.push(resource_id);
-                }
-            }
             Request::DetachBacking { resource_id } | Request::ResourceUnref { resource_id }
                 if self.test_latch_targets.contains(&resource_id) => {
                 self.test_latch_armed = false;
@@ -126,11 +122,29 @@ impl Device {
             _ => {}
         }
     }
+    #[cfg(feature = "test-mode")]
+    fn test_latch_mark(&mut self, resource_id: u32, w: u32, h: u32) {
+        if self.test_latch_armed && (w, h) == TEST_LATCH_SIZE
+            && !self.test_latch_targets.contains(&resource_id)
+            && self.test_latch_targets.len() < TEST_LATCH_TARGETS {
+            self.test_latch_targets.push(resource_id);
+        }
+    }
     /// A retirement runs only once all device work has really retired
     /// (abandoned/poisoned chains do not qualify); the server parks it until
-    /// then, except on a dead engine, which refuses it here (`gpu_api::admit`).
+    /// then, and one admitted without it (`gpu_api::admit`: quiescence
+    /// unreachable, or the park bound) is refused here before any ledger
+    /// change, so no `retiring` entry is left that `reap` could never finish.
     pub fn execute(&mut self, connection: i64, request: Request) -> Result<Vec<u8>, Error> {
-        if request.retires() && !self.gpu.all_work_retired() { return Err(Error::Hardware); }
+        if request.retires() && !self.gpu.all_work_retired() {
+            self.refused_retirements += 1;
+            if self.refused_retirements.is_power_of_two() {
+                crate::backend::diagnostic(&alloc::format!(
+                    "lictor: retirement refused on a non-quiescent engine (pins kept; {} so far)\n",
+                    self.refused_retirements));
+            }
+            return Err(Error::Hardware);
+        }
         let mut out = Vec::new();
         match request {
             Request::Cursor { shape, scale, x, y, visible } => {
@@ -159,6 +173,8 @@ impl Device {
                 if w == 0 || h == 0 || w > 8192 || h > 8192 { return Err(Error::BadField); }
                 self.reserve(resource_id, Kind::Resource)?;
                 let result = self.gpu.resource_create_2d(resource_id, w, h);
+                #[cfg(feature = "test-mode")]
+                if result.is_ok() { self.test_latch_mark(resource_id, w, h); }
                 result.put(&mut out);
             }
             Request::AttachBacking { resource_id, backing } => {

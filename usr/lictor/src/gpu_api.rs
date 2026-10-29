@@ -271,13 +271,19 @@ impl Request {
     }
 }
 /// Whether the broker runs `request` now or leaves it parked. A park must end:
-/// a seat episode ends, and in-flight chains retire. A dead engine never
-/// becomes quiescent again, so a retirement on one runs at once and is
-/// refused, keeping every pin it would have released -- the caller degrades
-/// instead of waiting forever on a reply.
-pub fn admit(request: &Request, phase: u32, quiescent: bool, dead: bool) -> bool {
-    request.seat() || (phase == 0 && (!request.retires() || quiescent || dead))
+/// a seat episode ends, and in-flight chains retire. Quiescence that can never
+/// come (a dead engine, a cursor queue poisoned until reset) admits a
+/// retirement at once, and one parked `PARK_BOUND_MS` is admitted whatever
+/// the cause; either way `Device::execute` refuses it, keeping every pin, and
+/// the caller degrades instead of waiting forever on a reply.
+pub fn admit(request: &Request, phase: u32, quiescent: bool, unreachable: bool, parked_ms: u64) -> bool {
+    request.seat()
+        || (phase == 0 && (!request.retires() || quiescent || unreachable || parked_ms >= PARK_BOUND_MS))
 }
+/// The longest a retirement waits for quiescence before it is refused: the
+/// bound every fenced chain already carries (backend gpu.rs asserts the two
+/// equal), past which the device's own abandonment has given up on it too.
+pub const PARK_BOUND_MS: u64 = 30_000;
 impl Wire for Request {
     fn put(&self, out: &mut Vec<u8>) {
         1u16.put(out);
@@ -470,34 +476,48 @@ mod admission_tests {
         for r in seat() { assert!(r.seat() && !r.retires(), "{r:?}"); }
     }
     #[test]
-    fn a_retirement_on_a_dead_engine_runs_to_its_refusal() {
-        // Parked, it would wait for a quiescence a dead engine never reaches,
-        // and the compositor blocks on the reply for good.
-        for r in retirements() { assert!(admit(&r, 0, false, true), "{r:?} parked on a dead engine"); }
+    fn a_retirement_on_unreachable_quiescence_runs_to_its_refusal() {
+        // Parked, it would wait for a quiescence a dead engine (or a cursor
+        // queue poisoned until reset) never reaches, and the compositor
+        // blocks on the reply for good.
+        for r in retirements() { assert!(admit(&r, 0, false, true, 0), "{r:?} parked on unreachable quiescence"); }
     }
     #[test]
     fn a_retirement_waits_for_in_flight_chains_on_a_live_engine() {
         for r in retirements() {
-            assert!(!admit(&r, 0, false, false), "{r:?} ran before the device quiesced");
-            assert!(admit(&r, 0, true, false), "{r:?} parked on a quiescent device");
+            assert!(!admit(&r, 0, false, false, 0), "{r:?} ran before the device quiesced");
+            assert!(admit(&r, 0, true, false, 0), "{r:?} parked on a quiescent device");
+        }
+    }
+    #[test]
+    fn a_retirement_parked_to_the_bound_runs_to_its_refusal() {
+        // A chain the device never retires (a poisoned fenced slot) is not
+        // unreachable by construction, so only the clock can end that park.
+        for r in retirements() {
+            assert!(!admit(&r, 0, false, false, PARK_BOUND_MS - 1), "{r:?} ran before the bound");
+            assert!(admit(&r, 0, false, false, PARK_BOUND_MS), "{r:?} still parked at the bound");
         }
     }
     #[test]
     fn an_episode_parks_every_ordinary_request_whatever_the_engine() {
-        for phase in [1, 2, 3] {
+        // The bound is phase 0's: an episode's own deadlines end its park, and
+        // ordinary admission stays closed for the trusted path's whole span.
+        for phase in [1, 2, 3, 4] {
             for r in retirements().into_iter().chain(ordinary()) {
-                for (quiescent, dead) in [(false, false), (true, false), (false, true), (true, true)] {
-                    assert!(!admit(&r, phase, quiescent, dead), "{r:?} ran in phase {phase}");
+                for (quiescent, unreachable) in [(false, false), (true, false), (false, true), (true, true)] {
+                    for parked in [0, PARK_BOUND_MS, u64::MAX] {
+                        assert!(!admit(&r, phase, quiescent, unreachable, parked), "{r:?} ran in phase {phase}");
+                    }
                 }
             }
         }
     }
     #[test]
     fn seat_traffic_and_ordinary_work_run_regardless_of_quiescence() {
-        for (quiescent, dead) in [(false, false), (true, false), (false, true), (true, true)] {
-            for r in ordinary() { assert!(admit(&r, 0, quiescent, dead), "{r:?}"); }
-            for phase in [0, 1, 2, 3] {
-                for r in seat() { assert!(admit(&r, phase, quiescent, dead), "{r:?} in phase {phase}"); }
+        for (quiescent, unreachable) in [(false, false), (true, false), (false, true), (true, true)] {
+            for r in ordinary() { assert!(admit(&r, 0, quiescent, unreachable, 0), "{r:?}"); }
+            for phase in [0, 1, 2, 3, 4] {
+                for r in seat() { assert!(admit(&r, phase, quiescent, unreachable, 0), "{r:?} in phase {phase}"); }
             }
         }
     }

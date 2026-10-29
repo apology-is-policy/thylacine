@@ -1001,8 +1001,9 @@ mutual-authority witness is owed at H-4b-3's restore tool;
 for production, and both variants compile. One test lever rides the kernel
 command line instead of the ctl, because it is global and permanent:
 `thylacine.test-latch-dead` makes tapestryd, once it serves, arm the broker
-to latch the GPU engine dead when a 97x89 surface retires, and
-`tools/interactive/ls-gpu-dead.exp` then watches the compositor survive a
+to latch the GPU engine dead when a 97x89 surface retires; the global ctl
+says `test-latch-dead armed` only once the broker has accepted it, and
+`tools/interactive/ls-gpu-dead.exp` asks that state, then watches the compositor survive a
 dead engine -- the retirement refused, the ctl still answered
 ([[sub-lictor]]). The battery and its expect
 scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)

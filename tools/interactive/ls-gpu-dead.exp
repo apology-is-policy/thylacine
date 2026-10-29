@@ -14,10 +14,12 @@
 # resource created at the lever's size (97x89) -- so no boot probe's
 # retirement fires it. A surface created and destroyed from the shell does.
 #
-# PASS needs all of: the lever armed; the injected latch; the destroy write
-# answered; the compositor answering its ctl afterwards; and the abandoned
-# query seen to retire late (the instrument that tells a slow device from one
-# that never completes, given here its positive control).
+# PASS needs all of: the lever armed (the compositor's ctl says the broker
+# took it); the injected latch; lictor's refusal of the retirement; the
+# destroy write answered without error; the compositor answering its ctl
+# afterwards; and the abandoned query seen to retire late (the instrument
+# that tells a slow device from one that never completes, given here its
+# positive control).
 #
 # Runs under HVF on the ci image. Any GPU device will do: the park is the
 # broker's, not the renderer's.
@@ -28,13 +30,17 @@ set ::env(THYLACINE_TEST_LATCH_DEAD) 1
 source [file join [file dirname [info script]] lib.exp]
 
 lc_boot
-lc_expect "test-latch-dead armed" "the lever armed once the compositor posted"
 lc_login michael correct-horse-battery-staple-v1
 
+# The arm is asked of the compositor's state, not of its boot line, which
+# can land on either side of the login prompt.
 set timeout 30
-lc_send "cat /dev/tapestry/ctl"
+lc_send "cat /dev/tapestry/ctl; echo ctl-before"
 expect {
-    -re {display [0-9]+ [0-9]+} { lc_step "the compositor answers before the latch" }
+    -re {display [0-9]+ [0-9]+[^\n]*\n(.|\n)*test-latch-dead armed[^\n]*\n(.|\n)*\nctl-before} {
+        lc_step "the compositor answers before the latch, with the lever armed"
+    }
+    -re {\nctl-before} { lc_fail "the compositor's ctl carries no display line or no armed lever (did the broker refuse the arm?)" }
     timeout { lc_fail "the compositor's ctl never answered, before any latch (30s)" }
 }
 
@@ -75,13 +81,13 @@ if {[llength $made] != 1} {
 set sid [lindex $made 0]
 lc_step "the create made surface $sid at the lever's size"
 
-set latched 0
 set late 0
-lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl; echo destroy-returned"
+set refused 0
+set ok 0
+lc_send "echo destroy > /dev/tapestry/surface/$sid/ctl && echo destroy-ok; echo destroy-returned"
 set timeout 60
 expect {
     -ex "gpu command never retired (INJECTED by test-latch-dead)" {
-        set latched 1
         lc_step "lictor latched the engine dead at the retirement"
     }
     -re {\ndestroy-returned} { lc_fail "the destroy returned with no injected latch -- did the create make a 97x89 resource?" }
@@ -89,15 +95,31 @@ expect {
     timeout { lc_fail "no injected latch within 60s of the destroy -- did the create make a 97x89 resource?" }
 }
 # Before the fix the destroy's write parks in lictor for good, so its echo
-# never finishes and the sentinel behind it never prints.
+# never finishes and neither sentinel behind it prints. The wait is well
+# under lictor's 30 s park bound: a dead engine must refuse at once, and a
+# refusal that only the bound produced is the unreachable arm missing.
+set timeout 15
 expect {
     -ex "gpu synchronous chain retired" {
         set late 1
         lc_step "the abandoned query retired late (instrument control)"
         exp_continue
     }
-    -re {\ndestroy-returned} { lc_step "the destroy write was answered" }
-    timeout { lc_fail "the compositor hung on a dead engine: the destroy write never returned (60s)" }
+    -ex "lictor: retirement refused on a non-quiescent engine" {
+        set refused 1
+        lc_step "lictor refused the retirement rather than parking it"
+        exp_continue
+    }
+    -re {\ndestroy-ok} { set ok 1; exp_continue }
+    -re {\ndestroy-returned} {
+        if {!$ok} { lc_fail "the destroy write returned an error after the latch" }
+        lc_step "the destroy write was answered"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after the latch" }
+    timeout { lc_fail "the compositor hung on a dead engine: the destroy write did not return within 15s of the latch (a park the 30s bound would end late, or never)" }
+}
+if {!$refused} {
+    lc_fail "the destroy returned but lictor never said it refused the retirement -- which path answered it?"
 }
 
 set timeout 30

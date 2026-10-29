@@ -1680,6 +1680,10 @@ pub struct Comp {
     /// structural repaint heals the screen. Read as `composed-gpu-dead` in
     /// the global ctl.
     comp_gpu_dead: bool,
+    /// The broker accepted the test-latch-dead lever (read in the global
+    /// ctl, so a witness asks the state rather than racing a boot line).
+    #[cfg(feature = "test-mode")]
+    pub test_latch_armed: bool,
     /// A latch asked for a structural repaint; `frame_tick` performs it.
     comp_repaint_pending: bool,
     /// The tick the compositor context's health was last attended to: at
@@ -2549,6 +2553,8 @@ impl Comp {
             poke_hist_flush: [0; 8],
             comp_conv: None,
             comp_gpu_dead: false,
+            #[cfg(feature = "test-mode")]
+            test_latch_armed: false,
             comp_repaint_pending: false,
             comp_verify_tick: u64::MAX,
             comp_verify_pending: false,
@@ -16580,6 +16586,10 @@ impl Conn {
                     comp.composed_gpu, comp.composed_cpu, comp.comp_gpu_dead as u32
                 ),
             );
+            #[cfg(feature = "test-mode")]
+            if comp.test_latch_armed {
+                s.push_str("test-latch-dead armed\n");
+            }
             // Warp-C C-4: the present-path cost census, one line per op
             // class -- `cost <kind> <n> <sum_us> <max_us>`, cumulative since
             // boot (a reader diffs snapshots). Every kind is printed, zero or

@@ -490,6 +490,8 @@ const USED_SPIN_PER_WAKE: u32 = 65536;
 // bookkeeping: 30 s is orders above any real GL job, so reaching it means
 // the host renderer hung (the GPU-DESIGN section 9.2 accepted risk).
 const FENCE_ABANDON_MS: u64 = 30_000;
+// A retirement the broker parks gives up at the same bound (gpu_api::admit).
+const _: () = assert!(crate::gpu_api::PARK_BOUND_MS == FENCE_ABANDON_MS);
 
 /// The QEMU-virt virtio-gpu default scanout geometry, used when
 /// GET_DISPLAY_INFO reports no enabled scanout (never observed on QEMU;
@@ -1320,7 +1322,7 @@ impl Controlq {
                     let id = unsafe { r32(used_va + 4 + ((k % QUEUE_SIZE) as u64) * 8) };
                     if id == 0 || id == SYNC2_HEAD as u32 {
                         say!(
-                            "tapestryd: gpu synchronous chain retired {} ms after its deadline latched the engine dead",
+                            "lictor: gpu synchronous chain retired {} ms after its deadline latched the engine dead",
                             at.elapsed().as_millis()
                         );
                         self.latched = None;
@@ -1472,7 +1474,7 @@ impl Controlq {
         let began = Instant::now();
         #[cfg(feature = "test-mode")]
         if core::mem::take(&mut self.test_latch_next) {
-            say!("tapestryd: gpu command never retired (INJECTED by test-latch-dead)");
+            say!("lictor: gpu command never retired (INJECTED by test-latch-dead)");
             self.latched = Some((Instant::now(), self.used_seen));
             self.dead = true;
             return Err(());
@@ -1527,7 +1529,7 @@ impl Controlq {
         if took >= SLOW_SYNC_MS && took > self.sync_slowest_ms {
             self.sync_slowest_ms = took;
             say!(
-                "tapestryd: gpu synchronous command retired in {} ms (slowest yet; deadline {} ms)",
+                "lictor: gpu synchronous command retired in {} ms (slowest yet; deadline {} ms)",
                 took,
                 deadline_ms
             );
@@ -4475,6 +4477,12 @@ impl Gpu {
 
     pub fn engine_dead(&self) -> bool {
         self.ctrl.dead
+    }
+
+    /// Quiescence that can never come back: a latched engine, or a cursor
+    /// queue poisoned until device reset. `all_work_retired` stays false.
+    pub fn quiescence_unreachable(&self) -> bool {
+        self.ctrl.dead || self.cursor.queue.failed()
     }
 }
 

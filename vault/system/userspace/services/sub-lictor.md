@@ -125,13 +125,24 @@ A retirement (detach or unref of a resource, destroy of a context, detach of a
 context's resource, retire or drop of a host ring) runs only once every
 outstanding chain has really retired; until then the loop leaves it parked
 (`gpu_api::admit`, asked of each pending request). A park must end: an episode
-ends and in-flight chains retire, but a dead engine never becomes quiescent
-again. So a retirement on a dead engine runs at once and `Device::execute`
-refuses it, keeping every pin it would have released, and the compositor
-degrades instead of blocking on a reply that never comes. Until 2026-10-29 it
-parked: one command that missed the synchronous deadline took the display away
-for the rest of the boot, measured twice on thyla-pi (a boot-time blit probe,
-and a runtime console transfer).
+ends and in-flight chains retire, but some quiescence never comes back. A dead
+engine and a cursor queue poisoned until device reset
+(`Gpu::quiescence_unreachable`) admit a retirement at once; a chain the device
+may never retire (a poisoned fenced slot) is bounded by the clock instead, so a
+retirement parked `PARK_BOUND_MS` (30 s, asserted equal to the fenced
+abandonment bound) is admitted whatever the cause. Either way `Device::execute`
+refuses it before any ledger change, says so (at the 1st, 2nd, 4th, ... refusal),
+and the compositor degrades instead of blocking on a reply that never comes.
+The pins themselves stay because nothing frees one without a device
+completion: a refused detach keeps its backing, and `reap` releases an unref's
+pin only once the device journal reports it, which a dead engine never does.
+`execute`'s refusal keeps the ledger consistent, never leaving a `retiring`
+entry that `reap` could not finish. The bound is phase 0's only: an episode's
+own deadlines end its park, and ordinary admission stays closed for the whole
+trusted span. Until 2026-10-29 a retirement on a dead engine parked: one
+command that missed the synchronous deadline took the display away for the
+rest of the boot, measured twice on thyla-pi (a boot-time blit probe, and a
+runtime console transfer).
 
 The GPU command machinery remains in the trusted service. Its synchronous and
 asynchronous commands share one monotone fence sequence. Synchronous responses
@@ -148,8 +159,9 @@ which tells a late device from one that never completes.
 A test-mode lever reproduces the dead-engine state on demand.
 `thylacine.test-latch-dead` on the kernel command line
 (`THYLACINE_TEST_LATCH_DEAD=1` to `tools/run-vm.sh`) makes tapestryd arm the
-broker with `TestArmLatch` once it serves. `Device::test_latch_consider` then
-marks the resources created at 97 by 89 and, at the first retirement of one,
+broker with `TestArmLatch` once it serves, and its global ctl says
+`test-latch-dead armed` once the broker has taken it. `Device` then marks each
+resource created at 97 by 89 and, at the first retirement of one,
 latches the engine through a harmless display query whose wait reports its
 deadline passed, exactly the state a slow command leaves. Only the designated
 compositor reaches the broker, and only the booting operator sets the token.
@@ -272,7 +284,8 @@ death is different: a dead service leaves the seat failed until warden starts a
 new one, which must re-establish hardware ownership; no ordinary client
 inherits the seat. The ledger validates a request before it reserves an id, so
 a refused request leaves no reservation behind. A dead engine refuses every
-retirement (its pins stay) and fails every other device request; seat traffic
+retirement (its pins stay) and fails every command that would reach the ring;
+queries the broker answers from its own state still answer, and seat traffic
 still flows.
 
 ## Performance
@@ -345,9 +358,9 @@ OPEN (2026-10-29): the synchronous deadline is 500 ms for every command but a
 readback, and its latch is permanent, so a device that is merely busy for
 longer -- GPU-DESIGN's #31 class, met on thyla-pi by a 2D transfer during a
 16.7 s serve pass -- still costs the GPU for the boot; the compositor now
-survives it, but the display does not. And a seat episode on a dead engine
-never returns to normal (a restore needs quiescence), so it parks ordinary
-requests for good.
+survives it, but the display does not. And a seat episode never returns to
+normal while quiescence is unreachable or a chain is never retired (a restore
+and the trusted takeover both need it), so it parks ordinary requests for good.
 
 The current backend is QEMU virtio GPU/input with a neutral backdrop. Pi DMA,
 controller ownership and display conformance require separate qualification.
