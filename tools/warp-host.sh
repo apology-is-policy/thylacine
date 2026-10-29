@@ -4,7 +4,8 @@
 # `thyla-gl` ssh alias) from the build host: artifact sync, a plain smoke
 # boot, the llvmpipe baseline bench, and the virtio-gpu-gl capset boot.
 #
-#   tools/warp-host.sh sync      # repo (git archive HEAD) + boot artifacts
+#   tools/warp-host.sh sync      # repo (git archive HEAD) + boot artifacts + their records
+#   tools/warp-host.sh lint      # every scenario that logs in declares its image (sync runs it)
 #   tools/warp-host.sh smoke     # boot to 'Thylacine boot OK' (2D device)
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
@@ -196,19 +197,78 @@ sync_pool() {
     echo "== restore twins refreshed: pool.img.baked-snapshot + both key twins match this sync =="
 }
 
-sync_all() {
-    # git archive HEAD: exactly the committed tree (no build/, no .git, no
-    # local junk). Uncommitted script changes ride separately below so a
-    # dirty iteration loop still tests what you edited. `tools/interactive/
-    # lib.exp` is in the list because EVERY warp .exp sources it: it was
-    # missing until the C-0d Fable close added a proc to it, and the Pi
-    # would have run the new scenario against HEAD's lib -- an "invalid
-    # command name" whose cause is a list that claimed to carry your edits.
-    ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
-    git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-ring.exp tools/warp/warp-ring-host3d.exp tools/warp/warp-img.exp tools/warp/warp-ring-xproc.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
-        scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
+# Every warp scenario that logs in must say what image it needs, or the wrong
+# one boots for its whole budget and fails as something else: a Halcyon-session
+# pool timed out at "shell never came up", a clade-less one at "no
+# composed-entry line within 900s". Asked of the scripts themselves, so a new
+# one cannot be missed.
+lint_scenarios() {
+    local undeclared="" f decl words boot
+    for f in "$REPO_ROOT"/tools/warp/*.exp; do
+        grep -q 'lc_login' "$f" || continue
+        # The declaration must name `shell` and come before the boot it saves.
+        # `|| true`: under pipefail a grep that finds nothing would end the lint
+        # silently, before it can name the scenario.
+        decl=$(grep -n '^lc_require_image {' "$f" | head -1 || true)
+        words=${decl#*\{}; words=${words%\}*}
+        boot=$(grep -nE '^[[:space:]]*lc_boot([[:space:]]|$)' "$f" | head -1 | cut -d: -f1 || true)
+        if [[ -z "$decl" || " $words " != *" shell "* || ( -n "$boot" && "${decl%%:*}" -gt "$boot" ) ]]; then
+            undeclared="$undeclared ${f#"$REPO_ROOT"/}"
+        fi
     done
+    if [[ -n "$undeclared" ]]; then
+        echo "== lint: REFUSED -- these scenarios log in without lc_require_image {shell ...} before lc_boot:$undeclared"
+        exit 2
+    fi
+    echo "== lint: every logging-in scenario declares its image"
+}
+
+# What sync ships from build/, fingerprinted (mtime + size): compared at the end
+# of a sync against its start, it proves no build rewrote an artifact meanwhile.
+artifact_stamp() {
+    local f
+    for f in kernel/thylacine.bin kernel/thylacine.elf ramfs.cpio disk.img \
+             fixtures/pool.img fixtures/pool.img.baked-snapshot fixtures/system.key \
+             fixtures/system.key.baked-snapshot pool-contents .config; do
+        stat -f "%m %z $f" "$REPO_ROOT/build/$f" 2>/dev/null || echo "absent $f"
+    done
+}
+
+sync_all() {
+    lint_scenarios
+    # The records ship as they stood when the sync began, and only if nothing
+    # sync ships changed while it ran: the pool is chosen at the start and
+    # takes minutes to move, so a bake finishing meanwhile would otherwise
+    # pair the old pool with the new record -- a session pool passing as ci.
+    local snap stamp0
+    snap=$(mktemp -d)
+    stamp0=$(artifact_stamp)
+    for f in pool-contents .config; do
+        if [[ -f "$REPO_ROOT/build/$f" ]]; then cp "$REPO_ROOT/build/$f" "$snap/$f"; fi
+    done
+    # git archive HEAD: exactly the committed tree (no build/, no .git, no
+    # local junk). Uncommitted changes under tools/ ride separately below
+    # so a dirty iteration loop still tests what you edited. The set is
+    # asked of git, not listed: the hand-kept list it replaces had missed
+    # lib.exp until the C-0d Fable close (an "invalid command name" on the
+    # Pi), and vkq-venus.exp, gfx_fp.py and screendump.sh never made it.
+    # The records of the image (below) go first and return last, after the
+    # pool: a sync that dies part-way leaves no record, so every scenario
+    # refuses, rather than an old pool beside a record of the new one.
+    ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share && rm -f $RREPO/build/pool-contents $RREPO/build/.config"
+    git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
+    # Captured first, so a failing git stops the sync instead of shipping
+    # nothing; --no-renames keeps a staged `git mv`'s new path on the list.
+    local changed untracked
+    changed=$(git -C "$REPO_ROOT" diff --name-only --no-renames --diff-filter=AMT HEAD -- tools/)
+    untracked=$(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- tools/)
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        # -n and </dev/null: both would otherwise drain the loop's list.
+        ssh -n "$HOST" "mkdir -p $RREPO/$(dirname "$f")"
+        scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/" < /dev/null
+    done <<< "$changed
+$untracked"
     echo "== artifacts =="
     scp -q "$REPO_ROOT"/build/kernel/thylacine.bin "$REPO_ROOT"/build/kernel/thylacine.elf \
         "$HOST:$RREPO/build/kernel/"
@@ -217,6 +277,21 @@ sync_all() {
     # --sparse; a raw copy would inflate 906M-in-5G to the full 5G on the
     # wire) and lands via dd seek into a pre-sized sparse .part.
     sync_pool
+    if [[ "$(artifact_stamp)" != "$stamp0" ]]; then
+        rm -rf "${snap:?}"
+        echo "SYNC-FAILED: build/ changed while it synced (a bake ran?) -- the records are withheld, so every scenario refuses this remote image; re-sync once the build is done"
+        exit 1
+    fi
+    # pool-contents is what populate verified in the pool (lc_require_image
+    # reads it); .config is what the build was asked for.
+    for f in pool-contents .config; do
+        if [[ -f "$snap/$f" ]]; then
+            scp -q "$snap/$f" "$HOST:$RREPO/build/"
+        else
+            echo "== sync: build/$f is absent -- every scenario that asks what this image holds will refuse it"
+        fi
+    done
+    rm -rf "${snap:?}"
 
     ssh "$HOST" "du -h $RREPO/build/fixtures/pool.img; ls -l $RREPO/build/kernel/thylacine.bin $RREPO/build/ramfs.cpio"
     echo "SYNC-DONE"
@@ -225,6 +300,9 @@ sync_all() {
 case "$cmd" in
 sync)
     sync_all
+    ;;
+lint)
+    lint_scenarios
     ;;
 smoke)
     ssh "$HOST" "${RPOLLS}bash $RREPO/tools/warp/boot-probe.sh smoke"
@@ -962,6 +1040,7 @@ quake)
         echo "WARP-4 GATE: VERIFIED"
     else
         echo "WARP-4 GATE: UNVERIFIED (need GLQ-VIRGL PASS + the scenario pass line)"
+        grep -m1 "LS-CI FAIL" "$out" || true
         exit 1
     fi
     # Fetch the dumps: the orientation strips are calibrated look-first
@@ -1062,6 +1141,7 @@ quake-vk-verdict)
         echo "W-4 VK GATE: VERIFIED"
     else
         echo "W-4 VK GATE: UNVERIFIED (need VKQ-VENUS PASS + the scenario pass line)"
+        grep -m1 "LS-CI FAIL" "$qlog" || true
         exit 1
     fi
     ;;

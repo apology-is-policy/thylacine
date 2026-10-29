@@ -123,9 +123,24 @@ itself. Until 2026-10-29 the record kept the overridden value. The record says
 what was asked for, not what landed: a clade bake with no staged toolchain is
 skipped with a warning, and populate's "payloads verified PRESENT" line is the
 content truth. `configure.sh` writes profiles through the same emitter but
-never exports, so a profile records the user's choices, not the shell's. And
-`--show-config` still writes `build/.config` before it exits, whether or not an
-image was built from it (OPEN-BUGS 2026-10-29T02:30Z).
+never exports, so a profile records the user's choices, not the shell's. Only a
+build that succeeds writes `build/.config`: it emits `.config.part` once the
+config resolves and moves it into place after its target returns, so
+`--show-config` (which prints and writes nothing) and a failed build leave the
+last good build's record. Until 2026-10-29 the record was written before any
+stage ran, so either could leave it naming a config no image had been built
+from.
+
+`build/pool-contents` is the content record of the pool. The mint writes it
+fresh, and populate appends `payloads=` only after it has stat-verified each
+payload in the pool. Under `THYLACINE_MKFS_PRESERVE=1` neither runs, so the
+old record survives with its pool. Since 2026-10-29 the payloads include
+`SESSION` when the Halcyon session lever baked `/lib/halcyon/session`. It is a
+mode, not optional content, recorded so a host-side gate (`lc_require_image`)
+can refuse a session pool before it boots one. `GLQUAKE` and `VIRGLPROVE`
+arrived the same day: `stage_clade` stages `tyr-glquake` and `virgl-prove` only
+when `build/clade/gl` holds them, so `CLADE` (verified by `clang++`) does not
+imply either.
 
 The lever selects a kernel, never a ramfs. `build/ramfs.cpio` is shared by every
 kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,

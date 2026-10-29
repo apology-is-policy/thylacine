@@ -39,6 +39,9 @@ proc pswp {} {
     return [list $in $out]
 }
 
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell CLADE GLQUAKE QUAKE}
+
 file mkdir $work
 # Per-attempt fixture isolation (#78/#85), Linux cp: the shared images are
 # never booted directly.
@@ -47,8 +50,6 @@ exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-bench.img
 exec cp $repo/build/disk.img $work/disk-bench.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-bench.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-bench.img
-
-source $repo/tools/interactive/lib.exp
 
 set s0 [pswp]
 

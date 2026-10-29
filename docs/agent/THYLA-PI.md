@@ -34,7 +34,11 @@ cora's groups, drop the control master: `ssh -O exit thyla-pi`.
 
 **Layout**: repo sync at `~/projects/thylacine` (push with `WARP_HOST=thyla-pi
 tools/warp-host.sh sync` — git-archive of HEAD + boot artifacts + the pool via
-sparse gzip; uncommitted tool scripts ride separately, re-scp after editing).
+sparse gzip; uncommitted changes under `tools/` ride separately, asked of git;
+the image's records `build/pool-contents` + `build/.config` travel after the
+pool). Every Warp scenario refuses before booting an image that cannot run it:
+a shell scenario needs `tools/build.sh kernel --config ci`, a `/clade` one
+`THYLACINE_BAKE_CLADE=1` over a staged `build/clade/stage`.
 Working fixtures + logs in `~/warp/`.
 
 **Care**:

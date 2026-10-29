@@ -197,16 +197,19 @@ if [[ "$config_selected" == 0 ]]; then bc_apply_preset default; fi
 bc_resolve
 bc_export                 # -> build_type/kernel_tests/boot_probes/dev_accounts/
                           #    sanitize/no_tickless + bake env vars
-mkdir -p "$BUILD_DIR"
-bc_emit_config "$BUILD_DIR/.config"
+# build/.config is the record of the image in build/: a build writes it aside and
+# moves it into place only once its target succeeds (after the dispatch below),
+# so --show-config and a failed build leave the last good build's record.
 if [[ "$show_config" == 1 ]]; then
-    echo "== resolved build config ($BUILD_DIR/.config) =="
+    echo "== resolved build config (not written: $BUILD_DIR/.config records the last build) =="
     bc_show
     echo "== -> build.sh knobs =="
     echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts sanitize='$sanitize' no_tickless=$no_tickless"
     if [[ ${#extra_cmake_args[@]} -gt 0 ]]; then printf 'cmake extra:'; printf ' %s' "${extra_cmake_args[@]}"; echo; fi
     exit 0
 fi
+mkdir -p "$BUILD_DIR"
+bc_emit_config "$BUILD_DIR/.config.part"
 
 # Translate user-friendly --sanitize values to the CMake variable.
 sanitize_cmake=""
@@ -4579,9 +4582,26 @@ GO4C /go4c"
         bake_want="$bake_want
 CLADE /clade/bin/clang++"
     fi
+    # stage_clade stages each GL binary only when build/clade/gl holds it, so a
+    # clade pool need not carry them: a scenario that runs one asks for it.
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -f "$vp_clade/bin/tyr-glquake" ]]; then
+        bake_want="$bake_want
+GLQUAKE /clade/bin/tyr-glquake"
+    fi
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -f "$vp_clade/bin/virgl-prove" ]]; then
+        bake_want="$bake_want
+VIRGLPROVE /clade/bin/virgl-prove"
+    fi
     if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -f "$vp_storm/Makefile" ]]; then
         bake_want="$bake_want
 STORM /storm/Makefile"
+    fi
+    # Not optional content but a mode, recorded here so a host-side gate can
+    # refuse a session pool before booting it (lc_require_image): login spawns
+    # halcyond, and no shell ever reaches the serial console.
+    if [[ "${THYLACINE_HALCYON_SESSION:-0}" != "0" ]]; then
+        bake_want="$bake_want
+SESSION /lib/halcyon/session"
     fi
     if [[ -f "$vp_quake/id1/pak0.pak" ]]; then
         bake_want="$bake_want
@@ -7710,6 +7730,8 @@ case "$target" in
         exit 1
         ;;
 esac
+# `clean` took the .part with build/.
+if [[ -f "$BUILD_DIR/.config.part" ]]; then mv -f "$BUILD_DIR/.config.part" "$BUILD_DIR/.config"; fi
 
 # --- build summary ------------------------------------------------------------
 # Print EXACTLY what this invocation (re)built / reused / preserved, so a session

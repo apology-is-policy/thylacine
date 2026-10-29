@@ -33,14 +33,15 @@ if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900
     set ::env(LS_CI_BOOT_TIMEOUT) 900
 }
 
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell}
+
 file mkdir $work
 file delete -force $work/pool-ringxproc.img $work/disk-ringxproc.img
 exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-ringxproc.img
 exec cp $repo/build/disk.img $work/disk-ringxproc.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-ringxproc.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-ringxproc.img
-
-source $repo/tools/interactive/lib.exp
 
 lc_boot
 lc_login michael correct-horse-battery-staple-v1

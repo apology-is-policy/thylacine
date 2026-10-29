@@ -53,14 +53,15 @@ if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900
     set ::env(LS_CI_BOOT_TIMEOUT) 900
 }
 
+source [file join [file dirname [info script]] .. interactive lib.exp]
+lc_require_image {shell GLQUAKE QUAKE}
+
 file mkdir $work
 file delete -force $work/pool-quarry.img $work/disk-quarry.img
 exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-quarry.img
 exec cp $repo/build/disk.img $work/disk-quarry.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-quarry.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-quarry.img
-
-source [file join [file dirname [info script]] .. interactive lib.exp]
 
 if {$lc_cmd_timeout < 2400} { set lc_cmd_timeout 2400 }
 

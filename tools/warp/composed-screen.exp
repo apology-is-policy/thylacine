@@ -148,6 +148,9 @@ if {$dev eq "virtio-gpu-gl-pci"} {
     set want_arm "2D"
 }
 
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell}
+
 file mkdir $work
 # Per-attempt fixture isolation (#78/#85): the synced images are never
 # booted directly, and a stale copy from a prior leg must never be booted
@@ -158,8 +161,6 @@ exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-$tag.img
 exec cp $repo/build/disk.img $work/disk-$tag.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-$tag.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-$tag.img
-
-source $repo/tools/interactive/lib.exp
 
 lc_boot
 

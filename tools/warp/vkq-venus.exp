@@ -77,6 +77,9 @@ proc pswp {} {
     return [list $in $out]
 }
 
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell QUAKE}
+
 file mkdir $work
 # Per-attempt fixture isolation (#78/#85): the synced images are never
 # booted directly.
@@ -85,8 +88,6 @@ exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-vkq.img
 exec cp $repo/build/disk.img $work/disk-vkq.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-vkq.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-vkq.img
-
-source $repo/tools/interactive/lib.exp
 
 set qmp [lc_qmp_sock]
 

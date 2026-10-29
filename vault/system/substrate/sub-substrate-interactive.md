@@ -56,7 +56,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -403,6 +403,20 @@ Every non-pass prints the steps file, a transcript tail, and the path to
 every attempt's preserved evidence. The summary line breaks the count into
 guest / INFRA / HARNESS and states plainly that only the guest failures say
 anything about Thylacine.
+
+A shell gate booted on a Halcyon-session image fails at login and names the
+image (2026-10-29). The bare `tools/build.sh` default is such an image
+(HALCYON_SESSION=y bakes `/lib/halcyon/session` into the pool). `lc_login`
+matches login's own `login: session compositor (halcyond) spawned` line beside
+the shell banner and fails naming `--config ci`. Before, the gate waited out
+the boot budget as "shell never came up after auth". The wrapper still counts
+this as a guest failure and retries it (OPEN-BUGS 2026-10-29T02:58Z).
+`lc_require_image {needs}` refuses an image before the boot, reading
+`build/pool-contents`. The need `shell` refuses a pool whose payloads list
+`SESSION`. A payload label (`CLADE`, `QUAKE`) refuses a pool that does not list
+it. An absent record, or one with no `payloads=` line, refuses outright. It
+prints `LS-CI FAIL: image refused: ...` and exits 1 without lc_fail's VM
+evidence, because no VM exists yet. Only the Warp scenarios call it so far.
 
 ## Performance
 

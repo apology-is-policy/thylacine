@@ -13,7 +13,7 @@ hazards: []
 abis: []
 design: ["docs/GPU-HOST-SETUP.md", "docs/GPU-DESIGN.md"]
 created: 2026-09-21
-updated: 2026-09-25
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -29,9 +29,33 @@ verb, and every hand-run remote gate, stands on -- and only lists the rest.
 
 - `sync` makes the remote `~/projects/thylacine` equal to `git archive HEAD`
   plus `build/kernel/thylacine.{bin,elf}`, `build/ramfs.cpio`,
-  `build/disk.img` and the pool. UNCOMMITTED work does not travel, except the
-  fixed list of harness files `sync_all` scp's on top (run-vm.sh, lib.exp, the
-  warp `.exp` set). A scenario edited but not committed runs at HEAD's version.
+  `build/disk.img`, the pool, and the image's two records (below).
+  UNCOMMITTED work travels only under `tools/`: every file git reports
+  modified or added against HEAD, or untracked and not ignored. Since
+  2026-10-29 the set is asked of git; the hand list it replaced had missed
+  `lib.exp` once and never carried `vkq-venus.exp`, `gfx_fp.py` or
+  `screendump.sh`. An edit outside `tools/` runs at HEAD's version.
+- The records travel with the image: `build/pool-contents` (what populate
+  verified in the pool, which `lc_require_image` reads) and `build/.config`
+  (what the build was asked for). The sync removes the remote copies before it
+  ships anything and returns them after the pool, so a sync that dies part-way
+  leaves no record and every scenario refuses, rather than an old pool sitting
+  beside a record of the new one. What it returns is a copy taken when the sync
+  began, and only if nothing it ships changed meanwhile: it fingerprints every
+  shipped artifact and both records (mtime + size) at the start and again after
+  the pool. The pool is chosen at the start and takes minutes to move, so a bake
+  finishing in between would otherwise pair the old pool with the new record --
+  a session pool passing as a ci one.
+- Every Warp scenario that logs in declares its image (`lc_require_image
+  {shell ...}`, then the payloads it runs: `CLADE` for a `/clade` binary,
+  `QUAKE` for the `/quake` data) and refuses before the boot an image that
+  cannot run it. `lint`, which `sync` runs first, refuses a scenario that logs
+  in without a declaration. Before 2026-10-29 the wrong image booted for the
+  whole budget and failed as something else: a Halcyon-session pool timed out
+  at "shell never came up after auth", and a clade-less one failed at "no
+  composed-entry line within 900s". The scenarios that launch through
+  `/bin/tyr-glquake` also fail at once on the launcher's "not reachable (is
+  the clade pool mounted?)" line.
 - The pool and the ramfs are a cryptographic PAIR: the ramfs bakes
   `bin/system.key`, the pool is sealed under it. A mismatch is `stratumd: run
   failed (rc=-201)` (STM_EBADTAG) and then `EXTINCTION: joey: bin/joey exited
@@ -93,7 +117,14 @@ the graphical trusted path on a real GPU scanout.
   resume, the previous pool is intact.
 - `SYNC-FAILED: assembled pool does not hash-match` -- same.
 - `SYNC-FAILED: the remote key twins do not match the local system.key`.
-- A verb whose evidence line is missing exits non-zero and says which.
+- A verb whose evidence line is missing exits non-zero and says which; the
+  detached `quake` and `quake-vk` verdicts also print the log's first
+  `LS-CI FAIL` line, so a refusal's reason reaches the terminal.
+- `SYNC-FAILED: build/ changed while it synced` -- a build rewrote something the
+  sync ships; the records are withheld, so every scenario refuses until a re-sync.
+- `LS-CI FAIL: image refused: ...` -- the synced image cannot run the scenario;
+  the line names the lever (`--config ci`, `THYLACINE_BAKE_CLADE=1`, the quake
+  stage) or the missing record.
 
 ## Performance
 

@@ -97,14 +97,15 @@ proc pswp {} {
     return [list $in $out]
 }
 
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell CLADE GLQUAKE QUAKE}
+
 file mkdir $work
 file delete -force $work/pool-decomp.img $work/disk-decomp.img
 exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-decomp.img
 exec cp $repo/build/disk.img $work/disk-decomp.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-decomp.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-decomp.img
-
-source $repo/tools/interactive/lib.exp
 
 set qmp [lc_qmp_sock]
 
@@ -260,6 +261,7 @@ proc run_leg {leg zoom} {
     set timeout 900
     expect {
         -re {scanout composed \((\d+)x(\d+)\)} { lc_step "$leg: composed entry (two leaves)" }
+        -ex "not reachable (is the clade pool mounted?)" { lc_fail "$leg: the launcher found no /clade/bin/tyr-glquake: this pool has no /clade, or its clade stage was assembled without build/clade/gl/tyr-glquake" }
         "user fault" { lc_fail "$leg: segv before the game window opened" }
         "Sys_Error"  { lc_fail "$leg: Sys_Error before the game window opened" }
         timeout      { lc_fail "$leg: no composed-entry line within 900s" }

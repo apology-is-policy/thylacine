@@ -89,6 +89,9 @@ proc pswp {} {
     return [list $in $out]
 }
 
+source $repo/tools/interactive/lib.exp
+lc_require_image {shell GLQUAKE QUAKE}
+
 file mkdir $work
 # Per-attempt fixture isolation (#78/#85): the synced images are never
 # booted directly.
@@ -97,8 +100,6 @@ exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-glq.img
 exec cp $repo/build/disk.img $work/disk-glq.img
 set ::env(THYLACINE_POOL_IMG) $work/pool-glq.img
 set ::env(THYLACINE_DISK_IMG) $work/disk-glq.img
-
-source $repo/tools/interactive/lib.exp
 
 set qmp [lc_qmp_sock]
 
@@ -146,6 +147,7 @@ lc_send "tyr-glquake -window -width $DW -height $DH -nosound -noglcompression +t
 set timeout 900
 expect {
     -re {scanout composed \((\d+)x(\d+)\)} { lc_step "composed entry (two leaves)" }
+    -ex "not reachable (is the clade pool mounted?)" { lc_fail "the launcher found no /clade/bin/tyr-glquake: this pool has no /clade, or its clade stage was assembled without build/clade/gl/tyr-glquake" }
     "user fault" { lc_fail "segv before the game window opened" }
     "Sys_Error"  { lc_fail "Sys_Error before the game window opened" }
     timeout      { lc_fail "no composed-entry line within 900s" }

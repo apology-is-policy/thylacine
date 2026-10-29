@@ -402,8 +402,14 @@ ssh thyla-gl 'git clone <origin-url> ~/projects/thylacine'
 ```
 
 **Artifacts: `tools/warp-host.sh sync` (AS-EXECUTED at Warp-1 — supersedes
-the rsync recipe below).** Build on the Mac as usual
-(`THYLACINE_BAKE_CLADE=1 THYLACINE_MKFS_PRESERVE=1 tools/build.sh all`), then:
+the rsync recipe below).** Build on the Mac as usual, then sync. Since the
+Halcyon-session default (2026-09-09) the image must be
+`THYLACINE_BAKE_CLADE=1 tools/build.sh kernel --config ci`: every scenario
+logs in to a serial shell, and since 2026-10-29 each one refuses any other
+image before it boots (`LS-CI FAIL: image refused: ...`, naming the lever).
+The Warp-1 recipe was `THYLACINE_BAKE_CLADE=1 THYLACINE_MKFS_PRESERVE=1
+tools/build.sh all`; `PRESERVE=1` skips the populate, so the pool keeps
+whatever the last bake put in it:
 
 ```bash
 tools/warp-host.sh sync     # repo (git archive HEAD) + all four boot artifacts

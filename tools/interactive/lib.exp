@@ -112,6 +112,53 @@ proc lc_pool_has {label} {
     return [expr {[lsearch -exact [split [string trim $labels] " "] $label] >= 0}]
 }
 
+# Refuse, BEFORE the boot, an image whose pool cannot run this scenario, naming
+# the lever that bakes what is missing. Without it the wrong image boots for the
+# whole budget and fails as something else: a Halcyon-session pool reached login
+# and timed out at "shell never came up", a clade-less one at "no composed-entry
+# line within 900s". `needs` holds `shell` (login must reach ut on the serial
+# console) and payload labels the pool must hold (CLADE, GLQUAKE, QUAKE, ...). Every
+# answer comes from build/pool-contents, so an absent record refuses: there is
+# nothing to tell "not baked" from "not recorded".
+proc lc_require_image {needs} {
+    set m [file join $::lc_repo build pool-contents]
+    if {![file readable $m]} {
+        lc_refuse "no bake record ($m), so nothing says what this pool holds -- re-bake, and on a GL host re-sync (tools/warp-host.sh sync ships it)"
+    }
+    set fh [open $m r]
+    set body [read $fh]
+    close $fh
+    if {![regexp -line {^payloads=(.*)$} $body -> labels]} {
+        lc_refuse "$m has no payloads= line, so this pool's populate never finished -- re-bake"
+    }
+    set labels [split [string trim $labels] " "]
+    foreach need $needs {
+        if {$need eq "shell"} {
+            if {[lsearch -exact $labels SESSION] >= 0} {
+                lc_refuse "this pool boots the Halcyon session (HALCYON_SESSION=y bakes /lib/halcyon/session): login starts halcyond, never a serial shell -- a shell gate needs tools/build.sh kernel --config ci"
+            }
+        } elseif {[lsearch -exact $labels $need] < 0} {
+            switch -- $need {
+                CLADE      { set how "THYLACINE_BAKE_CLADE=1 with build/clade/stage staged (tools/forage.sh clade)" }
+                GLQUAKE    { set how "THYLACINE_BAKE_CLADE=1 over a clade stage assembled with build/clade/gl/tyr-glquake present" }
+                VIRGLPROVE { set how "THYLACINE_BAKE_CLADE=1 over a clade stage assembled with build/clade/gl/virgl-prove present" }
+                QUAKE      { set how "build/quake/stage/id1/pak0.pak staged before the bake" }
+                default    { set how "the bake lever for $need" }
+            }
+            lc_refuse "this pool has no $need payload (payloads: [join $labels { }]) -- bake it with $how"
+        }
+    }
+    lc_step "image holds: $needs"
+}
+
+# A refusal before any VM exists: none of lc_fail's VM evidence applies, and its
+# infra check would misreport "the VM never started" as the cause.
+proc lc_refuse {msg} {
+    lc_step "REFUSED: $msg"
+    send_user "\nLS-CI FAIL: image refused: $msg\n"
+    exit 1
+}
+
 proc lc_step {msg} {
     if {[info exists ::env(LS_CI_STEPS)]} {
         catch {
@@ -831,6 +878,7 @@ proc lc_login {user pass} {
     lc_raw_send "$pass\r" "login password"
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
+        -ex "login: session compositor (halcyond) spawned" { lc_fail "this image boots the Halcyon session (HALCYON_SESSION=y): login started halcyond, and no shell comes to the serial console -- a shell gate needs tools/build.sh kernel --config ci" }
         -ex "login incorrect"         { lc_fail "auth rejected for $user -- the credential is known-good, so suspect #233 FIRST: a byte that reaches the console between login's password prompt and its noecho consctl flip is echoed AND then discarded by the flip's TCSAFLUSH line-reset, truncating the passphrase. Look for an echoed character immediately after 'password: ' in the preserved log; that is the fingerprint. Fixed by ordering (mode set BEFORE the prompt) -- a recurrence means the window reopened." }
         -re {EXTINCTION:}             { lc_extinction_fail "extinction during login/provision" }
         timeout                       { lc_fail "shell never came up after auth (login/provision stall?)" }

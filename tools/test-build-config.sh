@@ -14,6 +14,8 @@
 #                      DEV_ACCOUNTS CMake def); a wrong mapping fails here.
 #   T-emit-honored:    build/.config must record an honoured legacy env var;
 #                      drop bc__export_env's write-back and it fails.
+#   T-show-writes-nothing: --show-config and a failed build leave build/.config
+#                      as the last good build wrote it.
 set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -148,6 +150,25 @@ bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export; bc_emit
 eq "emit with no var set (control): the preset's n" "$(emitted CHUNK_CLADE "$tmp")" "n"
 unset THYLACINE_BAKE_CLADE
 rm -f "$tmp"
+
+echo "== T-show-writes-nothing: --show-config prints the config, never the record =="
+# Fails while --show-config emits: it once rewrote the record of the image in
+# build/ with a config no image was built from. A copy of the tree, so the real
+# build/ is never at stake.
+shtmp="$(mktemp -d)"
+mkdir -p "$shtmp/tools" "$shtmp/build"
+cp tools/build.sh tools/build-config.sh "$shtmp/tools/"
+cp -R configs "$shtmp/configs"
+printf 'the record of the last build\n' > "$shtmp/build/.config"
+show_out="$("$shtmp/tools/build.sh" --config production --show-config 2>&1)"
+eq "show leaves build/.config as the last build wrote it" "$(cat "$shtmp/build/.config")" "the record of the last build"
+if grep -q '^CHUNK_CLADE ' <<<"$show_out"; then ok "show still prints the resolved config"; else bad "show still prints the resolved config"; fi
+# A build that fails after resolving its config (the copy lacks the checkers the
+# dispatch runs first) must leave the record too; the .part proves it got that far.
+"$shtmp/tools/build.sh" nonesuch --config production >/dev/null 2>&1 && bad "the copied build failed" || ok "the copied build failed"
+if [[ -f "$shtmp/build/.config.part" ]]; then ok "the failed build resolved its config (.config.part)"; else bad "the failed build resolved its config (.config.part)"; fi
+eq "a failed build leaves build/.config as the last build wrote it" "$(cat "$shtmp/build/.config")" "the record of the last build"
+rm -rf "${shtmp:?}"
 
 echo "== emit: build/.config is written + grouped =="
 tmp="$(mktemp)"; bc_reset; bc_apply_preset dev; bc_resolve 2>/dev/null; bc_emit_config "$tmp"
