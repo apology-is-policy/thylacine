@@ -7,7 +7,7 @@ use alloc::{vec::Vec, vec};
 use libdriver::{driver::{run, Driver}, resource::BoundResources, Error};
 use libthyla_rs::{io::Write, *};
 use lictor::{backend::{gpu::Gpu, input::InputDev, screen::Screen, device::Device,
-    server::Conn, seat::{Seat, Input}}, endpoint as ep, gpu_api::{Request, Stats}, wire::Wire};
+    server::Conn, seat::{Seat, Input}}, endpoint as ep, gpu_api::{admit, Request, Stats}, wire::Wire};
 #[global_allocator]
 static ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 const MAX_CONNS: usize = 16;
@@ -56,13 +56,16 @@ impl Driver for Lictor {
             self.seat.step(&mut self.device, &mut self.screen, &mut self.inputs);
             for conn in &mut conns {
                 conn.advance(&self.device);
+                #[cfg(feature = "test-mode")]
+                if self.seat.phase == 0 {
+                    if let Some((_, req)) = conn.pending.as_ref() { self.device.test_latch_consider(req); }
+                }
                 let runnable = conn.pending.as_ref().is_some_and(|(_, req)| {
                     // A failed seat parks normal work exactly like a live
                     // episode: it recovers to NORMAL, and an error reply here
                     // would make the compositor give up on a display that is
                     // about to come back.
-                    matches!(req, Request::InputInfo { .. } | Request::InputDrain { .. } | Request::SeatState | Request::SeatQuiesced { .. })
-                        || (self.seat.phase == 0 && (!Device::requires_quiescence(req) || self.device.gpu.all_work_retired()))
+                    admit(req, self.seat.phase, self.device.gpu.all_work_retired(), self.device.gpu.engine_dead())
                 });
                 if !runnable {
                     #[cfg(feature = "test-mode")]

@@ -724,6 +724,12 @@ fi
 if [[ "${THYLACINE_VIEWTEST:-0}" == "1" ]]; then
     append_tokens+=("thylacine.viewtest")
 fi
+# Test lever (ls-gpu-dead): a test-mode tapestryd arms lictor to latch the GPU
+# engine dead when a 97x89 surface retires, the state a command that missed
+# its synchronous deadline leaves. Gated off by default.
+if [[ "${THYLACINE_TEST_LATCH_DEAD:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.test-latch-dead")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

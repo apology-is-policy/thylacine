@@ -52,7 +52,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-10-02
+updated: 2026-10-29
 ---
 ## Clipboard cancellation progress boundary
 
@@ -121,11 +121,38 @@ actual peer, pins a weave/GPU-BO and returns kernel-derived scatter segments.
 Pins survive ambiguous device completion and deferred retirement. Context links
 must be gone and device retirement acknowledged before IDs or backing are freed.
 
+A retirement (detach or unref of a resource, destroy of a context, detach of a
+context's resource, retire or drop of a host ring) runs only once every
+outstanding chain has really retired; until then the loop leaves it parked
+(`gpu_api::admit`, asked of each pending request). A park must end: an episode
+ends and in-flight chains retire, but a dead engine never becomes quiescent
+again. So a retirement on a dead engine runs at once and `Device::execute`
+refuses it, keeping every pin it would have released, and the compositor
+degrades instead of blocking on a reply that never comes. Until 2026-10-29 it
+parked: one command that missed the synchronous deadline took the display away
+for the rest of the boot, measured twice on thyla-pi (a boot-time blit probe,
+and a runtime console transfer).
+
 The GPU command machinery remains in the trusted service. Its synchronous and
 asynchronous commands share one monotone fence sequence. Synchronous responses
 must return the requested fence; queue acceptance alone is insufficient for
 trusted takeover. Legacy Virgl callbacks bound the sequence to 32 bits; exhaustion
 fails closed rather than wrapping or using an incompatible high-bit namespace.
+
+The synchronous deadline reports its own margin: each new slowest synchronous
+command past 50 ms is said, and once a deadline has latched the engine dead, a
+synchronous chain the device retires afterwards is said once with its delay,
+which tells a late device from one that never completes.
+
+A test-mode lever reproduces the dead-engine state on demand.
+`thylacine.test-latch-dead` on the kernel command line
+(`THYLACINE_TEST_LATCH_DEAD=1` to `tools/run-vm.sh`) makes tapestryd arm the
+broker with `TestArmLatch` once it serves. `Device::test_latch_consider` then
+marks the resources created at 97 by 89 and, at the first retirement of one,
+latches the engine through a harmless display query whose wait reports its
+deadline passed, exactly the state a slow command leaves. Only the designated
+compositor reaches the broker, and only the booting operator sets the token.
+`tools/interactive/ls-gpu-dead.exp` is the gate.
 
 ### Episode
 
@@ -243,7 +270,9 @@ and stale or expired generations cancel the episode and recover as above. Owner
 death is different: a dead service leaves the seat failed until warden starts a
 new one, which must re-establish hardware ownership; no ordinary client
 inherits the seat. The ledger validates a request before it reserves an id, so
-a refused request leaves no reservation behind.
+a refused request leaves no reservation behind. A dead engine refuses every
+retirement (its pins stay) and fails every other device request; seat traffic
+still flows.
 
 ## Performance
 
@@ -310,6 +339,14 @@ landings still need integration verification before this branch is merged.
 ordinary guest test client, never a source of trusted authority.
 
 ## Caveats
+
+OPEN (2026-10-29): the synchronous deadline is 500 ms for every command but a
+readback, and its latch is permanent, so a device that is merely busy for
+longer -- GPU-DESIGN's #31 class, met on thyla-pi by a 2D transfer during a
+16.7 s serve pass -- still costs the GPU for the boot; the compositor now
+survives it, but the display does not. And a seat episode on a dead engine
+never returns to normal (a restore needs quiescence), so it parks ordinary
+requests for good.
 
 The current backend is QEMU virtio GPU/input with a neutral backdrop. Pi DMA,
 controller ownership and display conformance require separate qualification.

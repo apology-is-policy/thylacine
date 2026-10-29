@@ -271,6 +271,10 @@ impl Gpu {
         self.invoke(Request::TestHoldCtxDied { ctx_pub }).unwrap_or(())
     }
     #[cfg(feature = "test-mode")]
+    pub fn test_arm_latch(&mut self) -> () {
+        self.invoke(Request::TestArmLatch).unwrap_or(())
+    }
+    #[cfg(feature = "test-mode")]
     pub fn test_abandoned_total(&self) -> u32 {
         self.query(Request::TestAbandonedTotal).unwrap_or(u32::MAX)
     }

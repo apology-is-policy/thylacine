@@ -290,6 +290,27 @@ fn declared_scale() -> Option<u16> {
     }
 }
 
+/// Test lever: `thylacine.test-latch-dead` on the kernel command line arms
+/// lictor to latch the engine dead when a 97x89 surface retires -- the state a
+/// GPU command missing its synchronous deadline leaves -- so a gate can watch
+/// the compositor ride it out. Per boot, and set by whoever boots the machine.
+#[cfg(feature = "test-mode")]
+fn latch_dead_declared() -> bool {
+    // SAFETY: SVC wrappers over a path literal and an owned buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 1024];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    n > 0
+        && (n as usize) < buf.len()
+        && buf[..n as usize]
+            .split(|b| b.is_ascii_whitespace() || *b == 0)
+            .any(|w| w == b"thylacine.test-latch-dead")
+}
+
 struct Tapestryd {
     comp: Comp,
     kbd: Option<InputDev>,
@@ -445,6 +466,11 @@ impl Driver for Tapestryd {
             self.comp.gpu.width,
             self.comp.gpu.height
         );
+        #[cfg(feature = "test-mode")]
+        if latch_dead_declared() {
+            self.comp.gpu.test_arm_latch();
+            say!("tapestryd: test-latch-dead armed (the engine latches dead when a 97x89 surface retires)");
+        }
 
         let mut conns: Vec<Conn> = Vec::new();
         let mut raw_events: Vec<RawInputEvent> = Vec::new();

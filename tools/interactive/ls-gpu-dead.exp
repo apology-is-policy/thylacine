@@ -1,0 +1,89 @@
+#!/usr/bin/env expect
+# ls-gpu-dead -- the compositor rides out a dead GPU engine.
+#
+# A GPU command that misses lictor's synchronous deadline latches the engine
+# dead for the rest of the boot. Until 2026-10-29 the compositor's next
+# retirement (a surface's detach or unref, a context destroy) then parked in
+# lictor forever -- a dead engine is never quiescent -- and tapestryd blocked
+# on the reply for good, so one slow command took the display away for the
+# whole boot (measured twice on thyla-pi; OPEN-BUGS 2026-10-29T03:54Z).
+#
+# THYLACINE_TEST_LATCH_DEAD=1 puts thylacine.test-latch-dead on the kernel
+# command line: tapestryd arms lictor, and lictor latches exactly as that
+# deadline does, through a synchronous query, at the first retirement of a
+# resource created at the lever's size (97x89) -- so no boot probe's
+# retirement fires it. A surface created and destroyed from the shell does.
+#
+# PASS needs all of: the lever armed; the injected latch; the destroy write
+# answered; the compositor answering its ctl afterwards; and the abandoned
+# query seen to retire late (the instrument that tells a slow device from one
+# that never completes, given here its positive control).
+#
+# Runs under HVF on the ci image. Any GPU device will do: the park is the
+# broker's, not the renderer's.
+
+set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_TEST_LATCH_DEAD) 1
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_expect "test-latch-dead armed" "the lever armed once the compositor posted"
+lc_login michael correct-horse-battery-staple-v1
+
+set timeout 30
+lc_send "cat /dev/tapestry/ctl"
+expect {
+    -re {display [0-9]+ [0-9]+} { lc_step "the compositor answers before the latch" }
+    timeout { lc_fail "the compositor's ctl never answered, before any latch (30s)" }
+}
+
+# One fid, two writes: the mint rebinds the fid onto the new surface's ctl,
+# and an interactive cat writes each console line as it reads it, so both
+# verbs ride that fid and no surface id has to be learned (ut redirects no
+# brace block and duplicates no fd).
+set latched 0
+set late 0
+lc_send "cat > /dev/tapestry/surface/new"
+sleep 1
+lc_send "create 97 89"
+sleep 1
+lc_send "destroy"
+set timeout 60
+expect {
+    -ex "gpu command never retired (INJECTED by test-latch-dead)" {
+        set latched 1
+        lc_step "lictor latched the engine dead at the retirement"
+    }
+    timeout { lc_fail "no injected latch within 60s of the destroy -- did the create make a 97x89 resource?" }
+}
+# Before the fix the destroy's write is still blocked inside cat, so this
+# end-of-file and the sentinel after it are never read.
+lc_raw_send "\x04" "Ctrl-D"
+lc_send "echo destroy-returned"
+expect {
+    -ex "gpu synchronous chain retired" {
+        set late 1
+        lc_step "the abandoned query retired late (instrument control)"
+        exp_continue
+    }
+    -re {\ndestroy-returned} { lc_step "the destroy write was answered" }
+    timeout { lc_fail "the compositor hung on a dead engine: the destroy write never returned (60s)" }
+}
+
+set timeout 30
+lc_send "cat /dev/tapestry/ctl; echo ctl-after"
+expect {
+    -ex "gpu synchronous chain retired" {
+        set late 1
+        lc_step "the abandoned query retired late (instrument control)"
+        exp_continue
+    }
+    -re {display [0-9]+ [0-9]+[^\n]*\n(.|\n)*ctl-after} { lc_step "the compositor still answers its ctl" }
+    -re {\nctl-after} { lc_fail "the ctl read returned without its display line" }
+    timeout { lc_fail "the compositor stopped answering its ctl after the latch (30s)" }
+}
+if {!$late} {
+    lc_fail "the abandoned query was never seen to retire -- the late-retire instrument is blind"
+}
+lc_pass "gpu-dead: a dead engine refuses the compositor's retirement, which degrades instead of hanging"

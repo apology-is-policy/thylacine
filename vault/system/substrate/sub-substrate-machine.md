@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-10-26
+updated: 2026-10-29
 ---
 ## Purpose
 
@@ -206,7 +206,11 @@ undeclared, and count a skip on what is undeclared and absent
 ([[sub-substrate-kernel-suite]]); `tools/test.sh` mirrors the same rules from
 its own environment ([[sub-substrate-gates]]). Every other token is appended
 before the walk, so a userspace reader with a short buffer (aurora and
-debug-probe read 256 bytes) still finds its own word where it was.
+debug-probe read 256 bytes) still finds its own word where it was. One of
+those is a test lever: `THYLACINE_TEST_LATCH_DEAD=1` appends
+`thylacine.test-latch-dead`, which a test-mode tapestryd reads to arm the GPU
+broker's dead-engine latch ([[sub-lictor]]; the gate is
+`tools/interactive/ls-gpu-dead.exp`).
 
 ## Data structures
 

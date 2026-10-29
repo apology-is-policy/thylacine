@@ -12,6 +12,13 @@ pub enum Presentation {
     Blob { resource: u32, width: u32, height: u32, format: u32, stride: u32 },
 }
 struct Backing { resource: u32, _pin: Pin }
+/// The latch lever's size (`create 97 89`, tools/interactive/ls-gpu-dead.exp):
+/// only resources created at it can fire the lever, so a boot probe's
+/// retirement never does.
+#[cfg(feature = "test-mode")]
+const TEST_LATCH_SIZE: (u32, u32) = (97, 89);
+#[cfg(feature = "test-mode")]
+const TEST_LATCH_TARGETS: usize = 16;
 struct Retiring { resource: u32, ticket: Retirement, done: bool }
 pub struct Device {
     // Drop order matters: reset the GPU before releasing any imported pins.
@@ -22,12 +29,18 @@ pub struct Device {
     rings: Vec<HostRing>,
     owner: u64,
     pub presentation: Presentation,
+    #[cfg(feature = "test-mode")]
+    test_latch_armed: bool,
+    #[cfg(feature = "test-mode")]
+    test_latch_targets: Vec<u32>,
 }
 impl Device {
     pub fn new(mut gpu: Gpu, owner: u64) -> Result<Self, Error> {
         gpu.enable_retirement_journal();
         Ok(Self { gpu, objects: Objects::default(), backings: Vec::new(),
-            retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None })
+            retiring: Vec::new(), rings: Vec::new(), owner, presentation: Presentation::None,
+            #[cfg(feature = "test-mode")] test_latch_armed: false,
+            #[cfg(feature = "test-mode")] test_latch_targets: Vec::new() })
     }
     pub fn bind_owner(&mut self, owner: u64) -> bool {
         if owner == 0 || (self.owner != 0 && self.owner != owner) { return false; }
@@ -89,15 +102,35 @@ impl Device {
             }
         }
     }
-    /// The server parks retirement requests until all device work has really
-    /// retired. Abandoned/poisoned chains do not qualify as completion.
-    pub fn requires_quiescence(request: &Request) -> bool {
-        matches!(request, Request::DetachBacking { .. } | Request::ResourceUnref { .. }
-            | Request::CtxDestroy { .. } | Request::CtxDetachResource { .. }
-            | Request::RetireHost3dRing { .. } | Request::DropHost3dRing { .. })
+    /// The armed latch lever, asked of each pending request before the server
+    /// admits it: a resource created at `TEST_LATCH_SIZE` becomes a target,
+    /// and the first retirement of a target latches the engine dead -- the
+    /// state a command that missed its synchronous deadline leaves, met by a
+    /// retirement exactly when the park would decide it.
+    #[cfg(feature = "test-mode")]
+    pub fn test_latch_consider(&mut self, request: &Request) {
+        if !self.test_latch_armed { return; }
+        match *request {
+            Request::ResourceCreate2d { resource_id, w, h } if (w, h) == TEST_LATCH_SIZE => {
+                if !self.test_latch_targets.contains(&resource_id)
+                    && self.test_latch_targets.len() < TEST_LATCH_TARGETS {
+                    self.test_latch_targets.push(resource_id);
+                }
+            }
+            Request::DetachBacking { resource_id } | Request::ResourceUnref { resource_id }
+                if self.test_latch_targets.contains(&resource_id) => {
+                self.test_latch_armed = false;
+                self.test_latch_targets.clear();
+                self.gpu.test_latch_now();
+            }
+            _ => {}
+        }
     }
+    /// A retirement runs only once all device work has really retired
+    /// (abandoned/poisoned chains do not qualify); the server parks it until
+    /// then, except on a dead engine, which refuses it here (`gpu_api::admit`).
     pub fn execute(&mut self, connection: i64, request: Request) -> Result<Vec<u8>, Error> {
-        if Self::requires_quiescence(&request) && !self.gpu.all_work_retired() { return Err(Error::Hardware); }
+        if request.retires() && !self.gpu.all_work_retired() { return Err(Error::Hardware); }
         let mut out = Vec::new();
         match request {
             Request::Cursor { shape, scale, x, y, visible } => {
@@ -415,6 +448,10 @@ impl Device {
             }
             Request::TestFencedFree => {
                 #[cfg(feature = "test-mode")] { let result = self.gpu.test_fenced_free(); result.put(&mut out); }
+                #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
+            }
+            Request::TestArmLatch => {
+                #[cfg(feature = "test-mode")] { self.test_latch_armed = true; ().put(&mut out); }
                 #[cfg(not(feature = "test-mode"))] { return Err(Error::BadField); }
             }
             Request::CompSlotState => {

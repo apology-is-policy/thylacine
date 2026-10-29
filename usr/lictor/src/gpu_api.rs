@@ -239,6 +239,9 @@ pub enum Request {
     TestAbandonCtx { ctx_pub: u32 },
     TestHoldCtxDied { ctx_pub: u32 },
     TestAbandonedTotal,
+    /// Test lever: the engine latches dead, as its synchronous deadline
+    /// would, at the next retirement the compositor asks for.
+    TestArmLatch,
     FencedHeld,
     TestFencedFree,
     CompSlotState,
@@ -252,6 +255,28 @@ pub enum Request {
     SeatQuiesced { generation: u64 },
     /// Semantic cursor only; no client resource or output selection.
     Cursor { shape: u8, scale: u16, x: u32, y: u32, visible: bool },
+}
+impl Request {
+    /// Gives back something the device may still read or write, so it runs
+    /// only once every outstanding chain has retired.
+    pub fn retires(&self) -> bool {
+        matches!(self, Self::DetachBacking { .. } | Self::ResourceUnref { .. }
+            | Self::CtxDestroy { .. } | Self::CtxDetachResource { .. }
+            | Self::RetireHost3dRing { .. } | Self::DropHost3dRing { .. })
+    }
+    /// Seat traffic, served while ordinary GPU work is parked.
+    pub fn seat(&self) -> bool {
+        matches!(self, Self::InputInfo { .. } | Self::InputDrain { .. }
+            | Self::SeatState | Self::SeatQuiesced { .. })
+    }
+}
+/// Whether the broker runs `request` now or leaves it parked. A park must end:
+/// a seat episode ends, and in-flight chains retire. A dead engine never
+/// becomes quiescent again, so a retirement on one runs at once and is
+/// refused, keeping every pin it would have released -- the caller degrades
+/// instead of waiting forever on a reply.
+pub fn admit(request: &Request, phase: u32, quiescent: bool, dead: bool) -> bool {
+    request.seat() || (phase == 0 && (!request.retires() || quiescent || dead))
 }
 impl Wire for Request {
     fn put(&self, out: &mut Vec<u8>) {
@@ -311,6 +336,7 @@ impl Wire for Request {
             Self::TestAbandonCtx { ctx_pub } => { 52u16.put(out); ctx_pub.put(out); },
             Self::TestHoldCtxDied { ctx_pub } => { 53u16.put(out); ctx_pub.put(out); },
             Self::TestAbandonedTotal => { 54u16.put(out); },
+            Self::TestArmLatch => { 67u16.put(out); },
             Self::FencedHeld => { 55u16.put(out); },
             Self::TestFencedFree => { 56u16.put(out); },
             Self::CompSlotState => { 57u16.put(out); },
@@ -382,6 +408,7 @@ impl Wire for Request {
             52 => Self::TestAbandonCtx { ctx_pub: <u32>::get(r)? },
             53 => Self::TestHoldCtxDied { ctx_pub: <u32>::get(r)? },
             54 => Self::TestAbandonedTotal,
+            67 => Self::TestArmLatch,
             55 => Self::FencedHeld,
             56 => Self::TestFencedFree,
             57 => Self::CompSlotState,
@@ -418,6 +445,65 @@ pub struct RingInfo { pub res_id: u32, pub size: u64, pub cache: u64 }
 record!(RingInfo { res_id: u32, size: u64, cache: u64 });
 
 #[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use alloc::vec;
+    fn retirements() -> Vec<Request> {
+        vec![Request::DetachBacking { resource_id: 1 }, Request::ResourceUnref { resource_id: 1 },
+            Request::CtxDestroy { ctx_id: 1 }, Request::CtxDetachResource { ctx_id: 1, resource_id: 1 },
+            Request::RetireHost3dRing { resource_id: 1 }, Request::DropHost3dRing { resource_id: 1 }]
+    }
+    fn ordinary() -> Vec<Request> {
+        vec![Request::Info, Request::Submit3dSync { ctx_id: 1, stream: Vec::new() },
+            Request::CtxCreate { ctx_id: 1, debug_name: Vec::new() },
+            Request::Flush { resource_id: 1, x: 0, y: 0, w: 1, h: 1 }, Request::EngineDead,
+            Request::TestArmLatch]
+    }
+    fn seat() -> Vec<Request> {
+        vec![Request::InputInfo { index: 0 }, Request::InputDrain { index: 0 }, Request::SeatState,
+            Request::SeatQuiesced { generation: 1 }]
+    }
+    #[test]
+    fn the_classes_are_disjoint() {
+        for r in retirements() { assert!(r.retires() && !r.seat(), "{r:?}"); }
+        for r in ordinary() { assert!(!r.retires() && !r.seat(), "{r:?}"); }
+        for r in seat() { assert!(r.seat() && !r.retires(), "{r:?}"); }
+    }
+    #[test]
+    fn a_retirement_on_a_dead_engine_runs_to_its_refusal() {
+        // Parked, it would wait for a quiescence a dead engine never reaches,
+        // and the compositor blocks on the reply for good.
+        for r in retirements() { assert!(admit(&r, 0, false, true), "{r:?} parked on a dead engine"); }
+    }
+    #[test]
+    fn a_retirement_waits_for_in_flight_chains_on_a_live_engine() {
+        for r in retirements() {
+            assert!(!admit(&r, 0, false, false), "{r:?} ran before the device quiesced");
+            assert!(admit(&r, 0, true, false), "{r:?} parked on a quiescent device");
+        }
+    }
+    #[test]
+    fn an_episode_parks_every_ordinary_request_whatever_the_engine() {
+        for phase in [1, 2, 3] {
+            for r in retirements().into_iter().chain(ordinary()) {
+                for (quiescent, dead) in [(false, false), (true, false), (false, true), (true, true)] {
+                    assert!(!admit(&r, phase, quiescent, dead), "{r:?} ran in phase {phase}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn seat_traffic_and_ordinary_work_run_regardless_of_quiescence() {
+        for (quiescent, dead) in [(false, false), (true, false), (false, true), (true, true)] {
+            for r in ordinary() { assert!(admit(&r, 0, quiescent, dead), "{r:?}"); }
+            for phase in [0, 1, 2, 3] {
+                for r in seat() { assert!(admit(&r, phase, quiescent, dead), "{r:?} in phase {phase}"); }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod cursor_wire_tests {
     use super::*;
     #[test]
@@ -427,6 +513,15 @@ mod cursor_wire_tests {
         assert_eq!(bytes,[1,0,66,0,1,2,3,4,5,6,7,8]);
         let mut r=Reader::new(&bytes).unwrap();
         assert!(matches!(Request::get(&mut r).unwrap(),Request::SeatQuiesced{generation:0x0807060504030201}));
+        r.finish().unwrap();
+    }
+    #[test]
+    fn the_latch_lever_has_its_own_opcode() {
+        let mut bytes = Vec::new();
+        Request::TestArmLatch.put(&mut bytes);
+        assert_eq!(bytes, [1, 0, 67, 0]);
+        let mut r = Reader::new(&bytes).unwrap();
+        assert!(matches!(Request::get(&mut r).unwrap(), Request::TestArmLatch));
         r.finish().unwrap();
     }
     #[test]

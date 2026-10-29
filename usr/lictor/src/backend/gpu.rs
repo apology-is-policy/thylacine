@@ -467,6 +467,9 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 // so the loop iterates, drains (catching a lost completion), and reaches this
 // deadline -- the F-A1 mask+ack cures the cause; this bounds the class.
 const SUBMIT_DEADLINE_MS: u64 = 500;
+// A synchronous command slower than this is reported (each new high), so a
+// boot that met its deadline still shows how close it came.
+const SLOW_SYNC_MS: u64 = 50;
 // F-A1 (C): the per-wait timeout that paces the stale-wake re-poll. Short vs
 // SUBMIT_DEADLINE_MS so several drains (each a chance to catch a lost
 // completion) run before the engine is declared dead. A healthy present
@@ -891,6 +894,17 @@ struct Controlq {
     /// would read a freshly-zeroed response buffer as resp_type=0x0 (the
     /// #31 cascade). Fail fast + honestly instead.
     dead: bool,
+    /// The synchronous deadline's own measurement: the slowest synchronous
+    /// command that still retired (said at each new high past
+    /// SLOW_SYNC_MS), and, once a deadline latched `dead`, when and against
+    /// which used.idx -- so a chain that retires after it is said once,
+    /// telling a late device from one that never completes.
+    sync_slowest_ms: u64,
+    latched: Option<(Instant, u16)>,
+    /// The latch lever (`Device::test_latch_consider`): the next
+    /// synchronous wait reports its deadline passed.
+    #[cfg(feature = "test-mode")]
+    test_latch_next: bool,
     /// The fenced lane (virgl only; 0 = absent): slot i owns descriptor
     /// pair (2+2i, 3+2i), its request buffer at flane_va + i*FREQ_LEN and
     /// its response header at flane_va + FRESP_OFF + i*FRESP_STRIDE.
@@ -1293,6 +1307,28 @@ impl Controlq {
             // strands its handles, mappings and pages for the process
             // lifetime. Abandoned (not completed) is the honest tag --
             // the device may still be mid-DMA, so the backings leak.
+            if let Some((at, seen)) = self.latched {
+                // Nothing consumes the ring once dead, so every entry past
+                // `seen` is new; only a synchronous head is the abandoned
+                // chain (a fenced one retiring proves nothing about it).
+                let used_va = self.ring_va + CTRL_USED_OFF;
+                virtio_rmb();
+                let now = unsafe { r16(used_va + 2) };
+                virtio_rmb();
+                let mut k = seen;
+                while k != now {
+                    let id = unsafe { r32(used_va + 4 + ((k % QUEUE_SIZE) as u64) * 8) };
+                    if id == 0 || id == SYNC2_HEAD as u32 {
+                        say!(
+                            "tapestryd: gpu synchronous chain retired {} ms after its deadline latched the engine dead",
+                            at.elapsed().as_millis()
+                        );
+                        self.latched = None;
+                        break;
+                    }
+                    k = k.wrapping_add(1);
+                }
+            }
             self.abandon_all("engine dead");
             return;
         }
@@ -1433,6 +1469,14 @@ impl Controlq {
         let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
+        let began = Instant::now();
+        #[cfg(feature = "test-mode")]
+        if core::mem::take(&mut self.test_latch_next) {
+            say!("tapestryd: gpu command never retired (INJECTED by test-latch-dead)");
+            self.latched = Some((Instant::now(), self.used_seen));
+            self.dead = true;
+            return Err(());
+        }
         'wait: loop {
             // A timeout still drains: used-ring progress is authoritative.
             // The same pump also completes tickets after asynchronous work.
@@ -1474,9 +1518,19 @@ impl Controlq {
                     wakes,
                     deadline_ms
                 );
+                self.latched = Some((Instant::now(), self.used_seen));
                 self.dead = true;
                 return Err(());
             }
+        }
+        let took = began.elapsed().as_millis() as u64;
+        if took >= SLOW_SYNC_MS && took > self.sync_slowest_ms {
+            self.sync_slowest_ms = took;
+            say!(
+                "tapestryd: gpu synchronous command retired in {} ms (slowest yet; deadline {} ms)",
+                took,
+                deadline_ms
+            );
         }
 
         // A spin may retire the chain before consuming its notification.
@@ -2015,6 +2069,10 @@ impl Gpu {
                 avail_idx: 0,
                 used_seen: 0,
                 dead: false,
+                sync_slowest_ms: 0,
+                latched: None,
+                #[cfg(feature = "test-mode")]
+                test_latch_next: false,
                 flane_va: if flane.is_some() { flane_va } else { 0 },
                 flane_pa,
                 fslots: [None; FENCED_SLOTS],
@@ -4313,6 +4371,15 @@ impl Gpu {
     /// identically there -- round-5 F5's trap, one level down. (Round-7 F7:
     /// fenced_held's insertion had stolen this doc AND the cfg gate below,
     /// leaving this fn silently un-gated.)
+    /// The latch lever's shot: a harmless display query whose wait reports
+    /// the deadline passed, so the engine latches dead with that chain still
+    /// in flight, exactly as a slow device leaves it.
+    #[cfg(feature = "test-mode")]
+    pub fn test_latch_now(&mut self) {
+        self.ctrl.test_latch_next = true;
+        let _ = self.query_display_info();
+    }
+
     #[cfg(feature = "test-mode")]
     pub fn test_fenced_free(&self) -> u32 {
         // The CLIENT pool (C-6): the reserved slot is never a client's, so a
