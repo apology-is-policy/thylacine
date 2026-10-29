@@ -172,3 +172,6 @@
 # 0065 (thread-model C7, vote 2026-10-29): a new thread starts with its creator's
 # signal mask -- start() and start_c11() restore it via __restore_sigs.
 0065-pouch-thread-inherits-mask.patch
+# 0066 (thread-model C7): a thrd_create thread registers clear_child_tid + its tid
+# as start() does -- without it thrd_join hangs.
+0066-pouch-c11-thread-registers.patch

@@ -1,0 +1,35 @@
+pouch boundary-line patch 0066 - a C11 thread registers its clear_child_tid and tid as a pthread does (thread-model C7).
+
+0004 replaced musl's clone -- which set CLONE_CHILD_CLEARTID on
+&__thread_list_lock for every new thread -- with SYS_THREAD_SPAWN, and
+re-armed that handoff inside start() with SYS_set_tid_address, which also
+returns the tid start() stores in self->tid before any __tl_lock (#111).
+start_c11(), the thrd_create entry, got neither. __pthread_exit takes the
+thread-list lock and leaves it for the kernel to release at exit through
+clear_child_tid; a C11 thread had none, so it exited holding the lock, and
+thrd_join -- and every later thread create or exit -- waited forever. The
+patch's own dossier listed thrd_create as "patched but untested".
+
+  src/thread/pthread_create.c    start_c11() does start()'s registration
+      before it restores the mask (0065) and runs the thread's function.
+
+The witness is pouch-hello-threads `mask-c11`, which makes and joins two
+thrd_create threads: without this patch the program hangs at the first
+join (seen at C7 phase f, 2026-10-29).
+
+--- a/src/thread/pthread_create.c
++++ b/src/thread/pthread_create.c
+@@ -249,6 +249,13 @@
+ {
+ 	struct start_args *args = p;
+ 	int (*start)(void*) = (int(*)(void*)) args->start_func;
++	/* pouch: start()'s registration, which a C11 thread needs as much:
++	 * &__thread_list_lock as clear_child_tid, so SYS_THREAD_EXIT releases
++	 * the thread-list lock __pthread_exit leaves held, and the kernel's tid
++	 * in self->tid before any __tl_lock (#111). */
++	int _pouch_tid = __syscall(SYS_set_tid_address, &__thread_list_lock);
++	if (_pouch_tid < 0) a_crash();
++	__pthread_self()->tid = _pouch_tid;
+ 	__restore_sigs(&args->sig_mask);
+ 	__pthread_exit((void *)(uintptr_t)start(args->start_arg));
+ 	return 0;
