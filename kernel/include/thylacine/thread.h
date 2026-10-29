@@ -230,13 +230,13 @@ struct Thread {
     // P6-pouch-signals-impl (sub-chunk 13a): note-delivery state per Thread.
     //
     // `note_mask`  — bit per NOTE_BIT_* (see <thylacine/notes.h>). Bit set
-    //                means this Thread defers delivery of that note (queue
-    //                entry is left in place; another Thread of the Proc, or
-    //                a future unmask, picks it up). Written ONLY by the owning
-    //                thread: SYS_NOTE_MASK, the phenotype rt_sigprocmask row,
-    //                the Linux delivery store, and the sigreturn restore --
-    //                never while that thread is inside a sleep/tsleep/torpor
-    //                (the lock-free read in thread_die_pending relies on this).
+    //                defers that note (the entry stays queued for a peer or a
+    //                later unmask). Before the thread is linked its creator
+    //                writes it (rfork_internal, both spawn arms; the link's lock
+    //                release orders that store); after, ONLY the owner writes
+    //                it: SYS_NOTE_MASK, the phenotype rt_sigprocmask row, the
+    //                Linux delivery store, the sigreturn restore -- never inside
+    //                a sleep/tsleep/torpor (thread_die_pending relies on this).
     //
     // `in_handler` — true while an async note handler is RUNNING on this
     //                Thread (between the EL0-return-tail dispatch and the

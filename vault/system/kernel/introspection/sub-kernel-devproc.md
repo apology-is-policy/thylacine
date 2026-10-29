@@ -633,9 +633,10 @@ gate a Proc-level file has -- I-39, the seals, fully-stopped for the register
 files, the off-CPU rule for `kstack` -- is the same code on both. Two rules are
 the layer's own:
 
-- **A thread that has gone answers not found, never its focus.** An open
-  per-thread file or tid directory whose thread has exited reads `-1`
-  (`regs`, `kstack`, the directory's listing); falling back to the focus would
+- **A thread that has gone is refused, never answered by its focus.** An open
+  per-thread file or tid directory whose thread has exited returns the bare `-1`
+  a program sees as `I/O error` (`regs`, `kstack`, the directory's listing; the
+  walk to a tid that does not exist is the not-found case); falling back to the focus would
   silently show another thread's state under the departed tid's name.
 - **A thread object writes only its register files** (`devproc_write`'s first
   gate). The walk makes no thread `ctl` or `mem`; the gate refuses one forged

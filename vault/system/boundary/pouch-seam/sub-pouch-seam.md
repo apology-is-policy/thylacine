@@ -497,8 +497,8 @@ per-call errno approximation built on top of it.
   replaced changes the marker as surely as one added: the threads census
   traded `exited-counted` for `held-counted,exited-freed` when exited
   threads began to be freed at the switch (2026-10-22, [[sub-pouch-thread]]),
-  and gained `mask` with 0065 (2026-10-29: a new thread starts with its
-  creator's signal mask).
+  and gained `mask`, `mask-c11` and `mask-queued` with 0065 (2026-10-29: a new
+  thread starts with its creator's signal mask).
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

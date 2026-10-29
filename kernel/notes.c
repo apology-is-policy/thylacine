@@ -1333,9 +1333,9 @@ static bool thread_death_held(const struct Thread *t) {
 // loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
 // observe, torpor's post-register check, the 9P reader's unwind decision --
-// and note_mask is written ONLY by the owning thread: SYS_NOTE_MASK, the
-// phenotype's rt_sigprocmask row, the Linux delivery store, and the phenotype
-// sigreturn restore -- never while that thread is inside one of those waits).
+// and once the thread is linked note_mask is written ONLY by its owner -- the
+// writers, and the creator's store before the link, are listed at
+// Thread.note_mask in thread.h -- never while it is inside one of those waits).
 // A masked thread reads false from the latch
 // leg: it neither unwinds nor terminates until it unmasks (masking defers --
 // matching the EL0-return tail, which also applies the observing thread's

@@ -253,8 +253,13 @@ the caller's Proc).
   used the `SYS_rt_sigprocmask` sentinel (ENOSYS) and so ran every thread
   unmasked, and upstream's `start_c11()` restores nothing. The `mask` leg makes a
   thread while main blocks SIGINT (it reads SIGINT blocked) and, as the control,
-  one while SIGINT is open (it reads it open).
-- C11 `thrd_create` (the `start_c11` path) is patched but untested.
+  one while SIGINT is open (it reads it open). That leg reads the TLS shadow,
+  which `__restore_sigs` writes whatever the kernel did, so two more legs reach
+  past it (C7 audit r2 F2): `mask-c11` is the same pair through `thrd_create`
+  (the `start_c11` path, untested until then), and `mask-queued` is the kernel
+  half -- main catches SIGINT, blocks and raises it so it queues, makes and joins
+  a thread, and unblocks; the handler must run on main, where a newborn the
+  kernel started unmasked would have taken it at its first entry.
 
 ## Provenance
 

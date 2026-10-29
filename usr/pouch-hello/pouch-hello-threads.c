@@ -65,7 +65,13 @@
 // starts the thread with the mask pthread_create blocked across the spawn, and
 // the thread's start restores its creator's own (patch 0065). A thread made while
 // main blocks SIGINT reads SIGINT blocked; the control, one variable away, is a
-// thread made while SIGINT is open, which reads it open.
+// thread made while SIGINT is open, which reads it open. Both read the mask through
+// pthread_sigmask, which answers from the thread's shadow, so two more legs reach
+// what that cannot. mask-c11: the same pair through thrd_create, whose start is
+// patched separately. mask-queued: the kernel half -- main catches SIGINT, blocks
+// it and raises it, so it waits in the queue; a thread is made and joined; main
+// unblocks, and the handler must run on main. A newborn the kernel started
+// unmasked would take the queued SIGINT at its first entry instead.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -74,6 +80,7 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <signal.h>
+#include <threads.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,6 +128,66 @@ static int mask_seen(int block) {
         seen = -4;
     pthread_sigmask(SIG_SETMASK, &old, NULL);
     return seen;
+}
+
+static int mask_worker_c11(void *arg) {
+    mask_worker(arg);
+    return 0;
+}
+
+static int mask_seen_c11(int block) {
+    sigset_t one, old;
+    sigemptyset(&one);
+    sigaddset(&one, SIGINT);
+    if (pthread_sigmask(block ? SIG_BLOCK : SIG_UNBLOCK, &one, &old) != 0) return -2;
+    int seen = -3;
+    thrd_t t;
+    if (thrd_create(&t, mask_worker_c11, &seen) != thrd_success ||
+        thrd_join(t, NULL) != thrd_success)
+        seen = -4;
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return seen;
+}
+
+static pthread_t g_mask_main;
+static volatile int g_mask_on_main = -1;   // 1 the handler ran on main, 0 elsewhere
+
+static void mask_handler(int sig) {
+    (void)sig;
+    g_mask_on_main = pthread_equal(pthread_self(), g_mask_main) ? 1 : 0;
+}
+
+static void *mask_idle(void *arg) {
+    (void)arg;
+    return NULL;
+}
+
+// Where a SIGINT queued while main blocked it is handled once a thread has been
+// made and joined and main unblocks: 1 on main, 0 on another thread, -1 nowhere,
+// below -1 a failed call.
+static int mask_queued_on_main(void) {
+    struct sigaction sa, old_sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = mask_handler;
+    if (sigaction(SIGINT, &sa, &old_sa) != 0) return -2;
+    sigset_t one, old;
+    sigemptyset(&one);
+    sigaddset(&one, SIGINT);
+    g_mask_main = pthread_self();
+    g_mask_on_main = -1;
+    int rc = -3;
+    if (pthread_sigmask(SIG_BLOCK, &one, &old) == 0) {
+        pthread_t t;
+        if (raise(SIGINT) != 0)
+            rc = -4;
+        else if (pthread_create(&t, NULL, mask_idle, NULL) != 0 || pthread_join(t, NULL) != 0)
+            rc = -5;
+        else
+            rc = 0;
+        pthread_sigmask(SIG_SETMASK, &old, NULL);
+    }
+    sigaction(SIGINT, &old_sa, NULL);
+    return rc != 0 ? rc : g_mask_on_main;
 }
 
 static long status_threads(void) {
@@ -415,6 +482,24 @@ int main(void) {
             return 21;
         }
         printf("pouch-hello-threads: mask: a new thread starts with its creator's mask OK\n");
+        int c11_blocked = mask_seen_c11(1);
+        int c11_open = mask_seen_c11(0);
+        if (c11_blocked != 1 || c11_open != 0) {
+            printf("pouch-hello-threads: mask-c11: a thrd_create thread made with SIGINT blocked reads %d, with it open %d, want 1 and 0 (FAILED)\n",
+                   c11_blocked, c11_open);
+            fflush(stdout);
+            return 22;
+        }
+        printf("pouch-hello-threads: mask-c11: a thrd_create thread starts with its creator's mask OK\n");
+        int on_main = mask_queued_on_main();
+        if (on_main != 1) {
+            printf("pouch-hello-threads: mask-queued: a SIGINT queued while main blocked it was handled %s (%d), want on main (FAILED)\n",
+                   on_main == 0 ? "on another thread" : on_main == -1 ? "nowhere" : "after a failed call",
+                   on_main);
+            fflush(stdout);
+            return 23;
+        }
+        printf("pouch-hello-threads: mask-queued: a queued SIGINT waited for main past a thread's birth OK\n");
     }
     printf("pouch-hello-threads: ok (%u workers, mutex-protected counter, joined)\n",
            NTHREADS);

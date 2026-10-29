@@ -2504,8 +2504,9 @@ authority can neither list it nor walk to a tid, while its owner and a
 thread's frame, including when the newest thread has exited (the thread-model
 review's C7 gate), and a write lands in the named thread's frame only; `step
 <tid>` arms the named thread and no other and refuses a tid that is not the
-Proc's; once a thread has gone, its open `regs` and `kstack` read as not found
-and its open directory lists as not found; a thread's object refuses a control
+Proc's; once a thread has gone, its open `regs` and `kstack` refuse a read and
+its open directory a listing, with the bare -1 a program sees as `I/O error`
+(the manual's wording); a thread's object refuses a control
 verb, even one forged from the qids the walk does make; the root, pid and tid
 directories list completely and resume from their cookies. Each is run red
 first. The kernel fixture parks no thread a resume can wake, so the step's fire

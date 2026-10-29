@@ -3457,7 +3457,7 @@ void proc_caught_note_wake(struct Proc *p) {
 // doomed by an exec (both read under p->threads_lock, which every walk holds),
 // has the family unmasked,
 // runs no handler, and is not in a wait that holds. The mask and the handler
-// flag are the thread's own, written without a lock, so they read exactly only
+// flag are the thread's own (thread.h), written without a lock: exact only
 // while it is blocked (it wrote them before it published its wait under
 // wait_lock); an awake thread designated on a stale value gives the
 // designation up at its tail or at its next wait (caught_target.tla Fresh,
@@ -6259,8 +6259,8 @@ static void proc_job_resume_one_locked(struct Proc *m) {
 // indistinguishable from the signal arriving a moment earlier (the POSIX
 // signal race; the LS-5c latch coherence concern does not apply since no
 // latch is armed here). The thread walk holds m->threads_lock; note_mask is
-// owner-written (SYS_NOTE_MASK), so the cross-thread load is the same
-// benign-race read, made explicit atomic.
+// owner-written once the thread is linked (thread.h), so the cross-thread load
+// is the same benign-race read, made explicit atomic.
 static bool proc_tty_susp_would_stop_locked(struct Proc *m) {
     if (!notes_proc_default_applies(m, NOTE_NAME_TTY_SUSP)) return false;
     if (proc_is_self_managing_notes(m)) return false;
