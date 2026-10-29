@@ -4453,8 +4453,14 @@ impl Gpu {
     /// while a synchronous chain is outstanding: the device reads a chain's
     /// request only when it processes it, which a stall defers, so staging
     /// over it would have the device run the new bytes as the old command.
-    fn req(&self, offset: u64) -> Result<u64, Error> {
+    fn req(&mut self, offset: u64) -> Result<u64, Error> {
         if !self.takes_commands() {
+            // The stall lever's shot rode this command, which never reaches
+            // a submission: spent here, never left for the next one.
+            #[cfg(feature = "test-mode")]
+            if core::mem::take(&mut self.ctrl.test_stall_late) {
+                say!("lictor: stall shot LOST -- its command was refused before staging");
+            }
             return Err(Error::Hardware);
         }
         Ok(self.ring_va + offset)

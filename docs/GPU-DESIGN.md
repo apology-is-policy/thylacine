@@ -2671,9 +2671,9 @@ three stall shots to aim (`TestStallNext`). Each makes the next synchronous
 command retire, then report its deadline missed. The broker's pump at the end of that same
 request revives the engine, so the reply already reads live with the stall
 count moved: the count, not the engine state, is what tells the compositor its
-step met a stall. A command that is refused, or ends before its chain retires,
-spends the shot and says `stall shot LOST`, so the shot never lands on a later
-command. tapestryd aims them at the compositor context's create, at one
+step met a stall. A command that is refused, at staging or at submission, or
+ends before its chain retires, spends the shot and says `stall shot LOST`, so
+the shot never lands on a later command. tapestryd aims them at the compositor context's create, at one
 blit-convention attempt, and at a health step once GPU composition runs.
 `tools/warp-host.sh composed-stall` (the GL host) asks that each bring-up step
 retries and succeeds, with no blit class left to the CPU, and that the health

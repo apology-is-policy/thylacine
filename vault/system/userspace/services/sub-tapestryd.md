@@ -3323,8 +3323,10 @@ runs once and used to fail for the boot:
   attempt (`conv_attempt`). Each attempt runs on a throwaway context, and an id
   is spent only by a create that made a context or that a stall may have made
   one with. So a standing stall's refused tries reuse one id. Past
-  `CONV_PROBE_CTX_SPAN` (128) ids the attempt fails closed, and a static assert
-  keeps that span under the venus band.
+  `CONV_PROBE_CTX_SPAN` ids the attempt fails closed. That span is derived:
+  `CONV_PROBE_ATTEMPTS` (four classes, each `BLIT_VARIANTS` plus a
+  confirmation) times one plus `BRINGUP_STALL_RETRIES`. A static assert keeps
+  it under the venus band.
 A step that a stall failed runs again. While the stall stands it retries every
 `STALL_POLL_MS` (50), since the broker answers revived or dead within 30 s.
 After a stall that began and revived inside the step, it retries at most
@@ -3332,8 +3334,14 @@ After a stall that began and revived inside the step, it retries at most
 `<step> met a GPU stall -- no verdict, retrying`, and the success after it says
 `<step> verified after a GPU stall`. The context's retry destroys before it
 re-creates, because lictor keeps the reservation of a create a stall failed.
-So does a convention attempt whose throwaway create failed. Every retried step
-already rolls back fully on failure. This was measured on the GL host: a real
+So does a convention attempt whose throwaway create a stall failed. A probe
+resource whose create a stall failed is unreffed as if made, and a failed
+context attach is detached too, since lictor links before the device answers. A
+step begun while the engine reads stalled counts as stalled whatever its parked
+cleanup read afterwards, so a revival absorbed by a cleanup cannot pass for the
+device's answer. The one residue is a throwaway destroy that itself stalls: the
+host may still destroy that context, but lictor's entry stays retiring for the
+boot, at most one per attempt. This was measured on the GL host: a real
 501 ms stall met the `slot S plain` probe step, and the prober settled `S CPU`
 for the boot (OPEN-BUGS 2026-10-29T11:39Z).
 

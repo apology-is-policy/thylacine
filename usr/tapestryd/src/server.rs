@@ -1214,10 +1214,15 @@ pub(crate) const COMPOSITOR_CTX: u32 = lictor::limits::COMPOSITOR_CTX;
 /// point; latching COMPOSITOR_CTX would take GPU composition down before it
 /// began. Destroyed after each attempt; never re-minted.
 const CONV_PROBE_CTX_BASE: u32 = COMPOSITOR_CTX + 1;
+/// The request variants a convention class tries, in order.
+const BLIT_VARIANTS: [BlitVariant; 3] = [BlitVariant::Plain, BlitVariant::SrcNeg, BlitVariant::DstNeg];
+/// Attempts one convention probe makes: four classes, each its variants plus
+/// one confirmation.
+const CONV_PROBE_ATTEMPTS: u32 = 4 * (BLIT_VARIANTS.len() as u32 + 1);
 /// The ids one convention probe may spend (`conv_attempt_once` refuses past
-/// it): sixteen attempts, each retried at most `BRINGUP_STALL_RETRIES` times
-/// after a stall, with room to spare.
-const CONV_PROBE_CTX_SPAN: u32 = 128;
+/// it): an id is spent by a made or stalled create, and an attempt is retried
+/// at most `BRINGUP_STALL_RETRIES` times after a revived stall.
+const CONV_PROBE_CTX_SPAN: u32 = CONV_PROBE_ATTEMPTS * (1 + BRINGUP_STALL_RETRIES);
 
 /// V-3b-1c-2 (Model B): the per-client VENUS device-ctx ids -- `WARP_VENUS_CTX_BASE
 /// + slot`, one per warp slot (`0..MAX_WARP_CTXS`). A dedicated band chosen to
@@ -4064,7 +4069,7 @@ impl Comp {
         if !bo && scaled {
             self.test_stall_bringup(true);
         }
-        for variant in [BlitVariant::Plain, BlitVariant::SrcNeg, BlitVariant::DstNeg] {
+        for variant in BLIT_VARIANTS {
             let dh = 2 * mult as u32;
             let words = Self::conv_words(p.scr_res, src_res, variant, false, false, 4, 0, 2, 1, dh);
             let rows = match self.conv_attempt(p, seq, |c, ctx| c.submit_blits(ctx, &[words])) {
@@ -4479,6 +4484,7 @@ impl Comp {
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
         let res = self.next_res_id();
         let h = if kind == 2 { CONV_ROWS as u32 } else { 4 };
+        let stalls = self.gpu.stalls;
         let created = if kind == 0 {
             self.gpu.resource_create_2d(res, 1, h).is_ok()
         } else {
@@ -4500,6 +4506,11 @@ impl Comp {
                 .is_ok()
         };
         if !created {
+            // A create a stall failed may exist host-side (lictor keeps its
+            // reservation): unref it like a made one.
+            if self.gpu.stalls != stalls {
+                let _ = self.gpu.resource_unref(res);
+            }
             Self::window_unmap(&mut self.va, va, size, "conv probe");
             unsafe { t_close(fd) };
             return None;
@@ -4969,14 +4980,19 @@ impl Comp {
         let mut revived = 0;
         loop {
             let stalls = self.gpu.stalls;
+            // A step begun on a stalled engine was refused, whatever a
+            // cleanup parked inside it read once the engine revived.
+            let begun_stalled = self.gpu.engine == Engine::Stalled;
             if let Some(v) = step(self) {
                 if said {
                     say!("tapestryd: {} verified after a GPU stall", what);
                 }
                 return Some(v);
             }
-            if failure_cause(stalls, self.gpu.stalls, self.gpu.engine) != FailureCause::Stall {
-                return None;
+            match failure_cause(stalls, self.gpu.stalls, self.gpu.engine) {
+                FailureCause::Stall => {}
+                FailureCause::Answer if begun_stalled => {}
+                FailureCause::EngineDead | FailureCause::Answer => return None,
             }
             if self.gpu.engine == Engine::Stalled {
                 let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(STALL_POLL_MS));
@@ -11444,6 +11460,7 @@ impl Comp {
             Self::window_unmap(win, va, size, "warp probe");
             unsafe { t_close(fd) };
         };
+        let stalls = self.gpu.stalls;
         let created = if buffer {
             self.gpu.resource_create_3d(
                 res_id,
@@ -11474,11 +11491,15 @@ impl Comp {
             )
         };
         if created.is_err() {
-            undo(&mut self.gpu, &mut self.va, 0, res_id);
+            // A create a stall failed may exist host-side, and lictor keeps
+            // its reservation: unref it like a made one.
+            let stage = if self.gpu.stalls != stalls { 1 } else { 0 };
+            undo(&mut self.gpu, &mut self.va, stage, res_id);
             return None;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
-            undo(&mut self.gpu, &mut self.va, 1, res_id);
+            // A stalled attach may have linked host-side: detach too.
+            undo(&mut self.gpu, &mut self.va, 2, res_id);
             return None;
         }
         if self

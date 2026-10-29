@@ -213,7 +213,14 @@ stall of known length, with no race against the device, carried to the
 compositor by the count alone. The shot rides exactly the next synchronous
 submission (`Controlq::stall_shot_bound`): one refused, unfenced, or ended
 before its chain retired spends it and says `stall shot LOST`, rather than
-leaving it armed for whoever sends next. tapestryd aims them at the
+leaving it armed for whoever sends next. So does a command refused at staging
+(`Gpu::req`, while the engine takes no commands). The shot still rides the next
+synchronous command whoever sends it, so a seat takeover landing between the
+compositor's aim and its command would take it. That needs test-mode, the
+bootarg and the operator's chord, and vote 30 recovers the seat.
+`CtxAttachResource` links the attachment in the ledger before the device
+answers, and a failure that left nothing (`left_nothing`) unlinks it, so the
+resource can still retire. tapestryd aims them at the
 compositor context's create, at one blit-convention attempt, and at a
 composition health step once GPU composition runs.
 Only the designated compositor reaches the broker, and only the booting

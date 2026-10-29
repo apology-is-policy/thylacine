@@ -397,7 +397,13 @@ impl Device {
                 self.check(resource_id, Kind::Resource)?;
                 self.check(ctx_id, Kind::Context)?;
                 self.objects.attach(self.owner, ctx_id, resource_id).map_err(|_| Error::BadField)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_attach_resource(ctx_id, resource_id);
+                // Linked before the device answers; a failure that left
+                // nothing unlinks, so the resource can still retire.
+                if result.is_err() && self.left_nothing(stalls) {
+                    let _ = self.objects.detached(self.owner, ctx_id, resource_id);
+                }
                 result.put(&mut out);
             }
             Request::CtxDetachResource { ctx_id, resource_id } => {
