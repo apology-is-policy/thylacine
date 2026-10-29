@@ -3120,8 +3120,15 @@ impl Gpu {
                 kept += 1;
                 continue;
             }
-            if e.res != 0 && e.unref_requested {
-                let _ = self.resource_unref_raw(e.res);
+            // An owner told Ok never asks again, so an unref the engine could
+            // not take (or that stalled) stays parked for the next accepted
+            // bind; a second UNREF of a freed id is a harmless refusal.
+            if e.res != 0
+                && e.unref_requested
+                && (!self.takes_commands() || (self.resource_unref_raw(e.res).is_err() && !self.takes_commands()))
+            {
+                self.condemned[kept] = e;
+                kept += 1;
             }
         }
         self.condemned_n = kept;
@@ -3330,6 +3337,11 @@ impl Gpu {
         len: u32,
         blob_id: u64,
     ) -> Result<HostRing, Error> {
+        // A stalled engine must not drive the reap below: it would tear down
+        // parked rings it cannot finish.
+        if !self.takes_commands() {
+            return Err(Error::Hardware);
+        }
         let size = (u64::from(len) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         // The blob size crosses the wire as a u32; a len that page-rounds to 1<<32
         // would truncate to a 0-size create over a full-size reservation. Guard
@@ -3457,7 +3469,7 @@ impl Gpu {
     /// prefix) so a caller under offset pressure (mint) can loop while progress is
     /// made rather than fail an alloc that a second pass would satisfy (round-2 F2).
     fn reap_hostmem_parked(&mut self) -> u32 {
-        if self.hostmem_parked.is_empty() {
+        if self.hostmem_parked.is_empty() || !self.takes_commands() {
             return 0;
         }
         const HOSTMEM_REAP_PER_PASS: u32 = 8;
@@ -3497,6 +3509,12 @@ impl Gpu {
     /// A refused step retains the reserved extent; only full acknowledged
     /// teardown returns it to the allocator.
     pub fn drop_host3d_ring(&mut self, ring: HostRing) {
+        // An engine that cannot take the teardown keeps the token, parked, for
+        // a later reap: nothing has been asked of the device yet.
+        if !self.takes_commands() {
+            self.hostmem_parked.push(ring);
+            return;
+        }
         // Every step is a prerequisite of address reuse. An uncertain device
         // completion deliberately leaks this reserved extent until service
         // restart/reset; logging an error is not permission to alias it.
@@ -4382,10 +4400,16 @@ impl Gpu {
     /// request only when it processes it, which a stall defers, so staging
     /// over it would have the device run the new bytes as the old command.
     fn req(&self, offset: u64) -> Result<u64, Error> {
-        if self.ctrl.refusing() || self.ctrl.sync_pending || self.ctrl.sync2_pending {
+        if !self.takes_commands() {
             return Err(Error::Hardware);
         }
         Ok(self.ring_va + offset)
+    }
+
+    /// The engine can stage and publish a synchronous command now. A refusal
+    /// made on this answer is a KNOWN outcome: nothing reached the device.
+    fn takes_commands(&self) -> bool {
+        !(self.ctrl.refusing() || self.ctrl.sync_pending || self.ctrl.sync2_pending)
     }
 
     /// Bring-up is over: from here a missed synchronous deadline stalls the
@@ -4504,14 +4528,19 @@ impl Gpu {
     /// flight, exactly as a slow device leaves it. `hold` withholds the
     /// chain's retirement, so the stall runs on to death.
     #[cfg(feature = "test-mode")]
-    pub fn test_latch_now(&mut self, hold: bool) {
+    pub fn test_latch_now(&mut self, hold: bool) -> bool {
+        let stalls = self.ctrl.stalls;
         self.ctrl.test_latch_next = true;
         self.ctrl.test_stall_hold = hold;
         let _ = self.query_display_info();
         self.ctrl.test_latch_next = false;
-        if self.ctrl.stalled.is_none() {
+        // A shot refused by a real stall injected nothing: arming the hold
+        // then would withhold that real chain's retirement.
+        let stalled = self.ctrl.stalls != stalls;
+        if !stalled {
             self.ctrl.test_stall_hold = false;
         }
+        stalled
     }
 
     /// Fenced slots currently allocatable. Read-only, and the ONLY thing that

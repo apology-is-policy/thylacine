@@ -393,9 +393,10 @@ ordinary guest test client, never a source of trusted authority.
 ## Caveats
 
 OPEN (2026-10-29): a stall costs tapestryd GPU composition for the boot.
-Every request during a stall fails at once, and the compositor's health tick
-fails closed and latches GPU composition off, so CPU composition carries on
-(OPEN-BUGS 2026-10-29T06:39Z). And a seat episode never returns to normal
+During a stall every request other than a retirement fails at once, and the
+compositor's health tick fails closed and latches GPU composition off, so CPU
+composition carries on (OPEN-BUGS 2026-10-29T06:39Z). A retirement parks, and
+the compositor blocks on its reply for the stall, up to the 30 s bound. And a seat episode never returns to normal
 while quiescence is unreachable or a chain is never retired, because a restore
 and the trusted takeover both need quiescence, so it parks ordinary requests
 for good. A stall now ends by itself within 30 s; a dead engine does not.

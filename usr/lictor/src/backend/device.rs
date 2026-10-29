@@ -68,14 +68,31 @@ impl Device {
     fn reserve(&mut self, id: u32, kind: Kind) -> Result<(), Error> {
         self.objects.reserve(self.owner, id, kind).map_err(|_| Error::BadField)
     }
+    /// A failed command left nothing on the device when no stall began
+    /// across it and the engine lives: refused before staging, or refused by
+    /// the device. Only then may its bookkeeping be undone (GPU-DESIGN 4.5.15).
+    fn left_nothing(&self, stalls: u32) -> bool {
+        self.gpu.stalls() == stalls && !self.gpu.engine_dead()
+    }
+    /// Release the reservation a create made, when its failure left nothing.
+    fn unreserve(&mut self, id: u32, kind: Kind, stalls: u32) {
+        if self.left_nothing(stalls) {
+            if let Ok(ticket) = self.objects.retire(self.owner, id, kind) {
+                let _ = self.objects.retired(ticket);
+            }
+        }
+    }
     fn attach(&mut self, connection: i64, resource: u32, source: BufferRef) -> Result<(), Error> {
         self.check(resource, Kind::Resource)?;
         if self.backings.iter().any(|b| b.resource == resource) { return Err(Error::BadField); }
         let pin = Pin::claim(connection, source)?;
+        let stalls = self.gpu.stalls();
         let result = self.gpu.attach_backing(resource, pin.segments());
-        // Even an error can be an ambiguous device completion. Pin first and
-        // retain through a later proven detach/unref, never unwind the DMA.
-        self.backings.push(Backing { resource, _pin: pin });
+        // A stall (or a death) is an ambiguous device completion: retain the
+        // pin through a later proven detach/unref, never unwind the DMA.
+        if result.is_ok() || !self.left_nothing(stalls) {
+            self.backings.push(Backing { resource, _pin: pin });
+        }
         result
     }
     pub fn reap(&mut self) {
@@ -133,8 +150,7 @@ impl Device {
                 let hold = self.test_latch_shots == 1;
                 self.test_latch_shots -= 1;
                 self.test_latch_targets.clear();
-                self.test_latch_fired.push(resource_id);
-                self.gpu.test_latch_now(hold);
+                if self.gpu.test_latch_now(hold) { self.test_latch_fired.push(resource_id); }
             }
             _ => {}
         }
@@ -189,7 +205,9 @@ impl Device {
             Request::ResourceCreate2d { resource_id, w, h } => {
                 if w == 0 || h == 0 || w > 8192 || h > 8192 { return Err(Error::BadField); }
                 self.reserve(resource_id, Kind::Resource)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.resource_create_2d(resource_id, w, h);
+                if result.is_err() { self.unreserve(resource_id, Kind::Resource, stalls); }
                 #[cfg(feature = "test-mode")]
                 if result.is_ok() { self.test_latch_mark(resource_id, w, h); }
                 result.put(&mut out);
@@ -241,15 +259,22 @@ impl Device {
                 let pin = Pin::claim(connection, backing)?;
                 if pin.count != 1 { return Err(Error::BadField); }
                 self.reserve(resource_id, Kind::Resource)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.create_ring_blob(resource_id, pin.segments[0].pa, len);
-                self.backings.push(Backing { resource: resource_id, _pin: pin });
+                if result.is_ok() || !self.left_nothing(stalls) {
+                    self.backings.push(Backing { resource: resource_id, _pin: pin });
+                } else {
+                    self.unreserve(resource_id, Kind::Resource, stalls);
+                }
                 result.put(&mut out);
             }
             Request::CreateHost3dBlob { resource_id, ctx_id, blob_flags, len, blob_id } => {
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len as u64 > 64 * 1024 * 1024 { return Err(Error::BadField); }
                 self.reserve(resource_id, Kind::Resource)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.create_host3d_blob(resource_id, ctx_id, blob_flags, len, blob_id);
+                if result.is_err() { self.unreserve(resource_id, Kind::Resource, stalls); }
                 result.put(&mut out);
             }
             Request::MapBlob { .. } => {
@@ -262,7 +287,9 @@ impl Device {
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len > 1024 * 1024 { return Err(Error::BadField); }
                 self.reserve(res_id, Kind::Resource)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.mint_host3d_ring(res_id, ctx_id, len, blob_id);
+                if result.is_err() { self.unreserve(res_id, Kind::Resource, stalls); }
                 let result = result.map(|ring| {
                     let info = RingInfo { res_id: ring.res_id, size: ring.size, cache: ring.cache };
                     self.rings.push(ring); info
@@ -298,18 +325,24 @@ impl Device {
             Request::CtxCreate { ctx_id, debug_name } => {
                 if debug_name.len() > 64 { return Err(Error::BadField); }
                 self.reserve(ctx_id, Kind::Context)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_create(ctx_id, &debug_name);
+                if result.is_err() { self.unreserve(ctx_id, Kind::Context, stalls); }
                 result.put(&mut out);
             }
             Request::CtxCreateVenus { ctx_id } => {
                 self.reserve(ctx_id, Kind::Context)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_create_venus(ctx_id);
+                if result.is_err() { self.unreserve(ctx_id, Kind::Context, stalls); }
                 result.put(&mut out);
             }
             Request::CtxCreateCapset { ctx_id, capset_id, debug_name } => {
                 if debug_name.len() > 64 { return Err(Error::BadField); }
                 self.reserve(ctx_id, Kind::Context)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.ctx_create_capset(ctx_id, capset_id, &debug_name);
+                if result.is_err() { self.unreserve(ctx_id, Kind::Context, stalls); }
                 result.put(&mut out);
             }
             Request::CtxDestroy { ctx_id } => {
@@ -338,7 +371,9 @@ impl Device {
             }
             Request::ResourceCreate3d { resource_id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags } => {
                 self.reserve(resource_id, Kind::Resource)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.resource_create_3d(resource_id, target, format, bind, width, height, depth, array_size, last_level, nr_samples, flags);
+                if result.is_err() { self.unreserve(resource_id, Kind::Resource, stalls); }
                 result.put(&mut out);
             }
             Request::SetScanout { resource_id, w, h } => {
@@ -369,7 +404,9 @@ impl Device {
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len as u64 > 64 * 1024 * 1024 { return Err(Error::BadField); }
                 self.reserve(res_id, Kind::Resource)?;
+                let stalls = self.gpu.stalls();
                 let result = self.gpu.create_presentable(res_id, ctx_id, len, blob_id);
+                if result.is_err() { self.unreserve(res_id, Kind::Resource, stalls); }
                 result.put(&mut out);
             }
             Request::CtxAttachResourceProbe { ctx_id, resource_id } => {

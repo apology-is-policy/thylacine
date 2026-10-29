@@ -2618,9 +2618,12 @@ block the serve loop, and seat input with it. Neither was taken.
   malformed entry still poisons the queue. A chain outstanding for
   `FENCE_ABANDON_MS` poisons it permanently, as before.
 
-**What a stall costs tapestryd.** Every request tapestryd makes during a stall
-fails at once, so tapestryd stays responsive and the present path skips
-frames. Its composition health tick fails closed, though (§4.5.12), and
+**What a stall costs tapestryd.** During a stall, every request tapestryd makes
+other than a retirement fails at once, and the present path skips frames. A
+retirement parks, and tapestryd's proxy reads its reply with no deadline, so
+the compositor's own loop blocks on it until the engine revives, dies, or the
+30 s park bound is reached. That cost is the price of keeping every pin until
+the device has retired the chain. Its composition health tick fails closed (§4.5.12), and
 latches GPU composition OFF, sticky. Until that tick learns to tell a stall
 from a context latch, a stall can cost GPU composition for the boot while CPU
 composition carries on. That fix is owed in tapestryd (OPEN-BUGS 2026-10-29
