@@ -277,8 +277,8 @@ struct Thread {
     // ARCH 7.6.4: the note families posted at this thread by name (tkill,
     // tgkill, pthread_kill, raise). No other thread can take them, whatever its
     // mask. A poster sets a bit holding the Proc's threads_lock; the owner's
-    // tail, or a discard holding that lock, clears it, each by an atomic AND
-    // whose old value says who took the note. q->lock does not guard it. KP_ZERO;
+    // tail, or a discard or the self-managing mark holding that lock, clears it,
+    // each by an atomic op whose old value says who took the note. q->lock does not guard it. KP_ZERO;
     // not inherited by a spawn or a fork; survives exec, as the queue does.
     u8                 note_direct;
     u8                 _pad_in_handler[3];   // explicit 8-byte alignment

@@ -43,6 +43,7 @@
 #ifdef KERNEL_TESTS
 #include <thylacine/caps.h>       // caps_t, in the tests' declarations below
 #include <thylacine/handle.h>     // hidx_t, likewise
+#include <thylacine/vivarium.h>   // enum viv_signote, struct viv_ksigaction, likewise
 #endif
 
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
@@ -4176,6 +4177,8 @@ s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
                             u64 optval_va, u64 optlen_va);
 s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
+                                    const struct viv_ksigaction *act);
 bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
 s64 viv_listen_for_test(struct Proc *p, u64 fd);
 s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);

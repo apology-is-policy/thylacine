@@ -484,18 +484,41 @@ resets the handler.
 hold it finds the tid (absent: ESRCH), does nothing for a thread past
 `THREAD_EXITING` or a Proc past `ALIVE`, drops a note the phenotype ignores, and sets
 the bit with an atomic OR. It then rouses the target under the target's `wait_lock`,
-unless the family is masked or the target is the caller. A fatal note wakes any
-rendez but `debug_rendez` and kicks the thread; a caught one goes through
-`caught_rouse_locked`. A masked target stays asleep, as Linux's `wants_signal` leaves
-it: a blocked thread's mask cannot change, and a thread racing to unmask reaches a
-tail or a wait entry, and both read the word. A self-managing Proc reads its notes
-from an fd with no per-thread reader and runs no handler, so there the note joins the
-queue; `notes_mark_self_managing` moves words already set.
+unless the target is the caller. A fatal note wakes any rendez but `debug_rendez` and
+kicks the thread; a caught one goes through `caught_rouse_locked`.
+
+It rouses a masked target too. The owner writes `note_mask` with no lock and no fence,
+then reads the word acquire-only, and the post sets the word and would then read the
+mask: the store-buffer shape, where ARMv8 lets each see the other's old value. A post
+that skipped the rouse on the mask could leave a thread that had just unmasked asleep
+over a word it read empty. The target's re-read under `wait_lock` is the precision, as
+the queue's wakers already have it, and a masked sleeper re-reads and parks again.
+`caught_target_buggy_direct_stale_mask.cfg` holds the bug.
+
+A self-managing Proc reads its notes from an fd with no per-thread reader and runs no
+handler, so there the note joins the queue with its sender. `notes_mark_self_managing`
+moves words already set, through `notes_move_to_queue_locked`. Their posts already
+answered 0, so the move cannot be refused: the ring has `NOTE_RING_SPARE` slots past
+`NOTE_QUEUE_DEPTH` that no post may fill, and past the depth a moved note coalesces
+with a queued note of its name or takes one. Only the move fills a spare slot, each
+time with a name not then queued at sender 0, so a full ring holds a moved note of
+every family and the slots cannot run out. A static assert keeps one per family.
+Every ring walk's modulus is `NOTE_RING_SLOTS`; the admission and the tail's budgets
+stay at the depth.
 
 **The disposition.** The post reads `SIG_IGN` and sets the bit in one hold of
 `threads_lock`. `rt_sigaction` stores the disposition, then `notes_discard_name` ends
 its `q->lock` hold and walks the threads under `threads_lock`. Whichever hold comes
 first, the note is refused or removed.
+
+A disposition that becomes terminate has the same shape. `viv_sigaction_settled`
+(`SIG_DFL` for a family that terminates), `notes_handler_resets` (`SA_RESETHAND` at a
+delivery) and `notes_set_handler` (`SYS_NOTIFY(0)`) store it and then call
+`proc_note_direct_rouse`, which under `threads_lock` rouses every other
+thread with a nonzero word: a post that held the lock first has set a bit the walk
+sees, and one that holds it after reads the new disposition itself. Without it a peer
+riding a caught note out in a hold wait would sleep on, since the unregistering thread's
+tail reads only its own word.
 
 **The tail.** `notes_tail_candidate_locked` takes a queued kill, then the lowest
 unmasked direct bit, then the queue's FIFO: private before shared, as Linux's
@@ -503,7 +526,10 @@ unmasked direct bit, then the queue's FIFO: private before shared, as Linux's
 take a bit between the peek and the consume. `notes_tail_consume_locked` is therefore
 a `fetch_and`, last, and on a raced discard it returns 0 and nothing is delivered. A
 native push that faults puts the bit back (`notes_tail_unconsume_locked`); a native
-Proc has no `rt_sigaction` to discard it in the meantime.
+Proc has no `rt_sigaction` to discard it in the meantime. A peer may have opened the
+note fd while it was out, so a Proc now self-managing gets it on the queue instead: the
+mark stores its flag under `q->lock`, so a flag not seen there means the mark's walk is
+yet to come and moves the bit itself.
 
 **Death.** Whether a direct note is fatal is read at use (`notes_direct_is_fatal`),
 never latched at the post, so exec's reset and `SYS_NOTIFY(0)` are honest.
@@ -972,11 +998,15 @@ L331-L333 (a spinning main takes a child's `SIGCHLD` while a polling peer is
 left alone) and jc-probe's spinint and spinnote rungs (a native spinner ended by
 `^C`, and one whose handler runs).
 
-Thread-directed notes. `test_notes.c`: `notes.direct_names_own_their_family`,
+Thread-directed notes. `test_notes.c`: `notes.direct_fallback_records_its_sender`,
+`notes.direct_move_survives_a_full_ring`,
+`notes.direct_unconsume_after_the_mark_goes_to_the_queue`,
+`notes.direct_names_own_their_family`,
 `_reaches_only_its_thread`, `_post_gates`, `_ignored_and_discarded`,
 `_candidate_discarded_delivers_nothing`, `_die_predicate`,
 `_deliverable_takes_no_claim`, `_self_managing_uses_the_queue`. `test_rendez.c`, on
-the `nt_*` interpreter: `rendez.direct_note_unwinds_only_its_target`,
+the `nt_*` interpreter: `rendez.direct_note_turns_fatal_when_the_handler_goes`,
+`rendez.direct_note_unwinds_only_its_target`,
 `_held_waits_ride_it_out`, `_read_at_wait_entry`, `_fatal_ends_any_wait`,
 `_native_rides_it_out`. `syscall.native_gap_unassigned` pins the numbers beside 138 and
 `vivarium.rejects_are_deliberate` the Linux rows they meet. On the device:

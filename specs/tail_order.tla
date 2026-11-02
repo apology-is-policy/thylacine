@@ -75,7 +75,7 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS
-    DEPTH,               \* NOTE_QUEUE_DEPTH: the ring's size and the per-tail budget
+    DEPTH,               \* NOTE_QUEUE_DEPTH: what a post may fill, and the per-tail budget
     BIRTH,               \* TRUE = the Thread starts as a held child (5f)
     BUGGY_NOTES_FIRST,
     BUGGY_NO_REPASS,

@@ -3144,7 +3144,11 @@ void proc_caught_note_wake(struct Proc *p);
 
 // proc_note_thread -- post `name` at the one thread `tid` of `p` (ARCH 7.6.4). 0,
 // -T_E_SRCH (no such thread), -T_E_INVAL (a name no program may aim at a thread).
-int proc_note_thread(struct Proc *p, int tid, const char *name);
+int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sender);
+
+// proc_note_direct_rouse -- every thread of `p` but the caller with a direct note
+// pending reads its word again: a disposition just became terminate (ARCH 7.6.4).
+void proc_note_direct_rouse(struct Proc *p);
 
 // proc_caught_note_walk — ARCH 8.8.3 "Which thread takes a caught note". For
 // each caught family with a note queued: wake a holder (a claim or a

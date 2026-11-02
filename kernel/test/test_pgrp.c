@@ -214,7 +214,7 @@ static u32 tty_count_named(struct Proc *p, const char *name) {
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (tty_streq(q->ring[idx].name, name)) found++;
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     spin_unlock(&q->lock);
     return found;

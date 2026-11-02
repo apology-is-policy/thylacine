@@ -2799,13 +2799,14 @@ tick while a peer that could unwind slept on.
 | `caught_target_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | the same | violation (`NoStrand`) | 613245 |
 | `caught_target_buggy_stale_keeps.cfg` | `BUGGY_STALE_KEEPS` | the same | violation (`NoStrand`) | 616829 |
 | `caught_target_direct.cfg` | none; one process-directed post, one direct, a caught family | `TypeOK` + `OneClaimant` + `NoStolenDirect` + `NoStrand` + `NoDirectStrand` | clean | 795560 |
-| `caught_target_direct_fatal.cfg` | none; the same, a family whose default terminates (`DIRECT_FATAL`) | the same | clean | 410299 |
+| `caught_target_direct_fatal.cfg` | none; the same, a family whose default terminates (`DIRECT_FATAL`) | the same | clean | 434763 |
 | `caught_target_buggy_direct_to_queue.cfg` | `BUGGY_DIRECT_TO_QUEUE` (no process-directed post) | the invariants | violation (`NoStolenDirect`) | 57 |
 | `caught_target_buggy_direct_claims.cfg` | `BUGGY_DIRECT_CLAIMS` | the invariants | violation (`OneClaimant`) | 993 |
-| `caught_target_buggy_direct_needs_claim.cfg` | `BUGGY_DIRECT_NEEDS_CLAIM` | the invariants + `NoDirectStrand` | violation (`NoDirectStrand`) | 799928 |
+| `caught_target_buggy_direct_needs_claim.cfg` | `BUGGY_DIRECT_NEEDS_CLAIM` | the invariants + `NoDirectStrand` | violation (`NoDirectStrand`) | 812160 |
 | `caught_target_buggy_direct_no_rouse.cfg` | `BUGGY_DIRECT_NO_ROUSE` | the same | violation (`NoDirectStrand`) | 792792 |
-| `caught_target_buggy_direct_no_observe.cfg` | `BUGGY_DIRECT_NO_OBSERVE` | the same | violation (`NoDirectStrand`) | 801480 |
-| `caught_target_buggy_fatal_unwinds_only.cfg` | `BUGGY_FATAL_UNWINDS_ONLY`, `DIRECT_FATAL` | the same | violation (`NoDirectStrand`) | 410299 |
+| `caught_target_buggy_direct_no_observe.cfg` | `BUGGY_DIRECT_NO_OBSERVE` | the same | violation (`NoDirectStrand`) | 813712 |
+| `caught_target_buggy_fatal_unwinds_only.cfg` | `BUGGY_FATAL_UNWINDS_ONLY`, `DIRECT_FATAL` | the same | violation (`NoDirectStrand`) | 422531 |
+| `caught_target_buggy_direct_stale_mask.cfg` | `BUGGY_DIRECT_STALE_MASK` | the same | violation (`NoDirectStrand`) | pending |
 
 Each counterexample was read for its mechanism, not only its verdict: the
 designee blocks in a hold wait holding the family while a peer sleeps in an
@@ -2837,7 +2838,18 @@ then drains, and with the family no longer open the target sleeps on over its ow
 note (`DIRECT_NEEDS_CLAIM`); the post leaves the target asleep in an unwinding
 wait (`DIRECT_NO_ROUSE`); the post lands before the target enters a wait, the
 entry does not read the word, and nothing wakes it (`DIRECT_NO_OBSERVE`, the I-9
-shape); a fatal note leaves its target in a hold wait (`FATAL_UNWINDS_ONLY`).
+shape); a fatal note leaves its target in a hold wait (`FATAL_UNWINDS_ONLY`); the
+target unmasks, enters a wait with its word empty, and the post skips the rouse on
+the mask it still reads (`DIRECT_STALE_MASK`).
+
+The post rouses a masked target, because a rouse gated on the mask is the store-buffer
+litmus test: the owner's plain store of `note_mask` and acquire read of the word, and
+the poster's OR and read of the mask, can each see the other's old value. The model
+cannot produce that order, since `Mask` and its tail's read are one step, so the
+ghost `wasMasked` stands for the stale read. It is `FALSE` in every other cfg and
+moves no count. A disposition turning fatal after the post is not modelled either:
+`DIRECT_FATAL` is a constant, and `proc_note_direct_rouse` is held by
+`rendez.direct_note_turns_fatal_when_the_handler_goes`.
 
 | Spec action | Code site (as-built) | Property pinned |
 |---|---|---|
@@ -2850,7 +2862,7 @@ shape); a fatal note leaves its target in a hold wait (`FATAL_UNWINDS_ONLY`).
 | `Irq` | `arch/arm64/vectors.S` `0x480` -> `.Lel0_return` (#964) | `NoStrand` (`IRQ_NO_NOTES`) |
 | `Deliver` / `Release` | `kernel/notes.c::notes_deliver_at_el0_return`: the delivery loop, then `notes_release_claims` (the claim and the designation; a walk skipping the releaser while the note is queued) | `NoStrand` (`RELEASE_NO_WAKE`) |
 | `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `threads_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
-| `PostDirect` | `kernel/proc.c::proc_note_thread`, under `p->threads_lock` alone (ARCH 7.3.1 has no `threads_lock` <-> `q->lock` edge): the tid found, an atomic OR of `Thread.note_direct`, then under the target's `wait_lock` the rouse unless the family is masked: `caught_rouse_locked` for a caught note, any rendez but `debug_rendez` plus a kick for a fatal one | `NoStolenDirect` (`DIRECT_TO_QUEUE`); `NoDirectStrand` (`DIRECT_NO_ROUSE`, `FATAL_UNWINDS_ONLY`) |
+| `PostDirect` | `kernel/proc.c::proc_note_thread`, under `p->threads_lock` alone (ARCH 7.3.1 has no `threads_lock` <-> `q->lock` edge): the tid found, an atomic OR of `Thread.note_direct`, then under the target's `wait_lock` the rouse, masked or not: `caught_rouse_locked` for a caught note, any rendez but `debug_rendez` plus a kick for a fatal one | `NoStolenDirect` (`DIRECT_TO_QUEUE`); `NoDirectStrand` (`DIRECT_NO_ROUSE`, `FATAL_UNWINDS_ONLY`, `DIRECT_STALE_MASK`) |
 | `DirectEnds` / `UnwindDirect` | `kernel/notes.c::thread_caught_note_claim`: an unmasked direct bit with a live handler returns true without touching `note_claim` or `note_target`; `thread_die_pending` for a fatal one, whose mask gate is the only one | `OneClaimant` (`DIRECT_CLAIMS`); `NoDirectStrand` (`DIRECT_NEEDS_CLAIM`) |
 | `HoldEnds` / `ResumeHold` | `thread_die_pending` in `sleep_common` and `tsleep_common`, register-then-observe and post-`sched()`: it ends every wait but the debug stop | `NoDirectStrand` (`FATAL_UNWINDS_ONLY`) |
 | The reads in `EnterUWait` / `EnterHWait` / `Handoff` | the same predicates, read under `wait_lock` on entry, the lock the post's rouse takes | `NoDirectStrand` (`DIRECT_NO_OBSERVE`) |
@@ -2880,7 +2892,7 @@ handler runs) hold the code to it. `test_rendez.c`'s `rendez.direct_note_*`, `te
 `raise-masked` legs hold the direct half.
 
 Pre-commit gate: `specs/check-caught-target.sh` (the 3 clean cfgs at their pinned
-counts, the 14 buggy cfgs violating their named properties), on any change to
+counts, the 15 buggy cfgs violating their named properties), on any change to
 `proc_caught_note_walk`, `thread_caught_note_claim`, `notes_release_claims`,
 `sleep_caught_wait_enter`, `notes_handoff_target`, `notes_exit_drop_locked`,
 `proc_note_thread`, `notes_tail_candidate_locked`, `notes_tail_consume_locked`,

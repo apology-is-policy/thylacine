@@ -1780,7 +1780,7 @@ static u32 js_note_count(struct Proc *p, const char *name) {
         const char *a = q->ring[idx].name, *b = name;
         while (*a && *a == *b) { a++; b++; }
         if (*a == *b) found++;
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        idx = (idx + 1) % NOTE_RING_SLOTS;
     }
     spin_unlock(&q->lock);
     return found;

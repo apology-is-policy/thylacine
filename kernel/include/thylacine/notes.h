@@ -109,6 +109,13 @@ struct Thread;
 // infallible.
 #define NOTE_QUEUE_DEPTH  16u
 
+// Slots past the depth, which no post may fill. A direct note the post already
+// answered 0 for and that must move to the queue cannot be refused, and it takes
+// one of these unless a note of its name is queued (notes_move_to_queue_locked).
+// One per family suffices; notes.c asserts it.
+#define NOTE_RING_SPARE   8u
+#define NOTE_RING_SLOTS   (NOTE_QUEUE_DEPTH + NOTE_RING_SPARE)
+
 // Coalesce threshold: when count >= this, kernel-synthetic posters of an
 // already-queued same-name note merge (preserving the most recent arg,
 // post-order ordering unchanged for that name). Userspace SYS_POSTNOTE
@@ -243,7 +250,7 @@ struct NoteQueue {
     u32                      tail;        // index of next enqueue
     u32                      count;
     u32                      _pad;        // explicit 8-byte alignment
-    struct Note              ring[NOTE_QUEUE_DEPTH];
+    struct Note              ring[NOTE_RING_SLOTS];
     // F3 audit close (sub-chunk 13a): devnotes_read uses the poll_-
     // waiter_list mechanism — each reader has its own private Rendez +
     // stack-allocated poll_waiter; producers wake via poll_waiter_list_-
@@ -817,6 +824,9 @@ int notes_tail_candidate_for_test(struct Proc *p, struct Thread *t, struct Note 
                                   int *direct);
 int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
                                 struct Note *out);
+void notes_tail_unconsume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                   const struct Note *n);
+void notes_handler_resets_for_test(struct Proc *p, u32 sn);   // an enum viv_signote
 #endif // KERNEL_TESTS
 
 #endif  // THYLACINE_NOTES_H

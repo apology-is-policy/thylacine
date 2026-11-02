@@ -117,6 +117,10 @@
 (*       its word after registering (I-9; NoDirectStrand).                 *)
 (*   BUGGY_FATAL_UNWINDS_ONLY -- a fatal direct note ends only an unwinding*)
 (*       wait, as a caught one does (NoDirectStrand).                      *)
+(*   BUGGY_DIRECT_STALE_MASK  -- the post skips the rouse on the target's  *)
+(*       mask, and may read one the target has since cleared: it writes it *)
+(*       with no lock and no fence, and reads an empty word before it      *)
+(*       blocks (NoDirectStrand). wasMasked stands for the stale read.     *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -125,7 +129,8 @@ CONSTANTS Threads, MAX_POSTS, MAX_WAITS, MAX_DIRECT, DIRECT_FATAL, NONE,
           BUGGY_DOUBLE_DESIGNATE, BUGGY_EXIT_KEEPS, BUGGY_RELEASE_NO_WAKE,
           BUGGY_IRQ_NO_NOTES, BUGGY_STALE_KEEPS,
           BUGGY_DIRECT_TO_QUEUE, BUGGY_DIRECT_NEEDS_CLAIM, BUGGY_DIRECT_CLAIMS,
-          BUGGY_DIRECT_NO_ROUSE, BUGGY_DIRECT_NO_OBSERVE, BUGGY_FATAL_UNWINDS_ONLY
+          BUGGY_DIRECT_NO_ROUSE, BUGGY_DIRECT_NO_OBSERVE, BUGGY_FATAL_UNWINDS_ONLY,
+          BUGGY_DIRECT_STALE_MASK
 
 ASSUME NONE \notin Threads
 
@@ -160,13 +165,15 @@ VARIABLES ts,        \* per-thread state
           dposted,   \* thread-directed notes posted so far
           dtgt,      \* ghost: NONE, or the target of a direct post the buggy
                      \* cfg put on the queue
-          stolen     \* ghost: a direct note ran on a thread it did not name
+          stolen,    \* ghost: a direct note ran on a thread it did not name
+          wasMasked  \* ghost: a mask a stale read could still see (the buggy
+                     \* cfg only; FALSE otherwise, so the counts do not move)
 
 vars == <<ts, masked, inh, woken, des, own, q, posted, walkOwed, wpick, nwait,
-          wskip, wcur, dq, dposted, dtgt, stolen>>
+          wskip, wcur, dq, dposted, dtgt, stolen, wasMasked>>
 
 \* The fields of the direct extension, for actions it does not touch.
-dvars == <<dq, dposted, dtgt, stolen>>
+dvars == <<dq, dposted, dtgt, stolen, wasMasked>>
 
 Claimed  == des \cup own
 Open     == Claimed = {}
@@ -218,6 +225,7 @@ TypeOK == /\ ts \in [Threads -> States]
           /\ dposted \in 0..MAX_DIRECT
           /\ dtgt \in Threads \cup {NONE}
           /\ stolen \in BOOLEAN
+          /\ wasMasked \in [Threads -> BOOLEAN]
 
 Init == /\ ts = [t \in Threads |-> "user"]
         /\ masked = [t \in Threads |-> FALSE]
@@ -230,6 +238,7 @@ Init == /\ ts = [t \in Threads |-> "user"]
         /\ wskip = NONE /\ wcur = NONE
         /\ dq = [t \in Threads |-> FALSE]
         /\ dposted = 0 /\ dtgt = NONE /\ stolen = FALSE
+        /\ wasMasked = [t \in Threads |-> FALSE]
 
 -----------------------------------------------------------------------------
 \* The environment: a child exits, a key is pressed.
@@ -244,9 +253,9 @@ Post == /\ posted < MAX_POSTS
 \* tkill. The post holds the Proc's threads_lock, so an exited target is seen
 \* exactly and nothing is posted to it. It rouses the target under the target's
 \* wait_lock, where the target's entry to a wait publishes the wait and reads
-\* the word, so the two are atomic with respect to each other. A masked note
-\* leaves it asleep: a blocked thread's mask cannot change, and it reads the word
-\* again when it next enters a wait.
+\* the word, so the two are atomic with respect to each other. Masked or not: the
+\* mask is its owner's, written with no lock and no fence, so the post may not act
+\* on what it reads of it. A masked sleeper re-reads its word and parks again.
 PostDirect(t) == /\ dposted < MAX_DIRECT /\ ts[t] # "exited"
                  /\ dposted' = dposted + 1
                  /\ IF BUGGY_DIRECT_TO_QUEUE
@@ -256,14 +265,15 @@ PostDirect(t) == /\ dposted < MAX_DIRECT /\ ts[t] # "exited"
                             /\ dtgt' = t
                             /\ UNCHANGED <<dq, woken>>
                        ELSE /\ dq' = [dq EXCEPT ![t] = TRUE]
-                            /\ woken' = IF BUGGY_DIRECT_NO_ROUSE THEN woken
+                            /\ woken' = IF BUGGY_DIRECT_NO_ROUSE
+                                           \/ (BUGGY_DIRECT_STALE_MASK /\ (masked[t] \/ wasMasked[t]))
+                                        THEN woken
                                         ELSE [woken EXCEPT ![t] =
-                                                @ \/ (~masked[t] /\
-                                                      (ts[t] = "uwait"
-                                                       \/ (ts[t] = "hwait" /\ DIRECT_FATAL
-                                                           /\ ~BUGGY_FATAL_UNWINDS_ONLY)))]
+                                                @ \/ ts[t] = "uwait"
+                                                  \/ (ts[t] = "hwait" /\ DIRECT_FATAL
+                                                      /\ ~BUGGY_FATAL_UNWINDS_ONLY)]
                             /\ UNCHANGED <<q, walkOwed, wskip, dtgt>>
-                 /\ UNCHANGED <<ts, masked, inh, des, own, posted, wpick, nwait, wcur, stolen>>
+                 /\ UNCHANGED <<ts, masked, inh, des, own, posted, wpick, nwait, wcur, stolen, wasMasked>>
 
 \* The walk: re-wake the claim holders, then pick a candidate for an open
 \* family, skipping the releaser when a release owes the walk.
@@ -360,9 +370,12 @@ Return(t)     == /\ ts[t] = "pre"
 
 Mask(t)       == /\ ts[t] = "pre" /\ t \notin own
                  /\ masked' = [masked EXCEPT ![t] = ~masked[t]]
+                 /\ wasMasked' = IF BUGGY_DIRECT_STALE_MASK
+                                     THEN [wasMasked EXCEPT ![t] = @ \/ masked[t]]
+                                     ELSE wasMasked
                  /\ ts' = [ts EXCEPT ![t] = "deliver"]
                  /\ UNCHANGED <<inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
-                 /\ UNCHANGED dvars
+                 /\ UNCHANGED <<dq, dposted, dtgt, stolen>>
 
 \* The EXITING commit, under the threads_lock (so never inside a walk). The
 \* exit call is a new syscall, so no claim of its own is held. A direct note
@@ -469,7 +482,7 @@ Deliver(t)    == /\ ts[t] = "deliver"
                        ELSE UNCHANGED <<q, inh, dq, stolen>>
                  /\ ts' = [ts EXCEPT ![t] = "release"]
                  /\ UNCHANGED <<masked, woken, des, own, posted, walkOwed, wpick, nwait, wskip, wcur,
-                                 dposted, dtgt>>
+                                 dposted, dtgt, wasMasked>>
 
 \* The default of a fatal direct note: exits_note, the group's one death. Its
 \* claim on the group commits under the threads_lock, so never inside a walk.

@@ -3635,16 +3635,40 @@ static void caught_wake_unwinders(struct Proc *p, u32 fam) {
     }
 }
 
+// End whatever wait `x` is in but a debug stop, so it reads its note word again.
+static void note_rouse_fatal_locked(struct Thread *x) {
+    struct Rendez *r = x->rendez_blocked_on;
+    if (r && r != &x->debug_rendez) wakeup(r);
+    sched_kick_thread(x);
+}
+
+// A disposition just became terminate, so a direct note a peer was riding out is
+// now fatal, and only that peer's own wait or tail reads its word. The caller stored
+// the disposition first: a post whose hold of threads_lock comes after this one's
+// reads the new disposition itself, and one before it has set the bit seen here.
+void proc_note_direct_rouse(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC || p == g_kproc) return;
+    struct Thread *self = current_thread();
+    irq_state_t s = proc_threads_lock(p);
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
+        if (x == self || __atomic_load_n(&x->note_direct, __ATOMIC_ACQUIRE) == 0) continue;
+        irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+        note_rouse_fatal_locked(x);
+        spin_unlock_irqrestore(&x->wait_lock, ws);
+    }
+    proc_threads_unlock(p, s);
+}
+
 // ARCH 7.6.4: post `name` at the one thread `tid` of `p`. The caller pins `p`
 // (it is the caller's own, or g_proc_table_lock is held). A thread not yet freed
 // but past THREAD_EXITING accepts the note and nothing receives it, as a dead
-// child accepts one from its parent.
+// child accepts one from its parent. `sender` is what a queued note records.
 //
 // Reading the disposition and setting the bit share one hold of threads_lock, the
 // hold notes_discard_name's walk comes after its disposition store: see there.
 // Rousing the target under its wait_lock pairs with the register-then-observe in
 // sleep_common and tsleep_common, which read the word under that lock (I-9).
-int proc_note_thread(struct Proc *p, int tid, const char *name) {
+int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sender) {
     if (!p || p->magic != PROC_MAGIC || p == g_kproc) return -(int)T_E_SRCH;
     int bit = notes_direct_bit(name);
     if (bit < 0) return -(int)T_E_INVAL;
@@ -3661,19 +3685,16 @@ int proc_note_thread(struct Proc *p, int tid, const char *name) {
         to_queue = proc_is_self_managing_notes(p);
         if (!to_queue && !notes_direct_ignored(p, name)) {
             __atomic_or_fetch(&x->note_direct, (u8)(1u << (u32)bit), __ATOMIC_RELEASE);
-            // A masked note leaves its target asleep, as Linux's wants_signal does.
-            // A blocked thread's mask cannot change; a thread racing to unmask
-            // reaches a tail or a wait entry, and each reads the word.
-            if (x != current_thread() &&
-                !(__atomic_load_n(&x->note_mask, __ATOMIC_RELAXED) & (1ull << (u32)bit))) {
+            // Masked or not. The owner writes its mask with no lock and no fence, so
+            // a read here can see the old mask while the owner, having unmasked,
+            // reads a word without this bit, and each misses the other. The reader's
+            // re-check under wait_lock is the precision: a masked sleeper parks again.
+            if (x != current_thread()) {
                 irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
-                if (notes_direct_is_fatal(p, name)) {
-                    struct Rendez *r = x->rendez_blocked_on;
-                    if (r && r != &x->debug_rendez) wakeup(r);
-                    sched_kick_thread(x);
-                } else {
+                if (notes_direct_is_fatal(p, name))
+                    note_rouse_fatal_locked(x);
+                else
                     caught_rouse_locked(x);
-                }
                 spin_unlock_irqrestore(&x->wait_lock, ws);
             }
         }
@@ -3683,7 +3704,7 @@ int proc_note_thread(struct Proc *p, int tid, const char *name) {
 
     // A self-managing Proc reads its notes from an fd, which has no per-thread
     // reader, and runs no handler: the note joins the queue.
-    int rc = notes_post(p, name, 0u, NULL, false);
+    int rc = notes_post(p, name, 0u, sender, false);
     if (rc == 0) {
         proc_interrupt_terminate_wake(p);
         proc_caught_note_wake(p);

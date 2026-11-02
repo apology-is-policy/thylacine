@@ -6146,7 +6146,7 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // A tid names one thread, so the note goes on its word. Its threads_lock
     // nests under the proc_table_lock this walk holds.
     if (w->target_tid > 0) {
-        int trc = proc_note_thread(target, w->target_tid, w->name);
+        int trc = proc_note_thread(target, w->target_tid, w->name, w->caller);
         w->result = (trc == 0) ? 1 : -1;
         if (trc != 0) w->err = (s64)trc;
         return 1;
@@ -6333,7 +6333,7 @@ static s64 postnote_tid(struct exception_context *ctx, struct Proc *p, int tid,
         proc_fault_terminate(snare, ctx->elr);
     }
     if (kill) return postnote_self(p, name);
-    return (s64)proc_note_thread(p, tid, name);
+    return (s64)proc_note_thread(p, tid, name, p);
 }
 
 #ifdef KERNEL_TESTS
@@ -14706,7 +14706,7 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
         // tkill and tgkill name a thread; `kill` ends the group wherever it is
         // aimed, through the self arm's one cascade.
         if (tid > 0 && !notes_name_is_kill(name))
-            return (s64)proc_note_thread(p, tid, name);
+            return (s64)proc_note_thread(p, tid, name, p);
         return postnote_self(p, name);
     }
     // A snare:* death is the caller's own to choose, never another Proc's.
@@ -14733,6 +14733,39 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
 // Test support: drives the REAL shell with an explicit caller.
 s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
     return viv_kill(NULL, caller, pid, tid, sig);
+}
+#endif
+
+// What a disposition just stored in the table means for what is already pending.
+//
+// POSIX 2.4.3 / Linux do_sigaction: a disposition that IGNORES -- SIG_IGN, or
+// SIG_DFL for a signal whose default is ignore -- discards every instance already
+// pending, blocked or not. AFTER the store, so notes_post's under-lock disposition
+// read and this discard are one step (see notes_discard_name): a poster that saw
+// SIG_DFL enqueued in a lock hold this one follows, and is removed here; one that
+// takes the lock after this sees the new value and drops. Without it the pending
+// note waited for the EL0 tail's discard arm, and a guest that re-installed a
+// HANDLER before unblocking had it delivered -- a signal POSIX says died at the
+// SIG_IGN. Nothing to discard is the common case and costs one locked scan of an
+// empty ring.
+//
+// A disposition that TERMINATES makes a caught direct note a peer is riding out
+// fatal, and that peer's wait reads its word only when something rouses it.
+static void viv_sigaction_settled(struct Proc *p, enum viv_signote note,
+                                  const struct viv_ksigaction *act) {
+    if (act->handler == VIV_SIG_IGN ||
+        (act->handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
+        const char *nm = viv_signote_note_name(note);
+        if (nm) (void)notes_discard_name(p, nm);
+    } else if (act->handler == VIV_SIG_DFL && viv_signote_default_is_terminate(note)) {
+        proc_note_direct_rouse(p);
+    }
+}
+
+#ifdef KERNEL_TESTS
+void viv_sigaction_settled_for_test(struct Proc *p, enum viv_signote note,
+                                    const struct viv_ksigaction *act) {
+    viv_sigaction_settled(p, note, act);
 }
 #endif
 
@@ -15507,22 +15540,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             (void)viv_sigtab_set(tab, note, &act);
         }
 
-        // POSIX 2.4.3 / Linux do_sigaction: a disposition that IGNORES --
-        // SIG_IGN, or SIG_DFL for a signal whose default is ignore -- discards
-        // every instance already pending, blocked or not. AFTER the store, so
-        // notes_post's under-lock disposition read and this discard are one
-        // step (see notes_discard_name): a poster that saw SIG_DFL enqueued in
-        // a lock hold this one follows, and is removed here; one that takes
-        // the lock after this sees the new value and drops. Without it the
-        // pending note waited for the EL0 tail's discard arm, and a guest that
-        // re-installed a HANDLER before unblocking had it delivered -- a
-        // signal POSIX says died at the SIG_IGN. Nothing to discard is the
-        // common case and costs one locked scan of an empty ring.
-        if (act.handler == VIV_SIG_IGN ||
-            (act.handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
-            const char *nm = viv_signote_note_name(note);
-            if (nm) (void)notes_discard_name(p, nm);
-        }
+        viv_sigaction_settled(p, note, &act);
         return 0;
     }
 

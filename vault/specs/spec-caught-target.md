@@ -15,14 +15,15 @@ cfgs:
   - "caught_target_buggy_release_no_wake.cfg -- a release owes no walk: NoStrand (165597)"
   - "caught_target_buggy_irq_no_notes.cfg -- the IRQ tail has no notes leg: NoStrand (613245)"
   - "caught_target_buggy_stale_keeps.cfg -- a designee entering an unwinding wait it cannot take (masked, or in a handler) keeps the designation: NoStrand (616829)"
-  - "caught_target_direct.cfg -- clean, one process-directed post and one direct, a caught family: TypeOK + OneClaimant + NoStolenDirect + NoStrand + NoDirectStrand (795560)"
-  - "caught_target_direct_fatal.cfg -- clean, the same with a family whose default terminates (410299)"
+  - "caught_target_direct.cfg -- clean, one process-directed post and one direct, a caught family: TypeOK + OneClaimant + NoStolenDirect + NoStrand + NoDirectStrand (807792)"
+  - "caught_target_direct_fatal.cfg -- clean, the same with a family whose default terminates (434763)"
   - "caught_target_buggy_direct_to_queue.cfg -- a direct post goes on the process queue, as tkill did: NoStolenDirect (57)"
   - "caught_target_buggy_direct_claims.cfg -- a direct unwind takes the family's claim: OneClaimant (993)"
-  - "caught_target_buggy_direct_needs_claim.cfg -- a direct note unwinds its target only if the family is open: NoDirectStrand (799928)"
+  - "caught_target_buggy_direct_needs_claim.cfg -- a direct note unwinds its target only if the family is open: NoDirectStrand (812160)"
   - "caught_target_buggy_direct_no_rouse.cfg -- the post leaves a blocked target asleep: NoDirectStrand (792792)"
-  - "caught_target_buggy_direct_no_observe.cfg -- a thread entering a wait does not read its word: NoDirectStrand (801480)"
-  - "caught_target_buggy_fatal_unwinds_only.cfg -- a fatal direct note ends only an unwinding wait: NoDirectStrand (410299)"
+  - "caught_target_buggy_direct_no_observe.cfg -- a thread entering a wait does not read its word: NoDirectStrand (813712)"
+  - "caught_target_buggy_fatal_unwinds_only.cfg -- a fatal direct note ends only an unwinding wait: NoDirectStrand (422531)"
+  - "caught_target_buggy_direct_stale_mask.cfg -- the post skips the rouse on a mask its target has since cleared: NoDirectStrand (pending)"
 gate: "any change to proc_caught_note_walk, thread_caught_note_claim, notes_release_claims, sleep_caught_wait_enter, notes_handoff_target, notes_exit_drop_locked, proc_note_thread, notes_tail_candidate_locked, notes_tail_consume_locked, thread_die_pending, or where a claim, a designation or a direct bit is set or cleared; specs/check-caught-target.sh"
 created: 2026-10-12
 updated: 2026-11-02
@@ -44,9 +45,13 @@ was picked on a stale value gives the designation up at its tail, or at its next
 wait if that wait cannot unwind for it (`uentry`). A release's walk skips the
 releasing thread (`wskip`, `wcur`).
 
-A direct post (ARCH 7.6.4) sets the named thread's word `dq` and rouses it unless the
-family is masked. The ghost `stolen` records a delivery of that note by another
-thread. `DIRECT_FATAL` makes the family one whose default ends the group.
+A direct post (ARCH 7.6.4) sets the named thread's word `dq` and rouses it, masked or
+not. The ghost `stolen` records a delivery of that note by another thread.
+`DIRECT_FATAL` makes the family one whose default ends the group, and is a constant:
+a disposition turning fatal after the post is not modelled, and
+`rendez.direct_note_turns_fatal_when_the_handler_goes` holds that wake. `Mask` and its
+tail's read are one step, so the store-buffer order the rouse guards against is
+represented by the ghost `wasMasked`, which only `BUGGY_DIRECT_STALE_MASK` sets.
 
 ## What it pins
 
