@@ -167,7 +167,10 @@ struct larder_attr_ent {
                                //   type); attr_serve / fresh_size / a walk LEAF
                                //   reject it (their consumers read size/times/
                                //   cvers). Any full install clears it.
+    bool           gen_known;  // the fetch that installed this learned `gen`
     s32            hnext;      // hash chain: next slot in this key's bucket, -1 = end
+    u64            gen;        // the file's generation: which file this inode number
+                               //   names (cvers runs on across a reused number)
     struct t_stat  attr;       // cached metadata (mode/uid/gid/size/times/nlink/...)
 };
 
@@ -322,7 +325,12 @@ bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
 // seq0 snapshot (the G4 qid-scoped gen guard; an over-wide window fail-safes to
 // skip). Otherwise skipped. `attr` is copied; a perm_only entry upgrades to full.
 void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
-                         u32 cvers, const struct t_stat *attr);
+                         u32 cvers, const struct t_stat *attr, const u64 *gen);
+
+// The generation of the file the entry for `qid_path` names, as the fetch that
+// installed it learned it (`gen` above; NULL there forgets it, so an entry never
+// keeps a generation from before an overwrite). False with no such entry.
+bool larder_attr_gen(struct larder *l, u64 qid_path, u64 *gen_out);
 
 // Invalidate (OwnWrite). Drop `qid_path`'s cached entry (if present) and log the
 // invalidation event (always -- the file was mutated even if it was not cached,

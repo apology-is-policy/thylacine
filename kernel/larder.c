@@ -194,7 +194,7 @@ static struct larder_attr_ent *attr_install_slot_locked(struct larder *l,
 }
 
 void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
-                         u32 cvers, const struct t_stat *attr) {
+                         u32 cvers, const struct t_stat *attr, const u64 *gen) {
     if (!l || !attr) return;
     spin_lock(&l->lock);
     // The gen guard, G4 qid-scoped: skip only if an invalidation event named
@@ -217,9 +217,21 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
     e->valid     = true;
     e->ref       = true;
     e->perm_only = false;      // a full fresh record upgrades a G3 downgrade
+    e->gen_known = gen != NULL;
+    e->gen       = gen ? *gen : 0;
     e->attr      = *attr;
     l->attr_installs++;
     spin_unlock(&l->lock);
+}
+
+bool larder_attr_gen(struct larder *l, u64 qid_path, u64 *gen_out) {
+    if (!l || !gen_out) return false;
+    spin_lock(&l->lock);
+    struct larder_attr_ent *e = attr_find_locked(l, qid_path);
+    bool known = e && e->gen_known;
+    if (known) *gen_out = e->gen;
+    spin_unlock(&l->lock);
+    return known;
 }
 
 void larder_attr_invalidate(struct larder *l, u64 qid_path) {

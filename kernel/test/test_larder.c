@@ -95,7 +95,7 @@ static void put_pos(u64 parent, const char *name, u64 child, u32 mode) {
     a.qid_path = child;
     a.qid_vers = 1;
     a.qid_type = 0;
-    larder_attr_install(&g_larder, seq, child, /*cvers=*/1, &a);
+    larder_attr_install(&g_larder, seq, child, /*cvers=*/1, &a, NULL);
     larder_dentry_install(&g_larder, seq, parent, name, nlen(name), child,
                           /*negative=*/false);
 }
@@ -104,7 +104,7 @@ void test_larder_install_serve(void) {
     larder_reset();
     struct t_stat in = mk_stat(0755);
     u64 seq = larder_gen_snapshot(&g_larder);
-    larder_attr_install(&g_larder, seq, /*qid_path=*/5, /*cvers=*/10, &in);
+    larder_attr_install(&g_larder, seq, /*qid_path=*/5, /*cvers=*/10, &in, NULL);
 
     struct t_stat out;
     u64 seq0 = 0;
@@ -128,7 +128,7 @@ void test_larder_serve_miss(void) {
 void test_larder_invalidate(void) {
     larder_reset();
     struct t_stat in = mk_stat(0644);
-    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in, NULL);
 
     struct t_stat out;
     u64 seq0 = 0;
@@ -153,7 +153,7 @@ void test_larder_gen_guard_skips_raced_install(void) {
                                                      //   qid-scoped; an unrelated
                                                      //   event admits -- see
                                                      //   test_larder_gen_scope_qid)
-    larder_attr_install(&g_larder, seq, 8, 5, &in);  // "install the now-stale RPC result"
+    larder_attr_install(&g_larder, seq, 8, 5, &in, NULL);  // "install the now-stale RPC result"
 
     struct t_stat out;
     u64 seq0 = 0;
@@ -163,7 +163,7 @@ void test_larder_gen_guard_skips_raced_install(void) {
 
     // A fresh snapshot after the invalidate installs normally.
     u64 seq2 = larder_gen_snapshot(&g_larder);
-    larder_attr_install(&g_larder, seq2, 8, 5, &in);
+    larder_attr_install(&g_larder, seq2, 8, 5, &in, NULL);
     TEST_ASSERT(larder_attr_serve(&g_larder, 8, &out, &seq0),
                 "a fresh-snapshot install succeeds");
 }
@@ -178,7 +178,7 @@ void test_larder_root_qid_zero(void) {
                 "qid.path 0 misses on an empty cache (not a false hit)");
 
     struct t_stat in = mk_stat(040755);   // a dir mode
-    larder_attr_install(&g_larder, seq0, 0, 3, &in);
+    larder_attr_install(&g_larder, seq0, 0, 3, &in, NULL);
     TEST_ASSERT(larder_attr_serve(&g_larder, 0, &out, &seq0),
                 "root (qid.path 0) serves after install");
     TEST_EXPECT_EQ(out.mode, 040755u, "root's attr round-trips");
@@ -190,8 +190,8 @@ void test_larder_overwrite_wins(void) {
     larder_reset();
     struct t_stat a = mk_stat(0111);
     struct t_stat b = mk_stat(0222);
-    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 9, 1, &a);
-    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 9, 2, &b);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 9, 1, &a, NULL);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 9, 2, &b, NULL);
 
     struct t_stat out;
     u64 seq0 = 0;
@@ -212,7 +212,7 @@ void test_larder_eviction_bounded(void) {
     struct t_stat s = mk_stat(0600);
     // Fill exactly to capacity with qid.paths 0..N-1 (lru order 0 oldest).
     for (u64 k = 0; k < LARDER_ATTR_ENTRIES; k++)
-        larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), k, 1, &s);
+        larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), k, 1, &s, NULL);
 
     u32 valid = 0;
     for (u32 i = 0; i < LARDER_ATTR_ENTRIES; i++) if (g_larder.attr[i].valid) valid++;
@@ -221,7 +221,7 @@ void test_larder_eviction_bounded(void) {
 
     // One more entry evicts the LRU (qid 0 -- installed first, never re-served).
     larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder),
-                        (u64)LARDER_ATTR_ENTRIES, 1, &s);
+                        (u64)LARDER_ATTR_ENTRIES, 1, &s, NULL);
     TEST_EXPECT_EQ(g_larder.attr_evictions, 1ull, "one eviction on overflow");
 
     valid = 0;
@@ -725,7 +725,7 @@ void test_larder_attr_downgrade_perm_only(void) {
 
     struct t_stat fresh = mk_stat(040755);
     fresh.qid_path = 200; fresh.qid_vers = 2; fresh.qid_type = 0;
-    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 200, 2, &fresh);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 200, 2, &fresh, NULL);
     TEST_ASSERT(larder_attr_serve(&g_larder, 200, &out, &s0),
                 "a full install upgrades the downgraded entry");
 }
@@ -737,11 +737,11 @@ void test_larder_attr_downgrade_perm_only(void) {
 void test_larder_downgrade_guards_raced_populate(void) {
     larder_reset();
     struct t_stat in = mk_stat(040755);
-    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 200, 1, &in);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 200, 1, &in, NULL);
 
     u64 seq0 = larder_gen_snapshot(&g_larder);   // a populate's pre-RPC snapshot
     larder_attr_downgrade(&g_larder, 200);       // the mutation lands mid-RPC
-    larder_attr_install(&g_larder, seq0, 200, 1, &in);   // the raced stale install
+    larder_attr_install(&g_larder, seq0, 200, 1, &in, NULL);   // the raced stale install
     struct t_stat out; u64 s0 = 0;
     TEST_ASSERT(!larder_attr_serve(&g_larder, 200, &out, &s0),
                 "a raced full populate of the downgraded dir is skipped");
@@ -762,7 +762,7 @@ void test_larder_gen_scope_qid(void) {
     // (a) an unrelated event admits the fill.
     u64 seq0 = larder_gen_snapshot(&g_larder);
     larder_attr_invalidate(&g_larder, 999);         // a different file's event
-    larder_attr_install(&g_larder, seq0, 5, 1, &in);
+    larder_attr_install(&g_larder, seq0, 5, 1, &in, NULL);
     TEST_ASSERT(larder_attr_serve(&g_larder, 5, &out, &s0),
                 "an unrelated event no longer discards the fill");
     TEST_ASSERT(g_larder.inval_scope_passes >= 1ull, "scope pass counted");
@@ -770,7 +770,7 @@ void test_larder_gen_scope_qid(void) {
     // (b) an own-key event still skips.
     seq0 = larder_gen_snapshot(&g_larder);
     larder_attr_invalidate(&g_larder, 7);
-    larder_attr_install(&g_larder, seq0, 7, 1, &in);
+    larder_attr_install(&g_larder, seq0, 7, 1, &in, NULL);
     TEST_ASSERT(!larder_attr_serve(&g_larder, 7, &out, &s0),
                 "an event naming the key still skips the fill");
 
@@ -787,7 +787,7 @@ void test_larder_gen_scope_qid(void) {
     seq0 = larder_gen_snapshot(&g_larder);
     for (u64 i = 0; i < (u64)LARDER_INVAL_RING + 1u; i++)
         larder_attr_invalidate(&g_larder, 10000 + i);    // all unrelated
-    larder_attr_install(&g_larder, seq0, 11, 1, &in);
+    larder_attr_install(&g_larder, seq0, 11, 1, &in, NULL);
     TEST_ASSERT(!larder_attr_serve(&g_larder, 11, &out, &s0),
                 "an over-wide window fail-safes to skip");
     larder_destroy(&g_larder);

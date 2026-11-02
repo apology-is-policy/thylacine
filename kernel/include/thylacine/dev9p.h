@@ -179,6 +179,16 @@ struct dev9p_priv {
     u64                       co_size;
     struct t_stat             co_stat;
     u32                       co_rfid;
+    // A loose cached open binds no fid at mint (B1: its open is wire-free).
+    // co_start (a reference) and co_names (co_nname names, each a little-endian
+    // u16 length and its bytes) are the run that minted it, walked again on the
+    // first need. co_kfid is the fid that walk bound: P9_NOFID until then,
+    // installed once. The budget's charge is co_size + co_names_len.
+    struct Spoor             *co_start;
+    u8                       *co_names;
+    u32                       co_names_len;
+    u8                        co_nname;
+    u32                       co_kfid;
     // F1 write-behind (LARDER-DESIGN section 12): the per-open-file append-run
     // staging state. wb_lock is a PURE LEAF (only byte copies + state reads
     // under it -- wire I/O never; nothing else is ever acquired under it).

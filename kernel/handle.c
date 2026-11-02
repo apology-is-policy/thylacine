@@ -446,8 +446,13 @@ static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) 
             int rc = d->lock_sync(sp, how);
             spoor_clunk(sp);
             // A release lands what it can. A take that cannot have an open of
-            // its file read the server is refused.
-            if (rc != 0 && how == DEV_LOCK_SYNC_ACQUIRE) return rc;
+            // its file read the server is refused, unless that open answers
+            // ESTALE: it can no longer reach the file (a loose cached open of a
+            // file renamed since) and keeps its snapshot, and the take through
+            // the descriptor that can reach it stands. A dead file refuses that
+            // descriptor's own sync first.
+            if (rc != 0 && rc != -T_E_STALE && how == DEV_LOCK_SYNC_ACQUIRE)
+                return rc;
         }
     }
     return 0;

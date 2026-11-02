@@ -1210,7 +1210,7 @@ void test_dev9p_create_invalidates_reused_child(void) {
     for (size_t i = 0; i < sizeof(stale); i++) ((u8 *)&stale)[i] = 0;
     stale.mode = 0644;
     larder_attr_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
-                        0x77, /*cvers=*/1, &stale);
+                        0x77, /*cvers=*/1, &stale, NULL);
     struct t_stat probe; u64 s0 = 0;
     TEST_ASSERT(larder_attr_serve(&g_client.larder, 0x77, &probe, &s0),
                 "stale child entry present pre-create");
@@ -1289,12 +1289,12 @@ void test_dev9p_create_downgrades_parent_attr(void) {
     struct t_stat pa;
     for (size_t i = 0; i < sizeof(pa); i++) ((u8 *)&pa)[i] = 0;
     pa.mode = 040755; pa.qid_path = parent; pa.qid_vers = 1; pa.qid_type = 0x80;
-    larder_attr_install(l, seq, parent, /*cvers=*/1, &pa);
+    larder_attr_install(l, seq, parent, /*cvers=*/1, &pa, NULL);
     larder_dentry_install(l, seq, 0x500, "r", 1, parent, /*negative=*/false);
     struct t_stat sa;
     for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
     sa.mode = 0644; sa.qid_path = 0x600; sa.qid_vers = 1; sa.qid_type = 0;
-    larder_attr_install(l, seq, 0x600, /*cvers=*/1, &sa);
+    larder_attr_install(l, seq, 0x600, /*cvers=*/1, &sa, NULL);
     larder_dentry_install(l, seq, parent, "sib", 3, 0x600, /*negative=*/false);
 
     const char *names[] = {"r", "sib"};
@@ -3430,7 +3430,7 @@ void test_dev9p_open_trunc_invalidates(void) {
     // Cache a fresh attr + page 0 for the file.
     struct t_stat st = {0};
     st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
-    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st);
+    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st, NULL);
     (void)dev9p.read(nc, buf, 64, 0);            // populates nothing (<=4K, but
     u64 fsz = 0;                                  // the attr is the assertion target)
     TEST_ASSERT(larder_attr_fresh_size(l, nc->qid.path, nc->qid.vers, &fsz),
@@ -3478,7 +3478,7 @@ void test_dev9p_read_eof_attr_served(void) {
     // FRESH attr: EOF serves RPC-free; in-range reads still return bytes.
     struct t_stat st = {0};
     st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
-    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st);
+    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st, NULL);
     w0 = g_tread_seen;
     r = dev9p.read(nc, buf, 64, 20000);
     TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0 (attr-served)");
@@ -5654,7 +5654,7 @@ static void lk_seed(u64 q) {
     for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
     st.mode = 0100644u;
     struct larder *l = &g_client.larder;
-    larder_attr_install(l, larder_gen_snapshot(l), q, /*cvers=*/1, &st);
+    larder_attr_install(l, larder_gen_snapshot(l), q, /*cvers=*/1, &st, NULL);
     larder_page_install(l, larder_gen_snapshot(l), q, 0, /*cvers=*/1, pg, 8);
 }
 
