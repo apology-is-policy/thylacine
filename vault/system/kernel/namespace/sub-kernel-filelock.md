@@ -274,7 +274,9 @@ releases, with the Spoor held for as long as a map likes. The closer decrements
 `fd_refs` (`spoor_fd_drop`, with a full fence), then exchanges `lock_granted`. The
 taker stores `lock_granted` sequentially consistent, then reads `spoor_fd_open`. Either
 the close sees the grant or the taker sees the close; the taker's arm runs
-`Dev.fd_close` again, which is idempotent, and answers EBADF. A latch on the priv would
+`Dev.fd_close` again, which is idempotent, and answers EBADF. It runs on any answer,
+keeping a failure as it is: a take that failed with its outcome unknown recorded a
+grant too (self-audit SA4-1). A latch on the priv would
 answer a later take through a re-published Spoor with a false success, so there is none.
 
 A dying thread cannot send. If it holds the last reference, `Dev.close` follows at once

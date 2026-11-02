@@ -32,7 +32,8 @@
 
 #define ENV_NAME_MAX     64        // var name incl. the NUL
 #define ENV_VALUE_MAX    4096      // var value, raw bytes (kmalloc'd; DoS floor)
-#define ENV_MAX_ENTRIES  64        // per-Env cap (DoS floor; composes I-32)
+#define ENV_MAX_ENTRIES  256       // per-Env cap (DoS floor; composes I-32)
+#define ENV_FIRST_ENTRIES 64       // a new table's slots; it doubles up to the cap
 
 struct EnvEntry {
     u64   id;                       // monotonic; 0 == free slot (never reused)
@@ -54,7 +55,8 @@ struct Env {
                                     // the same file identity. See devenv_walk.
     u64              next_id;       // monotonic id source (>= 1; never reuses)
     int              count;         // live entries (the DoS bound)
-    struct EnvEntry  entries[ENV_MAX_ENTRIES];
+    int              cap;           // slots in entries; only grows while shared
+    struct EnvEntry *entries;       // replaced on growth: index only under the lock
 };
 
 struct Proc;

@@ -1379,6 +1379,8 @@ void test_env_overwrite_truncate(void);
 void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
+void test_env_table_grows(void);
+void test_env_install_any_size(void);
 void test_env_render_environ(void);              // VIVARIUM V-4b-6
 void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
 void test_env_clone_deep_independent(void);
@@ -3788,6 +3790,8 @@ struct test_case g_tests[] = {
     { "env.unset_monotonic",           test_env_unset_monotonic,           false, NULL },
     { "env.iter_order",                test_env_iter_order,                false, NULL },
     { "env.bounds",                    test_env_bounds,                    false, NULL },
+    { "env.table_grows", test_env_table_grows, false, NULL },
+    { "env.install_any_size", test_env_install_any_size, false, NULL },
     { "env.render_environ",            test_env_render_environ,            false, NULL },
     { "env.render_environ_eq_in_name", test_env_render_environ_eq_in_name, false, NULL },
     { "env.clone_deep_independent",    test_env_clone_deep_independent,    false, NULL },

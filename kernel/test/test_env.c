@@ -31,6 +31,8 @@ void test_env_overwrite_truncate(void);
 void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
+void test_env_table_grows(void);
+void test_env_install_any_size(void);
 void test_env_render_environ(void);              // VIVARIUM V-4b-6
 void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
 void test_env_clone_deep_independent(void);
@@ -296,6 +298,100 @@ void test_env_bounds(void) {
     }
     TEST_EXPECT_EQ(made, ENV_MAX_ENTRIES, "create caps at ENV_MAX_ENTRIES");
     edrop(q);
+    edrop(p);
+}
+
+// The table starts small and doubles to the cap. A name and a value set before
+// a growth keep their id and bytes after it, a clone of a grown table is whole,
+// and a full table refuses until a slot frees.
+void test_env_table_grows(void) {
+    TEST_EXPECT_EQ(ENV_FIRST_ENTRIES, 64, "the first table holds what one always has");
+    struct Proc *p = emk();
+    u64 ids[256];
+    char nm[5];
+    int made = 0;
+    for (int i = 0; i < 256; i++) {
+        nm[0] = 'g'; nm[1] = (char)('0' + i / 100); nm[2] = (char)('0' + (i / 10) % 10);
+        nm[3] = (char)('0' + i % 10); nm[4] = '\0';
+        ids[i] = env_create(p, nm, 4);
+        if (ids[i] != 0) made++;
+        char v = (char)('A' + i % 26);
+        TEST_EXPECT_EQ(env_write(p, ids[i], 0, &v, 1), (long)1, "a value in each slot");
+    }
+    TEST_EXPECT_EQ(made, 256, "256 names fit: the table grew past 64 and 128");
+    TEST_EXPECT_EQ(env_create(p, "over", 4), (u64)0, "the next distinct name is refused");
+    for (int i = 0; i < 256; i++) {
+        nm[0] = 'g'; nm[1] = (char)('0' + i / 100); nm[2] = (char)('0' + (i / 10) % 10);
+        nm[3] = (char)('0' + i % 10); nm[4] = '\0';
+        TEST_EXPECT_EQ(env_lookup(p, nm, 4), ids[i], "a name keeps its id across growth");
+        char v = 0;
+        TEST_EXPECT_EQ(env_read(p, ids[i], 0, &v, 1), (long)1, "its value reads back");
+        TEST_ASSERT(v == (char)('A' + i % 26), "with its bytes");
+    }
+    u64 after = 0, id = 0;
+    char name[ENV_NAME_MAX];
+    u32 nlen = 0;
+    int seen = 0;
+    while (env_iter(p, after, &id, name, sizeof(name), &nlen)) {
+        TEST_ASSERT(id > after, "iteration stays in id order");
+        after = id;
+        seen++;
+    }
+    TEST_EXPECT_EQ(seen, 256, "iteration visits every slot of the grown table");
+
+    struct Proc *c = emk();
+    TEST_EXPECT_EQ(env_clone_into(c, p), 0, "a grown table clones");
+    TEST_EXPECT_EQ(env_lookup(c, "g255", 4), ids[255], "the clone holds the last slot");
+    char v = 0;
+    TEST_EXPECT_EQ(env_read(c, ids[255], 0, &v, 1), (long)1, "and its value");
+    TEST_ASSERT(v == (char)('A' + 255 % 26), "with its bytes");
+
+    TEST_ASSERT(env_unset(p, "g100", 4), "a slot frees");
+    TEST_ASSERT(env_create(p, "over", 4) != 0, "and the refused name now fits");
+    TEST_EXPECT_EQ(env_lookup(c, "over", 4), (u64)0, "the clone is independent");
+    edrop(c);
+    edrop(p);
+}
+
+// A spawn's refill takes the block's table whichever is larger, and issues ids
+// the group never used, so an open handle's old id resolves to nothing.
+void test_env_install_any_size(void) {
+    // A small group takes a grown block.
+    struct Proc *p = emk();
+    u64 old_id = env_create(p, "old", 3);
+    TEST_ASSERT(old_id != 0, "a small group");
+    static char block[256 * 7];
+    u32 o = 0;
+    for (int i = 0; i < 256; i++) {
+        block[o++] = 'b';
+        block[o++] = (char)('0' + i / 100);
+        block[o++] = (char)('0' + (i / 10) % 10);
+        block[o++] = (char)('0' + i % 10);
+        block[o++] = '=';
+        block[o++] = (char)('A' + i % 26);
+        block[o++] = '\0';
+    }
+    int err = 0;
+    struct Env *big = env_from_block(block, o, &err);
+    TEST_ASSERT(big != NULL, "256 names in a block");
+    env_install(p, big);
+    TEST_EXPECT_EQ(env_lookup(p, "old", 3), (u64)0, "the refill replaces");
+    u64 last = env_lookup(p, "b255", 4);
+    TEST_ASSERT(last > old_id, "with ids the group never issued");
+    char v = 0;
+    TEST_EXPECT_EQ(env_read(p, last, 0, &v, 1), (long)1, "the last slot reads");
+    TEST_ASSERT(v == (char)('A' + 255 % 26), "with its bytes");
+    TEST_EXPECT_EQ(env_read(p, old_id, 0, &v, 1), (long)-1, "and the old id resolves to nothing");
+
+    // A grown group takes a small block.
+    static const char small[] = "s=1";
+    struct Env *one = env_from_block(small, sizeof(small), &err);
+    TEST_ASSERT(one != NULL, "a one-name block");
+    env_install(p, one);
+    TEST_EXPECT_EQ(env_lookup(p, "b255", 4), (u64)0, "the grown table's names are gone");
+    TEST_ASSERT(env_lookup(p, "s", 1) != 0, "and the block's is there");
+    u64 next = env_create(p, "after", 5);
+    TEST_ASSERT(next != 0, "the group goes on");
     edrop(p);
 }
 

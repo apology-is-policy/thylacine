@@ -87,6 +87,10 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   `-T_E_AGAIN` (the wait loop is generic). ERROR, GRACE or an undefined status
   is `-T_E_NOLCK`. A Tgetlock type 9P2000.L does not define is `-T_E_IO`. The
   test answer's `pid` is -1.
+- A take names the taking Proc's principal, in decimal, in Tlock's `client_id`
+  (`lock_client_id`; operator vote 38), so a limit on the server can count what one
+  identity holds. The kernel composes it, so a Proc cannot spend another identity's
+  share. An unlock adds no record and names none.
 - A grant drops the qid's Larder attributes and pages. The invalidates log
   the qid, so a fill in flight from before the grant is dropped rather than
   installed after it.

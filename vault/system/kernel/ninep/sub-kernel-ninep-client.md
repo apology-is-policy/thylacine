@@ -677,6 +677,7 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
 - A partial walk (`nwqid < nwname`) succeeds at this layer with the elements it
   got, and the caller reads the short count (`co_bind` and the resolver's pounce
   decide what it means).
+- `p9_client_lock` carries Tlock's `client_id` from its caller (operator vote 38).
 - **An abandoned mutator** (B-3h audit round 3, 2026-11-02): an op marked `mutates`
   in the session whose caller a death pulled out can still land, and its caller's
   own invalidate never runs. `client_abandon_forgets_locked` runs

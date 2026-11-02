@@ -203,11 +203,12 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
     }
     // The open-file twin: the last descriptor closed during the call, and its
     // close saw no grant. A reference other than this call's can keep c alive
-    // indefinitely, and nothing else would release this lock.
-    if (rc == 0 && !proc_owner && !test && type != SYS_FILE_LOCK_UN &&
-        !spoor_fd_open(c)) {
+    // indefinitely, and nothing else would release this lock. Any answer: a take
+    // that failed with its outcome unknown recorded a grant too, and the close
+    // runs again harmlessly on one that took nothing.
+    if (!proc_owner && !test && type != SYS_FILE_LOCK_UN && !spoor_fd_open(c)) {
         if (c->dev->fd_close) (void)c->dev->fd_close(c);
-        rc = -T_E_BADF;
+        if (rc == 0) rc = -T_E_BADF;
     }
     handle_put(&h);
 

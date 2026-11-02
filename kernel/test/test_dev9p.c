@@ -265,6 +265,7 @@ static u32 g_race_fid;
 // and the answers the responder gives. lock_wire_reset() restores them all.
 static u32  g_tlock_seen, g_tlock_last_seq, g_tgetlock_seen;
 static u32  g_tlock_fid, g_tlock_flags, g_tlock_proc_id, g_tgetlock_proc_id;
+static u8   g_tlock_client[16];
 static u8   g_tlock_type;
 static u64  g_tlock_start, g_tlock_len;
 static u16  g_tlock_cid_len;
@@ -823,6 +824,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         g_tlock_len     = le64_at(req + 24);
         g_tlock_proc_id = le32_at(req + 32);
         g_tlock_cid_len = (u16)(req[36] | ((u16)req[37] << 8));
+        for (u16 i = 0; i < g_tlock_cid_len && i < sizeof(g_tlock_client); i++)
+            g_tlock_client[i] = req[38 + i];
         if (g_tlock_fail_ecode)
             return lock_rlerror(resp, resp_cap, tag, g_tlock_fail_ecode);
         if (resp_cap < P9_HDR_LEN + 1) return -1;
@@ -5690,7 +5693,14 @@ static void lock_wire_and_status_body(struct Spoor *f) {
     TEST_EXPECT_EQ(g_tlock_start, 100ull, "start");
     TEST_EXPECT_EQ(g_tlock_len, 20ull, "length");
     TEST_EXPECT_EQ(g_tlock_proc_id, fp->fid, "proc_id names the fid, which is the owner");
-    TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "no client_id");
+    // The take names the Proc's principal in decimal, so a limit on the server
+    // can count what one identity holds; an unlock adds no record and names none.
+    TEST_ASSERT(g_tlock_cid_len > 0 && g_tlock_cid_len <= 10, "a take names its identity");
+    u32 who = 0;
+    for (u16 i = 0; i < g_tlock_cid_len; i++) who = who * 10 + (u32)(g_tlock_client[i] - '0');
+    TEST_EXPECT_EQ(who, current_thread()->proc->principal_id, "the taking Proc's principal");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 100, 20, NULL), 0ll, "its unlock");
+    TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "names no identity");
 
     static const struct { u8 status; u32 type; s64 want; const char *what; } st[] = {
         { P9_LOCK_BLOCKED, SYS_FILE_LOCK_RD, -T_E_AGAIN, "BLOCKED -> EAGAIN" },

@@ -1158,6 +1158,19 @@ void test_filelock_last_descriptor_closes(void) {
     TEST_EXPECT_EQ(lk_held_on(4), 0u, "which it does");
     lk_close_fd(&f, b);
 
+    // A take that fails with its outcome unknown may hold a grant too: the close
+    // runs again, and the failure stands.
+    a = lk_open(&f, &g_lk_dev, 6, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    g_lk_close_fd = f.fd[a];
+    g_lk_stale_path = 6;
+    u32 fc1 = g_lk_fd_closes;
+    TEST_EXPECT_EQ(lk_call(&f, a, SYS_FILE_LOCK_WR, 0, 10), -(s64)T_E_STALE,
+                   "a failed take answers its own failure");
+    g_lk_stale_path = 0;
+    TEST_EXPECT_EQ(g_lk_fd_closes, fc1 + 2, "and its re-check runs the close again");
+    f.fd[a] = -1;   // the fake closed it
+
     // The last descriptor closes while a take is on the wire. A Proc lock has its
     // re-check; an open-file lock had no close left to drop it.
     a = lk_open(&f, &g_lk_dev, 5, RW);

@@ -863,7 +863,8 @@ int p9_session_send_fsync(struct p9_session *s,
 // The lock's proc_id and client_id: Stratum's owner is the fid alone, so the
 // kernel sends neither a pid nor a node name (they would only be advisory).
 int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
-                         u32 fid, u8 type, u32 flags, u64 start, u64 length) {
+                         u32 fid, u8 type, u32 flags, u64 start, u64 length,
+                         const u8 *client, u16 client_len) {
     if (!s) return -1;
     if (s->magic != P9_SESSION_MAGIC) return -1;
     if (s->state != P9_SESS_OPEN) return -1;
@@ -871,11 +872,11 @@ int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
     if (!fid_bound(s, fid)) return -1;
     int t = alloc_tag(s, false);
     if (t < 0) return -1;
-    // Stratum keys a lock by its fid. A server that keys by proc_id and client_id
-    // instead sees the same owners within one session; client_id is empty and
-    // fid numbers restart per session, so it cannot tell two sessions' apart.
+    // Stratum keys a lock by its fid, and counts a take's records against
+    // client_id, which names the identity and not the owner. proc_id names the
+    // owner within one session; fid numbers restart per session.
     int rc = p9_build_tlock(out, cap, (u16)t, fid, type, flags, start, length,
-                            fid, NULL, 0);
+                            fid, client, client_len);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TLOCK, fid, fid);
     return rc;

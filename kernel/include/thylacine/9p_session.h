@@ -485,7 +485,8 @@ int p9_session_send_fsync(struct p9_session *s,
 // Tlock / Tgetlock: a byte-range lock on `fid`, or a test for one (B-3h).
 // Read-shaped for the fid table: neither changes what the fid names.
 int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
-                         u32 fid, u8 type, u32 flags, u64 start, u64 length);
+                         u32 fid, u8 type, u32 flags, u64 start, u64 length,
+                         const u8 *client, u16 client_len);
 int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
                             u32 fid, u8 type, u64 start, u64 length);
 

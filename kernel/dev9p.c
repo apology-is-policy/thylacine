@@ -2412,7 +2412,7 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
         __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
         u8 status = P9_LOCK_ERROR;
         (void)p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
-                             &status);
+                             NULL, 0, &status);
     }
     return rc;
 }
@@ -2612,7 +2612,7 @@ static int dev9p_fd_close(struct Spoor *c) {
     if (granted && close_may_wait()) {
         u8 status = P9_LOCK_ERROR;
         int lr = p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
-                                &status);
+                                NULL, 0, &status);
         granted = lr == -P9_E_INTR || !close_may_wait();   // cut short: still owed
     }
     if (!staged && !granted) return rc;
@@ -2626,6 +2626,26 @@ static int dev9p_fd_close(struct Spoor *c) {
 static bool dev9p_lock_held(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     return p && __atomic_load_n(&p->lock_granted, __ATOMIC_ACQUIRE);
+}
+
+// The identity a take's records count against on the server (Tlock's client_id;
+// operator vote 38): the taking Proc's principal, in decimal. The kernel composes
+// it, so a Proc cannot spend another identity's share. Empty with no Proc.
+#define LOCK_CLIENT_ID_MAX 10   // UINT32_MAX in decimal
+static u16 lock_client_id(char out[LOCK_CLIENT_ID_MAX]) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return 0;
+    u32 v = t->proc->principal_id;
+    u16 n = 0;
+    do {
+        n++;
+    } while ((v /= 10) != 0);
+    v = t->proc->principal_id;
+    for (u16 i = n; i > 0; i--) {
+        out[i - 1] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    return n;
 }
 
 static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
@@ -2667,8 +2687,11 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
     // client flushes before any setlk, for the same reason.
     (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
 
+    char cid[LOCK_CLIENT_ID_MAX];
+    u16  cid_len = type == SYS_FILE_LOCK_UN ? 0 : lock_client_id(cid);
     u8 status = P9_LOCK_ERROR;
-    int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len, &status);
+    int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len,
+                            (const u8 *)cid, cid_len, &status);
     if (rc != 0) {
         // A death abandons the take with its outcome unknown, and the server may
         // have granted it. An extra unlock costs a round trip. EINTR is flush(5)'s

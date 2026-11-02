@@ -100,7 +100,7 @@ it was not found:
 | --- | --- |
 | `env: invalid option 'opt'` | An option other than `-i`, `-` or `--` was given before the first operand. |
 | `env: cannot set 'NAME=VALUE': invalid variable name` | The name is empty or contains a `/`. |
-| `env: cannot set 'NAME': reason` | The environment refused the variable: the name is longer than 63 bytes, the value is longer than 4096 bytes, or the process already holds 64 variables. |
+| `env: cannot set 'NAME': reason` | The environment refused the variable: the name is longer than 63 bytes, the value is longer than 4096 bytes, or the process already holds 256 variables. |
 | `env: cannot unset 'NAME': reason` | `-i` could not remove a variable. |
 | `env: cannot read path: reason` | `env` could not list its environment: `/env` for `-i`, or its `/proc/<pid>/environ` when printing. |
 | `env: 'COMMAND': reason` | The command could not be run. A missing command exits with status 127; any other cause, such as a file that is not a program, exits with 126. |
@@ -134,9 +134,9 @@ it was opened in: a process given the open file by another, as a command is
 given its output by the shell, reads and writes the opener's variable. When a
 process starts another, the kernel copies the starting process's variables into the new one,
 and the copy is independent from then on. A name holds at most 63 bytes and no
-`/`, a value at most 4096 bytes, and a process at most 64 variables. `posix_spawn`
+`/`, a value at most 4096 bytes, and a process at most 256 variables. `posix_spawn`
 hands the child the envp it is given, and `system` hands it `environ`. A list of more
-than 64 names, or more than 32 KiB in all, fails with `E2BIG`.
+than 256 names, or more than 32 KiB in all, fails with `E2BIG`.
 
 A process that replaces its program keeps its `/env`. The kernel also writes
 the variables into the new program's startup frame as `NAME=VALUE` strings,

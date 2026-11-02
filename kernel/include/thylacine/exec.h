@@ -210,8 +210,9 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // to the NUL count.
 //
 // THESE ARE A DELIBERATE CHOICE, NOT THE PRODUCT OF THE TWO /env MAXIMA.
-// ENV_MAX_ENTRIES (64) × (ENV_NAME_MAX + ENV_VALUE_MAX) is 260 KiB, which
-// beside the 64 KiB argv bound would put ~330 KiB of FRAME under the 1 MiB
+// ENV_MAX_ENTRIES (256) × (ENV_NAME_MAX + ENV_VALUE_MAX) is over 1 MiB. Even
+// when the table held 64, its 260 KiB beside the 64 KiB argv bound would have
+// put ~330 KiB of FRAME under the 1 MiB
 // stack of the time. That still passes the _Static_assert below — the assert only proves
 // the frame FITS — while leaving ~690 KiB of actual program stack against a
 // call graph G-7b measured overflowing 256 KiB (TyrQuake's model loader).
@@ -222,14 +223,14 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // A quarter of the 1 MiB stack the bound was sized against is 256 KiB; 64 KiB
 // argv + 32 KiB env is 96 KiB, comfortably inside it (and a sixteenth of the
 // 8 MiB stack since B-1b), leaving all but 96 KiB as program stack. Against
-// ENV_MAX_ENTRIES that is 512 bytes per variable on average — far above a
-// realistic NAME=VALUE, so no plausible environment reaches it, and one that
-// does is refused with T_E_2BIG rather than silently truncated.
+// ENV_MAX_ENTRIES that is 128 bytes per variable on average, so a full table
+// of long values can reach it, and one that does is refused with T_E_2BIG
+// rather than silently truncated.
 //
 // EXEC_ENV_MAX bounds the POINTER VECTOR independently, because the data
 // bound alone does not: 32 KiB of minimal "A=\0" records would be ~10900
 // entries and 87 KiB of envp[] pointers. 512 mirrors SYS_SPAWN_ARGV_MAX. The
-// /env projection can never approach it (ENV_MAX_ENTRIES is 64); it is the
+// /env projection can never reach it (ENV_MAX_ENTRIES is 256); it is the
 // vivarium's user-supplied envp walk that needs the ceiling.
 #define EXEC_ENV_MAX        512u
 #define EXEC_ENV_DATA_MAX   32768u

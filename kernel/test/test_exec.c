@@ -880,9 +880,9 @@ void test_exec_setup_env_frame(void) {
 // well-formed and splitting it would work.
 //
 // EXEC_ENV_DATA_MAX (32 KiB) is reachable from a /env projection:
-// ENV_MAX_ENTRIES (64) x ENV_VALUE_MAX (4096) is a quarter-megabyte, so nine
+// ENV_MAX_ENTRIES (256) x ENV_VALUE_MAX (4096) is a megabyte, so nine
 // full-size variables already exceed it. EXEC_ENV_MAX (the 512-entry vector
-// bound) is NOT reachable this way -- 64 entries can never make 512 -- which
+// bound) is NOT reachable this way -- 256 entries can never make 512 -- which
 // is exactly why it exists: it bounds the vivarium's user-supplied envp walk,
 // where the count is not capped by the Env table. So this drives the bound
 // that a native Proc can actually hit.

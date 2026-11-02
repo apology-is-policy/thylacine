@@ -306,8 +306,13 @@ or directory type plus the permission bits; setuid, setgid and sticky are
 dropped) and the parent's index — the pointers all into the archive. The table
 is a `struct ramfs_table` the Dev serves one of; the tests load crafted archives
 into their own. A per-process environment holds
-64 slots, each an inline name of at most 64 bytes and a separately allocated
-value of at most 4096, plus the id counter and the minted device number. The
+a table of slots, each an inline name of at most 64 bytes and a separately allocated
+value of at most 4096, plus the id counter and the minted device number. The table
+starts at 64 slots and doubles on demand to 256 (`env_grow`, operator vote 39): the
+allocation runs outside the Env's lock, slot indices survive so the id order
+`env_install` relies on holds, and a peer that grew first leaves its table in place. A
+clone first grows to the source's size, and `env_install` takes the block's whole table,
+so a committed spawn cannot fail. Legs: `env.table_grows`, `env.install_any_size`. The
 random state is a cipher context, a 1024-byte output buffer, a count of bytes
 remaining in it, and a countdown to the next strong re-seed.
 

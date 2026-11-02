@@ -2390,7 +2390,8 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
 // P9_LOCK_* answer; a conflict is a status (BLOCKED), not an error. Returns 0
 // or a negative errno (an Rlerror, or the transport's).
 int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
-                   u64 start, u64 length, u8 *status) {
+                   u64 start, u64 length, const u8 *client, u16 client_len,
+                   u8 *status) {
     if (!c || !status) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     spin_lock(&c->lock);
@@ -2399,7 +2400,8 @@ int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
     int te = client_await_tag_locked(c);
     if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_lock(&c->session, c->out_buf, c->out_buf_cap,
-                                   fid, type, flags, start, length);
+                                   fid, type, flags, start, length,
+                                   client, client_len);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
