@@ -40,6 +40,26 @@ impl Op {
         })
     }
 }
+/// Which refused requests a joined participant re-samples from, since the seat
+/// can move before a request reaches the coordinator. A re-sample restores no
+/// authority. A first Join has no registration to sample with, so it stays fatal,
+/// and a Join refused twice at one snapshot raced nothing, so retrying would spin.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Refusals {
+    join: Option<(u64, u64)>,
+}
+impl Refusals {
+    pub fn stale(&mut self, q: &Request, joined: bool) -> bool {
+        if !joined {
+            return false;
+        }
+        match q.op {
+            Op::Cancelled | Op::Retire => true,
+            Op::Join => self.join.replace((q.generation, q.revision)) != Some((q.generation, q.revision)),
+            _ => false,
+        }
+    }
+}
 fn u64at(b: &[u8], i: usize) -> u64 {
     u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
 }
@@ -546,6 +566,38 @@ mod tests {
         let s = c.state(s.registration, n, n).unwrap();
         c.cancelled(s.registration, n, n, s.generation, s.revision)
             .unwrap()
+    }
+    fn q(op: Op, generation: u64, revision: u64) -> Request {
+        Request { op, request: 1, registration: 1, generation, revision }
+    }
+    #[test]
+    fn a_joined_participant_resamples_a_refusal_once_per_snapshot() {
+        let mut r = Refusals::default();
+        assert!(r.stale(&q(Op::Cancelled, 1, 1), true));
+        assert!(r.stale(&q(Op::Retire, 1, 1), true));
+        assert!(r.stale(&q(Op::Join, 1, 5), true), "a Join lost a race");
+        assert!(!r.stale(&q(Op::Join, 1, 5), true), "the same snapshot twice raced nothing");
+        assert!(r.stale(&q(Op::Join, 2, 6), true), "the seat moved again");
+        assert!(!r.stale(&q(Op::State, 2, 6), true), "a refused State has nothing to sample");
+    }
+    #[test]
+    fn a_first_join_refused_stays_fatal() {
+        let mut r = Refusals::default();
+        assert!(!r.stale(&q(Op::Join, 1, 1), false));
+        assert!(!r.stale(&q(Op::Cancelled, 1, 1), false));
+    }
+    #[test]
+    fn a_generation_moved_under_a_join_is_refused_then_a_resample_joins() {
+        let mut c = table();
+        let s = join(&mut c, 1);
+        c.observe(s.generation, FAILED).unwrap();
+        c.observe(s.generation, NORMAL).unwrap();
+        let sampled = c.state(s.registration, 1, 1).unwrap();
+        assert!(!sampled.enabled);
+        c.observe(s.generation + 1, NORMAL).unwrap();
+        assert_eq!(c.join(s.registration, 1, 1, sampled.generation, sampled.revision), Err(Error::Denied));
+        let fresh = c.state(s.registration, 1, 1).unwrap();
+        assert!(c.join(s.registration, 1, 1, fresh.generation, fresh.revision).unwrap().enabled);
     }
     #[test]
     fn declaration_loss_keeps_live_obligation_and_prevents_rejoin() {

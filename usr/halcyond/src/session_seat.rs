@@ -3,7 +3,7 @@
 //! clipboard dispatch shares this owner with the native protocol adapter.
 //! All retirement callbacks finish before acknowledgement of a trusted episode.
 use halcyond::{hostbindings::{Bindings, Desired}, interaction::Interaction, paneroute::Routes};
-use libhalcyon::seat_control::{Op, Request, Snapshot};
+use libhalcyon::seat_control::{Op, Refusals, Request, Snapshot};
 use libthyla_rs::{
     err::{Error, Result},
     fs::File,
@@ -48,6 +48,7 @@ pub struct Link {
     stopping: bool,
     retired: bool,
     acknowledged: Option<(u64, u64)>,
+    refusals: Refusals,
 }
 const _: () = assert!(core::mem::size_of::<Link>() <= 48 * 1024);
 pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
@@ -73,6 +74,7 @@ impl Link {
             stopping: false,
             retired: false,
             acknowledged: None,
+            refusals: Refusals::default(),
         };
         link.send(Op::Join)?;
         Ok(link)
@@ -219,10 +221,10 @@ impl Link {
         };
         let reply = match done.result {
             Ok(r) => r,
-            // A phase may advance before a cancellation/retirement reaches the
-            // coordinator. Re-sample without restoring local authority.
+            // A phase may advance before a request reaches the coordinator.
+            // Re-sample without restoring local authority.
             Err(tapestry::seat::Error::Transport(-1))
-                if self.joined && matches!(done.request.op, Op::Cancelled | Op::Retire) =>
+                if self.refusals.stale(&done.request, self.joined) =>
             {
                 let _ = self.interaction.seat(None);
                 apps.retire(&mut self.interaction)?;
