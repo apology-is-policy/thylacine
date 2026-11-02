@@ -4,7 +4,7 @@ type: chg
 title: "A walk reply's count is capped by the walk"
 date: 2026-11-02
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["fb4ba165d", "d576f072a"]
 touched:
   - sub-kernel-ninep-session
   - sub-kernel-ninep-client
