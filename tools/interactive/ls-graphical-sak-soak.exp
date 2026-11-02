@@ -1,0 +1,158 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-soak -- the seat's return, cycled. Each cycle ends one episode
+# the clean way (a chord, then Enter) and one through the seat's failure path (a
+# chord held past the kernel's quiesce deadline), and after each the same two
+# things must work again: the session's link rejoins, typing reaches the shell,
+# and the next chord takes. A rare miss in that window would otherwise take one
+# boot per sample.
+#
+# Requires HALCYON_SESSION=y. LS_SOAK_CYCLES sets the cycle count: the default of 8
+# keeps a fleet run cheap, and a hunt asks for 60 or more.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set cycles [expr {[info exists ::env(LS_SOAK_CYCLES)] ? $::env(LS_SOAK_CYCLES) : 8}]
+
+lc_require_image {SESSION}
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc witness {stage} {
+    type "caps-probe --seat-restored\n"
+    global timeout
+    set timeout 30
+    expect {
+        -ex "seat-probe: PASS restored (endpoint denied; GPU denied; DAC verified)" { lc_step "typing reaches the shell ($stage)" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "seat $stage" }
+        timeout { lc_fail "no authority witness ($stage) -- typing did not reach the shell" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+proc rejoined {stage} {
+    global timeout
+    set timeout 15
+    expect {
+        -re {halcyond: seat link rejoined generation=[0-9]+} { lc_step "the session's seat link rejoined ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "rejoin ($stage)" }
+        timeout { lc_fail "no seat link rejoin within 15s ($stage) -- the session's participant stayed disabled" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+# The dead scenario's pause is fixed at 1500 ms; a little jitter walks the next
+# step across whatever the guest is still finishing.
+proc settle {} { after [expr {1500 + int(rand() * 500)}] }
+
+set ::lc_fail_probe {
+    type "caps-probe --seat-denied\n"
+    set timeout 12
+    expect {
+        -ex "seat-probe: PASS denied" { lc_step "fail-probe: typing reaches the shell" }
+        -ex "seat-probe: FAIL" { lc_step "fail-probe: the shell ran the probe and it failed" }
+        -ex "lictor: input withheld" { lc_step "fail-probe: lictor withheld the keys" }
+        timeout { lc_step "fail-probe: typing did not reach the shell within 12s" }
+        eof { lc_step "fail-probe: EOF after typing" }
+    }
+    key "ctrl+alt+f10"
+    set timeout 12
+    expect {
+        -re {lictor: trusted scanout active|lictor: seat failed[^\r\n]*} {
+            lc_step "fail-probe: a second chord took: $expect_out(0,string)"
+        }
+        timeout { lc_step "fail-probe: a second chord took nothing within 12s" }
+        eof { lc_step "fail-probe: EOF after the chord" }
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+witness baseline
+
+for {set i 1} {$i <= $cycles} {incr i} {
+    # The clean way out: the chord, then Enter ends the empty episode.
+    key "ctrl+alt+f10"
+    set timeout 30
+    expect {
+        -ex "lictor: trusted scanout active" {}
+        -re {EXTINCTION:} { lc_extinction_fail "cycle $i takeover" }
+        timeout { lc_fail "cycle $i empty: no takeover within 30s of the chord" }
+        eof { lc_fail "EOF (cycle $i)" }
+    }
+    after 1000
+    key "ret"
+    expect {
+        -ex "corvus: imperium: SAK with nothing pending" {}
+        -re {EXTINCTION:} { lc_extinction_fail "cycle $i end" }
+        timeout { lc_fail "cycle $i empty: the episode did not end within 30s of Enter" }
+        eof { lc_fail "EOF (cycle $i)" }
+    }
+    rejoined "cycle $i empty"
+    settle
+    witness "cycle $i empty"
+
+    # The failure path: the chord held past the quiesce deadline.
+    set hold [open "|$repo/tools/qmp-sendtext.sh -s $qmp -k ctrl+alt+f10@6000" r]
+    set timeout 20
+    expect {
+        -ex "lictor: trusted scanout active" {}
+        -re {EXTINCTION:} { lc_extinction_fail "cycle $i held takeover" }
+        timeout { lc_fail "cycle $i held: no takeover within 20s of the chord" }
+        eof { lc_fail "EOF (cycle $i)" }
+    }
+    expect {
+        -ex "lictor: kernel closed trusted seat (scanout private)" {}
+        -re {EXTINCTION:} { lc_extinction_fail "cycle $i held" }
+        timeout { lc_fail "cycle $i held: the seat did not fail within 20s" }
+        eof { lc_fail "EOF (cycle $i)" }
+    }
+    # Drain to EOF first: closing the read end under a live helper hands it EPIPE
+    # on its own status line, which is a harness failure and not the guest's.
+    if {[catch {read $hold; close $hold} e]} { lc_fail "held chord helper: $e" }
+    set timeout 30
+    expect {
+        -ex "lictor: trusted seat recovered; nothing was conferred" {}
+        -re {EXTINCTION:} { lc_extinction_fail "cycle $i recovery" }
+        timeout { lc_fail "cycle $i held: no recovery within 30s of the release" }
+        eof { lc_fail "EOF (cycle $i)" }
+    }
+    rejoined "cycle $i held"
+    settle
+    witness "cycle $i held"
+}
+lc_pass "graphical SAK soak: $cycles cycles, each episode's end rejoined the link, typing reached the shell and the next chord took"
+lc_quit
