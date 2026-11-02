@@ -235,7 +235,7 @@ static bool touch_tag(struct Proc *p, u64 base, u64 i) {
 // =============================================================================
 
 void test_detach_range_trims_left_right_middle(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -318,11 +318,11 @@ void test_detach_range_trims_left_right_middle(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back where it started");
 
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_detach_range_across_burrows_and_holes(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -379,11 +379,11 @@ void test_detach_range_across_burrows_and_holes(void) {
     burrow_unref(b2);
     burrow_unref(b3);
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_detach_range_refusals_change_nothing(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -469,11 +469,11 @@ void test_detach_range_refusals_change_nothing(void) {
 
     drop(p);                             // the CODE mapping goes with the Proc
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "every charge returned");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_detach_eager_pages_go_with_the_last_piece(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -496,11 +496,11 @@ void test_detach_eager_pages_go_with_the_last_piece(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
 
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_detach_lazy_over_256mib_detaches(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -532,11 +532,11 @@ void test_detach_lazy_over_256mib_detaches(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
 
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_detach_four_gib_reservation_round_trips(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -591,7 +591,7 @@ void test_detach_four_gib_reservation_round_trips(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
 
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 // =============================================================================
@@ -599,7 +599,7 @@ void test_detach_four_gib_reservation_round_trips(void) {
 // =============================================================================
 
 void test_capacity_window_sized_reservation_releases_in_bounded_steps(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -630,11 +630,11 @@ void test_capacity_window_sized_reservation_releases_in_bounded_steps(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
 
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_replace_window_releases_orphans(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 vmas0 = count_vmas(p->as);
@@ -679,11 +679,11 @@ void test_capacity_replace_window_releases_orphans(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
 
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_pagemap_nodes_charged_and_reclaimed(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
     u32 pool0 = capacity_pool_charged();
@@ -726,7 +726,7 @@ void test_capacity_pagemap_nodes_charged_and_reclaimed(void) {
     TEST_EXPECT_EQ(pages_of(p->as), 0u, "nothing charged");
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_default_is_ram_minus_reserve(void) {
@@ -766,7 +766,7 @@ void test_capacity_pool_refuses_users_keeps_tcb(void) {
     // The pool's reclaim (audit F8) would otherwise strip the idle images
     // earlier exec tests left cached and move the refusal point.
     (void)image_cache_evict_idle_for_test();
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *A = mk();
     struct Proc *S = mk();
     TEST_ASSERT(A && S, "two Procs");
@@ -830,11 +830,11 @@ void test_capacity_pool_refuses_users_keeps_tcb(void) {
     drop(A);
     drop(S);
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_fork_clone_charges_pages_and_nodes(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     u32 pool0 = capacity_pool_charged();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -878,11 +878,11 @@ void test_capacity_fork_clone_charges_pages_and_nodes(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0 + 14u, "the child's death returns the rest; the parent's tables are still its own");
     drop(p);
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_death_returns_charges_to_pool(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     u32 pool0 = capacity_pool_charged();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -903,7 +903,7 @@ void test_capacity_death_returns_charges_to_pool(void) {
 
     drop(p);
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "a dead address space returns its charges");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "and its pages");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "and its pages");
 }
 
 // =============================================================================
@@ -911,7 +911,7 @@ void test_capacity_death_returns_charges_to_pool(void) {
 // =============================================================================
 
 void test_capacity_page_tables_charged_and_reclaimed(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     u32 pool0 = capacity_pool_charged();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -977,14 +977,14 @@ void test_capacity_page_tables_charged_and_reclaimed(void) {
     TEST_EXPECT_EQ(count_of(p->as), 0u, "nothing charged");
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_memory_bomb_leaves_the_reserve(void) {
     // The pool's reclaim (audit F8) would otherwise strip the idle images
     // earlier exec tests left cached and move the refusal point.
     (void)image_cache_evict_idle_for_test();
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *A = mk();
     struct Proc *S = mk();
     TEST_ASSERT(A && S, "two Procs");
@@ -1009,7 +1009,7 @@ void test_capacity_memory_bomb_leaves_the_reserve(void) {
     s64 r = reserve(A, MIB(512), PR_RW, 0);
     TEST_ASSERT(r > 0, "A reserves 512 MiB");
     u64 va = (u64)r;
-    u64 free_loop = phys_free_pages();
+    u64 free_loop = test_free_pages_settled();
     u32 n = 0;
     for (u64 i = 0; i < 256; i++) {
         if (fault(A, va + i * MIB(2), true) != FAULT_HANDLED) break;
@@ -1021,7 +1021,7 @@ void test_capacity_memory_bomb_leaves_the_reserve(void) {
     TEST_EXPECT_EQ(tables_of(A->as), n + 2u, "an L3 per touch, plus the L1 and the L2");
     TEST_EXPECT_EQ(pages_of(A->as), 2u * n + 1u, "a page and a leaf per touch, plus the root");
     TEST_ASSERT(pool - capacity_pool_charged() < 3u, "refused within one touch's cost of the pool");
-    TEST_ASSERT(free_loop - phys_free_pages() <= (u64)K, "A's physical footprint is bounded by its room");
+    TEST_ASSERT(free_loop - test_free_pages_settled() <= (u64)K, "A's physical footprint is bounded by its room");
 
     // The TCB keeps allocating from the reserve.
     s64 rs = reserve(S, P, PR_RW, 0);
@@ -1050,14 +1050,14 @@ void test_capacity_memory_bomb_leaves_the_reserve(void) {
     drop(A);
     drop(S);
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 void test_capacity_fork_costs_the_pool_only_its_nodes(void) {
     // The pool's reclaim (audit F8) would otherwise strip the idle images
     // earlier exec tests left cached and move the refusal point.
     (void)image_cache_evict_idle_for_test();
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     u32 pool0 = capacity_pool_charged();
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -1097,7 +1097,7 @@ void test_capacity_fork_costs_the_pool_only_its_nodes(void) {
     TEST_EXPECT_EQ(detach(p, (u64)r, GIB(1)), (s64)0, "detach");
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
     drop(p);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before, "phys free back to baseline");
 }
 
 // B-1b: the phenotype madvise row's hint answer -- a range is "mapped" only

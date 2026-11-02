@@ -27,6 +27,7 @@
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
+#include "../../mm/magazines.h"  // test_free_pages_settled
 #include "../../mm/phys.h"   // the pool park a failing test leaves behind
 #include <thylacine/poll.h>         // the snapshot bound's test knob, released per test
 #include <thylacine/notes.h>        // test_caught: the interrupt post
@@ -3504,6 +3505,11 @@ unsigned g_test_yield_deep;
 // on the boot thread. See test.h for why a thunk cannot use TEST_ASSERT.
 volatile unsigned    g_test_proc_wait_timeouts;
 const char *volatile g_test_proc_wait_what;
+
+u64 test_free_pages_settled(void) {
+    magazines_drain_all();
+    return phys_free_pages();
+}
 
 bool test_all_passed(void) {
     // #134: a child-Proc wait expiry fails the suite even when every individual
