@@ -123,7 +123,10 @@ qualify a thirty-two-controller/multiple-session allocation guarantee.
 - `LS_CI_JOBS` scenarios run at once (**3** by default — but see the
   caveats, the file says otherwise twice).
 - Per-scenario bounded retry (`LS_CI_ATTEMPTS`, default 3); a scenario fails
-  only if ALL attempts fail.
+  only if ALL attempts fail. A deterministic break fails every attempt; a race
+  fails some, so a pass after a failed attempt keeps rc 0 but prints
+  `LS-CI: UNEXPLAINED` and the scenario's name after the verdict, on both exits.
+  Each failed attempt's evidence stays in `ls-ci-<name>.attempt<N>.{log,steps}`.
 - Scenario exit 77 = SKIP (a missing optional host artifact).
 
 ## Mechanism

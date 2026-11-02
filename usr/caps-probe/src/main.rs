@@ -112,7 +112,8 @@ fn seat_probe(stage: &str) -> i64 {
         Err(Error::PermissionDenied) if !elevated => {},
         _ => { t_putstr("seat-probe: FAIL DAC authority mismatch\n"); return 1; }
     }
-    t_putstr("seat-probe: PASS "); t_putstr(&stage[7..]);
-    t_putstr(" (endpoint denied; GPU denied; DAC verified)\n");
+    // One write: the kernel keeps a single console write whole, and any other
+    // process's line can land between two, which breaks a scenario's needle.
+    t_putstr(&alloc::format!("seat-probe: PASS {} (endpoint denied; GPU denied; DAC verified)\n", &stage[7..]));
     0
 }

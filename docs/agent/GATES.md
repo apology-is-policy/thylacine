@@ -194,7 +194,8 @@ make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --
 # login + assert rendered command output (the test that would have caught LS-1).
 # Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded
-# retry (LS_CI_ATTEMPTS=3) tolerates host-timing flakes.
+# retry (LS_CI_ATTEMPTS=3). A pass after a failed attempt keeps rc 0 but prints
+# `LS-CI: UNEXPLAINED` under the verdict: read it, a race fails SOME attempts.
 # REFUSES to start (exit 2) if a VM from this tree is already running (#224):
 # its reaper is tree-wide `pkill -9`, so it would SIGKILL a boot it does not
 # own -- presenting to the other gate as "qemu GONE, guest healthy" -- and both

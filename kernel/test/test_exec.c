@@ -622,7 +622,7 @@ void test_exec_setup_multi_segment(void) {
 }
 
 void test_exec_setup_lifecycle_round_trip(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
 
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -636,7 +636,7 @@ void test_exec_setup_lifecycle_round_trip(void) {
 
     drop_proc(p);
 
-    u64 free_after = phys_free_pages();
+    u64 free_after = test_free_pages_settled();
     TEST_EXPECT_EQ(free_after, free_before,
         "phys_free_pages must return to baseline (no leak in exec lifecycle: "
         "segment VMOs freed via vma_drain → burrow_release_mapping → "
