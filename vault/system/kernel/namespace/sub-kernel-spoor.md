@@ -223,7 +223,8 @@ the decrement (so the count reads 0) but before the free, so it can
 still safely read `aux`, `dev` and `qid`. A `pre <= 0` on any path is
 treated as a use-after-free diagnostic and extincts.
 
-`fd_refs` counts handle slots, where `ref` counts every holder (B-3h audit round
+`fd_refs` counts handle slots and a spawn's endowments in flight (`handle_endow_spoor`,
+`handle_endow_drop`), where `ref` counts every holder (B-3h audit round
 3, 2026-11-02; ARCH 7.9.1). Its last drop is the file's last close and `ref`'s is
 its last reference. `spoor_fd_drop` extincts on a drop below zero, and
 `spoor_clunk_rc` on a last reference that finds `fd_refs` non-zero, so a slot site

@@ -135,7 +135,7 @@ static int find_free_locked(struct Env *e) {
 // allocated outside the leaf lock: at this size kmalloc goes to the page
 // allocator. Slot indices survive, which keeps the id order env_install relies
 // on. False on OOM; the caller's view of the table is simply unchanged.
-static bool env_grow(struct Env *e, int seen) {
+bool env_grow(struct Env *e, int seen) {
     int ncap = seen * 2;
     if (ncap > ENV_MAX_ENTRIES) ncap = ENV_MAX_ENTRIES;
     struct EnvEntry *table = env_table_alloc(ncap);

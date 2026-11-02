@@ -1381,6 +1381,7 @@ void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
 void test_env_table_grows(void);
+void test_env_grow_after_a_peer(void);
 void test_env_install_any_size(void);
 void test_env_render_environ(void);              // VIVARIUM V-4b-6
 void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
@@ -1998,6 +1999,8 @@ void test_larder_attr_downgrade_perm_only(void);
 void test_larder_downgrade_guards_raced_populate(void);
 void test_larder_gen_scope_qid(void);
 void test_larder_forget_all(void);
+void test_larder_forget_one_slot_per_key(void);
+void test_larder_forget_full_page_table(void);
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -2070,6 +2073,8 @@ void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
 void test_dev9p_lock_wire_and_status(void);
+void test_dev9p_lock_one_name_on_a_fid(void);
+void test_dev9p_lock_caped_names_nothing(void);
 void test_dev9p_lock_grant_drops_larder(void);
 void test_dev9p_lock_unlock_flushes_first(void);
 void test_dev9p_lock_test_answers(void);
@@ -2138,6 +2143,8 @@ void test_p9_closer_dying_last_close_with_holder(void);
 void test_p9_closer_job_loses_a_run_loudly(void);
 void test_p9_closer_dying_last_close_of_a_root(void);
 void test_p9_closer_job_waits_out_a_peer_flush(void);
+void test_p9_closer_job_drops_a_flush_that_retired_first(void);
+void test_p9_closer_job_reports_a_first_jobs_loss(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
@@ -3802,6 +3809,7 @@ struct test_case g_tests[] = {
     { "env.iter_order",                test_env_iter_order,                false, NULL },
     { "env.bounds",                    test_env_bounds,                    false, NULL },
     { "env.table_grows", test_env_table_grows, false, NULL },
+    { "env.grow_after_a_peer", test_env_grow_after_a_peer, false, NULL },
     { "env.install_any_size", test_env_install_any_size, false, NULL },
     { "env.render_environ",            test_env_render_environ,            false, NULL },
     { "env.render_environ_eq_in_name", test_env_render_environ_eq_in_name, false, NULL },
@@ -4338,6 +4346,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "larder.gen_scope_qid",          test_larder_gen_scope_qid,          false, NULL },
     { "larder.forget_all",             test_larder_forget_all,             false, NULL },
+    { "larder.forget_one_slot_per_key", test_larder_forget_one_slot_per_key, false, NULL },
+    { "larder.forget_full_page_table", test_larder_forget_full_page_table, false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -4649,6 +4659,8 @@ struct test_case g_tests[] = {
     { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },
     { "dev9p.lock_wire_and_status",    test_dev9p_lock_wire_and_status,    false, NULL },
+    { "dev9p.lock_one_name_on_a_fid",  test_dev9p_lock_one_name_on_a_fid,  false, NULL },
+    { "dev9p.lock_caped_names_nothing", test_dev9p_lock_caped_names_nothing, false, NULL },
     { "dev9p.lock_grant_drops_larder", test_dev9p_lock_grant_drops_larder, false, NULL },
     { "dev9p.lock_unlock_flushes_first", test_dev9p_lock_unlock_flushes_first, false, NULL },
     { "dev9p.lock_test_answers",       test_dev9p_lock_test_answers,       false, NULL },
@@ -4734,6 +4746,10 @@ struct test_case g_tests[] = {
                                        test_p9_closer_dying_last_close_of_a_root, false, NULL },
     { "p9_closer.job_waits_out_a_peer_flush",
                                        test_p9_closer_job_waits_out_a_peer_flush, false, NULL },
+    { "p9_closer.job_drops_a_flush_that_retired_first",
+                                       test_p9_closer_job_drops_a_flush_that_retired_first, false, NULL },
+    { "p9_closer.job_reports_a_first_jobs_loss",
+                                       test_p9_closer_job_reports_a_first_jobs_loss, false, NULL },
     { "p9_closer.dying_last_close_with_holder",
                                        test_p9_closer_dying_last_close_with_holder, false, NULL },
     { "p9_closer.dying_lock_release_flushes_shared_run",

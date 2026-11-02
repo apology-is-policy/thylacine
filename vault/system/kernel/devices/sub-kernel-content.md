@@ -312,7 +312,9 @@ starts at 64 slots and doubles on demand to 256 (`env_grow`, operator vote 39): 
 allocation runs outside the Env's lock, slot indices survive so the id order
 `env_install` relies on holds, and a peer that grew first leaves its table in place. A
 clone first grows to the source's size, and `env_install` takes the block's whole table,
-so a committed spawn cannot fail. Legs: `env.table_grows`, `env.install_any_size`. The
+so a committed spawn cannot fail. Legs: `env.table_grows`, `env.grow_after_a_peer`,
+`env.install_any_size`. The clone's re-loop, for a peer that grows the source between its
+unlock and relock, has no leg: only a peer landing inside that window can show it. The
 random state is a cipher context, a 1024-byte output buffer, a count of bytes
 remaining in it, and a countdown to the next strong re-seed.
 

@@ -32,6 +32,7 @@ void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
 void test_env_table_grows(void);
+void test_env_grow_after_a_peer(void);
 void test_env_install_any_size(void);
 void test_env_render_environ(void);              // VIVARIUM V-4b-6
 void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
@@ -350,6 +351,33 @@ void test_env_table_grows(void) {
     TEST_ASSERT(env_create(p, "over", 4) != 0, "and the refused name now fits");
     TEST_EXPECT_EQ(env_lookup(c, "over", 4), (u64)0, "the clone is independent");
     edrop(c);
+    edrop(p);
+}
+
+// A caller that read the table's size before a peer grew it changes nothing: its
+// copy would hold only the slots it saw. The control is env.table_grows.
+void test_env_grow_after_a_peer(void) {
+    struct Proc *p = emk();
+    u64 ids[100];
+    char nm[4];
+    for (int i = 0; i < 100; i++) {
+        nm[0] = 'p'; nm[1] = (char)('0' + i / 10); nm[2] = (char)('0' + i % 10); nm[3] = '\0';
+        ids[i] = env_create(p, nm, 3);
+        char v = (char)('A' + i % 26);
+        TEST_EXPECT_EQ(env_write(p, ids[i], 0, &v, 1), (long)1, "a value in each slot");
+    }
+    struct Env *e = p->env;
+    int cap = e->cap;
+    TEST_ASSERT(cap > ENV_FIRST_ENTRIES, "the table grew once");
+    TEST_ASSERT(env_grow(e, ENV_FIRST_ENTRIES), "the stale caller succeeds");
+    TEST_EXPECT_EQ(e->cap, cap, "and leaves the table its size");
+    for (int i = 0; i < 100; i++) {
+        nm[0] = 'p'; nm[1] = (char)('0' + i / 10); nm[2] = (char)('0' + i % 10); nm[3] = '\0';
+        TEST_EXPECT_EQ(env_lookup(p, nm, 3), ids[i], "every name stands");
+        char v = 0;
+        TEST_EXPECT_EQ(env_read(p, ids[i], 0, &v, 1), (long)1, "its value reads back");
+        TEST_ASSERT(v == (char)('A' + i % 26), "with its bytes");
+    }
     edrop(p);
 }
 

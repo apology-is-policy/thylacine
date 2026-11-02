@@ -620,7 +620,8 @@ int  p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
                     u64 start, u64 length, const u8 *client, u16 client_len,
                     u8 *status);
 int  p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
-                       u64 start, u64 length, struct p9_getlock *out);
+                       u64 start, u64 length, const u8 *client, u16 client_len,
+                       struct p9_getlock *out);
 
 // =============================================================================
 // Weft operations (Weft-6; NET-THROUGHPUT.md section 6).

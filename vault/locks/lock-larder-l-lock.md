@@ -3,10 +3,10 @@ id: lock-larder-l-lock
 type: lock
 title: "larder.lock — the cache leaf"
 kind: spin
-orders-before: []
+orders-before: [lock-buddy-zone]
 guards: "all three sub-cache arrays + hashes + the gen ring + the diagnostics counters of one p9_client's Larder"
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-11-02
 ---
 ## Discipline
 

@@ -407,12 +407,13 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // would be unsound, not merely redundant: it completes while the FIRST
 // flusher's remaining chunks are still in flight, an ordering-dependent
 // through-write then lands, and the first flusher's stale residual chunks
-// silently overwrite it. The wait is the on_cpu-spin class -- a yield loop
-// bounded by the in-flight flusher's independent progress (it is parked in
-// the 9P recv and completes or death-unwinds per #811, decrementing either
-// way); no Rendez, so no park/wake surface, no single-waiter hazard, no new
-// I-9 leg. A kill ends the wait with the run kept, as a death inside the flush
-// keeps it. A last close can reach the wait (a peer holds a reference and is
+// silently overwrite it. The wait is bounded by the in-flight flusher's
+// independent progress (it is parked in the 9P recv and completes or
+// death-unwinds per #811, decrementing either way), and nobody wakes it: a yield
+// loop where a death can reach the thread, a timed sleep where none can
+// (wb_flush_wait). So no park/wake surface, no single-waiter hazard, no new I-9
+// leg. A kill ends the wait with the run kept, as a death inside the flush keeps
+// it. A last close can reach the wait (a peer holds a reference and is
 // flushing); the cap flush never does (staging requires wb_flushers == 0).
 //
 // The flusher count freezes the run: while it is nonzero, stagers stand
@@ -2443,6 +2444,45 @@ static int lock_wire_errno(int rc) {
     return rc;
 }
 
+// Tlock's client_id (operator vote 38). A take names the taking Proc's principal,
+// in decimal, and the server counts the take's records against it; the kernel
+// composes it, so a Proc cannot spend another identity's share. Every other
+// request on the fid names what its latest take named, so a server keying owners
+// by proc_id and client_id sees one owner, whichever thread sends the unlock. A
+// caped server's ids are not ours and it learns none (IDENTITY-DESIGN 3.2).
+#define LOCK_CLIENT_ID_MAX 10   // UINT32_MAX in decimal
+
+static u32 lock_taker(const struct dev9p_priv *p) {
+    struct Thread *t = current_thread();
+    if (p->client->cape || !t || !t->proc) return PRINCIPAL_INVALID;
+    return t->proc->principal_id;
+}
+
+static u32 lock_named(const struct dev9p_priv *p) {
+    return __atomic_load_n(&p->lock_principal, __ATOMIC_RELAXED);
+}
+
+// A lock may stand: the name goes first, for the close that exchanges the flag.
+static void lock_note_granted(struct dev9p_priv *p, u32 who) {
+    __atomic_store_n(&p->lock_principal, who, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+}
+
+static u16 lock_client_id(u32 who, char out[LOCK_CLIENT_ID_MAX]) {
+    if (who == PRINCIPAL_INVALID) return 0;
+    u32 v = who;
+    u16 n = 0;
+    do {
+        n++;
+    } while ((v /= 10) != 0);
+    v = who;
+    for (u16 i = n; i > 0; i--) {
+        out[i - 1] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    return n;
+}
+
 // The flush a release owes when its thread may not wait, queued alone on the
 // session's closer, and for a last close that leaves c alive the unlock after
 // it. The job holds c, so c's fid stays bound until it has run.
@@ -2450,6 +2490,7 @@ struct dev9p_lock_flush_job {
     struct p9_close_job job;     // first: the closer hands back this pointer
     struct Spoor       *c;
     bool                release_locks;
+    bool                staged;  // a run or a flush stood when this was queued
 };
 
 static int dev9p_lock_flush_job_run(struct p9_close_job *job,
@@ -2460,31 +2501,34 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     struct Spoor *c = j->c;
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
-    int  rc      = 0;
-    bool flushed = false;
+    int rc = 0;
     spin_lock(&p->wb_lock);
-    if (p->wb_len || p->wb_flushers) {
-        rc      = wb_flush_locked(p, c->qid.path);
-        flushed = true;
-    }
+    // What stood when this was queued, not what stands now: a flush can retire
+    // before the closer gets here, and that flush installed its pages and left any
+    // failure on the latch, which wb_flush_locked answers with.
+    if (j->staged)
+        rc = wb_flush_locked(p, c->qid.path);
     wb_release_dead_locked(p);       // a no-op while the anchor stands
     spin_unlock(&p->wb_lock);
     if (!j->release_locks) return rc;
 
     // Past the last close. Nobody reads the latch from here on, so a failure is
     // reported now; wb_flush_locked dropped the run, so there is nothing to
-    // retry. A peer that was flushing when that close came installed its pages
-    // as the open's: they go too, as the hand-off's do (dev9p_close_job_run).
-    if (flushed) {
+    // retry. A flush that stood at that close installed its pages as the open's:
+    // they go too, as the hand-off's do (dev9p_close_job_run). One that starts
+    // later finds the anchor gone and installs nothing.
+    if (j->staged) {
         larder_attr_invalidate(&p->client->larder, c->qid.path);
         larder_page_invalidate(&p->client->larder, c->qid.path);
     }
     if (rc != 0 && p9_client_fid_held(p->client, p->fid))
         p9_close_job_lost(p->fid, rc);
     if (__atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
-        u8 status = P9_LOCK_ERROR;
+        u8   status = P9_LOCK_ERROR;
+        char cid[LOCK_CLIENT_ID_MAX];
+        u16  cid_len = lock_client_id(lock_named(p), cid);
         (void)p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
-                             NULL, 0, &status);
+                             (const u8 *)cid, cid_len, &status);
     }
     return rc;
 }
@@ -2497,7 +2541,7 @@ static void dev9p_lock_flush_job_release(struct p9_close_job *job) {
 
 // Queue that job. 0, or a negative errno with nothing queued.
 static int dev9p_lock_flush_queue(struct dev9p_priv *p, struct Spoor *c,
-                                  bool release_locks) {
+                                  bool release_locks, bool staged) {
     if (!p->attached_owner) return -T_E_IO;     // a test's bare client
     struct dev9p_lock_flush_job *j = kmalloc(sizeof(*j), 0);
     if (!j) return -T_E_NOMEM;
@@ -2505,6 +2549,7 @@ static int dev9p_lock_flush_queue(struct dev9p_priv *p, struct Spoor *c,
     j->job.release   = dev9p_lock_flush_job_release;
     j->c             = c;
     j->release_locks = release_locks;
+    j->staged        = staged;
     spoor_ref(c);
     if (p9_attached_defer_close(p->attached_owner, P9_NOFID, &j->job) != 0) {
         spoor_clunk(c);            // the caller's reference keeps it open
@@ -2644,7 +2689,7 @@ static int dev9p_lock_sync(struct Spoor *c, u32 how) {
     spin_unlock(&p->wb_lock);
     if (!staged) return 0;
     if (!p->fid_owned) return -T_E_IO;         // a test's bare client
-    return dev9p_lock_flush_queue(p, c, /*release_locks=*/false);
+    return dev9p_lock_flush_queue(p, c, /*release_locks=*/false, /*staged=*/true);
 }
 
 // c's last descriptor has closed, on the closing thread, which may wait for its
@@ -2682,9 +2727,11 @@ static int dev9p_fd_close(struct Spoor *c) {
 
     bool granted = __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST);
     if (granted && close_may_wait()) {
-        u8 status = P9_LOCK_ERROR;
-        int lr = p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
-                                NULL, 0, &status);
+        u8   status = P9_LOCK_ERROR;
+        char cid[LOCK_CLIENT_ID_MAX];
+        u16  cid_len = lock_client_id(lock_named(p), cid);
+        int  lr = p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
+                                 (const u8 *)cid, cid_len, &status);
         granted = lr == -P9_E_INTR || !close_may_wait();   // cut short: still owed
     }
     if (!staged && !granted) return rc;
@@ -2693,33 +2740,13 @@ static int dev9p_fd_close(struct Spoor *c) {
     // An attach root's clunk never comes: the session owns its fid.
     if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) > 1 ||
         (!p->fid_owned && !p->cached_open))
-        (void)dev9p_lock_flush_queue(p, c, /*release_locks=*/true);
+        (void)dev9p_lock_flush_queue(p, c, /*release_locks=*/true, staged);
     return rc;
 }
 
 static bool dev9p_lock_held(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     return p && __atomic_load_n(&p->lock_granted, __ATOMIC_ACQUIRE);
-}
-
-// The identity a take's records count against on the server (Tlock's client_id;
-// operator vote 38): the taking Proc's principal, in decimal. The kernel composes
-// it, so a Proc cannot spend another identity's share. Empty with no Proc.
-#define LOCK_CLIENT_ID_MAX 10   // UINT32_MAX in decimal
-static u16 lock_client_id(char out[LOCK_CLIENT_ID_MAX]) {
-    struct Thread *t = current_thread();
-    if (!t || !t->proc) return 0;
-    u32 v = t->proc->principal_id;
-    u16 n = 0;
-    do {
-        n++;
-    } while ((v /= 10) != 0);
-    v = t->proc->principal_id;
-    for (u16 i = n; i > 0; i--) {
-        out[i - 1] = (char)('0' + v % 10);
-        v /= 10;
-    }
-    return n;
 }
 
 static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
@@ -2739,7 +2766,10 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
 
     if (test) {
         struct p9_getlock gl;
-        int rc = p9_client_getlock(p->client, fid, (u8)type, start, len, &gl);
+        char cid[LOCK_CLIENT_ID_MAX];
+        u16  cid_len = lock_client_id(lock_named(p), cid);
+        int rc = p9_client_getlock(p->client, fid, (u8)type, start, len,
+                                   (const u8 *)cid, cid_len, &gl);
         if (rc != 0) return lock_wire_errno(rc);
         if (gl.type == P9_LOCK_TYPE_UNLCK) {
             test->type  = SYS_FILE_LOCK_UN;
@@ -2761,8 +2791,9 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
     // client flushes before any setlk, for the same reason.
     (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
 
+    u32  who = type == SYS_FILE_LOCK_UN ? lock_named(p) : lock_taker(p);
     char cid[LOCK_CLIENT_ID_MAX];
-    u16  cid_len = type == SYS_FILE_LOCK_UN ? 0 : lock_client_id(cid);
+    u16  cid_len = lock_client_id(who, cid);
     u8 status = P9_LOCK_ERROR;
     int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len,
                             (const u8 *)cid, cid_len, &status);
@@ -2771,14 +2802,14 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
         // have granted it. An extra unlock costs a round trip. EINTR is flush(5)'s
         // answer: never applied.
         if (rc == -P9_E_IO && type != SYS_FILE_LOCK_UN)
-            __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+            lock_note_granted(p, who);
         return lock_wire_errno(rc);
     }
     if (status == P9_LOCK_BLOCKED && type != SYS_FILE_LOCK_UN) return -T_E_AGAIN;
     if (status != P9_LOCK_SUCCESS) return -T_E_NOLCK;   // ERROR, GRACE, or no status 9P defines
 
     if (type != SYS_FILE_LOCK_UN) {
-        __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+        lock_note_granted(p, who);
         // The last holder's writes are on the server: read them from there.
         // The invalidates log this qid, so a fill already in flight from before
         // the grant is dropped rather than installed after it.

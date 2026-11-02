@@ -488,7 +488,8 @@ int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
                          u32 fid, u8 type, u32 flags, u64 start, u64 length,
                          const u8 *client, u16 client_len);
 int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
-                            u32 fid, u8 type, u64 start, u64 length);
+                            u32 fid, u8 type, u64 start, u64 length,
+                            const u8 *client, u16 client_len);
 
 // =============================================================================
 // Mutation-family send APIs (P5-wire-mutation).

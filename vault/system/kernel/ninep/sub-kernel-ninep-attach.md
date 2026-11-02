@@ -369,7 +369,9 @@ spawn_failed, reaped, live_refusals).
 
 `p9_close_job_lost` prints the flush-failed line and counts a job error for a job alone,
 which `closer_serve` cannot tell: its entry names no fid. Such a job runs once, because the
-flush it runs drops the run on a failure. Leg: `p9_closer.job_loses_a_run_loudly`.
+flush it runs drops the run on a failure. The job of a last close reports whichever flush
+left the latch, an earlier job's included, since nobody reads it after that close. Legs:
+`p9_closer.job_loses_a_run_loudly`, `.job_reports_a_first_jobs_loss`.
 
 ## Concurrency
 

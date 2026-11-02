@@ -105,6 +105,8 @@ void test_dev9p_walk_create_refuses_dmsrv_bits(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
 void test_dev9p_lock_wire_and_status(void);
+void test_dev9p_lock_one_name_on_a_fid(void);
+void test_dev9p_lock_caped_names_nothing(void);
 void test_dev9p_lock_grant_drops_larder(void);
 void test_dev9p_lock_unlock_flushes_first(void);
 void test_dev9p_lock_test_answers(void);
@@ -268,7 +270,7 @@ static u32  g_tlock_fid, g_tlock_flags, g_tlock_proc_id, g_tgetlock_proc_id;
 static u8   g_tlock_client[16];
 static u8   g_tlock_type;
 static u64  g_tlock_start, g_tlock_len;
-static u16  g_tlock_cid_len;
+static u16  g_tlock_cid_len, g_tgetlock_cid_len;
 static u8   g_tlock_status;            // the Rlock status (0 = SUCCESS)
 static u32  g_tlock_fail_ecode;        // != 0: every Tlock answers Rlerror(ecode)
 static u32  g_tgetlock_fid;
@@ -286,6 +288,7 @@ static void lock_wire_reset(void) {
     g_tlock_type = 0xff;
     g_tlock_start = g_tlock_len = 0;
     g_tlock_cid_len = 0xffff;
+    g_tgetlock_cid_len = 0xffff;
     g_tlock_status = P9_LOCK_SUCCESS;
     g_tlock_fail_ecode = 0;
     g_tgetlock_fid = g_tgetlock_proc_id = 0;
@@ -845,6 +848,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         g_tgetlock_start = le64_at(req + 12);
         g_tgetlock_len   = le64_at(req + 20);
         g_tgetlock_proc_id = le32_at(req + 28);
+        g_tgetlock_cid_len = (u16)(req[32] | ((u16)req[33] << 8));
         if (g_tgetlock_fail_ecode)
             return lock_rlerror(resp, resp_cap, tag, g_tgetlock_fail_ecode);
         // Rgetlock: type@7 start@8 length@16 proc_id@24 client_id@28 ("srv").
@@ -1582,11 +1586,6 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     teardown(root);
 }
 
-// G2 suspect backstop: a by-name op ERRORING through a consumed fid latches
-// fid_suspect, and the close CLUNKS instead of re-parking -- the loop-breaker
-// for a stale fid whose staleness event was unknowable (the evicted-dentry
-// residual). Non-vacuous: without the suspect gate the close re-parks (no
-// clunk) and the poisoned fid would serve again.
 // A forget says an op with no owner may have removed any directory, so a fid parked
 // before it is no answer: the next take clunks it and goes to the wire. The control
 // is dirfid_consume_and_recycle, the same walks with no forget.
@@ -1640,6 +1639,11 @@ void test_dev9p_dirfid_forget_outdates_parked(void) {
     teardown(root);
 }
 
+// G2 suspect backstop: a by-name op ERRORING through a consumed fid latches
+// fid_suspect, and the close CLUNKS instead of re-parking -- the loop-breaker
+// for a stale fid whose staleness event was unknowable (the evicted-dentry
+// residual). Non-vacuous: without the suspect gate the close re-parks (no
+// clunk) and the poisoned fid would serve again.
 void test_dev9p_dirfid_suspect_not_reparked(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
@@ -5732,6 +5736,14 @@ static void lk_close(struct Spoor *c) {
     lk_drop(c);
 }
 
+// The principal the last Tlock named, read back from its decimal client_id.
+static u32 lk_named(void) {
+    u32 who = 0;
+    for (u16 i = 0; i < g_tlock_cid_len && i < sizeof(g_tlock_client); i++)
+        who = who * 10 + (u32)(g_tlock_client[i] - '0');
+    return who;
+}
+
 static void lock_wire_and_status_body(struct Spoor *f) {
     struct dev9p_priv *fp = dev9p_priv_of(f);
     TEST_ASSERT(fp != NULL && fp->fid != P9_NOFID && !fp->cached_open,
@@ -5747,13 +5759,10 @@ static void lock_wire_and_status_body(struct Spoor *f) {
     TEST_EXPECT_EQ(g_tlock_len, 20ull, "length");
     TEST_EXPECT_EQ(g_tlock_proc_id, fp->fid, "proc_id names the fid, which is the owner");
     // The take names the Proc's principal in decimal, so a limit on the server
-    // can count what one identity holds; an unlock adds no record and names none.
+    // can count what one identity holds.
     TEST_ASSERT(g_tlock_cid_len > 0 && g_tlock_cid_len <= 10, "a take names its identity");
-    u32 who = 0;
-    for (u16 i = 0; i < g_tlock_cid_len; i++) who = who * 10 + (u32)(g_tlock_client[i] - '0');
-    TEST_EXPECT_EQ(who, current_thread()->proc->principal_id, "the taking Proc's principal");
+    TEST_EXPECT_EQ(lk_named(), current_thread()->proc->principal_id, "the taking Proc's principal");
     TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 100, 20, NULL), 0ll, "its unlock");
-    TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "names no identity");
 
     static const struct { u8 status; u32 type; s64 want; const char *what; } st[] = {
         { P9_LOCK_BLOCKED, SYS_FILE_LOCK_RD, -T_E_AGAIN, "BLOCKED -> EAGAIN" },
@@ -5797,6 +5806,69 @@ void test_dev9p_lock_wire_and_status(void) {
     } else {
         test_fail("open fileA");
     }
+    teardown(root);
+}
+
+// A server keying owners by proc_id and client_id sees one owner on a fid: every
+// request names what the fid's latest take named, whoever sends it. A last close's
+// unlock has no caller to ask. The closer's is p9_closer.dying_last_close_with_holder.
+void test_dev9p_lock_one_name_on_a_fid(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    u32 me = current_thread()->proc->principal_id;
+    struct t_file_lock tl;
+
+    lock_wire_reset();
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, &tl), 0ll, "a test");
+    TEST_EXPECT_EQ((u32)g_tgetlock_cid_len, 0u, "names nobody before any take");
+
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, NULL), 0ll, "a take");
+    TEST_EXPECT_EQ(lk_named(), me, "names this Proc");
+
+    // Another principal's take on this shared open file: nothing below asks this one.
+    __atomic_store_n(&fp->lock_principal, 1000u, __ATOMIC_RELAXED);
+    g_tgetlock_cid_len = 0xffff;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, &tl), 0ll, "its test");
+    TEST_EXPECT_EQ((u32)g_tgetlock_cid_len, 4u, "names the taker");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 1, NULL), 0ll, "an unlock");
+    TEST_EXPECT_EQ(lk_named(), 1000u, "names the taker, not the caller");
+
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_RD, 0, 1, NULL), 0ll, "a take of this Proc's");
+    TEST_EXPECT_EQ(lk_named(), me, "names this Proc");
+    TEST_EXPECT_EQ(fp->lock_principal, me, "and is the fid's name from here on");
+
+    __atomic_store_n(&fp->lock_principal, 1000u, __ATOMIC_RELAXED);
+    lock_wire_reset();
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "the last close");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "sends its unlock");
+    TEST_EXPECT_EQ(lk_named(), 1000u, "naming the taker");
+    lk_drop(f);
+    teardown(root);
+}
+
+// A caped server's ids are not ours (IDENTITY-DESIGN 3.2): the attach withheld the
+// caller's number, and no lock request gives it away. The control is the leg above,
+// one variable away.
+void test_dev9p_lock_caped_names_nothing(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    p9_client_set_cape(&g_client, CAPE_UID, CAPE_GID);
+    struct Spoor *f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    struct t_file_lock tl;
+    lock_wire_reset();
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, NULL), 0ll, "a take");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "reaches the server");
+    TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "and names nobody");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, &tl), 0ll, "a test");
+    TEST_EXPECT_EQ((u32)g_tgetlock_cid_len, 0u, "names nobody");
+    g_tlock_cid_len = 0xffff;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 1, NULL), 0ll, "an unlock");
+    TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "names nobody");
+    lk_close(f);
     teardown(root);
 }
 
@@ -6511,7 +6583,7 @@ static void lock_close_releases_body(struct Spoor *root) {
     TEST_EXPECT_EQ((u64)g_tlock_type, (u64)P9_LOCK_TYPE_UNLCK, "an unlock");
     TEST_EXPECT_EQ(g_tlock_fid, fid, "on the lock fid");
     TEST_EXPECT_EQ(g_clunk_seen, 0u, "and no clunk: the holder has the fid");
-    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "a descriptor published again closes");
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "run again, as a lost take's recheck runs it");
     TEST_EXPECT_EQ(g_tlock_seen, 1u, "with no lock left to release");
     lk_drop(f);
     TEST_EXPECT_EQ(g_clunk_seen, 0u, "one reference down, no clunk");

@@ -25,7 +25,7 @@ close(fd);
 
 `l_start` and `l_len` are both zero here, which selects every byte of the file, including bytes added later. `F_OFD_SETLKW` waits until the lock is granted. Closing the descriptor releases the lock before `close` returns, because this descriptor is the only one that refers to the open file; a descriptor copied with `dup` or inherited by a child refers to the same open file and keeps the lock held until it is closed as well. The data the program wrote reaches the file service before the lock is released, so the next holder reads it.
 
-To release a lock while keeping the file open, repeat the call with `l_type` set to `F_UNLCK` and the same range. Unlocking part of a locked range leaves the rest of it locked.
+To release a lock while keeping the file open, repeat the call with `l_type` set to `F_UNLCK` and the same range. Unlocking part of a locked range leaves the rest of it locked. Unlocking the middle of a range leaves two ranges where there was one, so it counts toward the limits described below and can fail with `ENOLCK`, releasing nothing. Closing a descriptor never fails this way.
 
 ### Try for a lock without waiting
 
@@ -52,7 +52,7 @@ To release a lock while keeping the file open, repeat the call with `l_type` set
 
 A descriptor opened with `O_PATH` does not count as a descriptor of the file here, so closing one releases nothing. `chmod` and `utimensat` given a path use such a descriptor internally, and also release nothing.
 
-A process can lock at most 128 different files as a process owner. A file keeps its place in that count after an unlock, until the process closes a descriptor of the file or exits. Stratum, the file service that holds the system's own files, limits every owner to 256 separate locked ranges, every user to 4,096 and a file system to 65,536 ranges in all, and refuses further requests with `ENOLCK`. Adjacent ranges of the same type count as one.
+A process can lock at most 128 different files as a process owner. A file keeps its place in that count after an unlock, until the process closes a descriptor of the file or exits. Stratum, the file service that holds the system's own files, limits every owner to 256 separate locked ranges, every user to 4,096 and a file system to 65,536 ranges in all, and refuses further requests with `ENOLCK`. Adjacent ranges of the same type held by one owner count as one. Those limits count a range against the user who took it, whoever later divides it.
 
 ### Lock a file from a native program
 
@@ -63,7 +63,7 @@ A native program written in Rust calls `t_file_lock` in `libthyla-rs`, and a nat
 | Error | Native message | Cause and response |
 | --- | --- | --- |
 | `EAGAIN` | `resource temporarily unavailable` | Another owner holds a conflicting lock and the call was not asked to wait. Try again later. |
-| `EBADF` | `bad handle` | The descriptor is closed, opened for walking only, or opened without the access the lock type requires. A close during a waiting call also causes it, and releases the lock: any descriptor for a process owner, the last for an open file. |
+| `EBADF` | `bad handle` | The descriptor is closed, opened for walking only, or opened without the access the lock type requires, or a close ended a waiting call, as described in Technical Details. |
 | `EINVAL` | `invalid argument` | `l_whence`, `l_type` or a `flock` operation is not valid, the range starts before the beginning of the file, or an `F_OFD_` request has a non-zero `l_pid`. A native `SYS_FILE_LOCK` call whose range would reach 2^64 also receives it. |
 | `EFAULT` | `bad address` | A native `SYS_FILE_LOCK` test names an answer address that cannot be written. The service is not asked if the address is outside the process's half of memory. |
 | `EOVERFLOW` | not applicable | The range ends past the largest offset a signed 64-bit number can hold, or `F_GETLK` cannot represent the conflicting lock. |
@@ -84,6 +84,8 @@ Stratum can reuse the number of a removed file. The generation distinguishes the
 ### Waiting
 
 The file service never holds a request open. It answers a conflict at once, and the kernel retries a waiting request after a delay that starts at 1 millisecond and doubles to a limit of 64 milliseconds. Waiters do not form a queue, so a process that asks at the moment a lock is released can be granted it ahead of one that has waited longer, and no order of grant is guaranteed. Killing a process ends its wait. A caught signal does not interrupt the wait for a program built with Pouch or a native program, so `alarm` cannot put a time limit on `F_SETLKW`; a program that needs a limit can use `F_SETLK` in a loop with its own delay.
+
+A close can also end a wait, with `EBADF` and the lock released. For a process owner, that is a close of the descriptor the call names. For an open file owner, it is the last close of the open file.
 
 Neither the service nor the kernel detects deadlock. Two owners that each wait for a lock the other holds wait until one of them is killed, and `EDEADLK` is never returned. Programs that take more than one lock should take them in a fixed order.
 

@@ -122,6 +122,10 @@ struct dev9p_priv {
     // when the last descriptor closes either has its grant seen by the close or
     // sees the close (sys_file_lock_handler).
     bool               lock_granted;
+    // The principal the fid's latest take named in Tlock's client_id; every later
+    // request on the fid names it too. PRINCIPAL_INVALID for none yet, and always
+    // on a caped session.
+    u32                lock_principal;
     // B-3h: the inode generation of the file the fid names, learned once by
     // dev9p_lock_ident (a file keeps its generation for life; a file that
     // takes a dead one's inode number gets a new one). lock_ident is a

@@ -235,6 +235,21 @@ G34 to G37 were retargeted to `dev9p_fd_close`):
 `lseek(fd, 0, SEEK_CUR)`'s missing store has no deterministic leg: only a peer thread's
 read landing inside the call can show it.
 
+Audit round 5's regressions, each of which must go red at its own leg (not yet run):
+- G82, the job goes by what it finds: `p9_closer.job_drops_a_flush_that_retired_first`.
+- G83, the same, for the latch: `p9_closer.job_reports_a_first_jobs_loss`.
+- G84, a caped take names its principal: `dev9p.lock_caped_names_nothing`.
+- G85, G87, G88, an unlock names its caller, a last close's unlock or a Tgetlock names
+  nobody: `dev9p.lock_one_name_on_a_fid`. G86, the job's unlock names nobody:
+  `p9_closer.dying_last_close_with_holder`.
+- G89, G90, G91, a fill after a forget takes a new slot: `larder.forget_one_slot_per_key`.
+- G92, an own page takes no stamp; G95, a forgotten page counts as invalidated:
+  `larder.forget_all`. G93, a forgotten page counts as evicted:
+  `larder.forget_full_page_table`.
+- G94, a stale grower overwrites a peer's table: `env.grow_after_a_peer`.
+The dentry CLOCK reading a forgotten slot as live costs time alone (the hand clears its
+reference bit on the first pass and takes it on the second): no leg can show it.
+
 ## Cached opens and the take's sync (B-3h3, 2026-11-02)
 
 A take must leave the snapshot of every open it covers, or the holder reads the

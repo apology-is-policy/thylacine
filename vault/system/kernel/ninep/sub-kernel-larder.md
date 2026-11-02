@@ -268,16 +268,19 @@ Capacities (all tunable; the sizing history is load-bearing context):
 **A forget is one store** (B-3h audit round 4). `larder_forget_all` moves `l->epoch` and
 jumps gen past the ring. Each entry is stamped at install, and `attr_live`, `dentry_live`
 and `page_live` read another epoch as an empty slot, so finds miss it and CLOCK takes it
-first; it stays chained until that reuse unlinks it. 64 bits: a forget costs one round trip,
-so 32 could wrap in a day and revive a stale slot. Lock order: `c->lock` -> `l->lock` at a
-forget. Leg: `larder.forget_all`.
+first; it stays chained until that reuse unlinks it, or a fill of its own key takes it over
+(`attr_key_slot_locked` and its twins). A key holds one slot however often a session forgets,
+so no chain outgrows the table's load factor, and a forgotten page counts in neither
+`page_evictions` nor `page_invalidations`. 64 bits: a forget costs one round trip, so 32 could
+wrap in a day and revive a stale slot. Lock order: `c->lock` -> `l->lock` at a forget. Legs:
+`larder.forget_all`, `.forget_one_slot_per_key`, `.forget_full_page_table`.
 
 ## Concurrency
 
 Every entry point is a single lock/unlock pair on the one leaf lock — no
 mid-op release, no cross-op held state ([[lock-larder-l-lock]]: only the
 buddy zone lock ever nests below, via the non-blocking kmalloc/kfree;
-never held with `c->lock`; never across an RPC). The two SMP disciplines
+`c->lock` nests above it only at a forget; never across an RPC). The two SMP disciplines
 that make the shared-client exposure sound:
 
 1. **Serve/invalidate atomicity** — a serve copies the whole entry (or

@@ -258,6 +258,8 @@ uniform-mode cape):
 *Nothing identity-bearing crosses to a caped server:*
 - Tattach sends `n_uname` = none (F-4).
 - A create sends gid `(u32)-1`, which a POSIX server reads as "leave the group".
+- A lock request sends an empty `client_id`, so a take counts against no identity's
+  share on that server.
 - chown and chgrp are refused before the wire, with `SYS_WSTAT`'s generic
   failure like its other refusals (a Loom create that names a group is a chgrp
   too, and answers `-EACCES`): the cape imposes ownership, and a server-side

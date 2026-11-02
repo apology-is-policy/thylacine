@@ -23,8 +23,8 @@ updated: 2026-11-02
 ---
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
-`p9_client_lock(c, fid, type, flags, start, length, &status)` and
-`p9_client_getlock(c, fid, type, start, length, &out)` follow
+`p9_client_lock(c, fid, type, flags, start, length, client, client_len, &status)` and
+`p9_client_getlock(c, fid, type, start, length, client, client_len, &out)` follow
 `p9_client_fsync`'s shape. A conflict is a status (`P9_LOCK_BLOCKED`), not an
 error: the server never waits. The session sends the fid as `proc_id` and an
 empty client id. Stratum keys its owner on the fid and ignores both. An Rlerror
@@ -677,7 +677,7 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
 - A partial walk (`nwqid < nwname`) succeeds at this layer with the elements it
   got, and the caller reads the short count (`co_bind` and the resolver's pounce
   decide what it means).
-- `p9_client_lock` carries Tlock's `client_id` from its caller (operator vote 38).
+- `p9_client_lock` and `p9_client_getlock` carry `client_id` from their caller (operator vote 38).
 - A live owner whose reply beat its Rflush left no abandoned op: its mark clears at that
   reply, so the Rflush forgets nothing (audit round 4, leg
   `9p_client.note_flush_live_mutator_keeps_larder`). A death in the flush wait forgets at

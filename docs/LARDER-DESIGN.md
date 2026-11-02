@@ -787,8 +787,8 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   installing them as OWN, because that late write is unordered with the
   file's later writers (the G1 write-populate premise holds only for a flush
   inside the open). The flush itself tells which it is: with the append anchor
-  gone it drops rather than installs, and a job that waited out a peer's flush
-  drops what that peer installed.
+  gone it drops rather than installs, and that last close's job drops what a flush
+  standing at the close installed, whether it waited the flush out or found it retired.
 - **An abandoned mutator** (B-3h audit round 3, 2026-11-02). A Twrite, a Tsetattr
   or any op that changes the server, whose caller a death pulled out before its
   reply, can still land, and the client no longer knows which file or name it
@@ -798,7 +798,8 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   it. Its generation jump (`LARDER_INVAL_RING + 1`) fails every fill in flight.
   It is one store whatever the cache holds, because EL0 sets the rate: an epoch
   each entry is stamped with at install, so an entry from before it is an empty
-  slot, chained until CLOCK reuses it. A parked directory fid carries the epoch
+  slot, chained until CLOCK or a fill of its own key reuses it. A key holds one slot
+  however often a session forgets, so no chain outgrows the table's load factor. A parked directory fid carries the epoch
   too, and one from before a forget is clunked at its next take. An owner that has
   its reply is no abandonment (a caught note's flush whose reply came first): it
   invalidates for itself, and the mark clears. A forget cannot name what the op

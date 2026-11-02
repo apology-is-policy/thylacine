@@ -207,8 +207,6 @@ static int alloc_tag(struct p9_session *s, bool flush) {
     return grow(s);
 }
 
-// Mark tag `t` active with the given op shape. Caller validates `t` is
-// free.
 // Does a server running this kind change what a client caches? A Tlopen does when
 // it truncates (p9_session_send_lopen).
 bool p9_session_kind_mutates(u8 kind) {
@@ -222,6 +220,8 @@ bool p9_session_kind_mutates(u8 kind) {
     }
 }
 
+// Mark tag `t` active with the given op shape. Caller validates `t` is
+// free.
 static void mark_outstanding(struct p9_session *s, u16 t,
                               u8 kind, u32 fid, u32 new_fid) {
     struct p9_outstanding *e = entry(s, t);
@@ -860,8 +860,9 @@ int p9_session_send_fsync(struct p9_session *s,
     return rc;
 }
 
-// The lock's proc_id and client_id: Stratum's owner is the fid alone, so the
-// kernel sends neither a pid nor a node name (they would only be advisory).
+// A lock request's proc_id is its fid, never a pid. Its client_id is the caller's
+// to name: the identity a take's records count against, which a server keying
+// owners by the two also reads, so a fid's requests must all name the same one.
 int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
                          u32 fid, u8 type, u32 flags, u64 start, u64 length,
                          const u8 *client, u16 client_len) {
@@ -883,7 +884,8 @@ int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
 }
 
 int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
-                            u32 fid, u8 type, u64 start, u64 length) {
+                            u32 fid, u8 type, u64 start, u64 length,
+                            const u8 *client, u16 client_len) {
     if (!s) return -1;
     if (s->magic != P9_SESSION_MAGIC) return -1;
     if (s->state != P9_SESS_OPEN) return -1;
@@ -892,7 +894,7 @@ int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
     int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tgetlock(out, cap, (u16)t, fid, type, start, length,
-                               fid, NULL, 0);
+                               fid, client, client_len);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TGETLOCK, fid, fid);
     return rc;

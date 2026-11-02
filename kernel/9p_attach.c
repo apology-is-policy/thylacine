@@ -744,9 +744,9 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
         // A job alone (fid P9_NOFID) has no Tclunk to send. Its failure stays
         // with the open file it wrote for: the run is dropped and the error
         // latches for that open's next write, fsync or close. Past that open's
-        // last close nobody reads the latch, and the job has said so itself
-        // (p9_close_job_lost). A flush a death cancelled keeps its run for the
-        // close that follows.
+        // last close nobody reads the latch, so that close's job reports it,
+        // whichever flush left it (p9_close_job_lost). A flush a death cancelled
+        // keeps its run for the close that follows.
         bool clunk = e->fid != P9_NOFID;
         int  rc   = clunk ? closer_send(self, a, e->fid) : 0;
         bool live = rc != 0 && p9_client_fid_held(a->client, e->fid);

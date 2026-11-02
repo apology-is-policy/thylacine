@@ -17,9 +17,10 @@ updated: 2026-11-02
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
 `p9_session_send_lock` and `p9_session_send_getlock` build the two requests
-on a bound fid, with the fid as `proc_id` and an empty `client_id`: Stratum keys a
+on a bound fid, with the fid as `proc_id` and the caller's `client_id`: Stratum keys a
 lock by its fid, and a server that keys by the other two sees the same owners
-within one session (fid numbers restart per session).
+within one session, since dev9p names one `client_id` on a fid (fid numbers restart
+per session).
 They are read-shaped for the fid table: neither changes what the fid names. The dispatch arms parse Rlock's status into
 `p9_dispatch_result.lock_status`, and Rgetlock into `.getlock` (plain
 scalars, safe past the call).
@@ -269,7 +270,7 @@ MAX_FIDS ≥ 1.
 `p9_session_kind_mutates` is the kind table behind `mutates` (leg
 `9p_session.mutates_kinds`, over every kind), and an honoured late reply clears the mark.
 
-`p9_session_send_lock` carries Tlock's `client_id` from its caller: the identity a
+`p9_session_send_lock` and `p9_session_send_getlock` carry `client_id` from their caller: the identity a
 take's records count against on the server (operator vote 38). Its `proc_id` stays the
 fid, the owner within one session.
 

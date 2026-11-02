@@ -21,6 +21,8 @@ void test_larder_root_qid_zero(void);
 void test_larder_overwrite_wins(void);
 void test_larder_eviction_bounded(void);
 void test_larder_forget_all(void);
+void test_larder_forget_one_slot_per_key(void);
+void test_larder_forget_full_page_table(void);
 // L1d dentry sub-cache. Maps to fs_cache.tla's Read + OwnWrite subset (NO Open
 // gate -- a name-binding has no content-version to revalidate; the parent's
 // si_cvers does not track a dirent change, so own-write invalidation is the sole
@@ -773,15 +775,8 @@ void test_larder_downgrade_guards_raced_populate(void) {
     TEST_EXPECT_EQ(g_larder.attr_install_skips, 1ull, "guard skip counted");
 }
 
-// G4: the populate guard is qid-SCOPED via the invalidation ring log. An
-// install whose (seq0, gen] window holds only UNRELATED events proceeds (the
-// global gen discarded these fills -- the measured 726-886 lost installs per
-// S3 window); an event naming the install's own key still skips (the
-// resurrection close); a window wider than the ring fail-safes to skip.
-// Non-vacuous: with the global guard (inval_hits := gen != seq0) leg (a) fails.
 // A forget is one store, whatever the cache holds: nothing from before it serves,
-// no fill from before it installs, and its slots are free for the next fills. They
-// stay chained, so a key filled again must find its new entry, not the old one.
+// no fill from before it installs, and its slots are free for the next fills.
 void test_larder_forget_all(void) {
     larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x31);
@@ -823,7 +818,7 @@ void test_larder_forget_all(void) {
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 0u,
                    "an old page fill installs nothing");
 
-    // A fresh fill of the same key, with the old entry still chained.
+    // A fresh fill of the same key, on its old slot.
     larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 3, 1, &b, NULL);
     TEST_ASSERT(larder_attr_serve(&g_larder, 3, &out, &s0), "a new attr fill serves");
     TEST_EXPECT_EQ(out.mode, 0222u, "the new one");
@@ -840,14 +835,85 @@ void test_larder_forget_all(void) {
     TEST_EXPECT_EQ(g_larder.dentry_evictions, de, "no live dentry was evicted");
     TEST_ASSERT(larder_attr_serve(&g_larder, 3, &out, &s0), "the new attr still serves");
 
-    // Dropping a file whose pages were forgotten, then filling one of them again.
+    // Dropping a file whose pages were forgotten counts nothing: they had gone.
+    // Then filling one of them again.
+    u64 pi = g_larder.page_invalidations;
     larder_page_invalidate(&g_larder, 7);
+    TEST_EXPECT_EQ(g_larder.page_invalidations, pi, "no live page was dropped");
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 3, 5, g_pgsrc, 64);
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 64u,
                    "a page fills again");
+
+    // A client's own write after a forget serves as it did before one.
+    larder_page_install_own(&g_larder, 8, 0, 0, g_pgsrc, 64);
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 8, 0, 0, 64, 99, g_pgout, &s0), 64u,
+                   "an own page serves");
     larder_destroy(&g_larder);
 }
 
+// A key holds one slot across forgets, so a session that forgets in a loop cannot
+// build a chain out of one file's fills.
+void test_larder_forget_one_slot_per_key(void) {
+    larder_reset();
+    fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x41);
+    struct t_stat a = mk_stat(0111);
+    for (u32 round = 0; round < 8u; round++) {
+        u64 seq0 = larder_gen_snapshot(&g_larder);
+        larder_attr_install(&g_larder, seq0, 3, 1, &a, NULL);
+        larder_dentry_install(&g_larder, seq0, 3, "n", 1, 4, false);
+        larder_page_install(&g_larder, seq0, 7, 3, 5, g_pgsrc, 64);
+        larder_page_install_own(&g_larder, 8, 0, 0, g_pgsrc, 64);
+        larder_forget_all(&g_larder);
+    }
+    TEST_EXPECT_EQ(g_larder.attr_used, 1u, "one attr slot");
+    TEST_EXPECT_EQ(g_larder.dentry_used, 1u, "one dentry slot");
+    TEST_EXPECT_EQ(g_larder.page_used, 2u, "one slot for each page");
+
+    struct t_stat out; u64 s0 = 0, child = 0;
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 3, &out, &s0), "the last forget still holds");
+    u64 seq0 = larder_gen_snapshot(&g_larder);
+    larder_attr_install(&g_larder, seq0, 3, 1, &a, NULL);
+    larder_dentry_install(&g_larder, seq0, 3, "n", 1, 4, false);
+    larder_page_install(&g_larder, seq0, 7, 3, 5, g_pgsrc, 64);
+    TEST_ASSERT(larder_attr_serve(&g_larder, 3, &out, &s0), "an attr on its old slot serves");
+    TEST_ASSERT(larder_dentry_lookup(&g_larder, 3, "n", 1, &child), "a dentry too");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 64u, "a page too");
+    larder_destroy(&g_larder);
+}
+
+// A full page table, forgotten, refills under other keys: CLOCK takes the forgotten
+// slots and unlinks them from both indexes. Nothing counts as evicted until the
+// table is full of live pages again.
+void test_larder_forget_full_page_table(void) {
+    larder_reset();
+    fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x51);
+    for (u32 k = 0; k < LARDER_PAGE_ENTRIES; k++)
+        larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, k, 5, g_pgsrc, 64);
+    TEST_EXPECT_EQ(g_larder.page_evictions, 0ull, "the table filled with no eviction");
+    larder_forget_all(&g_larder);
+    for (u32 k = 0; k < LARDER_PAGE_ENTRIES; k++)
+        larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 9, k, 5, g_pgsrc, 64);
+    TEST_EXPECT_EQ(g_larder.page_evictions, 0ull, "no live page was evicted");
+    u64 s0 = 0;
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 9, 0, 0, 64, 5, g_pgout, &s0), 64u,
+                   "the first refill survives");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 9, LARDER_PAGE_ENTRIES - 1u, 0, 64, 5,
+                                     g_pgout, &s0), 64u, "and the last");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, 64, 5, g_pgout, &s0), 0u,
+                   "the old file serves nothing");
+
+    // The control: the table is live now, so the next fill evicts one.
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 11, 0, 5, g_pgsrc, 64);
+    TEST_EXPECT_EQ(g_larder.page_evictions, 1ull, "a live table evicts");
+    larder_destroy(&g_larder);
+}
+
+// G4: the populate guard is qid-SCOPED via the invalidation ring log. An
+// install whose (seq0, gen] window holds only UNRELATED events proceeds (the
+// global gen discarded these fills -- the measured 726-886 lost installs per
+// S3 window); an event naming the install's own key still skips (the
+// resurrection close); a window wider than the ring fail-safes to skip.
+// Non-vacuous: with the global guard (inval_hits := gen != seq0) leg (a) fails.
 void test_larder_gen_scope_qid(void) {
     larder_reset();
     struct t_stat in = mk_stat(0644);

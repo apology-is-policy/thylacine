@@ -4,9 +4,9 @@ type: lock
 title: "c->lock (per-p9_client spinlock)"
 kind: spin
 guards: "The whole shared-client state: the session's tag table (each active tag's registered rpc, its chunks and counters, grown under this lock) + its fid table, out_buf staging, the reader election (reader_active, be_reader hand-off), the send-flow state (send_progress, send_waiters + list registration), done_reply_buf, and the c->dead latch."
-orders-before: []
+orders-before: [lock-larder-l-lock]
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-11-02
 ---
 ## Discipline
 

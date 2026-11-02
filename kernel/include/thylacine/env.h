@@ -55,11 +55,15 @@ struct Env {
                                     // the same file identity. See devenv_walk.
     u64              next_id;       // monotonic id source (>= 1; never reuses)
     int              count;         // live entries (the DoS bound)
-    int              cap;           // slots in entries; only grows while shared
-    struct EnvEntry *entries;       // replaced on growth: index only under the lock
+    int              cap;           // slots in entries; changes only under the lock
+    struct EnvEntry *entries;       // doubled by env_grow, replaced by env_install:
+                                    // index only under the lock
 };
 
 struct Proc;
+
+// One step up from `seen` slots, unless a peer already took it. False on OOM.
+bool env_grow(struct Env *e, int seen);
 
 // --- lifecycle (proc.c) -----------------------------------------------------
 // env_clone_into deep-copies parent's env into child (fresh ref=1); a NULL

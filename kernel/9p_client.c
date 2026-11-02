@@ -1165,12 +1165,6 @@ static int client_take_back_unsent_locked(struct p9_client *c, u16 tag, u8 type)
     return rc;
 }
 
-// Submit the Tmsg already built into c->out_buf (built_len bytes; the caller's
-// session_send_* allocated the tag and marked it outstanding), run the
-// elected-reader wait, dispatch the reply, surface the result in *out. c->lock
-// HELD on entry + exit. Returns 0 / -P9_E_IO / -<server errno>. On a death-
-// interrupt the Thread is unwinding to its EL0-return die-check; the return is
-// immaterial (it never re-enters EL0).
 // A dying thread is leaving an op that mutates. The server may have run it, or
 // may yet: nobody will invalidate for it, and the client cannot name what it
 // touched. Its late reply or Rflush forgets again, for a fill read in between.
@@ -1179,6 +1173,12 @@ static void client_abandon_forgets_locked(struct p9_client *c, u16 tag) {
     if (e && e->active && e->mutates) larder_forget_all(&c->larder);
 }
 
+// Submit the Tmsg already built into c->out_buf (built_len bytes; the caller's
+// session_send_* allocated the tag and marked it outstanding), run the
+// elected-reader wait, dispatch the reply, surface the result in *out. c->lock
+// HELD on entry + exit. Returns 0 / -P9_E_IO / -<server errno>. On a death-
+// interrupt the Thread is unwinding to its EL0-return die-check; the return is
+// immaterial (it never re-enters EL0).
 static int client_run(struct p9_client *c, size_t built_len,
                       struct p9_dispatch_result *out) {
     u32 size; u8 type; u16 tag;
@@ -2414,7 +2414,8 @@ int p9_client_lock(struct p9_client *c, u32 fid, u8 type, u32 flags,
 
 // Tgetlock: would a lock on `fid` be granted? *out is the server's answer.
 int p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
-                      u64 start, u64 length, struct p9_getlock *out) {
+                      u64 start, u64 length, const u8 *client, u16 client_len,
+                      struct p9_getlock *out) {
     if (!c || !out) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     spin_lock(&c->lock);
@@ -2423,7 +2424,8 @@ int p9_client_getlock(struct p9_client *c, u32 fid, u8 type,
     int te = client_await_tag_locked(c);
     if (te != 0) CLIENT_UNLOCK_RET(c, te);
     int len = p9_session_send_getlock(&c->session, c->out_buf,
-                                      c->out_buf_cap, fid, type, start, length);
+                                      c->out_buf_cap, fid, type, start, length,
+                                      client, client_len);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
