@@ -892,6 +892,8 @@ This is a deliberate inversion of priority versus Plan 9 (where `/proc/<pid>/not
 
 #define NOTE_NAME_MAX    16u    /* 15 bytes + NUL; bounds the supported set */
 #define NOTE_QUEUE_DEPTH 16u    /* per-Proc; overflow → -EAGAIN at SYS_POSTNOTE */
+#define NOTE_RING_SPARE   8u    /* past the depth, for a moved direct note alone */
+#define NOTE_RING_SLOTS  (NOTE_QUEUE_DEPTH + NOTE_RING_SPARE)
 
 #define NOTE_BIT_INTERRUPT   0u
 #define NOTE_BIT_KILL        1u
@@ -923,7 +925,7 @@ _Static_assert(sizeof(struct note_record) == 32, "ABI-pinned");
 struct NoteQueue {
     spinlock_t       lock;
     u32              head, tail, count;
-    struct Note      ring[NOTE_QUEUE_DEPTH];
+    struct Note      ring[NOTE_RING_SLOTS];
     struct Rendez    waiters;   /* devnotes_read parks here */
 };
 ```
@@ -991,10 +993,10 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 **Thread-directed notes** (thread-model C4; operator vote 5, 2026-10-21; `specs/caught_target.tla`). `SYS_POSTNOTE_TID`, and `tkill` and `tgkill` in the Linux phenotype, post at one thread. Each thread has a word beside the Proc's queue, one bit per note family, with the same ownership the queue's kill-first scan has: only that thread's tail takes from it. A bit can stand for one name because every name a program may post owns its family (`notes.direct_names_own_their_family` walks the table). Pending notes of one family coalesce on the word, as Linux's standard signals do; the queue still holds what is process-directed, and `kill` never lands on a word.
 - **The tail** takes a queued `kill` first, then the lowest unmasked bit of its own word, then the queue's mask-permitted FIFO: private before shared, as Linux's `dequeue_signal`. `q->lock` does not guard the word, so the peek and the consume can disagree: the consume is an atomic and, and if the bit has gone the tail delivers nothing, never whatever note came next.
 - **The post** holds `p->threads_lock` alone, so the `Thread *` stays valid, and takes no `q->lock`: §7.3.1 has no edge between the two. It reads the disposition and sets the bit in one hold. A note the phenotype ignores is dropped there. `rt_sigaction` stores the disposition, then walks every word under `threads_lock` after its queue pass, so either order of the two holds removes the note or refuses it.
-- **A masked note waits on that thread alone** and leaves it asleep: no peer can take it, and a fatal one reaches no group exit until that thread unmasks, as `wants_signal` keeps Linux's `complete_signal` from it. A blocked thread's mask cannot change, and a thread on its way to a wait reads the word under the `wait_lock` the post's rouse takes (I-9).
-- **The class is read when it is used**, never latched at the post: `exec`'s handler reset and `SYS_NOTIFY(0)` can make a caught note fatal while it waits behind a mask. A note whose default would end the Proc satisfies `thread_die_pending` for that thread alone and wakes any wait of it but a debug stop; the tail then ends the group through `exits_note`, so this adds no second termination primitive. A caught note unwinds its target's listed wait in a phenotype Proc, and a native wait rides it out to the call's end (§8.8.3, item 11c).
+- **A masked note waits on that thread alone**: no peer can take it, and a fatal one reaches no group exit until that thread unmasks, as `wants_signal` keeps Linux's `complete_signal` from it. The post rouses the thread under its `wait_lock`, masked or not. The owner writes its mask with no lock and no fence, so a read of the mask could see the old value while the owner, having unmasked, reads a word without this bit, and each would miss the other. The target's re-read under that `wait_lock` is the precision, and a masked sleeper parks again (I-9).
+- **The class is read when it is used**, never latched at the post: `exec`'s handler reset and `SYS_NOTIFY(0)` can make a caught note fatal while it waits behind a mask. A note whose default would end the Proc satisfies `thread_die_pending` for that thread alone and wakes any wait of it but a debug stop; the tail then ends the group through `exits_note`, so this adds no second termination primitive. A disposition that becomes terminate rouses every other thread with a pending word, after its store, since only a word's owner reads it. A caught note unwinds its target's listed wait in a phenotype Proc, and a native wait rides it out to the call's end (§8.8.3, item 11c).
 - **No claim.** A direct unwind takes no family claim: the claim keeps a note many threads could take to one sleeper, and this one has one taker. The bit stays until the tail, so a 9P call that carries on after a lost flush reads it again and unwinds again, as a claim holder does.
-- **A Proc that turns self-managing** moves every word to the queue, under no `q->lock` across the walk, because the fd has no per-thread reader. A word dies with its thread and is not inherited by `spawn` or `fork`; `exec` leaves it, as it leaves the queue.
+- **A Proc that turns self-managing** moves every word to the queue, under no `q->lock` across the walk, because the fd has no per-thread reader; a post after that joins the queue with its sender. A moved note's post already answered 0, so the move cannot be refused: past `NOTE_QUEUE_DEPTH` it coalesces with a queued note of its name or takes one of `NOTE_RING_SPARE` slots no post may fill, one per family. A consumed note whose push faults after the mark goes to the queue too. A word dies with its thread and is not inherited by `spawn` or `fork`; `exec` leaves it, as it leaves the queue.
 
 **`kill` is non-catchable**: bypasses mask, handler, and fd-read. Posting `kill` to a Proc terminates it immediately at the next return-to-EL0 (mirrors SIGKILL).
 
