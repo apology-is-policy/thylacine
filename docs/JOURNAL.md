@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-11-02 (aux, Opus 5.5 1M) -- SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte
+
+**Decisions that were the operator's:** vote 15 of project_aux_votes_1021: a separate chunk straight after C4, on bits 8 and 9, which is also the signoff for `docs/ERRORS.md`.
+
+**What it is.** SIGUSR1 and SIGUSR2 had no note, so `kill(pid, SIGUSR1)` could not reach a handler through the note machinery. `term` (S-2) was the template: a user-postable, default-terminating, catchable note with its own family. Two rows are the easy part. Bits 8 and 9 do not fit the words that carry a family, so `note_caught` goes to u32 and `note_claim`, `note_target` and `note_direct` to u16.
+
+**Why the width is the chunk.** `(u8)(1u << 8)` is 0, and it compiles. A cast left narrow loses a claim or a designation silently, while every test on a family below bit 8 stays green. `(u16)~mask` applied to the u32 `note_caught` clears the whole high half, which is the claim half. So every cast on these words was read and widened, and the tests were made to run on usr1 and usr2 rather than on the families they already used.
+
+**The layout, measured.** My first attempt widened `note_claim` where it stood and grew `struct Thread` to 1792; that slot had one byte free. It moved beside `last_cpu`, into `_pad_prowl3`. `note_caught` takes the slot `term_sig` and `group_term_sig` had, and those two move into `_pad_identity`. By `clang -fdump-record-layouts`, `sizeof(struct Proc)` stays 504 and `sizeof(struct Thread)` stays 1776.
+
+**What writing the sabotages found, before anything ran.** Fifty-three mutations were listed against the code as written. Three of them had no test to kill them: `(u16)~(mine << shift)` on the drop and on the exit path, and `(u8)~tgt` with two high designations, because a single-family fixture cannot see an over-clearing mask; and the holder's re-wake cast had no test at all. b429cb8e6 adds two-family legs and the holder's body. The list is `~/projects/aux-gate/usr/sabs.py`; whether each one goes red on its own line is still to be read.
+
+**Exactly what is verified at this entry.** On b429cb8e6, into a scratch directory: four changed kernel objects and two guest C programs compile with 0 warnings; `cargo check` of libthyla-rs, libutopia, viv-pheno-probe and u-job-test passes with no warning on the new lines; `check-flag-words.py` passes. Nothing has been linked, booted or run on a guest. Vault lint and `check-invariants.py` pass on the merged tree. This entry gains lines as the leases report.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
 
 **Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.
