@@ -25,7 +25,7 @@ updated: 2026-10-29
 
 `sys_wstat_for_proc` splits into `wstat_prepare` (the mask sanity, the per-field
 bounds, the times copied by their _SET bits) and `wstat_apply` (the O_PATH size
-refusal, perm_wstat_check, the Dev), with the handle lookup between them, so its
+refusal, the Dev's `wstat_bind`, perm_wstat_check, the Dev), with the handle lookup between them, so its
 order (EINVAL before EBADF) is unchanged. `sys_wstat_spoor_for_proc` runs the
 same two on a Spoor the kernel resolved for itself, refuses SIZE (no write
 envelope) and leaves the caller's reference alone. The phenotype's utimensat and

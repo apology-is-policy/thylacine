@@ -258,7 +258,7 @@ static u32 g_race_fid;
 // B-3h file locks: what the last Tlock / Tgetlock / zero-name Twalk carried,
 // and the answers the responder gives. lock_wire_reset() restores them all.
 static u32  g_tlock_seen, g_tlock_last_seq, g_tgetlock_seen;
-static u32  g_tlock_fid, g_tlock_flags, g_tlock_proc_id;
+static u32  g_tlock_fid, g_tlock_flags, g_tlock_proc_id, g_tgetlock_proc_id;
 static u8   g_tlock_type;
 static u64  g_tlock_start, g_tlock_len;
 static u16  g_tlock_cid_len;
@@ -281,7 +281,7 @@ static void lock_wire_reset(void) {
     g_tlock_cid_len = 0xffff;
     g_tlock_status = P9_LOCK_SUCCESS;
     g_tlock_fail_ecode = 0;
-    g_tgetlock_fid = 0;
+    g_tgetlock_fid = g_tgetlock_proc_id = 0;
     g_tgetlock_type = 0xff;
     g_tgetlock_start = g_tgetlock_len = 0;
     g_gl_type = P9_LOCK_TYPE_UNLCK;
@@ -835,6 +835,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         g_tgetlock_type  = req[11];
         g_tgetlock_start = le64_at(req + 12);
         g_tgetlock_len   = le64_at(req + 20);
+        g_tgetlock_proc_id = le32_at(req + 28);
         if (g_tgetlock_fail_ecode)
             return lock_rlerror(resp, resp_cap, tag, g_tgetlock_fail_ecode);
         // Rgetlock: type@7 start@8 length@16 proc_id@24 client_id@28 ("srv").
@@ -5620,7 +5621,7 @@ static void lock_wire_and_status_body(struct Spoor *f) {
     TEST_EXPECT_EQ(g_tlock_flags, 0u, "never the BLOCK flag: the kernel does the waiting");
     TEST_EXPECT_EQ(g_tlock_start, 100ull, "start");
     TEST_EXPECT_EQ(g_tlock_len, 20ull, "length");
-    TEST_EXPECT_EQ(g_tlock_proc_id, 0u, "no proc_id: the fid is the owner");
+    TEST_EXPECT_EQ(g_tlock_proc_id, fp->fid, "proc_id names the fid, which is the owner");
     TEST_EXPECT_EQ((u32)g_tlock_cid_len, 0u, "no client_id");
 
     static const struct { u8 status; u32 type; s64 want; const char *what; } st[] = {
@@ -5752,17 +5753,30 @@ static void lock_unlock_flushes_first_body(struct Spoor *f) {
     TEST_ASSERT(g_twrite_last_seq < g_tlock_last_seq,
                 "the flush Twrite precedes the unlock's Tlock");
 
-    // A take sends no staged bytes: only a release needs them on the server.
-    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 256, 128, 256), 128ll, "stage again");
+    // Every set-lock lands the run first. A conversion gives up its write lock
+    // and admits readers, who must read what it wrote.
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 256, 64, 256), 64ll, "stage again");
     TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "take again");
-    TEST_EXPECT_EQ(g_twrite_seen, 1u, "a take flushes nothing");
+    TEST_EXPECT_EQ(g_twrite_seen, 2u, "the take flushed the run");
+    TEST_ASSERT(g_twrite_last_seq < g_tlock_last_seq, "before its Tlock");
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 320, 64, 320), 64ll, "stage under the write lock");
+    TEST_EXPECT_EQ(g_twrite_seen, 2u, "staged, not sent");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll, "convert to a read lock");
+    TEST_EXPECT_EQ(g_twrite_seen, 3u, "the conversion flushed the run");
+    TEST_ASSERT(g_twrite_last_seq < g_tlock_last_seq, "before its Tlock");
+
+    // A test changes nothing, so it lands nothing.
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 384, 32, 384), 32ll, "stage under the read lock");
+    struct t_file_lock tans;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, &tans), 0ll, "a test");
+    TEST_EXPECT_EQ(g_twrite_seen, 3u, "flushes nothing");
     TEST_EXPECT_EQ((s64)dev9p.lock_sync(f, DEV_LOCK_SYNC_RELEASE), 0ll,
                    "lock_sync(RELEASE)");
-    TEST_EXPECT_EQ(g_twrite_seen, 2u, "lock_sync(RELEASE) flushes the run");
+    TEST_EXPECT_EQ(g_twrite_seen, 4u, "lock_sync(RELEASE) flushes the run");
 
     // A flush that fails still releases: the lock must not outlive the
     // holder's unlock, and the error latches for the next write or fsync.
-    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 384, 64, 384), 64ll, "stage a third time");
+    TEST_EXPECT_EQ((s64)dev9p.write(f, chunk + 416, 64, 416), 64ll, "stage a last time");
     g_twrite_fail_ecode = 28;   // ENOSPC
     u32 tl = g_tlock_seen;
     TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll,
@@ -5795,6 +5809,7 @@ static void lock_test_answers_body(struct Spoor *f) {
     TEST_EXPECT_EQ(g_tgetlock_seen, 1u, "one Tgetlock");
     TEST_EXPECT_EQ(g_tlock_seen, 0u, "and no Tlock: a test changes nothing");
     TEST_EXPECT_EQ(g_tgetlock_fid, fp->fid, "on the file's fid");
+    TEST_EXPECT_EQ(g_tgetlock_proc_id, fp->fid, "proc_id names the fid");
     TEST_EXPECT_EQ((u32)g_tgetlock_type, (u32)P9_LOCK_TYPE_WRLCK, "the asked type");
     TEST_EXPECT_EQ(g_tgetlock_start, 50ull, "the asked start");
     TEST_EXPECT_EQ(g_tgetlock_len, 10ull, "the asked length");
@@ -5888,6 +5903,21 @@ static void lock_owner_clone_body(struct Spoor *root, struct Spoor *f) {
     g_twalk_clone_fail_ecode = 0;
     if (o) lk_close(o);
     TEST_ASSERT(o == NULL, "a refused clone mints nothing");
+    TEST_EXPECT_EQ((s64)err, (s64)-T_E_NOLCK, "and answers ENOLCK");
+    // A file that has died says so, and a failed wire is still no lock.
+    g_twalk_clone_fail_ecode = T_E_STALE;
+    err = 0;
+    o = dev9p.lock_owner(f, &err);
+    g_twalk_clone_fail_ecode = 0;
+    if (o) lk_close(o);
+    TEST_ASSERT(o == NULL, "the clone of a dead file's fid mints nothing");
+    TEST_EXPECT_EQ((s64)err, (s64)-T_E_STALE, "and answers ESTALE");
+    g_twalk_clone_fail_ecode = T_E_IO;
+    err = 0;
+    o = dev9p.lock_owner(f, &err);
+    g_twalk_clone_fail_ecode = 0;
+    if (o) lk_close(o);
+    TEST_ASSERT(o == NULL, "a clone the wire failed mints nothing");
     TEST_EXPECT_EQ((s64)err, (s64)-T_E_NOLCK, "and answers ENOLCK");
     err = 0;
     o = dev9p.lock_owner(f, &err);
@@ -6075,6 +6105,28 @@ static void cached_open_loose_stale_body(struct Spoor *root) {
     TEST_EXPECT_EQ((s64)dev9p.read(co, buf, (long)sizeof(buf), 0), 16ll, "the snapshot serves");
     TEST_ASSERT(buf[0] == data[0] && buf[15] == data[15], "its bytes");
 
+    // The other answers that mean the name no longer reaches the file.
+    g_wga_lerror_ecode = T_E_NOTDIR;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
+                   "a directory on the run replaced by a file: ESTALE");
+    g_wga_lerror_ecode = T_E_STALE;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
+                   "a dead walk start: ESTALE");
+
+    // A wire that failed says nothing about the file, and must not read as a
+    // file that moved: a peer's ESTALE lets a take stand under its snapshot.
+    g_wga_lerror_ecode = T_E_IO;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_NOLCK,
+                   "a walk the wire failed: a lock answers ENOLCK");
+    g_wga_lerror_ecode = T_E_IO;
+    TEST_EXPECT_EQ((s64)dev9p.lock_sync(co, DEV_LOCK_SYNC_ACQUIRE), (s64)-T_E_NOLCK,
+                   "an ACQUIRE refuses its take");
+    g_wga_lerror_ecode = T_E_IO;
+    TEST_EXPECT_EQ((s64)dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL), (s64)-T_E_IO,
+                   "a wstat answers EIO");
+    TEST_EXPECT_EQ((u64)g_tlock_seen, 0ull, "no lock sent");
+    TEST_EXPECT_EQ((u64)cp->co_kfid, (u64)P9_NOFID, "no fid kept");
+
     // Replaced: the name reaches a new file at the same reused number.
     g_ga_gen = 0x78; g_wga_seen = 0; g_clunk_seen = 0; g_clunk_fid_n = 0;
     TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
@@ -6125,6 +6177,27 @@ static void cached_open_loose_stale_body(struct Spoor *root) {
     size_t lens[1] = { 5 };
     struct t_stat sts[DEV_WALK_ATTRS_MAX];
     struct larder *l = &g_client.larder;
+
+    // An opened base: a server refuses a walk from it, so a loose open could
+    // never bind. The control, one variable away, mints from the same state.
+    co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "fixture: a loose cached open primes the Larder");
+    spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+    root->flag |= COPEN;
+    g_client.loose = true;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    g_client.loose = false;
+    root->flag &= ~(u32)COPEN;
+    TEST_ASSERT(co == NULL, "an opened base mints no loose cached open");
+    if (co) spoor_clunk(co);
+    g_client.loose = true;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    g_client.loose = false;
+    TEST_ASSERT(co != NULL, "control: an unopened base does");
+    if (co) spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+
     g_wga_no_gen = true;
     co_prime(root, "fileA", 5);
     g_wga_no_gen = false;
@@ -6185,10 +6258,45 @@ static void cached_open_loose_wstat_body(struct Spoor *root) {
     (void)p9_client_reader_pump_ready(&g_client);
 }
 
+// A wstat is judged by the file's owner now. The open-time stat a loose cached
+// open's fstat serves may name a former owner: root chowned the file away, and
+// the descriptor outlived the chown. The fake's walk reports uid 0x1111.
+static void cached_open_loose_wstat_authority_body(struct Spoor *root) {
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 7 + 5);
+    struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL, "priv");
+    cp->co_stat.uid = 0x9999u;
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x9999u;
+    p->primary_gid  = 0x9999u;
+    p->caps         = 0;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, co);
+    TEST_ASSERT(fd >= 0, "handle_alloc");
+    g_ga_gen = 0x77;
+    g_setattr_valid = g_setattr_mode = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0640u, 0, 0, 0, NULL),
+                   -(s64)T_E_ACCES, "the owner at open is refused once the file is another's");
+    TEST_EXPECT_EQ(g_setattr_valid, 0xdeadbeefu, "and no Tsetattr was sent");
+    TEST_ASSERT(cp->co_kfid != P9_NOFID, "the wstat bound before it judged");
+    // The control, one variable away: the file's owner now, through the same fd.
+    p->principal_id = 0x1111u;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0640u, 0, 0, 0, NULL), 0ll,
+                   "the owner now is admitted");
+    TEST_EXPECT_EQ(g_setattr_mode, 0640u, "and the mode reached the wire");
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    (void)p9_client_reader_pump_ready(&g_client);
+}
+
 void test_dev9p_cached_open_loose_wstat(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
     cached_open_loose_wstat_body(root);
+    cached_open_loose_wstat_authority_body(root);
     lock_wire_reset();
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);

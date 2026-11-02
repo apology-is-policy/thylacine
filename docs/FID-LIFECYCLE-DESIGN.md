@@ -230,8 +230,14 @@ file lock needs a fid too.
   to the budget with the snapshot) and the generation the Larder knows. A file
   whose generation the Larder does not know is not minted loose. On its first
   `wstat`, lock or Loom registration it walks the run again into a fresh fid and
-  accepts only the same `qid.path` and generation; anything else answers `ESTALE`
-  and binds nothing. The objection above to a retained-path re-walk stands for a
+  accepts only the same `qid.path` and generation. A name that no longer reaches
+  the file, or reaches another one, answers `ESTALE` and binds nothing. A wire that
+  failed says nothing about the file: it answers its own errno (`ENOLCK` on a lock
+  call) and also binds nothing. A `wstat` binds before it is judged (the Dev slot
+  `wstat_bind`), so the stat `perm_wstat_check` reads is the file's own, not the
+  open-time one, which may name a former owner. A run from an opened base is not
+  minted loose: a server refuses a walk from an opened fid, so that open could
+  never bind. The objection above to a retained-path re-walk stands for a
   walk that is trusted. This one is checked, so a rename can make it fail but
   cannot make it reach another file, a reused inode number included. **What this
   leaves:** on a loose mount, a read-only descriptor of a small cached file renamed

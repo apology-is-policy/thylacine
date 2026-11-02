@@ -56,6 +56,7 @@ __attribute__((unused)) static int cancellable_close(int fd) { cancellable_close
 #define dup tested_dup
 #define pipe2 tested_pipe2
 #include "descriptor-under-test.h"
+#include "lock-under-test.h"
 /* The lock call: x3 (len) and x4 (the TEST answer) beside mock's record. A
  * TEST that succeeds writes test_answer where x4 points. */
 static long la3, la4;
@@ -72,7 +73,7 @@ static long mock5(long n,long a,long b,long c,long d,long e,int cp) {
 /* SEEK_CUR reads the cursor; SEEK_END reads the size and must not seek. */
 static off_t cur_pos=100, file_size=1000;
 static int lseek_calls, fstat_calls, lseek_fail, fstat_fail;
-static off_t mock_lseek(int fd,off_t off,int wh) { (void)fd; lseek_calls++; assert(off==0 && wh==SEEK_CUR); if (lseek_fail) { errno=EBADF; return -1; } return cur_pos; }
+static off_t mock_lseek(int fd,off_t off,int wh) { (void)fd; lseek_calls++; assert(off==0 && wh==SEEK_CUR); if (lseek_fail) { errno=lseek_fail==2?ESPIPE:EBADF; return -1; } return cur_pos; }
 static int mock_fstat(int fd,struct stat *st) { (void)fd; fstat_calls++; if (fstat_fail) { errno=EBADF; return -1; } memset(st,0,sizeof *st); st->st_size=file_size; return 0; }
 #define __lseek mock_lseek
 #define __fstat mock_fstat
@@ -125,6 +126,7 @@ int main(void) {
  LRESET(0);CASE("neg-start",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,-1,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
  LRESET(0);cur_pos=100;CASE("whence-cur",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,-10,5,0))==0 && a2==90 && la3==5 && lseek_calls==1 && fstat_calls==0);
  LRESET(0);lseek_fail=1;CASE("whence-cur-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,0,1,0))==-1 && errno==EBADF && calls==0);
+ LRESET(0);lseek_fail=2;CASE("whence-cur-no-cursor",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,3,1,0))==0 && calls==1 && a2==3 && la3==1 && lseek_calls==1);
  LRESET(0);file_size=1000;CASE("whence-end",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,-1,1,0))==0 && a2==999 && la3==1 && fstat_calls==1 && lseek_calls==0);
  LRESET(0);fstat_fail=1;CASE("whence-end-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EBADF && calls==0);
  LRESET(0);CASE("whence-bad",tested_fcntl(8,F_SETLK,FL(F_WRLCK,9,0,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
@@ -159,9 +161,10 @@ int main(void) {
  LRESET(0);CASE("flock-sh",tested_flock(8,LOCK_SH)==0 && a1==0x10);
  LRESET(0);CASE("flock-un",tested_flock(8,LOCK_UN)==0 && a1==2);
  LRESET(0);CASE("flock-un-nb",tested_flock(8,LOCK_UN|LOCK_NB)==0 && a1==2);
- LRESET(0);CASE("flock-bad-op",tested_flock(8,0)==-1 && errno==EINVAL && calls==1 && number==129);
- LRESET(0);CASE("flock-sh-ex",tested_flock(8,LOCK_SH|LOCK_EX)==-1 && errno==EINVAL && calls==1);
- LRESET(-EBADF);CASE("flock-bad-op-closed",tested_flock(8,0)==-1 && errno==EBADF);
+ LRESET(0);CASE("flock-bad-op",tested_flock(8,0)==-1 && errno==EINVAL && calls==0);
+ LRESET(0);CASE("flock-sh-ex",tested_flock(8,LOCK_SH|LOCK_EX)==-1 && errno==EINVAL && calls==0);
+ LRESET(-EBADF);CASE("flock-bad-op-closed",tested_flock(8,0)==-1 && errno==EINVAL && calls==0);
+ LRESET(0);CASE("flock-bad-op-negative",tested_flock(-1,0)==-1 && errno==EINVAL && calls==0);
  LRESET(-EAGAIN);CASE("flock-would-block",tested_flock(8,LOCK_EX|LOCK_NB)==-1 && errno==EWOULDBLOCK);
  LRESET(-EBADF);CASE("flock-ex-rdonly",tested_flock(8,LOCK_EX)==-1 && errno==EBADF);
  LRESET(0);CASE("flock-socket",tested_flock(POUCH_SOCK_TAG,LOCK_EX)==-1 && errno==ENOSYS && calls==0);

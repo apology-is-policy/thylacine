@@ -1312,10 +1312,12 @@ static struct Spoor *co_mint_fail(struct dev9p_priv *src, u32 fid, u8 *buf,
 }
 
 // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3; refines
-// I-38): the fidless close-to-open open. stalk calls this on the FINAL run of a
-// plain read-only STALK_OPEN resolution, BEFORE the normal bind walk. Contract
-// per <thylacine/dev.h> open_cached: on success the returned Spoor is OPENED +
-// fidless and sts[0..nname) holds the walk's FRESH per-component records for
+// I-38): the close-to-open open served from a snapshot. stalk calls this on the
+// FINAL run of a plain read-only STALK_OPEN resolution, BEFORE the normal bind
+// walk. Contract per <thylacine/dev.h> open_cached: on success the returned
+// Spoor is OPENED with no opened fid (a strict open keeps its walk's unopened
+// fid, a loose one holds none until it needs one) and sts[0..nname) holds the
+// walk's FRESH per-component records for
 // the RESOLVER's mandatory fail-ordering post-scan (permission policy stays in
 // stalk -- I-28/I-22); on NULL nothing was bound or revealed and the caller's
 // observable outcome comes from the normal path.
@@ -1330,6 +1332,10 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     struct p9_client *client = src_priv->client;
     if (client->wga_unsupported) return NULL;
     if (!__atomic_load_n(&client->cacheable, __ATOMIC_RELAXED)) return NULL;
+    // A server refuses a walk from an opened fid. A strict open learns that from
+    // its wire query below; a loose one would learn it on its first need, as an
+    // ESTALE on a file nothing moved.
+    if (client->loose && (c->flag & COPEN)) return NULL;
     struct larder *l = &client->larder;
     // The gen witness (B1-audit F1): captured BEFORE the hint's coverage
     // decision; larder_pages_snapshot fails closed if ANY invalidate moves
@@ -1460,8 +1466,11 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     //    A loose open also keeps what its first lock or wstat will need to bind
     //    a fid: its run's names, and the generation that says the walk reached
     //    the same file. A file whose generation the Larder does not know takes
-    //    the normal path. seq0 covers the read: a mutation that could change
-    //    what this number names invalidates it, and fails the snapshot below.
+    //    the normal path. seq0 covers the read against every mutation made
+    //    through this session's ops: it invalidates the number and fails the
+    //    snapshot below. A writer the Larder cannot see (Loom, another session)
+    //    can pair the old snapshot with a new generation. That bind can then
+    //    reach only the new file, and a take moves the reads there too.
     u32 conames_len = 0;
     if (client->loose) {
         if (!larder_attr_gen(l, leaf->qid_path, &cogen)) return NULL;
@@ -1986,8 +1995,8 @@ static int dev9p_close(struct Spoor *c) {
         // DIRECTORY fid on a cacheable client parks in the dir-fid cache
         // instead of clunking -- the next bind-form resolve of this dir
         // re-issues it with zero wire ops. Gates: never-opened (COPEN would
-        // make the fid mode-bound; a cached_open priv is fidless and cannot
-        // reach here fid_owned), a dir (files are opened to be used -- no
+        // make the fid mode-bound; a cached open's kept fid names a plain file,
+        // and the dir gate refuses it), a dir (files are opened to be used -- no
         // repeat-bind win), cacheable (the Larder-backed class), NOT suspect
         // (a by-name op errored through this fid -- the stale-fid backstop),
         // and NOT staled (no invalidation event named this qid since the
@@ -2417,8 +2426,12 @@ static int co_bind(struct dev9p_priv *p) {
                                    (const u8 *const *)names, lens, &nwqid, qids, attrs);
     if (rc != 0 || nwqid != (u16)nname) {   // nothing bound
         kfree(attrs);
-        if (rc == -P9_E_INTR) return -T_E_INTR;
-        return -T_E_STALE;
+        // ESTALE says the file moved, and a peer's ESTALE lets a take stand
+        // while that peer keeps its snapshot. A wire that failed says nothing
+        // about the file.
+        if (rc == 0 || rc == -T_E_NOENT || rc == -T_E_NOTDIR || rc == -T_E_STALE)
+            return -T_E_STALE;
+        return dev9p_wire_errno(rc);
     }
     const struct p9_attr *leaf = &attrs[nname - 1];
     bool same = leaf->qid.path == p->co_stat.qid_path &&
@@ -2436,7 +2449,7 @@ static int co_bind(struct dev9p_priv *p) {
 }
 
 // A lock call answers what it can: ESTALE and EINTR as they are, and any other
-// failure to bind as ENOLCK.
+// failure to reach the file as ENOLCK.
 static int co_bind_lock_errno(int rc) {
     return (rc == -T_E_STALE || rc == -T_E_INTR) ? rc : -T_E_NOLCK;
 }
@@ -2548,8 +2561,10 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
         return 0;
     }
 
-    if (type == SYS_FILE_LOCK_UN)
-        (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
+    // Every set-lock lands c's staged writes first: an unlock gives its range
+    // up, and a write lock converted to a read lock admits readers. Linux's NFS
+    // client flushes before any setlk, for the same reason.
+    (void)dev9p_lock_sync(c, DEV_LOCK_SYNC_RELEASE);
 
     u8 status = P9_LOCK_ERROR;
     int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len, &status);
@@ -2592,8 +2607,8 @@ static struct Spoor *dev9p_lock_owner(struct Spoor *c, int *err) {
         if (rc == 0) {
             np = priv_alloc(p->client, nf, /*fid_owned=*/true, p->attached_owner);
             if (!np) dev9p_clunk_fid(p->client, p->attached_owner, nf);
-        } else if (rc == -P9_E_INTR) {
-            *err = -T_E_INTR;
+        } else {
+            *err = co_bind_lock_errno(lock_wire_errno(rc));
         }
     }
     if (!np) {
@@ -2827,6 +2842,14 @@ static void dev9p_remove(struct Spoor *c) {
     // .unlink slot (dev9p_unlink) instead. Left as a no-op stub.
 }
 
+// A loose cached open's fstat answers from the open-time stat, whose owner may
+// be a former one. Its fid makes the stat SYS_WSTAT judges the file's own.
+static int dev9p_wstat_bind(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !p->cached_open) return 0;
+    return co_bind(p);
+}
+
 static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     // The Plan 9 wire-stat .wstat slot is deferred; SYS_WSTAT (chmod/chown)
@@ -3016,6 +3039,7 @@ struct Dev dev9p = {
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,
+    .wstat_bind   = dev9p_wstat_bind,
     .wstat_native = dev9p_wstat_native,
     .power    = dev9p_power,
 };

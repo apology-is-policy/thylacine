@@ -855,8 +855,11 @@ int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
     if (!fid_bound(s, fid)) return -1;
     int t = alloc_tag(s, false);
     if (t < 0) return -1;
+    // Stratum keys a lock by its fid. A server that keys by proc_id and client_id
+    // instead sees the same owners: the session names the client, the fid the
+    // owner.
     int rc = p9_build_tlock(out, cap, (u16)t, fid, type, flags, start, length,
-                            0, NULL, 0);
+                            fid, NULL, 0);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TLOCK, fid, fid);
     return rc;
@@ -872,7 +875,7 @@ int p9_session_send_getlock(struct p9_session *s, u8 *out, size_t cap,
     int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tgetlock(out, cap, (u16)t, fid, type, start, length,
-                               0, NULL, 0);
+                               fid, NULL, 0);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TGETLOCK, fid, fid);
     return rc;

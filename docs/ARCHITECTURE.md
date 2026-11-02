@@ -2856,18 +2856,20 @@ x4 `out`). `op` holds the type (`LOCK_RD` 0, `LOCK_WR` 1, `LOCK_UN` 2) and three
 bits: `LOCK_WAIT` (0x10), `LOCK_TEST` (0x20) and `LOCK_PROC` (0x40). Any other
 bit answers `EINVAL`, and so does TEST with `LOCK_UN` or `LOCK_WAIT` (`F_GETLK`
 asks about a lock to take, and has nothing to wait for). `len` 0 means to the
-end of the file, as in `struct flock`; a range that would pass 2^64 answers
-`EINVAL`. `LOCK_WR` needs a descriptor open for writing and `LOCK_RD` one open
+end of the file, as in `struct flock`; a range whose end would reach 2^64 answers
+`EINVAL`, because a server's table holds the end in a u64. `LOCK_WR` needs a descriptor open for writing and `LOCK_RD` one open
 for reading (`EBADF`), as POSIX asks. TEST asks for neither. A navigation-only
 (`O_PATH`) descriptor answers `EBADF`, as Linux's `fcntl` does. The answer is 0
 or `-EAGAIN` (held by another owner), `-ENOLCK`, `-EBADF`, `-EINVAL`, `-EINTR`,
-`-EFAULT` (TEST's `out` cannot be written) or `-ESTALE` (the file has died: an
+`-EFAULT` (TEST's `out` cannot be written; one outside the user half answers before the server is asked) or `-ESTALE` (the file has died: an
 unlinked file's fid). A server's `EBADF` is a verdict on its own fid and
 crosses as `EIO`. A file whose Dev serves no locks answers `ENOLCK`, as Linux's
 NFS does without its lock daemon. In v1.0 only dev9p serves them.
 
 **Two owners.** A lock belongs to exactly one owner, and two owners conflict
-when their ranges overlap and either lock is a write lock.
+when their ranges overlap and either lock is a write lock. Every request carries
+its fid as `proc_id`, so a server that keys owners by `proc_id` and `client_id`
+rather than by fid sees the same owners.
 - **The open file** (no `LOCK_PROC`). The lock is taken on the Spoor's own fid,
   so it is Stratum's per-fid owner: Linux's open-file-description (OFD)
   semantics. A dup, an inherited descriptor or a passed handle names the same
@@ -2886,7 +2888,10 @@ when their ranges overlap and either lock is a write lock.
   bounded per Proc (I-32); past the bound a new file answers `ENOLCK`, and a
   take the server refuses spends no slot.
   - **Closing any of the Proc's descriptors on that file drops all of them**,
-    and so does the handle table's teardown at exit. The close lands the
+    and so does the handle table's teardown at exit. A navigation-only
+    (`O_PATH`) descriptor is no open of the file, and its close drops nothing, as
+    Linux's `filp_flush` skips `FMODE_PATH`: `chmod(path)` and `utimensat(path)`
+    close one inside the call. The close lands the
     staged writes of every open of the file the table holds, then unlocks the
     whole file through the Proc's fid and waits for the answer, then drops the
     fid. A lock call another thread has in flight on that fid keeps it until
@@ -2906,7 +2911,9 @@ when their ranges overlap and either lock is a write lock.
     fid inherits the generation of the descriptor it was cloned from. So a
     dead file's descriptor neither locks through, nor drops, the entry of the
     file that took its number: its lock answers `ESTALE`, and its close leaves
-    the entry alone. A Proc fid that answers `ESTALE` anyway (its own file has
+    the entry alone. So does a close that cannot learn the generation, since no
+    entry can be shown to name its file; an entry that does name it lasts until
+    the Proc's next close of the file or its exit. A Proc fid that answers `ESTALE` anyway (its own file has
     died, or the server reports no generation) is retired, and the call is
     asked once more with a new fid; the dead file's locks died with it. The
     same file reached through two sessions is two files here, an edge Linux has
@@ -2944,24 +2951,29 @@ and attributes, a cached open's snapshot (FID-LIFECYCLE 3.3) and an open file's
 write-behind run (LARDER-DESIGN 12). A lock holder must see the last holder's
 writes, as with NFS and Linux's v9fs, so:
 - **Taking a lock** drops this file's Larder attributes and pages, so the next
-  read goes to the server. An affected open stops serving its snapshot: the
-  locking open for an open-file lock, or every open of the file in the Proc's
-  table for a Proc lock. An open needs a fid to lock. A strict cached open kept
+  read goes to the server. Every open of the file in the Proc's table stops
+  serving its snapshot, for either owner, because the lock covers what any of the
+  Proc's opens read (Linux's NFS client drops the whole inode's cache the same
+  way). An open needs a fid to lock. A strict cached open kept
   its walk's (operator vote 20). A loose one kept none, so that its open stays
   wire-free (vote B1): on its first lock it re-walks the run that minted it from
   the walk start it keeps, and accepts the result only if it reaches the same
   `qid.path` and generation. If the file was renamed away, unlinked or replaced,
   the lock answers `ESTALE` and binds nothing, and the fd's reads keep serving
-  its snapshot. For a Proc lock, another descriptor in the table that cannot
-  reach the file this way also keeps its snapshot, and the take through the
-  descriptor that can reach it stands. FID-LIFECYCLE section 3.3 has the rest,
+  its snapshot. Another descriptor in the table that cannot reach the file this
+  way also keeps its snapshot, and the take through the descriptor that can reach
+  it stands. A peer that fails for any other reason refuses the take with
+  `ENOLCK`, since nothing says the file moved. FID-LIFECYCLE section 3.3 has the rest,
   including `wstat`, which binds the same way.
-- **Releasing a lock** flushes the write-behind run first: the open's own run
-  for an open-file lock, or the run of every open of the file in the Proc's
-  table for a Proc lock. This applies to an unlock and to the close that drops
-  a lock, and the release is sent after the flush returns. A flush that fails
-  still releases: the error latches on the open, for its next write, `fsync` or
-  close. A thread a death has reached can send neither, so its flush goes to
+- **Setting a lock** flushes the write-behind run first: the open's own run for
+  an open-file lock, or the run of every open of the file in the Proc's table for
+  a Proc lock. This applies to an unlock, to a take and to the close that drops a
+  lock, and the request is sent after the flush returns. A conversion is why a
+  take needs it: a write lock turned into a read lock admits readers, who must
+  read what the holder wrote (Linux's NFS client flushes before any `setlk`, for
+  this reason). A test changes nothing and flushes nothing. A flush that fails
+  still sends the request: the error latches on the open, for its next write,
+  `fsync` or close. A thread a death has reached can send neither, so its flush goes to
   the session's closer as a job of its own and its release follows it there;
   the closer serves a session in order (FID-LIFECYCLE section 9). This covers
   an open another Proc still shares, whose run no close of this Proc hands
@@ -2977,9 +2989,11 @@ writes, as with NFS and Linux's v9fs, so:
 - `flock` takes a whole-file lock on the open file and waits unless `LOCK_NB`
   is given; a conflict answers `EWOULDBLOCK`. `LOCK_EX` needs a descriptor open
   for writing (`EBADF`), as on Linux's NFS client (`flock(2)`, NOTES).
-- The refusals come in Linux's order: `l_whence`, the range, the type, the access
-  mode, then an OFD request's `l_pid`. A closed descriptor answers `EBADF` first,
-  even for a request Pouch refuses itself. A `struct flock` the caller cannot read
+- `fcntl`'s refusals come in Linux's order: `l_whence`, the range, the type, the
+  access mode, then an OFD request's `l_pid`. A closed descriptor answers `EBADF`
+  first, even for a request Pouch refuses itself. `flock` reads its op first, as
+  Linux does, so a bad op answers `EINVAL` on any descriptor. A descriptor with no
+  cursor reads `SEEK_CUR` as 0, Linux's `f_pos` of a pipe. A `struct flock` the caller cannot read
   or write faults in the caller, where Linux answers `EFAULT`.
 - `F_GETLK` answers `l_pid` -1, and when nothing conflicts it changes only `l_type`.
 - Every kind of lock goes to one server table, so `flock` and `fcntl` locks

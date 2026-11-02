@@ -26,6 +26,9 @@ Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
 - `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes before a
   release.
 - `lock_ident(c)` learns once which file `c` names, and can answer ESTALE.
+- `wstat_bind(c)` readies `c` before SYS_WSTAT reads the stat its policy judges,
+  so that stat is the file's own rather than its state at open. A failure refuses
+  the wstat. NULL-permitted; dev9p binds a loose cached open.
 
 The first four are NULL-permitted together: a Dev without `lock` answers
 ENOLCK, as NFS without lockd does. `lock_ident` is NULL-permitted alone. A

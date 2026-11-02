@@ -1565,12 +1565,7 @@ static struct Spoor *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
 
 // Common user-VA range check (NULL / overflow / past UACCESS bound).
 static bool sys_validate_user_buf(u64 buf_va, u64 len) {
-    if (len == 0)                                    return true;
-    if (buf_va == 0)                                 return false;
-    if (buf_va >= UACCESS_USER_VA_TOP)                return false;
-    if (buf_va + len < buf_va)                        return false;
-    if (buf_va + len > UACCESS_USER_VA_TOP)           return false;
-    return true;
+    return uaccess_user_range_ok(buf_va, len);
 }
 
 // The Spoor half of spoor_write_common: every gate a write passes once the
@@ -5390,6 +5385,10 @@ static s64 wstat_apply(struct Proc *p, struct Spoor *c, u32 valid, u32 mode,
     // is EACCES, never EPERM (-EPERM is the -1 the pouch seam reads as EIO).
     if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_TIMES)) &&
         c->dev && c->dev->perm_enforced) {
+        if (c->dev->wstat_bind) {
+            int br = c->dev->wstat_bind(c);
+            if (br != 0)                             return wstat_dev_errno(br);
+        }
         struct t_stat cur;
         int sr = spoor_stat_native(c, &cur);
         if (sr != 0)                                 return wstat_dev_errno(sr);

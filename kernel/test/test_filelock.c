@@ -9,6 +9,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/exception.h"
+#include "../../arch/arm64/uaccess.h"
 
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>
@@ -74,6 +75,7 @@ static u8             g_lk_owner_tag;      // aux of a minted owner
 static struct Spoor  *g_lk_stale;          // .lock on this Spoor answers ESTALE
 static u64            g_lk_stale_path;     // != 0: every .lock on this path does
 static struct Spoor  *g_lk_dead;           // .lock_ident on this Spoor answers ESTALE
+static int            g_lk_ident_fail;     // != 0: and answers this instead
 static u32            g_lk_idents;         // .lock_ident calls that asked the "server"
 // A fake Spoor's generation is its qid.vers once .lock_ident has learned it (0
 // = not yet); the file's true one is registered here (default 1).
@@ -99,6 +101,7 @@ static void lk_reset(void) {
     g_lk_stale = NULL;
     g_lk_stale_path = 0;
     g_lk_dead = NULL;
+    g_lk_ident_fail = 0;
     for (u32 i = 0; i < 8; i++) { g_lk_gens[i].s = NULL; g_lk_gens[i].gen = 0; }
     g_lk_idents = 0;
 }
@@ -222,7 +225,7 @@ static bool lk_same_file(struct Spoor *a, struct Spoor *b) {
 static int lk_ident(struct Spoor *c) {
     if (c->qid.vers != 0) return 0;
     g_lk_idents++;
-    if (c == g_lk_dead) return -T_E_STALE;
+    if (c == g_lk_dead) return g_lk_ident_fail ? g_lk_ident_fail : -T_E_STALE;
     c->qid.vers = lk_true_gen(c);
     return 0;
 }
@@ -281,6 +284,11 @@ static bool lk_acquired(struct Spoor *c) {
     return false;
 }
 
+static void lk_sync_reset(void) {
+    g_lk_sync_n = g_lk_sync_last_seq = 0;
+    for (u32 i = 0; i < 8; i++) g_lk_synced[i] = NULL;
+}
+
 static void lk_acq_reset(void) {
     g_lk_acq_n = g_lk_acq_last_seq = g_lk_take_seq = 0;
     for (u32 i = 0; i < 8; i++) g_lk_acquired[i] = NULL;
@@ -336,8 +344,12 @@ static void lk_teardown(struct lk_fix *f, u64 maxpath) {
     g_lk_close_fd = -1;
 }
 
+static s64 lk_call_out(struct lk_fix *f, int i, u64 op, u64 start, u64 len, u64 out) {
+    return sys_file_lock_handler((u64)f->fd[i], op, start, len, out);
+}
+
 static s64 lk_call(struct lk_fix *f, int i, u64 op, u64 start, u64 len) {
-    return sys_file_lock_handler((u64)f->fd[i], op, start, len, 0x10000000ull);
+    return lk_call_out(f, i, op, start, len, 0x10000000ull);
 }
 
 static void lk_fix_init(struct lk_fix *f) {
@@ -365,9 +377,11 @@ static void refusals_body(struct lk_fix *f, int rw, int ro, int wo, int opath,
                    -(s64)T_E_INVAL, "a test that waits is EINVAL");
     TEST_EXPECT_EQ(lk_call(f, rw, W, 2, (u64)-1ll), -(s64)T_E_INVAL,
                    "a range past 2^64 is EINVAL");
+    TEST_EXPECT_EQ(lk_call(f, rw, W, 1, (u64)-1ll), -(s64)T_E_INVAL,
+                   "a range reaching 2^64 is EINVAL");
     TEST_EXPECT_EQ(g_lk_calls, 0u, "no refusal reached the Dev");
-    // The control one byte away: the last byte is exactly 2^64 - 1.
-    TEST_EXPECT_EQ(lk_call(f, rw, W, 1, (u64)-1ll), (s64)0, "a range ending at 2^64 - 1 locks");
+    // The control one byte away: the range ends at exactly 2^64 - 1.
+    TEST_EXPECT_EQ(lk_call(f, rw, W, 1, (u64)-2ll), (s64)0, "a range ending at 2^64 - 1 locks");
     TEST_EXPECT_EQ(lk_call(f, rw, U, 0, 0), (s64)0, "and unlocks");
 
     u32 calls = g_lk_calls;
@@ -385,6 +399,22 @@ static void refusals_body(struct lk_fix *f, int rw, int ro, int wo, int opath,
                    "a Dev with no lock slots is ENOLCK");
 
     TEST_EXPECT_EQ(lk_call(f, ro, U, 0, 0), (s64)0, "an unlock needs no right");
+    // An answer the copy-out could not recover from never reaches it, and the
+    // question never reaches the server.
+    const u64 T = R | SYS_FILE_LOCK_TEST;
+    calls = g_lk_calls;
+    TEST_EXPECT_EQ(lk_call_out(f, wo, T, 0, 1, 0xffff000000000000ull), -(s64)T_E_FAULT,
+                   "a kernel-half answer is EFAULT");
+    TEST_EXPECT_EQ(lk_call_out(f, wo, T, 0, 1, 0), -(s64)T_E_FAULT, "so is a null one");
+    TEST_EXPECT_EQ(lk_call_out(f, wo, T, 0, 1, UACCESS_USER_VA_TOP - 8), -(s64)T_E_FAULT,
+                   "one that runs past the user half");
+    TEST_EXPECT_EQ(lk_call_out(f, wo, T, 0, 1, (u64)-8ll), -(s64)T_E_FAULT, "and one that wraps");
+    TEST_EXPECT_EQ(g_lk_calls, calls, "none reached the Dev");
+    // The control one byte away: the last answer that fits asks, then faults on
+    // kproc's empty user half.
+    TEST_EXPECT_EQ(lk_call_out(f, wo, T, 0, 1, UACCESS_USER_VA_TOP - sizeof(struct t_file_lock)),
+                   -(s64)T_E_FAULT, "the highest answer in the user half");
+    TEST_EXPECT_EQ(g_lk_calls, calls + 1, "reached the Dev");
     calls = g_lk_calls;
     TEST_EXPECT_EQ(lk_call(f, wo, R | SYS_FILE_LOCK_TEST, 0, 1), -(s64)T_E_FAULT,
                    "a test needs no right; its answer faults on kproc's empty user half");
@@ -463,15 +493,22 @@ static void proc_owner_body(struct lk_fix *f, int a, int b, int c) {
     TEST_ASSERT(owner != f->sp[a] && owner != f->sp[b], "the lock is the owner's, not A's");
     TEST_EXPECT_EQ(lk_call(f, b, R, 0, 10), -(s64)T_E_AGAIN,
                    "an open-file lock conflicts with the Proc's own lock");
+    lk_sync_reset();
     TEST_EXPECT_EQ(lk_call(f, b, R | P, 0, 10), (s64)0,
                    "the Proc's read lock through B replaces its write lock");
+    TEST_ASSERT(lk_synced(f->sp[a]) && lk_synced(f->sp[b]) && !lk_synced(f->sp[c]),
+                "after landing the writes of every open of file 1, and only file 1");
+    TEST_ASSERT(g_lk_sync_last_seq < g_lk_take_seq, "before the conversion was sent");
     TEST_EXPECT_EQ(g_lk_last_spoor, owner, "on the same owner");
     TEST_EXPECT_EQ(g_lk_mints, 1u, "adopted, not minted");
     TEST_EXPECT_EQ(lk_call(f, b, R, 0, 10), (s64)0, "and now admits B's read lock");
     TEST_EXPECT_EQ(lk_call(f, c, W | P, 0, 0), (s64)0, "a second file");
     TEST_EXPECT_EQ(g_lk_mints, 2u, "mints a second owner");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 2u, "two entries");
-    TEST_EXPECT_EQ(g_lk_sync_n, 0u, "no take landed anything");
+    lk_sync_reset();
+    TEST_EXPECT_EQ(lk_call(f, a, R | SYS_FILE_LOCK_TEST | P, 0, 10), -(s64)T_E_FAULT,
+                   "a test runs (its answer faults on kproc)");
+    TEST_EXPECT_EQ(g_lk_sync_n, 0u, "and lands nothing");
     TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_UN | P, 0, 0), (s64)0,
                    "the Proc unlocks file 1 through A");
     TEST_ASSERT(lk_synced(f->sp[a]) && lk_synced(f->sp[b]) && !lk_synced(f->sp[c]),
@@ -497,7 +534,7 @@ void test_filelock_proc_owner(void) {
 // landing every staged write the Proc can reach.
 // -----------------------------------------------------------------------------
 
-static void close_drops_body(struct lk_fix *f, int a, int b, int d) {
+static void close_drops_body(struct lk_fix *f, int a, int b, int d, int op) {
     TEST_EXPECT_EQ(lk_call(f, a, SYS_FILE_LOCK_WR | SYS_FILE_LOCK_PROC, 0, 10), (s64)0,
                    "the Proc locks file 1 through A");
     struct Spoor *owner = g_lk_last_spoor;
@@ -505,6 +542,13 @@ static void close_drops_body(struct lk_fix *f, int a, int b, int d) {
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "closing another file's fd keeps the entry");
     TEST_EXPECT_EQ(g_lk_owner_closes, 0u, "and the owner");
     u32 un0 = g_lk_un_seq;
+    // A navigation-only descriptor is no open of the file: the control one
+    // variable away is B's close, below.
+    lk_close_fd(f, op);
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "closing an O_PATH fd of file 1 keeps the entry");
+    TEST_EXPECT_EQ(g_lk_un_seq, un0, "and sends no unlock");
+    TEST_EXPECT_EQ(lk_held_on(1), 1u, "and the lock is held");
+    lk_sync_reset();                 // the take already landed A's and B's writes
     lk_close_fd(f, b);
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "closing B (file 1) drops the entry");
     TEST_EXPECT_EQ(g_lk_owner_closes, 1u, "and clunks the owner");
@@ -524,7 +568,9 @@ void test_filelock_close_drops(void) {
     int a = lk_open(&f, &g_lk_dev, 1, RW);
     int b = lk_open(&f, &g_lk_dev, 1, RW);
     int d = lk_open(&f, &g_lk_dev, 2, RW);
-    if (a >= 0 && b >= 0 && d >= 0) close_drops_body(&f, a, b, d);
+    int op = lk_open(&f, &g_lk_dev, 1, RW);
+    if (op >= 0) f.sp[op]->flag |= CWALKONLY;
+    if (a >= 0 && b >= 0 && d >= 0 && op >= 0) close_drops_body(&f, a, b, d, op);
     else test_fail("filelock: fixture allocation failed");
     lk_teardown(&f, 2);
 }
@@ -825,7 +871,7 @@ void test_filelock_stale_entry_retired(void) {
 // that took its number match by number alone. The generation tells them apart.
 // -----------------------------------------------------------------------------
 
-static void reused_number_body(struct lk_fix *f, int y, int y2, int x, int xk) {
+static void reused_number_body(struct lk_fix *f, int y, int y2, int x, int xk, int xi) {
     const u64 P = SYS_FILE_LOCK_PROC;
     lk_set_gen(f->sp[y], 2);
     lk_set_gen(f->sp[y2], 2);
@@ -855,6 +901,14 @@ static void reused_number_body(struct lk_fix *f, int y, int y2, int x, int xk) {
     TEST_EXPECT_EQ(g_lk_idents, asked, "a dead file's descriptor that knows its generation needs no question");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "and its close keeps Y's entry too");
 
+    // A question the server could not answer names no file either.
+    g_lk_dead       = f->sp[xi];
+    g_lk_ident_fail = -T_E_IO;
+    lk_close_fd(f, xi);
+    g_lk_ident_fail = 0;
+    TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "a close that cannot learn its file keeps Y's entry");
+    TEST_EXPECT_EQ(lk_held_on(7), 1u, "and Y's lock");
+
     // The control, one variable away: a live descriptor of Y that never locked.
     lk_close_fd(f, y2);
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "closing another descriptor of Y drops the entry");
@@ -868,7 +922,9 @@ void test_filelock_reused_number(void) {
     int y2 = lk_open(&f, &g_lk_dev, 7, RW);
     int x  = lk_open(&f, &g_lk_dev, 7, RW);
     int xk = lk_open(&f, &g_lk_dev, 7, RW);
-    if (y >= 0 && y2 >= 0 && x >= 0 && xk >= 0) reused_number_body(&f, y, y2, x, xk);
+    int xi = lk_open(&f, &g_lk_dev, 7, RW);
+    if (y >= 0 && y2 >= 0 && x >= 0 && xk >= 0 && xi >= 0)
+        reused_number_body(&f, y, y2, x, xk, xi);
     else test_fail("filelock: fixture allocation failed");
     g_lk_dead = NULL;
     lk_teardown(&f, 7);

@@ -26,9 +26,10 @@ updated: 2026-11-02
 [[sub-kernel-filelock]]).
 - `op` is a type (`SYS_FILE_LOCK_RD` 0, `_WR` 1, `_UN` 2) plus the flags
   `_WAIT`, `_TEST` and `_PROC`. Any other bit, type 3, `_TEST|_UN`,
-  `_TEST|_WAIT`, or a range past 2^64 is `-T_E_INVAL`.
+  `_TEST|_WAIT`, or a range whose end would reach 2^64 is `-T_E_INVAL`.
 - `_TEST` writes a `struct t_file_lock` (32 bytes,
-  `_Static_assert`ed: type, start, len, pid = -1) to `out`.
+  `_Static_assert`ed: type, start, len, pid = -1) to `out`. An `out` outside the
+  user half is `-T_E_FAULT` before the server is asked.
 - The errnos are EBADF, ENOLCK (`T_E_NOLCK` 37), ESTALE (`T_E_STALE` 116),
   EAGAIN, EINTR and EFAULT.
 

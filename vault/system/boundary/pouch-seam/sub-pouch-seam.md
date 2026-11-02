@@ -26,9 +26,10 @@ updated: 2026-11-02
 ---
 ## 0065: fcntl locks and flock (2026-11-02, B-3h4)
 
-`_pouch_descriptor.h` gains `SYS_thyla_file_lock` 137, the `POUCH_FILE_LOCK_*` op
-words, `struct pouch_file_lock` (32 bytes) and `pouch_lock_refuse`. `fcntl.c`
-gains the lock commands, `src/linux/flock.c` the `flock` call ([[sub-pouch-fs]]).
+The new `_pouch_lock.h` holds `SYS_thyla_file_lock` 137, the `POUCH_FILE_LOCK_*` op
+words, `struct pouch_file_lock` (32 bytes) and `pouch_lock_refuse`. Only the lock
+adapters include it, so a checker of `_pouch_descriptor.h` need not mock them.
+`fcntl.c` gains the lock commands, `src/linux/flock.c` the `flock` call ([[sub-pouch-fs]]).
 The census gains `POUCH_CENSUS_LOCKS`, the file-lock prover's legs.
 
 ## 0063: utimensat over SYS_WSTAT, and __syscall7 (2026-10-22, B-3g G12)

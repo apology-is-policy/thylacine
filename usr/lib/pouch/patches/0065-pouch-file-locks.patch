@@ -1,18 +1,19 @@
 Pouch fcntl locks and flock over native SYS_FILE_LOCK 137 (B-3h4; operator
-votes 34 and 35, ARCH 9.6.11).
+votes 34 and 35, ARCH 9.6.11). Its definitions live in _pouch_lock.h, which
+only the lock adapters include.
 
 fcntl F_SETLK, F_SETLKW and F_GETLK name the Proc as the lock's owner, which
 is POSIX's descriptor table: any close of the file by the Proc drops its
 locks, threads share them, and a child does not inherit them. F_OFD_SETLK,
 F_OFD_SETLKW and F_OFD_GETLK name the open file, and l_pid must be 0
 (EINVAL). The range is Linux's (flock64_to_posix_lock): l_whence SEEK_SET,
-SEEK_CUR (the cursor) or SEEK_END (fstat's size, so the cursor never moves);
+SEEK_CUR (the cursor; 0 on a pipe) or SEEK_END (fstat's size, so the cursor never moves);
 a negative l_len locks the bytes before l_start; l_len 0 runs to the end of
 the file; past LLONG_MAX is EOVERFLOW and below 0 EINVAL. The refusals come
 in Linux's order: whence, the range, the type, the access mode, then an OFD
 request's l_pid. A refusal the adapter makes before the kernel sees the
 request first asks the kernel about the descriptor, so a closed one answers
-EBADF, as Linux does. F_SETLKW waits in the kernel and is a cancellation
+EBADF, as Linux does; flock reads its op first, as Linux does. F_SETLKW waits in the kernel and is a cancellation
 point. F_GETLK reports a conflicting lock's type and range with l_whence
 SEEK_SET and l_pid -1, Linux's answer for an OFD lock (the server keeps no
 process ids); a free range changes only l_type, to F_UNLCK. l_type maps by
@@ -30,12 +31,16 @@ caller's wait ends only on a grant or a kill until native waits take caught
 notes (ARCH 8.8.3), so F_SETLKW's EINTR is not reachable yet. Tagged Pouch
 sockets answer ENOSYS (B-3k gives them kernel descriptors).
 
---- a/src/internal/_pouch_descriptor.h
-+++ b/src/internal/_pouch_descriptor.h
-@@ -14,6 +14,30 @@
- #define POUCH_HANDLE_NONBLOCK        0x400L
- #define POUCH_HANDLE_APPEND          0x800L
- 
+--- /dev/null
++++ b/src/internal/_pouch_lock.h
+@@ -0,0 +1,40 @@
++/* Lock adapters only, so a checker of the descriptor header need not mock these. */
++#ifndef _POUCH_LOCK_H
++#define _POUCH_LOCK_H
++#include <errno.h>
++#include "syscall.h"
++#include "_pouch_descriptor.h"
++
 +/* SYS_thyla_file_lock (kernel syscall.h SYS_FILE_LOCK and its op word): a
 + * byte-range lock the file's server holds. The owner is the open file, or
 + * with PROC the Proc's descriptor table. len 0 runs to the end of the file.
@@ -60,13 +65,6 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +    unsigned _pad1;
 +};
 +
- static inline int pouch_descriptor_check(int fd)
- {
-     if (fd < 0) return EBADF;
-@@ -29,6 +53,15 @@
-     return result == -1 ? -ENOSYS : result;
- }
- 
 +/* A lock request the adapter refuses before the kernel sees it. Linux has
 + * already answered a closed descriptor EBADF by then, so ask the kernel. */
 +static inline int pouch_lock_refuse(int fd, int e)
@@ -75,13 +73,10 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +    errno = e;
 +    return -1;
 +}
-+
- /* O_CLOEXEC is the native descriptor flag, set after the descriptor exists:
-  * a peer thread's spawn in between sees it unflagged, which Linux's single
-  * call rules out. A tagged socket has no native slot to flag: ENOSYS while it
++#endif
 --- a/src/fcntl/fcntl.c
 +++ b/src/fcntl/fcntl.c
-@@ -1,6 +1,9 @@
+@@ -1,7 +1,11 @@
  #include <fcntl.h>
  #include <stdarg.h>
  #include <errno.h>
@@ -89,9 +84,11 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +#include <unistd.h>
 +#include <sys/stat.h>
  #include "_pouch_descriptor.h"
++#include "_pouch_lock.h"
  
  /* The open-file status the kernel can change after open is O_NONBLOCK only:
-@@ -19,6 +22,119 @@
+  * O_APPEND lives in the server's open of the file, so F_SETFL may restate it
+@@ -19,6 +23,123 @@
  	return fl;
  }
  
@@ -127,8 +124,12 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +		base = 0;
 +		break;
 +	case SEEK_CUR:
++		/* A descriptor with no cursor reads as 0, Linux's f_pos of a pipe. */
 +		base = __lseek(fd, 0, SEEK_CUR);
-+		if (base < 0) return -1;
++		if (base < 0) {
++			if (errno != ESPIPE) return -1;
++			base = 0;
++		}
 +		break;
 +	case SEEK_END: {
 +		/* fstat, not lseek: the lock must not move the cursor. */
@@ -211,7 +212,7 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
  int fcntl(int fd, int cmd, ...)
  {
      int arg = 0;
-@@ -36,6 +152,18 @@
+@@ -36,6 +157,18 @@
          va_end(ap);
          break;
      }
@@ -232,28 +233,29 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
          return -1;
 --- a/src/linux/flock.c
 +++ b/src/linux/flock.c
-@@ -1,7 +1,24 @@
+@@ -1,7 +1,25 @@
  #include <sys/file.h>
 -#include "syscall.h"
 +#include <errno.h>
 +#include "_pouch_descriptor.h"
++#include "_pouch_lock.h"
  
 +/* flock over SYS_thyla_file_lock: a whole-file lock owned by the open file,
 + * the byte-range lock Linux's NFS client turns flock into. So flock and fcntl
 + * locks on one file conflict, and LOCK_EX needs a descriptor open for
-+ * writing (EBADF), as on Linux NFS. */
++ * writing (EBADF), as on Linux NFS. Linux reads the op before the descriptor. */
  int flock(int fd, int op)
  {
 -	return syscall(SYS_flock, fd, op);
-+	int ec = pouch_descriptor_check(fd);
-+	if (ec) { errno = ec; return -1; }
 +	long type;
 +	switch (op & ~LOCK_NB) {
 +	case LOCK_SH: type = POUCH_FILE_LOCK_RD; break;
 +	case LOCK_EX: type = POUCH_FILE_LOCK_WR; break;
 +	case LOCK_UN: type = POUCH_FILE_LOCK_UN; break;
-+	default: return pouch_lock_refuse(fd, EINVAL);
++	default: errno = EINVAL; return -1;
 +	}
++	int ec = pouch_descriptor_check(fd);
++	if (ec) { errno = ec; return -1; }
 +	if (!(op & LOCK_NB) && type != POUCH_FILE_LOCK_UN) type |= POUCH_FILE_LOCK_WAIT;
 +	long ret = pouch_descriptor_result(__syscall5(SYS_thyla_file_lock, fd, type, 0, 0, 0));
 +	if (ret < 0) { errno = (int)-ret; return -1; }

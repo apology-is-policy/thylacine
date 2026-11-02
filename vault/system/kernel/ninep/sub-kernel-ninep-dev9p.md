@@ -36,9 +36,15 @@ until then). Any other open answers its own fid.
   charge is the snapshot's size plus `co_names_len`.
 - **`co_bind`** is a loose open's first need. It walks the kept names from the
   base (Twalkgetattr, BASIC|GEN) into a fresh fid and accepts only a full walk
-  to the same `qid.path` with a valid generation equal to `lock_gen`. Otherwise
-  the fid goes back and the answer is `-T_E_STALE` (`-T_E_INTR` for an
-  interrupted walk, `-T_E_NOMEM` with nothing sent). The fid is CAS-installed in
+  to the same `qid.path` with a valid generation equal to `lock_gen`. A name that
+  no longer reaches the file (a partial walk, ENOENT, ENOTDIR, ESTALE) or reaches
+  another one answers `-T_E_STALE`, and any fid goes back. A wire that failed says
+  nothing about the file and answers its own errno through `dev9p_wire_errno`
+  (`-T_E_INTR` for an interrupted walk; `-T_E_NOMEM` with nothing sent), so a table
+  peer's failure refuses a take rather than letting that peer keep its snapshot
+  under the lock. A run from an opened base is not minted loose: a server refuses
+  a walk from an opened fid, so that open could never bind (strict learns it at its
+  wire query). The fid is CAS-installed in
   `co_kfid`; a loser clunks its own (`dev9p.cached_open_install_race`).
 - **`co_read_live`** ends the snapshot: a zero-name clone of the kept fid and a
   Tlopen O_RDONLY, CAS-installed in `co_rfid`, the loser clunking its own.
@@ -51,7 +57,10 @@ until then). Any other open answers its own fid.
   EINTR as they are and otherwise ENOLCK (`co_bind_lock_errno`).
   `dev9p_lock_owner` clones `lock_fid(p)`. `dev9p_lock_sync(ACQUIRE)` answers
   what a lock call can: ESTALE, EINTR, else ENOLCK.
-- **Metadata.** `dev9p_wstat_native` binds and sends Tsetattr on the kept fid.
+- **Metadata.** `dev9p_wstat_bind` (the Dev's `wstat_bind`) binds before
+  `wstat_apply` reads the stat its policy judges, because the open-time stat may
+  name a former owner. `dev9p_wstat_native` binds too and sends Tsetattr on the
+  kept fid.
   `dev9p_stat_native` serves the open-time stat until a fid is bound, then asks
   the server through it. `co_patch_stat` reports the snapshot's size and version
   while reads still serve the snapshot, so a reader sized by fstat reads what is
@@ -78,12 +87,14 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
 - A grant drops the qid's Larder attributes and pages. The invalidates log
   the qid, so a fill in flight from before the grant is dropped rather than
   installed after it.
-- An unlock first lands `c`'s write-behind run (`dev9p_lock_sync`). A flush
-  that fails still releases, and the error latches for the next write or
-  fsync.
+- Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
+  unlock gives its range up, and a conversion to a read lock admits readers. A
+  test lands nothing. A flush that fails still sends the request, and the error
+  latches for the next write or fsync.
 - `dev9p_lock_owner(c)` mints a second owner on `c`'s file: a zero-name
   Twalk clone of `c`'s fid into a fresh fid (Stratum admits the clone of an
-  open fid). The clone is unopened, never published, and flagged
+  open fid). A clone that fails answers ESTALE or EINTR as they are and otherwise
+  ENOLCK. The clone is unopened, never published, and flagged
   `fid_locks`, so `dev9p_close` never parks it in the directory-fid cache.
   It inherits `c`'s learned generation.
 - `dev9p_lock_ident(c)` learns once, with one Tgetattr for

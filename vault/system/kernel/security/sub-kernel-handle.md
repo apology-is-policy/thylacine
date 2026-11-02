@@ -51,9 +51,10 @@ because the handle table already has the right lifetime and sharing.
   file. A dead entry is never found again.
 - `lock_owners_on_close` runs after a descriptor leaves the table and before
   its object is released, from `handle_close`'s report path,
-  `handle_replace` and `handle_dup_to`. If an entry names the closed file
-  (by number, then confirmed by the closed Spoor's identity; a dead file's
-  descriptor shows no entry), it lands every staged write of that file the
+  `handle_replace` and `handle_dup_to`. A navigation-only descriptor is no open
+  of the file, and its close skips all of this. If an entry names the closed file
+  (by number, then confirmed by the closed Spoor's identity; a descriptor that
+  cannot learn its identity, a dead file's included, shows no entry), it lands every staged write of that file the
   table can reach (`lock_sync_table`). It then sends the whole-file unlock
   through the entry, waits for it, and removes the entry unless a lock call
   is using it.

@@ -36,7 +36,9 @@ access faulted and the caller must treat it as a bad-address error. The kernel
 does not extinct.
 
 Callers validate the address range before calling; the primitives do not
-range-check. The word primitives additionally require alignment from the
+range-check. `uaccess_user_range_ok(va, len)` is the rule: a non-empty range lies
+wholly in the user half, because a kernel-half fault extincts rather than recovers.
+`sys_validate_user_buf` wraps it. The word primitives additionally require alignment from the
 caller, because an alignment fault is *not* in the recoverable set.
 
 ## Mechanism

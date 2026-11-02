@@ -100,4 +100,15 @@ u64 uaccess_fixup_lookup(u64 fault_pc);
 // user VA" before consulting the fixup table.
 #define UACCESS_USER_VA_TOP  (1ull << 47)
 
+// May [va, va + len) go to a uaccess primitive? It must lie wholly in the user
+// half: the fixup table recovers a user-half fault, and a kernel-half address
+// faults to an extinction. An empty range needs no address.
+static inline bool uaccess_user_range_ok(u64 va, u64 len) {
+    if (len == 0)                        return true;
+    if (va == 0)                         return false;
+    if (va >= UACCESS_USER_VA_TOP)       return false;
+    if (va + len < va)                   return false;
+    return va + len <= UACCESS_USER_VA_TOP;
+}
+
 #endif // THYLACINE_ARCH_ARM64_UACCESS_H

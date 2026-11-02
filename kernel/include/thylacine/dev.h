@@ -202,6 +202,10 @@ struct Dev {
                             const char **name, int nname);
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
+    // wstat_bind(c): before SYS_WSTAT reads the stat its policy judges, make
+    // stat_native report the file as it is now, not as it was at open. A failure
+    // refuses the wstat with that errno. NULL-permitted.
+    int             (*wstat_bind)(struct Spoor *c);
     int             (*wstat_native)(struct Spoor *c, u32 valid,
                                     u32 mode, u32 uid, u32 gid, u64 size,
                                     const struct t_timespec *times);
@@ -374,7 +378,8 @@ struct Dev {
     //     with `test` non-NULL, ask without changing anything and fill *test.
     //     Never waits: a conflict is -T_E_AGAIN, and the caller retries. A
     //     granted take leaves c reading what the server holds (lock-to-unlock
-    //     consistency); a drop sends only after c's staged writes land.
+    //     consistency); every set-lock sends only after c's staged writes land,
+    //     since an unlock and a conversion each give something up.
     //   lock_owner(c, err) -- mint an UNOPENED Spoor naming c's file with its
     //     own server-side owner (dev9p: a zero-name clone of c's fid). It is
     //     never published as a descriptor; only the Proc owner table holds
@@ -383,7 +388,7 @@ struct Dev {
     //     under the handle-table spinlock: it must not block. It may answer by
     //     what the two Spoors already know of their files.
     //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
-    //     before a lock on its file is dropped. DEV_LOCK_SYNC_ACQUIRE: from now
+    //     before a set-lock on its file. DEV_LOCK_SYNC_ACQUIRE: from now
     //     on c reads what the server holds (dev9p: a cached open leaves its
     //     snapshot); asked before a take on c's file, and a failure refuses
     //     the take.

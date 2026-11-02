@@ -42,10 +42,14 @@ Pouch serves the POSIX file locks over `SYS_FILE_LOCK` (ARCH 9.6.11,
 owner, `F_OFD_*` for the open file (`l_pid` must be 0), and `flock` for the open
 file over the whole file, waiting unless `LOCK_NB` is given. Pouch holds Linux's
 `flock64_to_posix_lock` range rules: `l_whence` resolved through `lseek` and
-`fstat` when the call is made, a negative `l_len` normalised, overflow as
-EOVERFLOW. The refusals come in Linux's order (whence, range, type, access mode,
-OFD `l_pid`). `pouch_lock_refuse` probes `flags_get` first, so a closed descriptor
-answers EBADF even for a request Pouch refuses itself. `F_SETLKW` is a
+`fstat` when the call is made (a descriptor with no cursor reads as 0, Linux's
+`f_pos` of a pipe), a negative `l_len` normalised, overflow as EOVERFLOW.
+`fcntl`'s refusals come in Linux's order (whence, range, type, access mode, OFD
+`l_pid`). `pouch_lock_refuse` probes `flags_get` first, so a closed descriptor
+answers EBADF even for a request Pouch refuses itself. `flock` reads its op first,
+as Linux does, so a bad op answers EINVAL on any descriptor. The call's number, op
+bits and answer structure live in `_pouch_lock.h`, which only `fcntl.c` and
+`flock.c` include, so a checker of `_pouch_descriptor.h` need not mock them. `F_SETLKW` is a
 cancellation point (`__syscall_cp`). `F_GETLK` answers `l_pid` -1, changes only
 `l_type` when the range is free, and writes `l_len` 0 for a conflict that ends past
 `LLONG_MAX`. `LOCK_EX` needs a descriptor open for writing (EBADF), as Linux's NFS
@@ -54,11 +58,11 @@ Linux answers EFAULT. A socket's tag answers ENOSYS while it is live and EBADF
 once it is not.
 
 `tools/test-pouch-descriptor-ops.py` runs the real `fcntl.c` and `flock.c` on the
-host, with the ABI parsed from the kernel's `syscall.h`: 130 cases at each of two
+host, with the ABI parsed from the kernel's `syscall.h`: 132 cases at each of two
 optimisation levels, with named mutants for each rule. On the guest,
 `/bin/pouch-hello-locks` (`POUCH_CENSUS_LOCKS`) runs its legs over Stratum's table
 (`own`, `split`, `posix-close`, `ofd`, `ofd-vs-proc`, `flock`, `wait`, `sqlite`,
-`cached-ro`, `errors`). Each conflict is between two Procs, or two open files of
+`cached-ro`, `downgrade`, `errors`). Each conflict is between two Procs, or two open files of
 one Proc: the prover spawns itself with a mode in `argv[1]` to ask.
 
 ## utimensat sets times; chmod's refusal is EPERM (2026-10-22, 0063)

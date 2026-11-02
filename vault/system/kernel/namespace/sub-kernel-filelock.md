@@ -40,17 +40,21 @@ per (Proc, file), and which file each names.
   file. Threads share the entry. An rfork child starts with an empty table.
   exec keeps the table, and close-on-exec closes drop entries as any other
   close does. **Any close of the file by the Proc** drops all the Proc's
-  locks on it.
+  locks on it, except that a navigation-only descriptor is no open of the file
+  and its close drops nothing (Linux's `filp_flush` skips `FMODE_PATH`).
 - **Refusals.**
   - `-T_E_INVAL`: an unknown op bit, type 3, `_TEST|_UN`, `_TEST|_WAIT`, or a
-    range whose last byte lies past 2^64 (`len` 0 means "to EOF").
+    range whose end would reach 2^64 (`len` 0 means "to EOF"). A server's table
+    holds the end in a u64, and Stratum refuses more.
   - `-T_E_BADF`: not a Spoor; a navigation-only (`T_OPATH`) descriptor; a
     read lock without read rights; a write lock without write rights.
   - `-T_E_NOLCK`: the Dev serves no locks; the server answers ERROR, GRACE or
     a status 9P does not define; or the Proc's table is full
     (`PROC_LOCK_OWNER_MAX` 128, I-32).
   - `-T_E_STALE`: the descriptor's file has died on its server.
-  - `-T_E_FAULT`: a `_TEST` answer the call cannot copy out.
+  - `-T_E_FAULT`: a `_TEST` answer outside the user half, refused before any
+    wire op because only a user-half fault recovers (`uaccess_user_range_ok`,
+    [[sub-kernel-uaccess]]), or one the call cannot copy out.
 - **Conflict.** `-T_E_AGAIN`. With `_WAIT` the call polls instead, backing
   off from 1 ms to 64 ms, doubling each time. The server cannot report when a
   conflicting lock goes, so the cap bounds both the latency after a release
@@ -88,8 +92,10 @@ PROC owner it:
    the entry.
 2. If there is no entry, treats an unlock as done, and runs a test through a
    temporary owner from `Dev.lock_owner`, clunked after the call.
-3. For an unlock, first lands every staged write of the file that the Proc
-   can reach (`handle_lock_sync_file(..., DEV_LOCK_SYNC_RELEASE)`).
+3. For any set-lock (an unlock, a take, a conversion), first lands every staged
+   write of the file that the Proc can reach
+   (`handle_lock_sync_file(..., DEV_LOCK_SYNC_RELEASE)`). A conversion gives up its
+   write lock and admits readers. A test lands nothing.
 4. Locks through the owner.
 5. If the owner's fid answers `-T_E_STALE` on the first try, retires the
    entry and asks again once. The entry's file has died: Stratum kills an
@@ -126,7 +132,7 @@ held across an RPC.
   harm. A refused take spends no slot: an entry that never held a lock is
   removed when its last user puts it.
 - I-38 (lock-to-unlock consistency): a grant drops the file's Larder attrs
-  and pages, and every release lands the staged writes first (dev9p half).
+  and pages, and every set-lock lands the staged writes first (dev9p half).
 - I-5/I-6: none. A lock is not a handle, and a minted owner is never
   published to a handle slot.
 
@@ -141,7 +147,7 @@ A dying thread that cannot flush or send hands both to the session's closer
 
 A take is one Tlock round trip, plus on the Proc's first take on a file a
 zero-name Twalk and one Tgetattr for the generation (learned once per
-Spoor). A release adds the write-behind flush.
+Spoor). A set-lock with staged writes adds the write-behind flush.
 
 ## Prosecution
 
@@ -181,16 +187,33 @@ B-3h3's mutants, each of which must go red at its own leg (not yet run):
   `dev9p.cached_open_loose_lock`.
 - G16, a NULL generation is kept: `larder.attr_gen`.
 
+Audit round 1's regressions, each of which must go red at its own leg (not yet run):
+- G20, a `_TEST` answer is not range-checked: the kernel extincts at
+  `filelock.refusals`.
+- G21a, only an unlock flushes: `dev9p.lock_unlock_flushes_first`. G21b, only a
+  Proc unlock syncs; G21c, a test syncs: `filelock.proc_owner`.
+- G22, `wstat_apply` does not bind before its policy:
+  `dev9p.cached_open_loose_wstat`.
+- G23, an `O_PATH` close drops the Proc's locks: `filelock.close_drops`.
+- G24, every walk failure is ESTALE; G24b, only ENOENT is; G28, a loose mint from
+  an opened base: `dev9p.cached_open_loose_stale`.
+- G25, a clone's failure is always ENOLCK: `dev9p.lock_owner_clone`.
+- G26, only ESTALE stops the close hook: `filelock.reused_number`.
+- G27, a range may reach 2^64: `filelock.refusals`.
+- G29, G30, `proc_id` 0: `dev9p.lock_wire_and_status`, `dev9p.lock_test_answers`.
+
 ## Cached opens and the take's sync (B-3h3, 2026-11-02)
 
 A take must leave the snapshot of every open it covers, or the holder reads the
 file as it was at open. `file_lock_acquire_sync` runs before every take attempt,
-on `c` and then, for the Proc owner, on every open of the file in the table
-(`handle_lock_sync_file(..., DEV_LOCK_SYNC_ACQUIRE)`). The open-file owner learns
+on `c` and then, for either owner, on every open of the file in the table
+(`handle_lock_sync_file(..., DEV_LOCK_SYNC_ACQUIRE)`), because the lock covers what
+any of the Proc's opens read. The open-file owner learns
 its file first, as an entry's get does, so an open of a dead file sharing its
 number is left alone. A failed sync refuses the take, except that a table peer
 answering ESTALE keeps its snapshot and the take through the descriptor that can
-reach the file stands. The descriptor's own ESTALE refuses first. A cached open's
+reach the file stands. A peer's other failures refuse: nothing says the file
+moved. The descriptor's own ESTALE refuses first. A cached open's
 close now matches entries by generation as any open's does: both kinds learn one
 at mint.
 

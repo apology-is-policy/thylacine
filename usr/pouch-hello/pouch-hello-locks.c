@@ -13,7 +13,9 @@
 //                 there reports its type and range, l_pid -1.
 //   split       : unlocking the middle of a lock leaves both ends held.
 //   posix-close : closing ANY descriptor of the file drops all the Proc's
-//                 F_SETLK locks on it (POSIX's descriptor-table owner).
+//                 F_SETLK locks on it (POSIX's descriptor-table owner). A
+//                 navigation-only descriptor is no open of the file: O_PATH's
+//                 close, and the one inside chmod(path), keep them.
 //   ofd         : an F_OFD_ lock belongs to its open file: a second open of
 //                 the file in the same Proc conflicts with it, and closing
 //                 that second open drops nothing.
@@ -28,8 +30,11 @@
 //                 is admitted and a writer is not.
 //   cached-ro   : a read-only descriptor of a small file the kernel holds whole
 //                 (a cached open, whose kernel legs pin the mechanism): it takes
-//                 a read lock, flock, fchmod and futimens, and once locked it
-//                 reads what the last holder wrote, not what it saw at open.
+//                 a read lock, flock, fchmod and futimens. Before the lock it
+//                 reads what it saw at open, and once locked what the last
+//                 holder wrote.
+//   downgrade   : a write lock converted to a read lock lands the holder's
+//                 staged append first, so the reader it admits reads it.
 //   errors      : a write lock through a read-only descriptor and flock
 //                 LOCK_EX on one are EBADF, an OFD request with a pid and a
 //                 bad whence are EINVAL, a range past LLONG_MAX is EOVERFLOW,
@@ -112,6 +117,8 @@ static int child(const char *a1, const char *a2, const char *a3, const char *a4,
 //   flk  <ex|sh|un> <errno>                     flock with LOCK_NB
 //   setw <r|w> <start> <len>                    F_SETLKW, after one byte on fd 1
 //   wbyte                                       write 'x' at 0 under F_SETLKW
+//   size <n>                                    fstat reports size n
+//   rbyte <off> <c>                             under a read lock on byte 0, byte off is c
 static int child_main(int argc, char **argv) {
     int fd = open(FILE_A, O_RDWR);
     if (fd < 0) return 90;
@@ -150,6 +157,17 @@ static int child_main(int argc, char **argv) {
         if (lk(fd, F_SETLKW, 'w', 0, 1) != 0) return 88;
         if (pwrite(fd, "x", 1, 0) != 1) return 87;
         return lk(fd, F_SETLK, 'u', 0, 1) == 0 ? 0 : 86;
+    }
+    if (!strcmp(m, "size") && argc >= 3) {
+        struct stat st;
+        if (fstat(fd, &st) != 0) return 85;
+        return st.st_size == strtoll(argv[2], 0, 0) ? 0 : 84;
+    }
+    if (!strcmp(m, "rbyte") && argc >= 4) {
+        if (lk(fd, F_SETLK, 'r', 0, 1) != 0) return 83;
+        char b = 0;
+        if (pread(fd, &b, 1, strtoll(argv[2], 0, 0)) != 1) return 82;
+        return b == argv[3][0] ? 0 : 81;
     }
     return 89;
 }
@@ -208,6 +226,12 @@ static int leg_split(int fd) {
 static int leg_posix_close(int fd) {
     if (lk(fd, F_SETLK, 'w', 0, 10) != 0) return fail("posix-close: F_SETLK WRLCK [0,10)");
     if (other_set('s', 'w', 0, 10, EAGAIN) != 0) return fail("posix-close: the lock is not held");
+    int op = open(FILE_A, O_PATH);
+    if (op < 0) return fail("posix-close: an O_PATH open");
+    if (close(op) != 0) return fail("posix-close: its close");
+    if (other_set('s', 'w', 0, 10, EAGAIN) != 0) return fail("posix-close: an O_PATH close dropped the Proc's locks");
+    if (chmod(FILE_A, 0644) != 0) return fail("posix-close: chmod");
+    if (other_set('s', 'w', 0, 10, EAGAIN) != 0) return fail("posix-close: chmod(path) dropped the Proc's locks");
     int fd2 = open(FILE_A, O_RDWR);
     if (fd2 < 0) return fail("posix-close: second open");
     if (close(fd2) != 0) return fail("posix-close: close");
@@ -316,8 +340,12 @@ static int leg_cached_ro(void) {
     int ro = open(FILE_A, O_RDONLY);
     if (ro < 0) return fail("cached-ro: open");
     if (child("wbyte", 0, 0, 0, 0, 0) != 0) return fail("cached-ro: another Proc's locked write");
-    if (lk(ro, F_SETLK, 'r', 0, 1) != 0) return fail("cached-ro: a read lock");
+    // The legs below prove nothing unless this open is the cached one: until the
+    // lock it reads the file as it saw it.
     char b = 0;
+    if (pread(ro, &b, 1, 0) != 1 || b != 'd') return fail("cached-ro: the open is not served from its snapshot");
+    if (lk(ro, F_SETLK, 'r', 0, 1) != 0) return fail("cached-ro: a read lock");
+    b = 0;
     if (pread(ro, &b, 1, 0) != 1 || b != 'x') return fail("cached-ro: the lock does not read the last holder's write");
     if (other_set('s', 'w', 0, 1, EAGAIN) != 0) return fail("cached-ro: the read lock is not held");
     if (flock(ro, LOCK_SH | LOCK_NB) != 0) return fail("cached-ro: flock LOCK_SH");
@@ -331,6 +359,20 @@ static int leg_cached_ro(void) {
     if (close(ro) != 0) return fail("cached-ro: close");
     if (other_set('s', 'w', 0, 1, 0) != 0) return fail("cached-ro: its close kept the Proc's lock");
     printf("pouch-hello-locks: cached-ro ok\n");
+    return 0;
+}
+
+// fd was born by its create, so its appends stage in the kernel. The child's
+// fstat shows the byte has not reached the server until the conversion lands it.
+static int leg_downgrade(int fd) {
+    off_t end = lseek(fd, 0, SEEK_END);
+    if (end < 0) return fail("downgrade: lseek");
+    if (lk(fd, F_SETLK, 'w', 0, 1) != 0) return fail("downgrade: F_SETLK WRLCK");
+    if (write(fd, "y", 1) != 1) return fail("downgrade: the append");
+    if (child("size", num(0, end), 0, 0, 0, 0) != 0) return fail("downgrade: the append was not staged");
+    if (lk(fd, F_SETLK, 'r', 0, 1) != 0) return fail("downgrade: the conversion");
+    if (child("rbyte", num(0, end), "y", 0, 0, 0) != 0) return fail("downgrade: the reader it admitted does not read the append");
+    printf("pouch-hello-locks: downgrade ok\n");
     return 0;
 }
 
@@ -375,6 +417,7 @@ int main(int argc, char **argv) {
         || leg_wait(fd) || release_all(fd) != 0
         || leg_sqlite(fd) || release_all(fd) != 0
         || leg_cached_ro() || release_all(fd) != 0
+        || leg_downgrade(fd) || release_all(fd) != 0
         || leg_errors(fd))
         return 1;
     if (unlink(FILE_A) != 0) return fail("unlink");

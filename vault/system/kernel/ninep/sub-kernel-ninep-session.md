@@ -17,8 +17,9 @@ updated: 2026-10-29
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
 `p9_session_send_lock` and `p9_session_send_getlock` build the two requests
-on a bound fid. They are read-shaped for the fid table: neither changes what
-the fid names. The dispatch arms parse Rlock's status into
+on a bound fid, with the fid as `proc_id` and an empty `client_id`: Stratum keys a
+lock by its fid, and a server that keys by the other two sees the same owners.
+They are read-shaped for the fid table: neither changes what the fid names. The dispatch arms parse Rlock's status into
 `p9_dispatch_result.lock_status`, and Rgetlock into `.getlock` (plain
 scalars, safe past the call).
 

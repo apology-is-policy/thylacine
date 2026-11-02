@@ -481,6 +481,10 @@ u32 handle_lock_owner_count(struct Proc *p) {
 static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
                                  void *obj) {
     if (kind != KOBJ_SPOOR || !obj) return;
+    // A navigation-only descriptor is no open of the file, and chmod(path) and
+    // utimensat(path) close one inside the call. Linux's filp_flush skips the
+    // POSIX-lock release under FMODE_PATH.
+    if (((struct Spoor *)obj)->flag & CWALKONLY) return;
     // Read without t->lock. An entry inserted before the slot was emptied (both
     // under t->lock) is visible here; one inserted after was taken after this
     // close, and the post-grant fd re-check covers a take through this fd.
@@ -489,16 +493,17 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
 
     // An entry found by number alone may name the file that took the number
     // of c's dead one, so a candidate makes c learn its identity first (a
-    // round trip at most once per Spoor, and only on a match). If c's file
-    // has died and it never learned it, no entry can be shown to name it: a
-    // live one names another file, and a dead one holds no lock.
+    // round trip at most once per Spoor, and only on a match). If c cannot
+    // learn it, no entry can be shown to name c's file, and an entry that
+    // names another file must keep its locks; one that does name c's file
+    // keeps them until the Proc's next close of the file or its exit.
     struct Dev *cd = c->dev;
     if (cd && cd->lock_ident) {
         spin_lock(&t->lock);
         bool candidate = lock_owner_find_locked(t, c) != NULL;
         spin_unlock(&t->lock);
         if (!candidate) return;
-        if (cd->lock_ident(c) == -T_E_STALE) return;
+        if (cd->lock_ident(c) != 0) return;
     }
 
     struct Spoor *owner = NULL;

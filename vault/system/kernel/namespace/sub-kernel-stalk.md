@@ -670,14 +670,16 @@ component without X-search, and `T_E_LOOP` through an intermediate loop.
 
 The FINAL run of a plain read-only `STALK_OPEN` (`omode == 0` exactly —
 OTRUNC / write / OEXEC / O_PATH never take it) on a Dev with `open_cached`
-may be served FIDLESS: the Dev revalidates server-fresh (a forced-wire
-query walk; on a B1 LOOSE client the records may be cache-served),
+may be served from a snapshot: the Dev revalidates server-fresh (a forced-wire
+walk that binds the fid the open keeps unopened; on a B1 LOOSE client the records
+may be cache-served and nothing binds until the open first needs a fid),
 snapshots the fully-page-cached content, and returns an OPENED Spoor plus
 the walk's records in `sts`. **The resolver keeps every permission
 decision** — the same left-to-right X post-scan, then the final R/W gate,
 identical fail ordering. ANY mount hit in the run (leaf included — this
-path has no quarry-cross) discards the cached open (`spoor_clunk` is
-wire-free) and falls back to the normal walk, whose split/cross machinery
+path has no quarry-cross) discards the cached open (`spoor_clunk` waits for
+nothing: a loose open sends nothing, and a strict open's kept fid clunks
+asynchronously) and falls back to the normal walk, whose split/cross machinery
 owns the crossing. A NULL return reveals nothing — the observable outcome
 is the normal path's.
 

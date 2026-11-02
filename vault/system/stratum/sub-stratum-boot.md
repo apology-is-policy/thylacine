@@ -88,7 +88,7 @@ spelling, a link's own times included ([[sub-pouch-fs]]), and then
 legs over a TZif file the prover writes itself, which musl opens through
 `openat`'s translation and maps private (0060), and then, from B-3h4
 (2026-11-02), `/bin/pouch-hello-locks` (`POUCH_CENSUS_LOCKS`): the file-lock
-prover's ten legs, every conflict between two Procs or two open files over
+prover's eleven legs, every conflict between two Procs or two open files over
 Stratum's lock table ([[sub-pouch-fs]]). Each is boot-fatal. The
 marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads

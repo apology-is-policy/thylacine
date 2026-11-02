@@ -24,7 +24,10 @@ death pending cannot flush the open file's staged run itself, so it queues
 the flush as a job alone ahead of the lock owner's deferred Tclunk
 ([[sub-kernel-ninep-dev9p]]). Because the queue is per-session FIFO, with
 tail append, head pop and one closer per session, the run lands before the
-lock is released. Test: `p9_closer.dying_lock_release_flushes_shared_run`.
+lock is released. A job alone that fails leaves its failure with the open file
+it wrote for: the run is dropped and the error latches for that open's next
+write, fsync or close. A flush a death cancelled keeps its run for the close that
+follows. Test: `p9_closer.dying_lock_release_flushes_shared_run`.
 It asserts one write, the Tclunk after it, the shared fid left open,
 `jobs` +1, `sent` +1, and `dropped` and `refused` unchanged.
 

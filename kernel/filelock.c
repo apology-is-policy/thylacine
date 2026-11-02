@@ -20,7 +20,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/timer.h"     // timer_now_ns -- the backoff deadline
-#include "../arch/arm64/uaccess.h"   // uaccess_copy_out -- the TEST answer
+#include "../arch/arm64/uaccess.h"   // the TEST answer: its range, its copy-out
 
 // LOCK_WAIT's backoff between attempts: 1 ms, doubling to 64 ms. The server
 // cannot tell us when a conflicting lock goes, so the wait is a poll; the cap
@@ -91,7 +91,9 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
             spoor_clunk(tmp);
             return rc;
         }
-        if (type == SYS_FILE_LOCK_UN && !test)
+        // A set-lock gives up what it replaces: an unlock its range, a
+        // conversion its old type. Every open's staged writes land first.
+        if (!test)
             (void)handle_lock_sync_file(p, owner, DEV_LOCK_SYNC_RELEASE);
         if (take) {
             int sr = file_lock_acquire_sync(p, c, owner);
@@ -139,8 +141,13 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
     if (type > SYS_FILE_LOCK_UN)                return -(s64)T_E_INVAL;
     // F_GETLK asks about a lock to take, and has nothing to wait for.
     if (test && (type == SYS_FILE_LOCK_UN || wait)) return -(s64)T_E_INVAL;
-    // The last byte, start + len - 1, must fit in 64 bits; len 0 is "to EOF".
-    if (len != 0 && len - 1 > (u64)-1ll - start) return -(s64)T_E_INVAL;
+    // The range's end, start + len, must fit in 64 bits: a server's table holds
+    // it as a u64 (Stratum refuses more). len 0 is "to EOF".
+    if (len != 0 && len > (u64)-1ll - start) return -(s64)T_E_INVAL;
+    // Before any question goes to the server: the answer's copy-out recovers
+    // only from a fault in the user half.
+    if (test && !uaccess_user_range_ok(out_va, sizeof(struct t_file_lock)))
+        return -(s64)T_E_FAULT;
 
     // POSIX: a read lock needs a descriptor open for reading, a write lock one
     // open for writing. An unlock and a test need neither.
