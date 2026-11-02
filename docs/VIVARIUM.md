@@ -489,7 +489,7 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
   piece; it composes with notes (I-19) and the EL0-return-tail delivery checkpoint
   that already exists for note delivery and for the I-39 debug stop.
 - **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/`SA_RESTART`/queued
-  `siginfo`/`tgkill` fidelity.
+  `siginfo` fidelity. (`tgkill` fidelity landed at thread-model C4; §6.22.)
 
 **CORRECTION to Tier 1, 2026-07-30 (V-6 entry; user-voted).** The clause *"restores
 `pstate`/`pc` from user memory at `rt_sigreturn`"* described Linux's mechanism, not
@@ -2523,11 +2523,12 @@ default), and the signal chunk's S-2 gave it its own note, `term`
   become a way to signal a Proc the caller could not otherwise reach, so there
   is no third gate. `kill(0, sig)` is the caller, as Pouch's sentinel makes it;
   a negative pid (a process group, or every process) is refused with `EPERM`,
-  because the gate admits no group. Notes are per-Proc, so `tkill` and `tgkill`
-  resolve the thread id to its Proc and post there: a thread-directed signal
-  reaches whichever thread of that Proc takes the note, not necessarily the
-  thread named (a stated imprecision; `tgkill` still refuses a tid outside the
-  named thread group with `ESRCH`). Signal 0 runs the gate and posts nothing. A
+  because the gate admits no group. `tkill` and `tgkill` resolve the thread id to
+  its Proc, ask the same gate, and post at that thread (ARCH 7.6.4 *Thread-directed
+  notes*; operator vote 5, 2026-10-21): only it takes the note, and a blocked one
+  waits on it alone. `kill` ends the whole group whichever thread is named.
+  `tgkill` refuses a tid outside the named thread group with `ESRCH`. Signal 0
+  runs the gate and posts nothing. A
   missing target, or a child already reaped, is `ESRCH`; a refusal by the gate
   is `EPERM`, and the gate is asked first, so a dead Proc that is not the
   caller's child reads `EPERM` too. A child that has died but is not yet reaped
