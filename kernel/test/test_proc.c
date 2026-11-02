@@ -2136,11 +2136,11 @@ void test_proc_exec_reset_dispositions(void) {
                                   .restorer = 0x400100, .mask = 0x2ull };
     struct viv_ksigaction lst = { .handler = 0x400200, .flags = 0x10000000ull,
                                   .restorer = 0x400300, .mask = 0x4ull };
-    _Static_assert(VIV_SIGNOTE_TTY_CONT + 1u == VIV_SIGNOTE_COUNT,
+    _Static_assert(VIV_SIGNOTE_USR2 + 1u == VIV_SIGNOTE_COUNT,
                    "the last-entry seed must sit at COUNT-1");
     TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &ign), "seed IGN");
     TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hnd), "seed handler");
-    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst), "seed COUNT-1");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_USR2, &lst), "seed COUNT-1");
     p->sigtab     = tab;
     p->handler_va = 0x400000ull;
 
@@ -2155,7 +2155,7 @@ void test_proc_exec_reset_dispositions(void) {
                 got.mask == 0x2ull,
                 "pre: the accessor hands back the fields installed WITH the "
                 "handler (the install publishes handler last)");
-    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_CONT, &got),
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_USR2, &got),
                 "pre: the last entry really has a handler");
 
     // Driven through the exec path's extracted note-side helper (see

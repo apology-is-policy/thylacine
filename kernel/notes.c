@@ -48,9 +48,8 @@
 // dispatch uses to recognize the non-catchable note (N-4).
 //
 // We accept input names ONLY from the closed v1.0 set. SYS_POSTNOTE rejects
-// anything else with -EINVAL (per ARCH §7.6.5 — alarm/hangup/usr1/usr2/
-// stop/cont are deferred); kernel-synthetic posters only call with the
-// known names (child_exit, pipe).
+// anything else with -EINVAL (per ARCH §7.6.5; `alarm` has no note yet);
+// kernel-synthetic posters only call with the known names (child_exit, pipe).
 
 // #15: `dfl` is the third column. notes_default_action (the NDFLT arm) and
 // notes_name_terminate_latch (the EL0-tail uncaught TERMINATE arm) both read
@@ -90,6 +89,10 @@ static const struct note_name_entry g_known_notes[] = {
     // as `interrupt`, so a death by it read back as SIGINT and a Proc could not
     // ignore Ctrl-C without ignoring SIGTERM too. Userspace-postable.
     { NOTE_NAME_TERM, NOTE_BIT_TERM,     NOTE_DFL_TERMINATE, NOTE_SIG_TERM },
+    // SIGUSR1's and SIGUSR2's (operator vote 2026-11-02): a program's own, and
+    // terminating until it says otherwise, as POSIX has them.
+    { NOTE_NAME_USR1, NOTE_BIT_USR1,     NOTE_DFL_TERMINATE, NOTE_SIG_USR1 },
+    { NOTE_NAME_USR2, NOTE_BIT_USR2,     NOTE_DFL_TERMINATE, NOTE_SIG_USR2 },
     // SIGCHLD's POSIX default is ignore. Before #15 an NDFLT from a
     // child_exit handler killed the Proc; pouch worked around the kernel by
     // spelling this default NCONT instead (patches 0007/0021), which is why
@@ -147,7 +150,8 @@ _Static_assert(NOTE_SIG_HUP  == VIV_SIGHUP  && NOTE_SIG_INT  == VIV_SIGINT  &&
                NOTE_SIG_ABRT == VIV_SIGABRT && NOTE_SIG_BUS  == VIV_SIGBUS  &&
                NOTE_SIG_FPE  == VIV_SIGFPE  && NOTE_SIG_KILL == VIV_SIGKILL &&
                NOTE_SIG_SEGV == VIV_SIGSEGV && NOTE_SIG_PIPE == VIV_SIGPIPE &&
-               NOTE_SIG_TERM == VIV_SIGTERM,
+               NOTE_SIG_TERM == VIV_SIGTERM && NOTE_SIG_USR1 == VIV_SIGUSR1 &&
+               NOTE_SIG_USR2 == VIV_SIGUSR2,
                "NOTE_SIG_* must be the Linux aarch64 numbers vivarium.h names");
 
 // strncmp-style name compare bounded by NOTE_NAME_MAX (so we don't read
@@ -448,6 +452,10 @@ static u32 notes_name_terminate_latch(const char *name) {
         return PROC_FLAG_PIPE_TERMINATE_PENDING;
     if (bit == (int)NOTE_BIT_TERM)
         return PROC_FLAG_TERM_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_USR1)
+        return PROC_FLAG_USR1_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_USR2)
+        return PROC_FLAG_USR2_TERMINATE_PENDING;
     return 0;
 }
 
@@ -569,8 +577,7 @@ static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
     if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
     if (!notes_proc_has_live_handler(p, name) && !proc_is_self_managing_notes(p))
         return;
-    __atomic_or_fetch(&p->note_caught,
-                      (u16)(1u << (CAUGHT_LATCH_SHIFT + (u32)bit)),
+    __atomic_or_fetch(&p->note_caught, 1u << (CAUGHT_LATCH_SHIFT + (u32)bit),
                       __ATOMIC_RELEASE);
 }
 
@@ -626,7 +633,7 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
                                            const struct Note *popped) {
     int bit = notes_name_to_bit(popped->name);
     if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
-    u16 fambit = (u16)(1u << (CAUGHT_LATCH_SHIFT + (u32)bit));
+    u32 fambit = 1u << (CAUGHT_LATCH_SHIFT + (u32)bit);
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_to_bit(q->ring[idx].name) == bit)
@@ -637,7 +644,7 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
     // that took it and ends at that thread's EL0-return tail (notes_release_-
     // claims). A sleeper's claim CAS that raced this drain fails on the changed
     // word, so no claim is taken for a family with nothing queued.
-    __atomic_and_fetch(&p->note_caught, (u16)~fambit, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&p->note_caught, ~fambit, __ATOMIC_RELEASE);
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +671,7 @@ static const char *notes_direct_name(u32 bit) {
 }
 
 // The families on `t`'s word that its mask admits. Owner-read of note_mask, as
-// at every caller. A byte load decides the common case on every sleep and tail.
+// at every caller. A word load decides the common case on every sleep and tail.
 static u32 notes_direct_unmasked(const struct Thread *t) {
     return (u32)__atomic_load_n(&t->note_direct, __ATOMIC_ACQUIRE) &
            ~(u32)t->note_mask & NOTE_MASK_SUPPORTED;
@@ -1142,10 +1149,10 @@ u32 notes_discard_name(struct Proc *p, const char *name) {
     // edge between the two locks.
     int bit = notes_direct_bit(name);
     if (bit >= 0) {
-        u8 b = (u8)(1u << (u32)bit);
+        u16 b = (u16)(1u << (u32)bit);
         irq_state_t s = proc_threads_lock(p);
         for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
-            if (__atomic_fetch_and(&x->note_direct, (u8)~b, __ATOMIC_ACQ_REL) & b)
+            if (__atomic_fetch_and(&x->note_direct, (u16)~b, __ATOMIC_ACQ_REL) & b)
                 removed++;
         }
         proc_threads_unlock(p, s);
@@ -1456,7 +1463,7 @@ void notes_mark_self_managing(struct Proc *p) {
     u32 moved = 0;
     irq_state_t s = proc_threads_lock(p);
     for (struct Thread *x = p->threads; x; x = x->next_in_proc)
-        moved |= __atomic_exchange_n(&x->note_direct, (u8)0, __ATOMIC_ACQ_REL);
+        moved |= __atomic_exchange_n(&x->note_direct, (u16)0, __ATOMIC_ACQ_REL);
     proc_threads_unlock(p, s);
     for (; moved; moved &= moved - 1u) {
         const char *name = notes_direct_name((u32)__builtin_ctz(moved));
@@ -1552,6 +1559,14 @@ bool thread_die_pending(struct Thread *t) {
         // only interrupt (SIGINT blocked) still unwinds for a pending term.
         if ((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_TERM)) == 0)
+            return true;
+        // Each user-defined latch pairs with its own bit: SIGUSR1 blocked leaves
+        // a pending usr2 fatal, and the reverse.
+        if ((flags & PROC_FLAG_USR1_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_USR1)) == 0)
+            return true;
+        if ((flags & PROC_FLAG_USR2_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_USR2)) == 0)
             return true;
         // A note aimed at this thread alone ends every wait of this thread, and
         // no peer's: the tail's exits_note then runs the group's one death.
@@ -1665,10 +1680,10 @@ bool thread_caught_note_claim(struct Thread *t) {
     if (!thread_caught_note_deliverable(t)) return false;
     struct Proc *p = t->proc;
     if (notes_direct_caught(p, t)) return true;
-    u16 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+    u32 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
     for (;;) {
-        u32 caught  = ((u32)flags & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
-        u32 claimed = ((u32)flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
+        u32 caught  = (flags & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+        u32 claimed = (flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
         u32 deliv   = caught & ~t->note_mask & NOTE_MASK_SUPPORTED;
         // A claim this thread holds is its own to unwind on. A wait that claimed
         // and then completed anyway leaves the claim until the call's tail, and
@@ -1678,19 +1693,19 @@ bool thread_caught_note_claim(struct Thread *t) {
         // posting walk set the claim bit on this thread's behalf, so no CAS is
         // owed. The claim is recorded before the designation goes, so the
         // family's bit always has a holder (the walk's re-wake looks for one).
-        u8 tgt = (u8)(__atomic_load_n(&t->note_target, __ATOMIC_ACQUIRE) & deliv);
+        u16 tgt = (u16)(__atomic_load_n(&t->note_target, __ATOMIC_ACQUIRE) & deliv);
         if (tgt) {
-            __atomic_store_n(&t->note_claim, (u8)(t->note_claim | tgt), __ATOMIC_RELAXED);
-            __atomic_and_fetch(&t->note_target, (u8)~tgt, __ATOMIC_RELEASE);
+            __atomic_store_n(&t->note_claim, (u16)(t->note_claim | tgt), __ATOMIC_RELAXED);
+            __atomic_and_fetch(&t->note_target, (u16)~tgt, __ATOMIC_RELEASE);
             return true;
         }
         u32 open    = deliv & ~claimed;
         if (open == 0) return false;   // every family deliverable here is taken
         u32 fam = open & (~open + 1u); // the lowest: any one family unwinds us
         if (__atomic_compare_exchange_n(&p->note_caught, &flags,
-                                        (u16)(flags | (fam << CAUGHT_CLAIM_SHIFT)),
+                                        flags | (fam << CAUGHT_CLAIM_SHIFT),
                                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            __atomic_store_n(&t->note_claim, (u8)(t->note_claim | fam), __ATOMIC_RELAXED);
+            __atomic_store_n(&t->note_claim, (u16)(t->note_claim | fam), __ATOMIC_RELAXED);
             return true;
         }
         // `flags` now holds the fresh word: a post, a drain or a peer's claim.
@@ -1771,10 +1786,10 @@ u8 thread_caught_wait_kind(const struct Thread *t, bool caught_ok) {
 // walk skips `skip`. Called with no lock held.
 static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip) {
     struct Proc *p   = t->proc;
-    u16          was = __atomic_fetch_and(&p->note_caught,
-                                          (u16)~(mine << CAUGHT_CLAIM_SHIFT),
+    u32          was = __atomic_fetch_and(&p->note_caught,
+                                          ~(mine << CAUGHT_CLAIM_SHIFT),
                                           __ATOMIC_ACQ_REL);
-    u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+    u32 caught = (was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if ((caught & mine) == 0) return;
     proc_caught_note_walk(p, skip);
 }
@@ -1785,8 +1800,8 @@ static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip)
 // holds, a masked one when it unwinds. The walk re-checks a pick under that
 // lock, so it cannot designate `t` again for one of these families until the
 // wait ends; a family whose note is still queued goes to another thread now.
-void notes_handoff_target(struct Thread *t, u8 keep) {
-    u8 drop = (u8)(__atomic_fetch_and(&t->note_target, keep, __ATOMIC_ACQ_REL) & (u8)~keep);
+void notes_handoff_target(struct Thread *t, u16 keep) {
+    u16 drop = (u16)(__atomic_fetch_and(&t->note_target, keep, __ATOMIC_ACQ_REL) & (u16)~keep);
     if (drop == 0 || !t->proc) return;
     notes_drop_families(t, drop, NULL);
 }
@@ -1802,9 +1817,9 @@ void notes_exit_drop_locked(struct Thread *t) {
     u32 mine = t->note_claim | __atomic_exchange_n(&t->note_target, 0, __ATOMIC_ACQ_REL);
     __atomic_store_n(&t->note_claim, 0, __ATOMIC_RELAXED);
     if (mine == 0) return;
-    u16 was = __atomic_fetch_and(&p->note_caught, (u16)~(mine << CAUGHT_CLAIM_SHIFT),
+    u32 was = __atomic_fetch_and(&p->note_caught, ~(mine << CAUGHT_CLAIM_SHIFT),
                                  __ATOMIC_ACQ_REL);
-    u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+    u32 caught = (was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if (caught & mine) proc_caught_note_walk_locked(p, NULL);
 }
 
@@ -1831,8 +1846,8 @@ static int notes_tail_candidate_locked(struct Proc *p, struct Thread *t,
 static int notes_tail_consume_locked(struct Proc *p, struct Thread *t, int direct,
                                      struct Note *out) {
     if (direct < 0) return notes_dequeue_locked(p, t, out);
-    u8 b = (u8)(1u << (u32)direct);
-    if ((__atomic_fetch_and(&t->note_direct, (u8)~b, __ATOMIC_ACQ_REL) & b) == 0) return 0;
+    u16 b = (u16)(1u << (u32)direct);
+    if ((__atomic_fetch_and(&t->note_direct, (u16)~b, __ATOMIC_ACQ_REL) & b) == 0) return 0;
     notes_direct_fill(out, (u32)direct);
     return 1;
 }
@@ -1870,7 +1885,7 @@ static void notes_tail_unconsume_locked(struct Proc *p, struct Thread *t, int di
             notes_move_to_queue_locked(p, n->name);
             return;
         }
-        __atomic_or_fetch(&t->note_direct, (u8)(1u << (u32)direct), __ATOMIC_RELEASE);
+        __atomic_or_fetch(&t->note_direct, (u16)(1u << (u32)direct), __ATOMIC_RELEASE);
         return;
     }
     (void)notes_reenqueue_head_locked(p->notes, n);

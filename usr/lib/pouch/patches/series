@@ -181,3 +181,5 @@
 0066-pouch-c11-thread-registers.patch
 # 0067 (thread-model C4, operator votes 5 and 14): pthread_kill and raise name one thread over SYS_postnote_tid; kill(pid) stays process-directed.
 0067-pouch-thread-directed-kill.patch
+# 0068 (operator vote 15): SIGUSR1 and SIGUSR2 are the usr1 and usr2 notes.
+0068-pouch-usr-notes.patch

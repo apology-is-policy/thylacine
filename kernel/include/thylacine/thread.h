@@ -256,6 +256,10 @@ struct Thread {
     //                  SYS_NOTED syscall's exception_context.
     u64                note_mask;
     bool               in_handler;
+    // enum caught_wait: the kind of wait the thread is in, published under its
+    // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
+    // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
+    u8                 caught_wait;
     // ARCH 8.8.3 (dec-2026-10-12-note-target): the caught-note families the
     // posting walk claimed on this thread's behalf -- a designation, the
     // walk's choice of who takes the note. The walk sets bits under this
@@ -264,24 +268,20 @@ struct Thread {
     // exit), and thread_caught_note_claim turns one into note_claim when it
     // unwinds. Atomic: written across threads. KP_ZERO; not rfork-propagated;
     // exec clears it.
-    u8                 note_target;
-    // enum caught_wait: the kind of wait the thread is in, published under its
-    // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
-    // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
-    u8                 caught_wait;
+    u16                note_target;
     // The user-pool pages this thread's kernel memory is charged as (ARCH
     // 7.3.5): THREAD_POOL_PAGES, or 0 for a kproc thread that is the reserve's.
     // Set at create, before anything can free the thread; returned once, by
     // thread_destroy. Carved from in_handler's pad -- no size change.
     u8                 pool_pages;
+    u8                 _pad_in_handler;      // explicit 2-byte alignment
     // ARCH 7.6.4: the note families posted at this thread by name (tkill,
     // tgkill, pthread_kill, raise). No other thread can take them, whatever its
     // mask. A poster sets a bit holding the Proc's threads_lock; the owner's
     // tail, or a discard or the self-managing mark holding that lock, clears it,
     // each by an atomic op whose old value says who took the note. q->lock does not guard it. KP_ZERO;
     // not inherited by a spawn or a fork; survives exec, as the queue does.
-    u8                 note_direct;
-    u8                 _pad_in_handler[3];   // explicit 8-byte alignment
+    u16                note_direct;
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
@@ -519,13 +519,6 @@ struct Thread {
     // padding before debug_stepover_va -- no size change.
     bool               note_interruptible;
 
-    // ARCH 8.8.3: the caught-note families whose unwind this thread claimed
-    // (thread_caught_note_claim), mirrored in proc_flags' claim sub-field. A
-    // claim ends at the thread's next EL0-return tail, delivered or not
-    // (notes_deliver_at_el0_return releases it). Owner-only; KP_ZERO inits it
-    // 0; not rfork-propagated; exec clears it. Also fits that padding.
-    u8                 note_claim;
-
     u64                debug_stepover_va;
 
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
@@ -601,7 +594,14 @@ struct Thread {
     u64                nsleeps;
     u64                nmigrations;
     u16                last_cpu;
-    u16                _pad_prowl3[3];
+    // ARCH 8.8.3: the caught-note families whose unwind this thread claimed
+    // (thread_caught_note_claim), mirrored in Proc.note_caught's claim half. A
+    // claim ends at the thread's next EL0-return tail, delivered or not
+    // (notes_deliver_at_el0_return releases it). Owner-only; KP_ZERO inits it
+    // 0; not rfork-propagated; exec clears it. Carved from this pad when a
+    // family word outgrew the byte beside note_interruptible.
+    u16                note_claim;
+    u16                _pad_prowl3[2];
 
     // Task #96: the FP/SIMD half of the note-delivery context save.
     //

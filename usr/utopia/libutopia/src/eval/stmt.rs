@@ -2455,6 +2455,8 @@ pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
         "child_exit" => Some(NoteClass::ChildExit),
         "sak" => Some(NoteClass::Sak),
         "term" => Some(NoteClass::Term),
+        "usr1" => Some(NoteClass::Usr1),
+        "usr2" => Some(NoteClass::Usr2),
         _ if name.starts_with("tty:") => Some(NoteClass::Tty),
         _ => None,
     }

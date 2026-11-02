@@ -113,7 +113,7 @@ struct Thread;
 // answered 0 for and that must move to the queue cannot be refused, and it takes
 // one of these unless a note of its name is queued (notes_move_to_queue_locked).
 // One per family suffices; notes.c asserts it.
-#define NOTE_RING_SPARE   8u
+#define NOTE_RING_SPARE   10u
 #define NOTE_RING_SLOTS   (NOTE_QUEUE_DEPTH + NOTE_RING_SPARE)
 
 // Coalesce threshold: when count >= this, kernel-synthetic posters of an
@@ -170,12 +170,20 @@ struct Thread;
 // INTERRUPT's, so a Proc that ignores Ctrl-C still dies of an unhandled term.
 #define NOTE_BIT_TERM        7u
 
+// The user-defined notes (SIGUSR1, SIGUSR2; docs/ERRORS.md "The user-defined
+// notes"): catchable, default terminate, and meaning whatever the program says.
+// A bit each, so a program can catch or mask one alone.
+#define NOTE_BIT_USR1        8u
+#define NOTE_BIT_USR2        9u
+
 // F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
 // family even though no v1.0 consumer exists; reserves the bit
 // position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live. IM-1 adds
-// NOTE_BIT_SAK (bit 6), live. The signal chunk adds NOTE_BIT_TERM (bit 7),
-// live -- the last family the per-Thread u8 claim and designation hold.
-#define NOTE_MASK_SUPPORTED  0xffu
+// NOTE_BIT_SAK (bit 6), live. The signal chunk adds NOTE_BIT_TERM (bit 7), live.
+// The user-defined pair takes bits 8 and 9. A family word is therefore wider than
+// a byte: Thread's note_target, note_claim and note_direct are u16, and
+// Proc.note_caught holds latch and claim in a u32. notes.c asserts each fits.
+#define NOTE_MASK_SUPPORTED  0x3ffu
 
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
@@ -285,6 +293,14 @@ struct NoteQueue {
 
 _Static_assert(sizeof(NOTE_NAME_TERM) <= NOTE_NAME_MAX,
                "NOTE_NAME_TERM does not fit NOTE_NAME_MAX");
+
+// The user-defined notes, SIGUSR1's and SIGUSR2's. Userspace-postable.
+#define NOTE_NAME_USR1 "usr1"
+#define NOTE_NAME_USR2 "usr2"
+
+_Static_assert(sizeof(NOTE_NAME_USR1) <= NOTE_NAME_MAX &&
+               sizeof(NOTE_NAME_USR2) <= NOTE_NAME_MAX,
+               "NOTE_NAME_USR1 and NOTE_NAME_USR2 do not fit NOTE_NAME_MAX");
 
 // `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
 // fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
@@ -396,7 +412,8 @@ _Static_assert(sizeof(NOTE_NAME_SNARE_ABORT) <= NOTE_NAME_MAX,
 enum note_death_sig {
     NOTE_SIG_HUP  = 1,  NOTE_SIG_INT  = 2,  NOTE_SIG_QUIT = 3,  NOTE_SIG_ILL  = 4,
     NOTE_SIG_TRAP = 5,  NOTE_SIG_ABRT = 6,  NOTE_SIG_BUS  = 7,  NOTE_SIG_FPE  = 8,
-    NOTE_SIG_KILL = 9,  NOTE_SIG_SEGV = 11, NOTE_SIG_PIPE = 13, NOTE_SIG_TERM = 15,
+    NOTE_SIG_KILL = 9,  NOTE_SIG_USR1 = 10, NOTE_SIG_SEGV = 11, NOTE_SIG_USR2 = 12,
+    NOTE_SIG_PIPE = 13, NOTE_SIG_TERM = 15,
 };
 
 // The signal a death by the note `name` records: a snare:* name, or a
@@ -744,7 +761,7 @@ bool thread_caught_note_claim(struct Thread *t);
 // locked ends `t`'s claim and designation at its THREAD_EXITING commit, under
 // t->proc->threads_lock.
 u8   thread_caught_wait_kind(const struct Thread *t, bool caught_ok);
-void notes_handoff_target(struct Thread *t, u8 keep);
+void notes_handoff_target(struct Thread *t, u16 keep);
 void notes_exit_drop_locked(struct Thread *t);
 
 // bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED

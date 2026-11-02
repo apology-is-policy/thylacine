@@ -550,7 +550,9 @@ inherited or ever cleared: both mark a Proc that is going.
 Bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING` (2026-10-13), `term`'s terminate
 latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty and pipe
 latches. It became free when the caught-note latch and claim sub-fields (bits
-11..17 and 22..28) left for `Proc.note_caught`. `PROC_FLAGS_ALL` names every
+11..17 and 22..28) left for `Proc.note_caught`. Bits 22 and 23 are
+`PROC_FLAG_USR1_TERMINATE_PENDING` and `PROC_FLAG_USR2_TERMINATE_PENDING`
+(2026-11-02), in the same mask, a latch each. `PROC_FLAGS_ALL` names every
 flag, and a `_Static_assert` that the popcount of their union equals the sum
 of their popcounts proves them disjoint at compile time. Membership in that
 list is by hand, so the build's guard is `tools/check-flag-words.py`, which

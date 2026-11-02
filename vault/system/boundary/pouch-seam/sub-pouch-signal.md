@@ -54,7 +54,8 @@ caller, and the kernel ends the process with it
 does carry signals since gcpark-b (2026-10-12): the kernel records the
 signal of every death by note, a fault (`snare:segv` → `SIGSEGV`, …,
 `snare:abort` → `SIGABRT`) or an uncaught terminating note (`interrupt` →
-`SIGINT`, `term` → `SIGTERM`, `kill` → `SIGKILL`, `pipe` → `SIGPIPE`,
+`SIGINT`, `term` → `SIGTERM`, `usr1` → `SIGUSR1`, `usr2` → `SIGUSR2`,
+`kill` → `SIGKILL`, `pipe` → `SIGPIPE`,
 `tty:quit`, `tty:hup`),
 and a parent's `waitpid` reads it as `WIFSIGNALED` / `WTERMSIG`
 (docs/ERRORS.md "The wait status"). No handler runs for a fault signal.
@@ -79,6 +80,11 @@ no note can reach a registered handler over an unset sigtab.
 shared `interrupt`: the dispatcher guessed by handler-presence (SIGINT's if
 installed, else SIGTERM's), blocking SIGINT blocked SIGTERM, and a child
 killed with SIGTERM read `WTERMSIG == SIGINT`.
+
+**SIGUSR1 and SIGUSR2 have a note each** since 0068 (operator vote 15, 2026-11-02):
+`usr1` and `usr2`, bits 8 and 9, which took the supported mask to 0x3af. `sigaction`,
+`kill`, `raise` and `pthread_kill` all answered EINVAL for them before it. SIGALRM is
+now what a signal with no note means.
 
 **The tty family is RECEIVE-ONLY.** The kernel's POST axis rejects any
 userspace `tty:*` post — the I-39 gate that makes a terminal event

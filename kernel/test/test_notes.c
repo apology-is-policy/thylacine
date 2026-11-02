@@ -1219,11 +1219,11 @@ void test_notes_caught_note_deliverable_predicate(void) {
 
     // kproc guard: forced caught bits never make a kproc thread deliverable.
     fake_t.proc = kproc();
-    __atomic_or_fetch(&kproc()->note_caught, (u16)CAUGHT_LATCH_MASK,
+    __atomic_or_fetch(&kproc()->note_caught, CAUGHT_LATCH_MASK,
                       __ATOMIC_RELEASE);
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
                 "kproc guarded even when the caught sub-field is forced");
-    __atomic_and_fetch(&kproc()->note_caught, (u16)~CAUGHT_LATCH_MASK,
+    __atomic_and_fetch(&kproc()->note_caught, ~CAUGHT_LATCH_MASK,
                        __ATOMIC_RELEASE);
 
     p->state = PROC_STATE_ZOMBIE;
@@ -1279,7 +1279,7 @@ void test_notes_caught_note_claim_once(void) {
     bool c4    = thread_caught_note_claim(&c);
     // a's tail releases its claim with an interrupt still queued.
     notes_release_claims_for_test(&a);
-    u8   a_rec = a.note_claim;
+    u16  a_rec = a.note_claim;
     bool c5    = thread_caught_note_claim(&c);
     // Drain the rest: every caught bit clears, and the claims stay with their
     // owners until their tails.
@@ -1417,7 +1417,7 @@ void test_notes_caught_note_stop_dequeue_drains(void) {
     // realistic arm needs a phenotype per-signal sigtab; forcing the bit tests
     // the FIX -- does the stop-dequeue drain it? -- with the same end state.)
     __atomic_or_fetch(&p->note_caught,
-                      (u16)(1u << (CAUGHT_LATCH_SHIFT + NOTE_BIT_TTY)),
+                      1u << (CAUGHT_LATCH_SHIFT + NOTE_BIT_TTY),
                       __ATOMIC_RELEASE);
     TEST_ASSERT(proc_caught_note_pending(p),
                 "caught-TTY bit armed (simulated caught tty:winch sibling)");
@@ -2237,7 +2237,7 @@ void test_notes_direct_names_own_their_family(void) {
         bool want = notes_name_user_postable(name) && !notes_name_is_kill(name);
         TEST_EXPECT_EQ(bit >= 0, want, "a name may land on the word iff a program may post it, and it is not kill");
         if (bit < 0) continue;
-        TEST_ASSERT(bit < 8, "the family fits note_direct");
+        TEST_ASSERT((u32)bit < 8u * sizeof(g_dn_a.note_direct), "the family fits note_direct");
         TEST_ASSERT(!(seen & (1u << (u32)bit)), "two postable names share a family: the word could not say which");
         seen |= 1u << (u32)bit;
         // What the word says back is the name that was posted.
@@ -2645,6 +2645,213 @@ void test_notes_direct_unconsume_after_the_mark_goes_to_the_queue(void) {
     notes_tail_unconsume_for_test(p, &g_dn_a, direct, &n);
     TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "after the mark no word holds it");
     TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_TERM), 1u, "the queue does");
+    dn_free(p);
+}
+
+// The user-defined notes: each terminates by default and records its own signal, on
+// a latch of its own, so blocking one leaves the other fatal. Red before they existed,
+// when neither name was a note and the post was refused.
+void test_notes_usr_notes_die_apart(void) {
+    static const struct {
+        const char *name;
+        u32 bit, other_bit, latch, other_latch;
+        int sig;
+    } rows[2] = {
+        { NOTE_NAME_USR1, NOTE_BIT_USR1, NOTE_BIT_USR2, PROC_FLAG_USR1_TERMINATE_PENDING,
+          PROC_FLAG_USR2_TERMINATE_PENDING, 10 },
+        { NOTE_NAME_USR2, NOTE_BIT_USR2, NOTE_BIT_USR1, PROC_FLAG_USR2_TERMINATE_PENDING,
+          PROC_FLAG_USR1_TERMINATE_PENDING, 12 },
+    };
+    for (u32 i = 0; i < 2u; i++) {
+        struct Proc *p = proc_alloc();
+        TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+        struct Thread fake_t;
+        fake_t.note_direct         = 0;
+        fake_t.proc                = p;
+        fake_t.note_mask           = 0u;
+        fake_t.exit_close_active   = false;
+        fake_t.kthread_join_active = false;
+
+        const char *name = rows[i].name;
+        bool fresh = thread_die_pending(&fake_t);
+        int  dfl   = (int)notes_default_action(name);
+        int  sig   = notes_death_signal(name);
+        int  bit   = notes_direct_bit(name);
+        int  post  = notes_post(p, name, 0u, NULL, false);
+        u32  flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+        bool gate  = proc_intr_terminate_pending(p);
+        bool open_ = thread_die_pending(&fake_t);
+        fake_t.note_mask = (u64)1u << rows[i].other_bit;
+        bool other_masked = thread_die_pending(&fake_t);
+        fake_t.note_mask = (u64)1u << rows[i].bit;
+        bool own_masked = thread_die_pending(&fake_t);
+        fake_t.note_mask = 0u;
+        struct Note got;
+        got.name[0] = 0;
+        spin_lock(&p->notes->lock);
+        int deq = notes_dequeue_for_fd_locked(p, NULL, &got);
+        spin_unlock(&p->notes->lock);
+        bool got_it  = dn_same_name(got.name, name);
+        bool drained = thread_die_pending(&fake_t);
+
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+
+        TEST_ASSERT(!fresh, "fresh Proc -> false");
+        TEST_EXPECT_EQ(dfl, (int)NOTE_DFL_TERMINATE, "its default action is TERMINATE");
+        TEST_EXPECT_EQ(sig, rows[i].sig, "a death by it records its own signal");
+        TEST_EXPECT_EQ(bit, (int)rows[i].bit, "a program may aim it at a thread, on its own bit");
+        TEST_EXPECT_EQ(post, 0, "a userspace post of it is accepted");
+        TEST_ASSERT((flags & rows[i].latch) != 0, "it arms its own latch");
+        TEST_ASSERT((flags & rows[i].other_latch) == 0, "and not its twin's");
+        TEST_ASSERT(gate, "the wake gate fires on it");
+        TEST_ASSERT(open_, "armed + unmasked -> true");
+        TEST_ASSERT(other_masked, "its twin masked -> still true (per-family)");
+        TEST_ASSERT(!own_masked, "itself masked -> false");
+        TEST_ASSERT(deq >= 0 && got_it, "the queued note is it");
+        TEST_ASSERT(!drained, "drained -> the latch clears -> false");
+    }
+}
+
+static u32 fb_latch(const struct Proc *p) {
+    return (__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+}
+static u32 fb_claim(const struct Proc *p) {
+    return (__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
+}
+
+// A family bit a byte cannot hold, through every word it passes: the latch, the claim
+// half, a thread's claim, its designation, a hand-off, and the direct word's post,
+// consume, unconsume, discard and move. Each is a cast a narrower type turns into 0,
+// which compiles.
+void test_notes_family_past_the_first_byte(void) {
+    const u32 usr2 = 1u << NOTE_BIT_USR2;
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state     = PROC_STATE_ALIVE;
+    p->phenotype = PHENO_LINUX;
+    notes_set_handler(p, 0x1000u);
+
+    static struct Thread a, b;          // BSS-zeroed, reset each run
+    a.proc = b.proc = p;
+    a.note_mask = b.note_mask = 0u;
+    a.exit_close_active = b.exit_close_active = false;
+    a.in_handler = b.in_handler = false;
+    a.note_interruptible = b.note_interruptible = true;
+    a.note_claim = b.note_claim = 0u;
+    a.note_target = b.note_target = 0u;
+    a.note_direct = b.note_direct = 0u;
+
+    int  post   = notes_post(p, NOTE_NAME_USR2, 0u, NULL, true);
+    u32  latch  = fb_latch(p);
+    bool a1     = thread_caught_note_claim(&a);
+    u32  a_rec  = a.note_claim;
+    u32  held   = fb_claim(p);
+    bool b1     = thread_caught_note_claim(&b);
+
+    // A drain clears its latch bit and leaves the claim half alone.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int  drain  = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    u32  latch0 = fb_latch(p);
+    u32  held1  = fb_claim(p);
+    notes_release_claims_for_test(&a);
+    u32  a_rec0 = a.note_claim;
+    u32  held0  = fb_claim(p);
+
+    // A designation of the family becomes the claim when its thread unwinds.
+    int  post2  = notes_post(p, NOTE_NAME_USR2, 0u, NULL, true);
+    __atomic_or_fetch(&p->note_caught, usr2 << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    b.note_target = (u16)usr2;
+    bool b2     = thread_caught_note_claim(&b);
+    u32  b_rec  = b.note_claim;
+    u32  b_tgt  = b.note_target;
+    notes_release_claims_for_test(&b);
+
+    // A hand-off keeps the family it is told to, and gives up the claim bit otherwise.
+    __atomic_or_fetch(&p->note_caught, usr2 << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    a.note_target = (u16)usr2;
+    notes_handoff_target(&a, (u16)usr2);
+    u32  kept   = a.note_target;
+    u32  heldk  = fb_claim(p);
+    notes_handoff_target(&a, 0u);
+    u32  gone   = a.note_target;
+    u32  heldg  = fb_claim(p);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(post, 0, "a caught usr2 is accepted");
+    TEST_EXPECT_EQ(latch, usr2, "its bit in the latch half");
+    TEST_ASSERT(a1, "the first sleeper claims it");
+    TEST_EXPECT_EQ(a_rec, usr2, "and records it");
+    TEST_EXPECT_EQ(held, usr2, "its bit in the claim half");
+    TEST_ASSERT(!b1, "a second sleeper is refused: the claim was seen");
+    TEST_ASSERT(drain >= 0, "the drain pops it");
+    TEST_EXPECT_EQ(latch0, 0u, "the latch bit cleared");
+    TEST_EXPECT_EQ(held1, usr2, "the claim survived the drain");
+    TEST_EXPECT_EQ(a_rec0, 0u, "the release empties the thread's record");
+    TEST_EXPECT_EQ(held0, 0u, "and the claim half");
+    TEST_EXPECT_EQ(post2, 0, "a second usr2 is accepted");
+    TEST_ASSERT(b2, "the designee unwinds");
+    TEST_EXPECT_EQ(b_rec, usr2, "its designation became its claim");
+    TEST_EXPECT_EQ(b_tgt, 0u, "and went");
+    TEST_EXPECT_EQ(kept, usr2, "a hand-off keeping the family leaves the designation");
+    TEST_EXPECT_EQ(heldk, usr2, "and the claim bit");
+    TEST_EXPECT_EQ(gone, 0u, "one that does not gives the designation up");
+    TEST_EXPECT_EQ(heldg, 0u, "and the claim bit");
+
+    struct Proc *d = dn_proc();
+    TEST_ASSERT(d != NULL, "proc_alloc succeeded");
+    d->handler_va = DN_HANDLER_VA;
+    struct Note n;
+    int direct = -1;
+    TEST_EXPECT_EQ(proc_note_thread(d, DN_TID_A, NOTE_NAME_USR2, NULL), 0, "post at a");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), usr2, "on a's word");
+    TEST_EXPECT_EQ(dn_word(&g_dn_b), 0u, "and not b's");
+    TEST_EXPECT_EQ(notes_tail_candidate_for_test(d, &g_dn_a, &n, &direct), 1, "a's tail finds it");
+    TEST_EXPECT_EQ(direct, (int)NOTE_BIT_USR2, "as this family");
+    TEST_ASSERT(dn_same_name(n.name, NOTE_NAME_USR2), "by name");
+    TEST_EXPECT_EQ(notes_tail_consume_for_test(d, &g_dn_a, direct, &n), 1, "and consumes it");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the word is empty");
+    notes_tail_unconsume_for_test(d, &g_dn_a, direct, &n);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), usr2, "an unconsume puts it back");
+    TEST_EXPECT_EQ(notes_discard_name(d, NOTE_NAME_USR2), 1u, "a discard takes it");
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "off the word");
+    TEST_EXPECT_EQ(proc_note_thread(d, DN_TID_A, NOTE_NAME_USR2, NULL), 0, "post again");
+    notes_mark_self_managing(d);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark empties the word");
+    TEST_EXPECT_EQ(ndflt_note_count(d, NOTE_NAME_USR2), 1u, "into the queue");
+    dn_free(d);
+}
+
+// NOTE_RING_SPARE is one per family, and a full ring must take every family a program
+// can aim at a thread: the table is walked, so a new row is counted.
+void test_notes_every_direct_family_fits_past_a_full_ring(void) {
+    struct Proc *p = dn_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->handler_va = DN_HANDLER_VA;
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, i, p, false), 0, "fill to the depth");
+    u32 families = 0;
+    const char *name;
+    for (u32 i = 0; (name = notes_known_name_for_test(i)) != NULL; i++) {
+        if (notes_direct_bit(name) < 0) continue;
+        families++;
+        TEST_EXPECT_EQ(proc_note_thread(p, DN_TID_A, name, NULL), 0, "the post lands");
+    }
+    TEST_ASSERT(families >= 6u, "interrupt, pipe, child_exit, term, usr1 and usr2 at least");
+    notes_mark_self_managing(p);
+    TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark emptied the word");
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + families - 1u,
+                   "every family past the depth but interrupt, which coalesces");
+    for (u32 i = 0; (name = notes_known_name_for_test(i)) != NULL; i++) {
+        if (notes_direct_bit(name) < 0 || dn_same_name(name, NOTE_NAME_INTERRUPT)) continue;
+        TEST_EXPECT_EQ(ndflt_note_count(p, name), 1u, "and each is queued once");
+    }
     dn_free(p);
 }
 

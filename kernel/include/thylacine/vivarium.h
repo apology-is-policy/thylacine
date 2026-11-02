@@ -1161,7 +1161,8 @@ enum viv_verdict vivarium_madvise_decide(u64 advice, enum viv_madvise_kind *kind
 enum {
     VIV_SIGHUP  = 1,  VIV_SIGINT  = 2,  VIV_SIGQUIT = 3,  VIV_SIGILL  = 4,
     VIV_SIGABRT = 6,  VIV_SIGBUS  = 7,  VIV_SIGFPE  = 8,  VIV_SIGKILL = 9,
-    VIV_SIGSEGV = 11, VIV_SIGPIPE = 13, VIV_SIGTERM = 15, VIV_SIGCHLD = 17,
+    VIV_SIGUSR1 = 10, VIV_SIGSEGV = 11, VIV_SIGUSR2 = 12, VIV_SIGPIPE = 13,
+    VIV_SIGTERM = 15, VIV_SIGCHLD = 17,
     VIV_SIGCONT = 18, VIV_SIGSTOP = 19, VIV_SIGTSTP = 20, VIV_SIGWINCH = 28,
 };
 
@@ -1240,8 +1241,7 @@ _Static_assert(_Alignof(struct viv_ksigaction) == 8 && sizeof(u64) == 8,
 //
 // VIV_SIGNOTE_NONE means "no note in the tree carries this signal" -- the row
 // declines rather than inventing a delivery. That is the honest answer for
-// SIGALRM (no timer note), SIGUSR1/2 (no general-purpose note), and the rest of
-// the realtime range.
+// SIGALRM (no timer note) and the realtime range.
 enum viv_signote {
     VIV_SIGNOTE_NONE = 0,
     VIV_SIGNOTE_INTERRUPT,       // SIGINT only -- see viv_signal_note for why
@@ -1260,12 +1260,14 @@ enum viv_signote {
     VIV_SIGNOTE_TTY_WINCH,       // SIGWINCH
     VIV_SIGNOTE_TTY_SUSP,        // SIGTSTP
     VIV_SIGNOTE_TTY_CONT,        // SIGCONT
+    VIV_SIGNOTE_USR1,            // SIGUSR1
+    VIV_SIGNOTE_USR2,            // SIGUSR2
 };
 
 enum viv_signote viv_signal_note(u64 signum);
 
 // One past the last real note kind -- the array bound for a per-note table.
-#define VIV_SIGNOTE_COUNT ((u32)VIV_SIGNOTE_TTY_CONT + 1u)
+#define VIV_SIGNOTE_COUNT ((u32)VIV_SIGNOTE_USR2 + 1u)
 
 #ifdef KERNEL_TESTS
 // Does `signum` EXCLUSIVELY own its note -- is it the ONLY Linux signal this
@@ -2240,7 +2242,7 @@ enum viv_verdict vivarium_sigprocmask_decide(u64 how, u64 sigsetsize);
 // numbering is notes.h's and is passed in by the caller so this file stays free
 // of kernel headers.
 struct viv_notebit_map {
-    u8 interrupt, kill, pipe, child_exit, snare, tty, term;
+    u8 interrupt, kill, pipe, child_exit, snare, tty, term, usr1, usr2;
 };
 u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m);
 

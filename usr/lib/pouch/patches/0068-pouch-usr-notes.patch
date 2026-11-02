@@ -1,0 +1,120 @@
+pouch boundary-line patch 0068 - SIGUSR1 and SIGUSR2 are the `usr1` and `usr2` notes.
+
+Operator vote 15 (2026-11-02). The kernel has both notes now (NOTE_BIT_USR1 = 8,
+NOTE_BIT_USR2 = 9, default terminate, a death recorded as the signal; docs/ERRORS.md
+"The user-defined notes"). Before this sigaction, kill, raise and pthread_kill all
+answered EINVAL for them, and pthread_kill(t, SIGUSR1) is the classic use of naming a
+thread.
+
+  src/internal/_pouch_signal.h  POUCH_NOTE_BIT_USR1 and POUCH_NOTE_BIT_USR2, and the
+      supported mask 0xaf -> 0x3af, so __block_all_sigs and __block_app_sigs block them.
+  src/signal/_pouch_signal.c    __pouch_sig_to_note names them; the sigset translations
+      give each its own bit both ways; the handler dispatches each name to its signal.
+      An uncaught one reaches SYS_NOTED(NDFLT), whose default for it is terminate.
+  src/signal/sigaction.c        Both join the supported set.
+
+A signal with no note is still EINVAL; SIGALRM is the example now.
+
+Witnesses: pouch-hello-signals `usr-apart` and `usr-death`, pouch-hello-threads
+`kill-usr`.
+
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -99,7 +99,11 @@
+ /* SIGTERM's own note, `term` (NOTE_BIT_TERM): masked and caught apart
+  * from SIGINT's `interrupt`. */
+ #define POUCH_NOTE_BIT_TERM        (1u << 7)
+-#define POUCH_NOTE_MASK_SUPPORTED  0xafu
++/* SIGUSR1's and SIGUSR2's notes, `usr1` and `usr2` (NOTE_BIT_USR1 and
++ * NOTE_BIT_USR2): a bit each, default terminate. */
++#define POUCH_NOTE_BIT_USR1        (1u << 8)
++#define POUCH_NOTE_BIT_USR2        (1u << 9)
++#define POUCH_NOTE_MASK_SUPPORTED  0x3afu
+ 
+ /* SYS_NOTED arg semantics (matches kernel/include/thylacine/notes.h
+  * "SYS_NOTED arg semantics" docblock, R4-F6 audit close). */
+@@ -124,8 +128,9 @@
+ 
+ /* Translate POSIX signum -> note name string. Writes the static-storage
+  * canonical name to *out on success. Returns 0 on the supported set
+- * (SIGINT -> "interrupt"; SIGTERM -> "term"; SIGKILL -> "kill"; SIGPIPE ->
+- * "pipe"; SIGCHLD -> "child_exit"; the tty family), -1 on unsupported. */
++ * (SIGINT -> "interrupt"; SIGTERM -> "term"; SIGUSR1 -> "usr1"; SIGUSR2 ->
++ * "usr2"; SIGKILL -> "kill"; SIGPIPE -> "pipe"; SIGCHLD -> "child_exit"; the tty
++ * family), -1 on unsupported. */
+ hidden int __pouch_sig_to_note(int sig, const char **out);
+ 
+ /* The snare a fault signal names, for a process ending itself with it:
+--- a/src/signal/_pouch_signal.c
++++ b/src/signal/_pouch_signal.c
+@@ -52,6 +52,12 @@
+     case SIGTERM:
+         *out = "term";
+         return 0;
++    case SIGUSR1:
++        *out = "usr1";
++        return 0;
++    case SIGUSR2:
++        *out = "usr2";
++        return 0;
+     case SIGKILL:
+         *out = "kill";
+         return 0;
+@@ -100,6 +106,8 @@
+     /* sigismember returns 1/0/-1 (-1 on bad arg). Treat -1 as not-set. */
+     if (sigismember(s, SIGINT) == 1) m |= POUCH_NOTE_BIT_INTERRUPT;
+     if (sigismember(s, SIGTERM) == 1) m |= POUCH_NOTE_BIT_TERM;
++    if (sigismember(s, SIGUSR1) == 1) m |= POUCH_NOTE_BIT_USR1;
++    if (sigismember(s, SIGUSR2) == 1) m |= POUCH_NOTE_BIT_USR2;
+     /* SIGKILL/SIGSTOP cannot be blocked; we silently drop them. */
+     if (sigismember(s, SIGPIPE) == 1) m |= POUCH_NOTE_BIT_PIPE;
+     if (sigismember(s, SIGCHLD) == 1) m |= POUCH_NOTE_BIT_CHILD_EXIT;
+@@ -117,6 +125,8 @@
+     sigemptyset(out);
+     if (m & POUCH_NOTE_BIT_INTERRUPT)  sigaddset(out, SIGINT);
+     if (m & POUCH_NOTE_BIT_TERM)       sigaddset(out, SIGTERM);
++    if (m & POUCH_NOTE_BIT_USR1)       sigaddset(out, SIGUSR1);
++    if (m & POUCH_NOTE_BIT_USR2)       sigaddset(out, SIGUSR2);
+     if (m & POUCH_NOTE_BIT_PIPE)       sigaddset(out, SIGPIPE);
+     if (m & POUCH_NOTE_BIT_CHILD_EXIT) sigaddset(out, SIGCHLD);
+     if (m & POUCH_NOTE_BIT_TTY) {
+@@ -141,6 +151,10 @@
+         sig = SIGINT;
+     } else if (__pouch_note_name_eq(name, "term")) {
+         sig = SIGTERM;
++    } else if (__pouch_note_name_eq(name, "usr1")) {
++        sig = SIGUSR1;
++    } else if (__pouch_note_name_eq(name, "usr2")) {
++        sig = SIGUSR2;
+     } else if (__pouch_note_name_eq(name, "pipe")) {
+         sig = SIGPIPE;
+     } else if (__pouch_note_name_eq(name, "child_exit")) {
+@@ -174,7 +188,8 @@
+ 
+     if (h == SIG_DFL || h == 0) {
+         /* Default action for the v1.0 supported set:
+-         *   SIGINT / SIGTERM / SIGPIPE: terminate (NDFLT → kernel exits)
++         *   SIGINT / SIGTERM / SIGUSR1 / SIGUSR2 / SIGPIPE: terminate (NDFLT →
++         *       kernel exits)
+          *   SIGCHLD: ignore (NCONT — child_exit's default per POSIX)
+          *   SIGKILL: terminate (NDFLT; though this branch is unreachable
+          *            because the kernel handles kill before delivery)
+--- a/src/signal/sigaction.c
++++ b/src/signal/sigaction.c
+@@ -3,7 +3,7 @@
+  * table — the bootstrap handler (__pouch_note_handler) is registered
+  * once at process startup and dispatches by note name to the table.
+  *
+- * v1.0 supported signums: SIGINT, SIGTERM, SIGPIPE, SIGCHLD.
++ * v1.0 supported signums: SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGPIPE, SIGCHLD.
+  * SIGKILL/SIGSTOP/others return EINVAL (POSIX-conformant for SIGKILL/
+  * SIGSTOP; documented v1.0 limitation for the rest).
+  */
+@@ -29,6 +29,7 @@
+ 	 * also return EINVAL at v1.0 — the supported set grows per chunk
+ 	 * without an ABI break. */
+ 	if (sig != SIGINT && sig != SIGTERM &&
++	    sig != SIGUSR1 && sig != SIGUSR2 &&
+ 	    sig != SIGPIPE && sig != SIGCHLD &&
+ 	    /* PTY-3: the tty job-control family (receive-only -- the
+ 	     * kernel raises them; kill()/raise() of them answer EPERM).

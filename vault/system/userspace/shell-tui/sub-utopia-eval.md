@@ -328,7 +328,7 @@ through `note_class_for_name`, where any `tty:`-prefixed name (`tty:susp`,
 'tty:susp'` masks the whole tty family — matched by prefix rather than by
 enumerating the five, because before this arm existed that exact `mask note
 'tty:susp'` parsed, ran its body, and masked nothing. `term` maps to its own
-`NoteClass::Term` (2026-10-13).
+`NoteClass::Term` (2026-10-13), and `usr1` and `usr2` to theirs (2026-11-02).
 
 ### `kill` sends `term` by default (2026-10-13)
 

@@ -589,6 +589,8 @@ pub extern "C" fn rs_main() -> i64 {
         ("child_exit", Some(NoteClass::ChildExit)),
         ("sak", Some(NoteClass::Sak)), // IM-1: the trusted-path note, its own class
         ("term", Some(NoteClass::Term)), // SIGTERM's note, apart from interrupt
+        ("usr1", Some(NoteClass::Usr1)),
+        ("usr2", Some(NoteClass::Usr2)),
         ("kill", None),
         ("ttysusp", None), // no colon: not the family
         ("snare:segv", None),

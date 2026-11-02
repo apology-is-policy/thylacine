@@ -471,9 +471,10 @@ every die-check. Since #91 the numeric status is a **separate** field,
 the Proc dies and carries the msg; `exit_status` decides *what status* the
 parent's wait reads. `Proc.term_sig` (u8, gcpark-b) is the death signal beside
 it, 0 for an exit; `group_term_sig` is its set-once claim twin beside
-`group_exit_code`. Both took the old `_reserved0` slot, so `struct Proc` keeps
-its size; S-2 gave the slot's remaining u16 to `note_caught`. A death by the
-`term` note (2026-10-13) records SIGTERM, 15.
+`group_exit_code`. Both sit in the pad after `supp_gid_count`, moved there on
+2026-11-02 when `note_caught` outgrew its u16 and took their old slot whole, so
+`struct Proc` keeps its size. A death by the `term` note (2026-10-13) records
+SIGTERM, 15; by `usr1` or `usr2` (2026-11-02), 10 or 12.
 
 `Proc.debug_stop_req` / `job_stop_req` — the two stop owners, deliberately
 in the same cache line so the tail's fast path reads both in two ACQUIRE

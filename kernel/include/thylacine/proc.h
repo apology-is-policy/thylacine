@@ -386,25 +386,14 @@ struct Proc {
     // single-waiter `child_done` Rendez + the lockless `wait_pid_cond` walk
     // that the guard existed to protect) -- RETIRES the guard: all may wait.
     // The field's four bytes stay so every following field holds its pinned
-    // offset; gcpark-b took two of them for the death signal below, and the
-    // signal chunk's S-2 took the other two for note_caught.
+    // offset; they hold note_caught now.
     //
-    // gcpark-b: the POSIX signal the Proc died of (notes.h NOTE_SIG_*), 0 for a
-    // Proc that exited. term_sig is the ZOMBIE record, written beside
-    // exit_status by proc_become_zombie_locked and read by wait_pid_for, both
-    // under g_proc_table_lock. group_term_sig is the group-termination stash,
-    // group_exit_code's companion: written once, in the set-once claim that
-    // publishes group_exit_msg, and read by the last Thread out, again under
-    // g_proc_table_lock (I-24). Bytes, not ints: a signal is 1..127.
-    u8                 term_sig;
-    u8                 group_term_sig;
-
-    // ARCH 8.8.3: the caught-note latch (low byte) and its unwind claim (high
-    // byte), one bit per note family; CAUGHT_LATCH_MASK below has the
+    // ARCH 8.8.3: the caught-note latch (low half) and its unwind claim (high
+    // half), one bit per note family; CAUGHT_LATCH_MASK below has the
     // discipline. A word of its own, not proc_flags bits: the claim's CAS needs
-    // both bytes in one word, and no reader needs either byte together with a
+    // both halves in one word, and no reader needs either half together with a
     // proc_flags bit. NOT propagated by rfork; KP_ZERO at proc_alloc.
-    u16                note_caught;
+    u32                note_caught;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from
@@ -472,7 +461,17 @@ struct Proc {
     u32                primary_gid;
     u32                supp_gids[PROC_SUPP_GIDS_MAX];
     u8                 supp_gid_count;
-    u8                 _pad_identity[3];   // explicit align padding
+
+    // gcpark-b: the POSIX signal the Proc died of (notes.h NOTE_SIG_*), 0 for a
+    // Proc that exited. term_sig is the ZOMBIE record, written beside
+    // exit_status by proc_become_zombie_locked and read by wait_pid_for, both
+    // under g_proc_table_lock. group_term_sig is the group-termination stash,
+    // group_exit_code's companion: written once, in the set-once claim that
+    // publishes group_exit_msg, and read by the last Thread out, again under
+    // g_proc_table_lock (I-24). Bytes, not ints: a signal is 1..127.
+    u8                 term_sig;
+    u8                 group_term_sig;
+    u8                 _pad_identity;      // explicit align padding
 
     // SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1,
     // invariant I-24). NULL = no group termination in progress; non-NULL =
@@ -1186,14 +1185,20 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // Proc.note_caught to make room for this family.
 #define PROC_FLAG_TERM_TERMINATE_PENDING (1u << 11)
 
+// The user-defined notes' terminate latches, one each for the reason the term
+// latch is its own: a thread that masked usr1 still unwinds for a pending usr2.
+// Same discipline as the term latch above.
+#define PROC_FLAG_USR1_TERMINATE_PENDING (1u << 22)
+#define PROC_FLAG_USR2_TERMINATE_PENDING (1u << 23)
+
 // item 11 (ARCH §8.8.3): the CAUGHT-note-deliverable latch -- the non-death
-// sibling of the terminate latches above. The LOW BYTE of Proc.note_caught, not
+// sibling of the terminate latches above. The LOW HALF of Proc.note_caught, not
 // proc_flags: it was the sub-field at proc_flags bits 11..17 until the `term`
 // family needed an eighth bit and proc_flags had none left. Every reader and
-// writer touches only the two note_caught bytes (the claim's CAS needs both in
-// one word; nothing needs either beside a proc_flags bit), so the move kept
-// every atomicity the code relied on. One bit per note family ALIGNED TO
-// NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6, TERM=7),
+// writer touches only note_caught (the claim's CAS needs both halves in one
+// word; nothing needs either beside a proc_flags bit), so the move kept every
+// atomicity the code relied on. One bit per note family ALIGNED TO NOTE_BIT_*
+// (INTERRUPT=0 .. TTY=5, SAK=6, TERM=7, USR1=8, USR2=9),
 // so thread_caught_note_deliverable can gate it by the per-Thread note_mask
 // exactly as thread_die_pending gates the terminate latches. The per-family
 // pairing is REQUIRED for the same reason the PTY-1b comment above gives: a
@@ -1208,7 +1213,7 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // does not include notes.h; notes.c static_asserts it equals
 // NOTE_MASK_SUPPORTED << CAUGHT_LATCH_SHIFT.
 #define CAUGHT_LATCH_SHIFT      0u
-#define CAUGHT_LATCH_MASK       (0xffu << CAUGHT_LATCH_SHIFT)  // note_caught bits 0..7
+#define CAUGHT_LATCH_MASK       (0x3ffu << CAUGHT_LATCH_SHIFT)  // note_caught bits 0..9
 
 // #237: the PIPE terminate-disposition latch -- the THIRD terminate family
 // (interrupt, tty:quit/hup, now pipe). Armed when notes_post commits an
@@ -1282,9 +1287,9 @@ _Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SEAT_MANAGER)) == 0,
     "the debug taint must not overlap the term latch or the flags below it");
 
-// ARCH 8.8.3: the CLAIM, the HIGH BYTE of Proc.note_caught (proc_flags bits
+// ARCH 8.8.3: the CLAIM, the HIGH HALF of Proc.note_caught (proc_flags bits
 // 22..28 until S-2 moved it with the latch), one bit per note family aligned
-// like the caught byte above. One caught note unwinds ONE interruptible sleeper,
+// like the latch above. One caught note unwinds ONE interruptible sleeper,
 // as Linux interrupts one thread for a process-directed signal: the sleeper
 // that unwinds sets its family's claim bit with a CAS on the whole note_caught
 // word, so the claim
@@ -1295,10 +1300,10 @@ _Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_TERM_TERMINATE_PENDING |
 // claimant's unwind and refuse every wait in the Proc. Exec clears the field (a
 // Proc execs alone). NOT propagated by rfork; never set on kproc (the caught bit
 // never is).
-#define CAUGHT_CLAIM_SHIFT     8u
-#define CAUGHT_CLAIM_MASK      (0xffu << CAUGHT_CLAIM_SHIFT)  // note_caught bits 8..15
+#define CAUGHT_CLAIM_SHIFT     16u
+#define CAUGHT_CLAIM_MASK      (0x3ffu << CAUGHT_CLAIM_SHIFT)  // note_caught bits 16..25
 _Static_assert((CAUGHT_CLAIM_MASK & CAUGHT_LATCH_MASK) == 0 &&
-               ((CAUGHT_CLAIM_MASK | CAUGHT_LATCH_MASK) >>
+               (((u64)CAUGHT_CLAIM_MASK | CAUGHT_LATCH_MASK) >>
                 (8u * sizeof(((struct Proc *)0)->note_caught))) == 0,
     "the caught latch and its claim are disjoint and both fit Proc.note_caught");
 
@@ -1364,7 +1369,9 @@ bool proc_may_create_srv_registry(const struct Proc *p);
     (PROC_FLAG_INTR_TERMINATE_PENDING | \
      PROC_FLAG_TTY_TERMINATE_PENDING | \
      PROC_FLAG_PIPE_TERMINATE_PENDING | \
-     PROC_FLAG_TERM_TERMINATE_PENDING)
+     PROC_FLAG_TERM_TERMINATE_PENDING | \
+     PROC_FLAG_USR1_TERMINATE_PENDING | \
+     PROC_FLAG_USR2_TERMINATE_PENDING)
 
 // Every proc_flags bit, and a check DERIVED from the list rather than pinned to
 // pairs: the flags are disjoint iff the popcount of their union is the sum of
@@ -1378,7 +1385,8 @@ bool proc_may_create_srv_registry(const struct Proc *p);
      PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
      PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
      PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_MAIN_TID | \
-     PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY)
+     PROC_FLAG_MAY_RAISE_THREAD_BUDGET | PROC_FLAG_SESSION_REGISTRY | \
+     PROC_FLAG_USR1_TERMINATE_PENDING | PROC_FLAG_USR2_TERMINATE_PENDING)
 _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
     __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
@@ -1389,6 +1397,8 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
     __builtin_popcount(PROC_FLAG_CONSOLE_RENDERER) +
     __builtin_popcount(PROC_FLAG_MAY_RAISE_PAGE_BUDGET) +
     __builtin_popcount(PROC_FLAG_TERM_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_USR1_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_USR2_TERMINATE_PENDING) +
     __builtin_popcount(PROC_FLAG_PIPE_TERMINATE_PENDING) +
     __builtin_popcount(PROC_FLAG_SESSION_HANGUP) + __builtin_popcount(PROC_FLAG_SEAT_MANAGER) +
     __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +

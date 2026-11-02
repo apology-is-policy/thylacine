@@ -247,7 +247,9 @@ seam-90 close, [[chg-2026-10-06-seam90-close]]), and since 2026-09-29
 `note_interruptible`: whether a caught note may unwind the thread's current
 wait, set only by the vivarium dispatcher for signal(7)'s list and cleared at
 the syscall exit and around a page-in ([[sub-kernel-notes]]); and since
-2026-09-30 `note_claim`, the caught-note families this thread has claimed, which
+2026-09-30 `note_claim` (a u16 since 2026-11-02, beside `last_cpu`, when `usr2` took a
+bit no byte holds, as `note_target` and `note_direct` did in place), the caught-note
+families this thread has claimed, which
 only the thread itself writes and its EL0-return tail releases; and since
 2026-10-12 `note_target`, the families the posting walk designated this thread
 for, set under its `wait_lock`, turned into its claim when it unwinds, released

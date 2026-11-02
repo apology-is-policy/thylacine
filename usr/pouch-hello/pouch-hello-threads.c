@@ -85,7 +85,8 @@
 // the worker is in nanosleep when the note is posted; it takes it no later than
 // the call's end (a native wait rides a caught note out, item 11c, and this leg
 // does not pin which). kill-answers: signal 0 probes and posts nothing, a signal
-// with no note is EINVAL (SIGUSR1 has none yet), and a tty signal is EPERM.
+// with no note is EINVAL (SIGALRM has none), and a tty signal is EPERM. kill-usr:
+// kill-worker's leg with SIGUSR1, the classic use, whose family bit a byte cannot hold.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -274,12 +275,12 @@ static void kill_reset(void) {
 }
 
 // Each leg answers 0, or the line it should fail with on stdout and a non-zero.
-static int kill_leg_worker(void) {
+static int kill_leg_worker(int sig, const char *leg) {
     kill_reset();
     pthread_t w;
     if (pthread_create(&w, NULL, kill_spinner, NULL) != 0) return -1;
     int ready = kill_wait_ready();
-    int rc = ready == 1 ? pthread_kill(w, SIGINT) : -2;
+    int rc = ready == 1 ? pthread_kill(w, sig) : -2;
     for (int i = 0; rc == 0 && i < 3000 && !__atomic_load_n(&g_kill_count, __ATOMIC_SEQ_CST); i++)
         usleep(1000);
     int count = __atomic_load_n(&g_kill_count, __ATOMIC_SEQ_CST);
@@ -288,8 +289,8 @@ static int kill_leg_worker(void) {
     __atomic_store_n(&g_kill_stop, 1, __ATOMIC_SEQ_CST);
     pthread_join(w, NULL);
     if (rc != 0 || count != 1 || !on_worker) {
-        printf("pouch-hello-threads: kill-worker: rc=%d count=%d on_worker=%d on_main=%d, want 0 1 1 0 (FAIL)\n",
-               rc, count, on_worker, on_main);
+        printf("pouch-hello-threads: %s: rc=%d count=%d on_worker=%d on_main=%d, want 0 1 1 0 (FAIL)\n",
+               leg, rc, count, on_worker, on_main);
         return 1;
     }
     return 0;
@@ -344,14 +345,14 @@ static int kill_leg_answers(void) {
     int ready = kill_wait_ready();
     int probe = pthread_kill(w, 0);
     int no_range = pthread_kill(w, 999);
-    int no_note = pthread_kill(w, SIGUSR1);
+    int no_note = pthread_kill(w, SIGALRM);
     int tty = pthread_kill(w, SIGTSTP);
     usleep(20 * 1000);
     int count = __atomic_load_n(&g_kill_count, __ATOMIC_SEQ_CST);
     __atomic_store_n(&g_kill_stop, 1, __ATOMIC_SEQ_CST);
     pthread_join(w, NULL);
     if (ready != 1 || probe != 0 || no_range != EINVAL || no_note != EINVAL || tty != EPERM || count != 0) {
-        printf("pouch-hello-threads: kill-answers: ready=%d probe=%d range=%d usr1=%d tstp=%d count=%d, want 1 0 %d %d %d 0 (FAIL)\n",
+        printf("pouch-hello-threads: kill-answers: ready=%d probe=%d range=%d alrm=%d tstp=%d count=%d, want 1 0 %d %d %d 0 (FAIL)\n",
                ready, probe, no_range, no_note, tty, count, EINVAL, EINVAL, EPERM);
         return 1;
     }
@@ -670,17 +671,21 @@ int main(void) {
         printf("pouch-hello-threads: mask-queued: a queued SIGINT waited for main past a thread's birth OK\n");
     }
     {
-        struct sigaction sa, old_sa;
+        struct sigaction sa, old_sa, old_usr;
         memset(&sa, 0, sizeof sa);
         sa.sa_handler = kill_handler;
-        if (sigaction(SIGINT, &sa, &old_sa) != 0) {
+        if (sigaction(SIGINT, &sa, &old_sa) != 0 || sigaction(SIGUSR1, &sa, &old_usr) != 0) {
             printf("pouch-hello-threads: kill-worker: sigaction failed: %d\n", errno);
             fflush(stdout);
             return 24;
         }
-        int bad = kill_leg_worker();
+        int bad = kill_leg_worker(SIGINT, "kill-worker");
         if (bad == 0) {
             printf("pouch-hello-threads: kill-worker: pthread_kill ran the handler on the named worker OK\n");
+            bad = kill_leg_worker(SIGUSR1, "kill-usr");
+        }
+        if (bad == 0) {
+            printf("pouch-hello-threads: kill-usr: pthread_kill(SIGUSR1) ran the handler on the named worker OK\n");
             bad = kill_leg_masked(0, "kill-masked");
         }
         if (bad == 0) {
@@ -696,6 +701,7 @@ int main(void) {
             bad = kill_leg_answers();
         }
         sigaction(SIGINT, &old_sa, NULL);
+        sigaction(SIGUSR1, &old_usr, NULL);
         if (bad != 0) {
             if (bad < 0) printf("pouch-hello-threads: kill legs: pthread_create failed: %d\n", bad);
             fflush(stdout);

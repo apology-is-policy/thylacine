@@ -1046,6 +1046,15 @@ peer branch numbers calls 127-131 and renumbers on its next merge (handoff 048;
 operator vote 6 makes Linux kill/tkill/tgkill Tier-2 rows later, so an assert
 pinning those rows' kind to ENOSYS would go stale).
 
+## SIGUSR1 and SIGUSR2 get notes (2026-11-02)
+
+`SIGUSR1` maps to `usr1` and `SIGUSR2` to `usr2` (`VIV_SIGNOTE_USR1`, `VIV_SIGNOTE_USR2`,
+bits 8 and 9 in the guest's sigset conversions), each its own disposition and its own
+default terminate, and both are in `vivarium_kill_decide`'s POST set. The enum values are
+appended, so every earlier row keeps its number and `VIV_SIGNOTE_USR2` is the table's last
+entry. SIGALRM is the example of a signal with no note: the deliberate refusal of SIGUSR1
+and SIGUSR2 this page used to name is gone.
+
 ## SIGTERM and SIGABRT get notes; the kill family (2026-10-13, S-2)
 
 `SIGTERM` maps to `term` (`VIV_SIGNOTE_TERM`, bit 7 in the guest's sigset
@@ -1055,14 +1064,14 @@ and with its own note `sigaction(SIGTERM, ...)` is translated like any other
 and `sigaction(SIGINT, SIG_IGN)` leaves it alone. `SIGABRT` maps to
 `snare:abort` (`VIV_SIGNOTE_SNARE_ABORT`), translated at `SIG_DFL` only: a
 `snare:*` death is never queued, so an ignore or a handler is forwarded and
-refused. Both enum values were inserted mid-list; `TTY_CONT` stays last, so
-the count assertions hold.
+refused. Both enum values were inserted mid-list; `TTY_CONT` stayed last, so
+the count assertions held.
 
 `kill` (129), `tkill` (130) and `tgkill` (131) are Tier-2 rows with one shell,
 `viv_kill` ([[sub-kernel-syscall-dispatch]]), over a pure decision here:
 `vivarium_kill_decide(sig, &name)` answers PROBE (signal 0), POST (a signal
-whose note any program may post: `interrupt`, `term`, `kill`, `pipe`,
-`child_exit`), SELF_DEATH (a signal a `snare:*` death carries: SIGABRT,
+whose note any program may post: `interrupt`, `term`, `usr1`, `usr2`, `kill`,
+`pipe`, `child_exit`), SELF_DEATH (a signal a `snare:*` death carries: SIGABRT,
 SIGSEGV, SIGBUS, SIGILL, SIGFPE, through `viv_signote_snare_death`) or REFUSE
 (past `_NSIG`, a signal no note carries, a `tty:*` signal, which the line
 discipline alone posts). The shell answers REFUSE with `EINVAL` before

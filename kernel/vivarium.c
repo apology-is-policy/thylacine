@@ -1818,13 +1818,13 @@ enum viv_signote viv_signal_note(u64 signum) {
     case VIV_SIGWINCH:                    return VIV_SIGNOTE_TTY_WINCH;
     case VIV_SIGTSTP:                     return VIV_SIGNOTE_TTY_SUSP;
     case VIV_SIGCONT:                     return VIV_SIGNOTE_TTY_CONT;
+    case VIV_SIGUSR1:                     return VIV_SIGNOTE_USR1;
+    case VIV_SIGUSR2:                     return VIV_SIGNOTE_USR2;
 
     // NOT a gap, and worth naming so a future reader does not "fix" it by
     // inventing a delivery:
     //   SIGALRM  — no timer note exists; setitimer/alarm are themselves ENOSYS,
     //              so nothing could post it.
-    //   SIGUSR1/2 — no general-purpose note; a note has a fixed 16-byte name
-    //              from a closed set, so there is nothing to carry them.
     //   SIGSTOP  — uncatchable by POSIX and rejected by the sigaction domain.
     //   32..64   — the realtime range, which requires queued siginfo (Tier 2).
     default: return VIV_SIGNOTE_NONE;
@@ -1853,6 +1853,8 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
     // EL0-return-tail dispatcher can see them.
     case VIV_SIGNOTE_INTERRUPT:
     case VIV_SIGNOTE_TERM:
+    case VIV_SIGNOTE_USR1:
+    case VIV_SIGNOTE_USR2:
     case VIV_SIGNOTE_KILL:
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_CHILD_EXIT:
@@ -1902,6 +1904,8 @@ enum viv_kill_kind vivarium_kill_decide(u64 sig, const char **name_out) {
     // authority question -- the one Pouch's kill already answers.
     case VIV_SIGNOTE_INTERRUPT:
     case VIV_SIGNOTE_TERM:
+    case VIV_SIGNOTE_USR1:
+    case VIV_SIGNOTE_USR2:
     case VIV_SIGNOTE_KILL:
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_CHILD_EXIT:
@@ -3118,6 +3122,8 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
     // it in a disposition table (vivarium_sigaction_decide refuses SIGKILL).
     if (viv_name_eq(name, NOTE_NAME_INTERRUPT))  return VIV_SIGNOTE_INTERRUPT;
     if (viv_name_eq(name, NOTE_NAME_TERM))       return VIV_SIGNOTE_TERM;
+    if (viv_name_eq(name, NOTE_NAME_USR1))       return VIV_SIGNOTE_USR1;
+    if (viv_name_eq(name, NOTE_NAME_USR2))       return VIV_SIGNOTE_USR2;
     if (viv_name_eq(name, NOTE_NAME_KILL))       return VIV_SIGNOTE_KILL;
     if (viv_name_eq(name, NOTE_NAME_PIPE))       return VIV_SIGNOTE_PIPE;
     if (viv_name_eq(name, NOTE_NAME_CHILD_EXIT)) return VIV_SIGNOTE_CHILD_EXIT;
@@ -3136,6 +3142,8 @@ const char *viv_signote_note_name(enum viv_signote note) {
     switch (note) {
     case VIV_SIGNOTE_INTERRUPT:  return NOTE_NAME_INTERRUPT;
     case VIV_SIGNOTE_TERM:       return NOTE_NAME_TERM;
+    case VIV_SIGNOTE_USR1:       return NOTE_NAME_USR1;
+    case VIV_SIGNOTE_USR2:       return NOTE_NAME_USR2;
     case VIV_SIGNOTE_KILL:       return NOTE_NAME_KILL;
     case VIV_SIGNOTE_PIPE:       return NOTE_NAME_PIPE;
     case VIV_SIGNOTE_CHILD_EXIT: return NOTE_NAME_CHILD_EXIT;
@@ -3159,6 +3167,8 @@ const struct viv_notebit_map g_viv_notebits = {
     .snare      = NOTE_BIT_SNARE,
     .tty        = NOTE_BIT_TTY,
     .term       = NOTE_BIT_TERM,
+    .usr1       = NOTE_BIT_USR1,
+    .usr2       = NOTE_BIT_USR2,
 };
 
 u64 viv_signote_to_signal(enum viv_signote note) {
@@ -3191,14 +3201,16 @@ bool viv_signote_default_is_ignore(enum viv_signote note) {
 
 bool viv_signote_default_is_terminate(enum viv_signote note) {
     switch (note) {
-    // SIGPIPE / SIGINT / SIGTERM / SIGHUP / SIGQUIT: the POSIX default is to
-    // terminate. The phenotype branch answers a SIG_DFL guest from this table,
+    // SIGPIPE / SIGINT / SIGTERM / SIGUSR1 / SIGUSR2 / SIGHUP / SIGQUIT: the POSIX
+    // default is to terminate. The phenotype branch answers a SIG_DFL guest from this table,
     // never from the native latch scan, so every terminating row must be here:
     // notes.death_signal_table derives the answer from g_known_notes' dfl for
     // every named row, so a row added to either side and missed here fails.
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_INTERRUPT:
     case VIV_SIGNOTE_TERM:
+    case VIV_SIGNOTE_USR1:
+    case VIV_SIGNOTE_USR2:
     case VIV_SIGNOTE_TTY_HUP:
     case VIV_SIGNOTE_TTY_QUIT:
         return true;
@@ -3538,6 +3550,8 @@ u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m) {
         switch (viv_signal_note(sig)) {
         case VIV_SIGNOTE_INTERRUPT:  out |= 1ULL << m->interrupt;  break;
         case VIV_SIGNOTE_TERM:       out |= 1ULL << m->term;       break;
+        case VIV_SIGNOTE_USR1:       out |= 1ULL << m->usr1;       break;
+        case VIV_SIGNOTE_USR2:       out |= 1ULL << m->usr2;       break;
         case VIV_SIGNOTE_PIPE:       out |= 1ULL << m->pipe;       break;
         case VIV_SIGNOTE_CHILD_EXIT: out |= 1ULL << m->child_exit; break;
 
@@ -3581,6 +3595,8 @@ u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
         switch (viv_signal_note(sig)) {
         case VIV_SIGNOTE_INTERRUPT:  bit = 1ULL << m->interrupt;  break;
         case VIV_SIGNOTE_TERM:       bit = 1ULL << m->term;       break;
+        case VIV_SIGNOTE_USR1:       bit = 1ULL << m->usr1;       break;
+        case VIV_SIGNOTE_USR2:       bit = 1ULL << m->usr2;       break;
         case VIV_SIGNOTE_PIPE:       bit = 1ULL << m->pipe;       break;
         case VIV_SIGNOTE_CHILD_EXIT: bit = 1ULL << m->child_exit; break;
 

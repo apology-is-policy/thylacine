@@ -819,6 +819,10 @@ pub const T_NOTE_BIT_SAK:        u8 = 6;
 // catchable, default terminate. Its own bit, so a program masks or catches it
 // apart from `interrupt`.
 pub const T_NOTE_BIT_TERM:       u8 = 7;
+// `usr1` and `usr2` -- SIGUSR1's and SIGUSR2's notes: a program's own to mean what
+// it likes. Catchable, default terminate, a bit each.
+pub const T_NOTE_BIT_USR1:       u8 = 8;
+pub const T_NOTE_BIT_USR2:       u8 = 9;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
@@ -831,7 +835,7 @@ pub const T_NOTE_BIT_TERM:       u8 = 7;
 // ties it to the NoteClass set at compile time, which catches a variant added
 // without the bit; it CANNOT catch the kernel growing a bit this file never
 // hears about, because both sides of that check live here.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0xff;
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3ff;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my

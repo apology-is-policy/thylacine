@@ -1728,8 +1728,8 @@ void test_vivarium_signal_map(void) {
     // recorded at the mapper's default arm; a future "fix" that invents a
     // delivery for one of these must come here and say why.
     TEST_ASSERT(viv_signal_note(14) == VIV_SIGNOTE_NONE, "SIGALRM: no timer note");
-    TEST_ASSERT(viv_signal_note(10) == VIV_SIGNOTE_NONE, "SIGUSR1: no note");
-    TEST_ASSERT(viv_signal_note(12) == VIV_SIGNOTE_NONE, "SIGUSR2: no note");
+    TEST_ASSERT(viv_signal_note(VIV_SIGUSR1) == VIV_SIGNOTE_USR1, "SIGUSR1 -> usr1");
+    TEST_ASSERT(viv_signal_note(VIV_SIGUSR2) == VIV_SIGNOTE_USR2, "SIGUSR2 -> usr2");
     TEST_ASSERT(viv_signal_note(VIV_SIGABRT) == VIV_SIGNOTE_SNARE_ABORT,
                 "SIGABRT -> snare:abort: a self-directed raise() dies of it");
     TEST_ASSERT(viv_signal_note(VIV_SIGSTOP) == VIV_SIGNOTE_NONE,
@@ -1838,12 +1838,16 @@ void test_vivarium_sigset_to_notemask(void) {
     // kernel headers. These values are notes.h's.
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
-        .snare = 4, .tty = 5, .term = 7,
+        .snare = 4, .tty = 5, .term = 7, .usr1 = 8, .usr2 = 9,
     };
 
     // One signal -> one bit.
     TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGPIPE - 1), &m) == (1ULL << 2),
                 "SIGPIPE -> NOTE_BIT_PIPE");
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGUSR1 - 1), &m) == (1ULL << 8),
+                "SIGUSR1 -> NOTE_BIT_USR1");
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGUSR2 - 1), &m) == (1ULL << 9),
+                "SIGUSR2 -> NOTE_BIT_USR2");
     TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGCHLD - 1), &m) == (1ULL << 3),
                 "SIGCHLD -> NOTE_BIT_CHILD_EXIT");
 
@@ -1906,7 +1910,7 @@ void test_vivarium_sigset_to_notemask(void) {
 void test_vivarium_handler_mask(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
-        .snare = 4, .tty = 5, .term = 7,
+        .snare = 4, .tty = 5, .term = 7, .usr1 = 8, .usr2 = 9,
     };
     const u64 CHILD = 1ULL << 3, INTR = 1ULL << 0, PIPE = 1ULL << 2,
               TTY = 1ULL << 5;
@@ -1935,9 +1939,9 @@ void test_vivarium_handler_mask(void) {
     hm = vivarium_handler_mask(0, 0, 0, VIV_SIGCHLD, &m);
     TEST_ASSERT(hm == CHILD, "empty sa_mask: exactly the delivered signal");
 
-    // A signal with no note adds no bit (SIGUSR1 = 10); an out-of-range signum
+    // A signal with no note adds no bit (SIGALRM = 14); an out-of-range signum
     // adds nothing rather than shifting by 64+.
-    hm = vivarium_handler_mask(0, 0, 0, 10, &m);
+    hm = vivarium_handler_mask(0, 0, 0, 14, &m);
     TEST_ASSERT(hm == 0, "a note-less signal adds no bit");
     hm = vivarium_handler_mask(INTR, 0, 0, 0, &m);
     TEST_ASSERT(hm == INTR, "signum 0 adds nothing (no shift by -1)");
@@ -1999,6 +2003,8 @@ void test_vivarium_signal_exclusivity(void) {
 void test_vivarium_signote_deliverable(void) {
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_INTERRUPT),  "interrupt");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TERM),       "term");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_USR1),       "usr1");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_USR2),       "usr2");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_KILL),       "kill");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_PIPE),       "pipe");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_CHILD_EXIT), "child_exit");
@@ -2052,7 +2058,8 @@ void test_vivarium_kill_decide(void) {
     TEST_ASSERT(kd_is(VIV_SIGCONT,  VIV_KILL_REFUSE, NULL), "SIGCONT refused");
     TEST_ASSERT(kd_is(VIV_SIGSTOP,  VIV_KILL_REFUSE, NULL), "SIGSTOP refused");
     TEST_ASSERT(kd_is(14,           VIV_KILL_REFUSE, NULL), "SIGALRM refused");
-    TEST_ASSERT(kd_is(10,           VIV_KILL_REFUSE, NULL), "SIGUSR1 refused");
+    TEST_ASSERT(kd_is(VIV_SIGUSR1,  VIV_KILL_POST, NOTE_NAME_USR1), "SIGUSR1 posts usr1");
+    TEST_ASSERT(kd_is(VIV_SIGUSR2,  VIV_KILL_POST, NOTE_NAME_USR2), "SIGUSR2 posts usr2");
     TEST_ASSERT(kd_is(VIV_NSIG + 1, VIV_KILL_REFUSE, NULL), "past the last signal");
     TEST_ASSERT(vivarium_kill_decide(VIV_SIGTERM, NULL) == VIV_KILL_REFUSE,
                 "a NULL out-pointer fails closed");
@@ -2189,12 +2196,16 @@ void test_vivarium_sigtab(void) {
 void test_vivarium_notemask_to_sigset(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
-        .snare = 4, .tty = 5, .term = 7,
+        .snare = 4, .tty = 5, .term = 7, .usr1 = 8, .usr2 = 9,
     };
 
     TEST_ASSERT(viv_notemask_to_sigset(1ULL << 2, &m)
                     == (1ULL << (VIV_SIGPIPE - 1)),
                 "the pipe bit reports exactly SIGPIPE");
+    TEST_ASSERT(viv_notemask_to_sigset(1ULL << 8, &m) == (1ULL << (VIV_SIGUSR1 - 1)),
+                "the usr1 bit reports exactly SIGUSR1");
+    TEST_ASSERT(viv_notemask_to_sigset(1ULL << 9, &m) == (1ULL << (VIV_SIGUSR2 - 1)),
+                "the usr2 bit reports exactly SIGUSR2");
 
     // THE HONEST OVER-REPORT. One tty bit blocks five signals, so reading the
     // mask back names all five. Showing the guest the tidy answer it asked for
@@ -2259,6 +2270,8 @@ void test_vivarium_signote_reverse(void) {
                 "interrupt is SIGINT's alone since V-6b evicted SIGTERM");
     TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_TERM) == VIV_SIGTERM,
                 "term is SIGTERM's");
+    TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_USR1) == VIV_SIGUSR1, "usr1 is SIGUSR1's");
+    TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_USR2) == VIV_SIGUSR2, "usr2 is SIGUSR2's");
 
     // The Linux default-action table. Only these three do nothing by default;
     // getting the set wrong either drops a signal that should kill (too many)
@@ -4256,24 +4269,24 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
     // the table; a reset that stopped one entry short, or zeroed the gate
     // field alone, passed everything above. Both arms: reset_caught must clear
     // a caught COUNT-1 row completely; reset must leave NO byte standing.
-    _Static_assert(VIV_SIGNOTE_TTY_CONT + 1u == VIV_SIGNOTE_COUNT,
+    _Static_assert(VIV_SIGNOTE_USR2 + 1u == VIV_SIGNOTE_COUNT,
                    "the last-entry seed must sit at COUNT-1");
     struct viv_ksigaction lst = { .handler = 0x400200ull, .flags = 0x10000000ull,
                                   .restorer = 0x400300ull, .mask = 0x4ull };
-    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst);
-    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_CONT, &got)
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_USR2, &lst);
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_USR2, &got)
                 && got.flags == 0x10000000ull && got.restorer == 0x400300ull
                 && got.mask == 0x4ull,
                 "F5 pre: the COUNT-1 row is a live handler with every field set");
     viv_sigtab_reset_caught(tab);
-    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_TTY_CONT].handler == VIV_SIG_DFL
-                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].flags == 0
-                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].restorer == 0
-                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].mask == 0,
+    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_USR2].handler == VIV_SIG_DFL
+                && tab->act[(u32)VIV_SIGNOTE_USR2].flags == 0
+                && tab->act[(u32)VIV_SIGNOTE_USR2].restorer == 0
+                && tab->act[(u32)VIV_SIGNOTE_USR2].mask == 0,
                 "F5: reset_caught reaches the LAST entry and clears all four fields");
     TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_PIPE),
                 "F5: ...and still keeps SIG_IGN");
-    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst);      // re-arm for the full reset
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_USR2, &lst);      // re-arm for the full reset
     viv_sigtab_reset(tab);
     {
         const u8 *raw = (const u8 *)tab;

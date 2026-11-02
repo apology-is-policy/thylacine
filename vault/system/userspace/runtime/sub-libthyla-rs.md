@@ -100,6 +100,10 @@ eighth class in `NoteClass::ALL`. The runtime does not mask it at startup (it
 masks only `pipe`), so a native program with no handler and no notes reader
 dies of a `term` by the kernel's default, as of an `interrupt`.
 
+**The `usr1` and `usr2` notes (2026-11-02).** `T_NOTE_BIT_USR1` is 8, `T_NOTE_BIT_USR2`
+is 9 and `T_NOTE_MASK_SUPPORTED` 0x3ff; `NoteClass::ALL` has ten classes. Bit positions
+are `u8` here, and every mask built from one shifts a `u64`, so nothing narrows them.
+
 **`notes::send` reports the kernel's reason (2026-10-14).** `SYS_POSTNOTE`
 answers errnos ([[dec-2026-10-14-postnote-errnos]]), and `send` maps them
 through `Error::from_syscall_return` instead of flattening every failure to

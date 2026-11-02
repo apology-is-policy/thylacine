@@ -3604,13 +3604,13 @@ static int caught_designate(struct Proc *p, struct Thread *x, u32 fam) {
     irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
     if (caught_candidate(p, x, fam)) {
         rc = CAUGHT_SETTLED;
-        u16 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+        u32 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
         while ((flags & (fam << CAUGHT_LATCH_SHIFT)) &&
                !(flags & (fam << CAUGHT_CLAIM_SHIFT))) {
             if (__atomic_compare_exchange_n(&p->note_caught, &flags,
-                                            (u16)(flags | (fam << CAUGHT_CLAIM_SHIFT)),
+                                            flags | (fam << CAUGHT_CLAIM_SHIFT),
                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                __atomic_or_fetch(&x->note_target, (u8)fam, __ATOMIC_RELEASE);
+                __atomic_or_fetch(&x->note_target, (u16)fam, __ATOMIC_RELEASE);
                 caught_rouse_locked(x);
                 rc = CAUGHT_DESIGNATED;
                 break;
@@ -3684,7 +3684,7 @@ int proc_note_thread(struct Proc *p, int tid, const char *name, struct Proc *sen
     if (p->state == PROC_STATE_ALIVE && x->state != THREAD_EXITING) {
         to_queue = proc_is_self_managing_notes(p);
         if (!to_queue && !notes_direct_ignored(p, name)) {
-            __atomic_or_fetch(&x->note_direct, (u8)(1u << (u32)bit), __ATOMIC_RELEASE);
+            __atomic_or_fetch(&x->note_direct, (u16)(1u << (u32)bit), __ATOMIC_RELEASE);
             // Masked or not. The owner writes its mask with no lock and no fence, so
             // a read here can see the old mask while the owner, having unmasked,
             // reads a word without this bit, and each misses the other. The reader's
@@ -5413,7 +5413,7 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // the walk sets one under this thread's wait_lock, so both are cleared
     // under it: a designation made after the clear has its claim bit too.
     irq_state_t ws = spin_lock_irqsave(&self->wait_lock);
-    __atomic_and_fetch(&p->note_caught, (u16)~CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&p->note_caught, ~CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
     __atomic_store_n(&self->note_claim, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&self->note_target, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&self->wait_lock, ws);
