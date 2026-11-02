@@ -5,7 +5,7 @@ title: "B-3h audit round 4's fixes"
 date: 2026-11-02
 arc: arc-boosty
 depth: skeletal
-commits: ["*(pending)*"]
+commits: ["f1007a408"]
 touched:
   - sub-kernel-filelock
   - sub-kernel-ninep-dev9p
