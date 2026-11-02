@@ -2245,6 +2245,9 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    // A caller subtracts this from what it has left, and so does the program
+    // behind write(2): more than the Twrite carried must never reach them.
+    if (r.write_count > count) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (out_accepted) *out_accepted = r.write_count;
     spin_unlock(&c->lock);
     return 0;
@@ -2458,6 +2461,7 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
     int e = client_run(c, (size_t)slen, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    if (r.weftio_count > len) CLIENT_UNLOCK_RET(c, -P9_E_IO);   // as a Twrite's
     if (out_count) *out_count = r.weftio_count;
     spin_unlock(&c->lock);
     return 0;

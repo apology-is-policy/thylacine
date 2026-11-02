@@ -1842,6 +1842,7 @@ void test_9p_client_walkgetattr_overcount_fails_closed(void);
 void test_9p_client_abandoned_walk_overcount_fails_closed(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
+void test_9p_client_write_overcount_refused(void);
 void test_9p_client_bulk_write_clamps_short(void);
 void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
@@ -4265,6 +4266,7 @@ struct test_case g_tests[] = {
     { "9p_client.abandoned_walk_overcount_fails_closed", test_9p_client_abandoned_walk_overcount_fails_closed, false, NULL },
     { "9p_client.lopen_read",          test_9p_client_lopen_read,          false, NULL },
     { "9p_client.write",               test_9p_client_write,               false, NULL },
+    { "9p_client.write_overcount_refused", test_9p_client_write_overcount_refused, false, NULL },
     { "9p_client.bulk_write_clamps_short",
                                        test_9p_client_bulk_write_clamps_short,
                                                                            false, NULL },

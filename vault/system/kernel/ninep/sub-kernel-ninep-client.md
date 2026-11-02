@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
@@ -96,6 +96,10 @@ One function per op, `0` on success / `-errno` on failure:
   (`client_max_read_count` = msize − 11; `client_max_write_payload` =
   `min(msize, out_buf_cap)` − 23); callers loop per POSIX short-op
   discipline.
+  A reply that claims more than its request carried, an Rread, Rreaddir,
+  Rwrite or Rweftio count past the op's, fails that op with `-EIO` and leaves
+  the session up: the caller subtracts the count from what it has left, and so
+  does the program behind `write(2)`.
 - **Metadata / mutation**: `getattr` / `setattr` / `readdir` / `statfs` /
   `fsync` / `symlink` / `mknod` / `rename` / `readlink` / `link` / `mkdir` /
   `renameat` / `unlinkat`.

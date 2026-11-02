@@ -824,7 +824,12 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
     // (netd in place -- a READ's bytes are in the guest's ring slice; a WRITE's were
     // read out of it), so the kernel copies NOTHING. The Rweftio count IS the result
     // (the byte count netd moved). No loom_bufcopy -- that is the zero-copy property.
-    if (op->weft) return dr ? loom_count_result(dr->weftio_count) : 0;
+    if (op->weft) {
+        if (!dr) return 0;
+        u32 got = dr->weftio_count;
+        if (got > op->op_count) got = op->op_count;
+        return loom_count_result(got);
+    }
     switch (op->opcode) {
     case LOOM_OP_READ: {
         if (!dr) return 0;
@@ -834,8 +839,12 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
             loom_bufcopy(op->buf_kva, dr->read_data, got);
         return loom_count_result(got);
     }
-    case LOOM_OP_WRITE:
-        return dr ? loom_count_result(dr->write_count) : 0;
+    case LOOM_OP_WRITE: {
+        if (!dr) return 0;
+        u32 got = dr->write_count;
+        if (got > op->op_count) got = op->op_count;   // its CQE is write(2)'s answer
+        return loom_count_result(got);
+    }
     // Loom-6b read-shaped output: copy the reply payload INTO the pinned dest
     // slice, bounded by op_count (the dest capacity) so a short buffer can never
     // overrun. READDIR / READLINK stream bytes; GETATTR / STATFS copy the parsed

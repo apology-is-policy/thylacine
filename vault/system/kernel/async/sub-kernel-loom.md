@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-11-02
 ---
 ## The create ops answer to M7 and M8 (2026-10-19, B-3e)
 
@@ -106,6 +106,8 @@ Fifteen of the twenty opcodes dispatch. The five that do not are the ones that
 passthrough. Registered handles wrap already-open fids, so those five need a
 registered-slot install and release surface that does not exist yet; they return
 "not implemented" rather than pretending.
+
+A completion never names more than its operation asked. A server's Rwrite or Rweftio count past the op's is held to the op, as a read's already was, because the entry is what the program reads as its `write`.
 
 ## Mechanism
 

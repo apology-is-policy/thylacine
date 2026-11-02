@@ -49,6 +49,7 @@ void test_9p_client_walkgetattr_overcount_fails_closed(void);
 void test_9p_client_abandoned_walk_overcount_fails_closed(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
+void test_9p_client_write_overcount_refused(void);
 void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
 void test_9p_client_statfs(void);
@@ -124,6 +125,8 @@ static bool g_wga_partial = false;
 // A leg's hostile server: this many qids more than the walk's reply should name.
 static u16 g_walk_overcount;
 static u32 g_walk_overcounts_sent;
+static u32 g_write_overcount;
+static u32 g_weft_overcount;
 
 int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap) {
@@ -249,13 +252,15 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWRITE) {
-        // Echo the requested count back as accepted-count.
+        // Echo the requested count back as accepted-count, and g_write_overcount
+        // more when a leg asks.
         // Request body: fid(4) + offset(8) + count(4) + data(count).
         if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
         u32 count = (u32)req[P9_HDR_LEN + 4 + 8]
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 1] << 8)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 2] << 16)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 3] << 24);
+        count += g_write_overcount;
         size_t total = P9_HDR_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -630,6 +635,42 @@ void test_9p_client_lopen_read(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
+// A server claims it took more than the request carried. A caller subtracts the
+// answer from what it has left, so the claim stops here. The op fails as an
+// over-long Rread does, and the session lives.
+void test_9p_client_write_overcount_refused(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 11, (const u8 *)"f", 1, NULL);
+    const u8 payload[4] = {'w', 'r', 'i', 't'};
+    u32 got = 0;
+    int rc = p9_client_write(&g_client, 11, 0, (u32)sizeof(payload), payload, &got);
+    TEST_EXPECT_EQ(rc, 0, "control: a reply naming what was sent");
+    TEST_EXPECT_EQ((u64)got, (u64)sizeof(payload), "its count");
+
+    g_write_overcount = 1;
+    got = 0xffffffffu;
+    rc = p9_client_write(&g_client, 11, 0, (u32)sizeof(payload), payload, &got);
+    g_write_overcount = 0;
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "an Rwrite past the Twrite is refused");
+    TEST_EXPECT_EQ((u64)got, (u64)0xffffffffu, "its count reaches no caller");
+    TEST_ASSERT(!g_client.dead, "the session lives");
+
+    // The canned Rweftio names 0x1000.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    got = 0;
+    rc = p9_client_weftio(&g_client, 20, 0, 0x1000u, WEFT_DIR_WRITE, &got);
+    TEST_EXPECT_EQ(rc, 0, "control: a Tweftio that asked for it");
+    TEST_EXPECT_EQ((u64)got, (u64)0x1000u, "its count");
+    got = 0xffffffffu;
+    rc = p9_client_weftio(&g_client, 20, 0, 0xfffu, WEFT_DIR_READ, &got);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "an Rweftio past the Tweftio is refused");
+    TEST_EXPECT_EQ((u64)got, (u64)0xffffffffu, "its count reaches no caller");
+    TEST_ASSERT(!g_client.dead, "the session lives");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
 void test_9p_client_write(void) {
     drive_client_open(&g_client, &g_loopback);
     p9_client_walk_one(&g_client, 0, 11, (const u8 *)"f", 1, NULL);
@@ -749,7 +790,7 @@ void test_9p_client_weftio(void) {
     p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
 
     u32 count = 0;
-    int rc = p9_client_weftio(&g_client, 20, /*off=*/0x100u, /*len=*/0x800u,
+    int rc = p9_client_weftio(&g_client, 20, /*off=*/0x100u, /*len=*/0x1000u,
                               WEFT_DIR_WRITE, &count);
     TEST_EXPECT_EQ(rc, 0,                        "weftio ok");
     TEST_EXPECT_EQ((u64)count, (u64)0x00001000u, "weftio count round-trip");
@@ -2216,6 +2257,18 @@ void test_9p_client_loom_write_e2e(void) {
                 g_loom_wcap[3]=='L' && g_loom_wcap[4]=='D' && g_loom_wcap[5]=='!',
                 "buffer bytes copied build-time onto the wire");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+
+    // A CQE is write(2)'s answer: it never names more than the op asked.
+    g_write_overcount = 1;
+    cl_stage_rw(l, 1, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/(u32)sizeof(payload),
+                /*bidx=*/0, /*buf_off=*/0, 0xF00D000000000007ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, /*min_complete=*/2, 0);   // the first CQE is still unreaped
+    g_write_overcount = 0;
+    TEST_EXPECT_EQ(n, 1, "the second SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)sizeof(payload),
+                   "an Rwrite past the op is held to the op");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
     burrow_unref(b);
@@ -2253,11 +2306,12 @@ static int loom_weft_capture_responder(void *ctx, const u8 *req, size_t req_len,
             // Rweftio echoing the requested len (proves the len round-trips the wire).
             size_t total = P9_HDR_LEN + 4;
             if (cap < total) return -1;
+            u32 said = g_weft_len + g_weft_overcount;
             resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
             resp[4] = P9_RWEFTIO;
             resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-            resp[7]  = (u8)(g_weft_len & 0xff);         resp[8]  = (u8)((g_weft_len >> 8) & 0xff);
-            resp[9]  = (u8)((g_weft_len >> 16) & 0xff); resp[10] = (u8)((g_weft_len >> 24) & 0xff);
+            resp[7]  = (u8)(said & 0xff);         resp[8]  = (u8)((said >> 8) & 0xff);
+            resp[9]  = (u8)((said >> 16) & 0xff); resp[10] = (u8)((said >> 24) & 0xff);
             return (int)total;
         }
     }
@@ -2398,6 +2452,17 @@ void test_9p_client_loom_weft_write_e2e(void) {
     TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)512, "result = Rweftio count");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(ringb), hc0, "op buffer pin balanced");
+
+    g_weft_overcount = 1;
+    cl_stage_rw(l, 1, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/512,
+                /*bidx=*/0, /*buf_off=*/poff, 0xF00DF00D00000201ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, /*min_complete=*/2, 0);   // the first CQE is still unreaped
+    g_weft_overcount = 0;
+    TEST_EXPECT_EQ(n, 1, "the second SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)512,
+                   "an Rweftio past the op is held to the op");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
 
     burrow_unref(ringb);
     loom_unref(l);
