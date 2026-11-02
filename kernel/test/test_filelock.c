@@ -225,9 +225,11 @@ static int lk_sync(struct Spoor *c, u32 how) {
 }
 
 // A last clunk is the server releasing that fid's locks (Stratum drops a
-// fid's records at Tclunk), so a freed Spoor's address never inherits them.
+// fid's records at Tclunk), so a freed Spoor's address never inherits them, nor
+// the stale mark: the next owner minted can take that address.
 static int lk_close(struct Spoor *c) {
     if (c->aux == &g_lk_owner_tag) g_lk_owner_closes++;
+    if (c == g_lk_stale) g_lk_stale = NULL;
     for (u32 i = 0; i < LK_MAXREC; i++)
         if (g_lk[i].live && g_lk[i].owner == c) g_lk[i].live = false;
     c->aux = NULL;
@@ -744,7 +746,7 @@ static void stale_entry_body(struct lk_fix *f, int a, int b) {
     TEST_EXPECT_EQ(lk_call(f, b, SYS_FILE_LOCK_WR | P, 20, 1), (s64)0,
                    "once the entry's fid answers ESTALE, a take is still granted");
     struct Spoor *fresh = g_lk_last_spoor;
-    TEST_ASSERT(fresh != dead && g_lk_mints == 2u, "through a fresh owner");
+    TEST_EXPECT_EQ(g_lk_mints, 2u, "through a fresh owner");
     TEST_EXPECT_EQ(g_lk_owner_closes, 1u, "the dead entry's owner is closed");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 1u, "and only the fresh entry is left");
 
