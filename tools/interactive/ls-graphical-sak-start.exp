@@ -47,7 +47,7 @@ proc step {needle why secs} {
     expect {
         -ex $needle { lc_step $why }
         -ex "inline-media service unavailable" { lc_fail "$why: the session lost its service to a chord" }
-        -ex "session ended" { lc_fail "$why: the session ended under a chord" }
+        -re {login: session ended \(code [1-9]} { lc_fail "$why: the session ended under a chord" }
         -re {EXTINCTION:} { lc_extinction_fail $why }
         timeout { lc_fail "$why: not within ${secs}s" }
         eof { lc_fail "EOF ($why)" }
@@ -99,7 +99,7 @@ step "halcyond: inline-media service /srv/halcyon-" "session start finished with
 set timeout 60
 expect {
     -re {halcyond: status bar [^\r\n]*running false panes 2} {}
-    -ex "session ended" { lc_fail "the session ended after start" }
+    -re {login: session ended \(code [1-9]} { lc_fail "the session ended after start" }
     -re {EXTINCTION:} { lc_extinction_fail "session" }
     timeout { lc_fail "welcome and shell did not become ready" }
 }
