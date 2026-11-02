@@ -881,14 +881,13 @@ records no signal).
 
 ## Caveats
 
-**Re-measured 2026-10-06: the first caveat below is history.** IM-1 added
-`NOTE_BIT_SAK` (bit 6), so the kernel's `NOTE_MASK_SUPPORTED` is `0x7f`, and it
-is consumed now: `thread_caught_note_deliverable` and `thread_caught_note_claim`
-AND it into the deliverable set, and three `_Static_assert`s tie it to the
-32-bit `proc_flags` caught-note fields and to the `u8` `Thread.note_claim`. That
-last assert bounded every supported note bit at 7 until the fields widened for
-`usr1` and `usr2` (2026-11-02). libthyla-rs is `0x7f` and
-names `T_NOTE_BIT_TTY` and `T_NOTE_BIT_SAK`; pouch is still `0x2f` (no `snare`,
+**Re-measured 2026-11-02: the first caveat below is history.** The kernel's
+`NOTE_MASK_SUPPORTED` is `0x3ff` (IM-1 added `NOTE_BIT_SAK`, bit 6; `term` is bit 7;
+`usr1` and `usr2` are bits 8 and 9), and it is consumed now:
+`thread_caught_note_deliverable` and `thread_caught_note_claim` AND it into the
+deliverable set, and `_Static_assert`s tie it to both halves of the 32-bit
+`note_caught` and to the `u16` `Thread.note_claim`, `note_direct` and `note_target`.
+libthyla-rs is `0x3ff`; pouch is `0x3af` (no `snare`,
 no `sak`, a kernel-synthetic note for the native login authority). The
 per-thread `note_mask` is `u64`, and so is every local the queue scans read it
 into: they were `u32`, lossless only because of that bound, and the kernel now

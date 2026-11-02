@@ -1014,8 +1014,10 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 | `tty:*` | 5 | kernel-synthetic (the PTY line discipline and job control) | yes | per note: `tty:quit`/`tty:hup` terminate, `tty:susp` stops, `tty:winch`/`tty:cont` are ignored |
 | `sak` | 6 | kernel-synthetic (the secure attention key, IM-1) | yes | ignored |
 | `term` | 7 | `SYS_POSTNOTE` (`SIGTERM` from Pouch and the Linux phenotype) | yes | `exits("term")`, the death recorded as `SIGTERM` (operator vote 2026-10-13) |
-| `usr1` | 8 | `SYS_POSTNOTE`, `SYS_POSTNOTE_TID` (`SIGUSR1` from Pouch and the Linux phenotype) | yes | `exits("usr1")`, the death recorded as `SIGUSR1` (operator vote 2026-11-02) |
-| `usr2` | 9 | `SYS_POSTNOTE`, `SYS_POSTNOTE_TID` (`SIGUSR2` from Pouch and the Linux phenotype) | yes | `exits("usr2")`, the death recorded as `SIGUSR2` (operator vote 2026-11-02) |
+| `usr1` | 8 | `SYS_POSTNOTE` (`SIGUSR1` from Pouch and the Linux phenotype) | yes | `exits("usr1")`, the death recorded as `SIGUSR1` (operator vote 2026-11-02) |
+| `usr2` | 9 | `SYS_POSTNOTE` (`SIGUSR2` from Pouch and the Linux phenotype) | yes | `exits("usr2")`, the death recorded as `SIGUSR2` (operator vote 2026-11-02) |
+
+`interrupt`, `pipe`, `child_exit`, `term`, `usr1` and `usr2` also go to one named thread through `SYS_POSTNOTE_TID` (7.6.4).
 
 `alarm` has no note at v1.0: it needs its own kernel hook (`SYS_ALARM`), and `sigaction` on `SIGALRM` returns `EINVAL`. Hangup, stop and continue arrived with the PTY-1 job-control arc as `tty:hup`, `tty:susp` and `tty:cont` (row 5 above). The supported set can grow per chunk without ABI break.
 

@@ -2881,8 +2881,9 @@ void test_notes_every_direct_family_fits_past_a_full_ring(void) {
     TEST_ASSERT(families >= 6u, "interrupt, pipe, child_exit, term, usr1 and usr2 at least");
     notes_mark_self_managing(p);
     TEST_EXPECT_EQ(dn_word(&g_dn_a), 0u, "the mark emptied the word");
-    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + families - 1u,
-                   "every family past the depth but interrupt, which coalesces");
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH + families, "every family past the depth");
+    TEST_EXPECT_EQ(ndflt_note_count(p, NOTE_NAME_INTERRUPT), NOTE_QUEUE_DEPTH + 1u,
+                   "a move coalesces only at sender 0, and the fill's interrupts name theirs");
     for (u32 i = 0; (name = notes_known_name_for_test(i)) != NULL; i++) {
         if (notes_direct_bit(name) < 0 || dn_same_name(name, NOTE_NAME_INTERRUPT)) continue;
         TEST_EXPECT_EQ(ndflt_note_count(p, name), 1u, "and each is queued once");

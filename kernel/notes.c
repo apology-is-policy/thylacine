@@ -557,6 +557,8 @@ _Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->n
                "ARCH 8.8.3: Thread.note_claim must hold every supported note family");
 _Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_direct))) == 0,
                "ARCH 7.6.4: Thread.note_direct must hold every supported note family");
+_Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_target))) == 0,
+               "ARCH 8.8.3: Thread.note_target must hold every supported note family");
 
 // item 11 (ARCH 8.8.3): the CAUGHT-note twin of the terminate arm above -- its
 // EXACT COMPLEMENT. The terminate arm REFUSES when a live handler exists OR the
@@ -2446,7 +2448,7 @@ again:
 // again before it does, and every peer's wait refuses a claimed family.
 // Released, the family is open again; if its note is still queued, the walk
 // picks a thread for it, and not this one, whose tail has just passed it by.
-// Every IRQ return from EL0 reaches here, so the common case reads two bytes.
+// Every IRQ return from EL0 reaches here, so the common case reads two fields.
 static void notes_release_claims(struct Thread *t) {
     if (t->note_claim == 0 && __atomic_load_n(&t->note_target, __ATOMIC_RELAXED) == 0)
         return;
