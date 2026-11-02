@@ -2493,7 +2493,8 @@ rather than new machinery:
 | `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | never caught or ignored (a handler is refused); the fault ends the Proc |
 | `SIGHUP`/`SIGQUIT`/`SIGWINCH`/`SIGTSTP`/`SIGCONT` | `tty:*` | PTY-1 semantics |
 | `SIGABRT` | none; a self-directed one ends the caller as `snare:abort` | default only; see below |
-| `SIGALRM`, `SIGUSR1/2` | — | no note exists; see below |
+| `SIGUSR1`, `SIGUSR2` | `usr1`, `usr2` | catchable; default terminate (operator vote 2026-11-02) |
+| `SIGALRM` | — | no note exists; see below |
 
 `SIGTERM` shared `interrupt` with `SIGINT` in the pouch mapping until V-6b took
 it off (a shared note cannot represent `SIGINT` ignored with `SIGTERM` at its
@@ -2543,7 +2544,7 @@ default), and the signal chunk's S-2 gave it its own note, `term`
 `rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
 explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
-are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
+are different facts. `SIGALRM` has no note to carry it;
 `SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
 ends the caller as `snare:abort` whatever its mask, so it terminates rather than
 running a handler.
