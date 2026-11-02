@@ -1902,9 +1902,10 @@ int p9_client_walk(struct p9_client *c,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    // The session refused a reply naming more than nwname, which sizes out_qids.
     if (out_nwqid) *out_nwqid = r.nwqid;
     if (out_qids) {
-        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++) {
+        for (u16 i = 0; i < r.nwqid; i++) {
             copy_qid(&out_qids[i], &r.qids[i]);
         }
     }
@@ -1950,9 +1951,11 @@ int p9_client_walkgetattr(struct p9_client *c,
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    // The session refused a reply naming more than nwname, which sizes both
+    // out arrays.
     if (out_nwqid) *out_nwqid = r.nwqid;
     if (out_qids) {
-        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++)
+        for (u16 i = 0; i < r.nwqid; i++)
             copy_qid(&out_qids[i], &r.qids[i]);
     }
     if (out_attrs && r.wga_data) {
@@ -1960,7 +1963,7 @@ int p9_client_walkgetattr(struct p9_client *c,
         // on this client and we still hold c->lock, so the fixed-stride
         // elements (frame-validated by p9_parse_rwalkgetattr) are safe
         // to extract here.
-        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++) {
+        for (u16 i = 0; i < r.nwqid; i++) {
             if (p9_parse_getattr_body(
                     r.wga_data + (size_t)i * P9_WGA_BODY_LEN,
                     P9_WGA_BODY_LEN, &out_attrs[i]) < 0) {

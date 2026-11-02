@@ -22,6 +22,14 @@ needed the operator.
 
 
 ---
+## 2026-11-02 (main, Opus 5.5) -- a P0 lands ahead of its chunk
+
+**The defect.** A 9P session capped a walk reply's `nwqid` at `P9_MAX_WALK`, and the client copied that many qids and attrs into arrays sized by the walk's own count. `kmalloc(sizeof(struct p9_attr) * nname)` in `dev9p_walk_attrs` and `dev9p_open_cached`, `wq[1]` on the stack in `dev9p_create`. Any EL0 Proc can serve 9P over two pipes through `SYS_ATTACH_9P` with no capability, so an unprivileged process could overflow the kernel heap or stack with one over-counted reply. It dates from POUNCE (`d9fdff5e8`, 2026-07-07), and POUNCE's own audit closed list had pronounced the bound safe, so a reviewer told not to re-report it would not look. A reviewer on the unrelated file-lock chunk found it in round 2 by reading the caller's array.
+
+**The operator's decision.** Land it ahead of that chunk rather than wait for its audit to close (vote 40). So this is B-3h's R2-F1 alone, carved from `bb7cb6548`: the session parses against the op's own count for both walk kinds, a longer reply ends the session, and every real server already answers within the count.
+
+**What "fixed" covers.** This over-count, on both arms and on a late reply. It does not change a short reply: a Twalk answered short still binds, which B-3h's round 3 narrows when it lands. Evidence: the four legs named in the commit, the mutants that turn each red, and the default build and suite, recorded in the commit that closes this entry.
+
 ## 2026-10-27 (main, Opus 5.5, effort max) -- a power loss, round 7 dirty, two side fixes, three votes
 
 **The restore.** The operator's laptop lost power overnight; `/private/tmp` went with it (the private Stratum clone, every build, the probes, `/tmp/tla2tools.jar`), and round 7's reviewer died mid-run without a report. The wedge series survived in the durable bundle (wedge `e6b2dd1`, 10 commits on `a78f4bb`). Clone, worktree and builds were rebuilt from it. **Wrong turn:** the restore recipe I had written from memory named the wrong build flags (hooks off for the Release builds); three builds failed with undeclared test hooks. The original flags were recovered from the transcript (IOURING/PQ off, WERROR on; Release builds keep hooks; nohooks builds libraries only) and saved as `stratum-private/rebuild.sh`. Sweep at `e6b2dd1` on the original flags: ctest 73/73, 0 warnings, nohooks 0, Pouch clean.

@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-19
+updated: 2026-11-02
 ---
 ## The session's create ends (2026-10-19, B-3e M7)
 
@@ -657,8 +657,12 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   abandoned-bit reclaim; a caught note → Tflush and a killable wait for the
   first answer (flush(5)). Only a genuine break (or demux violation) latches
   `c->dead`, which fails everything `-EIO` including parked senders.
-- Partial walks (`nwqid < nwname`) return `-EIO` at this layer (the
-  resolver's pounce handles partial semantics above).
+- `p9_client_walk` and `p9_client_walkgetattr` copy `r.nwqid` elements into the
+  caller's arrays, which the walk's `nwname` sizes; the session has refused a reply
+  naming more, and the session goes dead with it. Any EL0 Proc can serve 9P over
+  two pipes through `SYS_ATTACH_9P`, so that count is hostile input.
+- A partial walk (`nwqid < nwname`) succeeds at this layer with the elements it got,
+  and the caller reads the short count (the resolver's pounce decides what it means).
 
 ## Performance
 
@@ -775,7 +779,7 @@ the reader unwinds at any byte).
 2. `read`/`readdir`/`readlink` are COPY semantics at the public API; the
    internal zero-copy alias is valid only under the `done_reply_buf`
    discipline.
-3. Partial walks are `-EIO` at this layer.
+3. A partial walk succeeds at this layer; `nwqid` says how far it got.
 4. Rlerror ecodes are bounded to `[1,4095]` here (`map_error`) before
    negation — NOT passed through unbounded — yielding the `[-4095,-1]`
    passthrough window; a zero or out-of-range ecode collapses to `-EIO`

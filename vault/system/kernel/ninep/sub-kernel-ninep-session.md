@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -229,7 +229,7 @@ indistinguishable on the wire (9P has no per-tag generation) — the generic
 
 **Walkgetattr partial-walk nuance**: the TWALKGETATTR dispatch arm binds
 `new_fid` ONLY on a full walk with a real destination (`nwqid ==
-wga_nwname && new_fid != P9_NOFID`) — correct 9P2000.L partial-walk
+walk_nwname && new_fid != P9_NOFID`) — correct 9P2000.L partial-walk
 semantics, required by the multi-name POUNCE. The plain TWALK arm still
 binds unconditionally (its callers send 0/1 names, where partial cannot
 exist — the deferred refinement is noted in place).
@@ -243,8 +243,9 @@ inline `struct p9_tag_chunk`; `tag_dir`, `n_chunks`; the counters `n_active`,
 monotonic `next_op_id`, sent/completed counters. `struct p9_tag_chunk`: 64
 entries + `n_active` + `n_sync`. `struct p9_outstanding` (40 bytes): `active`, `kind`
 (the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`, `abandoned`,
-`holds_slot` (a reserved fid-table slot), `flush_oldtag`, `wga_nwname` (the
-walkgetattr full-walk comparand), `flush_tag` (a victim's Tflush), `async`,
+`holds_slot` (a reserved fid-table slot), `flush_oldtag`, `walk_nwname` (the walk's
+own count: it caps both walk kinds' replies, since the caller's arrays are sized by
+it, and a Twalkgetattr compares a full walk against it), `flush_tag` (a victim's Tflush), `async`,
 `owner` (the client's registered rpc). `n_reserved_slots` counts
 the held slots. Compile-time: MAX_OUTSTANDING ∈ [1, 0xFFFE] (room for NOTAG),
 MAX_FIDS ≥ 1.

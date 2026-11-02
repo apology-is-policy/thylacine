@@ -1803,6 +1803,7 @@ void test_9p_session_flush_reclaims_both(void);
 void test_9p_session_late_reply_does_not_free_awaiting_flush(void);
 void test_9p_session_abort_unsent_reclaims_tag(void);
 void test_9p_session_flush_rollback_restores_victim(void);
+void test_9p_session_walk_reply_overcount(void);
 void test_9p_transport_init_destroy(void);
 void test_9p_transport_round_trip(void);
 void test_9p_transport_send_frame_size_mismatch_rejected(void);
@@ -1929,6 +1930,9 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
 void test_9p_client_abandon_async_eagain_keeps_session_alive(void);
 void test_9p_client_async_send_eagain_keeps_session_alive(void);
 void test_9p_client_async_full_tag_pool_is_eagain(void);
+void test_9p_client_walk_overcount_fails_closed(void);
+void test_9p_client_walkgetattr_overcount_fails_closed(void);
+void test_9p_client_abandoned_walk_overcount_fails_closed(void);
 void test_larder_install_serve(void);
 void test_larder_serve_miss(void);
 void test_larder_invalidate(void);
@@ -4177,6 +4181,7 @@ struct test_case g_tests[] = {
                                        test_9p_session_abort_unsent_reclaims_tag, false, NULL },
     { "9p_session.flush_rollback_restores_victim",
                                        test_9p_session_flush_rollback_restores_victim, false, NULL },
+    { "9p_session.walk_reply_overcount", test_9p_session_walk_reply_overcount, false, NULL },
     { "9p_transport.init_destroy",     test_9p_transport_init_destroy,     false, NULL },
     { "9p_transport.round_trip",       test_9p_transport_round_trip,       false, NULL },
     { "9p_transport.send_frame_size_mismatch_rejected",
@@ -4445,6 +4450,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.async_full_tag_pool_is_eagain",
                                        test_9p_client_async_full_tag_pool_is_eagain,
+    { "9p_client.walk_overcount_fails_closed", test_9p_client_walk_overcount_fails_closed, false, NULL },
+    { "9p_client.walkgetattr_overcount_fails_closed", test_9p_client_walkgetattr_overcount_fails_closed, false, NULL },
+    { "9p_client.abandoned_walk_overcount_fails_closed", test_9p_client_abandoned_walk_overcount_fails_closed, false, NULL },
                                                                            false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
