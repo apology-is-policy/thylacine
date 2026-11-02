@@ -26,6 +26,10 @@
 //                 RESERVED, EXCLUSIVE, then the downgrade to SHARED with one
 //                 two-byte unlock of PENDING and RESERVED. After it, a reader
 //                 is admitted and a writer is not.
+//   cached-ro   : a read-only descriptor of a small file the kernel holds whole
+//                 (a cached open, whose kernel legs pin the mechanism): it takes
+//                 a read lock, flock, fchmod and futimens, and once locked it
+//                 reads what the last holder wrote, not what it saw at open.
 //   errors      : a write lock through a read-only descriptor and flock
 //                 LOCK_EX on one are EBADF, an OFD request with a pid and a
 //                 bad whence are EINVAL, a range past LLONG_MAX is EOVERFLOW,
@@ -107,6 +111,7 @@ static int child(const char *a1, const char *a2, const char *a3, const char *a4,
 //   get  <r|w> <start> <len> <type> <start'>   F_GETLK; len' rides argv[7]
 //   flk  <ex|sh|un> <errno>                     flock with LOCK_NB
 //   setw <r|w> <start> <len>                    F_SETLKW, after one byte on fd 1
+//   wbyte                                       write 'x' at 0 under F_SETLKW
 static int child_main(int argc, char **argv) {
     int fd = open(FILE_A, O_RDWR);
     if (fd < 0) return 90;
@@ -140,6 +145,11 @@ static int child_main(int argc, char **argv) {
         if (write(1, "W", 1) != 1) return 98;
         int rc = lk(fd, F_SETLKW, argv[2][0], strtoll(argv[3], 0, 0), strtoll(argv[4], 0, 0));
         return rc == 0 ? 0 : 99;
+    }
+    if (!strcmp(m, "wbyte")) {
+        if (lk(fd, F_SETLKW, 'w', 0, 1) != 0) return 88;
+        if (pwrite(fd, "x", 1, 0) != 1) return 87;
+        return lk(fd, F_SETLK, 'u', 0, 1) == 0 ? 0 : 86;
     }
     return 89;
 }
@@ -295,6 +305,35 @@ static int leg_sqlite(int fd) {
     return 0;
 }
 
+static int leg_cached_ro(void) {
+    // A whole read fills the kernel's pages, so the next read-only open is
+    // served from them.
+    static char whole[4096];
+    int p0 = open(FILE_A, O_RDONLY);
+    if (p0 < 0) return fail("cached-ro: the filling open");
+    if (read(p0, whole, sizeof whole) != (ssize_t)sizeof whole) return fail("cached-ro: the filling read");
+    close(p0);
+    int ro = open(FILE_A, O_RDONLY);
+    if (ro < 0) return fail("cached-ro: open");
+    if (child("wbyte", 0, 0, 0, 0, 0) != 0) return fail("cached-ro: another Proc's locked write");
+    if (lk(ro, F_SETLK, 'r', 0, 1) != 0) return fail("cached-ro: a read lock");
+    char b = 0;
+    if (pread(ro, &b, 1, 0) != 1 || b != 'x') return fail("cached-ro: the lock does not read the last holder's write");
+    if (other_set('s', 'w', 0, 1, EAGAIN) != 0) return fail("cached-ro: the read lock is not held");
+    if (flock(ro, LOCK_SH | LOCK_NB) != 0) return fail("cached-ro: flock LOCK_SH");
+    if (flock(ro, LOCK_UN) != 0) return fail("cached-ro: flock LOCK_UN");
+    if (fchmod(ro, 0640) != 0) return fail("cached-ro: fchmod");
+    struct timespec ts[2] = { { 1000000000L, 0 }, { 1100000000L, 0 } };
+    if (futimens(ro, ts) != 0) return fail("cached-ro: futimens");
+    struct stat st;
+    if (fstat(ro, &st) != 0 || (st.st_mode & 0777) != 0640 || st.st_mtim.tv_sec != 1100000000L)
+        return fail("cached-ro: fstat does not read the fchmod and futimens back");
+    if (close(ro) != 0) return fail("cached-ro: close");
+    if (other_set('s', 'w', 0, 1, 0) != 0) return fail("cached-ro: its close kept the Proc's lock");
+    printf("pouch-hello-locks: cached-ro ok\n");
+    return 0;
+}
+
 static int leg_errors(int fd) {
     int ro = open(FILE_A, O_RDONLY);
     if (ro < 0) return fail("errors: read-only open");
@@ -335,6 +374,7 @@ int main(int argc, char **argv) {
         || leg_flock(fd) || release_all(fd) != 0
         || leg_wait(fd) || release_all(fd) != 0
         || leg_sqlite(fd) || release_all(fd) != 0
+        || leg_cached_ro() || release_all(fd) != 0
         || leg_errors(fd))
         return 1;
     if (unlink(FILE_A) != 0) return fail("unlink");

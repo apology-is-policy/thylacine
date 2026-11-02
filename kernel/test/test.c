@@ -1949,6 +1949,7 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void);
 void test_9p_client_async_send_eagain_keeps_session_alive(void);
 void test_9p_client_async_full_tag_pool_is_eagain(void);
 void test_larder_install_serve(void);
+void test_larder_attr_gen(void);
 void test_larder_serve_miss(void);
 void test_larder_invalidate(void);
 void test_larder_gen_guard_skips_raced_install(void);
@@ -2056,7 +2057,9 @@ void test_dev9p_lock_unlock_flushes_first(void);
 void test_dev9p_lock_test_answers(void);
 void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
-void test_dev9p_lock_cached_open_refuses(void);
+void test_dev9p_cached_open_loose_lock(void);
+void test_dev9p_cached_open_loose_stale(void);
+void test_dev9p_cached_open_loose_wstat(void);
 void test_dev9p_lock_ident_generation(void);
 void test_dev9p_cached_open_lock(void);
 void test_dev9p_cached_open_loom(void);
@@ -4260,6 +4263,7 @@ struct test_case g_tests[] = {
     { "9p_client.statfs",              test_9p_client_statfs,              false, NULL },
     { "9p_client.weft",                test_9p_client_weft,                false, NULL },
     { "larder.install_serve",          test_larder_install_serve,          false, NULL },
+    { "larder.attr_gen",               test_larder_attr_gen,               false, NULL },
     { "larder.serve_miss",             test_larder_serve_miss,             false, NULL },
     { "larder.invalidate",             test_larder_invalidate,             false, NULL },
     { "larder.gen_guard",              test_larder_gen_guard_skips_raced_install, false, NULL },
@@ -4601,7 +4605,9 @@ struct test_case g_tests[] = {
     { "dev9p.lock_test_answers",       test_dev9p_lock_test_answers,       false, NULL },
     { "dev9p.lock_owner_clone",        test_dev9p_lock_owner_clone,        false, NULL },
     { "dev9p.lock_owner_never_parks",  test_dev9p_lock_owner_never_parks,  false, NULL },
-    { "dev9p.lock_cached_open_refuses", test_dev9p_lock_cached_open_refuses, false, NULL },
+    { "dev9p.cached_open_loose_lock",  test_dev9p_cached_open_loose_lock,  false, NULL },
+    { "dev9p.cached_open_loose_stale", test_dev9p_cached_open_loose_stale, false, NULL },
+    { "dev9p.cached_open_loose_wstat", test_dev9p_cached_open_loose_wstat, false, NULL },
     { "dev9p.lock_ident_generation",   test_dev9p_lock_ident_generation,   false, NULL },
     { "dev9p.cached_open_lock",        test_dev9p_cached_open_lock,        false, NULL },
     { "dev9p.cached_open_loom",        test_dev9p_cached_open_loom,        false, NULL },

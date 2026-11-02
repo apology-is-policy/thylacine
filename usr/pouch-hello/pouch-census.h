@@ -34,7 +34,7 @@
 #define POUCH_CENSUS_TZ \
     "pouch-hello-tz: legs=tz-file,tz-map,tz-unmap,tz-reload,tz-posix: exit 0"
 #define POUCH_CENSUS_LOCKS \
-    "pouch-hello-locks: legs=own,split,posix-close,ofd,ofd-vs-proc,flock,wait,sqlite,errors: exit 0"
+    "pouch-hello-locks: legs=own,split,posix-close,ofd,ofd-vs-proc,flock,wait,sqlite,cached-ro,errors: exit 0"
 // go-fs prints its own copy (main.go's census): Go cannot include this header,
 // and a disagreement fails the boot rather than passing it.
 #define GO_CENSUS_FS \

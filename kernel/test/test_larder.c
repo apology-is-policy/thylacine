@@ -13,6 +13,7 @@
 #include <thylacine/types.h>
 
 void test_larder_install_serve(void);
+void test_larder_attr_gen(void);
 void test_larder_serve_miss(void);
 void test_larder_invalidate(void);
 void test_larder_gen_guard_skips_raced_install(void);
@@ -123,6 +124,29 @@ void test_larder_serve_miss(void) {
     TEST_ASSERT(!hit, "empty cache misses");
     TEST_EXPECT_EQ(seq0, 0ull, "miss returns the current gen snapshot (0 here)");
     TEST_EXPECT_EQ(g_larder.attr_misses, 1ull, "one miss counted");
+}
+
+// An entry knows the generation only of the fetch that installed it: an install
+// that did not learn it forgets the old one, so a number never keeps the
+// generation of the file that had it before an overwrite.
+void test_larder_attr_gen(void) {
+    larder_reset();
+    struct t_stat in = mk_stat(0644);
+    u64 g = 0;
+    TEST_ASSERT(!larder_attr_gen(&g_larder, 7, &g), "no entry: unknown");
+    u64 known = 0x55;
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in, &known);
+    TEST_ASSERT(larder_attr_gen(&g_larder, 7, &g), "an install that learned it");
+    TEST_EXPECT_EQ(g, 0x55ull, "keeps it");
+    TEST_ASSERT(!larder_attr_gen(&g_larder, 8, &g), "another number: unknown");
+    known = 0x56;
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in, &known);
+    TEST_ASSERT(larder_attr_gen(&g_larder, 7, &g) && g == 0x56, "an overwrite replaces it");
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in, NULL);
+    TEST_ASSERT(!larder_attr_gen(&g_larder, 7, &g), "an install that did not learn it forgets it");
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in, &known);
+    larder_attr_invalidate(&g_larder, 7);
+    TEST_ASSERT(!larder_attr_gen(&g_larder, 7, &g), "an invalidate drops it");
 }
 
 void test_larder_invalidate(void) {

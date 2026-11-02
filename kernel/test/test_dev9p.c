@@ -109,7 +109,9 @@ void test_dev9p_lock_unlock_flushes_first(void);
 void test_dev9p_lock_test_answers(void);
 void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
-void test_dev9p_lock_cached_open_refuses(void);
+void test_dev9p_cached_open_loose_lock(void);
+void test_dev9p_cached_open_loose_stale(void);
+void test_dev9p_cached_open_loose_wstat(void);
 void test_dev9p_lock_ident_generation(void);
 void test_dev9p_cached_open_lock(void);
 void test_dev9p_cached_open_loom(void);
@@ -245,6 +247,7 @@ static u64  g_wga_size_ov;
 static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
 static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
 static u32  g_wga_lerror_ecode;  // != 0: the NEXT Twalkgetattr answers Rlerror, then clears
+static bool g_wga_no_gen;        // an Rwalkgetattr leaves the generation out of `valid`
 
 // B-3h file locks: what the last Tlock / Tgetlock / zero-name Twalk carried,
 // and the answers the responder gives. lock_wire_reset() restores them all.
@@ -281,6 +284,7 @@ static void lock_wire_reset(void) {
     g_twalk_clone_seen = g_twalk_clone_fid = g_twalk_clone_newfid = 0;
     g_twalk_clone_fail_ecode = 0;
     g_ga_gen = 0;
+    g_wga_no_gen = false;
     g_tgetattr_seen = 0;
     g_tgetattr_mask = 0;
 }
@@ -721,7 +725,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         for (u16 e = 0; e < nwqid; e++) {
             size_t o = P9_HDR_LEN + 2 + (size_t)e * P9_WGA_BODY_LEN;
             resp[o] = 0xff; resp[o + 1] = 0x07;              // valid = BASIC,
-            if (g_wga_mask & P9_GETATTR_GEN) resp[o + 1] |= 0x10;   // + GEN when asked
+            if ((g_wga_mask & P9_GETATTR_GEN) && !g_wga_no_gen)
+                resp[o + 1] |= 0x10;                         // + GEN when asked
             o += 8;
             resp[o] = g_wga_type_ov ? g_wga_type_ov : P9_QTFILE;   // qid.type
             { u32 v = g_wga_vers_ov;                         // qid.version
@@ -3660,7 +3665,8 @@ void test_dev9p_cached_open_loose(void) {
     TEST_EXPECT_EQ((u64)cp->fid, (u64)P9_NOFID, "fidless (P9_NOFID)");
     TEST_EXPECT_EQ(sts[0].qid_path, 0x20ull, "cached sts filled for the post-scan");
     TEST_EXPECT_EQ(sts[0].size, 0x200ull, "cached leaf size");
-    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x200ull, "budget charged");
+    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x207ull,
+                   "budget charged: the snapshot and the run's names");
 
     // Reads serve the snapshot taken at the CACHED cvers.
     u8 buf[0x200];
@@ -5929,46 +5935,246 @@ void test_dev9p_lock_owner_never_parks(void) {
     teardown(root);
 }
 
-static void lock_cached_open_refuses_body(struct Spoor *root) {
+// Mint a loose cached open of fileA (the responder's qid.path 0x20) whose file
+// has generation `gen`. No wire op: the Larder's hint serves the whole open.
+static struct Spoor *co_loose_mint(struct Spoor *root, const u8 *data, u32 n, u64 gen) {
     struct larder *l = &g_client.larder;
     const char *names[1] = { "fileA" };
     size_t lens[1] = { 5 };
     struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    g_ga_gen = gen;
     co_prime(root, "fileA", 5);
-    static u8 data[0x200];
-    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 5 + 1);
-    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data, (u32)sizeof(data));
-    // A loose client's cached open keeps no fid (a strict one's keeps its
-    // walk's: cached_open_lock).
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data, n);
     g_client.loose = true;
     struct Spoor *co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
     g_client.loose = false;
-    TEST_ASSERT(co != NULL, "a cached open");
-    struct dev9p_priv *cp = dev9p_priv_of(co);
-    bool fidless = cp != NULL && cp->cached_open && cp->fid == P9_NOFID;
-    lock_wire_reset();
-    struct t_file_lock ans = { 0 };
-    int r_take = dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL);
-    int r_test = dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, &ans);
-    int r_un   = dev9p.lock(co, SYS_FILE_LOCK_UN, 0, 0, NULL);
-    int err = 0;
-    struct Spoor *o = dev9p.lock_owner(co, &err);
-    u32 wire = g_tlock_seen + g_tgetlock_seen + g_twalk_clone_seen;
-    if (o) lk_close(o);
-    spoor_clunk(co);
-    TEST_ASSERT(fidless, "fidless");
-    TEST_EXPECT_EQ((s64)r_take, (s64)-T_E_NOLCK, "a take on a cached open: ENOLCK");
-    TEST_EXPECT_EQ((s64)r_test, (s64)-T_E_NOLCK, "a test: ENOLCK");
-    TEST_EXPECT_EQ((s64)r_un, (s64)-T_E_NOLCK, "an unlock: ENOLCK");
-    TEST_ASSERT(o == NULL, "no owner minted from a fidless open");
-    TEST_EXPECT_EQ((s64)err, (s64)-T_E_NOLCK, "ENOLCK");
-    TEST_EXPECT_EQ(wire, 0u, "nothing crossed the wire");
+    return co;
 }
 
-void test_dev9p_lock_cached_open_refuses(void) {
+// A loose cached open binds nothing at mint (B1) and learns its generation from
+// the Larder. Its first need walks the run that minted it again, once, into the
+// fid its take, test and Proc owner then address; an unlock that finds nothing
+// bound holds nothing and costs no wire. Its close clunks the fids and gives
+// back the budget and the run's base.
+static void cached_open_loose_lock_body(struct Spoor *root) {
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 5 + 1);
+    u64 budget0 = dev9p_co_budget_used();
+    int ref0 = root->ref;
+    struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL && cp->cached_open && cp->fid == P9_NOFID &&
+                cp->co_kfid == P9_NOFID, "with no fid");
+    TEST_ASSERT(cp->co_start == root && root->ref == ref0 + 1, "holding the run's base");
+    TEST_EXPECT_EQ((u64)cp->lock_ident, (u64)DEV9P_IDENT_GEN, "the Larder's generation");
+    TEST_EXPECT_EQ(cp->lock_gen, 0x77ull, "the file's");
+    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x207ull,
+                   "the budget holds the snapshot and the names");
+
+    lock_wire_reset();
+    g_wga_seen = 0;
+    g_ga_gen = 0x77;
+    TEST_EXPECT_EQ((s64)dev9p.lock_ident(co), 0ll, "lock_ident");
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll,
+                   "an unlock with nothing bound");
+    TEST_EXPECT_EQ((u64)(g_wga_seen + g_tlock_seen + g_tgetattr_seen), 0ull,
+                   "costs no wire");
+    TEST_EXPECT_EQ((u64)cp->co_kfid, (u64)P9_NOFID, "and binds nothing");
+
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll, "a take");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "walks the run again");
+    TEST_ASSERT((g_wga_mask & P9_GETATTR_GEN) != 0, "asking the generation");
+    TEST_EXPECT_EQ((u64)cp->co_kfid, (u64)g_wga_newfid, "and keeps the fid");
+    u32 kept = cp->co_kfid;
+    TEST_ASSERT(kept != P9_NOFID && cp->fid == P9_NOFID, "beside the priv's own fid");
+    TEST_EXPECT_EQ((u64)g_tlock_fid, (u64)kept, "the take goes on it");
+
+    struct t_file_lock ans = { 0 };
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, &ans), 0ll, "a test");
+    TEST_EXPECT_EQ((u64)g_tgetlock_fid, (u64)kept, "goes on it");
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_UN, 0, 0, NULL), 0ll, "an unlock");
+    TEST_EXPECT_EQ(g_tlock_seen, 2u, "reaches the server once it is bound");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "and nothing walked again");
+
+    int err = 0;
+    struct Spoor *o = dev9p.lock_owner(co, &err);
+    TEST_ASSERT(o != NULL, "the Proc owner is minted");
+    TEST_EXPECT_EQ((u64)g_twalk_clone_fid, (u64)kept, "as a clone of that fid");
+    if (o) lk_close(o);
+
+    TEST_EXPECT_EQ((s64)dev9p.lock_sync(co, DEV_LOCK_SYNC_ACQUIRE), 0ll, "ACQUIRE");
+    TEST_EXPECT_EQ((u64)g_twalk_clone_fid, (u64)kept, "clones that fid");
+    TEST_EXPECT_EQ((u64)cp->co_rfid, (u64)g_twalk_clone_newfid, "for a read fid");
+    u32 rf = cp->co_rfid;
+    u8 buf[16];
+    long r = dev9p.read(co, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ((s64)r, 5ll, "a read then reaches the server");
+    TEST_EXPECT_EQ((u64)g_tread_fid, (u64)rf, "through the read fid");
+
+    g_clunk_seen = 0; g_clunk_fid_n = 0;
+    spoor_clunk(co);
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 2ull, "the close clunks two fids");
+    TEST_ASSERT((g_clunk_fids[0] == rf && g_clunk_fids[1] == kept) ||
+                (g_clunk_fids[0] == kept && g_clunk_fids[1] == rf),
+                "the read fid and the bound fid");
+    TEST_EXPECT_EQ((s64)root->ref, (s64)ref0, "and lets go of the base");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "and of the budget");
+    (void)p9_client_reader_pump_ready(&g_client);
+}
+
+void test_dev9p_cached_open_loose_lock(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
-    lock_cached_open_refuses_body(root);
+    cached_open_loose_lock_body(root);
+    lock_wire_reset();
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// The walk is a hint, checked: it binds only the same file. A name that no longer
+// resolves binds nothing; a name that reaches another generation or another
+// number, or a server that will not say, gets its fid back. Each answers ESTALE
+// and sends no lock, the snapshot keeps serving, and a later walk may still bind.
+// A file the Larder knows no generation for is never minted loose at all.
+static void cached_open_loose_stale_body(struct Spoor *root) {
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 9 + 2);
+    struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL, "priv");
+    int err = 0;
+    u8 buf[16];
+
+    // Renamed or unlinked: the name is gone.
+    lock_wire_reset();
+    g_ga_gen = 0x77; g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_lerror_ecode = T_E_NOENT;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
+                   "a run that no longer resolves: ESTALE");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "after one walk");
+    TEST_EXPECT_EQ((u64)g_tlock_seen, 0ull, "no lock sent");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "nothing bound, nothing to clunk");
+    TEST_EXPECT_EQ((u64)cp->co_kfid, (u64)P9_NOFID, "no fid kept");
+    TEST_EXPECT_EQ((s64)dev9p.read(co, buf, (long)sizeof(buf), 0), 16ll, "the snapshot serves");
+    TEST_ASSERT(buf[0] == data[0] && buf[15] == data[15], "its bytes");
+
+    // Replaced: the name reaches a new file at the same reused number.
+    g_ga_gen = 0x78; g_wga_seen = 0; g_clunk_seen = 0; g_clunk_fid_n = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
+                   "another generation at this number: ESTALE");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "the walk's fid goes back");
+    TEST_EXPECT_EQ((u64)g_clunk_fids[0], (u64)g_wga_newfid, "that one");
+    TEST_EXPECT_EQ((u64)g_tlock_seen, 0ull, "no lock sent");
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    // A lock call's other doors answer the same.
+    g_ga_gen = 0x78; g_clunk_seen = 0;
+    TEST_ASSERT(dev9p.lock_owner(co, &err) == NULL, "no Proc owner");
+    TEST_EXPECT_EQ((s64)err, (s64)-T_E_STALE, "ESTALE");
+    TEST_EXPECT_EQ((s64)dev9p.lock_sync(co, DEV_LOCK_SYNC_ACQUIRE), (s64)-T_E_STALE,
+                   "an ACQUIRE: ESTALE");
+    TEST_EXPECT_EQ((u64)cp->co_rfid, (u64)P9_NOFID, "no read fid");
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    // A server that does not report the generation cannot prove the file.
+    g_ga_gen = 0x77; g_wga_no_gen = true; g_clunk_seen = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
+                   "no generation in the answer: ESTALE");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "the fid goes back");
+    g_wga_no_gen = false;
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    // Another number under the name.
+    u64 path0 = cp->co_stat.qid_path;
+    cp->co_stat.qid_path = path0 + 1;
+    g_clunk_seen = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), (s64)-T_E_STALE,
+                   "another number: ESTALE");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "the fid goes back");
+    cp->co_stat.qid_path = path0;
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    // The control, one variable away: the file is back, and the same call binds.
+    g_tlock_seen = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll,
+                   "the same file at the name again: the take stands");
+    TEST_EXPECT_EQ((u64)g_tlock_seen, 1ull, "on the wire");
+    TEST_EXPECT_EQ((u64)g_tlock_fid, (u64)cp->co_kfid, "on the fid that walk bound");
+    spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    // No known generation: the normal path, and no wire from this one.
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    struct larder *l = &g_client.larder;
+    g_wga_no_gen = true;
+    co_prime(root, "fileA", 5);
+    g_wga_no_gen = false;
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data, (u32)sizeof(data));
+    g_wga_seen = 0;
+    g_client.loose = true;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    g_client.loose = false;
+    TEST_ASSERT(co == NULL, "a file of no known generation is not minted loose");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "and costs no wire");
+    if (co) spoor_clunk(co);
+}
+
+void test_dev9p_cached_open_loose_stale(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    cached_open_loose_stale_body(root);
+    g_wga_no_gen = false;
+    lock_wire_reset();
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// fchmod and futimens through a read-only descriptor of a loose cached open:
+// the wstat binds, and the fstat after it asks the server through that fid with
+// the snapshot's size. Before the bind, fstat costs no wire. If the file moved,
+// the wstat answers ESTALE.
+static void cached_open_loose_wstat_body(struct Spoor *root) {
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 3 + 4);
+    struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL, "priv");
+    struct t_stat st;
+    lock_wire_reset();
+    g_ga_gen = 0x77; g_wga_seen = 0;
+    u32 ga0 = g_tgetattr_seen;
+    TEST_EXPECT_EQ((s64)dev9p.stat_native(co, &st), 0ll, "fstat before any bind");
+    TEST_EXPECT_EQ(g_tgetattr_seen, ga0, "serves the open-time stat");
+    TEST_EXPECT_EQ(st.size, 0x200ull, "its size");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "with no walk");
+
+    g_wga_lerror_ecode = T_E_NOENT;
+    TEST_EXPECT_EQ((s64)dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL),
+                   (s64)-T_E_STALE, "a wstat when the name is gone: ESTALE");
+    g_setattr_fid = P9_NOFID;
+    TEST_EXPECT_EQ((s64)dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0, NULL), 0ll,
+                   "a wstat when it resolves");
+    TEST_ASSERT(cp->co_kfid != P9_NOFID, "binds");
+    TEST_EXPECT_EQ((u64)g_setattr_fid, (u64)cp->co_kfid, "and goes on that fid");
+    ga0 = g_tgetattr_seen;
+    TEST_EXPECT_EQ((s64)dev9p.stat_native(co, &st), 0ll, "fstat after the wstat");
+    TEST_EXPECT_EQ(g_tgetattr_seen, ga0 + 1u, "asks the server");
+    TEST_EXPECT_EQ(st.size, 0x200ull, "with the snapshot's size, not the server's 0x100");
+    spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+}
+
+void test_dev9p_cached_open_loose_wstat(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    cached_open_loose_wstat_body(root);
     lock_wire_reset();
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
@@ -6152,8 +6358,8 @@ void test_dev9p_cached_open_lock(void) {
 
 // A Loom ring's ops go straight to the server: registering a cached open
 // installs its read fid, and the ring addresses that fid -- never P9_NOFID,
-// never the unopened kept fid. A loose cached open keeps no fid to clone and
-// cannot be registered.
+// never the unopened kept fid. A loose cached open binds its fid first, and a
+// file it can no longer reach cannot be registered.
 void test_dev9p_cached_open_loom(void) {
     struct Spoor *root = make_open_client_and_root();
     struct larder *l = &g_client.larder;
@@ -6189,9 +6395,17 @@ void test_dev9p_cached_open_loom(void) {
     TEST_ASSERT(co != NULL, "a loose cached open");
     cp = dev9p_priv_of(co);
     TEST_ASSERT(cp != NULL && cp->fid == P9_NOFID, "keeps no fid");
-    TEST_EXPECT_EQ((s64)dev9p_loom_register(co), (s64)-T_E_OPNOTSUPP,
-                   "and cannot be registered");
+    g_wga_lerror_ecode = T_E_NOENT;
+    TEST_EXPECT_EQ((s64)dev9p_loom_register(co), (s64)-T_E_STALE,
+                   "a name that is gone cannot be registered");
+    TEST_EXPECT_EQ((u64)cp->co_rfid, (u64)P9_NOFID, "and installs nothing");
+    TEST_EXPECT_EQ((s64)dev9p_loom_register(co), 0ll, "a name that resolves can");
+    TEST_ASSERT(cp->co_kfid != P9_NOFID, "it binds");
+    TEST_ASSERT(cp->co_rfid != P9_NOFID && cp->co_rfid != cp->co_kfid, "then installs a read fid");
+    TEST_EXPECT_EQ((s64)dev9p_client_fid(co, &cl, &fid), 0ll, "client_fid");
+    TEST_EXPECT_EQ((u64)fid, (u64)cp->co_rfid, "the ring's ops address it");
     spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     lock_wire_reset();
     larder_destroy(l);

@@ -926,6 +926,19 @@ static void acquire_syncs_body(struct lk_fix *f, int a, int b, int o, int o2) {
     TEST_EXPECT_EQ(lk_call(f, o, U, 0, 0), (s64)0, "its unlock");
     TEST_EXPECT_EQ(lk_call(f, o, W | P, 0, 0), (s64)0, "the Proc take");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), entries + 1u, "spends its slot");
+    // A peer that can no longer reach the file (ESTALE) keeps its snapshot, and
+    // a Proc take through the descriptor that can reach it stands. That
+    // descriptor's own ESTALE is the file's death, and refuses.
+    TEST_EXPECT_EQ(lk_call(f, o, U | P, 0, 0), (s64)0, "the unlock");
+    g_lk_acq_fail    = f->sp[o2];
+    g_lk_acq_fail_rc = -T_E_STALE;
+    TEST_EXPECT_EQ(lk_call(f, o, W | P, 0, 0), (s64)0, "a peer's ESTALE refuses no take");
+    TEST_EXPECT_EQ(lk_call(f, o, U | P, 0, 0), (s64)0, "its unlock");
+    g_lk_acq_fail = f->sp[o];
+    calls = g_lk_calls;
+    TEST_EXPECT_EQ(lk_call(f, o, W | P, 0, 0), -(s64)T_E_STALE, "its own ESTALE refuses");
+    TEST_EXPECT_EQ(g_lk_calls, calls, "before the server");
+    g_lk_acq_fail = NULL;
 }
 
 void test_filelock_acquire_syncs(void) {

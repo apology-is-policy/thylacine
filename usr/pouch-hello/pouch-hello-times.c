@@ -16,11 +16,9 @@
 //                a path that does not exist, and change nothing.
 //   now        : null times, and two UTIME_NOW, take the file server's clock:
 //                within a few seconds of the guest's.
-//   futimens   : the descriptor form. Every descriptor leg opens for writing:
-//                a read-only open of a small file the kernel holds (this
-//                one, just written) is the fidless cached open, which takes
-//                no wstat (FID-LIFECYCLE-DESIGN 3.3; its EOPNOTSUPP is
-//                pinned by the dev9p kernel tests).
+//   futimens   : the descriptor form. Every descriptor leg opens for writing;
+//                pouch-hello-locks' cached-ro leg covers a read-only descriptor
+//                of a small file the kernel holds (FID-LIFECYCLE-DESIGN 3.3).
 //   utimes     : utimes, futimes, utime and lutimes reach the same call.
 //   empty-path : AT_EMPTY_PATH with "" names the descriptor, and with
 //                AT_FDCWD the working directory; a directory takes times.
