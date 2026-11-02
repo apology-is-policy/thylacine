@@ -2939,3 +2939,30 @@ found two P2s in them across two audit rounds, and this tree carried both.
   changes rest on the guest legs.
 - **Audit.** Fable 5.1, 0/0/0/3, all in the records: the copied decision's offsets, the trigger row's dropped files, and
   the change record's `touched:`.
+
+## A seat that fails says so (votes 36, 37) -- 2026-11-02
+
+Code ff4a7458e, ee99f3c70, 9cc84c31e, 310355dc6, e4c2dc5bc, 99e70535f, 5c325e53a; witnesses adf79f457, 65a430ec8, c3f024eaa,
+5a188d90d, dba45c3c4. Closes OPEN-BUGS 2026-10-29T17:14Z, 2026-10-29T09:33Z, and the 2026-11-02 entries 09:00Z, 09:39Z,
+11:08Z, 15:13Z and both 19:06Z.
+
+- **The rules (operator votes 36, 37).** A dead seat service fails the seat and returns it to normal. `SEAT_QUERY`'s code
+  states the episode's medium: 0 none, 1 serial, 2 graphical.
+- **Generation.** A return to normal through a failure retires the generation; a commit keeps it. Before this,
+  `EpisodeIo::finish` read normal at its generation as a commit, so a service death in restoring gave the requester OK for
+  a cancelled grant.
+- **The regression and its fix.** That change killed the session on about half of recoveries, since Lictor served the old
+  generation at normal for one pass and a refused Join was fatal. A recovery now reports phase and generation together, and
+  a joined participant re-samples a refused Join (`Refusals`, `Seat::adopt`).
+- **Two defects behind one lost boot, both hidden by the wrapper's retry.** caps-probe's witness is one console write. The
+  kernel tests' exact free-page round trips settle the magazines first (`test_free_pages_settled`). The wrapper's last
+  lines now name a scenario that passed only on a retry, with rc unchanged.
+- **Witness.** Default suite 2122/2122 at c3f024eaa. q-seat8: the soak on the pre-fix mac image failed at cycle 57 on a split
+  witness, 1 in 115; on the fix, soak x3 and ls-graphical-sak-dead x6 at one attempt each, 0 failures, 0 split in 381
+  witnesses. K1 raw count with a forced-empty magazine red, 8 short. K2b walker frees only the root red through the settled
+  count, 3 short. q-seat9 at the tip: ls-graphical-sak-states (its first run on this series), -recover and plain PASS.
+  q-seat5 at 5c325e53a: re-join reverted red 3/3; host seat-control 11, libhalcyon 174, lictor 51 mutants red;
+  interaction-seat and im1-sak-lever PASS. Not the full CI gate (none until the operator says so).
+- **Audit.** Opus reviewing Opus, Fable having refused this conversation's shape: r2 0/0/2/4, r3 (a re-audit, r2's fix
+  having regressed) 0/0/2/4. F1-F6 and r3's two P2s fixed. Open: r3's four P3s and the one-write batch on corona/seat-p3,
+  F4's Corvus half, a chord within Corvus's 10 ms poll after a commit, a peer refill during the settling drain.

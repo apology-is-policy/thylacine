@@ -41,6 +41,7 @@ code:
   - tools/interactive/ls-graphical-sak-states.exp
   - tools/interactive/ls-graphical-sak-recover.exp
   - tools/interactive/ls-graphical-sak-dead.exp
+  - tools/interactive/ls-graphical-sak-soak.exp
   - usr/lictor/src/rpc_client.rs
   - usr/lictor/src/skein.rs
   - usr/lictor/src/wire.rs
@@ -405,7 +406,11 @@ wrong-key and Escape paths, all entered with the primary Ctrl-Alt-F10 chord; `ls
 adds real expiry and the five-failure lockout at the 800x720 minimum; and
 `ls-graphical-sak-recover` holds the chord past the quiesce deadline, requires
 the failure notice, the recovery with nothing conferred, a live workspace and
-then a full conferral on the recovered seat. `ls-graphical-sak-dead` fires the
+then a full conferral on the recovered seat. `ls-graphical-sak-soak` cycles the
+seat's return with no lever: each cycle ends one episode the clean way and one
+past the quiesce deadline, and after each the link must rejoin, typing must reach
+the shell and the next chord must take (8 cycles by default, `LS_SOAK_CYCLES` for
+a hunt). `ls-graphical-sak-dead` fires the
 `test-latch-dead` lever's seat half, one shot per trusted takeover
 (`Device::test_latch_seat_shot`, `SeatShot`). The first stalls the engine between disabling the outputs and binding the
 trusted image, and the device retires it, so the takeover fails part-way and

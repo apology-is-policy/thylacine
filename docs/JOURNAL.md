@@ -22,6 +22,110 @@ needed the operator.
 
 
 ---
+## 2026-11-02 -- a seat that fails has to say so, and two defects a retry would have hidden (corona)
+
+**Votes 36 and 37 (the operator's).** A dead seat service fails the seat and returns it to NORMAL (36). SEAT_QUERY
+states the episode's medium: 0 none, 1 serial, 2 graphical (37). ff4a7458e and 9cc84c31e landed them, UNBUILT at the
+time. The first prosecutor, on Fable, died on 10-29: its report reached me cut off inside F1 and the resume was stopped
+by a safeguard refusal. Only that F1 survives. Fable refuses this conversation's shape, so r2 and r3 ran Opus on Opus,
+which the audit skill allows; each brief said what such a round brings and what it does not.
+
+**r2 (0 P0, 0 P1, 2 P2, 4 P3): a false success on the trusted path.** `EpisodeIo::finish` read NORMAL at its generation
+as "restored and committed". Vote 36 cancels the grant and sets NORMAL in one hold, so a service dying in RESTORING gave
+the requester an OK for a grant that no longer existed. Before the vote the same state read FAILED and answered
+INTERNAL, so the vote made a narrow false success deterministic. My self-audit reached this and F3 before the report
+did. The fix: a return to NORMAL through a failure moves the generation, a commit keeps it
+(dec-2026-11-02-seat-failure-retires-generation, 310355dc6). F2 was a suite failure of mine: 
+`cons.graphical_seat_episode_medium` could never pass, since it called SEAT_FAIL at generation 0, and it masked every
+medium mutant. F4's Corvus half stays open: nothing in a guest drives `EpisodeIo::open` or `finish` through a seat
+failing right after ACK.
+
+**That fix killed the session, and the review had not looked.** q-seat4 at 310355dc6 went red on 3 of 3 attempts:
+`login: session ended (code 1)` at a different recovery each time. r2's fix proposal, which I took, did not check the
+consumers above Lictor. Lictor's FAILED arm stored RESTORED's phase and not its generation, so the state page served
+(g, NORMAL) for one pass and (g+1, NORMAL) on the next. Halcyond's Link answered the first with Join(g), the table had
+moved on and refused it, and a refused Join was fatal. A one-line probe confirmed the refused Join on q-seat5. Fixes:
+99e70535f reports phase and generation together, e4c2dc5bc re-samples a refused Join once, and 5c325e53a takes a reply
+whole, adds a rejoin witness and makes the Join mutants durable. Reverting the re-join went red 3 of 3 (q-seat5 R1).
+
+**r3 (0 P0, 0 P1, 2 P2, 4 P3), because r2's fix had regressed.** A bounded explorer with discriminating controls: the
+old guard reached 1504 and 7002 fatal states, the tip reached 0. It found no other consumer assuming the generation
+moves only at a chord, apart from test fixtures. Its four P3s are all availability and fail closed; they are drafted on
+corona/seat-p3 and remain open.
+
+**One failed attempt in five, and I deleted the evidence.** q-seat5's gauge1 reported PASS on the wrapper's last line,
+but attempt 1 had failed: rc=1 at 112 s with 3 recoveries against a pass's 4. My own gate script had removed
+`build/ls-ci-*.attempt*` right after counting them, so the capture half of the gate destroyed what the verdict half
+had just flagged. Only the VM's setup log survives. q-seat6 then ran the clean image 12 of 12, which said little
+about a failure that rare, and I said so in OPEN-BUGS rather than closing on it.
+
+**Wrong turns.** My `session-ended` gauge read 26 on every run, because joey's boot E2E prints
+`login: session ended (code 0)`; the needle has to be `code [1-9]`. I then spent about an hour reading the chord path,
+inferring lost input from "3 recoveries at 106 s". The failure message said typing had not reached the shell, and I
+treated that as an observation. It was a needle miss, and I had no transcript to check it against. Next, the Pi: plain
+4 of 4 and a soak of 8 boots by 60 cycles, 0 failures, 960 episode ends, 968 witnesses. That soak bounded a general
+lost-input bug and said nothing about what we later found, which does not show on the Pi at all.
+
+**q-seat7: keep every transcript, then read them.** adf79f457 gave the scenario `lc_fail_probe`, which asks the guest
+what still works before the kill, witnessed both ways on the Pi. q-seat7 ran 24 boots on the mac at LS_CI_ATTEMPTS=1,
+every step stamped, every failure's evidence kept (`work/oct29-warp-image/qs7-fail2.*`, `qs7-fail6.*`). Two failed, in
+two unrelated ways. On all 22 passes: 4 recoveries, 4 rejoins, f10=4, refused=0.
+
+- **Run 2, a witness split by another process.** The scenario said `no authority witness (baseline) -- typing did not
+  reach the shell`. That was false. The transcript reads `seat-probe: PASS baseline`, then a whole
+  `halcyond: status bar 3 painted ...` line, then ` (endpoint denied; GPU denied; DAC verified)`. caps-probe wrote its
+  line in three calls and the kernel keeps only one whole (kernel/cons.c:447). The fail-probe answered in the same boot:
+  typing reaches the shell, and a second chord took. Fix c3f024eaa. It is the likely cause of the 15:13Z failure,
+  since 112 s and 3 recoveries fit `witness cancelled` typed at about 76.5 s plus the 30 s timeout. That transcript is
+  gone, so this is an inference by timing and stays labelled as one.
+- **Run 6, a free-page count that killed a boot.** `FAIL: proc_pgtable_destroy must walk + free ALL sub-tables`, then
+  `tests: 2121/2122`, then `EXTINCTION: kernel test suite failed`. `phys_free_pages` (mm/phys.c:265) reads the buddy
+  only. A page in a per-CPU magazine is free and not counted, and a refill moves 8 pages, so a refill inside the test's
+  window reads as a leak. Siblings already drained first. Fix 65a430ec8: `test_free_pages_settled` in test_proc_pgtable,
+  test_exec, and test_capacity's 15 exact round trips (its commit message says 16; it is 15 plus one bound). The failing
+  boot printed no numbers, so its delta is unknown; the test now prints both.
+
+Both were boots that the wrapper's default of 3 attempts would have passed on retry, under a last line reading "PASS --
+all". 5a188d90d makes both exits name any scenario that passed only on a retry, witnessed on the real wrapper both ways.
+rc stays 0: whether that should go red is a gate policy for the operator, and I have not asked yet.
+
+**q-seat8 decided both (21:38Z..23:08Z, log `work/oct29-warp-image/q-seat8.log`).** Phase A ran the soak on the pre-fix
+image, on the mac this time. It failed at cycle 57 with the same split: `seat-probe: PASS restored`, a status-bar line,
+then the tail. That is 1 split in 115 witnesses, which the Pi's 968 clean ones could not have shown. With the fix, three
+soak boots gave 363 witnesses and six plain boots 18, with no split and no failure; one write cannot split, so the
+construction carries the claim and the numbers only agree with it.
+
+K1 forced this CPU's magazine empty and used the old raw count: `free_before=487439 free_after=487431`, 8 short, with
+the message run 6 printed. That measures the mechanism. It does not prove run 6 was this, since that boot printed no
+numbers; the suite then passed on all 13 boots of the fixed kernel, which at run 6's 1 in 24 would prove little alone. The fix
+closes this CPU's refill by construction. A peer CPU can still refill its set while the drain walks the others, or between
+the drain and the read, as `mm/magazines.c` has always said, so a much narrower window remains; that is enqueued with a
+stable-read fix. The mm-phys dossier already described this instrument trap in one direction: the test had not applied it.
+
+K2, the control that the fix still catches a real leak, did not go red the first time, it failed to build: my mutant left
+`l1_walk_and_free` unused, and the kernel builds with -Werror. An unbuilt mutant is not a red, so K2b reran it keeping the
+function referenced: `free_before=487424 free_after=487421`, 3 pages through the settled count, the shape the test's
+message names, and 2117/2122 as the other leak tests went with it. K3, the default suite at c3f024eaa: 2122/2122.
+
+**A gap this close found.** Reading the coverage for this entry, I saw that `ls-graphical-sak-states` had never run on
+this series, though it drives the Corvus paths votes 36 and 37 changed. q-seat9 baked the tip (dba45c3c4) and ran it with
+-recover and the plain scenario, each at one attempt: 215 s, 95 s, 118 s, all PASS, no non-zero session end.
+
+**Other work that came out of this.** dba45c3c4 lands the soak with no lever (default 8 cycles, q-seat8 passes 60).
+tools/check-console-lines.py on corona/seat-p3 fails a needle reading across two console writes: 28 pairs on 9 lines
+before its one-write fixes, 0 after, and the pre-fix caps-probe tree trips it through the very needle that failed.
+It does not see 69 lines of all-variable text with a separate newline; that is in OPEN-BUGS.
+
+**What "fixed" covers.** Vote 36's false success, the generation retire, the session kill and the split witness, on the
+images those gates ran; the default suite 2122/2122 at c3f024eaa, and no kernel or guest file differs at this tip. NOT
+covered: r3's four P3s, F4's Corvus half, a chord within Corvus's 10 ms poll after a commit (answers INTERNAL, fail-closed),
+the peer-refill window above, the census lines not yet landed. The 15:13Z boot's own cause stays an inference. main's tree
+needs all of vote 37, the generation retire, Seat::adopt and Refusals, and has the same two test defects if its tests
+match; I have not checked that.
+
+**Lessons.** A failure message is a claim: read the transcript before the message. A soak on the wrong host is not a
+control. A retry that passes is a failure with a clean summary line. A fix proposal is a hypothesis about its consumers.
+
 ## 2026-11-02 -- b3's env shapes come home, and a rewrite main already had (corona)
 
 **b3's env shapes, brought home.** main's backport of the spawn environment tail to b3 went through two audit
