@@ -4,7 +4,7 @@ type: chg
 title: "B-3h audit round 3's fixes"
 date: 2026-11-02
 arc: arc-boosty
-commits: ["8afd8eb87", "*(pending)*"]
+commits: ["8afd8eb87", "3549ab3c6"]
 touched:
   - sub-kernel-filelock
   - sub-kernel-ninep-dev9p
