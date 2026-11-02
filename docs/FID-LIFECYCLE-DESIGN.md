@@ -96,8 +96,8 @@ never reaped permanently burns a slot → tag-pool exhaustion → the client sta
 ownerless** (dispatch it, `clear_outstanding` frees the tag). This is EXACTLY the
 **#845 Tflush ownerless-dispatch** machinery already in the tree (an ownerless
 Rflush frees its oldtag; extend the same dispatch arm to an ownerless Rclunk).
-`dev9p_close`'s `p9_client_clunk` becomes `p9_client_clunk_async` (fire-and-forget)
-on the normal close path; the error-path clunks (dev9p_walk_attrs/walk/create) may
+`dev9p_close`'s `p9_client_clunk` becomes `p9_client_clunk_nowait` on every path (as
+built: it goes to a closer where it would wait for a tag or ring space); the error-path clunks (dev9p_walk_attrs/walk/create) may
 stay synchronous (rare, off the hot path) or also go async — an implementation
 choice, prosecuted in the audit.
 
@@ -568,7 +568,9 @@ session (operator vote 2026-09-29).
   them. A die-pending lock holder's release queues the flush of an open file
   another Proc still shares, then the lock fid's Tclunk, which its death
   refuses too. The closer runs the job and sends no Tclunk for it; a failed
-  flush stays latched on the open file, which still holds its run.
+  flush drops the run and latches on the open file. Only a death keeps a run.
+  Past the file's last close nobody reads that latch, so such a job reports its
+  own failure (`p9_close_job_lost`) and drops the file's cached pages.
 - A die-pending thread's last close of a descriptor whose Spoor another
   reference still holds (a map, a Loom op) queues the same kind of job with
   `release_locks` set: the closer flushes, then sends the whole-file unlock

@@ -126,9 +126,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r1-fixes]] — B-3h audit round 1's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r2-fixes]] — B-3h audit round 2's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-audit-r3-fixes]] — B-3h audit round 3's fixes
+- 2026-11-02 [[chg-2026-11-02-b3h-audit-r4-fixes]] — B-3h audit round 4's fixes
 - 2026-11-02 [[chg-2026-11-02-b3h-sa3-write-count]] — A server write count is bounded by the request
 - 2026-11-02 [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]] — B-3h3 and B-3h4: a cached open reaches its file; Pouch fcntl locks and flock
 - 2026-10-29 [[chg-2026-10-29-b3-spawn-env]] — b3 backports the spawn environment tail (env-a + env-c); the child is born with no environment
 - 2026-10-29 [[chg-2026-10-29-b3h2-file-locks]] — B-3h2: SYS_FILE_LOCK 137 with its two owners, the Proc owner table, and dev9p's lock path
-- 2026-10-29 [[chg-2026-10-29-env-bind-at-open]] — An open /env file binds its opener's environment; unknown syscalls answer ENOSYS; ut's unset reaches /env
 <!-- generated:end -->

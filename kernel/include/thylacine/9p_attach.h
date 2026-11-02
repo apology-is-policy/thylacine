@@ -245,6 +245,13 @@ void p9_clunk_refused(u32 fid, int rc);
 // run never reached a live server, so bytes write() reported written are lost.
 void p9_close_flush_failed(u32 fid, int rc);
 
+// A job alone lost a run past the file's last close: print that line and count
+// it as a job error, since closer_serve cannot tell. Holds no lock.
+void p9_close_job_lost(u32 fid, int rc);
+
+// Tests: a leg that loses a run on purpose keeps the line out of the log.
+void p9_close_flush_quiet_for_test(bool quiet);
+
 // Boot: start the pool with its first closer. -1 if it could not be created.
 int p9_closer_start(void);
 

@@ -64,7 +64,7 @@ asks the kernel, and ENOLCK replaces the EIO only when the kernel says the Dev l
 nothing (`/cap` is such a Dev).
 
 `tools/test-pouch-descriptor-ops.py` runs the real `fcntl.c` and `flock.c` on the
-host, with the ABI parsed from the kernel's `syscall.h`: 132 cases at each of two
+host, with the ABI parsed from the kernel's `syscall.h`: 135 cases at each of two
 optimisation levels, with named mutants for each rule. On the guest,
 `/bin/pouch-hello-locks` (`POUCH_CENSUS_LOCKS`) runs its legs over Stratum's table
 (`own`, `split`, `posix-close`, `ofd`, `ofd-vs-proc`, `flock`, `wait`, `sqlite`,

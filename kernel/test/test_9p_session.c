@@ -36,6 +36,7 @@ void test_9p_session_close_with_inflight_refused(void);
 void test_9p_session_state_gate_send_walk_before_open(void);
 void test_9p_session_walk_reply_overcount(void);
 void test_9p_session_mutates_mark(void);
+void test_9p_session_mutates_kinds(void);
 void test_9p_session_lopen_round_trip(void);
 void test_9p_session_lcreate_round_trip(void);
 void test_9p_session_read_round_trip(void);
@@ -312,6 +313,46 @@ void test_9p_session_mutates_mark(void) {
     }
 }
 
+static int synth_rwrite(u8 *out, size_t cap, u16 tag, u32 count);
+
+// Which kinds change what a client caches, over every kind there is. A missing row
+// would leave a dead owner's op invisible to the Larder, and only Twrite reaches a
+// Larder assert anywhere else. A tag a mutator used and a read reuses does not
+// inherit the mark.
+void test_9p_session_mutates_kinds(void) {
+    static const u8 yes[] = {
+        P9_TLCREATE, P9_TWRITE, P9_TSETATTR, P9_TSYMLINK, P9_TMKNOD,
+        P9_TRENAME, P9_TLINK, P9_TMKDIR, P9_TRENAMEAT, P9_TUNLINKAT,
+    };
+    for (u32 k = 0; k < 256u; k++) {
+        bool want = false;
+        for (u32 i = 0; i < sizeof(yes); i++) if (yes[i] == k) want = true;
+        TEST_EXPECT_EQ((u64)p9_session_kind_mutates((u8)k), (u64)want, "the kind table");
+    }
+
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+    u32 sz; u8 ty; u16 t1, t2;
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+    TEST_ASSERT(len > 0, "a clone");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t1);
+    int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t1, 0);
+    struct p9_dispatch_result r;
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "its Rwalk");
+    const u8 payload[] = { 'x' };
+    len = p9_session_send_write(&s, g_buf, sizeof(g_buf), 5, 0, 1, payload);
+    TEST_ASSERT(len > 0, "a Twrite");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t1);
+    TEST_ASSERT(p9_session_entry(&s, t1)->mutates, "is marked");
+    rlen = synth_rwrite(g_buf, sizeof(g_buf), t1, 1);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "its Rwrite");
+    len = p9_session_send_read(&s, g_buf, sizeof(g_buf), 5, 0, 16);
+    TEST_ASSERT(len > 0, "a Tread");
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t2);
+    TEST_EXPECT_EQ((u64)t2, (u64)t1, "on the lowest free tag: the write's");
+    TEST_ASSERT(!p9_session_entry(&s, t2)->mutates, "is not marked");
+}
+
 // A reply may name no more components than the walk asked: its caller's arrays
 // are sized by that count. Each count once as asked and once past it.
 void test_9p_session_walk_reply_overcount(void) {
@@ -353,27 +394,31 @@ void test_9p_session_walk_reply_overcount(void) {
         TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), g[i].rc, g[i].what);
         TEST_EXPECT_EQ((u64)p9_session_fid_bound(&s, 5), (u64)g[i].binds, g[i].what);
     }
-    // A late reply under a flush: absorbed ownerless and binding nothing, and
-    // refused for an owner that still waits.
-    for (int owner = 0; owner < 2; owner++) {
-        struct p9_session s;
-        TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
-        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
-        TEST_ASSERT(len > 0, "send_walk");
-        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
-        len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
-        TEST_ASSERT(len > 0, "send_flush");
-        int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t, 2);
-        r.bound_new_fid = P9_NOFID;
-        if (owner) {
-            TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r), -1,
-                           "a waiting owner refuses it");
-        } else {
-            TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
-                           "ownerless, it is absorbed");
-            TEST_EXPECT_EQ((u64)r.bound_new_fid, (u64)P9_NOFID, "and reports no bind");
+    // A late reply under a flush, for an owner that left and for one that still
+    // waits. An over-count is absorbed ownerless and refused with an owner, and a
+    // short walk is an answer to both. Neither binds.
+    static const struct { u16 nwqid; int owner_rc; } late[] = { { 2, -1 }, { 0, 0 } };
+    for (u32 l = 0; l < sizeof(late) / sizeof(late[0]); l++) {
+        for (int owner = 0; owner < 2; owner++) {
+            struct p9_session s;
+            TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+            int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 1, g_wnames, g_wlens);
+            TEST_ASSERT(len > 0, "send_walk");
+            p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+            len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+            TEST_ASSERT(len > 0, "send_flush");
+            int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t, late[l].nwqid);
+            r.bound_new_fid = P9_NOFID;
+            if (owner) {
+                TEST_EXPECT_EQ(p9_session_dispatch_flushed_rmsg(&s, g_buf, (size_t)rlen, &r),
+                               late[l].owner_rc, "a waiting owner's answer");
+            } else {
+                TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                               "ownerless, it is absorbed");
+                TEST_EXPECT_EQ((u64)r.bound_new_fid, (u64)P9_NOFID, "and reports no bind");
+            }
+            TEST_ASSERT(!p9_session_fid_bound(&s, 5), "it bound nothing");
         }
-        TEST_ASSERT(!p9_session_fid_bound(&s, 5), "it bound nothing");
     }
 }
 

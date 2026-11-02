@@ -265,6 +265,13 @@ Capacities (all tunable; the sizing history is load-bearing context):
 - `LARDER_PAGE_SIZE` = 4096 (aligns with the buddy/demand-page system and
   Go's page-aligned archive reads).
 
+**A forget is one store** (B-3h audit round 4). `larder_forget_all` moves `l->epoch` and
+jumps gen past the ring. Each entry is stamped at install, and `attr_live`, `dentry_live`
+and `page_live` read another epoch as an empty slot, so finds miss it and CLOCK takes it
+first; it stays chained until that reuse unlinks it. 64 bits: a forget costs one round trip,
+so 32 could wrap in a day and revive a stale slot. Lock order: `c->lock` -> `l->lock` at a
+forget. Leg: `larder.forget_all`.
+
 ## Concurrency
 
 Every entry point is a single lock/unlock pair on the one leaf lock — no

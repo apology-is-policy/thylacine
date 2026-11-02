@@ -211,7 +211,7 @@ static int alloc_tag(struct p9_session *s, bool flush) {
 // free.
 // Does a server running this kind change what a client caches? A Tlopen does when
 // it truncates (p9_session_send_lopen).
-static bool kind_mutates(u8 kind) {
+bool p9_session_kind_mutates(u8 kind) {
     switch (kind) {
     case P9_TLCREATE: case P9_TWRITE:   case P9_TSETATTR: case P9_TSYMLINK:
     case P9_TMKNOD:   case P9_TRENAME:  case P9_TLINK:    case P9_TMKDIR:
@@ -232,7 +232,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     e->fid     = fid;
     e->new_fid = new_fid;
     e->op_id   = s->next_op_id;
-    e->mutates = kind_mutates(kind);
+    e->mutates = p9_session_kind_mutates(kind);
     chunk(s, t / P9_TAG_CHUNK)->n_active++;
     s->n_active++;
     if (kind == P9_TFLUSH) s->n_flush++;
@@ -1222,8 +1222,8 @@ static int dispatch_rversion(struct p9_session *s,
 // The only fid state a reply creates is a walk's new fid, so a late successful
 // walk binds it -- into the slot the walk reserved -- and reports it in
 // out->bound_new_fid for the closer, since its owner is gone
-// (FID-LIFECYCLE section 9). The bind rule is the ordinary arms' (a TWALK
-// binds on any Rwalk, a TWALKGETATTR only on a full walk). holds_slot doubles
+// (FID-LIFECYCLE section 9). The bind rule is the ordinary arms' (only a full
+// walk binds). holds_slot doubles
 // as "not yet honoured": a duplicate late reply finds it clear and binds
 // nothing. The tag itself stays reserved until the Rflush, as before.
 static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
@@ -1608,6 +1608,7 @@ int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
     // has acted, so its fid is free for the owner's next op.
     int rc = apply_rmsg(s, op, tag, type, rmsg, len, out);
     op->owner_waits = false;
+    op->mutates     = false;   // the owner has its answer and invalidates for itself
     return rc;
 }
 

@@ -315,6 +315,12 @@ reach.
 `hidx_t` is the handle index type: signed, with -1 for
 invalid / not-found / table-full.
 
+**A spawn's endowment counts as a descriptor** (B-3h audit round 4, ARCH 9.6.11).
+`handle_endow_spoor` takes the slot's reference and a count in one table-lock hold, so no
+peer's close between them can be the last. The count stands until the child's slot takes
+over, and `handle_endow_drop` closes one no table took. Leg:
+`filelock.endowment_is_a_descriptor`.
+
 ## Concurrency
 
 One spinlock per table serializes alloc / close / get / dup. The discipline

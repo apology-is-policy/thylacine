@@ -9117,9 +9117,9 @@ static void sys_spawn_thunk(void *arg) {
 // making this drop the LAST ref, and the Dev's close hook (the console drain's
 // disarm, a pipe's EOF, a SrvConn teardown, a 9P fid clunk) must run then
 // (shed audit r4 F1; aux's H6). Non-static for devdev.spawn_unbump_runs_close.
-void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
-void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n) {
-    for (u32 j = 0; j < n; j++) spoor_clunk(bumped[j]);
+void sys_spawn_unbump_fds(struct Proc *p, struct Spoor *const *bumped, u32 n);
+void sys_spawn_unbump_fds(struct Proc *p, struct Spoor *const *bumped, u32 n) {
+    for (u32 j = 0; j < n; j++) handle_endow_drop(p, bumped[j]);
 }
 
 static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
@@ -9127,21 +9127,15 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
                                 rights_t bumped_rights[SYS_SPAWN_MAX_FDS]) {
     u32 bumped_count = 0;
     for (u32 i = 0; i < fd_count; i++) {
-        // #844: snapshot + the obj ref. Take the child's long-lived spoor_ref
-        // into bumped[], then handle_put releases the borrow. On get-fail
-        // (hh zeroed -> no-op put) or kind-mismatch, put + unwind prior bumps.
-        struct Handle hh;
-        if (handle_get(p, (hidx_t)fds[i], &hh) < 0 || hh.kind != KOBJ_SPOOR) {
-            handle_put(&hh);
-            sys_spawn_unbump_fds(bumped, bumped_count);
+        // The child's long-lived reference, which counts as a descriptor until
+        // its table holds the file: the parent's close is not the last, however
+        // soon it comes (ARCH 9.6.11). The thunk or an unwind gives it back.
+        if (handle_endow_spoor(p, (hidx_t)fds[i], &bumped[bumped_count],
+                               &bumped_rights[bumped_count]) < 0) {
+            sys_spawn_unbump_fds(p, bumped, bumped_count);
             return -1;
         }
-        struct Spoor *s = (struct Spoor *)hh.obj;
-        spoor_ref(s);
-        bumped[bumped_count]        = s;
-        bumped_rights[bumped_count] = hh.rights;
         bumped_count++;
-        handle_put(&hh);
     }
     return 0;
 }
@@ -9380,9 +9374,10 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // Install each Spoor in the child's handle table at the lowest
     // free slot. Post-rfork, the table is empty, so the first install
     // is fd 0, then 1, then 2, etc. handle_alloc consumes the spoor_ref
-    // we bumped on the parent's side; if it fails partway, the child's
+    // we bumped on the parent's side, and its slot takes over from the
+    // endowment's count; if it fails partway, the child's
     // proc_free → handle_table_free will release the installed handles,
-    // and the un-installed spoors need explicit spoor_clunk.
+    // and the un-installed spoors close as the descriptors they count as.
     //
     // R15 F231 close: rights are inherited from the parent's slot, NOT
     // hardcoded. This preserves I-6 (rights monotonically reduce on
@@ -9395,10 +9390,11 @@ static void sys_spawn_with_fds_thunk(void *arg) {
         if (fd != (hidx_t)i) {
             // Drop refs on the un-installed remainder; the installed
             // prefix gets cleaned up by proc_free.
-            for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            sys_spawn_unbump_fds(p, &spoors_local[i], fd_count - i);
             spoor_clunk(exe);
             exits("fail-fd-install");
         }
+        (void)spoor_fd_drop(spoors_local[i]);   // the slot counts now
         installed++;
     }
     (void)installed;
@@ -9451,14 +9447,14 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     sa->exe      = exe;
@@ -9474,7 +9470,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     return pid;
@@ -9611,14 +9607,14 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     sa->exe        = exe;
@@ -9635,7 +9631,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     return pid;
@@ -10119,7 +10115,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     bool cwd_ok = !sa->cwd_set || territory_setdot(p->territory, sa->cwd) == 0;
     kfree(sa);
     if (!cwd_ok) {
-        for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+        sys_spawn_unbump_fds(p, spoors_local, fd_count);
         spoor_clunk(exe);
         kfree(argv_data);
         exits("fail-cwd");
@@ -10218,9 +10214,9 @@ static void sys_spawn_full_argv_thunk(void *arg) {
                                   allowance.pci, allowance.pci_count) != 0) {
             // audit F2: no inherited fd is installed yet (the install loop is
             // below), so the bumped spoor refs in spoors_local[] would leak --
-            // clunk all of them, mirroring the fail-fd-install arm's clunk of
+            // close all of them, mirroring the fail-fd-install arm's close of
             // its un-installed range.
-            for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            sys_spawn_unbump_fds(p, spoors_local, fd_count);
             spoor_clunk(exe);
             kfree(argv_data);
             exits("fail-allowance");
@@ -10233,11 +10229,12 @@ static void sys_spawn_full_argv_thunk(void *arg) {
         hidx_t fd = handle_alloc(p, KOBJ_SPOOR, rights_local[i],
                                  spoors_local[i]);
         if (fd != (hidx_t)i) {
-            for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            sys_spawn_unbump_fds(p, &spoors_local[i], fd_count - i);
             spoor_clunk(exe);
             kfree(argv_data);
             exits("fail-fd-install");
         }
+        (void)spoor_fd_drop(spoors_local[i]);   // the slot counts now
         installed++;
     }
     (void)installed;
@@ -10339,7 +10336,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
                                              &exe_size, &exe_pheno_linux);
     }
     if (!exe) {
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
 
@@ -10351,7 +10348,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         argv_data_copy = kmalloc(argv_data_len, 0);
         if (!argv_data_copy) {
             spoor_clunk(exe);
-            sys_spawn_unbump_fds(bumped, fd_count);
+            sys_spawn_unbump_fds(p, bumped, fd_count);
             return -1;
         }
         for (u32 i = 0; i < argv_data_len; i++) argv_data_copy[i] = argv_data[i];
@@ -10361,7 +10358,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (!sa) {
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     sa->exe           = exe;
@@ -10417,7 +10414,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        sys_spawn_unbump_fds(bumped, fd_count);
+        sys_spawn_unbump_fds(p, bumped, fd_count);
         return -1;
     }
     // 5f: the held spawn's synchronous return -- back only once the child has

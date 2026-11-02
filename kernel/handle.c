@@ -901,6 +901,35 @@ void handle_put(struct Handle *h) {
     h->obj    = NULL;
 }
 
+// A spawn's endowment: the slot's Spoor, with its reference and a descriptor's
+// count taken in one hold, so no peer's close between them can be the last. The
+// count stands until the child's table holds the file (ARCH 9.6.11). A slot of
+// any other kind answers -1, as a bad index does.
+int handle_endow_spoor(struct Proc *p, hidx_t h, struct Spoor **out,
+                       rights_t *rights_out) {
+    if (!p || p->magic != PROC_MAGIC || !p->handles) return -1;
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+    struct HandleTable *t = p->handles;
+    spin_lock(&t->lock);
+    struct Handle *slot = &t->slots[h];
+    if (slot->magic != HANDLE_MAGIC || slot->kind != KOBJ_SPOOR) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    handle_acquire_obj(KOBJ_SPOOR, slot->obj);
+    handle_fd_count(KOBJ_SPOOR, slot->obj);
+    *out        = (struct Spoor *)slot->obj;
+    *rights_out = slot->rights;
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+// An endowment no table took: a descriptor's close, then its reference.
+void handle_endow_drop(struct Proc *p, struct Spoor *c) {
+    (void)handle_fd_drop(p->handles, KOBJ_SPOOR, c);
+    spoor_clunk(c);
+}
+
 void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp) {
     handle_acquire_obj(KOBJ_SPOOR, sp);
     out->magic  = HANDLE_MAGIC;

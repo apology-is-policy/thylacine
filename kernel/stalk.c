@@ -1717,9 +1717,9 @@ restart:
                                                              names, lens,
                                                              split_at + 1, sts);
                 if (rw == DEV_WALK_ATTRS_UNSUPPORTED) {
-                    // Unreachable with the one-way per-session latch (the
-                    // batch above just SUCCEEDED on this session), but the
-                    // sentinel is a static object -- it must never reach
+                    // This re-walk of the prefix can fail where the batch above
+                    // succeeded, and a multi-name failure answers the sentinel.
+                    // It is a static object -- it must never reach
                     // walkqid_free. Fail closed.
                     mc->aux = NULL;
                     spoor_unref(mc);
@@ -1798,9 +1798,9 @@ restart:
                                                                  names, lens,
                                                                  link_at, sts);
                     if (rw == DEV_WALK_ATTRS_UNSUPPORTED) {
-                        // Unreachable with the one-way per-session latch
-                        // (the batch above just SUCCEEDED on this session);
-                        // the sentinel is static -- never walkqid_free it.
+                        // This re-walk of the prefix can fail where the batch
+                        // above succeeded, and a multi-name failure answers the
+                        // sentinel, which is static -- never walkqid_free it.
                         lc->aux = NULL;
                         spoor_unref(lc);
                         goto fail;

@@ -209,6 +209,9 @@ fork shares the Spoor, and `spoor_clone` strips them with `COPEN` and
 `CWALKONLY`: a clone may walk to a different file, and a directory's "known, not
 slow" inherited by a pts below it would make the pts read uninterruptible.
 
+`fd_refs` counts handle-table slots and a spawn's endowments on their way to a child's
+table. Every other reference is no descriptor.
+
 ## Concurrency
 
 The refcount is the whole concurrency story. `spoor_ref` uses

@@ -291,8 +291,8 @@ struct Dev {
     //   close(c)       — release any per-Spoor resources held while open.
     //                    Called by spoor_clunk on the last drop. Returns 0,
     //                    or a negative error for work the close could not
-    //                    finish (dev9p: its write-behind flush); close(2)
-    //                    reports that as EIO.
+    //                    hand on (dev9p: a staged run no closer could take);
+    //                    close(2) reports that as EIO.
     struct Spoor *(*open)(struct Spoor *c, int omode);
     struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
                             u32 perm, u32 gid);
@@ -301,8 +301,9 @@ struct Dev {
     //     other references (a map, a mount, a Loom registration). What close(2)
     //     owes happens here, on the closing thread, which may wait for a server:
     //     dev9p lands its staged run and releases its locks. 0, or a negative
-    //     errno close(2) reports. Runs again if c is published again and that
-    //     descriptor closes. NULL-permitted.
+    //     errno close(2) reports. Runs once: nothing publishes a Spoor whose count
+    //     has reached zero. NULL-permitted, and may run again only when a lock
+    //     call finds the close passed it.
     //     close, by contrast, runs at the last REFERENCE, which can fall on any
     //     thread (an exec evicting an image, a reap draining a mapping), so it
     //     must never wait on anything outside the kernel.

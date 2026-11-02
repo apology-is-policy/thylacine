@@ -41,6 +41,9 @@ void test_p9_closer_dying_lock_release_flushes_shared_run(void);
 void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_dying_last_close_with_holder(void);
+void test_p9_closer_job_loses_a_run_loudly(void);
+void test_p9_closer_dying_last_close_of_a_root(void);
+void test_p9_closer_job_waits_out_a_peer_flush(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
@@ -681,7 +684,9 @@ void test_p9_closer_dying_last_close_with_holder(void) {
     struct p9_closer_stats base = closer_now();
     struct wbc w = {0};
     bool opened = wbc_open(&w), took = false, staged = false, started = false;
-    u32  nwrite0 = 0, nlock0 = 0;
+    u32  nwrite0 = 0, nlock0 = 0, inside = 0, past = 0;
+    u64  own0 = 0, own1 = 0;
+    u8   pg[16];
     if (opened) {
         took = dev9p.lock(w.f, SYS_FILE_LOCK_WR, 0, 0, NULL) == 0;   // lands the first run
         u8 chunk[WBC_LEN];
@@ -689,6 +694,9 @@ void test_p9_closer_dying_last_close_with_holder(void) {
         staged  = dev9p.write(w.f, chunk, WBC_LEN, WBC_LEN) == (long)WBC_LEN;
         nwrite0 = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
         nlock0  = __atomic_load_n(&g_rec_a.nlock, __ATOMIC_ACQUIRE);
+        inside  = larder_page_serve(&w.a->client->larder, w.f->qid.path, 0, 0,
+                                    sizeof(pg), 0, pg, NULL);
+        own0    = w.a->client->larder.page_own_installs;
         spoor_ref(w.f);            // the holder
         g_t1_spoor = w.f;
         g_wbc_crc  = 1;
@@ -704,6 +712,9 @@ void test_p9_closer_dying_last_close_with_holder(void) {
     struct srv_rec rec = g_rec_a;   // with the holder alive
     u64 budget = dev9p_wb_budget_used();
     if (opened) {
+        own1 = w.a->client->larder.page_own_installs;
+        past = larder_page_serve(&w.a->client->larder, w.f->qid.path, 0, 0,
+                                 sizeof(pg), 0, pg, NULL);
         spoor_clunk(w.f);          // the holder's
         spoor_clunk(w.f);          // the slot's
         TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
@@ -716,6 +727,9 @@ void test_p9_closer_dying_last_close_with_holder(void) {
     TEST_ASSERT(took, "a lock");
     TEST_ASSERT(staged, "and a run staged under it");
     TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)inside, (u64)sizeof(pg), "a flush inside the open keeps its pages");
+    TEST_EXPECT_EQ(own1, own0, "this one, past the last close, installs none");
+    TEST_EXPECT_EQ((u64)past, 0ull, "and the file's pages have gone");
     TEST_EXPECT_EQ((u64)(s64)g_wbc_crc, 0ull, "the close reports nothing lost");
     TEST_EXPECT_EQ((u64)rec.nwrite, (u64)nwrite0 + 1, "a closer landed the run");
     TEST_EXPECT_EQ(rec.write_off, (u64)WBC_LEN, "at its offset");
@@ -728,6 +742,166 @@ void test_p9_closer_dying_last_close_with_holder(void) {
     TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
     TEST_ASSERT(clunked, "the holder's drop clunked the fid");
+}
+
+// That close's job fails: write() said those bytes were written and nobody reads
+// the latch from here on, so the job says so. The lock and the buffer still go.
+void test_p9_closer_job_loses_a_run_loudly(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w), took = false, staged = false, started = false;
+    u32  nlock0 = 0;
+    if (opened) {
+        took = dev9p.lock(w.f, SYS_FILE_LOCK_WR, 0, 0, NULL) == 0;   // lands the first run
+        u8 chunk[WBC_LEN];
+        for (u32 i = 0; i < WBC_LEN; i++) chunk[i] = wbc_pat(i);
+        staged = dev9p.write(w.f, chunk, WBC_LEN, WBC_LEN) == (long)WBC_LEN;
+        nlock0 = __atomic_load_n(&g_rec_a.nlock, __ATOMIC_ACQUIRE);
+        p9_close_flush_quiet_for_test(true);
+        g_rec_a.fail_writes = 1;
+        spoor_ref(w.f);            // the holder
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, hc_close, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_rec_a.nlock, __ATOMIC_ACQUIRE) > nlock0);
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+        p9_close_flush_quiet_for_test(false);
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    u64 budget = dev9p_wb_budget_used();
+    if (opened) {
+        spoor_clunk(w.f);          // the holder's
+        spoor_clunk(w.f);          // the slot's
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(took, "a lock");
+    TEST_ASSERT(staged, "and a run staged under it");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)rec.fail_writes, 0ull, "the server refused the write");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one job ran");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors + 1, "and it reported the loss");
+    TEST_EXPECT_EQ((u64)rec.nlock, (u64)nlock0 + 1, "the lock went anyway");
+    TEST_EXPECT_EQ((u64)rec.lock_type, (u64)P9_LOCK_TYPE_UNLCK, "by an unlock");
+    TEST_EXPECT_EQ(budget, w.budget0, "and the buffer came back");
+}
+
+// A dying last close of an attach root: the session owns the fid, so no clunk
+// follows to release the lock. With no holder at all, a closer still does it.
+void test_p9_closer_dying_last_close_of_a_root(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w), took = false, started = false;
+    u32  nlock0 = 0;
+    int  ref = 0;
+    if (opened) {
+        took   = dev9p.lock(w.root, SYS_FILE_LOCK_WR, 0, 0, NULL) == 0;
+        nlock0 = __atomic_load_n(&g_rec_a.nlock, __ATOMIC_ACQUIRE);
+        ref    = __atomic_load_n(&w.root->ref, __ATOMIC_ACQUIRE);
+        g_t1_spoor = w.root;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, hc_close, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_rec_a.nlock, __ATOMIC_ACQUIRE) > nlock0);
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    struct p9_closer_stats st = closer_now();
+    struct srv_rec rec = g_rec_a;
+    if (opened) {
+        spoor_clunk(w.f);          // the file wbc_open staged: its own hand-off
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a session");
+    TEST_ASSERT(took, "a lock on its root");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_EXPECT_EQ((u64)ref, 1ull, "the root has no other holder");
+    TEST_EXPECT_EQ((u64)rec.nlock, (u64)nlock0 + 1, "a closer released the lock");
+    TEST_EXPECT_EQ((u64)rec.lock_type, (u64)P9_LOCK_TYPE_UNLCK, "with an unlock");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "by a job");
+}
+
+// A peer is flushing when the last close comes, and that close's thread is dying.
+// The job waits for it asleep (no death ends a closer's wait, and a hung server
+// can make it long), and what the peer installed goes when it retires: that write
+// lands past the last close, unordered with the file's later writers.
+void test_p9_closer_job_waits_out_a_peer_flush(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct p9_closer_stats base = closer_now();
+    struct wbc w = {0};
+    bool opened = wbc_open(&w), started = false;
+    u64  sleeps0 = 0, sleeps = 0;
+    u32  nwrite_mid = 1, inside = 0, past = 1;
+    u8   pg[16];
+    if (opened) {
+        struct dev9p_priv *p = (struct dev9p_priv *)w.f->aux;
+        spin_lock(&p->wb_lock);
+        p->wb_flushers++;          // the peer: wbc_open's run is frozen, on the wire
+        spin_unlock(&p->wb_lock);
+        spoor_ref(w.f);            // the holder
+        sleeps0 = dev9p_wb_flush_sleeps();
+        g_t1_spoor = w.f;
+        g_wbc_crc  = 1;
+        started = test_dying_start(&g_wbc_thread, hc_close, NULL, /*dead_now=*/true);
+        if (started) {
+            TEST_YIELD_UNTIL(test_dying_done(&g_wbc_thread));
+            test_dying_reap(&g_wbc_thread);
+        }
+        TEST_YIELD_UNTIL_SOFT(dev9p_wb_flush_sleeps() > sleeps0);
+        sleeps     = dev9p_wb_flush_sleeps();
+        nwrite_mid = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+
+        // The peer's write lands: its install, then its retirement.
+        u8 chunk[WBC_LEN];
+        for (u32 i = 0; i < WBC_LEN; i++) chunk[i] = wbc_pat(i);
+        larder_page_install_own(&w.a->client->larder, w.f->qid.path, 0, 0, chunk, WBC_LEN);
+        inside = larder_page_serve(&w.a->client->larder, w.f->qid.path, 0, 0,
+                                   sizeof(pg), 0, pg, NULL);
+        spin_lock(&p->wb_lock);
+        p->wb_flushers--;
+        p->wb_len = 0;
+        spin_unlock(&p->wb_lock);
+        TEST_YIELD_UNTIL_SOFT(closer_now().jobs > base.jobs);
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+        past = larder_page_serve(&w.a->client->larder, w.f->qid.path, 0, 0,
+                                 sizeof(pg), 0, pg, NULL);
+    }
+    struct p9_closer_stats st = closer_now();
+    u32 nwrite_end = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+    u64 budget = dev9p_wb_budget_used();
+    if (opened) {
+        spoor_clunk(w.f);          // the holder's
+        spoor_clunk(w.f);          // the slot's
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    wbc_end(&w);
+
+    TEST_ASSERT(opened, "a staged file on a closer session");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_ASSERT(sleeps > sleeps0, "the closer slept on the peer's flush");
+    TEST_EXPECT_EQ((u64)nwrite_mid, 0ull, "and sent nothing while it did");
+    TEST_EXPECT_EQ((u64)inside, (u64)sizeof(pg), "the peer's pages served");
+    TEST_EXPECT_EQ((u64)past, 0ull, "until the job dropped them");
+    TEST_EXPECT_EQ((u64)nwrite_end, 0ull, "the peer's run was the only write");
+    TEST_EXPECT_EQ(st.jobs, base.jobs + 1, "one job ran");
+    TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
+    TEST_EXPECT_EQ(budget, w.budget0, "the buffer came back");
 }
 
 // A close job whose write the server refuses once is run again, as a Tclunk

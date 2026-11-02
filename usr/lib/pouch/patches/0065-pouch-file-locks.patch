@@ -90,7 +90,7 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
  
  /* The open-file status the kernel can change after open is O_NONBLOCK only:
   * O_APPEND lives in the server's open of the file, so F_SETFL may restate it
-@@ -19,6 +23,131 @@
+@@ -19,6 +23,132 @@
  	return fl;
  }
  
@@ -137,12 +137,13 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +		/* fstat, not lseek: the lock must not move the cursor. */
 +		struct stat st;
 +		if (__fstat(fd, &st)) {
-+			/* EIO may mean this Dev has no stat at all, and a Dev with none that
-+			 * also locks nothing owes ENOLCK. A TEST changes nothing and says so. */
++			/* EIO may mean this Dev has no stat at all. A Dev with none that locks
++			 * nothing owes ENOLCK, and a walk-only descriptor EBADF, as for any
++			 * other whence. A TEST changes nothing and says which. */
 +			struct pouch_file_lock ans;
-+			if (errno == EIO && __syscall5(SYS_thyla_file_lock, fd,
-+			        POUCH_FILE_LOCK_WR | POUCH_FILE_LOCK_TEST, 0, 0, &ans) == -ENOLCK)
-+				errno = ENOLCK;
++			long r = errno == EIO ? __syscall5(SYS_thyla_file_lock, fd,
++			        POUCH_FILE_LOCK_WR | POUCH_FILE_LOCK_TEST, 0, 0, &ans) : 0;
++			if (r == -ENOLCK || r == -EBADF) errno = -r;
 +			return -1;
 +		}
 +		base = st.st_size;
@@ -222,7 +223,7 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
  int fcntl(int fd, int cmd, ...)
  {
      int arg = 0;
-@@ -36,6 +165,18 @@
+@@ -36,6 +166,18 @@
          va_end(ap);
          break;
      }

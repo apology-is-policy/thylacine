@@ -1587,6 +1587,59 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
 // for a stale fid whose staleness event was unknowable (the evicted-dentry
 // residual). Non-vacuous: without the suspect gate the close re-parks (no
 // clunk) and the poisoned fid would serve again.
+// A forget says an op with no owner may have removed any directory, so a fid parked
+// before it is no answer: the next take clunks it and goes to the wire. The control
+// is dirfid_consume_and_recycle, the same walks with no forget.
+void test_dev9p_dirfid_forget_outdates_parked(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+    g_unlinkat_fail_ecode = 0;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL && w1->spoor == nc1, "bind walk 1");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "parked, not clunked");
+
+    larder_forget_all(&g_client.larder);
+    u64 takes = g_client.dirfid.takes;
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "the forget itself sends nothing");
+
+    // The Larder is empty, so this one goes to the wire and fills it again. It
+    // stays open, so nothing else parks.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk 2");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 2ull, "walk 2 wired: the Larder was forgotten");
+    walkqid_free(w2);
+
+    // The Larder serves now, so this one reaches the take.
+    struct Spoor *nc3 = spoor_clone(root);
+    TEST_ASSERT(nc3 != NULL, "clone 3");
+    struct Walkqid *w3 = dev9p.walk_attrs(root, nc3, names, lens, 1, sts);
+    TEST_ASSERT(w3 != NULL && w3->spoor == nc3, "bind walk 3");
+    TEST_EXPECT_EQ(g_client.dirfid.takes, takes, "the outdated fid was not taken");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "it was clunked");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 3ull, "and walk 3 wired instead");
+    walkqid_free(w3);
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    spoor_clunk(nc3);
+    spoor_clunk(nc2);
+    (void)p9_client_reader_pump_ready(&g_client);
+    g_wga_type_ov = 0; g_wga_path_base = 0x20;
+    teardown(root);
+}
+
 void test_dev9p_dirfid_suspect_not_reparked(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");

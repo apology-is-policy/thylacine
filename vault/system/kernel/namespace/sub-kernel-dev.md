@@ -70,9 +70,10 @@ before that it passed the creator's `primary_gid`. Only
 session); the other seventeen create slots ignore it.
 
 **`Dev.close` returns `int` (2026-10-07).** Plan 9's close is `void`; ours
-returns 0, or a negative error for work the close could not finish. Only
-[[sub-kernel-ninep-dev9p]] has such work -- its last close flushes write-behind
-data, which Plan 9's mount driver never holds -- and every other Dev returns 0.
+returns 0, or a negative error for work the close could not hand on. Only
+[[sub-kernel-ninep-dev9p]] has such work -- a staged run no closer could take, since
+the flush itself moved to `Dev.fd_close` at the last descriptor -- and every other Dev
+returns 0.
 The hook still runs only on the last drop, and [[sub-kernel-spoor]]'s
 `spoor_clunk_rc` hands its result up; `close(2)` reports a negative as `EIO`
 once the fd is gone (ARCH section 21.11, `dec-2026-10-07-close-eio`). Every
@@ -273,6 +274,9 @@ in, which a cached mapping would keep alive past every handle.
 
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.
+
+`Dev.fd_close` runs once: nothing publishes a Spoor whose count has reached zero, so it
+runs again only when a lock call finds the close passed it (B-3h audit round 4).
 
 ## Concurrency
 

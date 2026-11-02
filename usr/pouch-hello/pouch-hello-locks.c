@@ -70,6 +70,7 @@
 #define FILE_M1 WORK "/map1"
 #define FILE_M2 WORK "/map2"
 #define FILE_M3 WORK "/map3"
+#define FILE_M4 WORK "/spawned"
 
 // SQLite's lock bytes (os_unix.c): one byte each for PENDING and RESERVED,
 // then the 510-byte SHARED range.
@@ -132,6 +133,7 @@ static int child(const char *a1, const char *a2, const char *a3, const char *a4,
 //   wbyte                                       write 'x' at 0 under F_SETLKW
 //   size <n>                                    fstat reports size n
 //   rbyte <off> <c>                             under a read lock on byte 0, byte off is c
+//   hold                                        keep what it inherited until a byte on fd 0
 static int child_main(int argc, char **argv) {
     const char *file = FILE_A;
     if (argv[1][0] == '/') { file = argv[1]; argv++; argc--; }
@@ -184,6 +186,10 @@ static int child_main(int argc, char **argv) {
         char b = 0;
         if (pread(fd, &b, 1, strtoll(argv[2], 0, 0)) != 1) return 82;
         return b == argv[3][0] ? 0 : 81;
+    }
+    if (!strcmp(m, "hold")) {
+        char b;
+        return read(0, &b, 1) == 1 ? 0 : 80;
     }
     return 89;
 }
@@ -451,6 +457,38 @@ static int leg_mapped_write(void) {
     return 0;
 }
 
+// A spawned child's descriptor names the parent's open file from the call on, so
+// the parent closing its own at once is no last close: the flock stands until the
+// child's goes. The child gets the file on its fd 2.
+static int leg_spawned(void) {
+    int f = open(FILE_M4, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (f < 0) return fail("spawned: open");
+    if (flock(f, LOCK_EX | LOCK_NB) != 0) return fail("spawned: flock");
+    int p[2];
+    if (pipe(p) != 0) return fail("spawned: pipe");
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, p[0], 0);
+    posix_spawn_file_actions_adddup2(&fa, f, 2);
+    char *av[] = { SELF, FILE_M4, "hold", NULL };
+    pid_t pid = -1;
+    int rc = posix_spawn(&pid, SELF, &fa, NULL, av, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) return fail("spawned: posix_spawn");
+    if (close(f) != 0) return fail("spawned: close");
+    close(p[0]);
+    if (child(FILE_M4, "flk", "ex", num(0, EWOULDBLOCK), 0, 0) != 0)
+        return fail("spawned: the parent's close dropped the child's flock");
+    if (write(p[1], "g", 1) != 1) return fail("spawned: release the holder");
+    close(p[1]);
+    if (reap(pid) != 0) return fail("spawned: the holder failed");
+    if (child(FILE_M4, "flk", "ex", "0", 0, 0) != 0)
+        return fail("spawned: the flock outlived the child");
+    if (unlink(FILE_M4) != 0) return fail("spawned: unlink");
+    printf("pouch-hello-locks: spawned ok\n");
+    return 0;
+}
+
 static int leg_errors(int fd) {
     int ro = open(FILE_A, O_RDONLY);
     if (ro < 0) return fail("errors: read-only open");
@@ -498,6 +536,7 @@ int main(int argc, char **argv) {
         || leg_whence(fd) || release_all(fd) != 0
         || leg_mapped() || release_all(fd) != 0
         || leg_mapped_write() || release_all(fd) != 0
+        || leg_spawned() || release_all(fd) != 0
         || leg_errors(fd))
         return 1;
     if (unlink(FILE_A) != 0) return fail("unlink");

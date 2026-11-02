@@ -730,6 +730,7 @@ void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
 void test_filelock_acquire_syncs(void);
 void test_filelock_last_descriptor_closes(void);
+void test_filelock_endowment_is_a_descriptor(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -1480,6 +1481,7 @@ void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
 void test_stalk_err_codes(void);
 void test_stalk_walk_attrs_unknown_failure(void);
+void test_stalk_walk_attrs_unknown_mount_split(void);
 void test_stalk_notdir(void);                                  // #79
 void test_stalk_dot_notdir(void);                              // #81
 void test_stalk_dot_notdir_mount(void);                        // #81
@@ -1770,6 +1772,7 @@ void test_9p_wire_tunlinkat_round_trip(void);
 void test_9p_session_init_destroy(void);
 void test_9p_session_walk_reply_overcount(void);
 void test_9p_session_mutates_mark(void);
+void test_9p_session_mutates_kinds(void);
 void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
@@ -1930,6 +1933,8 @@ void test_9p_client_clunk_malformed_reply_fails_closed(void);
 void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void);
 void test_9p_client_flush_malformed_reply_fails_closed(void);
 void test_9p_client_note_flush_honours_late_read(void);
+void test_9p_client_note_flush_live_mutator_keeps_larder(void);
+void test_9p_client_note_flush_death_forgets_larder(void);
 void test_9p_client_note_flush_rflush_first_cancels(void);
 void test_9p_client_note_flush_death_abandons(void);
 void test_9p_client_note_flush_reader_honours_walk(void);
@@ -1992,6 +1997,7 @@ void test_larder_page_destroy_frees(void);
 void test_larder_attr_downgrade_perm_only(void);
 void test_larder_downgrade_guards_raced_populate(void);
 void test_larder_gen_scope_qid(void);
+void test_larder_forget_all(void);
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -2018,6 +2024,7 @@ void test_dev9p_dirfid_perm_only_leaf_consume(void);
 void test_dev9p_dirfid_create_reuse_drop(void);
 void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void);
 void test_dev9p_dirfid_suspect_not_reparked(void);
+void test_dev9p_dirfid_forget_outdates_parked(void);
 void test_dev9p_create_invalidates_negative_dentry(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
@@ -2128,6 +2135,9 @@ void test_p9_closer_dying_lock_release_flushes_shared_run(void);
 void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_dying_last_close_with_holder(void);
+void test_p9_closer_job_loses_a_run_loudly(void);
+void test_p9_closer_dying_last_close_of_a_root(void);
+void test_p9_closer_job_waits_out_a_peer_flush(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
@@ -3072,6 +3082,7 @@ struct test_case g_tests[] = {
     { "filelock.reused_number", test_filelock_reused_number, false, NULL },
     { "filelock.acquire_syncs", test_filelock_acquire_syncs, false, NULL },
     { "filelock.last_descriptor_closes", test_filelock_last_descriptor_closes, false, NULL },
+    { "filelock.endowment_is_a_descriptor", test_filelock_endowment_is_a_descriptor, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
@@ -4138,6 +4149,7 @@ struct test_case g_tests[] = {
     { "9p_wire.tunlinkat_round_trip",  test_9p_wire_tunlinkat_round_trip,  false, NULL },
     { "9p_session.init_destroy",       test_9p_session_init_destroy,       false, NULL },
     { "9p_session.mutates_mark", test_9p_session_mutates_mark, false, NULL },
+    { "9p_session.mutates_kinds", test_9p_session_mutates_kinds, false, NULL },
     { "9p_session.walk_reply_overcount", test_9p_session_walk_reply_overcount, false, NULL },
     { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
@@ -4325,6 +4337,7 @@ struct test_case g_tests[] = {
                                        test_larder_downgrade_guards_raced_populate,
                                                                            false, NULL },
     { "larder.gen_scope_qid",          test_larder_gen_scope_qid,          false, NULL },
+    { "larder.forget_all",             test_larder_forget_all,             false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -4458,6 +4471,10 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.flush_malformed_reply_fails_closed",
                                        test_9p_client_flush_malformed_reply_fails_closed, false, NULL },
+    { "9p_client.note_flush_live_mutator_keeps_larder",
+                                       test_9p_client_note_flush_live_mutator_keeps_larder, false, NULL },
+    { "9p_client.note_flush_death_forgets_larder",
+                                       test_9p_client_note_flush_death_forgets_larder, false, NULL },
     { "9p_client.note_flush_honours_late_read",
                                        test_9p_client_note_flush_honours_late_read, false, NULL },
     { "9p_client.note_flush_rflush_first_cancels",
@@ -4579,6 +4596,8 @@ struct test_case g_tests[] = {
     { "dev9p.dirfid_rmdir_drop_and_no_stale_repark",
                                        test_dev9p_dirfid_rmdir_drop_and_no_stale_repark,
                                                                            false, NULL },
+    { "dev9p.dirfid_forget_outdates_parked",
+                                       test_dev9p_dirfid_forget_outdates_parked, false, NULL },
     { "dev9p.dirfid_suspect_not_reparked",
                                        test_dev9p_dirfid_suspect_not_reparked,
                                                                            false, NULL },
@@ -4709,6 +4728,12 @@ struct test_case g_tests[] = {
                                        test_p9_closer_exit_close_hands_off_tclunk, false, NULL },
     { "p9_closer.dying_close_hands_off_staged_run",
                                        test_p9_closer_dying_close_hands_off_staged_run, false, NULL },
+    { "p9_closer.job_loses_a_run_loudly",
+                                       test_p9_closer_job_loses_a_run_loudly, false, NULL },
+    { "p9_closer.dying_last_close_of_a_root",
+                                       test_p9_closer_dying_last_close_of_a_root, false, NULL },
+    { "p9_closer.job_waits_out_a_peer_flush",
+                                       test_p9_closer_job_waits_out_a_peer_flush, false, NULL },
     { "p9_closer.dying_last_close_with_holder",
                                        test_p9_closer_dying_last_close_with_holder, false, NULL },
     { "p9_closer.dying_lock_release_flushes_shared_run",
@@ -5134,6 +5159,7 @@ struct test_case g_tests[] = {
     { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
     { "stalk.err_codes",               test_stalk_err_codes,               false, NULL },
     { "stalk.walk_attrs_unknown_failure", test_stalk_walk_attrs_unknown_failure, false, NULL },
+    { "stalk.walk_attrs_unknown_mount_split", test_stalk_walk_attrs_unknown_mount_split, false, NULL },
     { "stalk.notdir",                  test_stalk_notdir,                  false, NULL },
     { "stalk.dot_notdir",              test_stalk_dot_notdir,              false, NULL },
     { "stalk.dot_notdir_mount",        test_stalk_dot_notdir_mount,        false, NULL },

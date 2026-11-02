@@ -225,7 +225,8 @@ struct Spoor {
 
     spin_lock_t   lock;        // per-Spoor lock; reserved for Phase 5+ SMP
     int           ref;         // refcount; spoor_alloc sets to 1
-    int           fd_refs;     // handle-table slots naming this Spoor, each of
+    int           fd_refs;     // handle-table slots naming this Spoor, and a spawn's
+                               // endowments on their way to a child's table, each of
                                // which also holds a ref; every other ref (a map,
                                // a mount, a Loom registration, a lock call) is no
                                // descriptor. spoor_fd_ref / spoor_fd_drop.

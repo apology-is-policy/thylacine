@@ -253,6 +253,9 @@ u64 dev9p_co_budget_used(void);
 // wb budget's occupancy). Tests assert the charge/uncharge balance.
 u64 dev9p_wb_budget_used(void);
 
+// Diagnostics: sleeps a thread no death reaches took waiting out a peer's flush.
+u64 dev9p_wb_flush_sleeps(void);
+
 // Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
 // budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth
 // of live runs. Balanced add/subtract pairs only; never in production paths.

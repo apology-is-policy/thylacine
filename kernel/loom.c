@@ -378,11 +378,11 @@ static void loom_free(struct Loom *l) {
     //
     // WHAT BOUNDS IT: the kthread's own work, never a server. It must never
     // block on a wire RPC (loom_dir_mutation_gate's rule: those ops are refused
-    // on an SQPOLL ring), and its reap's last close never waits for one either:
-    // no death reaches a kernel thread, so its Tclunk goes to the closer where
-    // it would wait for a tag or ring space (ARCH 8.8.1.1), and a write-behind
-    // run it cannot flush at once goes to the closer as a close job (ARCH 7.9.1
-    // part C).
+    // on an SQPOLL ring), and its reap never waits for one either: it holds
+    // references, never a descriptor, and a last reference waits for no server.
+    // Its Tclunk goes to a closer where it would wait for a tag or ring space
+    // (ARCH 8.8.1.1), and a run still staged goes with it as a close job (ARCH
+    // 7.9.1 part C).
     if (l->sqpoll) {
         __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
         wakeup(&l->sqpoll_park);

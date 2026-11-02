@@ -676,6 +676,10 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
 // guard). A duplicate reply after this is absorbed as an ownerless late
 // reply and binds nothing. Returns 0, or -1 on malformed / unmatched /
 // wrong-type replies and when the tag is not awaiting a flush.
+// Does a server running this kind change what a client caches? A Tlopen does when
+// it truncates, which the kind cannot say (p9_session_send_lopen).
+bool p9_session_kind_mutates(u8 kind);
+
 int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
                                      const u8 *rmsg, size_t len,
                                      struct p9_dispatch_result *out);

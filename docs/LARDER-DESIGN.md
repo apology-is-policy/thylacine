@@ -710,7 +710,8 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
     combined with the per-priv cap the kernel-heap exposure is bounded, and
     the degrade is the strict-mount behavior).
 - **Flush sites** (all funnel through one `wb_flush`):
-  1. **close** (`dev9p_close`) — BEFORE the async-clunk Tclunk (the
+  1. **last close** (`dev9p_fd_close`, on the thread closing the last
+     descriptor) — BEFORE any Tclunk (the
      fid must be live for the flush Twrites). This is the close-to-open
      anchor: the next open (any Proc) reads the flushed bytes.
   2. **fsync** — flush, then `p9_client_fsync`; errors return synchronously.
@@ -785,7 +786,9 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   (ARCH 7.9.1 part C). The closer writes it and then DROPS the file's attr and pages instead of
   installing them as OWN, because that late write is unordered with the
   file's later writers (the G1 write-populate premise holds only for a flush
-  inside the open).
+  inside the open). The flush itself tells which it is: with the append anchor
+  gone it drops rather than installs, and a job that waited out a peer's flush
+  drops what that peer installed.
 - **An abandoned mutator** (B-3h audit round 3, 2026-11-02). A Twrite, a Tsetattr
   or any op that changes the server, whose caller a death pulled out before its
   reply, can still land, and the client no longer knows which file or name it
@@ -793,6 +796,14 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   drops the session's whole Larder at the three points that learn of it: the
   abandonment itself, a late reply to the op, and a lone Rflush that answers for
   it. Its generation jump (`LARDER_INVAL_RING + 1`) fails every fill in flight.
+  It is one store whatever the cache holds, because EL0 sets the rate: an epoch
+  each entry is stamped with at install, so an entry from before it is an empty
+  slot, chained until CLOCK reuses it. A parked directory fid carries the epoch
+  too, and one from before a forget is clunked at its next take. An owner that has
+  its reply is no abandonment (a caught note's flush whose reply came first): it
+  invalidates for itself, and the mark clears. A forget cannot name what the op
+  touched, so a Proc killing its own writers in a loop keeps the session's cache
+  cold for everyone on it; nothing answers wrongly, and survivors pay re-reads.
   A write-through whose reply came back an error also drops the file's attr and
   pages, because a server can fail a write it applied in part. The residual is
   narrow: a fill that starts after the forget and reads the server before the
@@ -825,9 +836,9 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   run's end) and a concurrent read overlays the still-visible run —
   neither waits; only flush-needing ops do. The frozen-run rule also
   pins the buffer (no growth reallocation while a flusher reads it).
-  Death mid-stage: #926 closes handles at exit → the close flush runs
-  (dev9p_close runs at the LAST Spoor ref, so it is uncontended — the
-  cached-open/weft last-ref invariant; close never waits).
+  Death mid-stage: #926 closes handles at exit → the last descriptor's close
+  flushes (`dev9p_fd_close`). It can meet a holder's flush, and waits it out in
+  `wb_flush_locked`. `Dev.close` at the last reference never waits.
 
 ### 12.3 What it does NOT change
 

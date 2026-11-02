@@ -276,7 +276,9 @@ taker stores `lock_granted` sequentially consistent, then reads `spoor_fd_open`.
 the close sees the grant or the taker sees the close; the taker's arm runs
 `Dev.fd_close` again, which is idempotent, and answers EBADF. It runs on any answer,
 keeping a failure as it is: a take that failed with its outcome unknown recorded a
-grant too (self-audit SA4-1). A latch on the priv would
+grant too (self-audit SA4-1). A spawn's endowment counts as a descriptor from the call on,
+so the parent's close cannot drop a lock its child is about to hold (audit round 4, leg
+`filelock.endowment_is_a_descriptor`, prover leg `spawned`). A latch on the priv would
 answer a later take through a re-published Spoor with a false success, so there is none.
 
 A dying thread cannot send. If it holds the last reference, `Dev.close` follows at once

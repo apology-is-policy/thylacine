@@ -52,7 +52,7 @@ To release a lock while keeping the file open, repeat the call with `l_type` set
 
 A descriptor opened with `O_PATH` does not count as a descriptor of the file here, so closing one releases nothing. `chmod` and `utimensat` given a path use such a descriptor internally, and also release nothing.
 
-A process can lock at most 128 different files as a process owner. A file keeps its place in that count after an unlock, until the process closes a descriptor of the file or exits. Stratum, the file service that holds the system's own files, limits every owner to 256 separate locked ranges and a file system to 65,536 ranges in all, and refuses further requests with `ENOLCK`. Adjacent ranges of the same type count as one.
+A process can lock at most 128 different files as a process owner. A file keeps its place in that count after an unlock, until the process closes a descriptor of the file or exits. Stratum, the file service that holds the system's own files, limits every owner to 256 separate locked ranges, every user to 4,096 and a file system to 65,536 ranges in all, and refuses further requests with `ENOLCK`. Adjacent ranges of the same type count as one.
 
 ### Lock a file from a native program
 
@@ -63,7 +63,7 @@ A native program written in Rust calls `t_file_lock` in `libthyla-rs`, and a nat
 | Error | Native message | Cause and response |
 | --- | --- | --- |
 | `EAGAIN` | `resource temporarily unavailable` | Another owner holds a conflicting lock and the call was not asked to wait. Try again later. |
-| `EBADF` | `bad handle` | The descriptor is closed, opened for walking only, or opened without the access the lock type requires. A process-owner lock also receives this error when another thread closed the descriptor while the call was waiting; the lock has been released again. |
+| `EBADF` | `bad handle` | The descriptor is closed, opened for walking only, or opened without the access the lock type requires. A process-owner lock also receives this error when another thread closed the descriptor while the call was waiting; the lock has been released again. An open file's lock receives it when the open file's last descriptor closes during the call, and that lock has been released too. |
 | `EINVAL` | `invalid argument` | `l_whence`, `l_type` or a `flock` operation is not valid, the range starts before the beginning of the file, or an `F_OFD_` request has a non-zero `l_pid`. A native `SYS_FILE_LOCK` call whose range would reach 2^64 also receives it. |
 | `EFAULT` | `bad address` | A native `SYS_FILE_LOCK` test names an answer address that cannot be written. The service is not asked if the address is outside the process's half of memory. |
 | `EOVERFLOW` | not applicable | The range ends past the largest offset a signed 64-bit number can hold, or `F_GETLK` cannot represent the conflicting lock. |

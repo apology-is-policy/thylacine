@@ -266,6 +266,9 @@ own count, which caps both walk kinds' replies and says whether one was full),
 the held slots. Compile-time: MAX_OUTSTANDING ∈ [1, 0xFFFE] (room for NOTAG),
 MAX_FIDS ≥ 1.
 
+`p9_session_kind_mutates` is the kind table behind `mutates` (leg
+`9p_session.mutates_kinds`, over every kind), and an honoured late reply clears the mark.
+
 `p9_session_send_lock` carries Tlock's `client_id` from its caller: the identity a
 take's records count against on the server (operator vote 38). Its `proc_id` stays the
 fid, the owner within one session.

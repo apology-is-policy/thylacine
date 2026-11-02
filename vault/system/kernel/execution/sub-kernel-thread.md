@@ -213,7 +213,7 @@ reader slot by waiting; the thread sets and consumes it, and exec clears it
 hole (ARCH 7.9.1): `kthread_join_active`, which `loom_free` sets with save and
 restore around its SQPOLL kthread join so no death reaches that sleep, not
 even the kill that forces a final close ([[sub-kernel-loom]]). A second flag,
-`closes_never_wait`, went in B-3h's audit round 3: `Dev.close` now waits on no
+`closes_never_wait`, was removed in B-3h's audit round 3: `Dev.close` now waits on no
 thread, so nothing needs to mark one ([[sub-kernel-ninep-dev9p]]). `exit_close_active` has
 one setter again, the at-exit close. The struct size is unchanged at 1760.
 `cpu_pinned` is the single

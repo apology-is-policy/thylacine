@@ -87,6 +87,18 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   `-T_E_AGAIN` (the wait loop is generic). ERROR, GRACE or an undefined status
   is `-T_E_NOLCK`. A Tgetlock type 9P2000.L does not define is `-T_E_IO`. The
   test answer's `pid` is -1.
+- A flush with the append anchor gone drops the file's pages rather than installing
+  them, and a job past the last close drops what a peer's flush installed: that write is
+  unordered with the file's later writers. The job also gives back the buffer, and
+  reports a failure itself, since nobody reads the latch from there. A thread no death
+  reaches sleeps out a peer's flush (`wb_flush_wait`, doubling to 64 ms) rather than
+  yield for as long as a server hangs. A dying last close of an attach root queues the
+  job with no holder, since no clunk follows it. Legs:
+  `p9_closer.dying_last_close_with_holder`, `.job_loses_a_run_loudly`,
+  `.job_waits_out_a_peer_flush`, `.dying_last_close_of_a_root`.
+- A parked directory fid carries the Larder's epoch: a forget says an op with no owner
+  may have removed any directory, so `dirfid_take` clunks one from before it, and
+  `dirfid_put` lets a fresh fid replace it. Leg: `dev9p.dirfid_forget_outdates_parked`.
 - A take names the taking Proc's principal, in decimal, in Tlock's `client_id`
   (`lock_client_id`; operator vote 38), so a limit on the server can count what one
   identity holds. The kernel composes it, so a Proc cannot spend another identity's

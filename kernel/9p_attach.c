@@ -665,7 +665,14 @@ void p9_clunk_refused(u32 fid, int rc) {
     cons_diag_line_emit(&dl);
 }
 
+static bool g_close_flush_quiet;
+
+void p9_close_flush_quiet_for_test(bool quiet) {
+    __atomic_store_n(&g_close_flush_quiet, quiet, __ATOMIC_RELAXED);
+}
+
 void p9_close_flush_failed(u32 fid, int rc) {
+    if (__atomic_load_n(&g_close_flush_quiet, __ATOMIC_RELAXED)) return;
     struct cons_diag_line dl;
     cons_diag_line_init(&dl);
     cons_diag_line_puts(&dl, "9p: close: flush of fid ");
@@ -699,7 +706,8 @@ static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
 // Run a close job, retried like closer_send while the fid is still bound on a
 // live session: a write never sent for want of memory comes back -P9_E_IO
 // too, as does a server's EIO or EBADF (map_error folds EBADF), and a resend
-// of the run's explicit offsets is idempotent.
+// of the run's explicit offsets is idempotent. A job alone names no fid and runs
+// once: it flushes as an open does, which drops the run on a failure.
 static int closer_run_job(struct p9_closer *self, struct p9_attached *a,
                           struct p9_closer_entry *e) {
     u64 backoff = CLOSER_RETRY_NS_MIN;
@@ -735,8 +743,10 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
 
         // A job alone (fid P9_NOFID) has no Tclunk to send. Its failure stays
         // with the open file it wrote for: the run is dropped and the error
-        // latches for that open's next write, fsync or close. A flush a death
-        // cancelled keeps its run for the close that follows.
+        // latches for that open's next write, fsync or close. Past that open's
+        // last close nobody reads the latch, and the job has said so itself
+        // (p9_close_job_lost). A flush a death cancelled keeps its run for the
+        // close that follows.
         bool clunk = e->fid != P9_NOFID;
         int  rc   = clunk ? closer_send(self, a, e->fid) : 0;
         bool live = rc != 0 && p9_client_fid_held(a->client, e->fid);
@@ -858,6 +868,13 @@ static void closer_main(void *arg) {
         closer_free_reaped(reap);
         (void)tsleep(&self->r, closer_kicked_cond, self, deadline);
     }
+}
+
+void p9_close_job_lost(u32 fid, int rc) {
+    p9_close_flush_failed(fid, rc);
+    spin_lock(&g_closer_lock);
+    g_closer_st.job_errors++;
+    spin_unlock(&g_closer_lock);
 }
 
 u32 p9_closer_fail_spawns_for_test(u32 n) {

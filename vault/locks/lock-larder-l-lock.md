@@ -15,9 +15,11 @@ Every entry point is a single acquire/release pair — no cross-op held
 state, no mid-op release. The ONLY lock ever taken below it is the buddy
 zone lock via the non-blocking `kmalloc`/`kfree` (the lazy entry arrays,
 the per-slot 4 KiB page buffers) — the established `l->lock → buddy`
-order. It is NEVER held together with `c->lock` (an RPC that takes
+order. One edge comes down to it: `c->lock` -> `l->lock`, where an op that lost its
+owner forgets the Larder (9p_client.c, three sites, one store each). Nothing takes them
+the other way (an RPC that takes
 `c->lock` runs entirely outside it — the #360 lock-across-sleep rule),
-and never across a blocking op of any kind. Sleep-illegal under it.
+and it is never held across a blocking op of any kind. Sleep-illegal under it.
 
 The serves deliberately COPY OUT under the hold (≤ 88 B attr, ≤ 4 KiB
 page, ≤ 128 KiB cached-open snapshot — bounded upstream) — the lock hold

@@ -52,6 +52,7 @@
 // Forward declarations (registered in kernel/test/test.c).
 void test_stalk_err_codes(void);
 void test_stalk_walk_attrs_unknown_failure(void);
+void test_stalk_walk_attrs_unknown_mount_split(void);
 void test_stalk_long_component_bound(void);
 void test_stalk_resolve_multi(void);
 void test_stalk_resolve_deep(void);
@@ -471,6 +472,7 @@ static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
 
 // dev9p's answer to a multi-name walk that failed at a name it cannot name.
 static bool g_fix_wa_unknown;
+static int  g_fix_wa_unknown_in;   // > 0: the Nth multi-name walk from now answers it
 
 // The POUNCE fixture walk_attrs. Honors the sharpened contract in
 // <thylacine/dev.h>: transitions nc ONLY on a full walk; partial/query leave
@@ -489,6 +491,8 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
     if (c->flag & COPEN) return NULL;
     g_fix_walkattrs_calls++;
     if (g_fix_wa_unknown && nname > 1) return DEV_WALK_ATTRS_UNSUPPORTED;
+    if (nname > 1 && g_fix_wa_unknown_in > 0 && --g_fix_wa_unknown_in == 0)
+        return DEV_WALK_ATTRS_UNSUPPORTED;
 
     struct Walkqid *wq = walkqid_alloc(nname);
     if (!wq) return NULL;
@@ -911,10 +915,6 @@ void test_stalk_missing_component(void) {
     spoor_unref(root);
 }
 
-// errno-rollout (ER-1): stalk_err writes the cause so SYS_OPEN returns the real
-// -errno. The keystone: a missing path -> -T_E_NOENT (Go's os.IsNotExist true ->
-// the O_CREATE create-or-open fallback fires) instead of the bare -1 (Go's
-// Linux-shaped decode renders that EPERM, "operation not permitted"). A denial
 // A fused run that failed at a name the Dev cannot name decides nothing: the
 // resolver walks name by name, so each X gate runs in order and a name that
 // exists stays resolvable.
@@ -940,6 +940,10 @@ void test_stalk_walk_attrs_unknown_failure(void) {
     spoor_unref(root);
 }
 
+// errno-rollout (ER-1): stalk_err writes the cause so SYS_OPEN returns the real
+// -errno. The keystone: a missing path -> -T_E_NOENT (Go's os.IsNotExist true ->
+// the O_CREATE create-or-open fallback fires) instead of the bare -1 (Go's
+// Linux-shaped decode renders that EPERM, "operation not permitted"). A denial
 // reports T_E_ACCES, NEVER T_E_PERM (== 1 == the generic -1 sentinel).
 void test_stalk_err_codes(void) {
     struct Proc p; mkproc_system(&p);
@@ -3574,6 +3578,41 @@ void test_stalk_pounce_full_walk_past_mount(void) {
     TEST_ASSERT(q2 != NULL, "a/leaf resolves through the crossed mount");
     TEST_EXPECT_EQ((u64)q2->qid.path, (u64)4, "a/leaf -> mounted deep/leaf (qid 4)");
     spoor_clunk(q2);
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// A fused run past a mount point re-walks its prefix to the point, and that re-walk
+// can fail where the batch succeeded. A failure of two names answers the sentinel,
+// which the resolver must not take for a Walkqid: it fails closed, as T_E_IO. The
+// control, one variable away, misses in the mounted tree.
+void test_stalk_walk_attrs_unknown_mount_split(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // loop has no leaf; a/deep, under it, does.
+    struct Spoor *src = stalk(&p, root, "loop", 4, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "a/deep", 6, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve loop + a/deep");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount loop onto a/deep");
+
+    int e = -12345;
+    struct Spoor *q = stalk_err(&p, root, "a/deep/leaf", 11, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "the control: no leaf in the mounted tree");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "a miss");
+
+    e = -12345;
+    g_fix_wa_unknown_in = 2;          // the batch of three, then the re-walk of two
+    q = stalk_err(&p, root, "a/deep/leaf", 11, STALK_WALK, 0, &e);
+    int armed = g_fix_wa_unknown_in;
+    g_fix_wa_unknown_in = 0;
+    TEST_ASSERT(q == NULL, "the failed re-walk resolves nothing");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_IO, "and fails closed");
+    TEST_EXPECT_EQ((u64)armed, 0ull, "it reached the re-walk");
 
     territory_unref(p.territory);
     spoor_clunk(src);

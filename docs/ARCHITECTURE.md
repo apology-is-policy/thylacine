@@ -1041,7 +1041,7 @@ A descriptor's last close is not a Spoor's last reference (B-3h audit round 3, 2
 - *A kill during the close forces it* (part B). A kill (`proc_group_kill`: the `kill` note and the `/proc` ctl `kill`; never a hangup, `EXITKILL` or a legate scope's end) that finds the Proc already terminating -- its group exiting, or its last thread in the final close of an `exits()`, which sets no group exit message (`PROC_FLAG_EXIT_CLOSING`, which `exits()` publishes under the proc-table lock a kill decides under, before it releases that lock for the close) -- sets `PROC_FLAG_EXIT_CLOSE_FORCED` before its death wake, and `thread_die_pending` honours it under `exit_close_active`: the final close's send is refused, its wait unwinds through flush(5), its reader leaves the recv at any byte (8.8.1.1), and the Proc reaps. The kill changes how the close ends, never the status: the last thread read the group claim under the same hold that marked the close, so a kill that lands after the mark leaves the exit standing on both last-out paths, `exits()` and `SYS_THREAD_EXIT` (Linux's `PF_EXITING`; operator vote 2026-10-13, `dec-2026-10-13-exit-wins-final-close`). One wait stays held against every death, forced or not: `loom_free`'s join of its SQPOLL kthread (`kthread_join_active`), because abandoning it frees a live Thread, and a sleep that a death refused would spin in a non-preemptible syscall body. It stays bounded because that kthread never waits on a server (parts A and C).
 - *What the close could not finish goes to the closer* (part C; Plan 9's `forceclosefgrp`, which hands the open channels to the `ccloseq` close procs). A dev9p last close on a die-pending thread (a forced final close, or a killed thread's own last `close`) may not wait. If it holds the last reference, `Dev.close` follows at once and hands the staged run, the fid's clunk and the frees to a closer, which writes the run when the server answers. If a map or a Loom op still holds the Spoor, the close queues the flush and the release of a granted lock to the closer as a job of their own, since nothing says when that reference will go. A flush a death interrupts keeps its run staged until then (LARDER-DESIGN section 12).
 
-Nothing is discarded and there is no deadline; a run the hand-off cannot carry (no memory for the job), or whose write a live server still refuses after the closer's bounded retry (`closer_send`'s, about 1 s: a write never sent for want of memory comes back as the same `-EIO` as a refusal, and a resend at the run's explicit offsets is idempotent), is reported as `9p: close: flush of fid N failed rc R`, and `tools/test.sh` fails on that line. The closer drops the file's cached attributes and pages after its write rather than installing them, since the write lands unordered with the file's later writers. A forced exit's parent can read the file before the closer's flush lands: the I-38 window a kill that lands after the final-close mark buys (a second kill, when the group was already exiting). A kernel thread's hand-off opens no window, because its close is never a user's `close` (a reap drops the last reference after the user's own close returned).
+Nothing is discarded and there is no deadline; a run the hand-off cannot carry (no memory for the job), or whose write a live server still refuses after the closer's bounded retry (`closer_send`'s, about 1 s: a write never sent for want of memory comes back as the same `-EIO` as a refusal, and a resend at the run's explicit offsets is idempotent), is reported as `9p: close: flush of fid N failed rc R`, and `tools/test.sh` fails on that line. A job alone, past the last close with a holder alive, writes as an open's flush does and has no retry, since that flush drops the run on a failure; it reports the same line. The closer drops the file's cached attributes and pages after its write rather than installing them, since the write lands unordered with the file's later writers. A forced exit's parent can read the file before the closer's flush lands: the I-38 window a kill that lands after the final-close mark buys (a second kill, when the group was already exiting). A kernel thread's hand-off opens no window, because its close is never a user's `close` (a reap drops the last reference after the user's own close returned).
 
 ### 7.10 Open design questions
 
@@ -2876,7 +2876,9 @@ and fid numbers restart per session, so such a server could not tell two
 sessions' owners apart. Stratum keys by fid.
 - **The open file** (no `LOCK_PROC`). The lock is taken on the Spoor's own fid,
   so it is Stratum's per-fid owner: Linux's open-file-description (OFD)
-  semantics. A dup, an inherited descriptor or a passed handle names the same
+  semantics. A spawned child's descriptor counts from the spawn call, before the
+  child's table holds it, so the parent closing its own at once is no last close.
+  A dup, an inherited descriptor or a passed handle names the same
   open file and shares its locks. They last until that open file's last close,
   the close of its last descriptor in any table, which flushes, unlocks the whole
   file and waits for the answer (`Dev.fd_close`, 7.9.1). The fid is clunked at the
@@ -2956,8 +2958,10 @@ answer for an OFD lock.
 **The server's table follows POSIX ranges.** A lock request by an owner that
 already holds part of the range replaces that part atomically: an upgrade, a
 downgrade, or a split. An unlock trims and splits the owner's locks, and
-`Rgetlock` reports the conflicting lock itself. The table is bounded, and past
-the bound a request answers `ENOLCK`. Stratum's B-3h change makes it so. Before
+`Rgetlock` reports the conflicting lock itself. The table is bounded per fid, per
+identity (a take names the Proc's principal in Tlock's `client_id`, so one identity
+cannot spend everyone's share; operator vote 38) and in all, and past any bound a
+request answers `ENOLCK`. Stratum's B-3h change makes it so. Before
 it, a same-owner overlap stacked and an unlock matched only an exact range,
 which SQLite's EXCLUSIVE-to-SHARED downgrade and its two-byte PENDING+RESERVED
 unlock both trip over.

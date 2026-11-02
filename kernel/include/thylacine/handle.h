@@ -366,6 +366,9 @@ void handle_put(struct Handle *h);
 // consumer of snapshots takes it unchanged and handle_put releases it.
 struct Spoor;
 void handle_snapshot_spoor(struct Handle *out, struct Spoor *sp);
+int  handle_endow_spoor(struct Proc *p, hidx_t h, struct Spoor **out,
+                        rights_t *rights_out);
+void handle_endow_drop(struct Proc *p, struct Spoor *c);
 
 // Duplicate a handle within p's table with possibly reduced rights.
 //

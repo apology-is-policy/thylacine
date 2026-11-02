@@ -678,6 +678,10 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   got, and the caller reads the short count (`co_bind` and the resolver's pounce
   decide what it means).
 - `p9_client_lock` carries Tlock's `client_id` from its caller (operator vote 38).
+- A live owner whose reply beat its Rflush left no abandoned op: its mark clears at that
+  reply, so the Rflush forgets nothing (audit round 4, leg
+  `9p_client.note_flush_live_mutator_keeps_larder`). A death in the flush wait forgets at
+  once (leg `9p_client.note_flush_death_forgets_larder`).
 - **An abandoned mutator** (B-3h audit round 3, 2026-11-02): an op marked `mutates`
   in the session whose caller a death pulled out can still land, and its caller's
   own invalidate never runs. `client_abandon_forgets_locked` runs

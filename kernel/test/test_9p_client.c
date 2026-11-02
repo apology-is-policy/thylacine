@@ -4682,6 +4682,8 @@ void test_9p_client_flush_malformed_reply_fails_closed(void);
 void test_9p_client_note_flush_honours_late_read(void);
 void test_9p_client_note_flush_rflush_first_cancels(void);
 void test_9p_client_note_flush_death_abandons(void);
+void test_9p_client_note_flush_live_mutator_keeps_larder(void);
+void test_9p_client_note_flush_death_forgets_larder(void);
 void test_9p_client_note_flush_reader_honours_walk(void);
 void test_9p_client_note_flush_full_pool_own_reply(void);
 void test_9p_client_note_flush_pump_wakes_parked_flush(void);
@@ -5521,6 +5523,77 @@ void test_9p_client_note_flush_honours_late_read(void) {
     TEST_EXPECT_EQ(end, (u64)0, "the Rflush frees both tags");
     TEST_EXPECT_EQ(cancel, (u64)0, "nothing cancelled");
     TEST_EXPECT_EQ(orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A caught note on a write whose reply beats its Rflush: the owner has its answer
+// and invalidates for itself, so nothing is lost and nothing is forgotten.
+void test_9p_client_note_flush_live_mutator_keeps_larder(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(dy_bind(131), 1u, "walk binds 131");
+    dy_larder_fill();
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_WRITE, 131), "writer");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TWRITE, &parked);
+    dy_hold_reader(false);
+    int  pr = p9_client_reader_pump_ready(&g_client);          // the Rwrite
+    bool killed;
+    dy_finish(&killed);
+    u32  mid = dy_larder_entries();
+    int  pf  = p9_client_reader_pump_ready(&g_client);         // the Rflush
+    u32  end = dy_larder_entries();
+    u64  honoured = g_client.flush_honoured;
+    bool dead     = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the write parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted write waits for its Tflush's answer");
+    TEST_EXPECT_EQ(pr, 1, "the Rwrite, before the Rflush");
+    TEST_ASSERT(!killed, "the write returned on its own");
+    TEST_EXPECT_EQ(honoured, (u64)1, "counted as honoured");
+    TEST_EXPECT_EQ(mid, 3u, "its reply forgets nothing");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
+    TEST_EXPECT_EQ(end, 3u, "nor does its Rflush: the owner never left");
+    TEST_ASSERT(!dead, "the session stays live");
+}
+
+// A death in the flush wait of a write: no reply will tell anyone what the op did,
+// so the cache goes at the death, before the Rflush.
+void test_9p_client_note_flush_death_forgets_larder(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(dy_bind(133), 1u, "walk binds 133");
+    dy_larder_fill();
+    g_rec_hold = P9_TWRITE;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start_noted(DY_WRITE, 133), "writer");
+    bool parked;
+    bool waited = dy_note_and_flush(P9_TWRITE, &parked);
+    u32  before = dy_larder_entries();
+    if (waited) test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_dy));
+    bool died  = test_dying_done(&g_dy);
+    u32  after = dy_larder_entries();
+    dy_hold_reader(false);
+    int  pf = p9_client_reader_pump_ready(&g_client);          // the Rflush
+    bool killed;
+    dy_finish(&killed);
+    g_rec_hold = 0;
+    bool dead = g_client.dead;
+    dy_client_close();
+
+    TEST_ASSERT(g_dyop.setup_ok, "a Linux phenotype whose SIGCHLD is caught");
+    TEST_ASSERT(parked, "the write parked behind the held reader");
+    TEST_ASSERT(waited, "the interrupted write waits for its Tflush's answer");
+    TEST_EXPECT_EQ(before, 3u, "its note forgot nothing");
+    TEST_ASSERT(died, "the kill ends the flush wait");
+    TEST_EXPECT_EQ(after, 0u, "the death forgot every entry, with the Rflush still to come");
+    TEST_EXPECT_EQ(pf, 1, "the Rflush");
     TEST_ASSERT(!dead, "the session stays live");
 }
 

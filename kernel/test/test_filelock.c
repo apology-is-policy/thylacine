@@ -35,6 +35,7 @@ void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
 void test_filelock_acquire_syncs(void);
 void test_filelock_last_descriptor_closes(void);
+void test_filelock_endowment_is_a_descriptor(void);
 
 // -----------------------------------------------------------------------------
 // The fake Dev.
@@ -1081,6 +1082,59 @@ static void last_descriptor_count_body(struct Proc *parent, struct Proc *child,
     TEST_EXPECT_EQ(handle_close(child, d3), 0, "the child's");
     TEST_EXPECT_EQ(handle_close(parent, fd), 0, "the parent's last");
     TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "the child still has one");
+}
+
+extern void sys_spawn_unbump_fds(struct Proc *p, struct Spoor *const *bumped, u32 n);
+
+// A spawn's endowment is a descriptor from the parent's table to the child's: the
+// parent's close is not the last, however soon it comes.
+static void endowment_body(struct Proc *parent, struct Proc *child, struct Spoor *s,
+                           hidx_t fd) {
+    struct Spoor *e = NULL;
+    rights_t r = 0;
+    TEST_EXPECT_EQ(handle_endow_spoor(parent, PROC_HANDLE_MAX, &e, &r), -1, "a bad index");
+    TEST_EXPECT_EQ(handle_endow_spoor(parent, fd + 1, &e, &r), -1, "an empty slot");
+    TEST_EXPECT_EQ(handle_endow_spoor(parent, fd, &e, &r), 0, "an endowment");
+    TEST_ASSERT(e == s, "of the slot's file");
+    TEST_EXPECT_EQ((u64)r, (u64)RW, "with the slot's rights");
+
+    // Installed: the parent closes first, then the thunk's two steps.
+    TEST_EXPECT_EQ(handle_close(parent, fd), 0, "the parent closes at once");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 0u, "which is not the last close");
+    TEST_ASSERT(spoor_fd_open(s), "the open file stands");
+    hidx_t cfd = handle_alloc(child, KOBJ_SPOOR, r, e);
+    TEST_ASSERT(cfd >= 0, "the child's install");
+    TEST_ASSERT(!spoor_fd_drop(e), "whose slot takes over from the endowment");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 0u, "and that is not a close either");
+
+    // Never installed: the unwind is the close, once the slot has gone.
+    struct Spoor *e2 = NULL;
+    TEST_EXPECT_EQ(handle_endow_spoor(child, cfd, &e2, &r), 0, "a second endowment");
+    TEST_EXPECT_EQ(handle_close(child, cfd), 0, "its source closes");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 0u, "the endowment still counts");
+    sys_spawn_unbump_fds(child, &e2, 1);
+    TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "the unwind is the last close");
+    TEST_ASSERT(g_lk_fd_close_last == s, "of the open file");
+}
+
+void test_filelock_endowment_is_a_descriptor(void) {
+    lk_reset();
+    g_lk_fd_closes = g_lk_closes = g_lk_held_close_seq = 0;
+    g_lk_fd_close_last = NULL;
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    struct Spoor *s = spoor_alloc(&g_lk_dev);
+    hidx_t fd = -1;
+    if (s && parent) fd = handle_alloc(parent, KOBJ_SPOOR, RW, s);
+    if (fd >= 0 && child) {
+        s->qid.path = 1;
+        endowment_body(parent, child, s, fd);
+    } else {
+        test_fail("filelock: fixture allocation failed");
+    }
+    if (child)  { child->state  = PROC_STATE_ZOMBIE; proc_free(child); }
+    if (parent) { parent->state = PROC_STATE_ZOMBIE; proc_free(parent); }
+    TEST_EXPECT_EQ(g_lk_closes, 1u, "and the last reference ran its close");
 }
 
 // The fixture hands the caller's reference on to the first slot.

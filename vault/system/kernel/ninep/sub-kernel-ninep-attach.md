@@ -367,6 +367,10 @@ most one),
 idle_parked, retired, runq, pending, sent, dropped, refused, spawned,
 spawn_failed, reaped, live_refusals).
 
+`p9_close_job_lost` prints the flush-failed line and counts a job error for a job alone,
+which `closer_serve` cannot tell: its entry names no fid. Such a job runs once, because the
+flush it runs drops the run on a failure. Leg: `p9_closer.job_loses_a_run_loudly`.
+
 ## Concurrency
 
 The attach sequence itself is serial (one caller constructs a private

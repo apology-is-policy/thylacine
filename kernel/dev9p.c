@@ -14,6 +14,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/notes.h>   // thread_death_reaches: may the clunk wait
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
+#include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
 #include <thylacine/page.h>
@@ -23,6 +24,7 @@
 #include <thylacine/weft.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"     // timer_now_ns -- wb_flush_wait's deadline
 #include "../mm/slub.h"
 
 _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
@@ -203,16 +205,25 @@ static int dev9p_wire_errno(int rc) {
 // fids die with the session (no destroy-time wire teardown -- the session
 // close unbinds every fid server-side).
 
-// Take: remove + return the parked fid for `qid_path`, or -1.
-static s64 dirfid_take(struct p9_client *cl, u64 qid_path) {
+// Take: remove + return the parked fid for `qid_path`, or -1. An entry from
+// before a Larder forget may name an object an op with no owner removed: it is
+// no answer, and goes to *stale for the caller to clunk.
+static s64 dirfid_take(struct p9_client *cl, u64 qid_path, s64 *stale) {
     struct p9_dirfid_cache *dc = &cl->dirfid;
+    u64 epoch = larder_epoch(&cl->larder);
     s64 fid = -1;
+    *stale = -1;
     spin_lock(&dc->lock);
     for (u32 i = 0; i < P9_DIRFID_ENTRIES; i++) {
         if (dc->e[i].valid && dc->e[i].qid_path == qid_path) {
             dc->e[i].valid = false;
-            fid = (s64)dc->e[i].fid;
-            dc->takes++;
+            if (dc->e[i].epoch == epoch) {
+                fid = (s64)dc->e[i].fid;
+                dc->takes++;
+            } else {
+                *stale = (s64)dc->e[i].fid;
+                dc->drops++;
+            }
             break;
         }
     }
@@ -220,9 +231,10 @@ static s64 dirfid_take(struct p9_client *cl, u64 qid_path) {
     return fid;
 }
 
-// Park: insert {qid_path, fid}. Returns a fid the CALLER must clunk (the
-// incoming on dedup, an evicted victim on overflow), or -1.
-static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
+// Park: insert {qid_path, fid}, at the Larder epoch read before the fid was found
+// good. Returns a fid the CALLER must clunk (the incoming on dedup, an evicted
+// victim on overflow, a resident from before a forget), or -1.
+static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid, u64 epoch) {
     struct p9_dirfid_cache *dc = &cl->dirfid;
     s64 clunk = -1;
     s32 free_i = -1;
@@ -231,10 +243,18 @@ static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
         if (dc->e[i].valid) {
             if (dc->e[i].qid_path == qid_path) {
                 // Already parked: keep the resident (fids do not age), clunk
-                // the incoming.
-                dc->dedup_clunks++;
+                // the incoming. A resident from before a forget gives way.
+                s64 out = (s64)fid;
+                if (dc->e[i].epoch != epoch) {
+                    out = (s64)dc->e[i].fid;
+                    dc->e[i].fid   = fid;
+                    dc->e[i].epoch = epoch;
+                    dc->drops++;
+                } else {
+                    dc->dedup_clunks++;
+                }
                 spin_unlock(&dc->lock);
-                return (s64)fid;
+                return out;
             }
         } else if (free_i < 0) {
             free_i = (s32)i;
@@ -249,6 +269,7 @@ static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
     }
     dc->e[free_i].qid_path = qid_path;
     dc->e[free_i].fid      = fid;
+    dc->e[free_i].epoch    = epoch;
     dc->e[free_i].valid    = true;
     dc->donates++;
     spin_unlock(&dc->lock);
@@ -403,7 +424,8 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // On failure the run is DROPPED and the errno latched (the voted NFS-async
 // posture: the bytes are lost, the latch reports it via every subsequent
 // write/fsync and the last close -- retry-forever would wedge close). The
-// buffer itself stays allocated (freed at dev9p_close). A thread dying inside
+// buffer itself stays allocated until staging has stopped for good
+// (wb_release_dead_locked, dev9p_close at the latest). A thread dying inside
 // the flush is the exception: a death refuses its send or abandons its Twrite,
 // which says nothing about the server, and write() already reported those
 // bytes written. The run stays staged and nothing is latched, so the next
@@ -419,17 +441,44 @@ static bool wb_note_cancelled(int err) {
     return err == -P9_E_INTR && t && t->note_claim != 0;
 }
 
+// Waiting out a peer's flush. A thread a death can reach yields, and the death
+// ends the wait. A closer has no such end and a hung server can keep the flusher
+// parked for as long as it likes, so it sleeps, doubling to a bound.
+#define WB_FLUSH_WAIT_NS_MIN 1000000ull
+#define WB_FLUSH_WAIT_NS_MAX 64000000ull
+static u64 g_wb_flush_sleeps;
+
+u64 dev9p_wb_flush_sleeps(void) {
+    return __atomic_load_n(&g_wb_flush_sleeps, __ATOMIC_RELAXED);
+}
+
+static int wb_flush_wait_never(void *arg) { (void)arg; return 0; }
+
+static void wb_flush_wait(u64 *backoff) {
+    if (thread_death_reaches(current_thread())) {
+        sched();                     // yield; the flusher owns the progress
+        return;
+    }
+    __atomic_fetch_add(&g_wb_flush_sleeps, 1, __ATOMIC_RELAXED);
+    struct Rendez r;
+    rendez_init(&r);
+    (void)tsleep(&r, wb_flush_wait_never, NULL, timer_now_ns() + *backoff);
+    if (*backoff < WB_FLUSH_WAIT_NS_MAX) *backoff *= 2;
+}
+
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
+    u64 backoff = WB_FLUSH_WAIT_NS_MIN;
     while (p->wb_flushers != 0) {
         if (thread_die_pending(current_thread())) return -P9_E_IO;
         spin_unlock(&p->wb_lock);
-        sched();                     // yield; the flusher owns the progress
+        wb_flush_wait(&backoff);
         spin_lock(&p->wb_lock);
     }
     if (p->wb_len == 0) return p->wb_err ? -(p->wb_err) : 0;
     u64 off   = p->wb_off;
     u32 total = p->wb_len;
     u8 *buf   = p->wb_buf;
+    bool inside_open = p->wb_known;
     p->wb_flushers++;
     spin_unlock(&p->wb_lock);
 
@@ -445,11 +494,13 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     // content except the shared boundary page, which install_own extends
     // only when it is an OWN page ending exactly at our start; bytes outside
     // the run stay valid. Runs while wb_flushers > 0 (the frozen run pins
-    // wb_buf AND excludes same-file mutators -- the no-gen-guard premise).
-    // Outside wb_lock (the larder lock is its own leaf; wb_lock never nests
+    // wb_buf AND excludes same-file mutators -- the no-gen-guard premise). That
+    // premise is the open's: a flush past the last close (the anchor is gone)
+    // lands unordered with the file's later writers, so it drops as a failure
+    // does. Outside wb_lock (the larder lock is its own leaf; wb_lock never nests
     // with it).
     larder_attr_invalidate(&p->client->larder, qid_path);
-    if (err) {
+    if (err || !inside_open) {
         larder_page_invalidate(&p->client->larder, qid_path);
     } else {
         u64 ps  = LARDER_PAGE_SIZE;
@@ -737,7 +788,7 @@ int dev9p_loom_register(struct Spoor *c) {
     // path, so a registered priv never stages: flush the run and drop the
     // append anchor, as a metadata write does (dev9p_wstat_native). A latched
     // flush error fails the registration: the ring's ops would never report
-    // it, and the registered ref keeps the user's close from being the last.
+    // it.
     // wb_eligible stays set -- it gates the latch's report on write and fsync.
     struct dev9p_priv *p = priv_of(c);
     // A ring's ops go to the server: a cached open reads through a read fid
@@ -1116,7 +1167,10 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                 // would exclude exactly that window's death events, leaning
                 // on the create/mkdir drop-hook backstop alone.
                 u64 g2gen = larder_gen_snapshot(&cl->larder);
-                s64 cfid = dirfid_take(cl, sts[nname - 1].qid_path);
+                s64 stale;
+                s64 cfid = dirfid_take(cl, sts[nname - 1].qid_path, &stale);
+                if (stale >= 0)
+                    dev9p_close_clunk(cl, src_priv->attached_owner, (u32)stale);
                 if (cfid >= 0) {
                     struct Walkqid *sw = walkqid_alloc(nname);
                     if (sw) {
@@ -2019,13 +2073,16 @@ static int dev9p_close(struct Spoor *c) {
         bool parked = false;
         if ((c->flag & COPEN) == 0 && (c->qid.type & QTDIR) &&
             !p->fid_suspect && !p->fid_locks &&
-            __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-            !larder_qid_staled_since(&p->client->larder, p->fid_gen,
-                                     c->qid.path)) {
-            s64 vic = dirfid_put(p->client, c->qid.path, p->fid);
-            parked = true;
-            if (vic >= 0)
-                dev9p_close_clunk(p->client, p->attached_owner, (u32)vic);
+            __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED)) {
+            // The epoch first: a forget after the check leaves an old stamp.
+            u64 epoch = larder_epoch(&p->client->larder);
+            if (!larder_qid_staled_since(&p->client->larder, p->fid_gen,
+                                         c->qid.path)) {
+                s64 vic = dirfid_put(p->client, c->qid.path, p->fid, epoch);
+                parked = true;
+                if (vic >= 0)
+                    dev9p_close_clunk(p->client, p->attached_owner, (u32)vic);
+            }
         }
         if (!parked)
             dev9p_close_clunk(p->client, p->attached_owner, p->fid);
@@ -2403,13 +2460,28 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     struct Spoor *c = j->c;
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
-    int rc = 0;
+    int  rc      = 0;
+    bool flushed = false;
     spin_lock(&p->wb_lock);
-    if (p->wb_len || p->wb_flushers)
-        rc = wb_flush_locked(p, c->qid.path);
+    if (p->wb_len || p->wb_flushers) {
+        rc      = wb_flush_locked(p, c->qid.path);
+        flushed = true;
+    }
+    wb_release_dead_locked(p);       // a no-op while the anchor stands
     spin_unlock(&p->wb_lock);
-    if (j->release_locks &&
-        __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
+    if (!j->release_locks) return rc;
+
+    // Past the last close. Nobody reads the latch from here on, so a failure is
+    // reported now; wb_flush_locked dropped the run, so there is nothing to
+    // retry. A peer that was flushing when that close came installed its pages
+    // as the open's: they go too, as the hand-off's do (dev9p_close_job_run).
+    if (flushed) {
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+    }
+    if (rc != 0 && p9_client_fid_held(p->client, p->fid))
+        p9_close_job_lost(p->fid, rc);
+    if (__atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
         u8 status = P9_LOCK_ERROR;
         (void)p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
                              NULL, 0, &status);
@@ -2618,7 +2690,9 @@ static int dev9p_fd_close(struct Spoor *c) {
     if (!staged && !granted) return rc;
 
     if (granted) __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) > 1)
+    // An attach root's clunk never comes: the session owns its fid.
+    if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) > 1 ||
+        (!p->fid_owned && !p->cached_open))
         (void)dev9p_lock_flush_queue(p, c, /*release_locks=*/true);
     return rc;
 }

@@ -67,6 +67,7 @@
 #define P9_DIRFID_ENTRIES 64u
 struct p9_dirfid_ent {
     u64  qid_path;
+    u64  epoch;    // the Larder epoch it was parked at: a forget outdates it
     u32  fid;
     bool valid;
 };
@@ -393,8 +394,8 @@ struct p9_client {
     u32                  server_end;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
-    // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
-    // run outside the Larder lock). Serves the base X-check re-stat storm + fstat
+    // OWN near-leaf lock, below c->lock (a forget nests it, and nothing takes them
+    // the other way: the RPCs that take c->lock run outside it). Serves the base X-check re-stat storm + fstat
     // from local metadata; own-write invalidation keeps it close-to-open coherent.
     struct larder        larder;
     // G2 (term-4): the dir-fid cache -- PARKED, walk-fresh (never-opened) server

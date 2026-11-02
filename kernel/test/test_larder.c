@@ -20,6 +20,7 @@ void test_larder_gen_guard_skips_raced_install(void);
 void test_larder_root_qid_zero(void);
 void test_larder_overwrite_wins(void);
 void test_larder_eviction_bounded(void);
+void test_larder_forget_all(void);
 // L1d dentry sub-cache. Maps to fs_cache.tla's Read + OwnWrite subset (NO Open
 // gate -- a name-binding has no content-version to revalidate; the parent's
 // si_cvers does not track a dirent change, so own-write invalidation is the sole
@@ -778,6 +779,75 @@ void test_larder_downgrade_guards_raced_populate(void) {
 // S3 window); an event naming the install's own key still skips (the
 // resurrection close); a window wider than the ring fail-safes to skip.
 // Non-vacuous: with the global guard (inval_hits := gen != seq0) leg (a) fails.
+// A forget is one store, whatever the cache holds: nothing from before it serves,
+// no fill from before it installs, and its slots are free for the next fills. They
+// stay chained, so a key filled again must find its new entry, not the old one.
+void test_larder_forget_all(void) {
+    larder_reset();
+    fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x31);
+    struct t_stat a = mk_stat(0111);
+    struct t_stat b = mk_stat(0222);
+    for (u64 k = 0; k < LARDER_ATTR_ENTRIES; k++)
+        larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), k, 1, &a, NULL);
+    for (u64 k = 0; k < LARDER_DENTRY_ENTRIES; k++)
+        larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), k, "n", 1,
+                              k + 1, /*negative=*/false);
+    for (u32 k = 0; k < 64u; k++)
+        larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), /*qid=*/7, k,
+                            /*cvers=*/5, g_pgsrc, 64);
+
+    struct t_stat out; u64 s0 = 0, child = 0;
+    TEST_ASSERT(larder_attr_serve(&g_larder, 3, &out, &s0), "an attr serves before");
+    TEST_ASSERT(larder_dentry_lookup(&g_larder, 3, "n", 1, &child), "a dentry serves before");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 64u,
+                   "a page serves before");
+
+    u64 seq0 = larder_gen_snapshot(&g_larder);
+    u64 ep0  = larder_epoch(&g_larder);
+    larder_forget_all(&g_larder);
+    TEST_EXPECT_EQ(larder_epoch(&g_larder), ep0 + 1, "the epoch moved");
+    TEST_EXPECT_EQ(g_larder.forgets, 1ull, "one forget counted");
+
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 3, &out, &s0), "no attr serves after");
+    TEST_ASSERT(!larder_dentry_lookup(&g_larder, 3, "n", 1, &child), "no dentry serves after");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 0u,
+                   "no page serves after");
+
+    // A fill read before it: refused, for every kind.
+    larder_attr_install(&g_larder, seq0, 3, 1, &a, NULL);
+    larder_dentry_install(&g_larder, seq0, 3, "n", 1, 4, false);
+    larder_page_install(&g_larder, seq0, 7, 3, 5, g_pgsrc, 64);
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 3, &out, &s0), "an old attr fill installs nothing");
+    TEST_ASSERT(!larder_dentry_lookup(&g_larder, 3, "n", 1, &child),
+                "an old dentry fill installs nothing");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 0u,
+                   "an old page fill installs nothing");
+
+    // A fresh fill of the same key, with the old entry still chained.
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 3, 1, &b, NULL);
+    TEST_ASSERT(larder_attr_serve(&g_larder, 3, &out, &s0), "a new attr fill serves");
+    TEST_EXPECT_EQ(out.mode, 0222u, "the new one");
+
+    // The table refills in full, on forgotten slots: CLOCK takes them before any
+    // live entry, so nothing counts as evicted and the first fill survives.
+    u64 ae = g_larder.attr_evictions, de = g_larder.dentry_evictions;
+    for (u64 k = 1000; k < 1000 + LARDER_ATTR_ENTRIES - 1; k++)
+        larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), k, 1, &a, NULL);
+    for (u64 k = 10000; k < 10000 + LARDER_DENTRY_ENTRIES; k++)
+        larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), k, "n", 1,
+                              k + 1, false);
+    TEST_EXPECT_EQ(g_larder.attr_evictions, ae, "no live attr was evicted");
+    TEST_EXPECT_EQ(g_larder.dentry_evictions, de, "no live dentry was evicted");
+    TEST_ASSERT(larder_attr_serve(&g_larder, 3, &out, &s0), "the new attr still serves");
+
+    // Dropping a file whose pages were forgotten, then filling one of them again.
+    larder_page_invalidate(&g_larder, 7);
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 3, 5, g_pgsrc, 64);
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 3, 0, 64, 5, g_pgout, &s0), 64u,
+                   "a page fills again");
+    larder_destroy(&g_larder);
+}
+
 void test_larder_gen_scope_qid(void) {
     larder_reset();
     struct t_stat in = mk_stat(0644);

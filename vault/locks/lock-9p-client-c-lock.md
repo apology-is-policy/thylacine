@@ -24,6 +24,8 @@ updated: 2026-10-07
   `c->lock` → `send_waiters_list.lock` → `g_timerwait.lock` → per-waiter
   rendez lock. Peer lock notes land at the registry pass; until then this
   prose is the order's home for the client surface.
+- **The Larder's lock nests under it** at a forget: `c->lock` -> `l->lock` ->
+  buddy, and nothing takes them the other way.
 - **The transport's locks nest under it.** A send under `c->lock` takes the
   transport's own lock: the pipe's ring lock (the frame-atomic pipe send) or
   srvconn's `c2s.lock`. Since 2026-10-05 the death hangup (ARCH 21.10) runs

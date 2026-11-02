@@ -1089,6 +1089,11 @@ None owned. The dispatcher operates on the exception frame
 state is the two staging buffers, both stack-local, and a per-process atomic
 byte counter for the heap tier.
 
+Spawn's inherited descriptors count from the call (`sys_bump_inherit_fds`, by
+`handle_endow_spoor`): the parent's close is not the last, however soon it comes. The thunk
+drops the count once the child's slot holds the file, and every un-installed arm closes
+the file as the descriptor it counts as (`sys_spawn_unbump_fds`).
+
 ## Concurrency
 
 Each syscall runs on its caller's own thread with its own stack frame, so the

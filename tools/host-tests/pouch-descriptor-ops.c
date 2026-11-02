@@ -134,6 +134,7 @@ int main(void) {
  LRESET(0);file_size=1000;CASE("whence-end",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,-1,1,0))==0 && a2==999 && la3==1 && fstat_calls==1 && lseek_calls==0);
  LRESET(0);fstat_fail=1;CASE("whence-end-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EBADF && calls==0);
  LRESET(-ENOLCK);fstat_fail=2;CASE("whence-end-no-stat",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==ENOLCK && calls==1 && number==137 && (a1 & 0x20) && all_x0(8) && test_writes==0);
+ LRESET(-EBADF);fstat_fail=2;CASE("whence-end-walk-only",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EBADF && calls==1 && number==137 && (a1 & 0x20) && all_x0(8) && test_writes==0);
  LRESET(0);fstat_fail=2;CASE("whence-end-eio-stands",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EIO && calls==1 && number==137 && (a1 & 0x20));
  LRESET(0);CASE("whence-bad",tested_fcntl(8,F_SETLK,FL(F_WRLCK,9,0,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
  LRESET(0);CASE("start-overflow",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,LLONG_MAX,1,0))==-1 && errno==EOVERFLOW && calls==1 && number==129);

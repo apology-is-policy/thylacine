@@ -54,6 +54,20 @@ needed the operator.
 
 **An unverified premise, read.** `dev9p_close` now always clunks `nowait`. On a full tag pool that used to drain ownerless Rclunks and now spills to a closer, which drains them. `client_clunk_async`'s comment says a close burst alone no longer fills the share, so the spill should be rare, and the closer counts are the lease's to confirm.
 
+
+**Round 4 (14:43Z).** Three narrow parts on Opus, each with a budget and findings on disk as
+confirmed. 4a found the one P1: `sys_bump_inherit_fds` took a bare reference, so the parent's
+close, the normal next step of any spawn, read as the last close. I had read that function
+while writing design T and not seen it; a reference in flight on its way to a descriptor is
+neither a slot nor a holder, and my list of "no descriptor" holders simply omitted it. 4b's
+cost findings changed the shape of the forget: a scan of the whole Larder under `c->lock` at
+a rate EL0 sets would have been a real lock-duty attack, so it is an epoch now, and a parked
+fid stamps the same epoch rather than being walked under `c->lock`. 4c found that the job I
+added in round 3 broke a sentence I had written in the same commit: it installed OWN pages
+where the text says it drops them. The fix reads the anchor rather than adding a flag. Stratum's half
+of vote 38 caps records per client_id at 4096, and a release's split counts against the
+record's own client, or a release in the middle of each record doubles a share.
+
 ## 2026-10-27 (main, Opus 5.5, effort max) -- a power loss, round 7 dirty, two side fixes, three votes
 
 **The restore.** The operator's laptop lost power overnight; `/private/tmp` went with it (the private Stratum clone, every build, the probes, `/tmp/tla2tools.jar`), and round 7's reviewer died mid-run without a report. The wedge series survived in the durable bundle (wedge `e6b2dd1`, 10 commits on `a78f4bb`). Clone, worktree and builds were rebuilt from it. **Wrong turn:** the restore recipe I had written from memory named the wrong build flags (hooks off for the Release builds); three builds failed with undeclared test hooks. The original flags were recovered from the transcript (IOURING/PQ off, WERROR on; Release builds keep hooks; nohooks builds libraries only) and saved as `stratum-private/rebuild.sh`. Sweep at `e6b2dd1` on the original flags: ctest 73/73, 0 warnings, nohooks 0, Pouch clean.
