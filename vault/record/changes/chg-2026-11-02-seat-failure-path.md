@@ -4,7 +4,7 @@ type: chg
 title: "A seat that fails says so: votes 36 and 37, the generation retire, and the two defects behind one lost boot"
 date: 2026-11-02
 arc: arc-halcyon-interaction
-commits: ["ff4a7458e", "ee99f3c70", "9cc84c31e", "310355dc6", "e4c2dc5bc", "99e70535f", "5c325e53a", "adf79f457", "65a430ec8", "c3f024eaa", "5a188d90d", "dba45c3c4"]
+commits: ["ff4a7458e", "ee99f3c70", "9cc84c31e", "310355dc6", "e4c2dc5bc", "99e70535f", "5c325e53a", "adf79f457", "65a430ec8", "c3f024eaa", "5a188d90d", "dba45c3c4", "0d2ba9352"]
 touched:
   - sub-corvus
   - sub-halcyond
