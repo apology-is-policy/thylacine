@@ -392,6 +392,13 @@ again, provided no peer refills a set between the drain and the sample (the
 drain is safe at any time, but it is not a measurement; see October 21). Measured with the drain in place: the private teardown returns one
 page, the shared teardown returns zero.
 
+**It reads short too.** A refill moves 8 pages out of the buddy, so an exact round
+trip with no drain reads 8 short on a kernel with no leak when the test's CPU starts
+with an empty magazine: forcing that gave `free_before=487439 free_after=487431`, with
+the leak test's message. One boot's suite likely died this way (2026-11-02; that boot
+printed no numbers). The kernel tests' exact round trips use `test_free_pages_settled`,
+which drains first; a peer refilling during the drain still leaves a narrow window.
+
 **The earlier draft of the same test was worse — it passed.** It asserted
 on `PG_FREE`, which is unusable here because the buddy's coalesce anchors
 on the **lower-pfn** buddy: a freed page that merges rightward never gets
