@@ -76,9 +76,10 @@ about two minutes, and I re-stated the lease at 17:15Z. I told the operator the 
 under zsh passed `"name --self-test"` as one filename, so five checkers "failed" with rc 2.
 
 I also called C7 "the overhaul's last chunk" in its status section, journal entry and change note. It is not: the
-review's own chunk list has C4 (thread-directed notes, vote 5 YES, F-3 P2 still open: pouch posts `tkill` to the
-process) and C8-C10 unstarted. I found it writing the operator's 11-02 status, by reading that list instead of recalling
-it. `chg-2026-11-02-thread-overhaul-position` holds the position.
+review's own chunk list has C4 (thread-directed notes, vote 5 YES, F-3 P2 still open on every ref: the phenotype's
+`tkill`/`tgkill` use the tid only to find the Proc and post a note any unmasked thread may take, and native
+`pthread_kill` gets ENOSYS) and C8-C10 unstarted. I found it writing the operator's 11-02 status, by reading that list
+instead of recalling it, and first checked only aux-3 and described the mechanism wrongly; main's code settled both. `chg-2026-11-02-thread-overhaul-position` holds the position.
 
 And the lease. `run-final.sh` ended at 18:33:56Z with no release in it, relying on me to read the monitor. The session
 stopped there, so the Mac showed EXPIRED under my name until 2026-11-02 08:03Z (87.9 h held), and the landing waited
