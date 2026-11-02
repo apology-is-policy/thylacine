@@ -502,7 +502,10 @@ answered 0, so the move cannot be refused: the ring has `NOTE_RING_SPARE` slots 
 `NOTE_QUEUE_DEPTH` that no post may fill, and past the depth a moved note coalesces
 with a queued note of its name or takes one. Only the move fills a spare slot, each
 time with a name not then queued at sender 0, so a full ring holds a moved note of
-every family and the slots cannot run out. A static assert keeps one per family.
+every family and the slots cannot run out, and running out would extinct, as losing a
+kill's re-enqueue does. A static assert keeps one per family. Moved notes count against
+admission until they are read, so after a move a post can be refused until the reader
+has drained them too.
 Every ring walk's modulus is `NOTE_RING_SLOTS`; the admission and the tail's budgets
 stay at the depth.
 

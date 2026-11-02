@@ -901,11 +901,13 @@ _Static_assert(__builtin_popcount(NOTE_MASK_SUPPORTED) <= NOTE_RING_SPARE,
 // a spare slot. Spare slots always suffice: only this fills past the depth, each
 // time with a name not then queued at sender 0, so a full ring holds
 // NOTE_RING_SPARE distinct such names, which is every family, this one included.
+// Losing one would be a note its poster was told 0 for: N-2, as kill's re-enqueue.
 // The caller wakes q's hooks once it drops q->lock.
 static void notes_move_to_queue_locked(struct Proc *p, const char *name) {
     struct NoteQueue *q = p->notes;
     if (q->count < NOTE_QUEUE_DEPTH || notes_find_locked(q, name, 0u) < 0) {
-        if (q->count >= NOTE_RING_SLOTS) return;
+        if (q->count >= NOTE_RING_SLOTS)
+            extinction("notes_move_to_queue_locked: no spare slot -- N-2 violation");
         u32 idx = q->tail;
         notes_name_copy(q->ring[idx].name, name);
         q->ring[idx].arg = 0;
@@ -1420,7 +1422,8 @@ void notes_set_handler(struct Proc *p, u64 handler_va) {
         // (Unregistering does NOT re-arm -- the unregistering thread reaches
         // its own tail right after this syscall, where LS-5b re-evaluates,
         // and a blocked peer is then covered by the death cascade exits()
-        // triggers; see ARCH 8.8.2.)
+        // triggers; see ARCH 8.8.2. A thread that masks the family finds nothing
+        // at that tail, so the note then waits for a tail that can take it.)
         __atomic_and_fetch(&p->proc_flags,
                            ~PROC_FLAG_TERMINATE_PENDING_MASK,
                            __ATOMIC_RELEASE);
