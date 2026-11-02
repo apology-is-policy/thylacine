@@ -204,12 +204,14 @@ A descriptor opened for reading only, on a regular file of at most 128 KiB
 whose contents the kernel already holds, may be served from the kernel's cache
 without a connection to the file service. An empty file qualifies once the
 kernel has looked it up, and so does a file that a program on the system has
-just written. Setting times or
-the mode through such a descriptor fails with `EOPNOTSUPP` (`operation not
-supported` in native programs); setting them through the file's name, or
-through a descriptor opened for writing, succeeds. A file whose service
-keeps no times, such as a kernel device like `/dev/null`, gives the same error
-through either form.
+just written. Setting times or the mode through such a descriptor connects it
+to the file first. On the system's own files, that step walks the names the
+open used, and if the file has been renamed, removed or replaced since the
+open, the request fails with `ESTALE` (`stale file handle` in native programs);
+setting them through the file's current name, or through a new descriptor,
+succeeds. A file whose service keeps no times, such as a kernel device like
+`/dev/null`, fails with `EOPNOTSUPP` (`operation not supported`) through either
+form.
 
 POSIX's `AT_SYMLINK_NOFOLLOW` and `lutimes` set the times of a symbolic link
 itself, and both work for programs built with Pouch and in containers. Native
