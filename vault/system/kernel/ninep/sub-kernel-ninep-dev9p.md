@@ -15,8 +15,57 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-02
 ---
+## The fid a cached open keeps, and locks on it (B-3h3, 2026-11-02)
+
+FID-LIFECYCLE 3.3 and ARCH 9.6.11. A cached open still serves its snapshot with
+no wire. What it gained is a way to reach the server, `lock_fid(p)`: a strict
+open's kept fid, or the fid a loose open bound on its first need (`P9_NOFID`
+until then). Any other open answers its own fid.
+- **Strict** (operator vote 20, retain the walk fid unopened). The revalidating
+  Twalkgetattr in `dev9p_open_cached` binds a fresh fid (mask BASIC|GEN), which
+  `priv_alloc` keeps as `p->fid`, `fid_owned` and unopened. The walk teaches
+  `lock_gen` and `lock_ident`, so `lock_ident` costs no wire. A mint that fails
+  after the bind clunks the fid (`co_abandon`, `co_mint_fail`).
+- **Loose** (operator vote B1, the SYSTEM mount). The mint binds nothing, so its
+  open stays wire-free. It keeps `co_start` (a reference on the run's base),
+  `co_names` (packed, each a u16 LE length and its bytes; `co_nname`,
+  `co_names_len`) and the generation `larder_attr_gen` knows. A file with no
+  known generation is not minted loose: the normal path opens it. The budget
+  charge is the snapshot's size plus `co_names_len`.
+- **`co_bind`** is a loose open's first need. It walks the kept names from the
+  base (Twalkgetattr, BASIC|GEN) into a fresh fid and accepts only a full walk
+  to the same `qid.path` with a valid generation equal to `lock_gen`. Otherwise
+  the fid goes back and the answer is `-T_E_STALE` (`-T_E_INTR` for an
+  interrupted walk, `-T_E_NOMEM` with nothing sent). The fid is CAS-installed in
+  `co_kfid`; a loser clunks its own (`dev9p.cached_open_install_race`).
+- **`co_read_live`** ends the snapshot: a zero-name clone of the kept fid and a
+  Tlopen O_RDONLY, CAS-installed in `co_rfid`, the loser clunking its own.
+  `DEV_LOCK_SYNC_ACQUIRE` and `dev9p_loom_register` run it. A failure installs
+  nothing and the snapshot still serves. `dev9p_read` and `dev9p_client_fid`
+  address `co_rfid` once it is installed; before that `dev9p_client_fid` offers
+  a ring `P9_NOFID`, which fixes OPEN-BUGS 2026-10-22 16:34Z's Loom path.
+- **Locks.** `dev9p_lock` binds first, except that an unlock with nothing bound
+  holds nothing and answers 0 with no wire. A failure to bind answers ESTALE or
+  EINTR as they are and otherwise ENOLCK (`co_bind_lock_errno`).
+  `dev9p_lock_owner` clones `lock_fid(p)`. `dev9p_lock_sync(ACQUIRE)` answers
+  what a lock call can: ESTALE, EINTR, else ENOLCK.
+- **Metadata.** `dev9p_wstat_native` binds and sends Tsetattr on the kept fid.
+  `dev9p_stat_native` serves the open-time stat until a fid is bound, then asks
+  the server through it. `co_patch_stat` reports the snapshot's size and version
+  while reads still serve the snapshot, so a reader sized by fstat reads what is
+  there; the rest is the file's own, so a wstat through the open shows in it.
+- **Close** clunks `co_rfid` and `co_kfid` asynchronously, frees the names, lets
+  go of `co_start` and gives back the budget. A strict open's `p->fid` clunks as
+  any walked fid does.
+
+The residual, on the loose mount only: a read-only small cached file renamed,
+unlinked or replaced since its open answers ESTALE to a lock or wstat, and never
+reaches the wrong file; its reads keep serving the snapshot. Binding at every
+loose open would close it at about 1604 wire walks per W1 run, the walks vote B1
+removed ([[seam-co-fidless-wstat]], closed).
+
 ## Byte-range locks and lock-to-unlock consistency (B-3h2, 2026-10-29)
 
 dev9p serves the five lock slots of [[sub-kernel-dev]] for
@@ -51,8 +100,6 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
   Tclunk, and the closer serves a session's entries in order. Without it, a
   killed holder whose open file another Proc shares would release its lock
   before its staged bytes landed.
-- A fidless cached open answers `-T_E_NOLCK` and learns no identity until
-  Boosty B-3h3.
 
 ## Create admission by session end (2026-10-19, B-3e M7)
 
@@ -154,7 +201,8 @@ priv — the F236 discipline; walks inherit the parent's), `create_errno`
 (#99 transient), `fid_gen`/`fid_suspect` (G2), `poll` (the lazily-allocated
 arm state: the hook list an arm's answer walks, refcounted independently — #294), `weft` (the lazily-bound
 flow ring; CAS-installed, ACQUIRE-read), the cached-open triple
-(`cached_open`/`co_buf`/`co_size`/`co_stat`), and the write-behind block
+(`cached_open`/`co_buf`/`co_size`/`co_stat`) with what it reaches the server by
+(`co_rfid`, `co_kfid`, `co_start`, `co_names`, section above), and the write-behind block
 under `wb_lock` ([[lock-dev9p-wb-priv]]).
 
 **`dev9p_close` teardown order** (each step's position is load-bearing):
@@ -375,8 +423,9 @@ caller's `t_timespec` in the atime/mtime fields, and "now" carries its bit
 with zeroed fields, which the server answers with its own clock (Stratum
 honours that since its 2026-10-22 Tsetattr fix; before it stored the
 fields, the epoch). A caped session refuses UID/GID before anything else
-with EACCES (the cape, below); cached-open fails LOUD with EOPNOTSUPP
-([[seam-co-fidless-wstat]]); a failed flush or Tsetattr answers the wire's
+with EACCES (the cape, below); a cached open sends it on its kept fid, and a
+loose one binds first and answers ESTALE if the file moved since its open; a
+failed flush or Tsetattr answers the wire's
 errno through `dev9p_wire_errno` (its EPERM folded to EACCES);
 write-behind: flush first (a truncate must land after the staged bytes;
 a time must land after the write that would stamp it). The flush is the
@@ -555,7 +604,7 @@ when the transport has no name, `origin_dc`, its device character -- and
 the root and `handle_alloc` ([[sub-kernel-syscall-dispatch]]), so the plain
 fields are set before publication and never change; `dev9p_close` drops the
 reference. Only an unstamped root takes the stamp: a walked priv (`fid_owned`)
-and a cached-open priv (fidless like the root, but not one) refuse it, and a
+and a cached-open priv (not a root, and with no fid on a loose client) refuse it, and a
 walk -- the zero-name clone every mount crossing makes included -- always
 builds a fresh priv, so no copy of the root carries the name. A root reached
 by opening a 9P-mode /srv service is named through its `->path` instead
@@ -630,7 +679,8 @@ deliberately not owned here — the resolver post-scans.
 
 Real-errno propagation on read/write/fsync/getattr (#3/Area-F) and on
 rename/unlink (#80), and on wstat (G12): a chown/chgrp on a caped session
-answers EACCES before the wire, a cached open EOPNOTSUPP, and a flush or
+answers EACCES before the wire, a loose cached open that cannot reach its file
+ESTALE, and a flush or
 Tsetattr failure the wire's errno. `dev9p_create`'s errno record + accessor (#99).
 NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
 distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
@@ -726,8 +776,6 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 - [[seam-wb-close-flush-slot]] — the close-flush is best-effort (void
   `Dev.close`); fsync is the reliable channel; the bounded/abortable
   close-flush error slot is the v1.x lift.
-- [[seam-co-fidless-wstat]] — fchmod/fchown on a cached-open fd fails
-  loud (no fid to Tsetattr; no v1.0 consumer does this).
 - [[seam-larder-loom-bypass]] — the Loom-async-mutation bypass of the
   wb/Larder invalidates (self-inflicted-reachable only, L1f-F2 wording);
   [[seam-larder-stale-child-attr]] — rename/unlink leave the moved

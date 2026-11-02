@@ -43,7 +43,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -321,9 +321,9 @@ None crossing a boundary; every ABI record belongs to
   to stay dependency-free. It carries its own copy of the all-rights literal,
   which is one more unpinned copy of a bound the kernel also states as a
   literal.
-- **`Error`** — a flat enum of twenty errno-mapped variants (measured from
-  `as_errno`, 2026-09-24: nineteen registry values plus `DirectoryNotEmpty`'s
-  39, which has no `T_E_*`), a catch-all
+- **`Error`** — a flat enum of errno-mapped variants (measured from `as_errno`,
+  2026-11-02: 24 of the registry's 38 values, `NoLocks` 37 and `StaleFile` 116
+  the newest, plus `DirectoryNotEmpty`'s 39, which has no `T_E_*`), a catch-all
   carrying an integer, and two library-only variants for a read that ended
   early and a write that stopped making progress. No allocation: variants are
   unit or carry one integer, and `Display` uses static strings.

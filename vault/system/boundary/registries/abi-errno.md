@@ -10,7 +10,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## The surface
 
@@ -57,7 +57,7 @@ anywhere.
 | 107 | `T_E_NOTCONN` | ENOTCONN | `getpeername()`/`shutdown()` on an entry still FRESH |
 | 110 | `T_E_TIMEDOUT` | ETIMEDOUT | a `tsleep`/`torpor_wait` deadline elapsed |
 | 111 | `T_E_CONNREFUSED` | ECONNREFUSED | netd rejected the dial, or the data open failed after connect |
-| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number); `SYS_FILE_LOCK` today, the fidless cached-open re-walk from B-3h3 |
+| 116 | `T_E_STALE` | ESTALE | the descriptor's file has died on its server (Stratum kills an unlinked file's fids and reuses the number), or a loose cached open's re-walk no longer reaches its file (renamed, unlinked or replaced since the open): `SYS_FILE_LOCK`, and `SYS_WSTAT` on such an open |
 | 125 | `T_E_CANCELED` | ECANCELED | a Loom chain op cancelled by a failed predecessor |
 
 The **socket family** (24 remapped to EMFILE for the socket table, and 88/93/97/98/103/106/107/111) was appended at VIVARIUM V-5, its values read directly from `third_party/musl/arch/generic/bits/errno.h` because a Linux guest's libc compares against exactly those numbers — collapsing them to `EINVAL` would make a guest retry a connection that can never succeed. `INTR` (4), `2BIG` (7), `CHILD` (10) and `NOTTY` (25) each landed under the same append-under-ratified-scripture precedent the `-1` and change-protocol sections describe.
@@ -107,13 +107,13 @@ The three ranges a return value can fall in, as the seam reads them:
 ## Where the registry is mirrored, and where it has drifted
 
 **`usr/lib/libthyla-rs/src/err.rs`** is the only value-by-value mirror. It
-enumerates **22** of the 38 non-zero values (`as_errno`): 1, 2, 3, 5, 9, 11,
-12, 13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 38, 40, 95, 110, 111. Missing —
-**16** — is dominated by the V-5 socket family: `INTR` (4), `2BIG` (7),
+enumerates **24** of the 38 non-zero values (`as_errno`): 1, 2, 3, 5, 9, 11,
+12, 13, 14, 16, 17, 20, 21, 22, 28, 32, 34, 37, 38, 40, 95, 110, 111, 116. Missing —
+**14** — is dominated by the V-5 socket family: `INTR` (4), `2BIG` (7),
 `CHILD` (10), `NODEV` (19), `MFILE` (24), `NOTTY` (25), `NOTSOCK` (88),
 `PROTONOSUPPORT` (93), `AFNOSUPPORT` (97), `ADDRINUSE` (98),
-`CONNABORTED` (103), `ISCONN` (106), `NOTCONN` (107), `CANCELED` (125),
-and B-3h's `NOLCK` (37) and `STALE` (116), whose variants land with the
+`CONNABORTED` (103), `ISCONN` (106), `NOTCONN` (107) and `CANCELED` (125).
+B-3h's `NOLCK` (37, `NoLocks`) and `STALE` (116, `StaleFile`) landed with the
 native lock wrappers in Boosty B-3h4.
 `CONNREFUSED` (111) joined on 2026-09-24 as `ConnectionRefused`, because haul
 now branches on it, per this page's own rule (last Prosecution bullet), and

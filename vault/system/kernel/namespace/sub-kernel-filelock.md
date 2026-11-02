@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.6.11"]
 created: 2026-10-29
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -163,12 +163,43 @@ Mutants run in the B-3h2 lease (each must turn its named leg red):
 - F12, a get does not learn the identity: `filelock.reused_number`.
 - F13, the closer sends a Tclunk for a job alone: the p9_closer leg.
 
+B-3h3's mutants, each of which must go red at its own leg (not yet run):
+- G1, a take syncs nothing; G2, the table ignores a failed ACQUIRE; G13, it
+  refuses a peer's ESTALE; G19, a take skips the table:
+  `filelock.acquire_syncs`.
+- G3, a strict mint keeps no fid; G4a, ACQUIRE re-clones; G5, a read ignores the
+  read fid; G7, the close skips the read fid: `dev9p.cached_open_lock`.
+- G4b, G4c, a plain store replaces either CAS:
+  `dev9p.cached_open_install_race`.
+- G6, a ring gets the unopened fid: `dev9p.cached_open_loom`.
+- G8, a failed mint keeps its fid: `dev9p.cached_open_fallbacks`.
+- G9, fstat does not patch the size; G18, a wstat does not bind:
+  `dev9p.cached_open_loose_wstat`.
+- G10, no generation compare; G11, no number compare; G14, a mint with no known
+  generation; G15, no validity check: `dev9p.cached_open_loose_stale`.
+- G12, the base is not released; G17, an unlock binds:
+  `dev9p.cached_open_loose_lock`.
+- G16, a NULL generation is kept: `larder.attr_gen`.
+
+## Cached opens and the take's sync (B-3h3, 2026-11-02)
+
+A take must leave the snapshot of every open it covers, or the holder reads the
+file as it was at open. `file_lock_acquire_sync` runs before every take attempt,
+on `c` and then, for the Proc owner, on every open of the file in the table
+(`handle_lock_sync_file(..., DEV_LOCK_SYNC_ACQUIRE)`). The open-file owner learns
+its file first, as an entry's get does, so an open of a dead file sharing its
+number is left alone. A failed sync refuses the take, except that a table peer
+answering ESTALE keeps its snapshot and the take through the descriptor that can
+reach the file stands. The descriptor's own ESTALE refuses first. A cached open's
+close now matches entries by generation as any open's does: both kinds learn one
+at mint.
+
 ## Seams
 
-- A lock on a fidless cached open answers `-T_E_NOLCK` until Boosty B-3h3.
-  Its close matches entries by number, because a cached open learns no
-  generation until `co_gen` (B-3h3).
-- Pouch `fcntl`/`flock` and the libthyla-rs/libt mirrors come in B-3h4.
+None open. Pouch `fcntl`, `flock` and the libthyla-rs and libt mirrors landed
+with B-3h4 ([[sub-pouch-fs]], [[sub-kernel-syscall-abi]]). A caught note does not
+end a native or Pouch wait until item 11c (Caveats). Go's `cmd/go` file lock is
+still a no-op on Thylacine (OPEN-BUGS 2026-11-02).
 
 ## Caveats
 
@@ -180,7 +211,8 @@ Mutants run in the B-3h2 lease (each must turn its named leg red):
 ## History
 
 Boosty B-3h2 (commits d1853e821, c95ef3916, b693e2729 on branch b3h; close
-commit pending). Scripture 87ecc8153. Stratum's half (POSIX range records,
+commit in [[chg-2026-10-29-b3h2-file-locks]]). Scripture 87ecc8153. B-3h3 and
+B-3h4: [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]]. Stratum's half (POSIX range records,
 the zero-name clone of an open fid, ENOLCK caps) lands as one Stratum commit
 after the B-3h audit.
 

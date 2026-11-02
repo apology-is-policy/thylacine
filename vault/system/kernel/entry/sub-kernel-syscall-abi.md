@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## SYS_FILE_LOCK 137 (B-3h2, 2026-10-29)
 
@@ -35,8 +35,12 @@ updated: 2026-10-29
 `tools/check-flag-words.py` holds the op flags (the type values excluded)
 under its no-collision rule. `tools/test-native-handle-query.py` pins
 `SYS_FILE_LOCK = 137`. Linux rt_sigtimedwait shares the number
-([[sub-kernel-vivarium]]). The libthyla-rs and libt mirrors land with their
-wrappers in B-3h4.
+([[sub-kernel-vivarium]]). The libthyla-rs and libt mirrors landed with their
+wrappers in B-3h4: `T_SYS_FILE_LOCK`, `T_FILE_LOCK_*`, `struct t_file_lock` and
+`TFileLock` (32 bytes, asserted each side), and `t_file_lock`.
+`tools/check-prot-mirror.py` holds the op words across all three in a FILE_LOCK
+family, and `tools/test-native-handle-query.py` pins 137 in libt, libthyla-rs and
+Pouch's 0065. Pouch's host checker parses the same values from this header.
 
 ## SYS_FSTAT answers an errno (2026-10-20, ERRORS.md ER-2)
 

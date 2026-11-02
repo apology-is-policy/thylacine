@@ -3,7 +3,7 @@ id: sub-kernel-larder
 type: sub
 title: "The Larder — the guest-side 9P FS cache (attr + dentry + page)"
 parent: moc-kernel-ninep
-code: [kernel/larder.c, kernel/include/thylacine/larder.h]
+code: [kernel/larder.c, kernel/include/thylacine/larder.h, kernel/test/test_larder.c]
 audit: hard
 guarded-by: [inv-i38]
 validated-by: [spec-fs-cache, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-28
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -59,7 +59,14 @@ lazily-allocated array + page buffer.
   0 RPC-free.
 - `larder_attr_install` — Open/Refetch: install `{attr, cvers}` iff no
   invalidation event named this qid since `seq0` (the G4-scoped gen
-  guard); upgrades a `perm_only` entry to full.
+  guard); upgrades a `perm_only` entry to full. It also takes the inode
+  generation (`gen`, NULL when the server's answer left it out); every install
+  overwrites what the entry knew, so NULL forgets.
+- `larder_attr_gen` (B-3h3, 2026-11-02) — the generation the entry for this qid
+  holds, if any, for a loose cached open's mint. A caller reads it between the
+  hint and the snapshot: `seq0` fails the snapshot on any invalidate of this
+  number, so the generation read names the file the snapshot copies. Walks and
+  getattr populates ask BASIC|GEN, so a served file usually has one.
 - `larder_attr_invalidate` — OwnWrite: drop the entry + log a HARD event
   (always, even when nothing was cached — the concurrent-populate guard).
 - `larder_attr_downgrade` — G3: mark a PARENT dir's entry `perm_only`

@@ -13,8 +13,17 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-29
+updated: 2026-11-02
 ---
+## A take's sync across the table (B-3h3, 2026-11-02)
+
+`handle_lock_sync_file` now answers an int, with a new `DEV_LOCK_SYNC_ACQUIRE`:
+before a take, every open of the file in the table leaves its snapshot
+([[sub-kernel-ninep-dev9p]]). The walk stops at the first refusal, with one
+exception: a peer answering ESTALE keeps its snapshot, because it can no longer
+reach the file (a loose cached open of a file renamed since), and the take through
+the descriptor that can reach it stands. A release still lands what it can.
+
 ## The Proc lock owners (B-3h2, 2026-10-29)
 
 The handle table now also holds the Proc owner of `SYS_FILE_LOCK_PROC` locks

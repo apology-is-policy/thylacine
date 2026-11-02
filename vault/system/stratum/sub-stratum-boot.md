@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-22
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -86,7 +86,10 @@ nothing (0062), and `dtype`, readdir's `d_type` on the fixture and on `/hw`
 spelling, a link's own times included ([[sub-pouch-fs]]), and then
 `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
 legs over a TZif file the prover writes itself, which musl opens through
-`openat`'s translation and maps private (0060). Each is boot-fatal. The
+`openat`'s translation and maps private (0060), and then, from B-3h4
+(2026-11-02), `/bin/pouch-hello-locks` (`POUCH_CENSUS_LOCKS`): the file-lock
+prover's ten legs, every conflict between two Procs or two open files over
+Stratum's lock table ([[sub-pouch-fs]]). Each is boot-fatal. The
 marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).

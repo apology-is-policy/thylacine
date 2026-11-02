@@ -2,12 +2,13 @@
 id: seam-co-fidless-wstat
 type: seam
 title: "fchmod/fchown/futimens on a cached-open fd fails loud (no fid to Tsetattr)"
-status: open
+status: closed
 surface: [sub-kernel-ninep-dev9p]
 opened-by: chg-2026-07-11-fid-lifecycle
 tracker: ""
 created: 2026-07-31
 updated: 2026-10-22
+closed-by: chg-2026-11-02-b3h3-b3h4-cached-locks-pouch
 ---
 **Owed** (only if a consumer appears): the retain-the-walk-fid-unopened
 cached-open variant, so a fidless open can late-address a Tsetattr.
