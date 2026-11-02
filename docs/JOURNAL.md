@@ -75,6 +75,11 @@ about two minutes, and I re-stated the lease at 17:15Z. I told the operator the 
 "gated off"; measured, all 2151 started and none failed, and the difference was my pattern. My first checker loop
 under zsh passed `"name --self-test"` as one filename, so five checkers "failed" with rc 2.
 
+I also called C7 "the overhaul's last chunk" in its status section, journal entry and change note. It is not: the
+review's own chunk list has C4 (thread-directed notes, vote 5 YES, F-3 P2 still open: pouch posts `tkill` to the
+process) and C8-C10 unstarted. I found it writing the operator's 11-02 status, by reading that list instead of recalling
+it. `chg-2026-11-02-thread-overhaul-position` holds the position.
+
 And the lease. `run-final.sh` ended at 18:33:56Z with no release in it, relying on me to read the monitor. The session
 stopped there, so the Mac showed EXPIRED under my name until 2026-11-02 08:03Z (87.9 h held), and the landing waited
 too. No ref in the repo moved in that time and nobody was queued at the release, so I have no evidence it held anyone
@@ -85,7 +90,7 @@ Evidence: memory design_aux_corona_join.md and audit_aux_corona_join_closed_list
 
 ## 2026-10-29 (aux, Opus 5.5 1M) -- thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 
-The overhaul's last chunk, run across three compactions. C7b routes every first entry to EL0 through the shared
+A chunk of the overhaul, run across three compactions (this entry first called it the last; corrected 2026-11-02: C4 and C8-C10 remain). C7b routes every first entry to EL0 through the shared
 return tail; C7c adds `/proc/<pid>/thread/<tid>/`, `step <tid>` and a listable `/proc`. Landing: aux-3 at the
 landing commit after 86d1eccaf, GitHub.
 

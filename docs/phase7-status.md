@@ -2793,7 +2793,7 @@ the Go fork's (env-b) waits until main, b3 and aux-3 carry bit 2. Code a2693024e
 
 ## Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask — 2026-10-29
 
-The last chunk of the thread-model overhaul (`docs/thread-model-review.html`: F-7, decision 6). Operator votes
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`: F-7, decision 6); C4 and C8-C10 remain. Operator votes
 2026-10-29: no per-thread ctl (`step <tid>` on the Proc ctl), readdir in C7, `..` from a pid file to its pid
 directory, and V5 -- a new thread starts with its creator's note mask. In the reap tree on aux-3-c7, then
 aux-3-c7-probe.
@@ -2895,4 +2895,5 @@ an empty environment). On aux-3-join in the c7probe tree, built in the reap tree
 - **Still open, owned.** The F1 test's cleanup on an early assert has not executed (`fnd-aux-corona-join-r2-f1`): a
   planted early failure, queued for aux's next Mac lease. corona/env-shapes and async-memory's later commits are a second
   join; corona takes the lock conversions, the pts wakes and 842c0c908 from aux-3. The C7 residue stands as recorded
-  above (`seam-dirent-type-is-qid-type`, Ambush, the Go fork's minit comment, the ELF hash).
+  above (`seam-dirent-type-is-qid-type`, Ambush, the Go fork's minit comment, the ELF hash). The overhaul itself has C4
+  and C8-C10 to go (`chg-2026-11-02-thread-overhaul-position`).
