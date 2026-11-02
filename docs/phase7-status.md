@@ -2897,3 +2897,43 @@ an empty environment). On aux-3-join in the c7probe tree, built in the reap tree
   join; corona takes the lock conversions, the pts wakes and 842c0c908 from aux-3. The C7 residue stands as recorded
   above (`seam-dirent-type-is-qid-type`, Ambush, the Go fork's minit comment, the ELF hash). The overhaul itself has C4
   and C8-C10 to go (`chg-2026-11-02-thread-overhaul-position`).
+
+## Thread-model C4: a note aimed at one thread — 2026-11-02
+
+A chunk of the thread-model overhaul (`docs/thread-model-review.html`: F-3, decision 5). Operator votes 14-17
+of 2026-11-02: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP
+subset below. C8, C9 and C10 remain. On aux-3-c4 in the c7probe tree, built in the reap tree.
+
+- **The mechanism** (c73f00a9f scripture, 204b44f37, 96ffd0f0f, 799dfaba0, e24460495). `Thread.note_direct`, one
+  bit per family beside the Proc's queue, read only by that thread's tail: a queued kill, then the lowest unmasked
+  direct bit, then the queue. A post holds `threads_lock` only. A fatal direct note wakes any of the target's
+  waits; a caught one unwinds an interruptible wait through `thread_caught_note_claim` and takes no claim. Pouch
+  0067 aims `pthread_kill` and `raise` through `SYS_POSTNOTE_TID`. `caught_target.tla` carries the words.
+- **Audit r1** (Fable 5.1, start == end; 47f3f8c08): 0 P0 / 0 P1 / 1 P2 / 4 P3 (ce6e929a1, 756aea276). F1: a
+  rouse that asked the target's mask was the store-buffer litmus test, latent until a served unmask-and-wait
+  syscall. It no longer asks; removing it put every pinned model count back exactly, and a new buggy cfg holds it
+  (3174542 states). F2 `NOTE_RING_SPARE` and the move; F3 unconsume's self-managing arm; F4 the rouse when a
+  handler goes; F5 the fallback's sender.
+- **Self-found applying r1.** `SA_RESETHAND` at a delivery is a third store that turns a disposition fatal, in
+  neither the finding nor the plan. `notes_handler_resets` rouses for it. Round 2 enumerated the stores
+  independently and found the same three.
+- **Audit r2** (Fable 5.1, start == end; ce6e929a1): 0/0/0/2 and two observations (84987124d, 07635ad4e). F2: the
+  move's unreachable overflow arm extincts. F1 is pre-existing and not fixed here: see below.
+- **Found by the gates, fixed.** Lease 1 stopped on a test expecting `SLEEP_*` from a `tsleep`, which answers
+  `TSLEEP_*` (47f3f8c08). Lease 2's G1 "failed" on a production-shape compile error beside another sabotage's
+  left-over log, and G7 stayed green because it mutated the deliverable check while a wait unwinds through the
+  claim. Both were reworked and K34 added.
+- **Gates on f27c9f4ea.** Suite 2169/0, green and regreen (ELF identical, facf5e46ed8407b2); the boot reaches joey;
+  guest legs threads-census, kill-worker, kill-masked, raise-masked, kill-blocked, kill-answers. K23 ended the boot
+  on `notes_move_to_queue_locked: no spare slot -- N-2 violation`, proving 84987124d's line. K34 red on
+  `rendez.direct_note_held_waits_ride_it_out` and `notes.direct_deliverable_takes_no_claim`. G1 red on kill-worker
+  (`on_worker=0 on_main=1`); G7 red on V-1b's L341 (`on_peer=1 ws=15`). On ce6e929a1: K01-K33, G2-G6, G8 and P1,
+  each red on its own line. `check-caught-target.sh` 18/18. **SMP subset** (vote 17): `default-smp4` and
+  `ubsan-smp4` each 10/10, 0 corruption.
+- **NOT RUN.** The full SMP matrix, under the operator's hold of 2026-11-02; `tools/test-fault.sh`; the interactive
+  fleet; `tools/check-production.sh`, beyond the production-shape build `tools/test.sh` does first. C4 is verified
+  on these gates and not those, and the merge to main owes them.
+- **Still open, owned.** `seam-queue-note-fatal-after-post-wakes-nobody` (r2 F1, item 11c must decide it). A
+  blocked native or Pouch worker takes `pthread_kill` when its call ends, until 11c. At the merge to main: main's
+  `rt_sigpending`, `rt_sigtimedwait` and `rt_sigsuspend` rows and the `NOTE_RING_SLOTS` modulus need reading. The
+  merge also brings ad23e3315, scripture for the SIGUSR1/2 notes whose code is the next chunk.

@@ -41,7 +41,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 81
+## Open seams: 82
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -107,6 +107,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
 - [[seam-proc-name-torn-read]] (sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc)
 - [[seam-proxy-coord-eof]] (sub-stratum-session)
+- [[seam-queue-note-fatal-after-post-wakes-nobody]] (sub-kernel-notes)
 - [[seam-rfnameg-shared-territory]] (sub-kernel-territory)
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
 - [[seam-runq-rbtree]] (sub-kernel-sched)
@@ -128,11 +129,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-11-02 [[chg-2026-11-02-f3-what-it-is]] — What review finding F-3 is, read from main's code
+- 2026-11-02 [[chg-2026-11-02-thread-model-c4]] — Thread-model C4: a note aimed at one thread
 - 2026-11-02 [[chg-2026-11-02-thread-overhaul-position]] — The thread-model overhaul's position: C7 was not its last chunk
 - 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7-close]] — Thread-model C7 close: round 2, the C11 join fix, the final gates
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7]] — Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 - 2026-10-28 [[chg-2026-10-28-poll-hook-walks]] — Hook walks are batched, and none runs under its owner's lock (poll chunk, votes 12 + 13)
 - 2026-10-28 [[chg-2026-10-28-spawn-env]] — The spawn environment tail: a spawner names its child's whole environment (env-a kernel + native, env-c pouch)
-- 2026-10-22 [[chg-2026-10-22-thread-cap-live]] — The thread cap charges live threads (thread-model C1, vote 7)
 <!-- generated:end -->
