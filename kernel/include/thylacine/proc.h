@@ -3186,6 +3186,7 @@ void proc_exit_notify_parent_locked(struct Proc *p);
 // "Cross-file declarations"): hooks compiled only with the tests, and
 // functions that are static in a production build (VISIBLE_IF_KERNEL_TESTS).
 u32 caught_force_stale_for_test(struct Proc *p, u32 n);
+u32 caught_walks_for_test(void);
 u32 caught_repicks_for_test(void);
 void proc_close_handles_at_exit_for_test(struct Proc *p);
 u64 proc_exec_device_resets_for_test(void);

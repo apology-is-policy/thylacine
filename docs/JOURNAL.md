@@ -50,6 +50,14 @@ G3 stayed green, and the cause was my sabotage, not the kernel: a default death 
 
 K12, K15 and the new twins, G3, G7 and P1 are owed by the landing lease with the SMP subset, and until then nothing above says they hold.
 
+**The landing lease, 19:36Z to 21:18Z on a37734c18, and two explanations it killed.** Suite 2175/0, guest legs passed, regreen ELF identical (6b6084b4e5a75992), and the SMP subset `default-smp4` and `ubsan-smp4` each 10/10 with 0 corruption. That subset is my reading of the hold as a narrow gate, not a vote: vote 17 named C4, and I told the operator so during the run. K15 and K38 went red on the new test. G3 turned L345 red for the first time, `sig=12 ws=15`. P1's flush showed what I had only reasoned: its last line is kill-worker's OK, and it dies at kill-usr.
+
+K12 and its twin K37 stayed green. What I wrote above about K12 is wrong, including the comment I put in the test: a hand-off does not move the family to main. The walk prefers the calling thread (`poster = self`, proc.c), and a thread entering an unwinding wait with the family unmasked is a candidate, so it wins its own designation straight back. Who unwinds cannot show that, so my new test could not fail. What differs is a walk that did no good and a moment with the claim open. The test now counts walks through a test-only counter. If K12 and K37 go red on it, that also proves this reading, which so far is only a reading.
+
+G7 stayed green, against what I predicted. Withholding the latch should have left the child asleep past the probe's 4 seconds. My hypothesis is that the parent's kill beats the child's first entry, so the child dies there and L345 never had a sleeper to wake. A 200 ms settle before the kill makes the child sleep. If G7 goes red with `ws=-1`, the hypothesis holds; if it stays green, it is wrong too.
+
+The next lease owes K12, K37 and G7. The SMP subset ran on a37734c18; what follows it is a test-only counter, a test and a probe's nap.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
 
 **Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.

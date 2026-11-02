@@ -5172,8 +5172,8 @@ unsafe fn run_linux() -> ! {
     // Operator vote 15 (2026-11-02). Their family bits are past the first byte, so
     // the mask round trip is part of the claim. L344: each runs its handler with its
     // own number through kill, tgkill and tkill while its twin is blocked; the blocked
-    // twin's tkill runs nothing until the unblock, and then runs it once. L345: in a
-    // child with no handler each ends the child, and the wait reads its number.
+    // twin's tkill runs nothing until the unblock, and then runs it once. L345: each
+    // ends a child asleep with no handler, and the wait reads its number.
     const SIGUSR1: u64 = 10;
     const SIGUSR2: u64 = 12;
     let mut ku_mk = [0u8; 200];
@@ -5254,6 +5254,10 @@ unsafe fn run_linux() -> ! {
             let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
             linux_exit(0)
         }
+        // Posted at once, the note beats the child's first entry and kills it there, and
+        // no sleeper is ever woken. Correct code passes either way, so a late child is safe.
+        let settle: [i64; 2] = [0, 200_000_000];
+        let _ = svc4(NR_PPOLL, 0, 0, settle.as_ptr() as u64, 0);
         let posted = if kid > 0 { svc3(NR_KILL, kid as u64, sig, 0) } else { 1 };
         let ws = if kid > 0 { reap_or_kill(kid) } else { None };
         if !(posted == 0 && matches!(ws, Some(w) if (w & 0x7f) == sig as i32)) && ku_n == 0 {

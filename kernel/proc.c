@@ -3580,6 +3580,8 @@ u32 caught_force_stale_for_test(struct Proc *p, u32 n) {
     return __atomic_exchange_n(&g_caught_stale_left, n, __ATOMIC_ACQ_REL);
 }
 u32 caught_repicks_for_test(void) { return CAUGHT_REPICKS; }
+static u32 g_caught_walks;
+u32 caught_walks_for_test(void) { return __atomic_load_n(&g_caught_walks, __ATOMIC_ACQUIRE); }
 static bool caught_forced_stale(const struct Proc *p) {
     if (__atomic_load_n(&g_caught_stale_proc, __ATOMIC_ACQUIRE) != p) return false;
     u32 left = __atomic_load_n(&g_caught_stale_left, __ATOMIC_ACQUIRE);
@@ -3724,6 +3726,9 @@ void proc_caught_note_walk_locked(struct Proc *p, struct Thread *skip) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;            // belt: the arm never latches kproc
     ASSERT_TL_HELD(p);
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_caught_walks, 1u, __ATOMIC_RELEASE);
+#endif
     if (p->state != PROC_STATE_ALIVE) return;
     if (!proc_caught_note_pending(p)) return;
     const bool     pheno  = proc_caught_note_eintr_ready(p);

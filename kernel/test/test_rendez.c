@@ -2533,17 +2533,18 @@ void test_rendez_caught_note_poster_first(void) {
 
 // rendez.caught_note_designee_keeps -- a wait that can unwind for a family hands
 // nothing off. The peer posts, so the peer is designated with main awake; entering
-// its unwinding wait it keeps the designation and unwinds at once. Handed off, the
-// walk would give the family to main, the first awake thread, and the peer would
-// sleep on. caught_note_prefers_awake cannot see this: its designee is main, which
-// that walk picks straight back.
+// its unwinding wait it keeps the designation and unwinds at once. Who unwinds cannot
+// show a hand-off: the walk prefers the calling thread, so the peer would win the
+// family straight back, the claim open to anyone meanwhile. So the walks are counted.
 static void nt_designee_keeps_body(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
     bool made     = nt_setup(true, t);
     bool posted   = made && nt_run(t[1], 1, NT_POST, false);
     u16  peer_tgt = made ? nt_target(t[1]) : 0;
+    u32  walks    = caught_walks_for_test();
     bool back     = posted && nt_run(t[1], 1, NT_UWAIT, false);
+    u32  walked   = caught_walks_for_test() - walks;
     int  rc       = g_nt[1].rc;
     u16  claim    = made ? nt_claim(t[1]) : 0;
     u16  main_tgt = made ? nt_target(t[0]) : 0;
@@ -2556,6 +2557,7 @@ static void nt_designee_keeps_body(void) {
     TEST_EXPECT_EQ(rc, SLEEP_NOTEINTR, "...unwound for the note");
     TEST_ASSERT(claim & NT_FAM, "...the designation became its claim");
     TEST_ASSERT(!(main_tgt & NT_FAM), "main, awake, was handed nothing");
+    TEST_EXPECT_EQ(walked, 0u, "the wait walked no one: it kept the designation");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
