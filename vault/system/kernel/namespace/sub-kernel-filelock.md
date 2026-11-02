@@ -250,6 +250,17 @@ Audit round 5's regressions, each of which must go red at its own leg (not yet r
 The dentry CLOCK reading a forgotten slot as live costs time alone (the hand clears its
 reference bit on the first pass and takes it on the second): no leg can show it.
 
+Audit round 6's regressions, each of which must go red at its own leg (not yet run):
+- G96, a dying close says nothing of a flush that retired first:
+  `p9_closer.dying_close_reports_a_retired_flush`.
+- G97, a live close no program hears says nothing: `p9_closer.unheard_close_reports_its_loss`.
+- G98, a job with no run behind it drops pages: `p9_closer.job_keeps_what_landed_inside_the_open`.
+- G99, G101, G103, a teardown, `handle_close` and a replace claim a program reads the answer,
+  G102, close(2) claims none does: `filelock.last_descriptor_closes`. G100, an endowment's
+  unwind claims one does: `filelock.endowment_is_a_descriptor`.
+- G104, a refused take renames the fid, G105, a take of unknown outcome keeps the old name:
+  `dev9p.lock_one_name_on_a_fid`.
+
 ## Cached opens and the take's sync (B-3h3, 2026-11-02)
 
 A take must leave the snapshot of every open it covers, or the holder reads the
@@ -291,7 +302,8 @@ taker stores `lock_granted` sequentially consistent, then reads `spoor_fd_open`.
 the close sees the grant or the taker sees the close; the taker's arm runs
 `Dev.fd_close` again, which is idempotent, and answers EBADF. It runs on any answer,
 keeping a failure as it is: a take that failed with its outcome unknown recorded a
-grant too (self-audit SA4-1). A spawn's endowment counts as a descriptor from the call on,
+grant too (self-audit SA4-1). A wait does not look at the close: it runs until a grant, a
+note or a death, and this check answers then. A spawn's endowment counts as a descriptor from the call on,
 so the parent's close cannot drop a lock its child is about to hold (audit round 4, leg
 `filelock.endowment_is_a_descriptor`, prover leg `spawned`). A latch on the priv would
 answer a later take through a re-published Spoor with a false success, so there is none.

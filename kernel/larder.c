@@ -97,8 +97,8 @@ static bool attr_ensure_array_locked(struct larder *l) {
 }
 
 // A forget moved the epoch: a slot stamped before it is as good as empty. It
-// stays chained until CLOCK reuses it, and that reuse unlinks it. Caller holds
-// l->lock.
+// stays chained until a fill of its own key or CLOCK reuses it, and CLOCK's reuse
+// unlinks it. Caller holds l->lock.
 static inline bool attr_live(const struct larder *l,
                              const struct larder_attr_ent *e) {
     return e->valid && e->epoch == l->epoch;

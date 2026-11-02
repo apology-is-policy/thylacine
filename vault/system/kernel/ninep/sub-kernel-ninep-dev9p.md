@@ -788,6 +788,13 @@ now does what the closing thread owes, and `dev9p_close` does what any thread ma
 - `dev9p_close`'s clunks go through `dev9p_close_clunk`, always
   `p9_client_clunk_nowait`. A live thread's clunk used to wait out a full tag
   pool; it now spills to a closer, which waits instead.
+- A last close's failure with no run left goes to its caller. When no program will hear it,
+  on a dying thread or because the caller says so (`heard` false: an exit, a replace, an
+  endowment no table took), the close reports it with `p9_close_job_lost`. A latch a write or
+  an fsync already returned prints again. Legs: `p9_closer.dying_close_reports_a_retired_flush`,
+  `.unheard_close_reports_its_loss`.
+- A job with no run behind it only unlocks: what landed inside the open keeps its pages. Leg:
+  `p9_closer.job_keeps_what_landed_inside_the_open`.
 - `dev9p_fd_close` is idempotent: `sys_file_lock_handler` runs it again for a take
   that lost the race with the close (`spoor_fd_open`; [[sub-kernel-filelock]]). The
   grant store and the close's exchange are sequentially consistent for that.

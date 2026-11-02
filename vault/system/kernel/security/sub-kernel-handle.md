@@ -38,6 +38,11 @@ racing closes the one that sees the count reach zero does it. The teardown runs
 `handle_fd_drop` and the release per slot, and `fd_close` on each owner entry
 before its clunk. Leg: `filelock.last_descriptor_closes`.
 
+A caller tells `fd_close` whether it hands the answer to a program (`heard`). Only
+`handle_close_report`, which is close(2)'s, does. A teardown, a replace, a dup2's victim,
+`handle_close` and an endowment no table took do not, so a last close reports its own
+loss on those paths ([[sub-kernel-ninep-dev9p]]).
+
 ## The Proc lock owners (B-3h2, 2026-10-29)
 
 The handle table now also holds the Proc owner of `SYS_FILE_LOCK_PROC` locks

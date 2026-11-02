@@ -297,20 +297,21 @@ struct Dev {
     struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
                             u32 perm, u32 gid);
     int           (*close)(struct Spoor *c);
-    //   fd_close(c) -- c's last descriptor has closed, and c may live on behind
-    //     other references (a map, a mount, a Loom registration). What close(2)
-    //     owes happens here, on the closing thread, which may wait for a server:
-    //     dev9p lands its staged run and releases its locks. 0, or a negative
-    //     errno close(2) reports. Runs once: nothing publishes a Spoor whose count
-    //     has reached zero. NULL-permitted, and may run again only when a lock
-    //     call finds the close passed it.
+    //   fd_close(c, heard) -- c's last descriptor has closed, and c may live on
+    //     behind other references (a map, a mount, a Loom registration). What
+    //     close(2) owes happens here, on the closing thread, which may wait for a
+    //     server: dev9p lands its staged run and releases its locks. 0, or a
+    //     negative errno. heard says the caller hands that answer to a program; a
+    //     loss nobody will hear is the close's own to report. Runs once: nothing
+    //     publishes a Spoor whose count has reached zero. NULL-permitted, and may
+    //     run again only when a lock call finds the close passed it.
     //     close, by contrast, runs at the last REFERENCE, which can fall on any
     //     thread (an exec evicting an image, a reap draining a mapping), so it
     //     must never wait on anything outside the kernel.
     //   lock_held(c) -- might a lock taken through c itself stand? fd_close
     //     would release it. A cheap read, may answer true after an unlock.
     //     NULL-permitted.
-    int           (*fd_close)(struct Spoor *c);
+    int           (*fd_close)(struct Spoor *c, bool heard);
     bool          (*lock_held)(struct Spoor *c);
 
     // I/O.

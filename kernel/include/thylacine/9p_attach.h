@@ -269,7 +269,8 @@ struct p9_closer_stats {
                          // (its fids with it) or the fid was not bound
     u64 refused;         // entries left live on a live session (reported)
     u64 jobs;            // close jobs run (p9_attached_defer_close)
-    u64 job_errors;      // of those, run failed on a live session (reported)
+    u64 job_errors;      // runs lost on a live session (reported): a job's, or a
+                         // last close's that no program hears
     u64 spawned;
     u64 spawn_failed;
     u64 reaped;

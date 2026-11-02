@@ -82,6 +82,7 @@ static u32            g_lk_idents;         // .lock_ident calls that asked the "
 static u32            g_lk_fd_closes;      // .fd_close calls
 static u32            g_lk_held_close_seq; // seq of the last .fd_close that held a lock
 static struct Spoor  *g_lk_fd_close_last;  // the Spoor it last ran on
+static bool           g_lk_fd_close_heard; // what its caller said of the answer
 static u32            g_lk_closes;         // .close calls: last references
 // A fake Spoor's generation is its qid.vers once .lock_ident has learned it (0
 // = not yet); the file's true one is registered here (default 1).
@@ -257,10 +258,11 @@ static bool lk_held(struct Spoor *c) {
 }
 
 // A last close releases what this Spoor holds, as dev9p's whole-file unlock does.
-static int lk_fd_close(struct Spoor *c) {
+static int lk_fd_close(struct Spoor *c, bool heard) {
     g_lk_seq++;
     g_lk_fd_closes++;
     g_lk_fd_close_last = c;
+    g_lk_fd_close_heard = heard;
     if (lk_held(c)) g_lk_held_close_seq = g_lk_seq;
     for (u32 i = 0; i < LK_MAXREC; i++)
         if (g_lk[i].live && g_lk[i].owner == c) g_lk[i].live = false;
@@ -1067,6 +1069,7 @@ static void last_descriptor_count_body(struct Proc *parent, struct Proc *child,
     TEST_EXPECT_EQ(handle_replace(parent, d2, KOBJ_SPOOR, RW, s), 0, "and back");
     TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "t's only descriptor left");
     TEST_ASSERT(g_lk_fd_close_last == t, "its last close ran");
+    TEST_ASSERT(!g_lk_fd_close_heard, "and no program reads a replace's answer");
     TEST_EXPECT_EQ(g_lk_closes, 1u, "and with nothing else holding it, its last reference");
 
     // dup2 onto a descriptor of the same open file: one goes, one comes.
@@ -1115,6 +1118,7 @@ static void endowment_body(struct Proc *parent, struct Proc *child, struct Spoor
     sys_spawn_unbump_fds(child, &e2, 1);
     TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "the unwind is the last close");
     TEST_ASSERT(g_lk_fd_close_last == s, "of the open file");
+    TEST_ASSERT(!g_lk_fd_close_heard, "and no program reads its answer");
 }
 
 void test_filelock_endowment_is_a_descriptor(void) {
@@ -1160,6 +1164,7 @@ void test_filelock_last_descriptor_closes(void) {
     if (child) { child->state = PROC_STATE_ZOMBIE; proc_free(child); }
     TEST_EXPECT_EQ(g_lk_fd_closes, fc + 1, "the child's exit is the last close");
     TEST_ASSERT(g_lk_fd_close_last == s, "of the open file");
+    TEST_ASSERT(!g_lk_fd_close_heard, "and no program reads an exit's answer");
     if (parent) { parent->state = PROC_STATE_ZOMBIE; proc_free(parent); }
 
     struct lk_fix f;
@@ -1178,6 +1183,18 @@ void test_filelock_last_descriptor_closes(void) {
     spoor_clunk(pin);
     TEST_EXPECT_EQ(g_lk_closes, 1u, "until it lets go");
     TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "with no second close");
+
+    // close(2) hands a last close's answer to a program; the kernel's own does not.
+    a = lk_open(&f, &g_lk_dev, 3, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    int crc = 1;
+    TEST_EXPECT_EQ(handle_close_report(f.p, f.fd[a], &crc), 0, "close(2)'s close");
+    f.fd[a] = -1;
+    TEST_ASSERT(g_lk_fd_close_heard, "hands the answer on");
+    a = lk_open(&f, &g_lk_dev, 3, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    lk_close_fd(&f, a);
+    TEST_ASSERT(!g_lk_fd_close_heard, "the kernel's own does not");
 
     // A lock call's own reference is no descriptor either.
     a = lk_open(&f, &g_lk_dev, 3, RW);

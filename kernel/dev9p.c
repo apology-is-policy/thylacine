@@ -2707,7 +2707,7 @@ static int dev9p_lock_sync(struct Spoor *c, u32 how) {
 //
 // Reads the grant after spoor_fd_drop, as a lock call reads spoor_fd_open after
 // storing it: a grant this close misses, that call sees it missed.
-static int dev9p_fd_close(struct Spoor *c) {
+static int dev9p_fd_close(struct Spoor *c, bool heard) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
     int  rc     = 0;
@@ -2724,6 +2724,12 @@ static int dev9p_fd_close(struct Spoor *c) {
         spin_unlock(&p->wb_lock);
         if (staged) rc = 0;                // no loss yet: whoever lands it reports
     }
+    // The run has gone, write() said those bytes were written, and this answer
+    // reaches no program: an exit's close, or a thread that never returns to EL0.
+    // A latch a write or an fsync already returned prints again, which costs a line.
+    if (rc != 0 && (!heard || !close_may_wait()) &&
+        p9_client_fid_held(p->client, p->fid))
+        p9_close_job_lost(p->fid, rc);
 
     bool granted = __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST);
     if (granted && close_may_wait()) {

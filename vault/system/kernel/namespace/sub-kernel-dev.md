@@ -31,7 +31,7 @@ Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
   so that stat is the file's own rather than its state at open. A failure refuses
   the wstat. NULL-permitted; dev9p binds a loose cached open.
 
-`fd_close(c)` runs on the closing thread when the last handle slot naming `c` goes,
+`fd_close(c, heard)` runs on the closing thread when the last handle slot naming `c` goes,
 and may wait. It must be idempotent, because a take that lost the race with that
 close runs it again. `lock_held(c)` is non-blocking and says whether a lock was
 granted through `c`. `close(c)` runs at the last reference, which can fall on any
@@ -275,7 +275,7 @@ in, which a cached mapping would keep alive past every handle.
 `bestiary[]` is `BESTIARY_MAX + 1` (33) pointers with a NULL sentinel
 at `dev_count`. `g_dev_count` and `g_dev_init_done` are plain statics.
 
-`Dev.fd_close` runs once: nothing publishes a Spoor whose count has reached zero, so it
+`heard` says the caller hands `fd_close`'s answer to a program; a loss nobody will hear is the close's own to report. `Dev.fd_close` runs once: nothing publishes a Spoor whose count has reached zero, so it
 runs again only when a lock call finds the close passed it (B-3h audit round 4).
 
 ## Concurrency

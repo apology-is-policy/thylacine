@@ -2145,6 +2145,9 @@ void test_p9_closer_dying_last_close_of_a_root(void);
 void test_p9_closer_job_waits_out_a_peer_flush(void);
 void test_p9_closer_job_drops_a_flush_that_retired_first(void);
 void test_p9_closer_job_reports_a_first_jobs_loss(void);
+void test_p9_closer_dying_close_reports_a_retired_flush(void);
+void test_p9_closer_unheard_close_reports_its_loss(void);
+void test_p9_closer_job_keeps_what_landed_inside_the_open(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
@@ -4748,6 +4751,9 @@ struct test_case g_tests[] = {
                                        test_p9_closer_job_waits_out_a_peer_flush, false, NULL },
     { "p9_closer.job_drops_a_flush_that_retired_first",
                                        test_p9_closer_job_drops_a_flush_that_retired_first, false, NULL },
+    { "p9_closer.dying_close_reports_a_retired_flush", test_p9_closer_dying_close_reports_a_retired_flush, false, NULL },
+    { "p9_closer.unheard_close_reports_its_loss", test_p9_closer_unheard_close_reports_its_loss, false, NULL },
+    { "p9_closer.job_keeps_what_landed_inside_the_open", test_p9_closer_job_keeps_what_landed_inside_the_open, false, NULL },
     { "p9_closer.job_reports_a_first_jobs_loss",
                                        test_p9_closer_job_reports_a_first_jobs_loss, false, NULL },
     { "p9_closer.dying_last_close_with_holder",

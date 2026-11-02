@@ -3940,7 +3940,7 @@ void test_dev9p_cached_open_fallbacks(void) {
 // the caller clunks it, then teardown(root).
 // A descriptor's close: the last close, then the slot's reference.
 static int d9_close(struct Spoor *c) {
-    int frc = dev9p.fd_close(c);
+    int frc = dev9p.fd_close(c, true);
     int crc = spoor_clunk_rc(c);
     return frc ? frc : crc;
 }
@@ -5732,7 +5732,7 @@ static void lk_drop(struct Spoor *c) {
 
 // A descriptor's close.
 static void lk_close(struct Spoor *c) {
-    (void)dev9p.fd_close(c);
+    (void)dev9p.fd_close(c, true);
     lk_drop(c);
 }
 
@@ -5840,9 +5840,21 @@ void test_dev9p_lock_one_name_on_a_fid(void) {
     TEST_EXPECT_EQ(lk_named(), me, "names this Proc");
     TEST_EXPECT_EQ(fp->lock_principal, me, "and is the fid's name from here on");
 
+    // A take the server refused stands for nothing: the fid keeps its name.
+    __atomic_store_n(&fp->lock_principal, 1000u, __ATOMIC_RELAXED);
+    g_tlock_status = P9_LOCK_BLOCKED;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, NULL), (s64)-T_E_AGAIN, "a conflict");
+    g_tlock_status = P9_LOCK_SUCCESS;
+    TEST_EXPECT_EQ(fp->lock_principal, 1000u, "leaves the name alone");
+    // One whose outcome nobody knows may stand, in the name it sent.
+    g_tlock_fail_ecode = T_E_IO;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 1, NULL), (s64)-T_E_IO, "an unknown take");
+    g_tlock_fail_ecode = 0;
+    TEST_EXPECT_EQ(fp->lock_principal, me, "takes the name");
+
     __atomic_store_n(&fp->lock_principal, 1000u, __ATOMIC_RELAXED);
     lock_wire_reset();
-    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "the last close");
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f, true), 0ll, "the last close");
     TEST_EXPECT_EQ(g_tlock_seen, 1u, "sends its unlock");
     TEST_EXPECT_EQ(lk_named(), 1000u, "naming the taker");
     lk_drop(f);
@@ -6578,12 +6590,12 @@ static void lock_close_releases_body(struct Spoor *root) {
     TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "a take");
     spoor_ref(f);
     lock_wire_reset(); g_clunk_seen = 0;
-    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "the last close");
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f, true), 0ll, "the last close");
     TEST_EXPECT_EQ(g_tlock_seen, 1u, "sends one unlock with the holder alive");
     TEST_EXPECT_EQ((u64)g_tlock_type, (u64)P9_LOCK_TYPE_UNLCK, "an unlock");
     TEST_EXPECT_EQ(g_tlock_fid, fid, "on the lock fid");
     TEST_EXPECT_EQ(g_clunk_seen, 0u, "and no clunk: the holder has the fid");
-    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "run again, as a lost take's recheck runs it");
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f, true), 0ll, "run again, as a lost take's recheck runs it");
     TEST_EXPECT_EQ(g_tlock_seen, 1u, "with no lock left to release");
     lk_drop(f);
     TEST_EXPECT_EQ(g_clunk_seen, 0u, "one reference down, no clunk");
@@ -6596,7 +6608,7 @@ static void lock_close_releases_body(struct Spoor *root) {
     fid = dev9p_priv_of(root)->fid;
     TEST_EXPECT_EQ((s64)dev9p.lock(root, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll, "a take on the root");
     lock_wire_reset(); g_clunk_seen = 0;
-    TEST_EXPECT_EQ((s64)dev9p.fd_close(root), 0ll, "the root's last close");
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(root, true), 0ll, "the root's last close");
     TEST_EXPECT_EQ(g_tlock_seen, 1u, "sends one unlock");
     TEST_EXPECT_EQ((u64)g_tlock_type, (u64)P9_LOCK_TYPE_UNLCK, "an unlock");
     TEST_EXPECT_EQ(g_tlock_fid, fid, "on the session's root fid");
@@ -6713,7 +6725,7 @@ void test_dev9p_wb_last_close_with_holder(void) {
     u32  w0      = g_twrite_seen;
     spoor_ref(f);                  // a read-only map's
     g_clunk_seen = 0;
-    int  frc     = dev9p.fd_close(f);
+    int  frc     = dev9p.fd_close(f, true);
     u32  w1      = g_twrite_seen;
     u32  len1    = g_twrite_cap_len;
     u32  c1      = g_clunk_seen;

@@ -548,7 +548,8 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
 // though other references may keep the Spoor alive. The lock that close drops
 // admits a waiter, so every open of the file the table still holds lands its
 // writes first (ARCH 9.6.11). 0, or the close's negative errno.
-static int handle_fd_drop(struct HandleTable *t, enum kobj_kind kind, void *obj) {
+static int handle_fd_drop(struct HandleTable *t, enum kobj_kind kind, void *obj,
+                          bool heard) {
     if (kind != KOBJ_SPOOR || !obj) return 0;
     struct Spoor *c = (struct Spoor *)obj;
     if (!spoor_fd_drop(c)) return 0;
@@ -556,14 +557,15 @@ static int handle_fd_drop(struct HandleTable *t, enum kobj_kind kind, void *obj)
     if (!d || !d->fd_close) return 0;
     if (d->lock_held && d->lock_held(c))
         (void)lock_sync_table(t, c, DEV_LOCK_SYNC_RELEASE);
-    return d->fd_close(c);
+    return d->fd_close(c, heard);
 }
 
 // A descriptor naming `obj` has left t, by close or by replacement: the Proc's
 // locks on the file, the last close if it was one, then the slot's reference.
-static int handle_fd_left(struct HandleTable *t, enum kobj_kind kind, void *obj) {
+static int handle_fd_left(struct HandleTable *t, enum kobj_kind kind, void *obj,
+                          bool heard) {
     lock_owners_on_close(t, kind, obj);
-    int frc = handle_fd_drop(t, kind, obj);
+    int frc = handle_fd_drop(t, kind, obj, heard);
     int crc = handle_release_obj(kind, obj);
     return frc ? frc : crc;
 }
@@ -600,7 +602,7 @@ void handle_table_free(struct HandleTable *t) {
         lock_sync_table(t, t->lockowners[j].spoor, DEV_LOCK_SYNC_RELEASE);
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
-            (void)handle_fd_drop(t, t->slots[i].kind, t->slots[i].obj);
+            (void)handle_fd_drop(t, t->slots[i].kind, t->slots[i].obj, /*heard=*/false);
             handle_release_obj(t->slots[i].kind, t->slots[i].obj);
             t->slots[i].magic  = 0;
             t->slots[i].kind   = KOBJ_INVALID;
@@ -613,7 +615,7 @@ void handle_table_free(struct HandleTable *t) {
         struct Spoor *sp = lock_owner_remove_locked(t, &t->lockowners[0]);
         // No slot ever named an owner, so nothing counted it: this is its
         // last close.
-        if (sp->dev->fd_close) (void)sp->dev->fd_close(sp);
+        if (sp->dev->fd_close) (void)sp->dev->fd_close(sp, /*heard=*/false);
         spoor_clunk(sp);
     }
     kfree(t);
@@ -758,7 +760,7 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
     return h;   // -1 if the table is full
 }
 
-int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
+static int handle_close_as(struct Proc *p, hidx_t h, int *close_rc, bool heard) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     *close_rc = 0;
@@ -790,13 +792,17 @@ int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    *close_rc = handle_fd_left(t, kind, obj);
+    *close_rc = handle_fd_left(t, kind, obj, heard);
     return 0;
+}
+
+int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
+    return handle_close_as(p, h, close_rc, /*heard=*/true);
 }
 
 int handle_close(struct Proc *p, hidx_t h) {
     int close_rc;
-    return handle_close_report(p, h, &close_rc);
+    return handle_close_as(p, h, &close_rc, /*heard=*/false);
 }
 
 // VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in
@@ -854,7 +860,7 @@ int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
     // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after
     // the new object is already installed, so the slot is never momentarily
     // empty for a peer thread to allocate into.
-    (void)handle_fd_left(t, old_kind, old_obj);
+    (void)handle_fd_left(t, old_kind, old_obj, /*heard=*/false);
     return 0;
 }
 
@@ -926,7 +932,7 @@ int handle_endow_spoor(struct Proc *p, hidx_t h, struct Spoor **out,
 
 // An endowment no table took: a descriptor's close, then its reference.
 void handle_endow_drop(struct Proc *p, struct Spoor *c) {
-    (void)handle_fd_drop(p->handles, KOBJ_SPOOR, c);
+    (void)handle_fd_drop(p->handles, KOBJ_SPOOR, c, /*heard=*/false);
     spoor_clunk(c);
 }
 
@@ -1231,7 +1237,7 @@ int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec
     // the new object is installed, so the slot is never momentarily empty for a
     // peer thread to allocate into. handle_replace does it in this order for
     // the same reason.
-    if (had) (void)handle_fd_left(t, old_kind, old_obj);
+    if (had) (void)handle_fd_left(t, old_kind, old_obj, /*heard=*/false);
     return new_h;
 }
 

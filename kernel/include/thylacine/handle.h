@@ -296,7 +296,8 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 int handle_close(struct Proc *p, hidx_t h);
 
 // handle_close that also returns, in *close_rc, what the object's last close
-// reported: 0, or a Dev close hook's negative error (close(2)'s EIO).
+// reported: 0, or a Dev close hook's negative error (close(2)'s EIO). The caller
+// hands that to a program; without it, a last close reports its own loss.
 int handle_close_report(struct Proc *p, hidx_t h, int *close_rc);
 
 // Swap what a LIVE handle denotes, in place, keeping the same slot index.
