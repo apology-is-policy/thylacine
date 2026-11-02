@@ -221,6 +221,25 @@ from here; the display stays dark until a reboot. Rejected:
 - restarting Lictor and Tapestry after READY, which is a change to warden, and
   rebuilding the GPU state after a restart is unproven.
 
+**Where the episode runs** (operator vote 37, 2026-11-02). Both SAKs post Corvus
+the same `sak` note, and Corvus used to read the medium off the seat's phase:
+normal meant serial. A seat can reach normal between a graphical SAK's note and
+Corvus's SEAT_QUERY, when the service fails the episode and restores at once or
+when the service dies. Corvus then prompted for the key on the serial console
+with no episode open and nothing frozen, on any boot, the graphical-only posture
+included. SEAT_QUERY's `code` now states the medium, derived under the lock that
+orders every episode transition: 0 none, 1 serial, 2 graphical (active and
+EXCLUSIVE is graphical; any other active episode is serial, which a failed seat
+can also hold). Corvus prompts on what the kernel states. On none it reports the
+episode over and sends no END, since the kernel closed that episode and an END
+could close a newer one. Rejected:
+- refusing SYS_CONSOLE_OPEN to the trusted Proc outside an episode, alone or
+  beside the field: it enforces the same fact in the kernel, but alone it leaves
+  the medium inferred (a serial episode under a failed seat would be dropped),
+  and beside the field it can never fire while Corvus is correct;
+- reporting a normal seat with no episode as failed, which makes the reply's
+  phase stop being the seat's, and `finish` reads that phase.
+
 The
 current backend uses the neutral field because private workspace capture is not
 implemented. Serial authorization requires `thylacine.serial-sak=1`; the QEMU dev

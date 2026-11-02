@@ -4247,6 +4247,78 @@ cleanup:
 
 // The SERVICE dies mid-episode: the episode closes, the seat is FAILED with no
 // owner, and nothing a survivor holds can drive it (the ops are service-gated).
+// What Corvus reads from SEAT_QUERY: the medium, or ~0u when the query is refused.
+static u32 seat_test_medium(struct Proc *corvus, u32 *phase) {
+    struct seat_message m;
+    seat_zero(&m, sizeof(m));
+    if (proc_seat_op(corvus, SEAT_QUERY, &m) != 0) return ~0u;
+    if (phase) *phase = m.phase;
+    return m.code;
+}
+
+void test_cons_graphical_seat_episode_medium(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0;
+    u32 phase = ~0u;
+    proc_test_seat_reset();
+    bool setup = ep_setup(&f, true, true);
+    service = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup && service, "seat fixture");
+    service->state = PROC_STATE_ALIVE;
+    SEAT_CHECK(proc_set_seat_service(service) == 0, "service");
+    (void)proc_test_serial_sak(1);
+    SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_NONE && phase == SEAT_NORMAL, "idle: no episode");
+    SEAT_CHECK(seat_test_medium(f.owner, NULL) == ~0u, "only Corvus asks");
+
+    // NORMAL with an episode is serial: the positive control for the window
+    // below, one variable away. A failure leaves a serial episode open, so
+    // FAILED reads serial too, and the medium cannot be read off the phase.
+    SEAT_CHECK(proc_console_sak() && cons_episode_active(), "serial episode");
+    SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_SERIAL && phase == SEAT_NORMAL, "NORMAL reads serial");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && cons_episode_active(), "a failure spares a serial episode");
+    SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_SERIAL && phase == SEAT_FAILED, "FAILED reads serial");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "the serial episode ends");
+    SEAT_CHECK(seat_test_recover(service, m.generation), "the seat recovers");
+    SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_NONE, "END leaves no episode");
+
+    // A graphical episode, and QUERY's code no longer shares the mask length.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "graphical episode");
+    SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_GRAPHICAL && phase == SEAT_EXCLUSIVE, "EXCLUSIVE reads graphical");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation; m.value = 5;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_MASK, &m) == 0, "mask");
+    SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_GRAPHICAL, "the mask length does not reach QUERY");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.code == 5, "STATUS keeps the mask length");
+
+    // The window: a seat back at NORMAL before Corvus asks. A phase-only reader
+    // would prompt here on a console nothing has frozen.
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && !cons_episode_active(), "the failure closes the seat's episode");
+    SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_NONE, "FAILED with no episode reads none");
+    SEAT_CHECK(seat_test_recover(service, generation), "the service restores at once");
+    SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_NONE && phase == SEAT_NORMAL,
+               "NORMAL with no episode reads none, not serial");
+
+    // An episode that ended properly is no episode, while the seat restores.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "second graphical episode");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "END");
+    SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_NONE && phase == SEAT_RESTORING, "RESTORING reads none");
+cleanup:
+    (void)proc_test_serial_sak(1);
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat episode medium");
+#undef SEAT_CHECK
+}
+
 void test_cons_graphical_seat_service_death(void) {
     struct ep_fixture f;
     const char *err = NULL;
@@ -4286,11 +4358,13 @@ void test_cons_graphical_seat_service_death(void) {
     seat_zero(&m, sizeof(m));
     SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_NORMAL,
                "the service's death ends the seat: Corvus reads NORMAL");
+    SEAT_CHECK(m.code == SEAT_MEDIUM_NONE, "and no episode: a note still in flight prompts nowhere");
     m.generation = generation;
     SEAT_CHECK(proc_seat_op(f.trusted, SEAT_RESTORED, &m) == -1 && proc_seat_op(f.owner, SEAT_RESTORED, &m) == -1,
                "no survivor speaks for the dead service");
     SEAT_CHECK(proc_console_sak() && cons_episode_active(),
                "the serial BREAK reaches the console with the service dead and its client alive");
+    SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_SERIAL, "and Corvus reads serial");
     SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "the serial episode ends");
 cleanup:
     if (pid > 0) { __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE); (void)epd_reap(pid); }

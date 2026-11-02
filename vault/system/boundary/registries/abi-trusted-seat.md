@@ -16,7 +16,7 @@ mirrors:
   - usr/lib/libt/include/thyla/syscall.h
   - kernel/include/thylacine/vivarium.h
 created: 2026-09-18
-updated: 2026-09-21
+updated: 2026-11-02
 ---
 ## Contract
 
@@ -26,6 +26,12 @@ message contains u64 generation/sequence, u32 phase/length/code/value, then
 FAIL, QUERY, VISIBLE, MASK, GRANT and CLIENT. Phases 0..4 are normal, quiescing,
 exclusive, restoring and failed. Success is 0; refusal is -1. Generation and
 frame sequence bind state transitions and visibility, never a caller's name.
+
+QUERY's `code` is the console episode's medium: 0 none, 1 serial, 2 graphical.
+Every other reply that carries a status carries the mask length there, as QUERY
+did until operator vote 37 ([[dec-2026-11-02-seat-episode-medium]]). Corvus was
+the only QUERY caller and never read that field, and the size and layout do not
+change.
 
 The attention gesture is scanned in the kernel from INPUT key reports, in evdev
 codes: either Control (29, 97), either Alt (56, 100), and Delete (111) or F10

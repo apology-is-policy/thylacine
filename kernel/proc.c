@@ -3012,6 +3012,18 @@ static void proc_seat_fail_locked(void) {
     if (owns_episode && cons_episode_abandon()) proc_console_owner_restore_locked();
 }
 
+// Where the console episode runs, for Corvus to read instead of inferring it
+// from the phase: a seat can reach NORMAL after the SAK that posted its note and
+// before Corvus asks, and a serial prompt then sits on a console nothing froze.
+// An active episode is the seat's only while the seat is EXCLUSIVE: BEGIN from a
+// seat sets EXCLUSIVE, and END and every abandon leave it, all under
+// g_proc_table_lock. The seat cannot open one over a serial episode, and a
+// failure never closes a serial one, which is why FAILED can read serial.
+static u32 seat_episode_medium_locked(void) {
+    if (!cons_episode_active()) return SEAT_MEDIUM_NONE;
+    return g_seat.phase == SEAT_EXCLUSIVE ? SEAT_MEDIUM_GRAPHICAL : SEAT_MEDIUM_SERIAL;
+}
+
 static bool seat_attention_held(void) {
     bool ctrl = g_seat.held[SEAT_KEY_LEFTCTRL] || g_seat.held[SEAT_KEY_RIGHTCTRL];
     bool alt  = g_seat.held[SEAT_KEY_LEFTALT]  || g_seat.held[SEAT_KEY_RIGHTALT];
@@ -3148,7 +3160,7 @@ status:
     seat_zero(m, sizeof(*m));
     m->generation = g_seat.generation;
     m->sequence = g_seat.frame_sequence;
-    m->code = g_seat.masked_len;
+    m->code = op == SEAT_QUERY ? seat_episode_medium_locked() : g_seat.masked_len;
     m->value = g_seat.frame_sequence && g_seat.visible_sequence == g_seat.frame_sequence;
     m->phase = g_seat.phase;
     if (service) {

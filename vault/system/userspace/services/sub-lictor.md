@@ -53,7 +53,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Clipboard cancellation progress boundary
 
@@ -378,7 +378,11 @@ and stale or expired generations cancel the episode and recover as above. Owner
 death is different: nothing restarts a dead service (warden leaves a persistent
 service unsupervised once it is READY), so the kernel fails the seat and then
 returns it to normal, releasing nothing. The serial BREAK works again, the
-display stays dark for the boot, and no ordinary client inherits the seat. The ledger validates a request before it reserves an id, so
+display stays dark for the boot, and no ordinary client inherits the seat. Either
+way a seat can reach normal after a SAK's note and before Corvus asks, so Corvus
+reads the episode's medium from QUERY's `code` and not from the phase
+([[dec-2026-11-02-seat-episode-medium]]); `endpoint.rs` reads the reply and its
+host tests pin that the phase plays no part. The ledger validates a request before it reserves an id, so
 a refused request leaves no reservation behind. A dead engine refuses every
 retirement (its pins stay) and fails every command that would reach the ring;
 queries the broker answers from its own state still answer, and seat traffic

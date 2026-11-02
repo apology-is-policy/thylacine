@@ -22,6 +22,11 @@ struct Proc;
 #define SEAT_MASK 10u
 #define SEAT_GRANT 11u
 #define SEAT_CLIENT 12u
+// SEAT_QUERY's reply carries the console episode's medium in `code`. Every other
+// reply that carries a status carries the mask length there.
+#define SEAT_MEDIUM_NONE 0u
+#define SEAT_MEDIUM_SERIAL 1u
+#define SEAT_MEDIUM_GRAPHICAL 2u
 // The reserved attention gesture, in evdev key codes: either Control, either
 // Alt, and one of the keys below. Two final keys because Delete is absent
 // from compact and laptop keyboards; both are scanned here, below every

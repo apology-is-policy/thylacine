@@ -3697,17 +3697,29 @@ struct EpisodeIo {
     generation: u64,
     model: lictor::model::Model,
 }
+// What opening the episode's channel found. `Gone` owes no END: the kernel closed
+// that episode itself, and an END here could close a newer one.
+enum EpisodeOpen {
+    Ready(EpisodeIo),
+    Gone,
+    Failed,
+}
 impl EpisodeIo {
-    unsafe fn open() -> Option<Self> {
+    unsafe fn open() -> EpisodeOpen {
         use lictor::endpoint as ep;
         let mut m = ep::Message::default();
-        ep::call(ep::QUERY, &mut m).ok()?;
-        let (serial, generation) = match m.phase {
-            0 => { let fd = t_console_open(); if fd < 0 { return None; } (fd, 0) },
-            2 if m.generation != 0 => (-1, m.generation),
-            _ => return None,
+        if ep::call(ep::QUERY, &mut m).is_err() { return EpisodeOpen::Failed; }
+        let (serial, generation) = match m.episode_medium() {
+            Some(ep::EpisodeMedium::Gone) => return EpisodeOpen::Gone,
+            Some(ep::EpisodeMedium::Serial) => {
+                let fd = t_console_open();
+                if fd < 0 { return EpisodeOpen::Failed; }
+                (fd, 0)
+            }
+            Some(ep::EpisodeMedium::Graphical { generation }) => (-1, generation),
+            None => return EpisodeOpen::Failed,
         };
-        Some(Self { serial, generation, model: lictor::model::Model::default() })
+        EpisodeOpen::Ready(Self { serial, generation, model: lictor::model::Model::default() })
     }
     fn request(&mut self, p: &ImperiumPending) {
         self.model = lictor::model::Model {
@@ -3980,10 +3992,17 @@ unsafe fn verdict(fd: &mut EpisodeIo, out: &mut Vec<u8>, line: &[u8], state: lic
 // alone until END). Everything trusted happens here, then END + close + wipe
 // on every path.
 unsafe fn episode_consume(conns: &mut Vec<Conn>) {
-    let Some(mut channel) = EpisodeIo::open() else {
-        t_putstr("corvus: imperium: episode: console open FAILED -- ending\n");
-        episode_end();
-        return;
+    let mut channel = match EpisodeIo::open() {
+        EpisodeOpen::Ready(channel) => channel,
+        EpisodeOpen::Gone => {
+            t_putstr("corvus: imperium: episode: over before its query -- no prompt\n");
+            return;
+        }
+        EpisodeOpen::Failed => {
+            t_putstr("corvus: imperium: episode: console open FAILED -- ending\n");
+            episode_end();
+            return;
+        }
     };
     let fd = &mut channel;
     let mut out: Vec<u8> = Vec::new();

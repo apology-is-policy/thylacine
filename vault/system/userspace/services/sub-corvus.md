@@ -17,7 +17,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 
 ## Administrative authority specification
@@ -31,7 +31,10 @@ Runtime implementation and exact numeric ABI reservations are still pending.
 ## Graphical Lex curiata
 
 Corvus uses the kernel's current episode to select its serial or graphical
-transport. The graphical transport sends bounded semantic identity/capability/term
+transport: QUERY's `code` states the medium, and the seat's phase plays no part
+([[dec-2026-11-02-seat-episode-medium]]). When the kernel says no episode is open,
+one ended between the `sak` note and the query: Corvus reports it, prompts nowhere
+and sends no END, since an END could close a newer episode. The graphical transport sends bounded semantic identity/capability/term
 frames to [[sub-lictor]], waits for their actual visibility acknowledgement, then
 reads key bytes only from the generation-bound kernel queue. Mask counts are
 separate from authorization content. Key verification, wrong-key counters,

@@ -11,6 +11,19 @@ pub const VISIBLE: u64 = 9;
 pub const MASK: u64 = 10;
 pub const GRANT: u64 = 11;
 pub const CLIENT: u64 = 12;
+// QUERY's `code`: the console episode's medium. Other replies carry the mask
+// length there.
+pub const MEDIUM_NONE: u32 = 0;
+pub const MEDIUM_SERIAL: u32 = 1;
+pub const MEDIUM_GRAPHICAL: u32 = 2;
+/// Where the kernel says the console episode runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EpisodeMedium {
+    /// No episode is open: it ended before the question was asked.
+    Gone,
+    Serial,
+    Graphical { generation: u64 },
+}
 #[repr(C)]
 pub struct Message {
     pub generation: u64,
@@ -38,6 +51,19 @@ pub fn call(op: u64, msg: &mut Message) -> Result<(), ()> {
     }
     if result == 0 { Ok(()) } else { Err(()) }
 }
+impl Message {
+    /// Read QUERY's reply. `None` is a reply the kernel never sends. The phase
+    /// plays no part: a NORMAL seat may hold no episode, and a FAILED one a
+    /// serial episode.
+    pub fn episode_medium(&self) -> Option<EpisodeMedium> {
+        match self.code {
+            MEDIUM_NONE => Some(EpisodeMedium::Gone),
+            MEDIUM_SERIAL => Some(EpisodeMedium::Serial),
+            MEDIUM_GRAPHICAL if self.generation != 0 => Some(EpisodeMedium::Graphical { generation: self.generation }),
+            _ => None,
+        }
+    }
+}
 impl Drop for Message {
     fn drop(&mut self) {
         // INPUT/KEY can carry credentials. Scrub even on an error return.
@@ -45,5 +71,44 @@ impl Drop for Message {
         for i in 0..core::mem::size_of::<Self>() {
             unsafe { core::ptr::write_volatile(p.add(i), 0); }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(phase: u32, code: u32, generation: u64) -> Message {
+        let mut m = Message::default();
+        m.phase = phase;
+        m.code = code;
+        m.generation = generation;
+        m
+    }
+
+    #[test]
+    fn a_normal_seat_with_no_episode_is_gone_not_serial() {
+        assert_eq!(reply(0, MEDIUM_NONE, 7).episode_medium(), Some(EpisodeMedium::Gone));
+    }
+
+    #[test]
+    fn the_code_decides_whatever_the_phase_says() {
+        assert_eq!(reply(0, MEDIUM_SERIAL, 7).episode_medium(), Some(EpisodeMedium::Serial));
+        assert_eq!(reply(4, MEDIUM_SERIAL, 7).episode_medium(), Some(EpisodeMedium::Serial));
+        assert_eq!(reply(2, MEDIUM_NONE, 7).episode_medium(), Some(EpisodeMedium::Gone));
+    }
+
+    #[test]
+    fn graphical_carries_its_generation_and_needs_one() {
+        assert_eq!(
+            reply(2, MEDIUM_GRAPHICAL, 7).episode_medium(),
+            Some(EpisodeMedium::Graphical { generation: 7 })
+        );
+        assert_eq!(reply(2, MEDIUM_GRAPHICAL, 0).episode_medium(), None);
+    }
+
+    #[test]
+    fn a_code_the_kernel_never_sends_is_refused() {
+        assert_eq!(reply(0, 3, 7).episode_medium(), None);
+        assert_eq!(reply(2, u32::MAX, 7).episode_medium(), None);
     }
 }

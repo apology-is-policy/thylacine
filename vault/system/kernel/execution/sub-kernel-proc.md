@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Session posting ownership
 
@@ -40,7 +40,10 @@ elevated Proc permanently suppress the kernel's record of its own elevation.) Th
 SERVICE's death
 fails the seat and then returns it to NORMAL, releasing nothing, so the serial
 BREAK works again ([[dec-2026-10-29-seat-service-death]]); no process inherits
-its hardware ownership. The compositor's
+its hardware ownership. `seat_episode_medium_locked` answers Corvus's QUERY with
+where the console episode runs ([[dec-2026-11-02-seat-episode-medium]]): the lock
+that orders BEGIN, END and every abandon with the phase makes active and EXCLUSIVE
+the seat's episode, and any other active episode serial. The compositor's
 death fails the seat only while an episode is in progress; in the normal phase it
 just clears the client slot, so warden can seat a new one. `proc_seat_fail_locked`
 cancels the held grant, scrubs the key queue and closes the console episode ONLY

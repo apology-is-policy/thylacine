@@ -86,6 +86,12 @@ If Lictor itself exits, nothing restarts it, and the display stays dark until
 the machine restarts. The kernel cancels any pending request and returns the
 seat to normal, so a serial recovery session still works.
 
+If the display service fails or exits in the moment after the gesture, before
+the prompt appears, Thylacine shows no prompt on any console, and the request
+stays pending until its deadline. While Lictor is running, press the gesture
+again. The serial console reports
+`corvus: imperium: episode: over before its query -- no prompt`.
+
 The current QEMU backend uses a neutral dark background during authorization.
 The workspace is suspended from display and input while its panes remain alive.
 A blurred workspace snapshot is not yet provided by this backend.
