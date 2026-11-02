@@ -4,7 +4,7 @@ type: chg
 title: "B-3h2: SYS_FILE_LOCK 137 with its two owners, the Proc owner table, and dev9p's lock path"
 date: 2026-10-29
 arc: arc-boosty
-commits: ["f30f2a9eb", "d1853e821", "c95ef3916", "b693e2729", "80e99cae5", "*(pending)*"]
+commits: ["f30f2a9eb", "d1853e821", "c95ef3916", "b693e2729", "80e99cae5", "a22aad62a", "a849a6ba8"]
 touched:
   - sub-kernel-filelock
   - sub-kernel-handle
