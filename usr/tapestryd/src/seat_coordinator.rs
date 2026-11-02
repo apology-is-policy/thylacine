@@ -216,9 +216,13 @@ impl Conn {
                         Some(s)
                     })
             }
-            Op::State if self.registration == Some(q.registration) => table
-                .state(q.registration, self.stripes, self.lane)
-                .map(|s| (s.revision != q.revision).then_some(s)),
+            Op::State
+                if self.registration.is_none() || self.registration == Some(q.registration) =>
+            {
+                table
+                    .sample(q.registration, self.stripes, self.lane)
+                    .map(|s| (s.revision != q.revision).then_some(s))
+            }
             Op::Cancelled if self.registration == Some(q.registration) => table
                 .cancelled(
                     q.registration,
@@ -259,7 +263,7 @@ impl Conn {
                     match shared
                         .table
                         .lock()
-                        .state(t.request.registration, self.stripes, self.lane)
+                        .sample(t.request.registration, self.stripes, self.lane)
                     {
                         Ok(state)
                             if state.revision != t.request.revision
@@ -555,10 +559,16 @@ fn serve(shared: &Shared, control: &Control, listener: &File, seat: &mut Client)
             acknowledged = None;
         }
         // Fresh kernel peer death, not HUP, releases a retained obligation.
+        let parked = shared.table.lock().parked();
         let mut i = conns.len();
         while i > 0 {
             i -= 1;
             let c: &mut Conn = &mut conns[i];
+            // A first Join cannot succeed while the seat is away, so that time does
+            // not count against the bound on an unjoined lane. The kernel bounds it.
+            if parked {
+                c.created = libthyla_rs::time::monotonic_ns();
+            }
             let mut peer = TSrvPeerInfo::default();
             if unsafe { t_srv_peer(c.fd() as i64, &mut peer) } != 0 {
                 return Err(Error::Io);

@@ -179,22 +179,35 @@ mod native {
         }
         Ok(unsafe { File::from_raw_fd(fd as i32, Rights::READ | Rights::WRITE) })
     }
+    /// A seat away from normal parks the compositor, so this write waits out an
+    /// episode, and the table can refuse it for a moment as the compositor returns.
+    const RESERVE_ATTEMPTS: u64 = 200;
     /// Normal-connection setup only, before the UI starts presenting. The ctl
     /// pins this connection in the kernel; the reservation is not a credential.
     pub fn reserve(session: &EventRing) -> Result<(File, Snapshot), TapError> {
         let ctl = open_at(session.root(), b"ctl", T_ORDWR)?;
-        let q = Request {
+        let mut q = Request {
             op: Op::Reserve,
             request: 1,
             registration: 0,
             generation: 0,
             revision: 0,
         };
-        let bytes = q.encode();
-        if unsafe { t_write(ctl.as_raw_fd() as i64, bytes.as_ptr(), bytes.len()) }
-            != bytes.len() as i64
-        {
-            return Err(TapError::Connect);
+        loop {
+            let bytes = q.encode();
+            let n = unsafe { t_write(ctl.as_raw_fd() as i64, bytes.as_ptr(), bytes.len()) };
+            if n == bytes.len() as i64 {
+                break;
+            }
+            if n != -1 || q.request >= RESERVE_ATTEMPTS {
+                return Err(TapError::Connect);
+            }
+            // The table compares requests on this one fid, and a repeat is refused.
+            q.request += 1;
+            let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+        }
+        if q.request > 1 {
+            let _ = t_putstr("tapestry: seat reservation retried after a refusal\n");
         }
         if unsafe { t_lseek(ctl.as_raw_fd() as i64, 0, T_SEEK_SET) } != 0 {
             return Err(TapError::Connect);

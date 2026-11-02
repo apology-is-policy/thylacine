@@ -1,0 +1,111 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-start -- the operator's chord during session start.
+#
+# THYLACINE_TEST_SEAT_START=1 puts thylacine.test-seat-start on the kernel
+# command line: halcyond holds its start at each window a chord can land in,
+# and a chord lands in each. A seat away from normal holds the compositor, so
+# session start must wait for it and carry on, whatever the episode's length.
+#
+# before-reserve: the Reserve meets a compositor that is parked, and is served
+#   as it returns.
+# before-join: the reservation's snapshot goes stale, so the first Join is
+#   refused. The member has joined nothing and owes nothing: it samples, waits,
+#   and joins at the new generation. A first refused Join used to end the session.
+# after-join: the member owes a cancellation and pays it, while the compositor
+#   cannot admit it. Bring-up's 4 s and setup's 5 s wait both run out inside
+#   this episode unless the seat's time is not counted against them.
+#
+# Each episode is held open past those and past the coordinator's 5 s bound on an
+# unjoined lane, which starts up to 3 s into the before-join episode, after the
+# hold. The lost-first-join line is what
+# makes the before-join leg bite: without it a chord that missed the window
+# would pass it. "reservation retried" is reported, not required: it is a race
+# with the coordinator's own sample.
+#
+# Requires HALCYON_SESSION=y: the seat runs under the session compositor.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+set ::env(THYLACINE_TEST_SEAT_START) 1
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_require_image {SESSION}
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc step {needle why secs} {
+    global timeout
+    set timeout $secs
+    expect {
+        -ex $needle { lc_step $why }
+        -ex "inline-media service unavailable" { lc_fail "$why: the session lost its service to a chord" }
+        -ex "session ended" { lc_fail "$why: the session ended under a chord" }
+        -re {EXTINCTION:} { lc_extinction_fail $why }
+        timeout { lc_fail "$why: not within ${secs}s" }
+        eof { lc_fail "EOF ($why)" }
+    }
+}
+# Held open past every bound above, then ended with nothing pending.
+proc episode {leg} {
+    key "ctrl+alt+f10"
+    after 12000
+    key "ret"
+    step "corvus: imperium: SAK with nothing pending" "$leg: the episode ended" 15
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+step "halcyond: seat start held before-reserve" "the lever held the Reserve" 60
+episode before-reserve
+step "halcyond: seat start held before-join" "the Reserve was served after its episode" 30
+episode before-join
+step "halcyond: seat link joined after a lost first join" "the first Join lost to the chord and joined after it" 15
+step "halcyond: seat start held after-join" "the lever held bring-up after the Join" 15
+episode after-join
+step "halcyond: seat link rejoined" "the member paid its cancellation and rejoined" 15
+step "halcyond: inline-media service /srv/halcyon-" "session start finished with its service" 30
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -ex "session ended" { lc_fail "the session ended after start" }
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+type "caps-probe --seat-baseline\n"
+step "seat-probe: PASS baseline (endpoint denied; GPU denied; DAC verified)" "typing reaches the shell" 30
+lc_pass "a chord in each window of session start leaves a working session"
+lc_quit

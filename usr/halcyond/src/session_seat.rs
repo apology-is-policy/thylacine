@@ -3,7 +3,7 @@
 //! clipboard dispatch shares this owner with the native protocol adapter.
 //! All retirement callbacks finish before acknowledgement of a trusted episode.
 use halcyond::{hostbindings::{Bindings, Desired}, interaction::Interaction, paneroute::Routes};
-use libhalcyon::seat_control::{Op, Refusals, Request, Snapshot};
+use libhalcyon::seat_control::{Op, Participant, Snapshot};
 use libthyla_rs::{
     err::{Error, Result},
     fs::File,
@@ -42,13 +42,10 @@ pub struct Link {
     interaction: Interaction,
     queued: Option<libhalcyon::interaction_control::Request>,
     routes: Routes,
-    state: Snapshot,
+    seat: Participant,
     next: u64,
-    joined: bool,
-    stopping: bool,
-    retired: bool,
-    acknowledged: Option<(u64, u64)>,
-    refusals: Refusals,
+    #[cfg(feature="test-mode")]
+    first_join_lost: bool,
 }
 const _: () = assert!(core::mem::size_of::<Link>() <= 48 * 1024);
 pub const FIXED_BYTES: usize = core::mem::size_of::<Link>();
@@ -68,13 +65,10 @@ impl Link {
             interaction,
             queued: None,
             routes: Routes::empty(),
-            state: setup.snapshot,
+            seat: Participant::new(setup.snapshot),
             next: 1,
-            joined: false,
-            stopping: false,
-            retired: false,
-            acknowledged: None,
-            refusals: Refusals::default(),
+            #[cfg(feature="test-mode")]
+            first_join_lost: false,
         };
         link.send(Op::Join)?;
         Ok(link)
@@ -82,18 +76,7 @@ impl Link {
     fn send(&mut self, op: Op) -> Result<()> {
         let request = self.next;
         self.next = request.checked_add(1).ok_or(Error::Io)?;
-        let q = Request {
-            op,
-            request,
-            registration: self.state.registration,
-            generation: if op == Op::State {
-                0
-            } else {
-                self.state.generation
-            },
-            revision: self.state.revision,
-        };
-        self.channel.start(q).map_err(|_| Error::Io)?;
+        self.channel.start(self.seat.request(op, request)).map_err(|_| Error::Io)?;
         self.channel.pump().map_err(|_| Error::Io)
     }
     pub fn fd(&self) -> i32 {
@@ -103,7 +86,14 @@ impl Link {
         self.admission.as_ref().map_or(-1, |a| a.poll_fd())
     }
     pub fn ready(&self) -> bool {
-        self.joined && self.admission.as_ref().is_some_and(|a| a.ready())
+        self.seat.joined() && self.admission.as_ref().is_some_and(|a| a.ready())
+    }
+    pub fn joined(&self) -> bool {
+        self.seat.joined()
+    }
+    /// The compositor admits no one and answers nothing while this holds.
+    pub fn parked(&self) -> bool {
+        self.seat.parked()
     }
     pub fn runnable(&self) -> bool {
         self.queued.is_some() || self.admission.as_ref().is_some_and(|a| a.runnable())
@@ -111,10 +101,10 @@ impl Link {
     #[cfg(feature="test-mode")]
     pub fn bound_count(&self) -> u64 { self.bound_count }
     pub fn retired(&self) -> bool {
-        self.retired
+        self.seat.retired()
     }
     pub fn stop(&mut self) {
-        self.stopping = true;
+        self.seat.stop();
         let _ = self.interaction.seat(None);
     }
     /// Called before draining admission records. Coalescing may hide a removal,
@@ -131,11 +121,7 @@ impl Link {
         self.hosts = hosts;
         self.routes = desired;
     }
-    fn normal(&self) -> Option<u64> {
-        (self.joined && !self.stopping && !self.retired && self.state.enabled && self.state.phase == 0)
-            .then_some(self.state.generation)
-    }
-    pub fn session(&self) -> u64 { self.state.registration }
+    pub fn session(&self) -> u64 { self.seat.state().registration }
     pub fn context(&mut self, peer: halcyond::controllers::Peer) -> halcyond::application::Context<'_> {
         halcyond::application::Context { owner: &mut self.interaction, bindings: &self.bindings,
             desired: &self.hosts, queued: &mut self.queued, peer,
@@ -151,6 +137,7 @@ impl Link {
             self.admission.as_mut().ok_or(Error::Io)?.start(q).map_err(|_| Error::Io)?;
         }
         let now = libthyla_rs::time::monotonic_ns() / 1_000_000;
+        if self.seat.parked() { self.interaction.hold(now); }
         if let Some(done) = self.interaction.expire(now) { apps.complete(done); }
         retire_overdue(&mut self.interaction, &mut self.admission, now)?;
         let admission = self.admission.as_mut().ok_or(Error::Io)?;
@@ -196,21 +183,21 @@ impl Link {
             }
         }
         if !self.interaction.busy() && self.admission.as_ref().is_some_and(|a| a.ready()) {
-            let normal = self.normal();
+            let normal = self.seat.normal();
             if let Some(action) = self.bindings.plan(&self.hosts, normal) {
                 let q = self.interaction.control(action.op,
                     halcyond::controllers::RouteKey { leaf: action.host.route.leaf,
                         incarnation: action.host.route.incarnation },
                     if action.op == libhalcyon::interaction_control::Op::Bind { action.host.pid } else { 0 },
                     action.host.binding, now).map_err(|_| Error::Io)?;
-                if !self.bindings.started(action, q, self.state.generation) { return Err(Error::Io); }
+                if !self.bindings.started(action, q, self.seat.state().generation) { return Err(Error::Io); }
                 self.admission.as_mut().ok_or(Error::Io)?.start(q).map_err(|_| Error::Io)?;
             }
         }
         Ok(())
     }
     fn pump_seat(&mut self, apps: &mut impl Applications) -> Result<()> {
-        if self.retired {
+        if self.seat.retired() {
             return Ok(());
         }
         // The cancellation lane never waits for normal graphics or an
@@ -219,66 +206,50 @@ impl Link {
         let Some(done) = self.channel.take() else {
             return Ok(());
         };
+        // Rlerror is the table's decision; anything else broke the lane.
         let reply = match done.result {
-            Ok(r) => r,
-            // A phase may advance before a request reaches the coordinator.
-            // Re-sample without restoring local authority.
-            Err(tapestry::seat::Error::Transport(-1))
-                if self.refusals.stale(&done.request, self.joined) =>
-            {
-                let _ = self.interaction.seat(None);
-                apps.retire(&mut self.interaction)?;
-                self.state.revision = 0;
-                return self.send(Op::State);
-            }
-            _ => return Err(Error::Io),
+            Ok(r) => Some(r.state),
+            Err(tapestry::seat::Error::Transport(-1)) => None,
+            Err(_) => return Err(Error::Io),
         };
-        self.state = reply.state;
-        if done.request.op == Op::Retire {
-            self.retired = true;
-            return Ok(());
+        #[cfg(feature="test-mode")]
+        let rejoining = self.seat.joined() && done.request.op == Op::Join && reply.is_some();
+        #[cfg(feature="test-mode")]
+        if !self.seat.joined() && reply.is_none() {
+            self.first_join_lost = true;
         }
-        if done.request.op == Op::Join {
-            if !self.state.enabled || self.state.phase != 0 {
-                return Err(Error::PermissionDenied);
-            }
-            // Safe to write: this member now owes a cancellation, so the seat
-            // cannot reach EXCLUSIVE, where console output parks, without us.
-            #[cfg(feature="test-mode")]
-            if self.joined {
-                let _ = libthyla_rs::t_putstr(&alloc::format!(
-                    "halcyond: seat link rejoined generation={}\n", self.state.generation));
-            }
-            self.joined = true;
-            let _ = self.interaction.seat(Some(self.state.generation));
+        let step = self.seat.complete(&done.request, reply).map_err(|e| match e {
+            libhalcyon::seat_control::Error::Invalid => Error::PermissionDenied,
+            _ => Error::Io,
+        })?;
+        // Safe to write: this member now owes a cancellation, so the seat
+        // cannot reach EXCLUSIVE, where console output parks, without us.
+        #[cfg(feature="test-mode")]
+        if rejoining {
+            let _ = libthyla_rs::t_putstr(&alloc::format!(
+                "halcyond: seat link rejoined generation={}\n", self.seat.state().generation));
         }
-        if self.stopping {
-            let _ = self.interaction.seat(None);
-            apps.retire(&mut self.interaction)?;
-            return self.send(Op::Retire);
+        // Not when the refusal lands: console output parks during the episode, and
+        // this owner must keep telling setup that it is alive.
+        #[cfg(feature="test-mode")]
+        if self.first_join_lost && self.seat.joined() {
+            self.first_join_lost = false;
+            let _ = libthyla_rs::t_putstr(&alloc::format!(
+                "halcyond: seat link joined after a lost first join generation={}\n", self.seat.state().generation));
         }
-        if self.state.phase != 0 {
+        if step.revoke {
             let _ = self.interaction.seat(None);
             // No rendering or normal HIA wait occurs in this barrier. The
             // callback closes application fds and drops cached/partial replies.
             apps.retire(&mut self.interaction)?;
-            let identity = (self.state.generation, self.state.revision);
-            if done.request.op == Op::Cancelled {
-                self.acknowledged = Some(identity);
-            }
-            if self.state.phase == 1 && self.acknowledged != Some(identity) {
-                return self.send(Op::Cancelled);
-            }
-        } else if !self.state.enabled {
-            let _ = self.interaction.seat(None);
-            apps.retire(&mut self.interaction)?;
-            self.acknowledged = None;
-            return self.send(Op::Join);
         }
-        if self.normal().is_some() {
-            let _ = self.interaction.seat(self.normal());
+        if step.normal.is_some() {
+            let _ = self.interaction.seat(step.normal);
         }
-        self.send(Op::State)
+        match step.send {
+            Some(op) => self.send(op),
+            None => Ok(()),
+        }
     }
 }
 

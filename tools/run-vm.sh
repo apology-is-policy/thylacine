@@ -730,6 +730,11 @@ fi
 if [[ "${THYLACINE_TEST_LATCH_DEAD:-0}" == "1" ]]; then
     append_tokens+=("thylacine.test-latch-dead")
 fi
+# Test lever (ls-graphical-sak-start): a test-mode halcyond holds session start
+# at each window a chord can land in. Gated off by default.
+if [[ "${THYLACINE_TEST_SEAT_START:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.test-seat-start")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends

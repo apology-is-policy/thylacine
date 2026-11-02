@@ -1,0 +1,95 @@
+#!/usr/bin/expect -f
+# ls-graphical-sak-refused -- a graphical chord the kernel refuses.
+#
+# A serial episode is open, so the kernel refuses the chord and the seat stays
+# normal: no generation moves, and nothing else resets the compositor's view of
+# the keyboard. Lictor drops the batch that met the refusal, which may hold a
+# release a client is owed, so it must say so with SYN_DROPPED. Without that a
+# lost release leaves a key stuck at the client.
+#
+# Console output parks during the serial episode, so the reset's line can only
+# show after it ends, and typing then proves the compositor is still serving.
+#
+# Requires HALCYON_SESSION=y and the serial SAK posture.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 1
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_require_image {SESSION}
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc witness {stage} {
+    type "caps-probe --seat-$stage\n"
+    global timeout
+    set timeout 30
+    expect {
+        -ex "seat-probe: PASS $stage (endpoint denied; GPU denied; DAC verified)" { lc_step "typing reaches the shell ($stage)" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "seat $stage" }
+        timeout { lc_fail "no authority witness ($stage) -- typing did not reach the shell" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+witness baseline
+lc_raw_send "\001b" "monitor BREAK opens a serial episode"
+lc_expect "nothing pending -- press any key" "the serial episode is open"
+key "ctrl+alt+f10"
+after 1000
+lc_raw_send "x" "dismiss the panel"
+lc_expect "trusted path: done" "the serial episode ended"
+set timeout 15
+expect {
+    -ex "tapestryd: input reset (SYN_DROPPED)" { lc_step "the refused chord told the compositor its input was dropped" }
+    -ex "lictor: trusted scanout active" { lc_fail "the chord was not refused: the seat took over" }
+    -re {EXTINCTION:} { lc_extinction_fail "refused chord" }
+    timeout { lc_fail "no input reset within 15s -- a refused chord dropped a batch and said nothing" }
+    eof { lc_fail "EOF (refused chord)" }
+}
+witness restored
+lc_pass "a refused graphical chord resets the compositor's input and leaves the seat working"
+lc_quit

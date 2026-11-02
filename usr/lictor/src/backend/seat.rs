@@ -51,6 +51,7 @@ impl Seat {
     }
 
     pub fn input(&mut self, inputs: &mut [Input]) {
+        let mut lost = false;
         for input in inputs.iter_mut() {
             let mut events: Vec<RawInputEvent> = Vec::new();
             input.device.drain(|event| events.push(event));
@@ -67,7 +68,7 @@ impl Seat {
                             if ch != '\0' { m.length = ch.encode_utf8(&mut m.data[..4]).len() as u32; }
                         }
                     }
-                    if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; }
+                    if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; lost = true; }
                     else { self.adopt(&m); }
                 }
                 if self.phase == 0 && self.withheld {
@@ -84,7 +85,14 @@ impl Seat {
                 }
             }
         }
-        if self.phase != 0 { for input in inputs { input.events.clear(); } }
+        // A refused chord moves no generation, so nothing else tells the compositor
+        // that a release it was owed is gone.
+        if self.phase != 0 || lost {
+            for input in inputs {
+                input.events.clear();
+                if lost && !self.withheld { input.events.push((0, 3, 0)); }
+            }
+        }
     }
     // SeatState serves this pair, so a reply is taken whole: a recovery moves the
     // generation, and a new phase with the old one stales a client's Join.

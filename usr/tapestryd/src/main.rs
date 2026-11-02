@@ -540,6 +540,8 @@ impl Driver for Tapestryd {
                 input_seen |= !raw_events.is_empty();
                 for ev in &raw_events {
                     if ev.etype == EV_SYN && ev.code == 3 {
+                        #[cfg(feature = "test-mode")]
+                        say!("tapestryd: input reset (SYN_DROPPED)");
                         self.mods = Mods::default(); self.comp.seat_resumed(); continue;
                     }
                     if ev.etype != EV_KEY {

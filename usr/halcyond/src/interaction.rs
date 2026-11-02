@@ -370,6 +370,13 @@ impl Interaction {
     pub fn cancel_pending(&mut self, target: Target) -> Option<Completed> {
         self.broker.cancel_pending(target)
     }
+    /// While the seat is away from normal the compositor answers nothing, so a
+    /// flight cannot be late. It gets its full time back when the seat returns.
+    pub fn hold(&mut self, now: u64) {
+        if let Some(f) = self.flight.as_mut().filter(|f| !f.reported) {
+            f.started = now;
+        }
+    }
     pub fn expire(&mut self, now: u64) -> Option<Completion> {
         let done = if let Some(f) = self
             .flight
@@ -765,6 +772,27 @@ mod tests {
         assert_eq!(i.deadline(), None);
         assert_eq!(finish(&mut i, q, 10), None);
         assert!(!i.drain_required());
+    }
+    #[test]
+    fn a_flight_held_across_an_episode_gets_its_full_time_back() {
+        for publish in [false, true] {
+            let mut i = owner();
+            control_request(&mut i, publish, 17);
+            // An episode can outlast the admission time, and the compositor is parked.
+            i.hold(17 + ADMISSION_MS);
+            assert_eq!(i.expire(17 + ADMISSION_MS), None);
+            assert!(!i.drain_required());
+            i.hold(17 + 3 * ADMISSION_MS);
+            assert_eq!(i.deadline(), Some(17 + 4 * ADMISSION_MS));
+            assert_eq!(i.expire(16 + 4 * ADMISSION_MS), None);
+            // Back at normal, the ordinary bound holds again.
+            assert_eq!(failure(i.expire(17 + 4 * ADMISSION_MS)), Some(Failure::Timeout));
+            assert!(i.drain_required());
+            // A hold cannot undo a drain already owed.
+            i.hold(18 + 4 * ADMISSION_MS);
+            assert!(i.drain_required());
+            assert_eq!(i.deadline(), None);
+        }
     }
     #[test]
     fn control_expiry_reports_once_and_holds_slot_until_exact_drain() {

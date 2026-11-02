@@ -40,24 +40,118 @@ impl Op {
         })
     }
 }
-/// Which refused requests a joined participant re-samples from, since the seat
-/// can move before a request reaches the coordinator. A re-sample restores no
-/// authority. A first Join has no registration to sample with, so it stays fatal,
-/// and a Join refused twice at one snapshot raced nothing, so retrying would spin.
+/// Which refused requests a participant re-samples from, since the seat can move
+/// before a request reaches the coordinator. A re-sample restores no authority.
+/// A Join refused twice at one snapshot raced nothing, so retrying would spin.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Refusals {
+struct Refusals {
     join: Option<(u64, u64)>,
 }
 impl Refusals {
-    pub fn stale(&mut self, q: &Request, joined: bool) -> bool {
-        if !joined {
-            return false;
-        }
+    fn stale(&mut self, q: &Request) -> bool {
         match q.op {
             Op::Cancelled | Op::Retire => true,
             Op::Join => self.join.replace((q.generation, q.revision)) != Some((q.generation, q.revision)),
             _ => false,
         }
+    }
+}
+/// What the lane's owner does with one completed exchange, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Step {
+    /// Drop local authority, then finish the application work it covered.
+    pub revoke: bool,
+    /// The generation normal authority is restored at.
+    pub normal: Option<u64>,
+    pub send: Option<Op>,
+}
+/// One lane owner's seat decisions. The owner does the I/O, so every arm is
+/// reachable here without a transport or a guest.
+#[derive(Clone, Copy, Debug)]
+pub struct Participant {
+    state: Snapshot,
+    joined: bool,
+    stopping: bool,
+    retired: bool,
+    acknowledged: Option<(u64, u64)>,
+    refusals: Refusals,
+}
+impl Participant {
+    pub fn new(state: Snapshot) -> Self {
+        Self { state, joined: false, stopping: false, retired: false, acknowledged: None, refusals: Refusals::default() }
+    }
+    pub fn state(&self) -> Snapshot {
+        self.state
+    }
+    pub fn joined(&self) -> bool {
+        self.joined
+    }
+    pub fn retired(&self) -> bool {
+        self.retired
+    }
+    pub fn stop(&mut self) {
+        self.stopping = true;
+    }
+    /// The compositor serves nothing while the seat is away from normal.
+    pub fn parked(&self) -> bool {
+        !self.stopping && self.state.phase != NORMAL
+    }
+    pub fn normal(&self) -> Option<u64> {
+        (self.joined && !self.stopping && !self.retired && self.state.enabled && self.state.phase == NORMAL)
+            .then_some(self.state.generation)
+    }
+    pub fn request(&self, op: Op, request: u64) -> Request {
+        Request {
+            op,
+            request,
+            registration: self.state.registration,
+            generation: if op == Op::State { 0 } else { self.state.generation },
+            revision: self.state.revision,
+        }
+    }
+    /// `reply` is None when the table refused the request. Err ends the session's
+    /// participation: Denied for a refusal with nothing to sample from, Invalid for
+    /// a Join answered with a seat that is not normal.
+    pub fn complete(&mut self, q: &Request, reply: Option<Snapshot>) -> Result<Step, Error> {
+        let Some(state) = reply else {
+            if !self.refusals.stale(q) {
+                return Err(Error::Denied);
+            }
+            self.state.revision = 0;
+            return Ok(Step { revoke: true, normal: None, send: Some(Op::State) });
+        };
+        self.state = state;
+        if q.op == Op::Retire {
+            self.retired = true;
+            return Ok(Step { revoke: false, normal: None, send: None });
+        }
+        if q.op == Op::Join {
+            if !state.enabled || state.phase != NORMAL {
+                return Err(Error::Invalid);
+            }
+            self.joined = true;
+        }
+        if self.stopping {
+            // A lane that never joined holds no record to retire.
+            self.retired = !self.joined;
+            let send = self.joined.then_some(Op::Retire);
+            return Ok(Step { revoke: true, normal: None, send });
+        }
+        if state.phase != NORMAL {
+            let identity = (state.generation, state.revision);
+            if q.op == Op::Cancelled {
+                self.acknowledged = Some(identity);
+            }
+            // Only Join makes a member owe a cancellation, and the table refuses
+            // one from a lane it has not pinned.
+            let owes = self.joined && state.phase == QUIESCING && self.acknowledged != Some(identity);
+            return Ok(Step { revoke: true, normal: None, send: Some(if owes { Op::Cancelled } else { Op::State }) });
+        }
+        if !state.enabled {
+            self.acknowledged = None;
+            return Ok(Step { revoke: true, normal: None, send: Some(Op::Join) });
+        }
+        Ok(Step { revoke: false, normal: self.normal(), send: Some(Op::State) })
     }
 }
 fn u64at(b: &[u8], i: usize) -> u64 {
@@ -398,6 +492,21 @@ impl Coordinator {
         let i = self.lane(id, stripes, lane)?;
         Ok(self.snapshot_at(i))
     }
+    /// `state`, also for a reserving peer's own record before its lane is pinned:
+    /// a Join that lost a race needs a fresh pair, and the connection that reserved
+    /// parks with the compositor. Pins nothing and certifies nothing.
+    pub fn sample(&self, id: u64, stripes: u64, lane: u64) -> Result<Snapshot, Error> {
+        self.live()?;
+        let i = self.index(id)?;
+        if self.members[i].unwrap().lane.is_none() {
+            return if lane != 0 && self.members[i].unwrap().peer.stripes == stripes {
+                Ok(self.snapshot_at(i))
+            } else {
+                Err(Error::Denied)
+            };
+        }
+        self.state(id, stripes, lane)
+    }
     pub fn cancelled(
         &mut self,
         id: u64,
@@ -517,6 +626,9 @@ impl Coordinator {
         }
         Ok(())
     }
+    pub fn parked(&self) -> bool {
+        self.phase != NORMAL
+    }
     /// Even zero members needs a fresh QUIESCING sample. Calling this does
     /// not open trusted input; Lictor independently checks hardware and keys.
     pub fn aggregate(&self) -> Option<u64> {
@@ -570,23 +682,165 @@ mod tests {
     fn q(op: Op, generation: u64, revision: u64) -> Request {
         Request { op, request: 1, registration: 1, generation, revision }
     }
+    // One exchange against the real table, the way the coordinator routes it.
+    fn exchange(c: &mut Coordinator, p: &mut Participant, op: Op, n: u64) -> Result<Step, Error> {
+        let q = p.request(op, 1);
+        let s = p.state();
+        let reply = match op {
+            Op::Join => c.join(s.registration, n, n, q.generation, q.revision),
+            Op::State => c.sample(s.registration, n, n),
+            Op::Cancelled => c.cancelled(s.registration, n, n, q.generation, q.revision),
+            Op::Retire => c.retire(s.registration, n, n, q.generation, q.revision),
+            _ => unreachable!(),
+        };
+        p.complete(&q, reply.ok())
+    }
     #[test]
     fn a_joined_participant_resamples_a_refusal_once_per_snapshot() {
         let mut r = Refusals::default();
-        assert!(r.stale(&q(Op::Cancelled, 1, 1), true));
-        assert!(r.stale(&q(Op::Retire, 1, 1), true));
+        assert!(r.stale(&q(Op::Cancelled, 1, 1)));
+        assert!(r.stale(&q(Op::Retire, 1, 1)));
         // A Join lost a race; the same snapshot twice raced nothing; then the seat moved.
-        assert!(r.stale(&q(Op::Join, 1, 5), true));
-        assert!(!r.stale(&q(Op::Join, 1, 5), true));
-        assert!(r.stale(&q(Op::Join, 2, 6), true));
+        assert!(r.stale(&q(Op::Join, 1, 5)));
+        assert!(!r.stale(&q(Op::Join, 1, 5)));
+        assert!(r.stale(&q(Op::Join, 2, 6)));
         // A refused State has nothing left to sample with.
-        assert!(!r.stale(&q(Op::State, 2, 6), true));
+        assert!(!r.stale(&q(Op::State, 2, 6)));
     }
     #[test]
-    fn a_first_join_refused_stays_fatal() {
-        let mut r = Refusals::default();
-        assert!(!r.stale(&q(Op::Join, 1, 1), false));
-        assert!(!r.stale(&q(Op::Cancelled, 1, 1), false));
+    fn a_first_join_that_lost_to_a_chord_samples_and_joins_after_the_episode() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        c.observe(1, QUIESCING).unwrap();
+        // The owner has joined nothing, so it owes nothing and holds up no one.
+        assert_eq!(c.aggregate(), Some(1));
+        let refused = exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        assert_eq!(refused, Step { revoke: true, normal: None, send: Some(Op::State) });
+        assert_eq!(p.normal(), None);
+        let parked = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(parked.send, Some(Op::State), "an unpinned lane cannot send Cancelled");
+        assert!(p.parked());
+        c.observe(1, NORMAL).unwrap();
+        let back = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(back.send, Some(Op::Join));
+        assert_eq!(p.normal(), None, "a sample confers nothing");
+        let joined = exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        assert!(p.joined());
+        assert_eq!(joined, Step { revoke: false, normal: Some(1), send: Some(Op::State) });
+    }
+    #[test]
+    fn a_join_refused_twice_at_one_snapshot_is_fatal() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        let q = p.request(Op::Join, 1);
+        assert_eq!(p.complete(&q, None).unwrap().send, Some(Op::State));
+        assert_eq!(p.complete(&q, None), Err(Error::Denied));
+    }
+    #[test]
+    fn a_refused_state_is_fatal_since_nothing_is_left_to_sample_with() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        let q = p.request(Op::State, 1);
+        assert_eq!(p.complete(&q, None), Err(Error::Denied));
+    }
+    #[test]
+    fn a_join_answered_with_a_seat_away_from_normal_is_fatal() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        let q = p.request(Op::Join, 1);
+        let reply = Snapshot { phase: QUIESCING, enabled: true, ..reserved };
+        assert_eq!(p.complete(&q, Some(reply)), Err(Error::Invalid));
+        let reply = Snapshot { enabled: false, ..reserved };
+        assert_eq!(p.complete(&q, Some(reply)), Err(Error::Invalid));
+    }
+    #[test]
+    fn a_sample_confers_nothing_even_if_the_reply_claims_enabled() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        let q = p.request(Op::State, 1);
+        let step = p.complete(&q, Some(Snapshot { enabled: true, ..reserved })).unwrap();
+        assert_eq!(step.normal, None);
+        assert_eq!(p.normal(), None);
+    }
+    #[test]
+    fn a_joined_participant_cancels_once_then_rejoins_at_the_new_generation() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        c.observe(1, QUIESCING).unwrap();
+        assert_eq!(c.aggregate(), None);
+        let owed = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(owed, Step { revoke: true, normal: None, send: Some(Op::Cancelled) });
+        let paid = exchange(&mut c, &mut p, Op::Cancelled, 1).unwrap();
+        assert_eq!(paid.send, Some(Op::State), "the same snapshot is not cancelled twice");
+        assert_eq!(c.aggregate(), Some(1));
+        c.observe(1, FAILED).unwrap();
+        c.observe(2, NORMAL).unwrap();
+        let back = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(back, Step { revoke: true, normal: None, send: Some(Op::Join) });
+        assert_eq!(exchange(&mut c, &mut p, Op::Join, 1).unwrap().normal, Some(2));
+    }
+    #[test]
+    fn a_refused_rejoin_revokes_and_the_resample_still_owes_its_cancellation() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        c.observe(0, FAILED).unwrap();
+        c.observe(1, NORMAL).unwrap();
+        assert_eq!(exchange(&mut c, &mut p, Op::State, 1).unwrap().send, Some(Op::Join));
+        c.observe(2, QUIESCING).unwrap();
+        let refused = exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        assert_eq!(refused, Step { revoke: true, normal: None, send: Some(Op::State) });
+        let owed = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(owed.send, Some(Op::Cancelled));
+        assert_eq!(c.aggregate(), None);
+    }
+    #[test]
+    fn a_stopping_participant_retires_only_what_it_joined() {
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        c.observe(1, QUIESCING).unwrap();
+        exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        p.stop();
+        assert!(!p.parked());
+        let done = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(done, Step { revoke: true, normal: None, send: None });
+        assert!(p.retired());
+
+        let mut c = table();
+        let reserved = c.reserve(peer(1)).unwrap();
+        let mut p = Participant::new(reserved);
+        exchange(&mut c, &mut p, Op::Join, 1).unwrap();
+        p.stop();
+        assert_eq!(p.normal(), None);
+        let retire = exchange(&mut c, &mut p, Op::State, 1).unwrap();
+        assert_eq!(retire, Step { revoke: true, normal: None, send: Some(Op::Retire) });
+        assert!(!p.retired());
+        assert_eq!(exchange(&mut c, &mut p, Op::Retire, 1).unwrap().send, None);
+        assert!(p.retired());
+    }
+    #[test]
+    fn a_sample_is_refused_to_another_peer_and_pins_nothing() {
+        let mut c = table();
+        let s = c.reserve(peer(1)).unwrap();
+        assert_eq!(c.sample(s.registration, 2, 2), Err(Error::Denied));
+        assert_eq!(c.sample(s.registration, 1, 0), Err(Error::Denied));
+        assert_eq!(c.state(s.registration, 1, 1), Err(Error::Denied), "the plain read still needs a pin");
+        assert!(c.sample(s.registration, 1, 1).is_ok());
+        let sampled = c.sample(s.registration, 1, 1).unwrap();
+        assert!(!sampled.enabled);
+        // A different lane of the same peer can still be the one that joins.
+        c.join(s.registration, 1, 2, sampled.generation, sampled.revision).unwrap();
+        assert_eq!(c.sample(s.registration, 1, 1), Err(Error::Denied), "pinned now");
+        assert!(c.sample(s.registration, 1, 2).is_ok());
     }
     #[test]
     fn a_chord_under_a_rejoin_is_refused_and_the_resample_still_owes_its_cancellation() {

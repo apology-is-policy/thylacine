@@ -986,6 +986,7 @@ struct Shared {
     published: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
     mail: libthyla_rs::sync::Mutex<Mailbox>,
     seat: libthyla_rs::sync::Mutex<Option<crate::session_seat::Setup>>,
+    joined: core::sync::atomic::AtomicBool,
 }
 const _: () = assert!(core::mem::size_of::<Shared>() <= 16 * 1024);
 pub struct PanePlaceServer {
@@ -999,6 +1000,8 @@ impl PanePlaceServer {
         Self::start(user, None)
     }
     pub fn post_on(user: &str, ring: &tapestry::EventRing) -> Result<Self, PostError> {
+        #[cfg(feature="test-mode")]
+        test_seat_start_hold("before-reserve", None);
         let admission =
             tapestry::ordered::Channel::preopen(ring).map_err(|_| PostError::Unavailable)?;
         let (reservation, snapshot) =
@@ -1023,6 +1026,7 @@ impl PanePlaceServer {
             principal: uid as u32,
             published: published.clone(),
             seat: libthyla_rs::sync::Mutex::new(seat),
+            joined: core::sync::atomic::AtomicBool::new(false),
             mail: libthyla_rs::sync::Mutex::new(Mailbox {
                 routes: Routes::empty(),
                 hosts: halcyond::hostbindings::Desired::empty(),
@@ -1173,15 +1177,48 @@ impl PanePlaceServer {
         out
     }
 }
+/// Test lever: `thylacine.test-seat-start` on the kernel command line holds
+/// session start at each window a chord can land in, so a gate can aim one there.
+/// Per boot, and set by whoever boots the machine.
+#[cfg(feature = "test-mode")]
+fn test_seat_start_declared() -> bool {
+    // SAFETY: SVC wrappers over a path literal and an owned buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 1024];
+    let n = unsafe { libthyla_rs::t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    n > 0
+        && (n as usize) < buf.len()
+        && buf[..n as usize]
+            .split(|b| b.is_ascii_whitespace() || *b == 0)
+            .any(|w| w == b"thylacine.test-seat-start")
+}
+#[cfg(feature = "test-mode")]
+const TEST_SEAT_START_HOLD_MS: u64 = 3000;
+#[cfg(feature = "test-mode")]
+fn test_seat_start_hold(window: &str, control: Option<&libthyla_rs::service_worker::Control>) {
+    if test_seat_start_declared() {
+        say!("halcyond: seat start held {}", window);
+        if let Some(control) = control {
+            let _ = control.notify();
+        }
+        let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(TEST_SEAT_START_HOLD_MS));
+    }
+}
 fn run_owner(shared: &Shared, control: &libthyla_rs::service_worker::Control) -> Result<(), Error> {
     let setup = shared.seat.lock().take();
-    let participated = setup.is_some();
     let result = serve_owner(shared, control, setup);
-    // A stopped or failed posted service cannot leave a dead resident name.
+    // A stopped or failed posted service cannot leave a dead resident name, and
+    // only process death answers for a member that owes a cancellation. A member
+    // that never joined owes nothing, so its failure leaves the session running.
     // Shutdown occurs at process/session exit; no console write can precede it
     // on failure because ordinary console output parks during trusted input.
     if result.is_err()
-        && (participated || shared.published.load(core::sync::atomic::Ordering::Acquire))
+        && (shared.joined.load(core::sync::atomic::Ordering::Acquire)
+            || shared.published.load(core::sync::atomic::Ordering::Acquire))
     {
         unsafe {
             libthyla_rs::t_exit_group(1);
@@ -1199,17 +1236,53 @@ fn serve_owner(
         core::mem::size_of::<Conn>(), crate::session_seat::FIXED_BYTES,
         core::mem::size_of::<Shared>(), core::mem::size_of::<Pool>(),
         ACTIVE_CONNECTIONS, libthyla_rs::alloc::footprint());
+    #[cfg(feature="test-mode")]
+    if setup.is_some() {
+        test_seat_start_hold("before-join", Some(control));
+    }
     let mut seat = match setup {
         Some(s) => Some(crate::session_seat::Link::new(s, shared.principal)?),
         None => None,
     };
-    let deadline = libthyla_rs::time::monotonic_ns() + 4_000_000_000;
+    const BRING_UP_NS: u64 = 4_000_000_000;
+    let mut deadline = libthyla_rs::time::monotonic_ns() + BRING_UP_NS;
+    let mut noticed = 0;
+    #[cfg(feature="test-mode")]
+    let (mut test_after_join, mut test_held_until) = (test_seat_start_declared(), 0u64);
+    #[cfg(not(feature="test-mode"))]
+    let test_held_until = 0u64;
     if let Some(seat) = seat.as_mut() {
-        while !seat.ready() {
-            if control.stopping() || libthyla_rs::time::monotonic_ns() >= deadline {
+        loop {
+            let now = libthyla_rs::time::monotonic_ns();
+            // The hold keeps pumping: a joined member must answer its cancellation.
+            #[cfg(feature="test-mode")]
+            if test_after_join && seat.joined() {
+                test_after_join = false;
+                test_held_until = now + TEST_SEAT_START_HOLD_MS * 1_000_000;
+                say!("halcyond: seat start held after-join");
+            }
+            if seat.ready() && now >= test_held_until {
+                break;
+            }
+            // A seat away from normal holds the compositor, so its time is not
+            // the bring-up's. The kernel bounds the episode; say so to the
+            // thread waiting on this setup.
+            if seat.parked() || now < test_held_until {
+                deadline = now + BRING_UP_NS;
+                if now.saturating_sub(noticed) >= 1_000_000_000 {
+                    noticed = now;
+                    control.notify()?;
+                }
+            }
+            if control.stopping() || now >= deadline {
                 return Err(Error::TimedOut);
             }
-            seat.pump()?;
+            let pumped = seat.pump();
+            // Before the error: a member that joined in this pump owes a cancellation.
+            if seat.joined() {
+                shared.joined.store(true, core::sync::atomic::Ordering::Release);
+            }
+            pumped?;
             let mut p = [
                 TPollFd { fd: seat.fd(), events: T_POLLIN, revents: 0 },
                 TPollFd { fd: seat.admission_fd(), events: T_POLLIN, revents: 0 },

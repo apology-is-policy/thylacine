@@ -103,8 +103,9 @@ pub struct ServiceWorker<S: Send + Sync + 'static> {
     owned: Option<Owned<S>>,
 }
 impl<S: Send + Sync + 'static> ServiceWorker<S> {
-    /// Setup waits at most five seconds. The service's normal operation does
-    /// not make the graphics owner wait for protocol replies.
+    /// Setup waits at most five seconds past the worker's last notice. The
+    /// service's normal operation does not make the graphics owner wait for
+    /// protocol replies.
     pub fn new(state: S, run: fn(&S, &Control) -> Result<()>) -> Result<Self> {
         #[cfg(feature = "poll-worker-test")]
         if qualification::take(qualification::Fault::Startup) {
@@ -159,12 +160,17 @@ impl<S: Send + Sync + 'static> ServiceWorker<S> {
             events: crate::T_POLLIN,
             revents: 0,
         };
-        let n = Error::from_syscall_return(unsafe { crate::t_poll(&mut p, 1, 5000) })?;
-        if n == 0 {
-            return Err(Error::TimedOut);
+        loop {
+            p.revents = 0;
+            let n = Error::from_syscall_return(unsafe { crate::t_poll(&mut p, 1, 5000) })?;
+            if n == 0 {
+                return Err(Error::TimedOut);
+            }
+            match this.check() {
+                Err(Error::WouldBlock) => {}
+                done => return done.map(|()| this),
+            }
         }
-        this.check()?;
-        Ok(this)
     }
     pub fn state(&self) -> Result<&S> {
         self.owned

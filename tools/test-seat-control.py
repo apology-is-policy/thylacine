@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual-source seat/route schedules and eleven named counterexamples.
+"""Actual-source seat/route schedules and named counterexamples.
 
 Run from Astra's resource-leased checkout. No source edits or persistent model
 state: extracted production definitions and mutants live in a temporary directory.
@@ -38,6 +38,18 @@ cases=[
  ('drop-on-normal-eof',c,'v.enabled = false;','v.enabled = false; v.potential = false;','declaration_loss_keeps_live_obligation_and_prevents_rejoin'),
  ('join-not-resampled',c,'            Op::Join => self.join.replace((q.generation, q.revision)) != Some((q.generation, q.revision)),\n','','a_joined_participant_resamples_a_refusal_once_per_snapshot'),
  ('join-spins',c,'Op::Join => self.join.replace((q.generation, q.revision)) != Some((q.generation, q.revision)),','Op::Join => true,','a_joined_participant_resamples_a_refusal_once_per_snapshot'),
+ ('unjoined-cancels',c,'let owes = self.joined && state.phase == QUIESCING','let owes = state.phase == QUIESCING','a_first_join_that_lost_to_a_chord_samples_and_joins_after_the_episode'),
+ ('sample-confers',c,'(self.joined && !self.stopping','(!self.stopping','a_sample_confers_nothing_even_if_the_reply_claims_enabled'),
+ ('stop-keeps-normal',c,'(self.joined && !self.stopping','(self.joined','a_stopping_participant_retires_only_what_it_joined'),
+ ('refusal-keeps-authority',c,'return Ok(Step { revoke: true, normal: None, send: Some(Op::State) });\n        };','return Ok(Step { revoke: false, normal: None, send: Some(Op::State) });\n        };','a_refused_rejoin_revokes_and_the_resample_still_owes_its_cancellation'),
+ ('recovery-keeps-authority',c,'return Ok(Step { revoke: true, normal: None, send: Some(Op::Join) });','return Ok(Step { revoke: false, normal: None, send: Some(Op::Join) });','a_joined_participant_cancels_once_then_rejoins_at_the_new_generation'),
+ ('cancel-repeats',c,' && self.acknowledged != Some(identity)','','a_joined_participant_cancels_once_then_rejoins_at_the_new_generation'),
+ ('no-rejoin',c,'return Ok(Step { revoke: true, normal: None, send: Some(Op::Join) });','return Ok(Step { revoke: true, normal: None, send: Some(Op::State) });','a_joined_participant_cancels_once_then_rejoins_at_the_new_generation'),
+ ('join-any-reply',c,'if !state.enabled || state.phase != NORMAL {\n                return Err(Error::Invalid);','if false {\n                return Err(Error::Invalid);','a_join_answered_with_a_seat_away_from_normal_is_fatal'),
+ ('unjoined-retires',c,'let send = self.joined.then_some(Op::Retire);','let send = Some(Op::Retire);','a_stopping_participant_retires_only_what_it_joined'),
+ ('sample-before-pin-refused',c,'if self.members[i].unwrap().lane.is_none() {','if false {','a_sample_is_refused_to_another_peer_and_pins_nothing'),
+ ('sample-any-peer',c,'lane != 0 && self.members[i].unwrap().peer.stripes == stripes','lane != 0','a_sample_is_refused_to_another_peer_and_pins_nothing'),
+ ('sample-no-lane',c,'lane != 0 && self.members[i].unwrap().peer.stripes == stripes','self.members[i].unwrap().peer.stripes == stripes','a_sample_is_refused_to_another_peer_and_pins_nothing'),
  ('gate-without-ack',g,'&& self.acknowledged','&& true','exact_generation_and_quiescing_required'),
  ('gate-replay',g,'self.acknowledged = false;','/* stale acknowledgement survives */','no_replay_across_episode_failure_or_restoration'),
  ]
