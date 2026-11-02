@@ -2726,7 +2726,7 @@ static u32 fb_claim(const struct Proc *p) {
 // consume, unconsume, discard and move. Each is a cast a narrower type turns into 0,
 // which compiles.
 void test_notes_family_past_the_first_byte(void) {
-    const u32 usr2 = 1u << NOTE_BIT_USR2;
+    const u32 usr1 = 1u << NOTE_BIT_USR1, usr2 = 1u << NOTE_BIT_USR2;
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
@@ -2781,6 +2781,34 @@ void test_notes_family_past_the_first_byte(void) {
     u32  gone   = a.note_target;
     u32  heldg  = fb_claim(p);
 
+    // Two families at once. Giving one up leaves the other's claim alone, a masked
+    // designation stays when its twin becomes the claim, and an exit gives up only
+    // what the thread holds: a mask cast to 16 bits would clear the whole claim half.
+    const u32 both = usr1 | usr2;
+    __atomic_or_fetch(&p->note_caught, both << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    a.note_target = (u16)usr1;
+    notes_handoff_target(&a, 0u);
+    u32  held2  = fb_claim(p);
+
+    int  post3  = notes_post(p, NOTE_NAME_USR1, 0u, NULL, true);
+    __atomic_or_fetch(&p->note_caught, both << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    b.note_mask   = usr2;
+    b.note_target = (u16)both;
+    bool b3     = thread_caught_note_claim(&b);
+    u32  b_rec3 = b.note_claim;
+    u32  b_tgt3 = b.note_target;
+    b.note_mask   = 0u;
+    b.note_target = 0u;
+    notes_release_claims_for_test(&b);
+
+    __atomic_or_fetch(&p->note_caught, both << CAUGHT_CLAIM_SHIFT, __ATOMIC_RELEASE);
+    a.note_claim  = (u16)usr1;
+    irq_state_t ts = proc_threads_lock(p);
+    notes_exit_drop_locked(&a);
+    proc_threads_unlock(p, ts);
+    u32  a_rec3 = a.note_claim;
+    u32  held3  = fb_claim(p);
+
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 
@@ -2803,6 +2831,13 @@ void test_notes_family_past_the_first_byte(void) {
     TEST_EXPECT_EQ(heldk, usr2, "and the claim bit");
     TEST_EXPECT_EQ(gone, 0u, "one that does not gives the designation up");
     TEST_EXPECT_EQ(heldg, 0u, "and the claim bit");
+    TEST_EXPECT_EQ(held2, usr2, "a hand-off of usr1 leaves usr2's claim");
+    TEST_EXPECT_EQ(post3, 0, "a caught usr1 is accepted");
+    TEST_ASSERT(b3, "a designee of both, usr2 masked, unwinds");
+    TEST_EXPECT_EQ(b_rec3, usr1, "for usr1 alone");
+    TEST_EXPECT_EQ(b_tgt3, usr2, "and keeps the masked designation");
+    TEST_EXPECT_EQ(a_rec3, 0u, "an exit empties the thread's record");
+    TEST_EXPECT_EQ(held3, usr2, "and gives up its own family only");
 
     struct Proc *d = dn_proc();
     TEST_ASSERT(d != NULL, "proc_alloc succeeded");

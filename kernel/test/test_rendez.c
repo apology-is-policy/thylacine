@@ -2587,20 +2587,6 @@ void test_rendez_caught_note_handoff(void) {
     nt_handoff_body();
 }
 
-// rendez.caught_note_family_past_the_first_byte -- the paths above with usr2, whose
-// bit a byte cannot hold: the word, the walk's designation, the wait entry's keep
-// mask and the hand-off. A narrowing cast in any of them turns the bit into 0, which
-// compiles, and every test on a family below bit 8 stays green.
-void test_rendez_caught_note_family_past_the_first_byte(void) {
-    g_nt_note = NOTE_NAME_USR2;
-    g_nt_fam  = 1u << NOTE_BIT_USR2;
-    nt_direct_unwinds_body();
-    nt_prefers_awake_body();
-    nt_handoff_body();
-    g_nt_note = NOTE_NAME_INTERRUPT;
-    g_nt_fam  = 1u << NOTE_BIT_INTERRUPT;
-}
-
 // rendez.caught_note_exit_drop -- a designation ends at its thread's exit, at
 // the THREAD_EXITING commit, and the walk goes on to a thread that can take the
 // note. Main, awake and designated, exits through thread_exit_self; the peer,
@@ -2635,7 +2621,7 @@ void test_rendez_caught_note_exit_drop(void) {
 // queued. A second interrupt finds the family claimed,
 // so no thread is picked: only the walk's re-wake of the holder ends main's
 // wait (caught_target.tla BUGGY_NO_REKICK).
-void test_rendez_caught_note_holder_rewake(void) {
+static void nt_holder_rewake_body(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
     bool made   = nt_setup(true, t);
@@ -2673,6 +2659,25 @@ void test_rendez_caught_note_holder_rewake(void) {
     TEST_ASSERT(back2, "the walk re-woke the holder without a release");
     TEST_EXPECT_EQ(rc2, SLEEP_NOTEINTR, "...and it unwound for the second note");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+void test_rendez_caught_note_holder_rewake(void) {
+    nt_holder_rewake_body();
+}
+
+// rendez.caught_note_family_past_the_first_byte -- the paths above with usr2, whose
+// bit a byte cannot hold: the word, the walk's designation, the wait entry's keep
+// mask, the hand-off and the holder's re-wake. A narrowing cast in any of them turns
+// the bit into 0, which compiles, and every test on a family below bit 8 stays green.
+void test_rendez_caught_note_family_past_the_first_byte(void) {
+    g_nt_note = NOTE_NAME_USR2;
+    g_nt_fam  = 1u << NOTE_BIT_USR2;
+    nt_direct_unwinds_body();
+    nt_prefers_awake_body();
+    nt_handoff_body();
+    nt_holder_rewake_body();
+    g_nt_note = NOTE_NAME_INTERRUPT;
+    g_nt_fam  = 1u << NOTE_BIT_INTERRUPT;
 }
 
 // rendez.caught_note_native_kicks_only -- a native Proc's waits never unwind for
