@@ -383,9 +383,9 @@ pub extern "C" fn rs_main() -> i64 {
         // pts twin; ls-gfx-session asserts the armed line for every tile.
         match env_beacon_tier() {
             Some(t) => {
-                t_putstr("ut: beacon ");
-                t_putstr(t);
-                t_putstr(" inherited (pts host)\n");
+                // One console write: scenarios read these lines whole, and another
+                // process's line can land between two.
+                t_putstr(&alloc::format!("ut: beacon {} inherited (pts host)\n", t));
                 if t == "rich" && libthyla_rs::stdout_is_terminal() {
                     repl.set_beacon_rich(true);
                     t_putstr("ut: beacon rich (transcript zones armed)\n");
@@ -453,9 +453,7 @@ pub extern "C" fn rs_main() -> i64 {
             // tier -- a regression back to the dead-read shape (which
             // returned None) silences this line, so a scenario asserting it
             // is the fix's standing witness.
-            t_putstr("ut: beacon ");
-            t_putstr(t);
-            t_putstr(" exported\n");
+            t_putstr(&alloc::format!("ut: beacon {} exported\n", t));
             let stdout_is_cons = unsafe { libthyla_rs::t_fd_devclass(1) } == b'c' as i64;
             if t == "rich" && stdout_is_cons {
                 repl.set_beacon_rich(true);
@@ -619,9 +617,7 @@ pub extern "C" fn rs_main() -> i64 {
                                 beacon_tier = Some(t2);
                                 export_beacon(t2);
                                 repl.set_beacon_rich(t2 == "rich" && beacon_console);
-                                t_putstr("ut: beacon ");
-                                t_putstr(t2);
-                                t_putstr(" re-exported (renderer change)\n");
+                                t_putstr(&alloc::format!("ut: beacon {} re-exported (renderer change)\n", t2));
                             }
                         }
                     }

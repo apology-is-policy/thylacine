@@ -127,6 +127,10 @@ qualify a thirty-two-controller/multiple-session allocation guarantee.
   fails some, so a pass after a failed attempt keeps rc 0 but prints
   `LS-CI: UNEXPLAINED` and the scenario's name after the verdict, on both exits.
   Each failed attempt's evidence stays in `ls-ci-<name>.attempt<N>.{log,steps}`.
+- A needle reads one console write. The kernel keeps one write whole against other
+  writers and promises nothing between two, so a needle across two can miss when
+  another process's line lands inside. `tools/check-console-lines.py`, run by
+  `build.sh`, fails on one.
 - Scenario exit 77 = SKIP (a missing optional host artifact).
 
 ## Mechanism

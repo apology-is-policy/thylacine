@@ -899,6 +899,14 @@ DOSBOXCONF
              echo "    CLAUDE.md's condensed table must carry the same rows" >&2
              exit 1; }
 
+    # A scenario needle reading across two console writes misses when another
+    # process's line lands between them, and the gate reports the wrong failure.
+    echo "==> console line check (a needle reads one write)"
+    python3 "$REPO_ROOT/tools/check-console-lines.py" --self-test \
+        && python3 "$REPO_ROOT/tools/check-console-lines.py" --root "$REPO_ROOT" \
+        || { echo "==> console line check FAILED -- see tools/check-console-lines.py" >&2
+             exit 1; }
+
     # ERRORS.md principle 6: a syscall argument that does not fit is refused,
     # never cast down. Fatal, self-testing, sub-second.
     echo "==> argument width check (ERRORS.md principle 6)"

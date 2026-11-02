@@ -38,6 +38,20 @@
 #  endif
 #endif
 
+// One console write: another process's line can land between two, and a
+// scenario reads a spawn line whole. An overlong line keeps its newline.
+static void joey_put_line(const char *const *parts, size_t count) {
+    char line[160];
+    size_t len = 0;
+    for (size_t i = 0; i < count; i++) {
+        for (const char *p = parts[i]; *p && len < sizeof(line) - 1; p++) {
+            line[len++] = *p;
+        }
+    }
+    if (len == 0 || line[len - 1] != '\n') line[len++] = '\n';
+    (void)t_puts(line, len);
+}
+
 static const char *itoa_dec(long v, char *buf, size_t buf_sz) {
     if (buf_sz == 0) return "";
     if (v == 0) {
@@ -12675,11 +12689,11 @@ int main(void) {
                     return 1;
                 }
                 joey_daemon_record(aur_pid, rlabel);   // #80
-                t_putstr("joey: ");
-                t_putstr(rlabel);
-                t_putstr(" spawned pid=");
-                t_putstr(itoa_dec(aur_pid, dbuf, sizeof(dbuf)));
-                t_putstr(" (the console renderer; the gate's scanout owner)\n");
+                const char *spawned[] = {
+                    "joey: ", rlabel, " spawned pid=", itoa_dec(aur_pid, dbuf, sizeof(dbuf)),
+                    " (the console renderer; the gate's scanout owner)\n",
+                };
+                joey_put_line(spawned, sizeof(spawned) / sizeof(spawned[0]));
             }
         } else {
             t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");

@@ -174,19 +174,22 @@ fn print_proc_imperium() {
     let mut buf = [0u8; 256];
     let r = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     let _ = unsafe { t_close(fd) };
-    t_putstr("imperium-probe: ");
-    puts(&path);
-    t_putstr(": ");
+    // One console write: another process's line can land between two.
+    let mut line: Vec<u8> = Vec::new();
+    line.extend_from_slice(b"imperium-probe: ");
+    line.extend_from_slice(&path);
+    line.extend_from_slice(b": ");
     if r > 0 {
         let mut end = r as usize;
         while end > 0 && (buf[end - 1] == b'\n' || buf[end - 1] == b'\r') {
             end -= 1;
         }
-        puts(&buf[..end]);
+        line.extend_from_slice(&buf[..end]);
     } else {
-        t_putstr("(read failed)");
+        line.extend_from_slice(b"(read failed)");
     }
-    t_putstr("\n");
+    line.push(b'\n');
+    puts(&line);
 }
 
 #[no_mangle]

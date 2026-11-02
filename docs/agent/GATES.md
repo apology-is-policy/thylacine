@@ -193,6 +193,8 @@ make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --
 # login + assert rendered command output (the test that would have caught LS-1).
+# A needle must read one console write: tools/check-console-lines.py, run by
+# build.sh, fails if one spans two.
 # Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded
 # retry (LS_CI_ATTEMPTS=3). A pass after a failed attempt keeps rc 0 but prints
 # `LS-CI: UNEXPLAINED` under the verdict: read it, a race fails SOME attempts.

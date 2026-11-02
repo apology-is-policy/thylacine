@@ -47,9 +47,8 @@ use libthyla_rs::{
 };
 
 fn fail(leg: &str) -> ! {
-    t_putstr("viv-probe: FAIL: ");
-    t_putstr(leg);
-    t_putstr("\n");
+    // One console write: viv-run reads this line whole.
+    t_putstr(&format!("viv-probe: FAIL: {}\n", leg));
     unsafe { t_exits(1) }
 }
 
@@ -158,11 +157,7 @@ pub extern "C" fn rs_main() -> i64 {
         Err(_) => fail("readdir /proc"),
     }
     if listed.len() != 1 || listed[0] != my_pid {
-        let msg = format!("pid enumeration not exactly self ({} entries)", listed.len());
-        t_putstr("viv-probe: FAIL: ");
-        t_putstr(&msg);
-        t_putstr("\n");
-        unsafe { t_exits(1) }
+        fail(&format!("pid enumeration not exactly self ({} entries)", listed.len()));
     }
 
     // --- leg 4 rode leg 1a (/srv has no path into this namespace at all).

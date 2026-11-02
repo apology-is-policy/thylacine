@@ -3553,8 +3553,12 @@ unsafe fn imperium_pending_remaining_ms() -> Option<i32> {
     Some(core::cmp::min(ms, (i32::MAX as u64) - 1) as i32 + 1)
 }
 
+fn bytes_text(b: &[u8]) -> &str {
+    core::str::from_utf8(b).unwrap_or("?")
+}
+
 fn putbytes(b: &[u8]) {
-    t_putstr(core::str::from_utf8(b).unwrap_or("?"));
+    t_putstr(bytes_text(b));
 }
 
 fn put_hex64(v: u64) {
@@ -4072,9 +4076,9 @@ unsafe fn episode_confer(
         provincia::compose_locked(&p.user, p.level, out);
         let _ = console_write_all(fd, out);
         console_wait_any_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS);
-        t_putstr("corvus: imperium: RATE-LIMITED ");
-        putbytes(&p.user);
-        t_putstr("\n");
+        // One console write: another process's line can land between two, and
+        // the seat scenarios read these three verdict lines whole.
+        t_putstr(&alloc::format!("corvus: imperium: RATE-LIMITED {}\n", bytes_text(&p.user)));
         return ImperiumOutcome::RateLimited;
     }
     // 2. The provincia: the whole grant, on the unforgeable channel, first.
@@ -4146,9 +4150,7 @@ unsafe fn episode_confer(
     if !good {
         imperium_fail_inc(&p.user, p.level);
         verdict(fd, out, b"imperium DENIED: wrong key", lictor::model::State::Denied);
-        t_putstr("corvus: imperium: DENIED (wrong key) for ");
-        putbytes(&p.user);
-        t_putstr("\n");
+        t_putstr(&alloc::format!("corvus: imperium: DENIED (wrong key) for {}\n", bytes_text(&p.user)));
         return ImperiumOutcome::Denied;
     }
     imperium_fail_reset(&p.user, p.level);
@@ -4194,14 +4196,10 @@ unsafe fn episode_confer(
         return ImperiumOutcome::Internal;
     }
     verdict(fd, out, b"Authority conferred to the requesting process.", lictor::model::State::Success);
-    let mut nbuf = [0u8; 12];
-    t_putstr("corvus: imperium: CONFERRED to ");
-    putbytes(&p.user);
-    t_putstr(" session ");
-    t_putstr(usize_dec(session as usize, &mut nbuf));
-    t_putstr(" caps 0x");
-    put_hex64(p.caps);
-    t_putstr("\n");
+    t_putstr(&alloc::format!(
+        "corvus: imperium: CONFERRED to {} session {} caps 0x{:016x}\n",
+        bytes_text(&p.user), session, p.caps
+    ));
     ImperiumOutcome::Conferred { session }
 }
 
