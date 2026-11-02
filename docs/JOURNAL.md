@@ -22,6 +22,53 @@ needed the operator.
 
 
 ---
+## 2026-11-02 -- b3's env shapes come home, and a rewrite main already had (corona)
+
+**b3's env shapes, brought home.** main's backport of the spawn environment tail to b3 went through two audit
+rounds, and their findings were mine: the code was env-a and env-c. Two P2s. A tail-spawned child held a full copy of
+its spawner's environment until its thunk replaced it, so `/proc/<pid>/environ` showed what the spawner had chosen
+not to pass, a sealed spawner's included. And the tail admitted the names `.` and `..`, which no create or unlink
+reaches and every walk resolves, so such an entry took a slot, was copied to descendants and was projected into envp
+with no way to remove it. I ported the shapes as new commits on a branch off 0ece92257 rather than merging b3: the
+kernel-internal `RFCENVG`, so a tail spawn's child is born with no environment and adopts the built one; the dot
+rule in `name_valid`; pouch 0025's two skips; one read per value in `Command::env` and `env::var`; the live Env
+count and its refusal leg; the rfork word in check-flag-words; and b3's r2 decision record with the supersede flip.
+
+**Where this tree is not b3.** Three things had to be re-derived rather than copied. The env tail's offset assert is
+pinned on `SPAWN_EXT_CWD | SPAWN_EXT_THREADS`, since this tree carries the thread tail on bit 1. `env_live_count`
+has no production caller, and vote 19 says such a function compiles only under `KERNEL_TESTS`; b3 has no such rule,
+so its plain extern became a gated one. And the refusal leg's premise, that nothing else makes or frees an Env while
+the count is read, rests on how a reap frees a child here: `wait_pid_for` calls `proc_free` itself, after the last
+thread is freed, so the group is gone before the wait returns. b3's v19 handle refcounting (`env_ref`, `env_unref`,
+the `*_in` forms) is b3's own work and stays there; it arrives with a merge. b3's round 2 also corrected a stale
+libthyla-rs comment ("RFPROC alone is refused", false since L-5), and this tree had the same line.
+
+**Before a machine was free.** The pouch series applies at fuzz 0 and zero offset, all 51 patches, with both skips
+present. check-flag-words owns the rfork word and turns red when `RFCENVG` is given `RFENVG`'s bit. Both EL0 fork
+paths pass literal or exact-checked flags (`sys_rfork_core`'s two shapes, vivarium's literals), so no user word
+reaches the mask. (`check-flag-words` and the series check ran with no lease; everything below waited for the mac.)
+
+**The audit found the records, not the code.** Fable 5.1 reviewed the port (MODEL start == end) and returned 0/0/0/3,
+every finding in a record that claimed to describe this tree. The decision record I had copied from b3 verbatim
+decided "+120 after a cwd tail where bit 1 is refused"; this tree serves bit 1, so its tail sits at +104, +112, +120
+or +128. The trigger row had dropped the 0025 patch and its host test, which the row's own invariant makes
+load-bearing. The change record's `touched:` left out a dossier the port edits. My first fix edited both records in
+place, and the vault lint refused it: a committed record is append-only. Both notes live only in an unpushed WIP
+commit, so the fix goes into the cherry-pick that publishes them, and they are right from their first published
+commit. The withdrawn list is the useful part: the reviewer re-derived the NULL-env window, the single free of the
+built group on every exit, and the live-count premise against this tree's reap, and found each guarded by named code.
+
+**The landing moved ahead of its gates.** The plan was to gate the port in its own worktree and cherry-pick after. That worktree's tip by then was c0ca603d1, an unbuilt vote-36 commit, so a compile error there would have thrown away a whole lease, and a green there would have said nothing about the tree being pushed, which had moved on by four commits. So the three commits went onto corona/async-memory first (220748bd4, 050f893de, 51ddd036f, the records fixed in the first of them), and q-env2 ran on that tree, with its GREEN leg serving as the push gate. Vote 36's two seat mutants left this run and go with the F1 fix.
+
+**Gates, on 51ddd036f.** Default suite 2120/2120 (GREEN 08:14Z, and GREEN2 08:33Z after the mutants), joey's spawn-env probe OK with its 9 refusals. A red suite says little until it names its test, so I read each boot log: E2 (no `RFCENVG`) failed "the child's group is the built one, born empty (RFCENVG), not a refilled copy"; E3 (no dot rule) failed `"." refused`; E3j (the dot rule gone and its kernel legs silenced, so the boot reaches EL0) failed joey's probe at `dotdot=7436` where -22 is owed; E4 (no discard) failed "the group built for a spawn that then failed is freed". `test-pouch-env-init.py` passed 16/16, and each mutant failed exactly its own 6 cases. One line in that log proves nothing: `test-rust libthyla-rs` returned 0 having run 0 tests, because the crate cannot host-test, so `Command::env`'s and `env::var`'s single read rest on the guest legs alone. The summary grep I wrote for "... FAIL" matched no failure in any leg; the real lines start `FAIL:`.
+
+**Three days of nothing.** My queue place behind aux ended at 20:04Z on 10-29: aux's final run had finished at 18:33Z with no release in it, its session stopped, and `thyla-wake` exits rc=1 on an expired lease, so the hold ended without the machine. I did not act on that, and the session sat until 11-02 08:03Z, when aux released.
+
+**A rewrite main already had.** While the mac was busy I took a four-day-old OPEN-BUGS item of mine, "coreutils `env` is still the v1.0 degenerate". I wrote it a full implementation, 12 coreutil-smoke legs and a manual task (1346b1ed4 on corona/env-shapes), and enqueued a new P3, "ut cannot remove a variable from its own environment", then repeated both in a status reply to the operator. main c5451ed84 already had all of it: `env` (`coreutils::envcmd`, exec in place), ut's `unset`, `docs/manual/21-environment.md`, and bind-at-open in devenv. Worse, my manual task claimed `echo -n V > /env/NAME` sets the shell's variable, which on this branch does the opposite: ut's open truncates the shell's own copy and the value dies with `echo`, as measured on 09-16. What caught it was grepping memory for "env-b" and seeing `bug_env_redirect_writes_child_copy` in the file list. I reverted the commit (8263f4ba7; never built or pushed), withdrew the P3 and corrected the reply. The item was true of this branch only, and it stays open until the integration merge. On a branch 636 commits off main, check main's copy before fixing or enqueuing a missing feature.
+
+**What "fixed" covers.** On corona/async-memory: a spawned child born with no environment, the dot-name rule, pouch 0025's two skips, one read per value, the live Env count and its refusal leg, the rfork word in check-flag-words. Not here: b3's v19 handle refcounting and bind-at-open, so `> /env/NAME` from ut still empties the shell's variable on this branch until the merge, along with main's `env` and `unset`. Go env-b waits for branch main to carry bit 2, on main's word (0266 note 7): main c5451ed84 refuses the bit, so a tree building the fork's tip from it would lose every Go spawn. Vote 36 and its P1 (corvus choosing its medium from the seat phase alone, on main's tree too) remain open, unlanded.
+
+
 ## 2026-10-29 -- an image gate, the hang behind it, and a GPU stall that takes no verdict (corona)
 
 The trap (OPEN-BUGS 2026-10-28T23:14Z) cost me two Pi runs on 10-28: `warp-host.sh quake` on a default image booted

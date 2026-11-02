@@ -4,7 +4,7 @@ type: chg
 title: "The spawn environment tail takes b3's audited shapes: the child is born with no environment, the dot names are refused"
 date: 2026-10-29
 arc: arc-go-ide
-commits: []
+commits: ["220748bd4", "050f893de", "51ddd036f"]
 touched:
   - sub-kernel-content
   - sub-kernel-syscall-abi

@@ -2919,3 +2919,23 @@ composition off for the boot. Also closes 11:39Z, the same class at bring-up.
 - **Audit.** Fable 5.1, two rounds, 0/0/1/6, all fixed. Round 1: the stall shot was not bound to its command (now
   spent and said as LOST on any other exit); the attach-time health copy's stall was not counted. Round 2's P2: the
   convention attempt's cleanup destroy parked during a standing stall, and its revival read as the device's answer.
+
+## The spawn environment takes b3's audited shapes -- 2026-11-02
+
+Code 220748bd4, 050f893de, audit close 51ddd036f. Closes OPEN-BUGS 2026-10-29T09:41Z: main's b3 backport of env-a and env-c
+found two P2s in them across two audit rounds, and this tree carried both.
+
+- **Born empty.** A spawn with an environment tail forks with the kernel-internal `RFCENVG`, so the child adopts the built
+  group and `/proc/<pid>/environ` never shows the spawner's environment in between, a sealed spawner's included.
+- **Dot names.** `name_valid` refuses `.` and `..`, which no create or unlink reaches and every walk resolves.
+- **Also taken.** Pouch 0025's two skips, one read per value in `Command::env` and `env::var`, the live Env count and its
+  refusal leg (KERNEL_TESTS only, vote 19), the rfork word in check-flag-words.
+- **Not b3's words.** The tail's offset assert is pinned on `SPAWN_EXT_CWD | SPAWN_EXT_THREADS`, and
+  dec-2026-10-29-spawn-env-r2 places the tail at +104, +112, +120 or +128, since this tree serves bit 1. b3's handle
+  refcounting (bind-at-open) arrives with the integration merge.
+- **Witness.** Default suite 2120/2120, before and after the mutants, on 51ddd036f. Four mutants, each red at its own leg:
+  no `RFCENVG`, no dot rule at the kernel legs, no dot rule at joey's EL0 leg, and no discard of a refused spawn's group.
+  `test-pouch-env-init.py` 16/16, each mutant failing exactly its own 6 cases. `libthyla-rs` has no host tests, so its
+  changes rest on the guest legs.
+- **Audit.** Fable 5.1, 0/0/0/3, all in the records: the copied decision's offsets, the trigger row's dropped files, and
+  the change record's `touched:`.
