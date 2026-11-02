@@ -60,8 +60,10 @@ struct t_file_lock; // <thylacine/syscall.h>; SYS_FILE_LOCK's TEST answer
 // to the per-component loop -- correctness identical, RPC count higher.
 // Distinct from NULL (a REAL walk failure at the first component). Callers
 // must NOT walkqid_free it. dev9p latches the answer per-session, so after
-// the one probe RPC the sentinel returns instantly. Native implementations
-// (devramfs) never return it.
+// the one probe RPC the sentinel returns instantly. dev9p answers it unlatched
+// too when a multi-name walk failed and cannot say at which name: only the
+// per-component loop can then tell what the caller may know. Native
+// implementations (devramfs) never return it.
 extern struct Walkqid dev_walk_attrs_unsupported;
 #define DEV_WALK_ATTRS_UNSUPPORTED (&dev_walk_attrs_unsupported)
 
@@ -295,6 +297,20 @@ struct Dev {
     struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
                             u32 perm, u32 gid);
     int           (*close)(struct Spoor *c);
+    //   fd_close(c) -- c's last descriptor has closed, and c may live on behind
+    //     other references (a map, a mount, a Loom registration). What close(2)
+    //     owes happens here, on the closing thread, which may wait for a server:
+    //     dev9p lands its staged run and releases its locks. 0, or a negative
+    //     errno close(2) reports. Runs again if c is published again and that
+    //     descriptor closes. NULL-permitted.
+    //     close, by contrast, runs at the last REFERENCE, which can fall on any
+    //     thread (an exec evicting an image, a reap draining a mapping), so it
+    //     must never wait on anything outside the kernel.
+    //   lock_held(c) -- might a lock taken through c itself stand? fd_close
+    //     would release it. A cheap read, may answer true after an unlock.
+    //     NULL-permitted.
+    int           (*fd_close)(struct Spoor *c);
+    bool          (*lock_held)(struct Spoor *c);
 
     // I/O.
     //   read / write   — byte-stream I/O at offset.

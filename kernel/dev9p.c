@@ -37,15 +37,27 @@ _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
 // A thread no kill can pull out of a wait -- a kernel thread, an exit close --
 // never waits for the server here: where the clunk would wait for a tag or
 // for room in the request ring, the fid goes to the closer (ARCH 8.8.1.1).
+static void dev9p_clunk_settle(struct p9_client *cl, struct p9_attached *owner,
+                               u32 fid, int rc) {
+    if (rc == 0) return;
+    if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
+        return;
+    if (p9_client_fid_held(cl, fid)) p9_clunk_refused(fid, rc);
+}
+
 static void dev9p_clunk_fid(struct p9_client *cl, struct p9_attached *owner,
                             u32 fid) {
     int rc = thread_death_reaches(current_thread())
                  ? p9_client_clunk_async(cl, fid)
                  : p9_client_clunk_nowait(cl, fid);
-    if (rc == 0) return;
-    if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
-        return;
-    if (p9_client_fid_held(cl, fid)) p9_clunk_refused(fid, rc);
+    dev9p_clunk_settle(cl, owner, fid, rc);
+}
+
+// A last reference's clunk (Dev.close): it can fall on any thread, so it never
+// waits, even where a kill could end the wait.
+static void dev9p_close_clunk(struct p9_client *cl, struct p9_attached *owner,
+                              u32 fid) {
+    dev9p_clunk_settle(cl, owner, fid, p9_client_clunk_nowait(cl, fid));
 }
 
 // =============================================================================
@@ -378,8 +390,9 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // bounded by the in-flight flusher's independent progress (it is parked in
 // the 9P recv and completes or death-unwinds per #811, decrementing either
 // way); no Rendez, so no park/wake surface, no single-waiter hazard, no new
-// I-9 leg. Close never reaches the wait (last-ref: no concurrent op); the
-// cap flush never does either (staging requires wb_flushers == 0).
+// I-9 leg. A kill ends the wait with the run kept, as a death inside the flush
+// keeps it. A last close can reach the wait (a peer holds a reference and is
+// flushing); the cap flush never does (staging requires wb_flushers == 0).
 //
 // The flusher count freezes the run: while it is nonzero, stagers stand
 // down (write-through) and growth reallocation is impossible, so the
@@ -394,8 +407,8 @@ static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
 // the flush is the exception: a death refuses its send or abandons its Twrite,
 // which says nothing about the server, and write() already reported those
 // bytes written. The run stays staged and nothing is latched, so the next
-// flusher -- the last close at the latest -- sends it; a prefix that landed
-// is rewritten with the same bytes at the same offsets.
+// flusher -- the last close or a closer at the latest -- sends it; a prefix
+// that landed is rewritten with the same bytes at the same offsets.
 // Was this flush's EINTR a caught note cancelling the Twrite? Every caught-note
 // unwind takes the note's claim (thread_caught_note_unwinds), held until the
 // thread's EL0-return tail, so a claim marks the client's flush(5) cancellation.
@@ -408,6 +421,7 @@ static bool wb_note_cancelled(int err) {
 
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     while (p->wb_flushers != 0) {
+        if (thread_die_pending(current_thread())) return -P9_E_IO;
         spin_unlock(&p->wb_lock);
         sched();                     // yield; the flusher owns the progress
         spin_lock(&p->wb_lock);
@@ -1206,7 +1220,18 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         walkqid_free(w);
         return DEV_WALK_ATTRS_UNSUPPORTED;
     }
-    if (rc != 0 || nwqid > (u16)nname) {
+    if (rc != 0 && rc != -T_E_NOENT && nname > 1) {
+        // Any other failure of a multi-name walk does not say which name failed.
+        // A server may fail past the first name (Stratum: a read error, a wedged
+        // pool), so the resolver's "the first name failed" reading would skip the
+        // X gates of the names before it and the mount split, and report a path
+        // that may exist as missing. Nothing was bound. Let it walk name by name;
+        // this says nothing about the server's ability, so nothing latches.
+        kfree(attrs);
+        walkqid_free(w);
+        return DEV_WALK_ATTRS_UNSUPPORTED;
+    }
+    if (rc != 0) {
         // L1d negative populate: a definitive first-component miss (Rlerror
         // ENOENT -- name[0] does not exist in c) is cacheable so a repeated
         // failed lookup serves RPC-free. Only for -T_E_NOENT (a clean "no such
@@ -1215,9 +1240,9 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
             larder_dentry_install(&src_priv->client->larder, wga_seq0,
                                   c->qid.path, name[0], name_lens[0], 0,
                                   /*negative=*/true);
-        // Rlerror (miss at the first component / server error) or a
-        // malformed over-count. Nothing was bound (the session layer binds
-        // new_fid only on a FULL walk); nc untouched.
+        // Rlerror: a miss at the first component, or a one-name walk's failure.
+        // Nothing was bound (the session layer binds new_fid only on a FULL
+        // walk); nc untouched.
         kfree(attrs);
         walkqid_free(w);
         return NULL;
@@ -1815,24 +1840,12 @@ static void dev9p_close_job_release(struct p9_close_job *job) {
     kfree(j);
 }
 
-// May a last close wait for its server? Not on a thread a death has reached
-// (its sends are refused), nor on a kernel thread something joins without
-// bound (closes_never_wait: nothing would end the wait).
+// May a close wait for its server? Not on a thread a death has reached: its
+// sends are refused. Only a last descriptor's close and a lock call ask; a last
+// reference never waits.
 static bool close_may_wait(void) {
     struct Thread *t = current_thread();
-    return t && !t->closes_never_wait && !thread_die_pending(t);
-}
-
-// A close returns with its fid's locks released: a clunk releases them too, but
-// it never waits (ARCH 7.9.1 part A), and a server's workers need not serve it
-// before the request that follows. So the close waits on an unlock, as it waits
-// on its flush, which runs first. A thread that may not wait leaves them to the
-// clunk.
-static void dev9p_close_release_locks(struct dev9p_priv *p, u32 fid) {
-    if (!__atomic_load_n(&p->lock_granted, __ATOMIC_ACQUIRE) || !close_may_wait())
-        return;
-    u8 status = P9_LOCK_ERROR;
-    (void)p9_client_lock(p->client, fid, P9_LOCK_TYPE_UNLCK, 0, 0, 0, &status);
+    return t && !thread_die_pending(t);
 }
 
 // Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
@@ -1925,38 +1938,26 @@ static int dev9p_close(struct Spoor *c) {
         co_budget_uncharge(p->co_size + p->co_names_len);
         p->co_buf = NULL;
         if (p->co_rfid != P9_NOFID)
-            dev9p_clunk_fid(p->client, p->attached_owner, p->co_rfid);
-        if (p->co_kfid != P9_NOFID) {
-            dev9p_close_release_locks(p, p->co_kfid);
-            dev9p_clunk_fid(p->client, p->attached_owner, p->co_kfid);
-        }
+            dev9p_close_clunk(p->client, p->attached_owner, p->co_rfid);
+        if (p->co_kfid != P9_NOFID)
+            dev9p_close_clunk(p->client, p->attached_owner, p->co_kfid);
         if (p->co_names) kfree(p->co_names);
         p->co_names = NULL;
         if (p->co_start) spoor_clunk(p->co_start);
         p->co_start = NULL;
     }
 
-    // F1 write-behind: flush the staged run BEFORE the async-clunk Tclunk
-    // below (the fid must be live for the flush Twrites -- a Tclunk racing
-    // ahead would write to a dead fid). LAST-ref runs here (the cached-open/
-    // weft invariant), so no concurrent op exists on this priv: the plain
-    // wb_len/wb_err reads and the uncontended flush are sound; wb_flushers is
-    // 0. The close returns this flush's failure, or the one the latch kept
-    // from an earlier flush, and close(2) reports it as EIO (ARCH 21.11).
-    // A close that may not wait never flushes here, and a death that ends
-    // the flush keeps the run: a run still staged after this step goes to a
-    // closer with the fid's clunk (ARCH 7.9.1 part C), and is no loss yet.
-    // Then release the buffer + the global budget (unconditional on wb_buf:
-    // a priv that stopped staging may still own its buffer).
+    // F1 write-behind: the last close (dev9p_fd_close) landed the run if its
+    // thread could wait. One still staged here -- a death ended that flush, or
+    // the Spoor never had a descriptor -- goes to a closer with the fid's clunk
+    // (ARCH 7.9.1 part C), since this thread may not wait for the server, and is
+    // no loss yet. LAST-ref runs here (the cached-open/weft invariant), so no
+    // concurrent op exists on this priv: the plain wb_len reads are sound and
+    // wb_flushers is 0. Then release the buffer + the global budget
+    // (unconditional on wb_buf: a priv that stopped staging may still own its
+    // buffer).
     int  crc    = 0;
     bool handed = false;
-    if (p->wb_len && close_may_wait()) {
-        spin_lock(&p->wb_lock);
-        crc = wb_flush_locked(p, c->qid.path);
-        spin_unlock(&p->wb_lock);
-    } else if (!p->wb_len && p->wb_err) {
-        crc = -(p->wb_err);
-    }
     if (p->wb_len) {
         crc    = wb_close_hand_off(p, c->qid.path);
         handed = crc == 0;
@@ -1990,20 +1991,16 @@ static int dev9p_close(struct Spoor *c) {
     // tore down the adapter — walked privs closing afterward UAF'd via
     // their stale client pointer (R15 F236).
     if (p->fid_owned && !handed) {
-        dev9p_close_release_locks(p, p->fid);
         // Walk-derived Spoor: clunk the fid. FID-LIFECYCLE async-clunk -- the
-        // normal close path fires the Tclunk fire-and-forget (the submitter is
-        // not parked for the clunk RTT; the fid unbinds at send + its number is
-        // never reused, and the ownerless Rclunk drains via a later op's reader,
-        // the #845 discipline). Every dev9p clunk goes through dev9p_clunk_fid:
-        // the rollback clunks in walk/walk_attrs/create are asynchronous too, so
-        // no dev9p Tclunk waits for its Rclunk. p9_client_clunk_async composes
-        // internally with the #841 tag pool (it drains ownerless Rclunks on a
-        // full pool -- the #926 proc-exit close-burst -- before send) and the
-        // #349 c2s back-pressure (EAGAIN is retried, never a session death). A
-        // dying thread cannot send at all -- client_send_flow refuses every
-        // dying sender at its loop top, pool full or not -- so its Tclunk goes
-        // to the closer threads (FID-LIFECYCLE section 9), which is what
+        // Tclunk goes fire-and-forget (no thread is parked for the clunk RTT; the
+        // fid unbinds at send + its number is never reused, and the ownerless
+        // Rclunk drains via a later op's reader, the #845 discipline). The clunk
+        // also releases what locks the fid still holds, for a close that could
+        // not wait for its unlock. This thread may be anyone's, so where the
+        // send would wait for a tag or for ring space the fid goes to the
+        // closer threads instead (dev9p_close_clunk; FID-LIFECYCLE section 9),
+        // and a dying thread cannot send at all -- client_send_flow refuses every
+        // dying sender at its loop top, pool full or not -- which is what
         // gopls's kill of a child still in its spawn thunk reaches. The refusal
         // line prints only for a fid the live session still holds.
         // G2 donate (docs/FID-LIFECYCLE-DESIGN.md section 4): an UNOPENED
@@ -2028,10 +2025,10 @@ static int dev9p_close(struct Spoor *c) {
             s64 vic = dirfid_put(p->client, c->qid.path, p->fid);
             parked = true;
             if (vic >= 0)
-                dev9p_clunk_fid(p->client, p->attached_owner, (u32)vic);
+                dev9p_close_clunk(p->client, p->attached_owner, (u32)vic);
         }
         if (!parked)
-            dev9p_clunk_fid(p->client, p->attached_owner, p->fid);
+            dev9p_close_clunk(p->client, p->attached_owner, p->fid);
     }
 
     if (p->attached_owner) {
@@ -2245,7 +2242,15 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // handler returning -T_E_PERM=1). One residual: a server EPERM (Rlerror
     // ecode==1) collides with the -1 generic sentinel -> EIO; conveying it
     // needs a wider channel (the ER-rollout's job).
-    if (rc != 0) return (long)rc;
+    //
+    // A failed write may have landed: a reply this thread never read (a death),
+    // or a count past the request. As a failed flush does, drop what the file's
+    // entries said; the range is unknown, so all its pages go.
+    if (rc != 0) {
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+        return (long)rc;
+    }
     // L1c/L1e invalidate (fs_cache.tla OwnWrite): the file's attrs (size/mtime/
     // cvers) AND its content changed. Drop its cached attr entry AND the pages
     // the write actually TOUCHED (G1b range-scoped: [offset, offset+accepted)).
@@ -2276,7 +2281,8 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
 // issues Tweftio(WRITE); netd reads the ring IN PLACE + replies the moved-byte
 // count. Returns 1 if handled (the weft path was taken; *accepted set), 0 if NOT
 // a weft write (the caller falls back to the byte-copy path -- small payload,
-// not weft-bound, or a buffer outside the ring), -1 on a weft transport error.
+// not weft-bound, or a buffer outside the ring), -1 on a weft transport error or
+// a server's count past the request.
 // NOT the byte-copy path: the payload is already in the shared ring (the native
 // client wrote it there), so nothing is copied through the 9P body.
 int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepted) {
@@ -2290,7 +2296,7 @@ int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepte
         return 0;                                       // buffer not in the ring -> byte-copy
     u32 got = 0;
     int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_WRITE, &got);
-    if (e != 0) return -1;                              // weft attempted + failed (dead flow)
+    if (e != 0) return -1;                              // a dead flow, or a count past the request
     if (accepted) *accepted = got;
     return 1;                                           // handled zero-copy
 }
@@ -2302,7 +2308,7 @@ int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepte
 // into the ring + replies the recv'd byte count. Returns 1 if handled (*got set),
 // 0 if NOT a weft read (the caller falls back to the byte-copy path -- small
 // payload, not weft-bound, or a buffer outside the ring), -1 on a weft transport
-// error. NOT the byte-copy path: netd writes the bytes directly into the guest's
+// error or a server's count past the request. NOT the byte-copy path: netd writes the bytes directly into the guest's
 // shared ring, so nothing is copied back through the 9P body OR the SYS_READ
 // scratch -- the SYS_READ handler does NO uaccess_store on this path.
 int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got) {
@@ -2316,7 +2322,7 @@ int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got) {
         return 0;                                       // buffer not in the ring -> byte-copy
     u32 n = 0;
     int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_READ, &n);
-    if (e != 0) return -1;                              // weft attempted + failed (dead flow)
+    if (e != 0) return -1;                              // a dead flow, or a count past the request
     if (got) *got = n;
     return 1;                                           // handled zero-copy
 }
@@ -2381,17 +2387,20 @@ static int lock_wire_errno(int rc) {
 }
 
 // The flush a release owes when its thread may not wait, queued alone on the
-// session's closer. The job holds c, so c's fid stays bound until it has run.
+// session's closer, and for a last close that leaves c alive the unlock after
+// it. The job holds c, so c's fid stays bound until it has run.
 struct dev9p_lock_flush_job {
     struct p9_close_job job;     // first: the closer hands back this pointer
     struct Spoor       *c;
+    bool                release_locks;
 };
 
 static int dev9p_lock_flush_job_run(struct p9_close_job *job,
                                     struct p9_client *cl, u32 fid) {
     (void)cl;
     (void)fid;
-    struct Spoor *c = ((struct dev9p_lock_flush_job *)job)->c;
+    struct dev9p_lock_flush_job *j = (struct dev9p_lock_flush_job *)job;
+    struct Spoor *c = j->c;
     struct dev9p_priv *p = priv_of(c);
     if (!p) return 0;
     int rc = 0;
@@ -2399,6 +2408,12 @@ static int dev9p_lock_flush_job_run(struct p9_close_job *job,
     if (p->wb_len || p->wb_flushers)
         rc = wb_flush_locked(p, c->qid.path);
     spin_unlock(&p->wb_lock);
+    if (j->release_locks &&
+        __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST)) {
+        u8 status = P9_LOCK_ERROR;
+        (void)p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
+                             &status);
+    }
     return rc;
 }
 
@@ -2406,6 +2421,25 @@ static void dev9p_lock_flush_job_release(struct p9_close_job *job) {
     struct dev9p_lock_flush_job *j = (struct dev9p_lock_flush_job *)job;
     spoor_clunk(j->c);
     kfree(j);
+}
+
+// Queue that job. 0, or a negative errno with nothing queued.
+static int dev9p_lock_flush_queue(struct dev9p_priv *p, struct Spoor *c,
+                                  bool release_locks) {
+    if (!p->attached_owner) return -T_E_IO;     // a test's bare client
+    struct dev9p_lock_flush_job *j = kmalloc(sizeof(*j), 0);
+    if (!j) return -T_E_NOMEM;
+    j->job.run       = dev9p_lock_flush_job_run;
+    j->job.release   = dev9p_lock_flush_job_release;
+    j->c             = c;
+    j->release_locks = release_locks;
+    spoor_ref(c);
+    if (p9_attached_defer_close(p->attached_owner, P9_NOFID, &j->job) != 0) {
+        spoor_clunk(c);            // the caller's reference keeps it open
+        kfree(j);
+        return -T_E_NOMEM;
+    }
+    return 0;
 }
 
 // A loose cached open binds a fid on its first need, by walking the run that
@@ -2537,19 +2571,61 @@ static int dev9p_lock_sync(struct Spoor *c, u32 how) {
     bool staged = p->wb_len || p->wb_flushers;
     spin_unlock(&p->wb_lock);
     if (!staged) return 0;
-    if (!p->fid_owned || !p->attached_owner) return -T_E_IO;   // a test's bare client
-    struct dev9p_lock_flush_job *j = kmalloc(sizeof(*j), 0);
-    if (!j) return -T_E_NOMEM;
-    j->job.run     = dev9p_lock_flush_job_run;
-    j->job.release = dev9p_lock_flush_job_release;
-    j->c           = c;
-    spoor_ref(c);
-    if (p9_attached_defer_close(p->attached_owner, P9_NOFID, &j->job) != 0) {
-        spoor_clunk(c);            // the caller's reference keeps it open
-        kfree(j);
-        return -T_E_NOMEM;
+    if (!p->fid_owned) return -T_E_IO;         // a test's bare client
+    return dev9p_lock_flush_queue(p, c, /*release_locks=*/false);
+}
+
+// c's last descriptor has closed, on the closing thread, which may wait for its
+// server (ARCH 7.9.1, 9.6.11). The close returns with c's run landed and the
+// lock c holds released, though a map or a mount may keep c alive for much
+// longer. A clunk releases a fid's locks too, but it never waits and a server's
+// workers need not serve it before the request that follows, so the unlock is
+// sent after the flush returns, and waited on. Nothing stages after this: a
+// write through what keeps c alive goes straight through.
+//
+// A thread that may not wait (a death reached it, or reaches it here) cannot
+// send. With nothing else holding c, its last reference follows at once and
+// hands the run to a closer with the clunk, which releases the locks. With a
+// holder that might never let go, a closer does the flush and the unlock now.
+//
+// Reads the grant after spoor_fd_drop, as a lock call reads spoor_fd_open after
+// storing it: a grant this close misses, that call sees it missed.
+static int dev9p_fd_close(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return 0;
+    int  rc     = 0;
+    bool staged = false;
+    if (p->wb_eligible) {
+        spin_lock(&p->wb_lock);
+        if (close_may_wait())
+            rc = wb_flush_locked(p, c->qid.path);   // or the latched failure
+        else if (!p->wb_len && p->wb_err)
+            rc = -(p->wb_err);
+        p->wb_known = false;
+        staged = p->wb_len || p->wb_flushers;
+        wb_release_dead_locked(p);
+        spin_unlock(&p->wb_lock);
+        if (staged) rc = 0;                // no loss yet: whoever lands it reports
     }
-    return 0;
+
+    bool granted = __atomic_exchange_n(&p->lock_granted, false, __ATOMIC_SEQ_CST);
+    if (granted && close_may_wait()) {
+        u8 status = P9_LOCK_ERROR;
+        int lr = p9_client_lock(p->client, lock_fid(p), P9_LOCK_TYPE_UNLCK, 0, 0, 0,
+                                &status);
+        granted = lr == -P9_E_INTR || !close_may_wait();   // cut short: still owed
+    }
+    if (!staged && !granted) return rc;
+
+    if (granted) __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) > 1)
+        (void)dev9p_lock_flush_queue(p, c, /*release_locks=*/true);
+    return rc;
+}
+
+static bool dev9p_lock_held(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    return p && __atomic_load_n(&p->lock_granted, __ATOMIC_ACQUIRE);
 }
 
 static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
@@ -2593,12 +2669,19 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
 
     u8 status = P9_LOCK_ERROR;
     int rc = p9_client_lock(p->client, fid, (u8)type, 0, start, len, &status);
-    if (rc != 0) return lock_wire_errno(rc);
+    if (rc != 0) {
+        // A death abandons the take with its outcome unknown, and the server may
+        // have granted it. An extra unlock costs a round trip. EINTR is flush(5)'s
+        // answer: never applied.
+        if (rc == -P9_E_IO && type != SYS_FILE_LOCK_UN)
+            __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
+        return lock_wire_errno(rc);
+    }
     if (status == P9_LOCK_BLOCKED && type != SYS_FILE_LOCK_UN) return -T_E_AGAIN;
     if (status != P9_LOCK_SUCCESS) return -T_E_NOLCK;   // ERROR, GRACE, or no status 9P defines
 
     if (type != SYS_FILE_LOCK_UN) {
-        __atomic_store_n(&p->lock_granted, true, __ATOMIC_RELEASE);
+        __atomic_store_n(&p->lock_granted, true, __ATOMIC_SEQ_CST);
         // The last holder's writes are on the server: read them from there.
         // The invalidates log this qid, so a fill already in flight from before
         // the grant is dropped rather than installed after it.
@@ -3041,6 +3124,7 @@ struct Dev dev9p = {
     .open     = dev9p_open,
     .create   = dev9p_create,
     .close    = dev9p_close,
+    .fd_close = dev9p_fd_close,
 
     .read     = dev9p_read,
     .bread    = dev9p_bread,
@@ -3061,6 +3145,7 @@ struct Dev dev9p = {
     .lock_same_file = dev9p_lock_same_file,
     .lock_sync      = dev9p_lock_sync,
     .lock_ident     = dev9p_lock_ident,
+    .lock_held      = dev9p_lock_held,
     .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
 
     .remove   = dev9p_remove,

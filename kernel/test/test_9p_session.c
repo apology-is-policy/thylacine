@@ -35,6 +35,7 @@ void test_9p_session_dispatch_wrong_type_rejected(void);
 void test_9p_session_close_with_inflight_refused(void);
 void test_9p_session_state_gate_send_walk_before_open(void);
 void test_9p_session_walk_reply_overcount(void);
+void test_9p_session_mutates_mark(void);
 void test_9p_session_lopen_round_trip(void);
 void test_9p_session_lcreate_round_trip(void);
 void test_9p_session_read_round_trip(void);
@@ -287,6 +288,30 @@ static int synth_rwga_n(u8 *out, size_t cap, u16 tag, u16 n) {
     return synth_rmsg(out, cap, P9_RWALKGETATTR, tag, body, 2 + (size_t)n * P9_WGA_BODY_LEN);
 }
 
+// Which ops a client must forget for when their owner goes: what a server changes
+// by running them, a Tlopen only when it truncates.
+void test_9p_session_mutates_mark(void) {
+    static const struct { bool trunc; const char *what; } o[] = {
+        { false, "a plain Tlopen changes nothing" },
+        { true,  "a truncating Tlopen does" },
+    };
+    u32 sz; u8 ty; u16 t;
+    for (u32 i = 0; i < 2; i++) {
+        struct p9_session s;
+        TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "drive_session_open");
+        int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+        TEST_ASSERT(len > 0, "a clone");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        int rlen = synth_rwalk_n(g_buf, sizeof(g_buf), t, 0);
+        struct p9_dispatch_result r;
+        TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0, "its Rwalk");
+        len = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 5, o[i].trunc ? 01002u : 2u);
+        TEST_ASSERT(len > 0, "a Tlopen");
+        p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+        TEST_EXPECT_EQ((u64)p9_session_entry(&s, t)->mutates, (u64)o[i].trunc, o[i].what);
+    }
+}
+
 // A reply may name no more components than the walk asked: its caller's arrays
 // are sized by that count. Each count once as asked and once past it.
 void test_9p_session_walk_reply_overcount(void) {
@@ -298,6 +323,7 @@ void test_9p_session_walk_reply_overcount(void) {
         { 1, 1, 0,  true,  "one name, one qid" },
         { 1, 2, -1, false, "one name, two qids" },
         { 1, 16, -1, false, "one name, P9_MAX_WALK qids" },
+        { 1, 0, 0,  false, "one name, none: partial" },
     };
     for (u32 i = 0; i < sizeof(w) / sizeof(w[0]); i++) {
         struct p9_session s;
@@ -360,7 +386,7 @@ void test_9p_session_walk_round_trip(void) {
     int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf),
                                     /*src=*/0, /*new=*/5,
                                     1, g_wnames, g_wlens);
-    TEST_ASSERT(len > 0, "send_walk(0→5, clone) ok");
+    TEST_ASSERT(len > 0, "send_walk(0→5, one name) ok");
     u32 sz; u8 ty; u16 tag;
     p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
     TEST_EXPECT_EQ((u64)ty, (u64)P9_TWALK, "Twalk type");

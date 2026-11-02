@@ -542,6 +542,8 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         c->demux_orphan_flush++;
         // Read before the dispatch, which frees oldtag and its registration.
         struct p9_rpc *victim = client_owner(c, te->flush_oldtag);
+        struct p9_outstanding *old = p9_session_entry(&c->session, te->flush_oldtag);
+        bool forget = !victim && old && old->active && old->mutates;
         struct p9_dispatch_result discard;
         if (victim && (victim->on_complete || !victim->flushing)) {
             // Every flusher but flush(5) drops its registration BEFORE its
@@ -559,6 +561,9 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
             c->flush_cancelled++;
             wakeup(&victim->rendez);
         }
+        // The last word on an op whose owner left: a fill since the abandon may
+        // have read the file before the op ran.
+        if (forget) larder_forget_all(&c->larder);
     } else if (te->active && (te->awaiting_flush || te->abandoned)) {
         // #210: the third legitimate ownerless flow — an abandoned op's
         // LATE ORIGINAL reply (#845): the owner died and unwound, the tag
@@ -573,8 +578,13 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         // fails bound nothing and may not have filled in the result.
         c->demux_orphan_late++;
         struct p9_dispatch_result discard;
+        // The op has run, with nobody left to invalidate for it. Its Rflush, if
+        // one is coming, finds nothing more to do.
+        bool forget = te->mutates;
+        te->mutates = false;
         if (ownerless_dispatch_locked(c, len, &discard) == 0)
             client_orphan_fid_locked(c, discard.bound_new_fid);
+        if (forget) larder_forget_all(&c->larder);
     } else {
         // #210: the ownerless discard is no longer silent. With all three
         // by-design flows split out above, a frame landing here is one NO
@@ -1161,6 +1171,14 @@ static int client_take_back_unsent_locked(struct p9_client *c, u16 tag, u8 type)
 // HELD on entry + exit. Returns 0 / -P9_E_IO / -<server errno>. On a death-
 // interrupt the Thread is unwinding to its EL0-return die-check; the return is
 // immaterial (it never re-enters EL0).
+// A dying thread is leaving an op that mutates. The server may have run it, or
+// may yet: nobody will invalidate for it, and the client cannot name what it
+// touched. Its late reply or Rflush forgets again, for a fill read in between.
+static void client_abandon_forgets_locked(struct p9_client *c, u16 tag) {
+    struct p9_outstanding *e = p9_session_entry(&c->session, tag);
+    if (e && e->active && e->mutates) larder_forget_all(&c->larder);
+}
+
 static int client_run(struct p9_client *c, size_t built_len,
                       struct p9_dispatch_result *out) {
     u32 size; u8 type; u16 tag;
@@ -1290,6 +1308,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         client_unregister(c, tag, &rpc);
         kfree(rpc.reply_buf);
         p9_session_flush_owner_waits(&c->session, (u16)tag, false);
+        client_abandon_forgets_locked(c, (u16)tag);
         struct cons_diag_line dl;
         cons_diag_line_init(&dl);
         cons_diag_line_puts(&dl, "9p: op abandoned (tag ");
@@ -1319,6 +1338,7 @@ static int client_run(struct p9_client *c, size_t built_len,
         // transport write means the byte stream is broken, so latch dead.
         client_unregister(c, tag, &rpc);
         kfree(rpc.reply_buf);
+        client_abandon_forgets_locked(c, (u16)tag);
         int flen = p9_session_send_flush(&c->session, c->out_buf,
                                          c->out_buf_cap, (u16)tag);
         const char *flush_note = ", no flush staged)\n";

@@ -349,7 +349,7 @@ int p9_parse_rattach(const u8 *in, size_t len,
                      u16 *tag, struct p9_qid *qid);
 
 // Rwalk: array of qids for each walked component. Caller passes a qid
-// buffer of capacity `qid_cap` (typically P9_MAX_WALK). nwqid is set to
+// buffer of capacity `qid_cap` (the walk's own nwname). nwqid is set to
 // the actual count returned; *nwqid <= qid_cap is enforced by the parser.
 // Per the protocol, *nwqid <= nwname from the matching Twalk; the parser
 // doesn't see Twalk, so the caller-cap-bound (R111 doctrine from

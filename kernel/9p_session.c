@@ -209,6 +209,19 @@ static int alloc_tag(struct p9_session *s, bool flush) {
 
 // Mark tag `t` active with the given op shape. Caller validates `t` is
 // free.
+// Does a server running this kind change what a client caches? A Tlopen does when
+// it truncates (p9_session_send_lopen).
+static bool kind_mutates(u8 kind) {
+    switch (kind) {
+    case P9_TLCREATE: case P9_TWRITE:   case P9_TSETATTR: case P9_TSYMLINK:
+    case P9_TMKNOD:   case P9_TRENAME:  case P9_TLINK:    case P9_TMKDIR:
+    case P9_TRENAMEAT: case P9_TUNLINKAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void mark_outstanding(struct p9_session *s, u16 t,
                               u8 kind, u32 fid, u32 new_fid) {
     struct p9_outstanding *e = entry(s, t);
@@ -219,6 +232,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     e->fid     = fid;
     e->new_fid = new_fid;
     e->op_id   = s->next_op_id;
+    e->mutates = kind_mutates(kind);
     chunk(s, t / P9_TAG_CHUNK)->n_active++;
     s->n_active++;
     if (kind == P9_TFLUSH) s->n_flush++;
@@ -687,6 +701,7 @@ int p9_session_send_lopen(struct p9_session *s,
     int rc = p9_build_tlopen(out, cap, (u16)t, fid, flags);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TLOPEN, fid, fid);
+    if (flags & 01000u) entry(s, (u16)t)->mutates = true;   // 9P2000.L's O_TRUNC
     return rc;
 }
 
@@ -1220,6 +1235,7 @@ static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
     if (op->kind == P9_TWALK) {
         if (p9_parse_rwalk(rmsg, len, &tag_check, &nwqid,
                            out->qids, op->walk_nwname) < 0) return;
+        if (nwqid != op->walk_nwname) return;
     } else if (op->kind == P9_TWALKGETATTR) {
         const u8 *body = NULL;
         if (p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
@@ -1274,11 +1290,12 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         if (tag_check != tag) return -1;
         // Per 9P2000.L: bind new_fid into the fid table at Rwalk time
         // (server-side WalkBindsWithCurrentGen — see
-        // `stratum/v2/docs/reference/20-9p.md` §"fid.tla composition").
-        // At this bring-up subset we bind unconditionally; nuanced
-        // partial-walk semantics (when nwqid < requested nwname) land
-        // in P5-session-walk-partial.
-        if (slot_bind(s, tag, op->new_fid) < 0) {
+        // `stratum/v2/docs/reference/20-9p.md` §"fid.tla composition"), and only
+        // for a full walk: a shorter one bound nothing on the server, and its
+        // caller, which asked for every name, reports the walk failed.
+        if (nwqid != op->walk_nwname) {
+            out->nwqid = nwqid;
+        } else if (slot_bind(s, tag, op->new_fid) < 0) {
             // The bind goes into the slot send_walk reserved, so capacity
             // cannot refuse it; only a redundant already-bound fid can, a LOCAL
             // condition -- the server's Rwalk is conformant. Surface it as a
@@ -1304,9 +1321,6 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         // Bind new_fid ONLY on a FULL walk with a real destination -- the
         // correct partial-walk semantics (a partial Rwalkgetattr binds
         // nothing server-side; the NOFID query never names a destination).
-        // This is the nuance the TWALK arm defers (its callers send 0/1
-        // names, where partial cannot exist); the multi-name pounce
-        // requires it.
         if (op->new_fid != P9_NOFID && nwqid == op->walk_nwname) {
             if (slot_bind(s, tag, op->new_fid) < 0) {
                 // Same LOCAL-failure posture as the TWALK arm: a redundant

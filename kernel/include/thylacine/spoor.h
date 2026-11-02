@@ -225,6 +225,10 @@ struct Spoor {
 
     spin_lock_t   lock;        // per-Spoor lock; reserved for Phase 5+ SMP
     int           ref;         // refcount; spoor_alloc sets to 1
+    int           fd_refs;     // handle-table slots naming this Spoor, each of
+                               // which also holds a ref; every other ref (a map,
+                               // a mount, a Loom registration, a lock call) is no
+                               // descriptor. spoor_fd_ref / spoor_fd_drop.
     u32           flag;        // COPEN | CMSG
     int           mode;        // omode after open() succeeds; 0 pre-open
 
@@ -381,6 +385,16 @@ void spoor_clunk(struct Spoor *c);
 // spoor_clunk that returns the Dev close hook's result: 0, or the hook's
 // negative error on the last drop (0 while another holder keeps the Spoor).
 int spoor_clunk_rc(struct Spoor *c);
+
+// Descriptors, as opposed to references. A handle slot counts itself here when
+// it comes to name c; the slot that takes the count to zero is c's last close
+// (Dev.fd_close), and c may live on behind other references. spoor_fd_drop
+// answers whether it was the last, and is ordered before whatever the caller
+// reads next: a lock call that stores its grant and then asks spoor_fd_open
+// either sees the close or has its grant seen by it.
+void spoor_fd_ref(struct Spoor *c);
+bool spoor_fd_drop(struct Spoor *c);
+bool spoor_fd_open(const struct Spoor *c);
 
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:

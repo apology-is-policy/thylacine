@@ -110,6 +110,10 @@ void test_dev9p_lock_test_answers(void);
 void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
 void test_dev9p_lock_close_releases(void);
+void test_dev9p_lock_close_order(void);
+void test_dev9p_wga_failure_at_an_unknown_name(void);
+void test_dev9p_wb_last_close_with_holder(void);
+void test_dev9p_wb_dying_waiter_leaves_flush_wait(void);
 void test_dev9p_cached_open_loose_lock(void);
 void test_dev9p_cached_open_loose_stale(void);
 void test_dev9p_cached_open_loose_wstat(void);
@@ -3825,6 +3829,13 @@ void test_dev9p_cached_open_fallbacks(void) {
 // Mint a loose+cacheable client + root and create `wbfile` opened OWRITE
 // (the create-born eligibility path). Returns the opened Spoor via *out;
 // the caller clunks it, then teardown(root).
+// A descriptor's close: the last close, then the slot's reference.
+static int d9_close(struct Spoor *c) {
+    int frc = dev9p.fd_close(c);
+    int crc = spoor_clunk_rc(c);
+    return frc ? frc : crc;
+}
+
 static struct Spoor *wb_make_created(struct Spoor **out_root) {
     struct Spoor *root = make_open_client_and_root();
     if (!root) return NULL;
@@ -3868,7 +3879,7 @@ void test_dev9p_wb_coalesce_one_twrite(void) {
     for (u32 i = 0; i < sizeof(b); i++) b[i] = wb_pat(i);
     TEST_EXPECT_EQ((u64)dev9p.write(f, b, 64, 0), 64ull, "strict write ok");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "strict client: write-through");
-    spoor_clunk(f);
+    (void)d9_close(f);
     teardown(root);
 
     // (b) loose client: 4 appends stage; close coalesces to ONE Twrite.
@@ -3889,7 +3900,7 @@ void test_dev9p_wb_coalesce_one_twrite(void) {
     TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "4 appends: ZERO wire writes");
     TEST_ASSERT(dev9p_wb_budget_used() > budget0, "staged bytes charged");
     g_twrite_pat_on = true;
-    spoor_clunk(f);   // close: flush + async clunk
+    (void)d9_close(f);   // close: flush + async clunk
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "close: ONE coalesced Twrite");
     TEST_EXPECT_EQ(g_twrite_cap_off, 0ull, "flush lands at offset 0");
     TEST_EXPECT_EQ((u64)g_twrite_cap_len, 4000ull, "flush carries all 4000 bytes");
@@ -3958,7 +3969,7 @@ void test_dev9p_wb_overlay_read(void) {
     for (u32 i = 0; i < 100 && ok; i++)
         if (rb[i] != wb_pat(1500u + i)) ok = false;
     TEST_ASSERT(ok, "new-run bytes correct");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -3985,7 +3996,7 @@ void test_dev9p_wb_flush_at_close(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(o, chunk, 512, 0), 512ull, "stage");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "staged, not wired");
     g_twrite_pat_on = true;
-    spoor_clunk(o);
+    (void)d9_close(o);
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "close flushes ONE Twrite");
     TEST_ASSERT(g_twrite_pat_ok && g_twrite_cap_len == 512,
                 "flush payload correct");
@@ -4023,7 +4034,7 @@ void test_dev9p_wb_fsync_flush_and_error(void) {
     fe = dev9p.fsync(f, 0);
     TEST_EXPECT_EQ((u64)(-fe), 28ull, "subsequent fsync returns the latch");
     u32 tw_before_close = g_twrite_seen;
-    int crc = spoor_clunk_rc(f);
+    int crc = d9_close(f);
     TEST_EXPECT_EQ((u64)g_twrite_seen, (u64)tw_before_close,
                    "close emits no Twrite (the run was dropped)");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
@@ -4048,7 +4059,7 @@ void test_dev9p_wb_server_ebadf_reads_eio(void) {
     long fe = dev9p.fsync(f, 0);
     u32 seen = g_twrite_seen;
     g_twrite_fail_ecode = 0;
-    int crc = spoor_clunk_rc(f);
+    int crc = d9_close(f);
     wb_test_end(root);
 
     TEST_EXPECT_EQ((u64)we, 256ull, "stage");
@@ -4069,7 +4080,7 @@ void test_dev9p_wb_close_returns_flush_error(void) {
     TEST_ASSERT(f != NULL, "create (control)");
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage (control)");
-    int crc = spoor_clunk_rc(f);
+    int crc = d9_close(f);
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "the close flushed (control)");
     TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "a close whose flush succeeds returns 0");
     wb_test_end(root);
@@ -4080,7 +4091,7 @@ void test_dev9p_wb_close_returns_flush_error(void) {
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
     g_twrite_fail_ecode = 28;   // ENOSPC
-    crc = spoor_clunk_rc(f);
+    crc = d9_close(f);
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "the close flushed");
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
                    "a close whose flush fails returns its errno");
@@ -4112,7 +4123,7 @@ void test_dev9p_wb_dying_flush_keeps_run(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage (control)");
     TEST_EXPECT_EQ((u64)(s64)dev9p.fsync(f, 0), 0ull, "a live fsync succeeds (control)");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "and flushes the run (control)");
-    TEST_EXPECT_EQ((u64)(s64)spoor_clunk_rc(f), 0ull, "close (control)");
+    TEST_EXPECT_EQ((u64)(s64)d9_close(f), 0ull, "close (control)");
     wb_test_end(root);
 
     root = NULL;
@@ -4128,7 +4139,7 @@ void test_dev9p_wb_dying_flush_keeps_run(void) {
     test_dying_reap(&g_wbd_thread);
     u32 seen_dying = g_twrite_seen;
     int frc        = g_wbd_rc;
-    int crc        = spoor_clunk_rc(f);
+    int crc        = d9_close(f);
     u32 seen       = g_twrite_seen;
     u32 cap_len    = g_twrite_cap_len;
     u64 cap_off    = g_twrite_cap_off;
@@ -4174,7 +4185,7 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void) {
     int frc        = dev9p.fsync(f, 0);
     u32 seen       = g_twrite_seen;
     u32 cap_len    = g_twrite_cap_len;
-    int crc        = spoor_clunk_rc(f);
+    int crc        = d9_close(f);
     wb_test_end(root);
 
     TEST_ASSERT(g_wbd_rc < 0, "the dying truncate fails");
@@ -4206,7 +4217,7 @@ void test_dev9p_wb_wstat_keeps_the_latch(void) {
     int  wrc = dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0, NULL);
     long we  = dev9p.write(f, chunk, 256, 256);
     long fe1 = dev9p.fsync(f, 0);
-    int  crc = spoor_clunk_rc(f);
+    int  crc = d9_close(f);
     wb_test_end(root);
 
     TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
@@ -4259,7 +4270,7 @@ void test_dev9p_wb_dying_loom_register_keeps_staging(void) {
     u32 cap_len    = g_twrite_cap_len;
     long arc       = dev9p.write(f, chunk, 64, 256);
     u32 seen_app   = g_twrite_seen;
-    int crc        = spoor_clunk_rc(f);
+    int crc        = d9_close(f);
     wb_test_end(root);
     u64 budget     = dev9p_wb_budget_used();
 
@@ -4304,7 +4315,7 @@ void test_dev9p_wb_loom_register_keeps_the_latch(void) {
     int  why   = dev9p_loom_register(f);          // the refusal's own errno
     long we  = dev9p.write(f, chunk, 256, 256);
     long fe1 = dev9p.fsync(f, 0);
-    int  crc = spoor_clunk_rc(f);
+    int  crc = d9_close(f);
     wb_test_end(root);
 
     TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
@@ -4347,7 +4358,7 @@ void test_dev9p_wb_interrupted_flush_keeps_run(void) {
     u32  len1   = g_twrite_cap_len;
     u64  off1   = g_twrite_cap_off;
     long we     = dev9p.write(f, chunk + 256, 256, 256);
-    int  crc    = spoor_clunk_rc(f);
+    int  crc    = d9_close(f);
     u32  seen2  = g_twrite_seen;
     bool pat_ok = g_twrite_pat_ok;
     wb_test_end(root);
@@ -4383,7 +4394,7 @@ void test_dev9p_wb_server_eintr_latches(void) {
     long fe0  = dev9p.fsync(f, 0);
     long fe1  = dev9p.fsync(f, 0);
     u32  seen = g_twrite_seen;
-    int  crc  = spoor_clunk_rc(f);
+    int  crc  = d9_close(f);
     u32  seen_close = g_twrite_seen;
     wb_test_end(root);
 
@@ -4428,7 +4439,7 @@ void test_dev9p_wb_nonappend_writethrough(void) {
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 1500), 100ull, "post-wstat write");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…goes straight through");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -4450,7 +4461,7 @@ void test_dev9p_wb_fstat_staged_size(void) {
     // Second stat: larder-served (installed by the first), same patch.
     TEST_EXPECT_EQ((u64)dev9p.stat_native(f, &st), 0ull, "fstat (serve path)");
     TEST_EXPECT_EQ(st.size, 1536ull, "served size patched too");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -4485,7 +4496,7 @@ void test_dev9p_wb_cap_flush(void) {
     TEST_EXPECT_EQ(g_twrite_total, 262144ull, "exactly the 256 KiB flushed");
     TEST_ASSERT(g_twrite_pat_ok, "every wire byte matches the pattern");
     u32 tw_after_cap = g_twrite_seen;
-    spoor_clunk(f);   // drains the staged 9th chunk
+    (void)d9_close(f);   // drains the staged 9th chunk
     TEST_ASSERT(g_twrite_seen > tw_after_cap, "close drained the tail");
     TEST_EXPECT_EQ(g_twrite_total, 294912ull, "all 9 x 32 KiB on the wire");
     TEST_ASSERT(g_twrite_pat_ok, "tail bytes match too");
@@ -4513,7 +4524,7 @@ void test_dev9p_wb_budget_fallback(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
                    "post-release append (the through-write advanced the anchor)");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…stages again");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -4555,7 +4566,7 @@ void test_dev9p_wb_populate_readback(void) {
     got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
                             1234u, one, NULL);
     TEST_EXPECT_EQ((u64)got, 0ull, "normal install upgrades own -> cvers gate");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -4575,7 +4586,7 @@ void test_dev9p_wb_populate_append_chain(void) {
     for (u32 i = 0; i < 3000; i++) chunk[i] = wb_pat(5000u + i);
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 3000, 5000), 3000ull, "stage run 2");
     u64 qid = f->qid.path;
-    spoor_clunk(f);                      // close = flush 2 (extends page 1)
+    (void)d9_close(f);                      // close = flush 2 (extends page 1)
     u8 *out = wb_scratch();
     u32 got = larder_page_serve(&g_client.larder, qid, 0, 0, 4096, 99u, out, NULL);
     TEST_EXPECT_EQ((u64)got, 4096ull, "page 0 full");
@@ -4611,7 +4622,7 @@ void test_dev9p_wb_populate_failed_flush(void) {
     u32 got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
                                 0u, one, NULL);
     TEST_EXPECT_EQ((u64)got, 0ull, "nothing servable after the failed flush");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -4648,7 +4659,7 @@ void test_dev9p_wb_writethrough_range_invalidate(void) {
     for (u32 i = 0; i < 64 && ok; i++)
         if (one[i] != wb_pat(4096u + i)) ok = false;
     TEST_ASSERT(ok, "page 1 bytes intact");
-    spoor_clunk(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -5602,11 +5613,18 @@ static struct Spoor *lk_open_file(struct Spoor *root) {
     return o;
 }
 
-// The async Rclunk a close left unread: the loopback holds one reply.
-static void lk_close(struct Spoor *c) {
+// A reference goes. The async Rclunk a last one left unread: the loopback holds
+// one reply.
+static void lk_drop(struct Spoor *c) {
     u32 pre = g_clunk_seen;
     spoor_clunk(c);
     if (g_clunk_seen != pre) (void)p9_client_reader_pump_ready(&g_client);
+}
+
+// A descriptor's close.
+static void lk_close(struct Spoor *c) {
+    (void)dev9p.fd_close(c);
+    lk_drop(c);
 }
 
 static void lock_wire_and_status_body(struct Spoor *f) {
@@ -5794,7 +5812,7 @@ void test_dev9p_lock_unlock_flushes_first(void) {
     g_twrite_fail_ecode = 0;
     g_twrite_pat_on = false;
     lock_wire_reset();
-    (void)spoor_clunk_rc(f);
+    (void)d9_close(f);
     wb_test_end(root);
 }
 
@@ -6337,16 +6355,68 @@ static void lock_close_releases_body(struct Spoor *root) {
     lk_close(f);
     TEST_EXPECT_EQ(g_tlock_seen, 0u, "a refused take leaves nothing to unlock");
 
-    // A thread whose close may not wait leaves it to the clunk.
+    // A failed take: EIO is what a death's abandon answers, and the server may
+    // have granted it. EINTR is flush(5)'s: never applied.
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    lock_wire_reset();
+    g_tlock_fail_ecode = T_E_IO;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), (s64)-T_E_IO, "an unknown take");
+    lock_wire_reset(); g_clunk_seen = 0;
+    fid = dev9p_priv_of(f)->fid;
+    lk_close(f);
+    lock_close_expect_unlock(fid, "an unknown take costs one unlock");
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    lock_wire_reset();
+    g_tlock_fail_ecode = P9_E_INTR;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), (s64)-T_E_INTR, "a cancelled take");
+    lock_wire_reset(); g_clunk_seen = 0;
+    lk_close(f);
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "a cancelled take leaves nothing to unlock");
+
+    // A last reference with no last close before it can fall on any thread (an
+    // image eviction, a reap), and this live one is as good as any: it never
+    // waits, and leaves the lock to the clunk.
     f = lk_open_file(root);
     TEST_ASSERT(f != NULL, "open fileA");
     TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "a take");
     lock_wire_reset(); g_clunk_seen = 0;
-    current_thread()->closes_never_wait = true;
-    lk_close(f);
-    current_thread()->closes_never_wait = false;
-    TEST_EXPECT_EQ(g_tlock_seen, 0u, "a close that may not wait sends no unlock");
+    lk_drop(f);
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "a last reference sends no unlock");
     TEST_EXPECT_EQ(g_clunk_seen, 1u, "its clunk still goes");
+
+    // A holder that is no descriptor (a read-only map's, a mount's): the last
+    // close releases the lock all the same, and the fid stays with the holder.
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    fid = dev9p_priv_of(f)->fid;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "a take");
+    spoor_ref(f);
+    lock_wire_reset(); g_clunk_seen = 0;
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "the last close");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "sends one unlock with the holder alive");
+    TEST_EXPECT_EQ((u64)g_tlock_type, (u64)P9_LOCK_TYPE_UNLCK, "an unlock");
+    TEST_EXPECT_EQ(g_tlock_fid, fid, "on the lock fid");
+    TEST_EXPECT_EQ(g_clunk_seen, 0u, "and no clunk: the holder has the fid");
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(f), 0ll, "a descriptor published again closes");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "with no lock left to release");
+    lk_drop(f);
+    TEST_EXPECT_EQ(g_clunk_seen, 0u, "one reference down, no clunk");
+    lk_drop(f);
+    TEST_EXPECT_EQ(g_clunk_seen, 1u, "the holder's drop clunks");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "and sends no second unlock");
+
+    // The attach root: the session owns its fid and no close clunks it, so only
+    // the last close can release what it holds.
+    fid = dev9p_priv_of(root)->fid;
+    TEST_EXPECT_EQ((s64)dev9p.lock(root, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll, "a take on the root");
+    lock_wire_reset(); g_clunk_seen = 0;
+    TEST_EXPECT_EQ((s64)dev9p.fd_close(root), 0ll, "the root's last close");
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, "sends one unlock");
+    TEST_EXPECT_EQ((u64)g_tlock_type, (u64)P9_LOCK_TYPE_UNLCK, "an unlock");
+    TEST_EXPECT_EQ(g_tlock_fid, fid, "on the session's root fid");
+    TEST_EXPECT_EQ(g_clunk_seen, 0u, "and no Tclunk");
 
     // The Proc's owner, which a close of any descriptor or the exit drops.
     f = lk_open_file(root);
@@ -6373,6 +6443,158 @@ static void lock_close_releases_body(struct Spoor *root) {
     lk_close(co);
     lock_close_expect_unlock(fid, "its close sends one unlock");
     lock_wire_reset();
+}
+
+// A multi-name Twalkgetattr that fails with anything but a miss does not say at
+// which name, so the Dev answers "walk them one by one", and latches nothing: the
+// server speaks the op. One name has no such doubt, and a miss is a first-name
+// miss on every server.
+void test_dev9p_wga_failure_at_an_unknown_name(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    const char *names[2] = { "a", "b" };
+    const size_t lens[2] = { 1, 1 };
+    struct t_stat sts[2];
+
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "a clone");
+    g_wga_lerror_ecode = T_E_IO;
+    struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+    TEST_ASSERT(w == DEV_WALK_ATTRS_UNSUPPORTED, "two names, EIO: walk them one by one");
+    TEST_ASSERT(!g_client.wga_unsupported, "and the server's ability is not latched");
+    if (w && w != DEV_WALK_ATTRS_UNSUPPORTED) walkqid_free(w);
+
+    g_wga_lerror_ecode = T_E_NOENT;
+    w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+    TEST_ASSERT(w == NULL, "two names, ENOENT: a miss at the first");
+
+    g_wga_lerror_ecode = T_E_IO;
+    w = dev9p.walk_attrs(root, nc, names, lens, 1, sts);
+    TEST_ASSERT(w == NULL, "one name, EIO: that name failed");
+
+    g_wga_lerror_ecode = T_E_NOSYS;
+    w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+    TEST_ASSERT(w == DEV_WALK_ATTRS_UNSUPPORTED, "ENOSYS: the same answer");
+    TEST_ASSERT(g_client.wga_unsupported, "which does latch");
+
+    g_wga_lerror_ecode = 0;
+    g_client.wga_unsupported = false;
+    nc->aux = NULL;
+    spoor_unref(nc);
+    teardown(root);
+}
+
+// The order the unlock's meaning rests on: the run lands, the lock goes, the fid
+// goes.
+void test_dev9p_lock_close_order(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    long tk = dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL);
+    lock_wire_reset(); wb_wire_reset(); g_clunk_seen = 0;
+    long st = dev9p.write(f, chunk, 256, 0);
+    u32  w0 = g_twrite_seen;
+    lk_close(f);
+    u32  w1 = g_twrite_seen, l1 = g_tlock_seen, c1 = g_clunk_seen;
+    u32  ws = g_twrite_last_seq, ls = g_tlock_last_seq, cs = g_clunk_last_seq;
+    lock_wire_reset();
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((s64)tk, 0ll, "the take");
+    TEST_EXPECT_EQ((u64)st, 256ull, "the write");
+    TEST_EXPECT_EQ((u64)w0, 0ull, "stays staged");
+    TEST_EXPECT_EQ((u64)w1, 1ull, "the close lands it");
+    TEST_EXPECT_EQ((u64)l1, 1ull, "sends one unlock");
+    TEST_EXPECT_EQ((u64)c1, 1ull, "and one clunk");
+    TEST_ASSERT(ws < ls, "the run lands before the unlock");
+    TEST_ASSERT(ls < cs, "and the unlock goes before the clunk");
+}
+
+// A map or a mount can hold a Spoor long after its last close, and a read-only
+// map's pin outlives the Proc. close(2) still lands the run and gives back its
+// budget share; what the holder writes later goes straight through.
+void test_dev9p_wb_last_close_with_holder(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    u64  budget0 = dev9p_wb_budget_used();
+    long st      = dev9p.write(f, chunk, 256, 0);
+    u32  w0      = g_twrite_seen;
+    spoor_ref(f);                  // a read-only map's
+    g_clunk_seen = 0;
+    int  frc     = dev9p.fd_close(f);
+    u32  w1      = g_twrite_seen;
+    u32  len1    = g_twrite_cap_len;
+    u32  c1      = g_clunk_seen;
+    u64  budget1 = dev9p_wb_budget_used();
+    long wt      = dev9p.write(f, chunk + 256, 256, 256);
+    u32  w2      = g_twrite_seen;
+    spoor_clunk(f);
+    u32  c2      = g_clunk_seen;
+    spoor_clunk(f);
+    u32  c3      = g_clunk_seen;
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)st, 256ull, "a stage");
+    TEST_EXPECT_EQ((u64)w0, 0ull, "nothing on the wire");
+    TEST_EXPECT_EQ((s64)frc, 0ll, "the last close returns 0");
+    TEST_EXPECT_EQ((u64)w1, 1ull, "having landed the run with the holder alive");
+    TEST_EXPECT_EQ((u64)len1, 256ull, "all of it");
+    TEST_EXPECT_EQ((u64)c1, 0ull, "and no clunk: the holder has the fid");
+    TEST_EXPECT_EQ(budget1, budget0, "and the run's budget share came back");
+    TEST_EXPECT_EQ((u64)wt, 256ull, "the holder's write succeeds");
+    TEST_EXPECT_EQ((u64)w2, 2ull, "and goes straight through");
+    TEST_EXPECT_EQ((u64)c2, 0ull, "one reference down, no clunk");
+    TEST_EXPECT_EQ((u64)c3, 1ull, "the holder's drop clunks");
+}
+
+// The wait for another flusher ends at a kill, with the run kept.
+void test_dev9p_wb_dying_waiter_leaves_flush_wait(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    wb_wire_reset();
+    long st = dev9p.write(f, chunk, 256, 0);
+    spin_lock(&fp->wb_lock);
+    fp->wb_flushers++;             // a peer's flush, parked on its server
+    spin_unlock(&fp->wb_lock);
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    bool started = test_dying_start(&g_wbd_thread, wbd_fsync, NULL, /*dead_now=*/true);
+    if (started) TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_wbd_thread));
+    bool left = started && test_dying_done(&g_wbd_thread);
+    spin_lock(&fp->wb_lock);
+    fp->wb_flushers--;             // that flush retires, for a waiter that stayed
+    u32 kept = fp->wb_len;
+    spin_unlock(&fp->wb_lock);
+    if (started) {
+        TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+        test_dying_reap(&g_wbd_thread);
+    }
+    u32 seen0 = g_twrite_seen;
+    int crc   = d9_close(f);
+    u32 seen1 = g_twrite_seen;
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)st, 256ull, "a stage");
+    TEST_ASSERT(started, "a dying thread");
+    TEST_ASSERT(left, "its wait for the flusher ended at the kill");
+    TEST_ASSERT(g_wbd_rc < 0, "and its fsync failed");
+    TEST_EXPECT_EQ((u64)kept, 256ull, "the run stayed staged");
+    TEST_EXPECT_EQ((u64)seen0, 0ull, "nothing went on the wire");
+    TEST_EXPECT_EQ((u64)seen1, 1ull, "the last close landed it");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and lost nothing");
 }
 
 void test_dev9p_lock_close_releases(void) {

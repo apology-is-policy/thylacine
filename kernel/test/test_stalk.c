@@ -51,6 +51,7 @@
 
 // Forward declarations (registered in kernel/test/test.c).
 void test_stalk_err_codes(void);
+void test_stalk_walk_attrs_unknown_failure(void);
 void test_stalk_long_component_bound(void);
 void test_stalk_resolve_multi(void);
 void test_stalk_resolve_deep(void);
@@ -468,6 +469,9 @@ static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     return fix_stat_qid(c->qid.path, out);
 }
 
+// dev9p's answer to a multi-name walk that failed at a name it cannot name.
+static bool g_fix_wa_unknown;
+
 // The POUNCE fixture walk_attrs. Honors the sharpened contract in
 // <thylacine/dev.h>: transitions nc ONLY on a full walk; partial/query leave
 // nc untouched and return w->spoor == NULL.
@@ -484,6 +488,7 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
     // wrong once was invisible to every name leg in this file.
     if (c->flag & COPEN) return NULL;
     g_fix_walkattrs_calls++;
+    if (g_fix_wa_unknown && nname > 1) return DEV_WALK_ATTRS_UNSUPPORTED;
 
     struct Walkqid *wq = walkqid_alloc(nname);
     if (!wq) return NULL;
@@ -910,6 +915,31 @@ void test_stalk_missing_component(void) {
 // -errno. The keystone: a missing path -> -T_E_NOENT (Go's os.IsNotExist true ->
 // the O_CREATE create-or-open fallback fires) instead of the bare -1 (Go's
 // Linux-shaped decode renders that EPERM, "operation not permitted"). A denial
+// A fused run that failed at a name the Dev cannot name decides nothing: the
+// resolver walks name by name, so each X gate runs in order and a name that
+// exists stays resolvable.
+void test_stalk_walk_attrs_unknown_failure(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    g_fix_wa_unknown = true;
+    int e = -12345;
+    struct Spoor *deny = stalk_err(&p, root, "nox/sekret", 10, STALK_OPEN, 0, &e);
+    u64 deny_e = (u64)e;
+    e = -12345;
+    struct Spoor *miss = stalk_err(&p, root, "a/nope", 6, STALK_OPEN, 0, &e);
+    u64 miss_e = (u64)e;
+    struct Spoor *ok = stalk_err(&p, root, "a/b", 3, STALK_OPEN, 0, &e);
+    g_fix_wa_unknown = false;
+    TEST_ASSERT(deny == NULL, "nox/sekret is denied");
+    TEST_EXPECT_EQ(deny_e, (u64)T_E_ACCES, "as ACCES: nox's X gate ran");
+    TEST_ASSERT(miss == NULL, "a/nope misses");
+    TEST_EXPECT_EQ(miss_e, (u64)T_E_NOENT, "as NOENT");
+    TEST_ASSERT(ok != NULL, "a/b still resolves");
+    if (ok) spoor_clunk(ok);
+    spoor_unref(root);
+}
+
 // reports T_E_ACCES, NEVER T_E_PERM (== 1 == the generic -1 sentinel).
 void test_stalk_err_codes(void) {
     struct Proc p; mkproc_system(&p);

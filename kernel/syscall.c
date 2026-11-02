@@ -1732,8 +1732,9 @@ static s64 sys_write_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
     u32 accepted = 0;
     int v = dev9p_weft_try_write(c, buf_va, (u32)len, &accepted);
     if (v == 0) { spoor_clunk(c); return 0; }       // not a weft write -> byte-copy
-    // v == 1 (handled OK) or v == -1 (weft transport error -- the flow is dead,
-    // the byte-copy path would fail identically, so surface it).
+    // v == 1 (handled OK) or v == -1 (a weft transport error, where the flow is
+    // dead and the byte-copy path would fail identically, or a server's count
+    // past the request, which is no answer to trust: surface it).
     s64 r;
     if (v == 1) { c->offset += accepted; r = (s64)accepted; }
     else        { r = -1; }
@@ -1838,8 +1839,8 @@ static s64 sys_read_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
     int v = dev9p_weft_try_read(c, buf_va, (u32)len, &got);
     if (v == 0) { spoor_clunk(c); return 0; }       // not a weft read -> byte-copy
     // v == 1 (handled OK; netd wrote the bytes into the guest's ring) or v == -1
-    // (weft transport error -- the flow is dead, the byte-copy path would fail
-    // identically, so surface it).
+    // (a weft transport error, where the flow is dead and the byte-copy path would
+    // fail identically, or a server's count past the request: surface it).
     s64 r;
     if (v == 1) { c->offset += got; r = (s64)got; }
     else        { r = -1; }
@@ -2259,6 +2260,10 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
         if (offset < 0 && cur < INT64_MIN - offset) { spoor_clunk(c); return -T_E_INVAL; }
         new_off = cur + offset;
         if (new_off < 0)                            { spoor_clunk(c); return -T_E_INVAL; }
+        // A question: storing the answer would rewind a peer's read that moved
+        // the cursor meanwhile. ftell asks this, and so does a lock call's
+        // SEEK_CUR.
+        if (offset == 0)                            { spoor_clunk(c); return cur; }
         break;
     }
     case T_SEEK_END: {

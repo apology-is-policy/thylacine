@@ -4672,6 +4672,7 @@ void test_9p_client_nowait_clunk_full_share_defers(void);
 void test_9p_client_nowait_clunk_full_ring_takes_back(void);
 void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
 void test_9p_client_flushed_walk_late_reply_to_sink(void);
+void test_9p_client_dying_mutator_forgets_larder(void);
 void test_9p_client_abandoned_walk_late_reply_kept(void);
 void test_9p_client_abandoned_async_clunk_not_flushed(void);
 void test_9p_client_clunk_rlerror_drains_as_clunk(void);
@@ -4701,6 +4702,7 @@ void test_9p_client_loom_enter_wakes_when_role_frees(void);
 #define DY_WALK         3
 #define DY_READ         4
 #define DY_CLUNK_NOWAIT 5
+#define DY_WRITE        6
 
 static struct test_dying g_dy;
 static struct {
@@ -4740,7 +4742,10 @@ static void dy_run(void *arg) {
         rc = p9_client_clunk_nowait(&g_client, g_dyop.fid);
     else if (g_dyop.op == DY_WALK)
         rc = p9_client_walk_one(&g_client, 0, g_dyop.fid, (const u8 *)"w", 1, NULL);
-    else if (g_dyop.op == DY_READ) {
+    else if (g_dyop.op == DY_WRITE) {
+        u32 acc = 0;
+        rc = p9_client_write(&g_client, g_dyop.fid, 0, 16, g_dyop.data, &acc);
+    } else if (g_dyop.op == DY_READ) {
         u32 got = 0;
         rc = p9_client_read(&g_client, g_dyop.fid, 0, (u32)sizeof(g_dyop.data),
                             g_dyop.data, &got);
@@ -5127,6 +5132,103 @@ void test_9p_client_flushed_walk_late_reply_to_sink(void) {
     TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
 
     TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 60), 0, "the closer's clunk");
+    dy_client_close();
+}
+
+// An op that mutates loses its owner: the server may have run it, or may yet,
+// nobody will invalidate for it, and the client cannot name what it touched.
+#define DY_QID 0x700u
+static u8 g_dy_page[LARDER_PAGE_SIZE];
+
+static void dy_larder_fill(void) {
+    struct larder *l = &g_client.larder;
+    u64 seq = larder_gen_snapshot(l);
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.mode = 0644; st.qid_path = DY_QID; st.size = LARDER_PAGE_SIZE;
+    larder_attr_install(l, seq, DY_QID, /*cvers=*/1, &st, NULL);
+    larder_dentry_install(l, seq, 0x500, "f", 1, DY_QID, /*negative=*/false);
+    larder_page_install(l, seq, DY_QID, 0, /*cvers=*/1, g_dy_page, LARDER_PAGE_SIZE);
+}
+
+// How much of dy_larder_fill still serves: 3 for all, 0 for none.
+static u32 dy_larder_entries(void) {
+    struct larder *l = &g_client.larder;
+    struct t_stat st;
+    u64 seq, child;
+    u32 n = 0;
+    if (larder_attr_serve(l, DY_QID, &st, &seq)) n++;
+    if (larder_dentry_lookup(l, 0x500, "f", 1, &child)) n++;
+    if (larder_pages_cover(l, DY_QID, /*cvers=*/1, LARDER_PAGE_SIZE)) n++;
+    return n;
+}
+
+void test_9p_client_dying_mutator_forgets_larder(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(dy_bind(140), 1u, "walk binds 140");
+    dy_larder_fill();
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "the fixture serves all three kinds");
+
+    // A read leaves the cache alone: the control, one variable away.
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_READ, 140, /*dying=*/false), "a reader");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rread");
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "its Rflush");
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "a killed read forgets nothing");
+
+    // A write: gone at the kill, and a fill in flight from before it installs
+    // nothing. Filled again in the window, gone again at the late reply. The
+    // Rflush behind that reply has nothing more to do.
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WRITE, 140, /*dying=*/false), "a writer");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWRITE) == 1);
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "the write is in flight, its owner alive");
+    u64 seq0 = larder_gen_snapshot(&g_client.larder);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)(s64)g_dyop.rc, (u64)(s64)-P9_E_IO, "the dead owner's write failed");
+    TEST_EXPECT_EQ(dy_larder_entries(), 0u, "the kill forgets every entry");
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.mode = 0644; st.qid_path = DY_QID;
+    larder_attr_install(&g_client.larder, seq0, DY_QID, 1, &st, NULL);
+    u64 sq;
+    TEST_ASSERT(!larder_attr_serve(&g_client.larder, DY_QID, &st, &sq),
+                "and a fill read before it installs nothing");
+    dy_larder_fill();
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "a fill after the kill installs");
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the late Rwrite");
+    TEST_EXPECT_EQ(dy_larder_entries(), 0u, "says the write ran: forgotten again");
+    dy_larder_fill();
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "its Rflush");
+    TEST_EXPECT_EQ(dy_larder_entries(), 3u, "finds nothing more to do");
+
+    // The server never answers the write, and answers the flush.
+    g_rec_hold = P9_TWRITE;
+    u32 w0 = rec_count(P9_TWRITE);
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WRITE, 140, /*dying=*/false), "a second writer");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWRITE) == w0 + 1);
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    dy_larder_fill();
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the lone Rflush");
+    TEST_EXPECT_EQ(dy_larder_entries(), 0u, "forgets what was filled before it");
+    g_rec_hold = 0;
+
+    TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
+    TEST_ASSERT(!g_client.dead, "the session stays live");
+    TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, 140), 0, "a live clunk");
     dy_client_close();
 }
 

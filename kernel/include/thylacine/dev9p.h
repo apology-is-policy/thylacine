@@ -116,8 +116,11 @@ struct dev9p_priv {
     // server-side locks: its close clunks it, and never parks it in the
     // dir-fid cache, where a later consumer would inherit the locks.
     bool               fid_locks;
-    // B-3h: a lock was granted on this priv's lock fid, so its last close waits
-    // for an unlock before the clunk. Sticky; set with release at the grant.
+    // B-3h: a lock may stand on this priv's lock fid, so its last close waits for
+    // an unlock. Set at a grant (and a take a death abandoned), taken by that
+    // close. Sequentially consistent against Spoor.fd_refs: a take in flight
+    // when the last descriptor closes either has its grant seen by the close or
+    // sees the close (sys_file_lock_handler).
     bool               lock_granted;
     // B-3h: the inode generation of the file the fid names, learned once by
     // dev9p_lock_ident (a file keeps its generation for life; a file that

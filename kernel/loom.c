@@ -808,9 +808,8 @@ _Static_assert(__builtin_offsetof(struct p9_statfs, namelen) == 56, "Loom p9_sta
 
 // 6c audit F1: map a byte COUNT to a CQE result without aliasing the error
 // region. The CQE ABI is result >= 0 = byte count, result < 0 = -errno; a count
-// that would set the sign bit (> INT32_MAX -- a multi-GiB registered buffer, or
-// an over-large server-reported write/read count) must NOT wrap to a spurious
-// -errno. The data was already placed (READ) / accepted (WRITE); only the
+// that would set the sign bit (> INT32_MAX -- a multi-GiB registered buffer)
+// must NOT wrap to a spurious -errno. The data was already placed (READ) / accepted (WRITE); only the
 // reported magnitude caps. Clamp so the s32 cast stays non-negative.
 static s32 loom_count_result(u32 got) {
     if (got > 0x7FFFFFFFu) got = 0x7FFFFFFFu;
@@ -2720,10 +2719,6 @@ void loom_sqpoll_main(void *arg) {
     struct poll_waiter pw_cq;
     poll_waiter_init(&pw_cq, &l->sqpoll_park);
     struct loom_sqpoll_wait w = { .l = l, .cq = &pw_cq, .fs = &fs };
-    // loom_free joins this thread, so a reap's last close must not wait for
-    // its server (ARCH 7.9.1 part C).
-    current_thread()->closes_never_wait = true;
-
     for (;;) {
         if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) break;
 

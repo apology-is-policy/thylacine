@@ -729,6 +729,7 @@ void test_filelock_fork_exec_dup_teardown(void);
 void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
 void test_filelock_acquire_syncs(void);
+void test_filelock_last_descriptor_closes(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -1476,6 +1477,7 @@ void test_stalk_dotdot_containment(void);
 void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
 void test_stalk_err_codes(void);
+void test_stalk_walk_attrs_unknown_failure(void);
 void test_stalk_notdir(void);                                  // #79
 void test_stalk_dot_notdir(void);                              // #81
 void test_stalk_dot_notdir_mount(void);                        // #81
@@ -1765,6 +1767,7 @@ void test_9p_wire_trenameat_round_trip(void);
 void test_9p_wire_tunlinkat_round_trip(void);
 void test_9p_session_init_destroy(void);
 void test_9p_session_walk_reply_overcount(void);
+void test_9p_session_mutates_mark(void);
 void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
@@ -1917,6 +1920,7 @@ void test_9p_client_nowait_clunk_full_share_defers(void);
 void test_9p_client_nowait_clunk_full_ring_takes_back(void);
 void test_9p_client_clunk_dying_waiter_sends_no_flush(void);
 void test_9p_client_flushed_walk_late_reply_to_sink(void);
+void test_9p_client_dying_mutator_forgets_larder(void);
 void test_9p_client_abandoned_walk_late_reply_kept(void);
 void test_9p_client_abandoned_async_clunk_not_flushed(void);
 void test_9p_client_clunk_rlerror_drains_as_clunk(void);
@@ -2063,6 +2067,10 @@ void test_dev9p_lock_test_answers(void);
 void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
 void test_dev9p_lock_close_releases(void);
+void test_dev9p_lock_close_order(void);
+void test_dev9p_wga_failure_at_an_unknown_name(void);
+void test_dev9p_wb_last_close_with_holder(void);
+void test_dev9p_wb_dying_waiter_leaves_flush_wait(void);
 void test_dev9p_cached_open_loose_lock(void);
 void test_dev9p_cached_open_loose_stale(void);
 void test_dev9p_cached_open_loose_wstat(void);
@@ -2116,6 +2124,7 @@ void test_p9_closer_dying_close_hands_off_staged_run(void);
 void test_p9_closer_dying_lock_release_flushes_shared_run(void);
 void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
+void test_p9_closer_dying_last_close_with_holder(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
@@ -3059,6 +3068,7 @@ struct test_case g_tests[] = {
     { "filelock.stale_entry_retired", test_filelock_stale_entry_retired, false, NULL },
     { "filelock.reused_number", test_filelock_reused_number, false, NULL },
     { "filelock.acquire_syncs", test_filelock_acquire_syncs, false, NULL },
+    { "filelock.last_descriptor_closes", test_filelock_last_descriptor_closes, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
@@ -4122,6 +4132,7 @@ struct test_case g_tests[] = {
     { "9p_wire.trenameat_round_trip",  test_9p_wire_trenameat_round_trip,  false, NULL },
     { "9p_wire.tunlinkat_round_trip",  test_9p_wire_tunlinkat_round_trip,  false, NULL },
     { "9p_session.init_destroy",       test_9p_session_init_destroy,       false, NULL },
+    { "9p_session.mutates_mark", test_9p_session_mutates_mark, false, NULL },
     { "9p_session.walk_reply_overcount", test_9p_session_walk_reply_overcount, false, NULL },
     { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
@@ -4427,6 +4438,8 @@ struct test_case g_tests[] = {
                                        test_9p_client_clunk_dying_waiter_sends_no_flush, false, NULL },
     { "9p_client.flushed_walk_late_reply_to_sink",
                                        test_9p_client_flushed_walk_late_reply_to_sink, false, NULL },
+    { "9p_client.dying_mutator_forgets_larder",
+                                       test_9p_client_dying_mutator_forgets_larder, false, NULL },
     { "9p_client.abandoned_walk_late_reply_kept",
                                        test_9p_client_abandoned_walk_late_reply_kept, false, NULL },
     { "9p_client.abandoned_async_clunk_not_flushed",
@@ -4618,6 +4631,10 @@ struct test_case g_tests[] = {
     { "dev9p.lock_owner_clone",        test_dev9p_lock_owner_clone,        false, NULL },
     { "dev9p.lock_owner_never_parks",  test_dev9p_lock_owner_never_parks,  false, NULL },
     { "dev9p.lock_close_releases",     test_dev9p_lock_close_releases,     false, NULL },
+    { "dev9p.lock_close_order",        test_dev9p_lock_close_order,        false, NULL },
+    { "dev9p.wga_failure_at_an_unknown_name", test_dev9p_wga_failure_at_an_unknown_name, false, NULL },
+    { "dev9p.wb_last_close_with_holder", test_dev9p_wb_last_close_with_holder, false, NULL },
+    { "dev9p.wb_dying_waiter_leaves_flush_wait", test_dev9p_wb_dying_waiter_leaves_flush_wait, false, NULL },
     { "dev9p.cached_open_loose_lock",  test_dev9p_cached_open_loose_lock,  false, NULL },
     { "dev9p.cached_open_loose_stale", test_dev9p_cached_open_loose_stale, false, NULL },
     { "dev9p.cached_open_loose_wstat", test_dev9p_cached_open_loose_wstat, false, NULL },
@@ -4686,6 +4703,8 @@ struct test_case g_tests[] = {
                                        test_p9_closer_exit_close_hands_off_tclunk, false, NULL },
     { "p9_closer.dying_close_hands_off_staged_run",
                                        test_p9_closer_dying_close_hands_off_staged_run, false, NULL },
+    { "p9_closer.dying_last_close_with_holder",
+                                       test_p9_closer_dying_last_close_with_holder, false, NULL },
     { "p9_closer.dying_lock_release_flushes_shared_run",
                                        test_p9_closer_dying_lock_release_flushes_shared_run, false, NULL },
     { "p9_closer.forced_exit_close_hands_off_flush",
@@ -5108,6 +5127,7 @@ struct test_case g_tests[] = {
     { "stalk.xsearch_deny",            test_stalk_xsearch_deny,            false, NULL },
     { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
     { "stalk.err_codes",               test_stalk_err_codes,               false, NULL },
+    { "stalk.walk_attrs_unknown_failure", test_stalk_walk_attrs_unknown_failure, false, NULL },
     { "stalk.notdir",                  test_stalk_notdir,                  false, NULL },
     { "stalk.dot_notdir",              test_stalk_dot_notdir,              false, NULL },
     { "stalk.dot_notdir_mount",        test_stalk_dot_notdir_mount,        false, NULL },

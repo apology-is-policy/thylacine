@@ -1598,19 +1598,23 @@ restart:
             if (w == DEV_WALK_ATTRS_UNSUPPORTED) {
                 // This SESSION's server does not implement the fused op
                 // (dev9p latches the first ENOSYS; the sentinel then returns
-                // RPC-free). Not a walk failure -- nothing about the path was
-                // learned. Release the untouched clone, rewind the gather to
-                // just past the first component, and resolve per-component:
-                // the outer loop re-tokenizes the rest, and each subsequent
-                // iteration's walk_attrs returns the sentinel instantly, so
-                // the whole resolution degrades to today's loop.
+                // RPC-free), or this run failed at a name it cannot name.
+                // Not a walk failure -- nothing about the path was learned.
+                // Release the untouched clone, rewind the gather to just past
+                // the first component, and resolve per-component: the outer
+                // loop re-tokenizes the rest, each iteration consuming at least
+                // one name, and on a latched session each walk_attrs returns
+                // the sentinel instantly, so the whole resolution degrades to
+                // today's loop.
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }
                 i = ends[0];
                 goto per_component;
             }
             if (!w) {
-                // Failed at the FIRST component (dev9p Rlerror / transport /
-                // OOM): nothing bound, nc untouched (contract). The base was
+                // Failed at the FIRST component (dev9p: a miss there, or any
+                // failure of a one-name run; a longer run that failed elsewhere
+                // answered the sentinel above): nothing bound, nc untouched
+                // (contract). The base was
                 // X-checked above, so NOENT is correctly ordered -- the same
                 // disposition as the per-component loop's walk-NULL arm.
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }

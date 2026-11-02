@@ -385,12 +385,6 @@ struct Thread {
     // in a non-preemptible syscall body. Owner-only; a nested setter saves and
     // restores. Fits the same padding.
     bool               kthread_join_active;
-    // A kernel thread something joins without bound (the Loom SQPOLL kthread,
-    // joined by loom_free): its last closes never wait for a 9P server, so a
-    // staged write-behind run goes to a closer (ARCH 7.9.1 part C). Set once by
-    // the thread itself at entry; read only by it. Fits the same padding.
-    bool               closes_never_wait;
-
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
     // this Thread's OWN debugger park rendez. A thread observing a debugger stop
     // at its EL0-return tail (el0_return_stop_check) parks here via sleep(); the

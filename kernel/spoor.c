@@ -306,6 +306,10 @@ int spoor_clunk_rc(struct Spoor *c) {
         extinction("spoor_clunk of zero-ref Spoor");
     int rc = 0;
     if (pre == 1) {
+        // Every slot holds a ref, so a slot still counted here is a release
+        // that went round the count.
+        if (__atomic_load_n(&c->fd_refs, __ATOMIC_ACQUIRE) != 0)
+            extinction("spoor_clunk: last reference of a Spoor a descriptor names");
         // Last drop. Run Dev close hook (releases per-Spoor aux),
         // then free. The close hook sees ref=0 but storage is intact.
         if (c->dev && c->dev->close) {
@@ -318,6 +322,23 @@ int spoor_clunk_rc(struct Spoor *c) {
 
 void spoor_clunk(struct Spoor *c) {
     (void)spoor_clunk_rc(c);
+}
+
+void spoor_fd_ref(struct Spoor *c) {
+    if (c->magic != SPOOR_MAGIC) extinction("spoor_fd_ref of corrupted Spoor");
+    (void)t_atomic_fetch_add_acqrel_int(&c->fd_refs, 1);
+}
+
+bool spoor_fd_drop(struct Spoor *c) {
+    if (c->magic != SPOOR_MAGIC) extinction("spoor_fd_drop of corrupted Spoor");
+    int pre = t_atomic_fetch_sub_acqrel_int(&c->fd_refs, 1);
+    if (pre <= 0) extinction("spoor_fd_drop: no descriptor names this Spoor");
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return pre == 1;
+}
+
+bool spoor_fd_open(const struct Spoor *c) {
+    return __atomic_load_n(&c->fd_refs, __ATOMIC_SEQ_CST) > 0;
 }
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }

@@ -184,10 +184,12 @@ struct p9_outstanding {
     // The REQUESTED nwname of a TWALK or TWALKGETATTR. A reply naming more
     // components is a protocol violation: the caller's arrays are sized by this
     // count, not by P9_MAX_WALK. A TWALKGETATTR binds new_fid ONLY on a full
-    // walk (nwqid == walk_nwname). (The TWALK arm binds on any Rwalk -- safe
-    // because every TWALK caller sends 0/1 names, where a partial walk cannot
-    // exist; the pounce sends multi-name walks, where it can.)
+    // walk (nwqid == walk_nwname), as a server binds it: a shorter reply bound
+    // nothing there. A TWALK binds the same way.
     u16  walk_nwname;
+    // A server that ran this op changed what a client caches. If its owner goes
+    // before the answer, nobody invalidates for it (larder_forget_all).
+    bool mutates;
     // The tag of the Tflush in flight for this op; meaningful only with
     // awaiting_flush, so a flush is unstaged without a search.
     u16  flush_tag;

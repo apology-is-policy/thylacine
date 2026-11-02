@@ -504,7 +504,7 @@ int  p9_client_handshake(struct p9_client *c,
 // component is a (name_ptr, name_len) pair; `names` is `nwname`
 // pointers, `name_lens` is `nwname` lengths. `nwname == 0` clones
 // `src_fid` into `new_fid`. The output qids array is filled with up
-// to P9_MAX_WALK entries; `*out_nwqid` is set to the actual count.
+// to `nwname` entries; `*out_nwqid` is set to the actual count.
 // Returns 0 on success.
 int  p9_client_walk(struct p9_client *c,
                      u32 src_fid, u32 new_fid,

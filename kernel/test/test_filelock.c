@@ -34,6 +34,7 @@ void test_filelock_fork_exec_dup_teardown(void);
 void test_filelock_stale_entry_retired(void);
 void test_filelock_reused_number(void);
 void test_filelock_acquire_syncs(void);
+void test_filelock_last_descriptor_closes(void);
 
 // -----------------------------------------------------------------------------
 // The fake Dev.
@@ -77,6 +78,10 @@ static u64            g_lk_stale_path;     // != 0: every .lock on this path doe
 static struct Spoor  *g_lk_dead;           // .lock_ident on this Spoor answers ESTALE
 static int            g_lk_ident_fail;     // != 0: and answers this instead
 static u32            g_lk_idents;         // .lock_ident calls that asked the "server"
+static u32            g_lk_fd_closes;      // .fd_close calls
+static u32            g_lk_held_close_seq; // seq of the last .fd_close that held a lock
+static struct Spoor  *g_lk_fd_close_last;  // the Spoor it last ran on
+static u32            g_lk_closes;         // .close calls: last references
 // A fake Spoor's generation is its qid.vers once .lock_ident has learned it (0
 // = not yet); the file's true one is registered here (default 1).
 static struct { struct Spoor *s; u32 gen; } g_lk_gens[8];
@@ -244,10 +249,28 @@ static int lk_sync(struct Spoor *c, u32 how) {
     return 0;
 }
 
+static bool lk_held(struct Spoor *c) {
+    for (u32 i = 0; i < LK_MAXREC; i++)
+        if (g_lk[i].live && g_lk[i].owner == c) return true;
+    return false;
+}
+
+// A last close releases what this Spoor holds, as dev9p's whole-file unlock does.
+static int lk_fd_close(struct Spoor *c) {
+    g_lk_seq++;
+    g_lk_fd_closes++;
+    g_lk_fd_close_last = c;
+    if (lk_held(c)) g_lk_held_close_seq = g_lk_seq;
+    for (u32 i = 0; i < LK_MAXREC; i++)
+        if (g_lk[i].live && g_lk[i].owner == c) g_lk[i].live = false;
+    return 0;
+}
+
 // A last clunk is the server releasing that fid's locks (Stratum drops a
 // fid's records at Tclunk), so a freed Spoor's address never inherits them, nor
 // the stale mark: the next owner minted can take that address.
 static int lk_close(struct Spoor *c) {
+    g_lk_closes++;
     if (c->aux == &g_lk_owner_tag) g_lk_owner_closes++;
     if (c == g_lk_stale) g_lk_stale = NULL;
     for (u32 i = 0; i < LK_MAXREC; i++)
@@ -260,6 +283,8 @@ static struct Dev g_lk_dev = {
     .dc             = 'k',
     .name           = "locktest",
     .close          = lk_close,
+    .fd_close       = lk_fd_close,
+    .lock_held      = lk_held,
     .lock           = lk_lock,
     .lock_owner     = lk_lock_owner,
     .lock_same_file = lk_same_file,
@@ -1019,4 +1044,160 @@ void test_filelock_acquire_syncs(void) {
     if (a >= 0 && b >= 0 && o >= 0 && o2 >= 0) acquire_syncs_body(&f, a, b, o, o2);
     else test_fail("filelock: fixture allocation failed");
     lk_teardown(&f, 8);
+}
+
+// -----------------------------------------------------------------------------
+// The last descriptor, not the last reference: every kind of slot counts, nothing
+// else does, and that close drops what the open file holds with a holder alive.
+// -----------------------------------------------------------------------------
+
+static void last_descriptor_count_body(struct Proc *parent, struct Proc *child,
+                                       struct Spoor *s, struct Spoor *t, hidx_t fd) {
+    hidx_t d1 = handle_dup(parent, fd, RW);
+    hidx_t d2 = handle_dup_to(parent, fd, 20, false);
+    hidx_t d3 = handle_dup_posix(parent, fd, 30, false);
+    TEST_ASSERT(d1 >= 0 && d2 == 20 && d3 >= 30, "fixture: three more descriptors");
+    TEST_ASSERT(handle_table_copy_into(child, parent) == 4, "rfork copies all four");
+
+    // A replace: the slot leaves s, and comes to name t.
+    TEST_EXPECT_EQ(handle_replace(parent, d2, KOBJ_SPOOR, RW, t), 0, "a replace");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 0u, "no close yet: every slot still counted");
+    spoor_ref(s);
+    TEST_EXPECT_EQ(handle_replace(parent, d2, KOBJ_SPOOR, RW, s), 0, "and back");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "t's only descriptor left");
+    TEST_ASSERT(g_lk_fd_close_last == t, "its last close ran");
+    TEST_EXPECT_EQ(g_lk_closes, 1u, "and with nothing else holding it, its last reference");
+
+    // dup2 onto a descriptor of the same open file: one goes, one comes.
+    TEST_EXPECT_EQ(handle_dup_to(parent, fd, d2, false), d2, "dup2 onto its own open file");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "is no close");
+
+    // Closing all but one, in each table.
+    TEST_EXPECT_EQ(handle_close(parent, d1), 0, "close");
+    TEST_EXPECT_EQ(handle_close(parent, d2), 0, "close");
+    TEST_EXPECT_EQ(handle_close(parent, d3), 0, "close");
+    TEST_EXPECT_EQ(handle_close(child, d1), 0, "the child's");
+    TEST_EXPECT_EQ(handle_close(child, d2), 0, "the child's");
+    TEST_EXPECT_EQ(handle_close(child, d3), 0, "the child's");
+    TEST_EXPECT_EQ(handle_close(parent, fd), 0, "the parent's last");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "the child still has one");
+}
+
+// The fixture hands the caller's reference on to the first slot.
+void test_filelock_last_descriptor_closes(void) {
+    lk_reset();
+    g_lk_fd_closes = g_lk_closes = g_lk_held_close_seq = 0;
+    g_lk_fd_close_last = NULL;
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    struct Spoor *s = spoor_alloc(&g_lk_dev);
+    struct Spoor *t = spoor_alloc(&g_lk_dev);
+    hidx_t fd = -1;
+    if (s && parent) fd = handle_alloc(parent, KOBJ_SPOOR, RW, s);
+    if (fd >= 0 && child && t) {
+        s->qid.path = 1;
+        t->qid.path = 2;
+        last_descriptor_count_body(parent, child, s, t, fd);
+    } else {
+        test_fail("filelock: fixture allocation failed");
+    }
+    // An exit is a close of each slot.
+    u32 fc = g_lk_fd_closes;
+    if (child) { child->state = PROC_STATE_ZOMBIE; proc_free(child); }
+    TEST_EXPECT_EQ(g_lk_fd_closes, fc + 1, "the child's exit is the last close");
+    TEST_ASSERT(g_lk_fd_close_last == s, "of the open file");
+    if (parent) { parent->state = PROC_STATE_ZOMBIE; proc_free(parent); }
+
+    struct lk_fix f;
+    lk_fix_init(&f);
+    g_lk_fd_closes = g_lk_closes = g_lk_held_close_seq = 0;
+
+    // A holder, as a read-only map's pin: the close drops the lock regardless.
+    int a = lk_open(&f, &g_lk_dev, 3, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    struct Spoor *pin = f.sp[a];
+    TEST_EXPECT_EQ(lk_call(&f, a, SYS_FILE_LOCK_WR, 0, 0), (s64)0, "an open-file lock");
+    spoor_ref(pin);
+    lk_close_fd(&f, a);
+    TEST_EXPECT_EQ(lk_held_on(3), 0u, "the last close drops it with a holder alive");
+    TEST_EXPECT_EQ(g_lk_closes, 0u, "and the holder keeps the Spoor");
+    spoor_clunk(pin);
+    TEST_EXPECT_EQ(g_lk_closes, 1u, "until it lets go");
+    TEST_EXPECT_EQ(g_lk_fd_closes, 1u, "with no second close");
+
+    // A lock call's own reference is no descriptor either.
+    a = lk_open(&f, &g_lk_dev, 3, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    struct Handle h;
+    TEST_EXPECT_EQ(handle_get(f.p, f.fd[a], &h), 0, "a call's snapshot");
+    u32 fc0 = g_lk_fd_closes;
+    lk_close_fd(&f, a);
+    TEST_EXPECT_EQ(g_lk_fd_closes, fc0 + 1, "does not delay the last close");
+    handle_put(&h);
+    TEST_EXPECT_EQ(g_lk_fd_closes, fc0 + 1, "and its release is no second one");
+
+    // The close that drops a lock lands every open's writes first. One that
+    // leaves a descriptor open drops nothing and lands nothing.
+    a = lk_open(&f, &g_lk_dev, 4, RW);
+    int b = lk_open(&f, &g_lk_dev, 4, RW);
+    int c = lk_open(&f, &g_lk_dev, 4, RW);
+    TEST_ASSERT(a >= 0 && b >= 0 && c >= 0, "fixture: three opens of a file");
+    TEST_EXPECT_EQ(lk_call(&f, a, SYS_FILE_LOCK_WR, 0, 0), (s64)0, "a holds an open-file lock");
+    hidx_t da = handle_dup(f.p, f.fd[a], RW);
+    TEST_ASSERT(da >= 0, "fixture: a dup of a");
+    lk_sync_reset();
+    TEST_EXPECT_EQ(handle_close(f.p, da), 0, "the dup's close");
+    TEST_EXPECT_EQ(g_lk_sync_n, 0u, "lands nothing: a's descriptor remains");
+    TEST_EXPECT_EQ(lk_held_on(4), 1u, "and the lock stands");
+    lk_close_fd(&f, c);
+    TEST_EXPECT_EQ(g_lk_sync_n, 0u, "a close holding no lock lands nothing (control)");
+    lk_sync_reset();
+    lk_close_fd(&f, a);
+    TEST_ASSERT(lk_synced(f.sp[b]), "the last close lands b's writes");
+    TEST_ASSERT(g_lk_sync_last_seq < g_lk_held_close_seq, "before it gives the lock up");
+    TEST_EXPECT_EQ(lk_held_on(4), 0u, "which it does");
+    lk_close_fd(&f, b);
+
+    // The last descriptor closes while a take is on the wire. A Proc lock has its
+    // re-check; an open-file lock had no close left to drop it.
+    a = lk_open(&f, &g_lk_dev, 5, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    g_lk_close_fd = f.fd[a];
+    TEST_EXPECT_EQ(lk_call(&f, a, SYS_FILE_LOCK_WR, 0, 10), -(s64)T_E_BADF,
+                   "a take whose last descriptor closed mid-call is EBADF");
+    f.fd[a] = -1;   // the fake closed it
+    TEST_EXPECT_EQ(lk_held_on(5), 0u, "and holds nothing");
+    a = lk_open(&f, &g_lk_dev, 5, RW);
+    TEST_ASSERT(a >= 0, "fixture: a file");
+    hidx_t kept = handle_dup(f.p, f.fd[a], RW);
+    TEST_ASSERT(kept >= 0, "fixture: its dup");
+    g_lk_close_fd = f.fd[a];
+    TEST_EXPECT_EQ(sys_file_lock_handler((u64)kept, SYS_FILE_LOCK_WR, 0, 10, 0), (s64)0,
+                   "a descriptor remains: the take stands (control)");
+    f.fd[a] = -1;
+    TEST_EXPECT_EQ(lk_held_on(5), 1u, "and holds");
+    TEST_EXPECT_EQ(handle_close(f.p, kept), 0, "its close");
+    TEST_EXPECT_EQ(lk_held_on(5), 0u, "drops it");
+
+    // An exit lands the writes of a slot above the lock's before it gives the lock
+    // up, whatever the slots' order.
+    lk_reset();
+    g_lk_fd_closes = g_lk_held_close_seq = 0;
+    struct Proc *ex = proc_alloc();
+    struct Spoor *la = spoor_alloc(&g_lk_dev);
+    struct Spoor *lb = spoor_alloc(&g_lk_dev);
+    if (ex && la && lb) {
+        la->qid.path = lb->qid.path = 6;
+        TEST_ASSERT(handle_alloc(ex, KOBJ_SPOOR, RW, la) >= 0, "fixture: a");
+        TEST_ASSERT(handle_alloc(ex, KOBJ_SPOOR, RW, lb) >= 0, "fixture: b, above it");
+        TEST_EXPECT_EQ(la->dev->lock(la, SYS_FILE_LOCK_WR, 0, 0, NULL), 0, "a's lock");
+        ex->state = PROC_STATE_ZOMBIE;
+        proc_free(ex);
+        TEST_ASSERT(lk_synced(lb), "the exit lands b's writes");
+        TEST_ASSERT(g_lk_sync_last_seq < g_lk_held_close_seq, "before a gives the lock up");
+        TEST_EXPECT_EQ(lk_held_on(6), 0u, "which it does");
+    } else {
+        test_fail("filelock: fixture allocation failed");
+    }
+    lk_teardown(&f, 5);
 }

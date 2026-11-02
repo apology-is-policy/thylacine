@@ -296,6 +296,11 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     }
 }
 
+// A slot has come to name obj. Under the table lock.
+static void handle_fd_count(enum kobj_kind kind, void *obj) {
+    if (kind == KOBJ_SPOOR && obj) spoor_fd_ref((struct Spoor *)obj);
+}
+
 // =============================================================================
 // B-3h: the Proc owner of SYS_FILE_LOCK_PROC locks (ARCH 9.6.11; the contract is
 // at struct lock_owner_ent in handle.h).
@@ -539,6 +544,30 @@ static void lock_owners_on_close(struct HandleTable *t, enum kobj_kind kind,
     if (drop) spoor_clunk(drop);   // the table's
 }
 
+// A slot has stopped naming a Spoor. Its last close runs here, on this thread,
+// though other references may keep the Spoor alive. The lock that close drops
+// admits a waiter, so every open of the file the table still holds lands its
+// writes first (ARCH 9.6.11). 0, or the close's negative errno.
+static int handle_fd_drop(struct HandleTable *t, enum kobj_kind kind, void *obj) {
+    if (kind != KOBJ_SPOOR || !obj) return 0;
+    struct Spoor *c = (struct Spoor *)obj;
+    if (!spoor_fd_drop(c)) return 0;
+    struct Dev *d = c->dev;
+    if (!d || !d->fd_close) return 0;
+    if (d->lock_held && d->lock_held(c))
+        (void)lock_sync_table(t, c, DEV_LOCK_SYNC_RELEASE);
+    return d->fd_close(c);
+}
+
+// A descriptor naming `obj` has left t, by close or by replacement: the Proc's
+// locks on the file, the last close if it was one, then the slot's reference.
+static int handle_fd_left(struct HandleTable *t, enum kobj_kind kind, void *obj) {
+    lock_owners_on_close(t, kind, obj);
+    int frc = handle_fd_drop(t, kind, obj);
+    int crc = handle_release_obj(kind, obj);
+    return frc ? frc : crc;
+}
+
 void handle_table_free(struct HandleTable *t) {
     if (!t) return;
 
@@ -563,14 +592,15 @@ void handle_table_free(struct HandleTable *t) {
     // table -- breaks the self-only premise and would need the table lock
     // here AND coordination with the #926/#68 at-exit close. The
     // slot-zeroing is belt-and-suspenders before the kfree.
-    // B-3h: land each locked file's staged writes before its owner's clunk
-    // releases the lock. The entries are clunked after the slots: a last close
-    // that cannot wait hands its run and its clunk to a closer, and the
-    // owner's clunk must not overtake it.
+    // B-3h: land each locked file's staged writes before its owner gives the
+    // lock up. The entries go after the slots: a last close that cannot wait
+    // hands its run and its clunk to a closer, and the owner's clunk must not
+    // overtake it.
     for (u32 j = 0; j < t->nlockowners; j++)
         lock_sync_table(t, t->lockowners[j].spoor, DEV_LOCK_SYNC_RELEASE);
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
+            (void)handle_fd_drop(t, t->slots[i].kind, t->slots[i].obj);
             handle_release_obj(t->slots[i].kind, t->slots[i].obj);
             t->slots[i].magic  = 0;
             t->slots[i].kind   = KOBJ_INVALID;
@@ -581,6 +611,9 @@ void handle_table_free(struct HandleTable *t) {
     }
     while (t->nlockowners) {
         struct Spoor *sp = lock_owner_remove_locked(t, &t->lockowners[0]);
+        // No slot ever named an owner, so nothing counted it: this is its
+        // last close.
+        if (sp->dev->fd_close) (void)sp->dev->fd_close(sp);
         spoor_clunk(sp);
     }
     kfree(t);
@@ -660,6 +693,7 @@ static hidx_t handle_install_locked(struct HandleTable *t, enum kobj_kind kind,
             t->slots[i].kind   = kind;
             t->slots[i].rights = rights;
             t->slots[i].obj    = obj;
+            handle_fd_count(kind, obj);
             cloexec_set_locked(t, (hidx_t)i, cloexec);
             __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
             return (hidx_t)i;
@@ -756,8 +790,7 @@ int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    lock_owners_on_close(t, kind, obj);
-    *close_rc = handle_release_obj(kind, obj);
+    *close_rc = handle_fd_left(t, kind, obj);
     return 0;
 }
 
@@ -815,13 +848,13 @@ int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
     slot->kind   = kind;
     slot->rights = rights;
     slot->obj    = obj;
+    handle_fd_count(kind, obj);
     spin_unlock(&t->lock);
 
     // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after
     // the new object is already installed, so the slot is never momentarily
     // empty for a peer thread to allocate into.
-    lock_owners_on_close(t, old_kind, old_obj);
-    handle_release_obj(old_kind, old_obj);
+    (void)handle_fd_left(t, old_kind, old_obj);
     return 0;
 }
 
@@ -963,6 +996,7 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
         // an inherited fd silently less capable than the one it was forked from.
         dt->slots[i].rights = s->rights;
         dt->slots[i].obj    = s->obj;
+        handle_fd_count(s->kind, s->obj);
         // #151: fork PRESERVES close-on-exec -- POSIX, and the only reading that
         // makes the flag usable. A shell sets it on a bookkeeping fd once and
         // then forks per command; clearing it here would leak that fd into every
@@ -1152,6 +1186,7 @@ int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec
     dst->kind   = kind;
     dst->rights = rights;
     dst->obj    = obj;
+    handle_fd_count(kind, obj);
     // #151: SET, not inherited. dup2's new descriptor is close-on-exec exactly
     // when the caller asked (dup3's O_CLOEXEC), regardless of what `old` or the
     // previous occupant of this index carried. Inheriting from `old` is the
@@ -1167,10 +1202,7 @@ int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec
     // the new object is installed, so the slot is never momentarily empty for a
     // peer thread to allocate into. handle_replace does it in this order for
     // the same reason.
-    if (had) {
-        lock_owners_on_close(t, old_kind, old_obj);
-        handle_release_obj(old_kind, old_obj);
-    }
+    if (had) (void)handle_fd_left(t, old_kind, old_obj);
     return new_h;
 }
 

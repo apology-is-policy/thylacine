@@ -201,6 +201,14 @@ s64 sys_file_lock_handler(u64 fd_raw, u64 op, u64 start, u64 len, u64 out_va) {
         (void)file_lock_once(p, c, SYS_FILE_LOCK_UN, true, start, len, NULL);
         rc = -T_E_BADF;
     }
+    // The open-file twin: the last descriptor closed during the call, and its
+    // close saw no grant. A reference other than this call's can keep c alive
+    // indefinitely, and nothing else would release this lock.
+    if (rc == 0 && !proc_owner && !test && type != SYS_FILE_LOCK_UN &&
+        !spoor_fd_open(c)) {
+        if (c->dev->fd_close) (void)c->dev->fd_close(c);
+        rc = -T_E_BADF;
+    }
     handle_put(&h);
 
     if (rc == 0 && test &&

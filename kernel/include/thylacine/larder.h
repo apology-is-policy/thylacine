@@ -472,6 +472,12 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
 // file) and bump gen (always -- a concurrent populate that read the pre-write
 // content must be skipped). Slot buffers are retained for reuse.
 void larder_page_invalidate(struct larder *l, u64 qid_path);
+// Something on the server changed and the caller cannot say what: an op that
+// mutates lost its owner (9p_client.c), so nobody will invalidate for it and it
+// may land at any moment. Every entry goes, and no fill now in flight installs:
+// gen jumps past the ring, so every window fails safe. A file the op never
+// touched pays a re-read.
+void larder_forget_all(struct larder *l);
 // G1b (term-4): drop ONLY the file's pages whose page_index lies in
 // [first_idx, last_idx] -- the write-through discipline for a non-append
 // write of a known [offset, offset+len) range. Pages OUTSIDE the range keep

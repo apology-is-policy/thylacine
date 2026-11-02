@@ -853,6 +853,49 @@ void larder_page_invalidate(struct larder *l, u64 qid_path) {
     spin_unlock(&l->lock);
 }
 
+void larder_forget_all(struct larder *l) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    l->gen += LARDER_INVAL_RING + 1u;
+    if (l->attr) {
+        for (u32 i = 0; i < l->attr_cap; i++) {
+            if (!l->attr[i].valid) continue;
+            attr_hash_unlink_locked(l, (s32)i);
+            l->attr[i].valid = false;
+            l->attr_invalidations++;
+        }
+    }
+    if (l->dentry) {
+        for (u32 i = 0; i < l->dentry_cap; i++) {
+            if (!l->dentry[i].valid) continue;
+            dentry_hash_unlink_locked(l, (s32)i);
+            l->dentry[i].valid = false;
+            l->dentry_invalidations++;
+        }
+    }
+    if (l->page) {
+        // As larder_page_invalidate, over every qbucket: a !valid slot (a fresh
+        // install mid-copy) stays linked for its install's guard to skip.
+        for (u32 qb = 0; qb < l->page_qnbuckets; qb++) {
+            s32 *pp = &l->page_qhash[qb];
+            while (*pp != -1) {
+                s32 si = *pp;
+                struct larder_page_ent *e = &l->page[si];
+                if (e->valid) {
+                    page_hash_unlink_locked(l, si);
+                    *pp = e->qnext;
+                    e->qnext = -1;
+                    e->valid = false;
+                    l->page_invalidations++;
+                } else {
+                    pp = &e->qnext;
+                }
+            }
+        }
+    }
+    spin_unlock(&l->lock);
+}
+
 void larder_page_invalidate_range(struct larder *l, u64 qid_path,
                                   u64 first_idx, u64 last_idx) {
     if (!l) return;
