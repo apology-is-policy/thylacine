@@ -682,6 +682,8 @@ int main(void) {
         int bad = kill_leg_worker(SIGINT, "kill-worker");
         if (bad == 0) {
             printf("pouch-hello-threads: kill-worker: pthread_kill ran the handler on the named worker OK\n");
+            // SIGUSR1 mapped wrongly ends this process, and stdio would lose the lines above.
+            fflush(stdout);
             bad = kill_leg_worker(SIGUSR1, "kill-usr");
         }
         if (bad == 0) {

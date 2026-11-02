@@ -40,6 +40,16 @@ needed the operator.
 
 **Lease 1, 15:12Z to 15:27Z on 9f77a7394.** The CI bake passed, so the Rust and guest C link. The suite stopped at 2171 of 2172 on `vivarium.sigset_to_notemask`, whose exact pin of what block-all covers still read six notes. The kernel was right and the pin was stale, and neither my widening nor the audit saw it: a pin on a derived set that names its members has to be found by running it. A failed suite stops the boot, so joey did not run and the guest legs are still unproven.
 
+**Lease 2, 15:56Z to 18:06Z on 33fbf2198.** Suite 2173/0, the boot reached joey, and every guest leg passed on the first boot that ran them. Regreen rebuilt an identical ELF (5a56fe06a7a7a3a7). K01-K36 bar two went red with their own messages, B1-B7 each failed to build on their own guard, R1 on its const assert, and G1, G2, G4, G5, G6, P2, P3 and P4 on the right legs. Three sabotages did not earn their reds, and those are this lease's result.
+
+K12 stayed green. Its cast makes a thread hand off a high designation it could have honoured. `caught_note_prefers_awake` could not see it, because its designee is main and the walk, preferring the first awake thread, gave main the family straight back. So the wrong-thread case needed a designee that is not main: `caught_note_designee_keeps`, where the peer posts its own note.
+
+K15 stayed green. Its cast clears every claim on a designation, so a peer's wait could claim the same note and both threads unwind. That was not a width gap: no test at any family asserted that a designation closes its family. The model holds it; nothing at runtime did. `caught_note_designation_closes_the_family` does, and K38 is its twin with no cast.
+
+G3 stayed green, and the cause was my sabotage, not the kernel: a default death has two arms, so a flag on the predicate one of them asks could never have touched L345. L345 had therefore never turned red. G3 and G7 are rewritten to hit the wait's status and the latch. P1 went red with no line of its own, because stdio lost what the dying process had not flushed; I reasoned that it died at kill-usr, and a flush before that leg lets the next run show it instead.
+
+K12, K15 and the new twins, G3, G7 and P1 are owed by the landing lease with the SMP subset, and until then nothing above says they hold.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
 
 **Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.

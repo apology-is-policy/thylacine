@@ -2531,6 +2531,64 @@ void test_rendez_caught_note_poster_first(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
+// rendez.caught_note_designee_keeps -- a wait that can unwind for a family hands
+// nothing off. The peer posts, so the peer is designated with main awake; entering
+// its unwinding wait it keeps the designation and unwinds at once. Handed off, the
+// walk would give the family to main, the first awake thread, and the peer would
+// sleep on. caught_note_prefers_awake cannot see this: its designee is main, which
+// that walk picks straight back.
+static void nt_designee_keeps_body(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made     = nt_setup(true, t);
+    bool posted   = made && nt_run(t[1], 1, NT_POST, false);
+    u16  peer_tgt = made ? nt_target(t[1]) : 0;
+    bool back     = posted && nt_run(t[1], 1, NT_UWAIT, false);
+    int  rc       = g_nt[1].rc;
+    u16  claim    = made ? nt_claim(t[1]) : 0;
+    u16  main_tgt = made ? nt_target(t[0]) : 0;
+    bool down     = nt_teardown(t);
+
+    TEST_ASSERT(made && posted, "two threads, and the peer posted");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_ASSERT(peer_tgt & NT_FAM, "the poster was designated");
+    TEST_ASSERT(back, "its unwinding wait returned at once");
+    TEST_EXPECT_EQ(rc, SLEEP_NOTEINTR, "...unwound for the note");
+    TEST_ASSERT(claim & NT_FAM, "...the designation became its claim");
+    TEST_ASSERT(!(main_tgt & NT_FAM), "main, awake, was handed nothing");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+void test_rendez_caught_note_designee_keeps(void) {
+    nt_designee_keeps_body();
+}
+
+// rendez.caught_note_designation_closes_the_family -- one note, one unwind. Main,
+// awake, is designated by a post from outside, and the walk claims the family on
+// its behalf; a peer then entering an unwinding wait finds the family taken, and
+// sleeps. Left open, the peer's own claim would succeed and both would unwind.
+static void nt_designation_closes_the_family_body(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made   = nt_setup(true, t);
+    bool posted = made && nt_post(g_nt_proc);
+    u16  tgt    = made ? nt_target(t[0]) : 0;
+    u32  caught = made ? __atomic_load_n(&g_nt_proc->note_caught, __ATOMIC_ACQUIRE) : 0;
+    bool parked = posted && nt_run(t[1], 1, NT_UWAIT, true);
+    bool down   = nt_teardown(t);
+
+    TEST_ASSERT(made && posted, "two threads, and the note posted from outside");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_ASSERT(tgt & NT_FAM, "main, awake, was designated");
+    TEST_ASSERT(caught & (NT_FAM << CAUGHT_CLAIM_SHIFT), "the walk claimed the family for it");
+    TEST_ASSERT(parked, "the peer's unwinding wait refused the family and slept");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+void test_rendez_caught_note_designation_closes_the_family(void) {
+    nt_designation_closes_the_family_body();
+}
+
 // rendez.caught_note_handoff -- a designation ends when its thread enters a
 // wait that cannot unwind for the family: one that holds, or one that would
 // unwind but the family is masked, through sleep or tsleep alike. Main, awake,
@@ -2674,6 +2732,8 @@ void test_rendez_caught_note_family_past_the_first_byte(void) {
     g_nt_fam  = 1u << NOTE_BIT_USR2;
     nt_direct_unwinds_body();
     nt_prefers_awake_body();
+    nt_designee_keeps_body();
+    nt_designation_closes_the_family_body();
     nt_handoff_body();
     nt_holder_rewake_body();
     g_nt_note = NOTE_NAME_INTERRUPT;

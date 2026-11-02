@@ -113,6 +113,8 @@ void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_caught_note_release_wakes_peer(void);
 void test_rendez_caught_note_prefers_awake(void);
 void test_rendez_caught_note_poster_first(void);
+void test_rendez_caught_note_designee_keeps(void);
+void test_rendez_caught_note_designation_closes_the_family(void);
 void test_rendez_caught_note_handoff(void);
 void test_rendez_caught_note_family_past_the_first_byte(void);
 void test_rendez_caught_note_exit_drop(void);

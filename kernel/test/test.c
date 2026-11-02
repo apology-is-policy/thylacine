@@ -510,6 +510,8 @@ struct test_case g_tests[] = {
     { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
     { "rendez.caught_note_prefers_awake", test_rendez_caught_note_prefers_awake, false, NULL },
     { "rendez.caught_note_poster_first", test_rendez_caught_note_poster_first, false, NULL },
+    { "rendez.caught_note_designee_keeps", test_rendez_caught_note_designee_keeps, false, NULL },
+    { "rendez.caught_note_designation_closes_the_family", test_rendez_caught_note_designation_closes_the_family, false, NULL },
     { "rendez.caught_note_handoff", test_rendez_caught_note_handoff, false, NULL },
     { "rendez.caught_note_family_past_the_first_byte", test_rendez_caught_note_family_past_the_first_byte, false, NULL },
     { "rendez.caught_note_exit_drop", test_rendez_caught_note_exit_drop, false, NULL },
