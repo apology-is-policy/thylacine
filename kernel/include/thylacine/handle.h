@@ -194,7 +194,7 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 // per file the Proc has locked, each an UNOPENED Spoor naming that file with its
 // own server-side owner (Dev.lock_owner). Threads share them; rfork copies none
 // (the child's table starts empty); exec keeps them. A close of any descriptor
-// naming the file lands the file's staged writes, unlocks the whole file through
+// naming the file, other than a navigation-only one, lands the file's staged writes, unlocks the whole file through
 // the entry, and drops the entry unless a lock call is using it. Bounded (I-32):
 // a new file past the bound answers -T_E_NOLCK.
 //

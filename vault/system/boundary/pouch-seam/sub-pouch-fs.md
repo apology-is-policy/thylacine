@@ -56,6 +56,9 @@ cancellation point (`__syscall_cp`). `F_GETLK` answers `l_pid` -1, changes only
 client does. A `struct flock` the caller cannot read faults in the caller, where
 Linux answers EFAULT. A socket's tag answers ENOSYS while it is live and EBADF
 once it is not.
+`fcntl`'s `SEEK_CUR` reads the cursor through the raw call: the kernel's flat -1 on a
+descriptor with no cursor reads as 0, Linux's `f_pos` of a pipe, where `__lseek` would
+report it as EIO.
 
 `tools/test-pouch-descriptor-ops.py` runs the real `fcntl.c` and `flock.c` on the
 host, with the ABI parsed from the kernel's `syscall.h`: 132 cases at each of two

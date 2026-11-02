@@ -109,6 +109,7 @@ void test_dev9p_lock_unlock_flushes_first(void);
 void test_dev9p_lock_test_answers(void);
 void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
+void test_dev9p_lock_close_releases(void);
 void test_dev9p_cached_open_loose_lock(void);
 void test_dev9p_cached_open_loose_stale(void);
 void test_dev9p_cached_open_loose_wstat(void);
@@ -6269,6 +6270,11 @@ static void cached_open_loose_wstat_authority_body(struct Spoor *root) {
     struct dev9p_priv *cp = dev9p_priv_of(co);
     TEST_ASSERT(cp != NULL, "priv");
     cp->co_stat.uid = 0x9999u;
+    // Another session did the chown, so the Larder still names the former owner
+    // too. Only the bind's walk knows.
+    u64 former_gen = 0x77;
+    larder_attr_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                        cp->co_stat.qid_path, cp->co_stat.qid_vers, &cp->co_stat, &former_gen);
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
     p->principal_id = 0x9999u;
@@ -6290,6 +6296,92 @@ static void cached_open_loose_wstat_authority_body(struct Spoor *root) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     (void)p9_client_reader_pump_ready(&g_client);
+}
+
+// A close returns with its fid's locks gone: the clunk that would release them
+// does not wait, and a server's workers may serve the next request first.
+static void lock_close_expect_unlock(u32 fid, const char *what) {
+    TEST_EXPECT_EQ(g_tlock_seen, 1u, what);
+    TEST_EXPECT_EQ((u64)g_tlock_type, (u64)P9_LOCK_TYPE_UNLCK, "an unlock");
+    TEST_EXPECT_EQ(g_tlock_start, 0ull, "of the whole file");
+    TEST_EXPECT_EQ(g_tlock_len, 0ull, "to its end");
+    TEST_EXPECT_EQ(g_tlock_fid, fid, "on the lock fid");
+    TEST_ASSERT(g_clunk_seen >= 1u && g_tlock_last_seq < g_clunk_last_seq, "before its Tclunk");
+}
+
+static void lock_close_releases_body(struct Spoor *root) {
+    // Never asked for a lock: the control one variable away.
+    struct Spoor *f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    lock_wire_reset(); g_clunk_seen = 0;
+    lk_close(f);
+    TEST_EXPECT_EQ(g_clunk_seen, 1u, "a close clunks");
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "and with no lock granted sends no unlock");
+
+    // Granted and still held.
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    u32 fid = dev9p_priv_of(f)->fid;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 10, 5, NULL), 0ll, "a take");
+    lock_wire_reset(); g_clunk_seen = 0;
+    lk_close(f);
+    lock_close_expect_unlock(fid, "the close sends one unlock");
+
+    // Refused: nothing was granted.
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    lock_wire_reset();
+    g_tlock_status = P9_LOCK_BLOCKED;
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), (s64)-T_E_AGAIN, "a refused take");
+    lock_wire_reset(); g_clunk_seen = 0;
+    lk_close(f);
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "a refused take leaves nothing to unlock");
+
+    // A thread whose close may not wait leaves it to the clunk.
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    TEST_EXPECT_EQ((s64)dev9p.lock(f, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "a take");
+    lock_wire_reset(); g_clunk_seen = 0;
+    current_thread()->closes_never_wait = true;
+    lk_close(f);
+    current_thread()->closes_never_wait = false;
+    TEST_EXPECT_EQ(g_tlock_seen, 0u, "a close that may not wait sends no unlock");
+    TEST_EXPECT_EQ(g_clunk_seen, 1u, "its clunk still goes");
+
+    // The Proc's owner, which a close of any descriptor or the exit drops.
+    f = lk_open_file(root);
+    TEST_ASSERT(f != NULL, "open fileA");
+    int err = 0;
+    struct Spoor *o = dev9p.lock_owner(f, &err);
+    TEST_ASSERT(o != NULL, "a Proc owner");
+    fid = dev9p_priv_of(o)->fid;
+    TEST_EXPECT_EQ((s64)dev9p.lock(o, SYS_FILE_LOCK_WR, 0, 0, NULL), 0ll, "its take");
+    lock_wire_reset(); g_clunk_seen = 0;
+    lk_close(o);
+    lock_close_expect_unlock(fid, "its close sends one unlock");
+    lk_close(f);
+
+    // A loose cached open's bound fid.
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 9 + 2);
+    struct Spoor *co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    g_ga_gen = 0x77;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll, "its take binds");
+    fid = dev9p_priv_of(co)->co_kfid;
+    lock_wire_reset(); g_clunk_seen = 0;
+    lk_close(co);
+    lock_close_expect_unlock(fid, "its close sends one unlock");
+    lock_wire_reset();
+}
+
+void test_dev9p_lock_close_releases(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    lock_close_releases_body(root);
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
 }
 
 void test_dev9p_cached_open_loose_wstat(void) {

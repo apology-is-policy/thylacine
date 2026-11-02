@@ -240,21 +240,22 @@ struct Dev {
                                   const char **names, const size_t *name_lens,
                                   int nname, struct t_stat *sts);
 
-    // open_cached(c, names, name_lens, nname, sts) — the FID-LIFECYCLE fidless
-    // cached open (docs/FID-LIFECYCLE-DESIGN.md §3.3; refines I-38). OPTIONAL
+    // open_cached(c, names, name_lens, nname, sts) — the FID-LIFECYCLE cached
+    // open (docs/FID-LIFECYCLE-DESIGN.md §3.3; refines I-38). OPTIONAL
     // (NULL-permitted, like .walk_attrs): stalk calls it on the FINAL run of a
     // plain read-only STALK_OPEN resolution (omode == 0 exactly) BEFORE the
     // normal bind walk. Names are (ptr, len) pairs like walk_attrs; 1 <= nname
     // <= DEV_WALK_ATTRS_MAX.
     //
     // The Dev attempts, wholly internally: an RPC-free eligibility hint; ONE
-    // FORCED-WIRE query walk of the run (no fid binds on either end — the
-    // close-to-open revalidation, which MUST be server-fresh, never served
-    // from a cache); a snapshot of the leaf's full content at the fresh
-    // content-version; and the mint of an OPENED read-only fidless Spoor.
+    // FORCED-WIRE walk of the run (the close-to-open revalidation, which MUST be
+    // server-fresh, never served from a cache; its fid stays bound, unopened);
+    // a snapshot of the leaf's full content at the fresh content-version; and
+    // the mint of an OPENED read-only Spoor with no opened fid. A loose client's
+    // mint sends nothing and binds nothing until the open first needs a fid.
     //
-    //   - Success: returns the opened Spoor (one owned ref; wire-free to
-    //     destroy) AND fills sts[0..nname) with the walk's FRESH per-component
+    //   - Success: returns the opened Spoor (one owned ref; its destroy waits
+    //     for nothing unless a lock was granted on it) AND fills sts[0..nname) with the walk's FRESH per-component
     //     records. The CALLER (the resolver) then MUST run its fail-ordering
     //     post-scan on those records — per-component X-search, mount-membership
     //     scan, final-hop R/W perm — and destroy the Spoor on any denial or
@@ -388,7 +389,7 @@ struct Dev {
     //     under the handle-table spinlock: it must not block. It may answer by
     //     what the two Spoors already know of their files.
     //   lock_sync(c, how) -- DEV_LOCK_SYNC_RELEASE: land c's staged writes
-    //     before a set-lock on its file. DEV_LOCK_SYNC_ACQUIRE: from now
+    //     before a set-lock on its file, by any open of it in the Proc. DEV_LOCK_SYNC_ACQUIRE: from now
     //     on c reads what the server holds (dev9p: a cached open leaves its
     //     snapshot); asked before a take on c's file, and a failure refuses
     //     the take.

@@ -181,13 +181,13 @@ struct p9_outstanding {
     // into a binding by slot_bind.
     bool holds_slot;
     u16  flush_oldtag;
-    // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
-    // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).
-    // Meaningful only on a TWALKGETATTR entry. (The TWALK arm predates
-    // this and still binds unconditionally -- safe because every TWALK
-    // caller sends 0/1 names, where a partial walk cannot exist; the
-    // pounce sends multi-name walks, where it can.)
-    u16  wga_nwname;
+    // The REQUESTED nwname of a TWALK or TWALKGETATTR. A reply naming more
+    // components is a protocol violation: the caller's arrays are sized by this
+    // count, not by P9_MAX_WALK. A TWALKGETATTR binds new_fid ONLY on a full
+    // walk (nwqid == walk_nwname). (The TWALK arm binds on any Rwalk -- safe
+    // because every TWALK caller sends 0/1 names, where a partial walk cannot
+    // exist; the pounce sends multi-name walks, where it can.)
+    u16  walk_nwname;
     // The tag of the Tflush in flight for this op; meaningful only with
     // awaiting_flush, so a flush is unstaged without a search.
     u16  flush_tag;

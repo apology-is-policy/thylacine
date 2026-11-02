@@ -21,6 +21,9 @@ updated: 2026-11-02
 ---
 ## SYS_FILE_LOCK 137 (B-3h2, 2026-10-29)
 
+A range reaching 2^64 answers `-T_E_INVAL`. `SYS_WSTAT` on dev9p's loose cached open of a
+file that moved since its open answers `-T_E_STALE`.
+
 `file_lock(fd, op, start, len, out)` = 137 (operator votes 34-35,
 `dec-2026-10-29-b3h-file-locks`, ARCH 9.6.11; the full contract is in
 [[sub-kernel-filelock]]).

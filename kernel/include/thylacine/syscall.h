@@ -1396,8 +1396,9 @@ enum {
     //                 as EIO (<thylacine/errno.h>). The POSIX front ends answer
     //                 EPERM where ownership is the only possible refusal (mode,
     //                 uid, gid, any time but the touch);
-    //     EOPNOTSUPP  the Dev has no .wstat_native slot, or the fd is a
-    //                 fidless cached open (dev9p);
+    //     EOPNOTSUPP  the Dev has no .wstat_native slot;
+    //     ESTALE      the fd is a loose cached open (dev9p) of a file renamed,
+    //                 unlinked or replaced since its open;
     //     the server's errno (crossing by value, -1 folded to EACCES like every
     //     dev9p mutation) for a Tsetattr Rlerror or a write-behind flush
     //     failure; the file's stat failing answers its errno; EIO otherwise.
@@ -2603,7 +2604,7 @@ enum {
     //   A byte-range lock held by the file's server (ARCH 9.6.11; operator
     //   votes 34-35). op = a type (SYS_FILE_LOCK_RD / _WR / _UN) | _WAIT |
     //   _TEST | _PROC; any other bit, or type 3, is -T_E_INVAL. len 0 runs to
-    //   the end of the file; a range past 2^64 is -T_E_INVAL. _PROC makes the
+    //   the end of the file; a range reaching 2^64 is -T_E_INVAL. _PROC makes the
     //   Proc the owner (POSIX F_SETLK); without it the open file is (OFD,
     //   flock). _WR needs a descriptor open for writing and _RD one open for
     //   reading (-T_E_BADF); _UN and _TEST need neither. -T_E_AGAIN when

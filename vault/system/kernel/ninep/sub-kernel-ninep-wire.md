@@ -74,7 +74,8 @@ change masking / covert channel; the Stratum R111 P3 F-10 doctrine).
 **Caller-cap bounds before exposure.** Server-supplied counts are bounded
 against the caller's capacity BEFORE any write or pointer exposure:
 `p9_parse_rwalk` bounds `nwqid` against `qid_cap` (and `P9_MAX_WALK`) before
-unpacking a single qid; `p9_parse_rread`/`p9_parse_rreaddir` bound `count`
+unpacking a single qid, and the session passes the op's own requested count as
+`qid_cap`; `p9_parse_rread`/`p9_parse_rreaddir` bound `count`
 against `data_cap` before exposing `*data_ptr`; `p9_parse_rwalkgetattr`
 additionally requires the body length to be exactly `nwqid *
 P9_WGA_BODY_LEN` (153 — one Rgetattr body per walked component).

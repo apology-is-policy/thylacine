@@ -1764,6 +1764,7 @@ void test_9p_wire_tmkdir_round_trip(void);
 void test_9p_wire_trenameat_round_trip(void);
 void test_9p_wire_tunlinkat_round_trip(void);
 void test_9p_session_init_destroy(void);
+void test_9p_session_walk_reply_overcount(void);
 void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
@@ -1836,6 +1837,9 @@ void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
 void test_9p_client_walkgetattr(void);
+void test_9p_client_walk_overcount_fails_closed(void);
+void test_9p_client_walkgetattr_overcount_fails_closed(void);
+void test_9p_client_abandoned_walk_overcount_fails_closed(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
 void test_9p_client_bulk_write_clamps_short(void);
@@ -2057,6 +2061,7 @@ void test_dev9p_lock_unlock_flushes_first(void);
 void test_dev9p_lock_test_answers(void);
 void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
+void test_dev9p_lock_close_releases(void);
 void test_dev9p_cached_open_loose_lock(void);
 void test_dev9p_cached_open_loose_stale(void);
 void test_dev9p_cached_open_loose_wstat(void);
@@ -4116,6 +4121,7 @@ struct test_case g_tests[] = {
     { "9p_wire.trenameat_round_trip",  test_9p_wire_trenameat_round_trip,  false, NULL },
     { "9p_wire.tunlinkat_round_trip",  test_9p_wire_tunlinkat_round_trip,  false, NULL },
     { "9p_session.init_destroy",       test_9p_session_init_destroy,       false, NULL },
+    { "9p_session.walk_reply_overcount", test_9p_session_walk_reply_overcount, false, NULL },
     { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
     { "9p_session.walk_round_trip",    test_9p_session_walk_round_trip,    false, NULL },
@@ -4254,6 +4260,9 @@ struct test_case g_tests[] = {
     { "9p_client.handshake",           test_9p_client_handshake,           false, NULL },
     { "9p_client.walk_and_clunk",      test_9p_client_walk_and_clunk,      false, NULL },
     { "9p_client.walkgetattr",         test_9p_client_walkgetattr,         false, NULL },
+    { "9p_client.walk_overcount_fails_closed", test_9p_client_walk_overcount_fails_closed, false, NULL },
+    { "9p_client.walkgetattr_overcount_fails_closed", test_9p_client_walkgetattr_overcount_fails_closed, false, NULL },
+    { "9p_client.abandoned_walk_overcount_fails_closed", test_9p_client_abandoned_walk_overcount_fails_closed, false, NULL },
     { "9p_client.lopen_read",          test_9p_client_lopen_read,          false, NULL },
     { "9p_client.write",               test_9p_client_write,               false, NULL },
     { "9p_client.bulk_write_clamps_short",
@@ -4606,6 +4615,7 @@ struct test_case g_tests[] = {
     { "dev9p.lock_test_answers",       test_dev9p_lock_test_answers,       false, NULL },
     { "dev9p.lock_owner_clone",        test_dev9p_lock_owner_clone,        false, NULL },
     { "dev9p.lock_owner_never_parks",  test_dev9p_lock_owner_never_parks,  false, NULL },
+    { "dev9p.lock_close_releases",     test_dev9p_lock_close_releases,     false, NULL },
     { "dev9p.cached_open_loose_lock",  test_dev9p_cached_open_loose_lock,  false, NULL },
     { "dev9p.cached_open_loose_stale", test_dev9p_cached_open_loose_stale, false, NULL },
     { "dev9p.cached_open_loose_wstat", test_dev9p_cached_open_loose_wstat, false, NULL },

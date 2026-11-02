@@ -364,7 +364,7 @@
 #define T_E_NOLCK      37
 
 // Stale file handle: the file a descriptor names can no longer be reached
-// to act on it. Kernel-originated for a fidless cached open (FID-LIFECYCLE
+// to act on it. Kernel-originated for a loose cached open (FID-LIFECYCLE
 // 3.3) whose re-walk no longer reaches the same qid.path and generation
 // (renamed away, unlinked or replaced). Signed off with PX-22's ESTALE
 // (operator vote 2026-10-18 (28)); a server's ESTALE crosses by value.

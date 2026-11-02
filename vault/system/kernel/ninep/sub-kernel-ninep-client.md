@@ -26,8 +26,8 @@ updated: 2026-10-29
 `p9_client_lock(c, fid, type, flags, start, length, &status)` and
 `p9_client_getlock(c, fid, type, start, length, &out)` follow
 `p9_client_fsync`'s shape. A conflict is a status (`P9_LOCK_BLOCKED`), not an
-error: the server never waits. The client sends `proc_id` 0 and a fixed
-client id. Stratum keys its owner on the fid and ignores both. An Rlerror
+error: the server never waits. The session sends the fid as `proc_id` and an
+empty client id. Stratum keys its owner on the fid and ignores both. An Rlerror
 maps through `map_error`, which folds a server EBADF to `-P9_E_IO`. The
 callers are [[sub-kernel-ninep-dev9p]]'s lock slots.
 
@@ -667,6 +667,9 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   abandoned-bit reclaim; a caught note → Tflush and a killable wait for the
   first answer (flush(5)). Only a genuine break (or demux violation) latches
   `c->dead`, which fails everything `-EIO` including parked senders.
+- `p9_client_walk` and `p9_client_walkgetattr` copy `r.nwqid` elements into the
+  caller's arrays, which the walk's `nwname` sizes; the session has refused a reply
+  naming more, and the session goes dead with it.
 - Partial walks (`nwqid < nwname`) return `-EIO` at this layer (the
   resolver's pounce handles partial semantics above).
 

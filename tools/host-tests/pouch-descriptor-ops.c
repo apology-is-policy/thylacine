@@ -31,7 +31,15 @@ static long results[4];
 static int nresults, calls, live_socket=1, failures, checks;
 static long number, a0, a1, a2, numbers[4], args0[4], args1[4];
 static void *pouch_sock_resolve(int fd) { return fd==POUCH_SOCK_TAG && live_socket ? &live_socket : 0; }
+/* SEEK_CUR reads the cursor through the raw call, which says "no cursor" with
+ * the kernel's flat -1; SEEK_END reads the size and must not seek. */
+#ifndef SYS_lseek
+#define SYS_lseek 62
+#endif
+static off_t cur_pos=100, file_size=1000;
+static int lseek_calls, fstat_calls, lseek_fail, fstat_fail;
 static long mock(long n,long a,long b,long c) {
+ if (n==SYS_lseek) { (void)a; lseek_calls++; assert(b==0 && c==SEEK_CUR); return lseek_fail==1 ? -EBADF : lseek_fail==2 ? -1 : cur_pos; }
  if (calls<4) { numbers[calls]=n; args0[calls]=a; args1[calls]=b; }
  calls++;number=n;a0=a;a1=b;a2=c;
  return results[calls-1<nresults ? calls-1 : nresults-1];
@@ -70,12 +78,7 @@ static long mock5(long n,long a,long b,long c,long d,long e,int cp) {
 }
 #define __syscall5(n,a,b,c,d,e) mock5(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),0)
 #define __syscall_cp(n,a,b,c,d,e) mock5(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),1)
-/* SEEK_CUR reads the cursor; SEEK_END reads the size and must not seek. */
-static off_t cur_pos=100, file_size=1000;
-static int lseek_calls, fstat_calls, lseek_fail, fstat_fail;
-static off_t mock_lseek(int fd,off_t off,int wh) { (void)fd; lseek_calls++; assert(off==0 && wh==SEEK_CUR); if (lseek_fail) { errno=lseek_fail==2?ESPIPE:EBADF; return -1; } return cur_pos; }
 static int mock_fstat(int fd,struct stat *st) { (void)fd; fstat_calls++; if (fstat_fail) { errno=EBADF; return -1; } memset(st,0,sizeof *st); st->st_size=file_size; return 0; }
-#define __lseek mock_lseek
 #define __fstat mock_fstat
 #include "fcntl-under-test.c"
 #define flock tested_flock

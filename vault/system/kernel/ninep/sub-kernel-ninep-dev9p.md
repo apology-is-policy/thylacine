@@ -36,7 +36,10 @@ until then). Any other open answers its own fid.
   charge is the snapshot's size plus `co_names_len`.
 - **`co_bind`** is a loose open's first need. It walks the kept names from the
   base (Twalkgetattr, BASIC|GEN) into a fresh fid and accepts only a full walk
-  to the same `qid.path` with a valid generation equal to `lock_gen`. A name that
+  to the same `qid.path` with a valid generation equal to `lock_gen`. An accepted
+  walk installs the leaf's attributes in the Larder (guarded by a pre-walk
+  `seq0`), so the stat a `wstat` judges next is the walk's even if the Larder held
+  a view another session has since changed. A name that
   no longer reaches the file (a partial walk, ENOENT, ENOTDIR, ESTALE) or reaches
   another one answers `-T_E_STALE`, and any fid goes back. A wire that failed says
   nothing about the file and answers its own errno through `dev9p_wire_errno`
@@ -87,6 +90,11 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
 - A grant drops the qid's Larder attributes and pages. The invalidates log
   the qid, so a fill in flight from before the grant is dropped rather than
   installed after it.
+- A last close of a fid a lock was granted on (`lock_granted`, sticky) sends a
+  whole-file unlock after the flush and waits for it, then clunks. The clunk would
+  release the locks too, but it never waits (ARCH 7.9.1 part A) and Stratum's pool
+  may serve the next request first. A close that may not wait (`close_may_wait`)
+  leaves them to the clunk, and a run handed to a closer goes with its clunk.
 - Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
   unlock gives its range up, and a conversion to a read lock admits readers. A
   test lands nothing. A flush that fails still sends the request, and the error

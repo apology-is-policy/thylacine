@@ -33,6 +33,8 @@ fchmodat use it with `sys_resolve_kpath_for_proc` so they install no descriptor
 a peer thread could close and reuse ([[sub-kernel-vivarium]]); each folds only
 the wstat's EACCES into Linux's EPERM, never the resolve's (a search denied on
 the way stays EACCES). `dev9p.wstat_spoor_private` covers it.
+Since that bind, a loose cached open of a file that moved since its open answers
+`-T_E_STALE`, not `-T_E_OPNOTSUPP`.
 
 ## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
 

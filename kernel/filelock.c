@@ -67,6 +67,11 @@ static int file_lock_once(struct Proc *p, struct Spoor *c, u32 type,
                           struct t_file_lock *test) {
     bool take = !test && type != SYS_FILE_LOCK_UN;
     if (!proc_owner) {
+        // A set-lock gives up what it replaces, and every open's staged writes
+        // land first, as Linux's NFS client syncs the whole mapping. c's own land
+        // in its lock call: its descriptor may have left the table.
+        if (!test)
+            (void)handle_lock_sync_file(p, c, DEV_LOCK_SYNC_RELEASE);
         if (take) {
             int sr = file_lock_acquire_sync(p, c, c);
             if (sr != 0) return sr;

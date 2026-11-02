@@ -167,7 +167,7 @@ static void entry_zero(struct p9_outstanding *e) {
     e->abandoned      = false;
     e->holds_slot     = false;
     e->flush_oldtag   = 0;
-    e->wga_nwname     = 0;
+    e->walk_nwname    = 0;
     e->flush_tag      = 0;
     e->async          = false;
     e->owner          = NULL;
@@ -437,6 +437,7 @@ int p9_session_send_walk(struct p9_session *s,
                             nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALK, src_fid, new_fid);
+    entry(s, (u32)t)->walk_nwname = nwname;
     slot_reserve(s, (u16)t);
     return rc;
 }
@@ -474,7 +475,7 @@ int p9_session_send_walkgetattr(struct p9_session *s,
                                    nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALKGETATTR, src_fid, new_fid);
-    entry(s, (u32)t)->wga_nwname = nwname;
+    entry(s, (u32)t)->walk_nwname = nwname;
     if (new_fid != P9_NOFID) slot_reserve(s, (u16)t);
     return rc;
 }
@@ -856,8 +857,8 @@ int p9_session_send_lock(struct p9_session *s, u8 *out, size_t cap,
     int t = alloc_tag(s, false);
     if (t < 0) return -1;
     // Stratum keys a lock by its fid. A server that keys by proc_id and client_id
-    // instead sees the same owners: the session names the client, the fid the
-    // owner.
+    // instead sees the same owners within one session; client_id is empty and
+    // fid numbers restart per session, so it cannot tell two sessions' apart.
     int rc = p9_build_tlock(out, cap, (u16)t, fid, type, flags, start, length,
                             fid, NULL, 0);
     if (rc < 0) return -1;
@@ -1218,12 +1219,12 @@ static void honour_late_walk(struct p9_session *s, struct p9_outstanding *op,
     u16 nwqid;
     if (op->kind == P9_TWALK) {
         if (p9_parse_rwalk(rmsg, len, &tag_check, &nwqid,
-                           out->qids, P9_MAX_WALK) < 0) return;
+                           out->qids, op->walk_nwname) < 0) return;
     } else if (op->kind == P9_TWALKGETATTR) {
         const u8 *body = NULL;
         if (p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
-                                  out->qids, P9_MAX_WALK, &body) < 0) return;
-        if (nwqid != op->wga_nwname) return;
+                                  out->qids, op->walk_nwname, &body) < 0) return;
+        if (nwqid != op->walk_nwname) return;
     } else {
         return;
     }
@@ -1268,7 +1269,7 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
     } else if (op->kind == P9_TWALK) {
         u16 tag_check;
         u16 nwqid;
-        rc = p9_parse_rwalk(rmsg, len, &tag_check, &nwqid, out->qids, P9_MAX_WALK);
+        rc = p9_parse_rwalk(rmsg, len, &tag_check, &nwqid, out->qids, op->walk_nwname);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         // Per 9P2000.L: bind new_fid into the fid table at Rwalk time
@@ -1297,7 +1298,7 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         u16 nwqid;
         const u8 *body = NULL;
         rc = p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
-                                   out->qids, P9_MAX_WALK, &body);
+                                   out->qids, op->walk_nwname, &body);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         // Bind new_fid ONLY on a FULL walk with a real destination -- the
@@ -1306,7 +1307,7 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         // This is the nuance the TWALK arm defers (its callers send 0/1
         // names, where partial cannot exist); the multi-name pounce
         // requires it.
-        if (op->new_fid != P9_NOFID && nwqid == op->wga_nwname) {
+        if (op->new_fid != P9_NOFID && nwqid == op->walk_nwname) {
             if (slot_bind(s, tag, op->new_fid) < 0) {
                 // Same LOCAL-failure posture as the TWALK arm: a redundant
                 // bind completes THIS op with -EIO; it must not latch the

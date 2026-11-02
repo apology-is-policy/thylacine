@@ -23,7 +23,8 @@ Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
   through its own fid: the Proc owner.
 - `lock_same_file(a, b)` is non-blocking. It is asked only of two Spoors of
   the same Dev.
-- `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes before a
+- `lock_sync(c, DEV_LOCK_SYNC_RELEASE)` lands `c`'s staged writes, for any open
+  of the file in the Proc, before a
   release.
 - `lock_ident(c)` learns once which file `c` names, and can answer ESTALE.
 - `wstat_bind(c)` readies `c` before SYS_WSTAT reads the stat its policy judges,

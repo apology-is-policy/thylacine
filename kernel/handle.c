@@ -425,8 +425,10 @@ void handle_lock_owner_retire(struct Proc *p, struct Spoor *owner) {
 }
 
 // The per-slot walk: one slot per lock hold, so no sync runs under the lock.
-// A slot closed or reused mid-walk is either seen or not; a descriptor of the
-// file opened during the walk was opened after the event that asked for it.
+// A slot closed or reused mid-walk is either seen or not. A descriptor of the
+// file opened after the walk passed its slot was opened during the event that
+// asked for it: a cached open minted before a take's grant keeps its snapshot
+// under the lock (ARCH 9.6.11).
 static int lock_sync_table(struct HandleTable *t, struct Spoor *owner, u32 how) {
     struct Dev *d = owner->dev;
     if (!d || !d->lock_sync || !d->lock_same_file) return 0;

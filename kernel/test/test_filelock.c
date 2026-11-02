@@ -458,13 +458,24 @@ void test_filelock_refusals(void) {
 // The open-file owner: the Spoor's own fid, nothing minted.
 // -----------------------------------------------------------------------------
 
-static void file_owner_body(struct lk_fix *f, int a, int b) {
+static void file_owner_body(struct lk_fix *f, int a, int b, int c) {
     const u64 W = SYS_FILE_LOCK_WR, R = SYS_FILE_LOCK_RD, U = SYS_FILE_LOCK_UN;
+    lk_sync_reset();
     TEST_EXPECT_EQ(lk_call(f, a, W, 0, 10), (s64)0, "open file A takes a write lock");
     TEST_EXPECT_EQ(g_lk_last_spoor, f->sp[a], "as itself");
+    TEST_ASSERT(lk_synced(f->sp[a]) && lk_synced(f->sp[b]) && !lk_synced(f->sp[c]),
+                "after landing the writes of every open of file 1, and only file 1");
+    TEST_ASSERT(g_lk_sync_last_seq < g_lk_take_seq, "before the take was sent");
+    lk_sync_reset();
+    TEST_EXPECT_EQ(lk_call(f, b, R | SYS_FILE_LOCK_TEST, 0, 10), -(s64)T_E_FAULT,
+                   "a test runs (its answer faults on kproc)");
+    TEST_EXPECT_EQ(g_lk_sync_n, 0u, "and lands nothing");
     TEST_EXPECT_EQ(lk_call(f, b, R, 5, 10), -(s64)T_E_AGAIN,
                    "open file B of the same file conflicts");
+    lk_sync_reset();
     TEST_EXPECT_EQ(lk_call(f, a, U, 0, 0), (s64)0, "A unlocks");
+    TEST_ASSERT(lk_synced(f->sp[a]) && lk_synced(f->sp[b]),
+                "after landing the writes of every open of the file");
     TEST_EXPECT_EQ(lk_call(f, b, R, 5, 10), (s64)0, "and B's read lock is granted");
     TEST_EXPECT_EQ(g_lk_mints, 0u, "the open-file owner mints nothing");
     TEST_EXPECT_EQ(handle_lock_owner_count(f->p), 0u, "and keeps no entry");
@@ -475,9 +486,10 @@ void test_filelock_file_owner(void) {
     lk_fix_init(&f);
     int a = lk_open(&f, &g_lk_dev, 1, RW);
     int b = lk_open(&f, &g_lk_dev, 1, RW);
-    if (a >= 0 && b >= 0) file_owner_body(&f, a, b);
+    int c = lk_open(&f, &g_lk_dev, 2, RW);
+    if (a >= 0 && b >= 0 && c >= 0) file_owner_body(&f, a, b, c);
     else test_fail("filelock: fixture allocation failed");
-    lk_teardown(&f, 1);
+    lk_teardown(&f, 2);
 }
 
 // -----------------------------------------------------------------------------

@@ -116,6 +116,9 @@ struct dev9p_priv {
     // server-side locks: its close clunks it, and never parks it in the
     // dir-fid cache, where a later consumer would inherit the locks.
     bool               fid_locks;
+    // B-3h: a lock was granted on this priv's lock fid, so its last close waits
+    // for an unlock before the clunk. Sticky; set with release at the grant.
+    bool               lock_granted;
     // B-3h: the inode generation of the file the fid names, learned once by
     // dev9p_lock_ident (a file keeps its generation for life; a file that
     // takes a dead one's inode number gets a new one). lock_ident is a
@@ -172,8 +175,9 @@ struct dev9p_priv {
     // 20): fstat, a wstat and a lock address it. A loose client's has no fid,
     // and co_stat, the open-time metadata, serves its fstat. co_rfid stays
     // P9_NOFID until the open must read what the server holds (a lock's
-    // DEV_LOCK_SYNC_ACQUIRE, a Loom registration): then a clone of `fid`,
-    // opened for reading, is installed once (CAS), and reads go through it.
+    // DEV_LOCK_SYNC_ACQUIRE, a Loom registration): then a clone of its lock fid
+    // (`fid`, or a loose open's co_kfid), opened for reading, is installed once
+    // (CAS), and reads go through it.
     bool                      cached_open;
     u8                       *co_buf;
     u64                       co_size;

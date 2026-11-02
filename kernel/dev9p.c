@@ -1823,6 +1823,18 @@ static bool close_may_wait(void) {
     return t && !t->closes_never_wait && !thread_die_pending(t);
 }
 
+// A close returns with its fid's locks released: a clunk releases them too, but
+// it never waits (ARCH 7.9.1 part A), and a server's workers need not serve it
+// before the request that follows. So the close waits on an unlock, as it waits
+// on its flush, which runs first. A thread that may not wait leaves them to the
+// clunk.
+static void dev9p_close_release_locks(struct dev9p_priv *p, u32 fid) {
+    if (!__atomic_load_n(&p->lock_granted, __ATOMIC_ACQUIRE) || !close_may_wait())
+        return;
+    u8 status = P9_LOCK_ERROR;
+    (void)p9_client_lock(p->client, fid, P9_LOCK_TYPE_UNLCK, 0, 0, 0, &status);
+}
+
 // Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
 // negative errno when it cannot -- the priv owns no fid or no session
 // reference (a test's bare client), or no memory.
@@ -1914,8 +1926,10 @@ static int dev9p_close(struct Spoor *c) {
         p->co_buf = NULL;
         if (p->co_rfid != P9_NOFID)
             dev9p_clunk_fid(p->client, p->attached_owner, p->co_rfid);
-        if (p->co_kfid != P9_NOFID)
+        if (p->co_kfid != P9_NOFID) {
+            dev9p_close_release_locks(p, p->co_kfid);
             dev9p_clunk_fid(p->client, p->attached_owner, p->co_kfid);
+        }
         if (p->co_names) kfree(p->co_names);
         p->co_names = NULL;
         if (p->co_start) spoor_clunk(p->co_start);
@@ -1976,6 +1990,7 @@ static int dev9p_close(struct Spoor *c) {
     // tore down the adapter — walked privs closing afterward UAF'd via
     // their stale client pointer (R15 F236).
     if (p->fid_owned && !handed) {
+        dev9p_close_release_locks(p, p->fid);
         // Walk-derived Spoor: clunk the fid. FID-LIFECYCLE async-clunk -- the
         // normal close path fires the Tclunk fire-and-forget (the submitter is
         // not parked for the clunk RTT; the fid unbinds at send + its number is
@@ -2419,6 +2434,8 @@ static int co_bind(struct dev9p_priv *p) {
     if (!attrs) return -T_E_NOMEM;
     u32 nf = p9_client_alloc_fid(p->client);
     if (nf == P9_NOFID) { kfree(attrs); return -T_E_NOMEM; }
+    struct larder *l = &p->client->larder;
+    u64 seq0 = larder_gen_snapshot(l);
     u16 nwqid = 0;
     struct p9_qid qids[P9_MAX_WALK];
     int rc = p9_client_walkgetattr(p->client, sp->fid, nf,
@@ -2436,6 +2453,14 @@ static int co_bind(struct dev9p_priv *p) {
     const struct p9_attr *leaf = &attrs[nname - 1];
     bool same = leaf->qid.path == p->co_stat.qid_path &&
                 (leaf->valid & P9_GETATTR_GEN) && leaf->gen == p->lock_gen;
+    // The stat a wstat judges next: the Larder may hold what another session has
+    // since changed.
+    if (same) {
+        struct t_stat st;
+        t_stat_from_p9_attr(&st, leaf, p->client);
+        larder_attr_install(l, seq0, leaf->qid.path, leaf->qid.version, &st,
+                            attr_gen_of(leaf));
+    }
     kfree(attrs);
     if (!same) {
         dev9p_clunk_fid(p->client, p->attached_owner, nf);
@@ -2573,6 +2598,7 @@ static int dev9p_lock(struct Spoor *c, u32 type, u64 start, u64 len,
     if (status != P9_LOCK_SUCCESS) return -T_E_NOLCK;   // ERROR, GRACE, or no status 9P defines
 
     if (type != SYS_FILE_LOCK_UN) {
+        __atomic_store_n(&p->lock_granted, true, __ATOMIC_RELEASE);
         // The last holder's writes are on the server: read them from there.
         // The invalidates log this qid, so a fill already in flight from before
         // the grant is dropped rather than installed after it.

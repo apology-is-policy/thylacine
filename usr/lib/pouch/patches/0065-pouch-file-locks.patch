@@ -124,12 +124,12 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +		base = 0;
 +		break;
 +	case SEEK_CUR:
-+		/* A descriptor with no cursor reads as 0, Linux's f_pos of a pipe. */
-+		base = __lseek(fd, 0, SEEK_CUR);
-+		if (base < 0) {
-+			if (errno != ESPIPE) return -1;
-+			base = 0;
-+		}
++		/* A descriptor with no cursor reads as 0, Linux's f_pos of a pipe. The
++		 * kernel says so with its flat -1 (ESPIPE is not in the errno registry),
++		 * which __lseek would report as EIO. */
++		base = __syscall3(SYS_lseek, fd, 0, SEEK_CUR);
++		if (base == -1) base = 0;
++		else if (base < 0) { errno = -base; return -1; }
 +		break;
 +	case SEEK_END: {
 +		/* fstat, not lseek: the lock must not move the cursor. */

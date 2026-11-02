@@ -234,8 +234,11 @@ file lock needs a fid too.
   the file, or reaches another one, answers `ESTALE` and binds nothing. A wire that
   failed says nothing about the file: it answers its own errno (`ENOLCK` on a lock
   call) and also binds nothing. A `wstat` binds before it is judged (the Dev slot
-  `wstat_bind`), so the stat `perm_wstat_check` reads is the file's own, not the
-  open-time one, which may name a former owner. A run from an opened base is not
+  `wstat_bind`), and its walk's attributes replace the Larder's, so the stat
+  `perm_wstat_check` reads is the file's as of that walk, not the open-time one,
+  which may name a former owner. A later `wstat` through the same fid reads the
+  attribute cache, as any descriptor's does, and sees another session's chown only
+  when that entry goes. A run from an opened base is not
   minted loose: a server refuses a walk from an opened fid, so that open could
   never bind. The objection above to a retained-path re-walk stands for a
   walk that is trusted. This one is checked, so a rename can make it fail but

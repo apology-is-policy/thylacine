@@ -44,6 +44,9 @@
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
+void test_9p_client_walk_overcount_fails_closed(void);
+void test_9p_client_walkgetattr_overcount_fails_closed(void);
+void test_9p_client_abandoned_walk_overcount_fails_closed(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
 void test_9p_client_getattr(void);
@@ -118,6 +121,10 @@ static u8 g_loopback_resp[4096];
 // FEWER than requested (a partial walk).
 static bool g_wga_partial = false;
 
+// A leg's hostile server: this many qids more than the walk's reply should name.
+static u16 g_walk_overcount;
+static u32 g_walk_overcounts_sent;
+
 int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap) {
     (void)ctx;
@@ -150,16 +157,24 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWALK) {
-        // Always 1 qid back regardless of nwname requested.
-        size_t total = P9_HDR_LEN + 2 + P9_QID_LEN;
+        // One qid for a walk of any names, none for a clone, and g_walk_overcount
+        // more than that when a leg asks.
+        if (req_len < P9_HDR_LEN + 10) return -1;
+        u16 nwname = (u16)(req[P9_HDR_LEN + 8] | ((u16)req[P9_HDR_LEN + 9] << 8));
+        u16 n = (u16)((nwname ? 1 : 0) + g_walk_overcount);
+        size_t total = P9_HDR_LEN + 2 + (size_t)n * P9_QID_LEN;
         if (resp_cap < total) return -1;
-        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff); resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RWALK;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        resp[7] = 1; resp[8] = 0;            // nwqid = 1
-        resp[9] = P9_QTFILE;
-        for (int i = 0; i < 4; i++) resp[10 + i] = 0;
-        resp[14] = 77; for (int i = 1; i < 8; i++) resp[14 + i] = 0;
+        resp[7] = (u8)n; resp[8] = 0;
+        for (u16 q = 0; q < n; q++) {
+            u8 *el = resp + 9 + (size_t)q * P9_QID_LEN;
+            el[0] = P9_QTFILE;
+            for (int i = 0; i < 4; i++) el[1 + i] = 0;
+            el[5] = 77; for (int i = 1; i < 8; i++) el[5 + i] = 0;
+        }
+        if (g_walk_overcount) g_walk_overcounts_sent++;
         return (int)total;
     }
     if (type == P9_TWALKGETATTR) {
@@ -171,6 +186,7 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         u16 nwname = (u16)(req[P9_HDR_LEN + 16] |
                            ((u16)req[P9_HDR_LEN + 17] << 8));
         u16 n = (g_wga_partial && nwname > 0) ? (u16)(nwname - 1) : nwname;
+        n = (u16)(n + g_walk_overcount);
         size_t total = P9_HDR_LEN + 2 + (size_t)n * P9_WGA_BODY_LEN;
         if (resp_cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
@@ -191,6 +207,7 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
             el[33] = 1;                                  // nlink
             el[49] = (u8)(100 + i);                      // size
         }
+        if (g_walk_overcount) g_walk_overcounts_sent++;
         return (int)total;
     }
     if (type == P9_TCLUNK || type == P9_TSETATTR || type == P9_TFSYNC ||
@@ -459,7 +476,7 @@ void test_9p_client_walk_and_clunk(void) {
     int rc = p9_client_walk(&g_client, /*src=*/0, /*new=*/5,
                               /*nwname=*/0, NULL, NULL, &nwqid, qids);
     TEST_EXPECT_EQ(rc, 0, "walk(0→5, clone) ok");
-    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "1 qid returned");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)0, "a clone names no qids");
 
     // Walk-one convenience.
     const u8 name[] = {'a'};
@@ -471,6 +488,69 @@ void test_9p_client_walk_and_clunk(void) {
 
     rc = p9_client_clunk(&g_client, 5);
     TEST_EXPECT_EQ(rc, 0, "clunk fid 5 ok");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// A server names more components than the walk asked: the session refuses the
+// reply before any of it reaches the caller's array, which is sized by the walk.
+// Any process can serve a mount, so this is kernel memory against an EL0 peer.
+void test_9p_client_walk_overcount_fails_closed(void) {
+    drive_client_open(&g_client, &g_loopback);
+    static struct { struct p9_qid q[1]; u8 canary[sizeof(struct p9_qid) * 4]; } w;
+    for (size_t i = 0; i < sizeof(w.canary); i++) w.canary[i] = 0xA5;
+    const u8 name[] = {'a'};
+    const u8 *names[1] = { name };
+    size_t lens[1] = { 1 };
+    u16 nwqid = 0xffff;
+
+    int rc = p9_client_walk(&g_client, 0, 5, 1, names, lens, &nwqid, w.q);
+    TEST_EXPECT_EQ(rc, 0, "control: a reply naming what was asked");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "one qid");
+
+    g_walk_overcount = 4;
+    g_walk_overcounts_sent = 0;
+    rc = p9_client_walk(&g_client, 0, 6, 1, names, lens, &nwqid, w.q);
+    g_walk_overcount = 0;
+    TEST_EXPECT_EQ(g_walk_overcounts_sent, 1u, "the server over-counted");
+    TEST_ASSERT(rc != 0, "the walk fails");
+    TEST_ASSERT(g_client.dead, "and the session with it");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 6), "it bound nothing");
+    bool intact = true;
+    for (size_t i = 0; i < sizeof(w.canary); i++) intact = intact && w.canary[i] == 0xA5;
+    TEST_ASSERT(intact, "nothing landed past the caller's one qid");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_walkgetattr_overcount_fails_closed(void) {
+    drive_client_open(&g_client, &g_loopback);
+    static struct p9_qid qids[P9_MAX_WALK];
+    static struct { struct p9_attr a[1]; u8 canary[sizeof(struct p9_attr) * 4]; } w;
+    for (size_t i = 0; i < sizeof(w.canary); i++) w.canary[i] = 0xA5;
+    const u8 name[] = {'a'};
+    const u8 *names[1] = { name };
+    size_t lens[1] = { 1 };
+    u16 nwqid = 0xffff;
+
+    int rc = p9_client_walkgetattr(&g_client, 0, 5, P9_GETATTR_BASIC, 1, names, lens,
+                                   &nwqid, qids, w.a);
+    TEST_EXPECT_EQ(rc, 0, "control: a reply naming what was asked");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "one element");
+
+    g_walk_overcount = 4;
+    g_walk_overcounts_sent = 0;
+    rc = p9_client_walkgetattr(&g_client, 0, 6, P9_GETATTR_BASIC, 1, names, lens,
+                               &nwqid, qids, w.a);
+    g_walk_overcount = 0;
+    TEST_EXPECT_EQ(g_walk_overcounts_sent, 1u, "the server over-counted");
+    TEST_ASSERT(rc != 0, "the walk fails");
+    TEST_ASSERT(g_client.dead, "and the session with it");
+    bool intact = true;
+    for (size_t i = 0; i < sizeof(w.canary); i++) intact = intact && w.canary[i] == 0xA5;
+    TEST_ASSERT(intact, "nothing landed past the caller's one element");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -5126,6 +5206,31 @@ void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void) {
     TEST_EXPECT_EQ(g_client.orphan_kept + g_client.orphan_handed, (u64)0, "no orphan fid");
     TEST_EXPECT_EQ(g_client.demux_orphan, (u64)0, "no unexplained frame");
     g_rec_bad_reply_to = 0;
+    dy_client_close();
+}
+
+// An over-count is malformed too, and an abandoned walk's late reply fails closed.
+void test_9p_client_abandoned_walk_overcount_fails_closed(void) {
+    TEST_EXPECT_EQ(dy_client_open(), 0, "client over mq");
+    g_walk_overcount = 4;
+    g_walk_overcounts_sent = 0;
+
+    dy_hold_reader(true);
+    TEST_ASSERT(dy_start(DY_WALK, 111, /*dying=*/false), "walker");
+    TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the owner's Tflush meets a full ring
+    test_dying_kill(&g_dy);
+    TEST_YIELD_UNTIL(test_dying_done(&g_dy));
+    test_dying_reap(&g_dy);
+    TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "the walk is abandoned unflushed");
+
+    dy_hold_reader(false);
+    TEST_EXPECT_EQ(p9_client_reader_pump_ready(&g_client), 1, "the over-counted late Rwalk");
+    TEST_EXPECT_EQ(g_walk_overcounts_sent, 1u, "the server over-counted");
+    TEST_ASSERT(g_client.dead, "the session failed closed");
+    TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 111), "it bound nothing");
+    TEST_EXPECT_EQ(g_client.orphan_kept + g_client.orphan_handed, (u64)0, "no orphan fid");
+    g_walk_overcount = 0;
     dy_client_close();
 }
 

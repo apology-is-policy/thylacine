@@ -49,6 +49,8 @@ because the handle table already has the right lifetime and sharing.
   Stratum kills an unlinked file's fids and hands the lowest freed inode
   number to the next create, so the entry's number may now name another
   file. A dead entry is never found again.
+- `lock_sync_table` walks slot by slot: a cached open minted after the walk passed
+  its slot and before a take's grant keeps its snapshot under the lock (ARCH 9.6.11).
 - `lock_owners_on_close` runs after a descriptor leaves the table and before
   its object is released, from `handle_close`'s report path,
   `handle_replace` and `handle_dup_to`. A navigation-only descriptor is no open

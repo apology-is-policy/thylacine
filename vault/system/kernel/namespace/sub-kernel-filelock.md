@@ -85,8 +85,10 @@ for a waiting take, then loops on `file_lock_once`, with
 `file_lock_backoff` (a `tsleep_noteintr` on a private Rendez that is never
 woken) between attempts.
 
-`file_lock_once` for the FILE owner is one `c->dev->lock(c, ...)`. For the
-PROC owner it:
+`file_lock_once` for the FILE owner first lands every staged write of the file
+that the Proc can reach, for any set-lock, as the PROC owner does, and is then one
+`c->dev->lock(c, ...)`, which lands `c`'s own: its descriptor may have left the
+table. For the PROC owner it:
 1. Gets the entry with `handle_lock_owner_get(p, c, mint = take)`. That makes
    `c` learn its file's identity first (`Dev.lock_ident`) and adopts or mints
    the entry.
@@ -201,6 +203,15 @@ Audit round 1's regressions, each of which must go red at its own leg (not yet r
 - G26, only ESTALE stops the close hook: `filelock.reused_number`.
 - G27, a range may reach 2^64: `filelock.refusals`.
 - G29, G30, `proc_id` 0: `dev9p.lock_wire_and_status`, `dev9p.lock_test_answers`.
+
+Audit round 2's regressions, each of which must go red at its own leg (not yet run):
+- G31, a Twalk reply capped at `P9_MAX_WALK`; G32, a Twalkgetattr reply;
+  G33, a late one: `9p_client.walk_overcount_fails_closed`,
+  `9p_client.walkgetattr_overcount_fails_closed`, `9p_session.walk_reply_overcount`.
+- G34, a close sends no unlock; G35, one that may not wait does; G36, a loose
+  open's bound fid; G37, a fid-owning open's: `dev9p.lock_close_releases`.
+- G38, a bind leaves the Larder's attributes: `dev9p.cached_open_loose_wstat`.
+- G39, an open-file set-lock lands only its own run: `filelock.file_owner`.
 
 ## Cached opens and the take's sync (B-3h3, 2026-11-02)
 

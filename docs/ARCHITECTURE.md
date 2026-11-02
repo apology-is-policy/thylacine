@@ -1034,7 +1034,7 @@ Each flagged Thread, on its next **EL0-return tail**, observes its Proc's non-NU
 
 Exit status is the existing ok/fail collapse (`exit_status` ∈ {0,1}); the structured 64-bit status that distinguishes the literal `exit_group(N)` code remains the Phase-5+ deferral (`docs/ERRORS.md` "Exit-status semantics"; U-6d-a note).
 
-**The final close, and a kill during it (`dec-2026-10-07-exit-close`, 2026-10-07).** The last thread out closes the Proc's handles under `exit_close_active`, where no death reaches it, so a close that needs its server waits as a live thread's would: a write-behind flush has its reply before the parent's `wait` returns (I-38's close-to-open, across an exit). Any process can serve a mount, so that wait is bounded only by the server. Three rules bound what the server can hold.
+**The final close, and a kill during it (`dec-2026-10-07-exit-close`, 2026-10-07).** The last thread out closes the Proc's handles under `exit_close_active`, where no death reaches it, so a close that needs its server waits as a live thread's would: a write-behind flush has its reply before the parent's `wait` returns (I-38's close-to-open, across an exit), and so does the unlock of a fid a lock was granted on (9.6.11). Any process can serve a mount, so that wait is bounded only by the server. Three rules bound what the server can hold.
 - *A clunk never waits* (part A). A thread no death reaches (`thread_death_reaches`: a kernel thread, or the final close) clunks through `p9_client_clunk_nowait`; where the clunk would wait for a tag or for ring space, the fid goes to the closer (FID-LIFECYCLE-DESIGN section 9).
 - *A kill during the close forces it* (part B). A kill (`proc_group_kill`: the `kill` note and the `/proc` ctl `kill`; never a hangup, `EXITKILL` or a legate scope's end) that finds the Proc already terminating -- its group exiting, or its last thread in the final close of an `exits()`, which sets no group exit message (`PROC_FLAG_EXIT_CLOSING`, which `exits()` publishes under the proc-table lock a kill decides under, before it releases that lock for the close) -- sets `PROC_FLAG_EXIT_CLOSE_FORCED` before its death wake, and `thread_die_pending` honours it under `exit_close_active`: the final close's send is refused, its wait unwinds through flush(5), its reader leaves the recv at any byte (8.8.1.1), and the Proc reaps. The kill changes how the close ends, never the status: the last thread read the group claim under the same hold that marked the close, so a kill that lands after the mark leaves the exit standing on both last-out paths, `exits()` and `SYS_THREAD_EXIT` (Linux's `PF_EXITING`; operator vote 2026-10-13, `dec-2026-10-13-exit-wins-final-close`). One wait stays held against every death, forced or not: `loom_free`'s join of its SQPOLL kthread (`kthread_join_active`), because abandoning it frees a live Thread, and a sleep that a death refused would spin in a non-preemptible syscall body. It stays bounded because that kthread never waits on a server (parts A and C).
 - *What the close could not finish goes to the closer* (part C; Plan 9's `forceclosefgrp`, which hands the open channels to the `ccloseq` close procs). A dev9p last close whose write-behind flush may not wait -- on a die-pending thread (a forced final close, or a killed thread's own last `close`) or on a kernel thread something joins without bound (`closes_never_wait`: the Loom SQPOLL kthread's reap) -- hands the staged run, the fid's clunk and the frees to a closer, which writes the run when the server answers. A flush a death interrupts keeps its run staged until then (LARDER-DESIGN section 12).
@@ -2869,12 +2869,17 @@ NFS does without its lock daemon. In v1.0 only dev9p serves them.
 **Two owners.** A lock belongs to exactly one owner, and two owners conflict
 when their ranges overlap and either lock is a write lock. Every request carries
 its fid as `proc_id`, so a server that keys owners by `proc_id` and `client_id`
-rather than by fid sees the same owners.
+rather than by fid sees the same owners within one session. `client_id` is empty
+and fid numbers restart per session, so such a server could not tell two
+sessions' owners apart. Stratum keys by fid.
 - **The open file** (no `LOCK_PROC`). The lock is taken on the Spoor's own fid,
   so it is Stratum's per-fid owner: Linux's open-file-description (OFD)
   semantics. A dup, an inherited descriptor or a passed handle names the same
   open file and shares its locks. They last until that open file's last close,
-  which clunks the fid. `flock` and `F_OFD_*` use this owner, and so do native
+  which unlocks the whole file and waits for the answer, then clunks the fid: the
+  clunk would release them too, but it does not wait (7.9.1 part A), and a
+  server's workers need not serve it before the request that follows. A close
+  that may not wait leaves them to the clunk. `flock` and `F_OFD_*` use this owner, and so do native
   programs by default.
 - **The Proc** (`LOCK_PROC`). This is POSIX `F_SETLK`. Linux's POSIX owner is
   the descriptor table, and here the descriptor table is the Proc's handle
@@ -2954,7 +2959,10 @@ writes, as with NFS and Linux's v9fs, so:
   read goes to the server. Every open of the file in the Proc's table stops
   serving its snapshot, for either owner, because the lock covers what any of the
   Proc's opens read (Linux's NFS client drops the whole inode's cache the same
-  way). An open needs a fid to lock. A strict cached open kept
+  way). A descriptor opened after the walk passed its slot and before the
+  grant is the exception: a cached open minted in that window keeps its snapshot
+  under the lock, the cost of a thread racing an open against its own Proc's take.
+  An open needs a fid to lock. A strict cached open kept
   its walk's (operator vote 20). A loose one kept none, so that its open stays
   wire-free (vote B1): on its first lock it re-walks the run that minted it from
   the walk start it keeps, and accepts the result only if it reaches the same
@@ -2965,9 +2973,10 @@ writes, as with NFS and Linux's v9fs, so:
   it stands. A peer that fails for any other reason refuses the take with
   `ENOLCK`, since nothing says the file moved. FID-LIFECYCLE section 3.3 has the rest,
   including `wstat`, which binds the same way.
-- **Setting a lock** flushes the write-behind run first: the open's own run for
-  an open-file lock, or the run of every open of the file in the Proc's table for
-  a Proc lock. This applies to an unlock, to a take and to the close that drops a
+- **Setting a lock** flushes the write-behind run first, for either owner: the run
+  of every open of the file in the Proc's table, and the locking open's own, whose
+  descriptor may have left the table. Linux's NFS client syncs the whole mapping
+  the same way. This applies to an unlock, to a take and to the close that drops a
   lock, and the request is sent after the flush returns. A conversion is why a
   take needs it: a write lock turned into a read lock admits readers, who must
   read what the holder wrote (Linux's NFS client flushes before any `setlk`, for

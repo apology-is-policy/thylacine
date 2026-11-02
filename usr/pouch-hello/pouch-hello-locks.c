@@ -393,6 +393,8 @@ static int leg_errors(int fd) {
     int p[2];
     if (pipe(p) != 0) return fail("errors: pipe");
     if (lk(p[1], F_SETLK, 'w', 0, 1) != -1 || errno != ENOLCK) return fail("errors: a pipe's lock is not ENOLCK");
+    struct flock cur = { .l_type = F_WRLCK, .l_whence = SEEK_CUR, .l_start = 0, .l_len = 1 };
+    if (fcntl(p[1], F_SETLK, &cur) != -1 || errno != ENOLCK) return fail("errors: SEEK_CUR on a pipe is not ENOLCK");
     close(p[0]); close(p[1]);
     if (close(fd) != 0 || lk(fd, F_SETLK, 'w', 0, 1) != -1 || errno != EBADF)
         return fail("errors: a closed descriptor");
