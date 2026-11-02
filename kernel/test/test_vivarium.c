@@ -1884,8 +1884,9 @@ void test_vivarium_sigset_to_notemask(void) {
     u64 all = viv_sigset_to_notemask(~0ULL, &m);
     TEST_ASSERT((all & (1ULL << 1)) == 0, "block-all still excludes kill");
     TEST_ASSERT(all == ((1ULL << 0) | (1ULL << 2) | (1ULL << 3) |
-                        (1ULL << 4) | (1ULL << 5) | (1ULL << 7)),
-                "block-all covers exactly the six maskable notes");
+                        (1ULL << 4) | (1ULL << 5) | (1ULL << 7) |
+                        (1ULL << 8) | (1ULL << 9)),
+                "block-all covers exactly the eight maskable notes");
 
     // Fail closed on a NULL map rather than dereferencing it.
     TEST_ASSERT(viv_sigset_to_notemask(~0ULL, NULL) == 0, "NULL map -> 0");

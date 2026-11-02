@@ -36,6 +36,10 @@ needed the operator.
 
 **Exactly what is verified at this entry.** On b429cb8e6, into a scratch directory: four changed kernel objects and two guest C programs compile with 0 warnings; `cargo check` of libthyla-rs, libutopia, viv-pheno-probe and u-job-test passes with no warning on the new lines; `check-flag-words.py` passes. Nothing has been linked, booted or run on a guest. Vault lint and `check-invariants.py` pass on the merged tree. This entry gains lines as the leases report.
 
+**Audit r1, before the first boot.** The Mac was held, so Fable 5.1 read the code first: 0 P0, 1 P1, 0 P2, 2 P3 (9f77a7394). The P1 was my test expecting a move to coalesce with interrupts that name a sender; a move coalesces only at sender 0. The kernel bound was right. A `note_target` width assert and stale widths were the rest.
+
+**Lease 1, 15:12Z to 15:27Z on 9f77a7394.** The CI bake passed, so the Rust and guest C link. The suite stopped at 2171 of 2172 on `vivarium.sigset_to_notemask`, whose exact pin of what block-all covers still read six notes. The kernel was right and the pin was stale, and neither my widening nor the audit saw it: a pin on a derived set that names its members has to be found by running it. A failed suite stops the boot, so joey did not run and the guest legs are still unproven.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
 
 **Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.
