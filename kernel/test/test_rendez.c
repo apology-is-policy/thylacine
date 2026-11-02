@@ -2261,14 +2261,14 @@ void test_rendez_direct_note_read_at_wait_entry(void) {
     TEST_ASSERT(down, "both threads returned and were reclaimed");
     TEST_EXPECT_EQ(rc0, 0, "the caught post answers 0");
     TEST_ASSERT(u_back, "an unwinding wait entered with it returns");
-    TEST_EXPECT_EQ(u_rc, SLEEP_NOTEINTR, "unwound");
+    TEST_EXPECT_EQ(u_rc, SLEEP_NOTEINTR, "the sleep unwound");
     TEST_ASSERT(t_back, "a timed unwinding wait too");
-    TEST_EXPECT_EQ(t_rc, SLEEP_NOTEINTR, "unwound");
+    TEST_EXPECT_EQ(t_rc, TSLEEP_NOTEINTR, "the tsleep unwound");
     TEST_EXPECT_EQ(rc1, 0, "the fatal post answers 0");
     TEST_ASSERT(h_back, "a hold wait entered with a fatal note returns");
-    TEST_EXPECT_EQ(h_rc, SLEEP_INTR, "to die");
+    TEST_EXPECT_EQ(h_rc, SLEEP_INTR, "the sleep ended to die");
     TEST_ASSERT(th_back, "a timed hold wait too");
-    TEST_EXPECT_EQ(th_rc, SLEEP_INTR, "to die");
+    TEST_EXPECT_EQ(th_rc, TSLEEP_INTR, "the tsleep ended to die");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
