@@ -83,8 +83,10 @@ console reports `lictor: input withheld from the compositor`. Use a serial
 recovery session, or restart the machine.
 
 If Lictor itself exits, nothing restarts it, and the display stays dark until
-the machine restarts. The kernel cancels any pending request and returns the
-seat to normal, so a serial recovery session still works.
+the machine restarts. An authorization under way fails, and the requester reports
+an internal error. A request still waiting for the gesture stays pending until its
+deadline. A machine booted with `thylacine.serial-sak=1` can still confirm it from
+a serial recovery session. Without that setting, restart the machine.
 
 If the display service fails or exits in the moment after the gesture, before
 the prompt appears, Thylacine shows no prompt on any console, and the request

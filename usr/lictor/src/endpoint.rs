@@ -16,6 +16,8 @@ pub const CLIENT: u64 = 12;
 pub const MEDIUM_NONE: u32 = 0;
 pub const MEDIUM_SERIAL: u32 = 1;
 pub const MEDIUM_GRAPHICAL: u32 = 2;
+// ABI: seat.h pins the same three. Swapped, Corvus prompts on the wrong medium.
+const _: () = assert!(MEDIUM_NONE == 0 && MEDIUM_SERIAL == 1 && MEDIUM_GRAPHICAL == 2);
 /// Where the kernel says the console episode runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EpisodeMedium {
@@ -63,6 +65,10 @@ impl Message {
             _ => None,
         }
     }
+    /// A QUERY reply: is the episode open now the graphical one at `generation`?
+    pub fn owns_graphical_episode(&self, generation: u64) -> bool {
+        self.episode_medium() == Some(EpisodeMedium::Graphical { generation })
+    }
 }
 impl Drop for Message {
     fn drop(&mut self) {
@@ -104,6 +110,14 @@ mod tests {
             Some(EpisodeMedium::Graphical { generation: 7 })
         );
         assert_eq!(reply(2, MEDIUM_GRAPHICAL, 0).episode_medium(), None);
+    }
+
+    #[test]
+    fn only_the_same_graphical_episode_is_owned() {
+        assert!(reply(2, MEDIUM_GRAPHICAL, 7).owns_graphical_episode(7));
+        assert!(!reply(2, MEDIUM_GRAPHICAL, 8).owns_graphical_episode(7), "a newer graphical episode");
+        assert!(!reply(0, MEDIUM_SERIAL, 7).owns_graphical_episode(7), "a serial episode, same generation");
+        assert!(!reply(0, MEDIUM_NONE, 7).owns_graphical_episode(7), "no episode");
     }
 
     #[test]

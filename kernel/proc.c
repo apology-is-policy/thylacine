@@ -2706,8 +2706,9 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
     // holding BREAK is one gesture). BEGIN and the `sak` note both happen
     // HERE, under the lock that ALIVE-checked the trusted Proc: its death /
     // relinquish / replacement (the same lock) is ordered entirely before or
-    // after, so an episode never opens behind a consumer that just left, and
-    // corvus can never read the note and find no episode behind it. BEGIN
+    // after, so an episode never opens behind a consumer that just left. The
+    // note can outlive its episode: a seat can fail and close it before corvus
+    // reads the note, so corvus asks SEAT_QUERY's medium before it prompts. BEGIN
     // first, note second: a refused post (a Proc with no queue -- not a live
     // Proc, but the fail-safe costs one call) closes the episode again, because
     // an episode nobody was told about is a frozen console. The caught-note
@@ -2996,9 +2997,9 @@ int proc_set_seat_client(struct Proc *p) {
 
 // Caller holds the proc-table lock. Failing cancels the held grant, scrubs the
 // secret queue and closes the episode the SEAT opened. It never closes an
-// episode the seat does not own: a serial episode runs only while the seat is
-// NORMAL (proc_console_sak_from refuses otherwise), so abandoning on a
-// NORMAL-phase failure would unfreeze the console under a serial key entry.
+// episode the seat does not own: a serial episode opens only while the seat is
+// NORMAL (proc_console_sak_from refuses otherwise) and may outlast it, and
+// abandoning one here would unfreeze the console under a serial key entry.
 // Ordinary pixels come back only through SEAT_RESTORED, never from here.
 static void proc_seat_fail_locked(void) {
     bool owns_episode = g_seat.phase == SEAT_EXCLUSIVE;
@@ -3010,6 +3011,14 @@ static void proc_seat_fail_locked(void) {
     seat_zero(g_seat.frame, sizeof(g_seat.frame));
     g_seat.frame_len = g_seat.masked_len = 0;
     if (owns_episode && cons_episode_abandon()) proc_console_owner_restore_locked();
+}
+
+// A seat back at NORMAL through a failure retires its generation. Corvus polls
+// after END, and NORMAL at the generation it holds is how it knows the restore
+// committed the grant; a failure cancelled that grant. Not at the failure itself:
+// Lictor keys its failure notice on the generation it activated.
+static void seat_retire_generation_locked(void) {
+    if (g_seat.generation != ~0ull) g_seat.generation++;
 }
 
 // Where the console episode runs, for Corvus to read instead of inferring it
@@ -3089,6 +3098,7 @@ int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
     if (op == SEAT_RESTORED && service &&
             (g_seat.phase == SEAT_RESTORING || g_seat.phase == SEAT_FAILED)) {
         for (u32 i = 0; i < sizeof(g_seat.held); i++) if (g_seat.held[i]) goto done;
+        bool failed = g_seat.phase == SEAT_FAILED;
         // Physical restore + release drainage have completed. This grant-lock
         // release is the authority commit, ordered with failure by our lock.
         if (g_seat.grant_stripes && !cap_release_seat_grant(
@@ -3096,6 +3106,7 @@ int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
             proc_seat_fail_locked(); goto done;
         }
         g_seat.phase = SEAT_NORMAL;
+        if (failed) seat_retire_generation_locked();
         g_seat.grant_stripes = g_seat.grant_session = 0;
         g_seat.masked_len = 0;
         seat_zero(g_seat.keys, sizeof(g_seat.keys));
@@ -4244,7 +4255,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
     // with its own lock released); the parked-waiter wakes are the
     // child_waiters precedent below.
     // The compositor is an untrusted client: losing it mid-episode fails the
-    // episode, losing it in NORMAL fails nothing (warden may seat a new one).
+    // episode, losing it in NORMAL fails nothing and frees the slot.
     if (g_seat.client == p) {
         if (g_seat.phase != SEAT_NORMAL) proc_seat_fail_locked();
         g_seat.client = NULL;
@@ -4260,6 +4271,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
         proc_seat_fail_locked();
         g_seat.service = NULL;
         g_seat.phase = SEAT_NORMAL;
+        seat_retire_generation_locked();
         seat_zero(g_seat.held, sizeof(g_seat.held));
         g_seat.masked_len = 0;
     }

@@ -111,7 +111,7 @@ requires the display to stay dark, and before 2026-09-21 it did -- a chord held
 past the 5 s quiesce deadline, or a prompt left idle past the exclusive
 deadline, left the machine without a display until both seat processes died.
 A seat failure closes only the episode the seat opened; a serial episode, which
-runs only while the seat is normal, is never closed by one.
+opens only while the seat is normal, is never closed by one.
 
 The OWNER fails (it dies or stalls). A dead/stalled trusted service never causes
 the compositor to inherit display or input ownership. Cancel the pending grant

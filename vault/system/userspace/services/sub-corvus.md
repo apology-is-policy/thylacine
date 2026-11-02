@@ -41,6 +41,10 @@ separate from authorization content. Key verification, wrong-key counters,
 eligibility, requester-incarnation revalidation and request expiry remain Corvus
 policy. A graphical grant is held until physical restoration; Corvus ends the
 episode and waits for that commit before releasing the deferred success reply.
+It sends END only while QUERY still names its own graphical episode, and reads a
+commit as normal at the generation it holds: a failure's return to normal moves
+the generation, and the reply is then an internal error
+([[dec-2026-11-02-seat-failure-retires-generation]]).
 The terminal tool receives status and capabilities, never the authorization key.
 
 ## Purpose

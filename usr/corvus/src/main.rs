@@ -3739,9 +3739,18 @@ impl EpisodeIo {
     // grant. Merely withholding the reply is not the security boundary: the
     // kernel independently refuses early /use attempts by a polling requester.
     unsafe fn finish(&self) -> bool {
+        use lictor::endpoint as ep;
+        if self.generation != 0 {
+            // A failed seat already closed this episode, and the console may be
+            // running a newer one from the operator's BREAK. END names no episode,
+            // and ending that one would eat its prompt and unfreeze the console.
+            let mut m = ep::Message::default();
+            if ep::call(ep::QUERY, &mut m).is_err() || !m.owns_graphical_episode(self.generation) {
+                return false;
+            }
+        }
         if t_console_episode(T_CONSOLE_EPISODE_END) != 0 { return false; }
         if self.generation == 0 { return true; }
-        use lictor::endpoint as ep;
         for _ in 0..600 {
             let mut m = ep::Message::default();
             if ep::call(ep::QUERY, &mut m).is_err() || m.generation != self.generation { return false; }
@@ -3988,9 +3997,9 @@ unsafe fn verdict(fd: &mut EpisodeIo, out: &mut Vec<u8>, line: &[u8], state: lic
     if console_write_all(fd, out) && fd.generation != 0 { console_wait_any_key(fd, 10_000); }
 }
 
-// The `sak` note arrived: the kernel opened the episode (the console is ours
-// alone until END). Everything trusted happens here, then END + close + wipe
-// on every path.
+// The `sak` note arrived: the kernel opened an episode, which may already be over.
+// While it runs the console is ours alone until END. Everything trusted happens
+// here, then END + close + wipe on every path that found an episode.
 unsafe fn episode_consume(conns: &mut Vec<Conn>) {
     let mut channel = match EpisodeIo::open() {
         EpisodeOpen::Ready(channel) => channel,

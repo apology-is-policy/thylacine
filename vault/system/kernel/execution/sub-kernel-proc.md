@@ -45,12 +45,16 @@ where the console episode runs ([[dec-2026-11-02-seat-episode-medium]]): the loc
 that orders BEGIN, END and every abandon with the phase makes active and EXCLUSIVE
 the seat's episode, and any other active episode serial. The compositor's
 death fails the seat only while an episode is in progress; in the normal phase it
-just clears the client slot, so warden can seat a new one. `proc_seat_fail_locked`
+just clears the client slot. `proc_seat_fail_locked`
 cancels the held grant, scrubs the key queue and closes the console episode ONLY
-when the seat opened it (phase exclusive): a serial episode runs while the seat
-is normal, and closing it would unfreeze the console under a serial key entry.
+when the seat opened it (phase exclusive): a serial episode opens while the seat
+is normal and may outlast it, and closing it would unfreeze the console under a
+serial key entry.
 A failed seat returns to normal through SEAT_RESTORED, which releases nothing
-because the failure already zeroed the grant identity. The attention chord is
+because the failure already zeroed the grant identity. That return and the
+service's death both retire the generation, and a commit keeps it, since normal at
+its own generation is how Corvus knows the grant committed
+([[dec-2026-11-02-seat-failure-retires-generation]]). The attention chord is
 scanned here (`seat_attention_held`: Control + Alt + Delete or F10). Episode
 transitions, pending-grant commit/cancellation and death serialize under the
 process-table lock. The three phase deadlines (5 s quiesce, 90 s exclusive, 5 s

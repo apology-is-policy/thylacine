@@ -4002,6 +4002,8 @@ void test_cons_graphical_seat_gate(void) {
     m.generation = generation;
     SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL,
                "a failed seat recovers once the backend restored normal output");
+    SEAT_CHECK(m.generation == generation + 1, "the recovery retires the failed generation");
+    generation = m.generation;
     // The second reserved chord: Delete is absent from compact keyboards.
     SEAT_CHECK(seat_test_key(service, 97, 1, 0) == 0, "right ctrl");
     SEAT_CHECK(seat_test_key(service, 100, 1, 0) == 0, "right alt");
@@ -4024,7 +4026,7 @@ cleanup:
 // The authority commit and the two failure rules that are not visible from the
 // happy path: a held grant redeems only after RESTORED; a failure cancels it and
 // a later recovery releases nothing; and a seat failure never closes an
-// episode the seat did not open (a serial episode runs while the seat is
+// episode the seat did not open (a serial episode opens while the seat is
 // NORMAL -- closing it would unfreeze the console under a serial key entry).
 static int seat_test_grant(struct Proc *corvus, u64 generation, u64 caps, u64 stripes, u64 session) {
     struct seat_message m;
@@ -4083,6 +4085,7 @@ void test_cons_graphical_seat_grant_and_failure(void) {
     SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == -1, "no authority while restoring");
     m.generation = generation;
     SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL, "restored");
+    SEAT_CHECK(m.generation == generation, "a commit keeps its generation: Corvus reads that as committed");
     SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == (long)CAP_USE_WRITE_LEN,
                "restoration commits the grant");
 
@@ -4103,7 +4106,7 @@ void test_cons_graphical_seat_grant_and_failure(void) {
 
     // (3) A NORMAL-phase seat failure leaves a SERIAL episode alone.
     SEAT_CHECK(proc_console_sak() && cons_episode_active(), "serial episode opens while the seat is NORMAL");
-    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0, "the live generation");
     SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && m.phase == SEAT_FAILED, "seat fails underneath it");
     SEAT_CHECK(cons_episode_active(), "a seat failure must not close a serial episode");
     SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0 && !cons_episode_active(),
@@ -4245,8 +4248,6 @@ cleanup:
 #undef SEAT_CHECK
 }
 
-// The SERVICE dies mid-episode: the episode closes, the seat is FAILED with no
-// owner, and nothing a survivor holds can drive it (the ops are service-gated).
 // What Corvus reads from SEAT_QUERY: the medium, or ~0u when the query is refused.
 static u32 seat_test_medium(struct Proc *corvus, u32 *phase) {
     struct seat_message m;
@@ -4274,16 +4275,22 @@ void test_cons_graphical_seat_episode_medium(void) {
     SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_NONE && phase == SEAT_NORMAL, "idle: no episode");
     SEAT_CHECK(seat_test_medium(f.owner, NULL) == ~0u, "only Corvus asks");
 
+    // SEAT_FAIL needs a live generation, and only a chord moves one off zero.
+    SEAT_CHECK(seat_test_chord(service, &generation), "a chord gives the seat a generation");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && seat_test_recover(service, generation), "back to NORMAL");
+
     // NORMAL with an episode is serial: the positive control for the window
     // below, one variable away. A failure leaves a serial episode open, so
     // FAILED reads serial too, and the medium cannot be read off the phase.
     SEAT_CHECK(proc_console_sak() && cons_episode_active(), "serial episode");
     SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_SERIAL && phase == SEAT_NORMAL, "NORMAL reads serial");
-    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0, "the live generation");
     SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && cons_episode_active(), "a failure spares a serial episode");
     SEAT_CHECK(seat_test_medium(f.trusted, &phase) == SEAT_MEDIUM_SERIAL && phase == SEAT_FAILED, "FAILED reads serial");
     SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "the serial episode ends");
-    SEAT_CHECK(seat_test_recover(service, m.generation), "the seat recovers");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && seat_test_recover(service, m.generation), "the seat recovers");
     SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_NONE, "END leaves no episode");
 
     // A graphical episode, and QUERY's code no longer shares the mask length.
@@ -4319,6 +4326,8 @@ cleanup:
 #undef SEAT_CHECK
 }
 
+// The SERVICE dies mid-episode: the episode closes, the seat is NORMAL with no
+// owner, and nothing a survivor holds can drive it (the ops are service-gated).
 void test_cons_graphical_seat_service_death(void) {
     struct ep_fixture f;
     const char *err = NULL;
@@ -4359,7 +4368,6 @@ void test_cons_graphical_seat_service_death(void) {
     SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_NORMAL,
                "the service's death ends the seat: Corvus reads NORMAL");
     SEAT_CHECK(m.code == SEAT_MEDIUM_NONE, "and no episode: a note still in flight prompts nowhere");
-    m.generation = generation;
     SEAT_CHECK(proc_seat_op(f.trusted, SEAT_RESTORED, &m) == -1 && proc_seat_op(f.owner, SEAT_RESTORED, &m) == -1,
                "no survivor speaks for the dead service");
     SEAT_CHECK(proc_console_sak() && cons_episode_active(),
@@ -4372,6 +4380,105 @@ cleanup:
     proc_test_seat_reset();
     ep_teardown(&f);
     TEST_ASSERT(err == NULL, err ? err : "graphical seat service death");
+#undef SEAT_CHECK
+}
+
+// A service Proc that exits through the real chokepoint when told to. Binding it
+// again after a death is the proof that the role did not dangle.
+static int seat_test_spawn_service(struct Proc **service) {
+    *service = NULL;
+    g_epd_state = 0;
+    g_seat_child = NULL;
+    int pid = rfork(RFPROC, seat_child, (void *)(long)EPD_ROLE_SEAT_SERVICE);
+    if (pid <= 0) return pid;
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) != 0);
+    if (g_epd_state == 1) *service = __atomic_load_n(&g_seat_child, __ATOMIC_ACQUIRE);
+    return pid;
+}
+
+// The service dies with authority in flight, per phase. A commit keeps Corvus's
+// generation and a death moves it, which is all that tells Corvus's post-END poll
+// they apart; the control below is the same fixture with the service alive.
+void test_cons_graphical_seat_service_death_grant(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL, *committed = NULL, *requester = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0;
+    int pid = -1;
+    proc_test_seat_reset();
+    cap_reset_table();
+    bool setup = ep_setup(&f, true, true);
+    committed = proc_alloc();
+    requester = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+#define SEAT_KILL() do { \
+        __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE); \
+        SEAT_CHECK(epd_reap(pid) == pid, "reaped the service child"); \
+        pid = -1; \
+    } while (0)
+    SEAT_CHECK(setup && committed && requester, "seat fixture");
+    committed->state = PROC_STATE_ALIVE;
+    requester->state = PROC_STATE_ALIVE;
+    f.trusted->caps |= CAP_GRANT_CLEARANCE;
+    (void)proc_test_serial_sak(1);
+    u64 stripes = proc_stripes(requester);
+
+    pid = seat_test_spawn_service(&service);
+    SEAT_CHECK(pid > 0 && service, "the first service binds");
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "control: the episode opens");
+    SEAT_CHECK(seat_test_grant(f.trusted, generation, CAP_DAC_OVERRIDE, proc_stripes(committed), 0x2B1) == 0,
+               "control: the grant is held");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0 && seat_test_recover(service, generation),
+               "control: the live service restores");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_NORMAL && m.generation == generation,
+               "control: Corvus reads NORMAL at its generation");
+    SEAT_CHECK(cap_redeem_grant_for_writer(committed, CAP_DAC_OVERRIDE) == (long)CAP_USE_WRITE_LEN,
+               "control: that restoration committed the grant");
+
+    // RESTORING: Corvus has sent END and is polling for the commit.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "the next episode opens");
+    SEAT_CHECK(seat_test_grant(f.trusted, generation, CAP_DAC_OVERRIDE, stripes, 0x2B2) == 0 && cap_pending_count() == 1,
+               "a grant is held");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "END");
+    SEAT_KILL();
+    SEAT_CHECK(cap_pending_count() == 0, "the service's death in RESTORING cancels the held grant");
+    SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == -1, "and it never redeems");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_NORMAL, "Corvus reads NORMAL");
+    SEAT_CHECK(m.generation != generation, "at a moved generation, so it does not report a commit");
+
+    // EXCLUSIVE: the prompt is up.
+    pid = seat_test_spawn_service(&service);
+    SEAT_CHECK(pid > 0 && service, "the dead service's role did not dangle");
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode under a new service");
+    SEAT_CHECK(seat_test_grant(f.trusted, generation, CAP_DAC_OVERRIDE, stripes, 0x2B3) == 0 && cap_pending_count() == 1,
+               "a grant is held again");
+    SEAT_KILL();
+    SEAT_CHECK(cap_pending_count() == 0, "the service's death in EXCLUSIVE cancels the held grant");
+    SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == -1, "and that one never redeems");
+    SEAT_CHECK(!cons_episode_active(), "it closes the seat's episode");
+    SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_NONE, "and Corvus reads no episode");
+
+    // NORMAL under a serial episode, which the service's death does not own.
+    pid = seat_test_spawn_service(&service);
+    SEAT_CHECK(pid > 0 && service, "a third service binds");
+    SEAT_CHECK(proc_console_sak() && cons_episode_active(), "a serial episode opens");
+    SEAT_KILL();
+    SEAT_CHECK(cons_episode_active(), "the service's death spares a serial episode");
+    SEAT_CHECK(seat_test_medium(f.trusted, NULL) == SEAT_MEDIUM_SERIAL, "and Corvus still reads serial");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "Corvus ends it");
+cleanup:
+    if (pid > 0) { __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE); (void)epd_reap(pid); }
+    (void)proc_test_serial_sak(1);
+    cap_reset_table();
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (committed) { committed->state = PROC_STATE_ZOMBIE; proc_free(committed); }
+    if (requester) { requester->state = PROC_STATE_ZOMBIE; proc_free(requester); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat service death with a grant");
+#undef SEAT_KILL
 #undef SEAT_CHECK
 }
 

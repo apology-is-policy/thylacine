@@ -377,8 +377,9 @@ retains reservations instead of freeing potentially live backing. Failed takeove
 and stale or expired generations cancel the episode and recover as above. Owner
 death is different: nothing restarts a dead service (warden leaves a persistent
 service unsupervised once it is READY), so the kernel fails the seat and then
-returns it to normal, releasing nothing. The serial BREAK works again, the
-display stays dark for the boot, and no ordinary client inherits the seat. Either
+returns it to normal at a new generation, releasing nothing. On a boot with
+`thylacine.serial-sak=1` the serial BREAK works again, the display stays dark for
+the boot, and no ordinary client inherits the seat. Either
 way a seat can reach normal after a SAK's note and before Corvus asks, so Corvus
 reads the episode's medium from QUERY's `code` and not from the phase
 ([[dec-2026-11-02-seat-episode-medium]]); `endpoint.rs` reads the reply and its

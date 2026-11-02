@@ -213,8 +213,10 @@ are scrubbed and an episode the seat opened is closed -- and then returns it to
 normal, as RESTORED from FAILED does, releasing nothing. A seat with no service
 routes no input and no frame, so a compositor that outlives the service gains
 nothing from it. A failed seat whose service lives still refuses the BREAK and
-recovers through RESTORED. The serial console is how the operator recovers
-from here; the display stays dark until a reboot. Rejected:
+recovers through RESTORED. On a boot with `thylacine.serial-sak=1` the serial
+console is how the operator recovers from here; without it nothing reaches the
+trusted path until a reboot, which fails closed. The display stays dark either
+way. Rejected:
 - admitting the BREAK into a failed seat that has no service, which recovers
   the same way but leaves the seat reading FAILED with no owner able to restore
   it;
@@ -239,6 +241,19 @@ could close a newer one. Rejected:
   and beside the field it can never fire while Corvus is correct;
 - reporting a normal seat with no episode as failed, which makes the reply's
   phase stop being the seat's, and `finish` reads that phase.
+
+**A failure retires its generation.** After END, Corvus polls SEAT_QUERY and holds
+the requester's reply until the restore commits the grant. It reads a commit as
+normal at the generation it holds, so a seat that reaches normal through a failure,
+which cancelled the grant, must not read the same. Both such returns move the
+generation: the service's death and RESTORED from failed. A commit keeps it, and it
+moves at the return and not at the failure because Lictor keys its failure notice
+on the generation it activated. Corvus then answers the requester with an internal
+error, and the requester's redeem fails either way. Corvus also asks before a
+graphical END: END names no episode, so one sent after a failure could close a
+serial episode the operator has just opened, eating its prompt and unfreezing the
+console. The query narrows that race to the two calls; only an END that names its
+generation would close it.
 
 The
 current backend uses the neutral field because private workspace capture is not
