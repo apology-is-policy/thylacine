@@ -63,7 +63,7 @@ A native program written in Rust calls `t_file_lock` in `libthyla-rs`, and a nat
 | Error | Native message | Cause and response |
 | --- | --- | --- |
 | `EAGAIN` | `resource temporarily unavailable` | Another owner holds a conflicting lock and the call was not asked to wait. Try again later. |
-| `EBADF` | `bad handle` | The descriptor is closed, opened for walking only, or opened without the access the lock type requires. A process-owner lock also receives this error when another thread closed the descriptor while the call was waiting; the lock has been released again. An open file's lock receives it when the open file's last descriptor closes during the call, and that lock has been released too. |
+| `EBADF` | `bad handle` | The descriptor is closed, opened for walking only, or opened without the access the lock type requires. A close during a waiting call also causes it, and releases the lock: any descriptor for a process owner, the last for an open file. |
 | `EINVAL` | `invalid argument` | `l_whence`, `l_type` or a `flock` operation is not valid, the range starts before the beginning of the file, or an `F_OFD_` request has a non-zero `l_pid`. A native `SYS_FILE_LOCK` call whose range would reach 2^64 also receives it. |
 | `EFAULT` | `bad address` | A native `SYS_FILE_LOCK` test names an answer address that cannot be written. The service is not asked if the address is outside the process's half of memory. |
 | `EOVERFLOW` | not applicable | The range ends past the largest offset a signed 64-bit number can hold, or `F_GETLK` cannot represent the conflicting lock. |
