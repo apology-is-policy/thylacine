@@ -58,6 +58,10 @@ G7 stayed green, against what I predicted. Withholding the latch should have lef
 
 The next lease owes K12, K37 and G7. The SMP subset ran on a37734c18; what follows it is a test-only counter, a test and a probe's nap.
 
+**Lease 3, 23:17Z to 23:30Z on f5546b2be.** Both readings held, exactly as predicted. K12 went red only in the family test, "the wait walked no one", since its cast touches only the high bits; K37 went red in both families, same message. G7 went red on L345, `sig=10 fork=8240 kill=0 ws=-1`: without the latch a sleeping child outlives the probe's 4 seconds. Suite 2175/0, regreen ELF identical (57b66ede4b4f850c). The chunk lands on these, with the full matrix, `tools/test-fault.sh`, the interactive fleet and `tools/check-production.sh` not run, and the merge to main owing them.
+
+What I would keep from this run: three of the sabotages I wrote stayed green, and each time the first explanation I reached for was wrong or incomplete. Two of those explanations got written down as fact before anything had tested them. Only a prediction the next run could break told them apart.
+
 ## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
 
 **Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.

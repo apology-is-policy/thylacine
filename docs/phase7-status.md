@@ -2939,3 +2939,35 @@ subset below. C8, C9 and C10 remain. On aux-3-c4 in the c7probe tree, built in t
   blocked native or Pouch worker takes `pthread_kill` when its call ends, until 11c. At the merge to main: main's
   `rt_sigpending`, `rt_sigtimedwait` and `rt_sigsuspend` rows and the `NOTE_RING_SLOTS` modulus need reading. The
   merge also brings ad23e3315, scripture for the SIGUSR1/2 notes whose code is the next chunk.
+
+## SIGUSR1 and SIGUSR2 become notes, and every family word outgrows its byte — 2026-11-02
+
+Vote 15: a separate chunk straight after C4, and the signoff for `docs/ERRORS.md`. In the reap tree on aux-3-usr.
+
+- **The chunk** (ad23e3315 scripture, 451a39eaf, b429cb8e6). `usr1` and `usr2` on bits 8 and 9, catchable and
+  default-terminating, each with its own latch and recorded signal. `note_caught` to u32 and `note_claim`,
+  `note_target`, `note_direct` to u16, every cast widened; `sizeof(struct Proc)` 504 and `sizeof(struct Thread)`
+  1776 unchanged, by moving fields into existing padding. `NOTE_RING_SPARE` 10. The phenotype's rows are appended.
+  Pouch 0068, libthyla-rs, utopia's `mask note`.
+- **Audit r1** (Fable 5.1, start == end; 59503aa78, before the first boot): 0 P0 / 1 P1 / 0 P2 / 2 P3, not dirty, no
+  kernel behaviour changed (9f77a7394). F1: a full-ring test expected a move to coalesce with interrupts that name a
+  sender, and would have failed on correct code. F2: `note_target`'s missing width assert, with B7 as its witness.
+  F3: stale widths.
+- **Found by the leases, fixed.** Lease 1 stopped on a stale exact pin of what block-all covers (33fbf2198). Lease 2
+  left three sabotages green (a37734c18, f5546b2be). K15: nothing at runtime asserted that a designation closes its
+  family, at any family; `rendez.caught_note_designation_closes_the_family` does, K38 its twin. K12 and K37: a hand-off
+  in an unwinding wait wins its own designation straight back, since the walk prefers the caller, so
+  `rendez.caught_note_designee_keeps` counts walks. My first account of K12 was wrong and the journal says so. G3
+  could never touch L345, since a default death has two arms; rewritten, and G7 showed L345 had never had a sleeper
+  (the kill beat the child's first entry), so L345 now settles first.
+- **Gates on f5546b2be.** Suite 2175/0, green and regreen (ELF identical, 57b66ede4b4f850c); guest legs threads-census,
+  signals-census, kill-usr, usr-apart, death-usr1, death-usr2. K12 and K37 red on "the wait walked no one"; G7 red on
+  L345 (`sig=10 ws=-1`). On a37734c18: K15 and K38 on the new test, G3 on L345 (`sig=12 ws=15`), P1 dying at kill-usr.
+  On 33fbf2198: K01-K36 bar K12 and K15, each on its own line; B1-B7 and R1 on their own guards; G1, G2, G4, G5, G6,
+  P2, P3, P4 on the right legs. **SMP subset on a37734c18:** `default-smp4` and `ubsan-smp4` each 10/10, 0 corruption.
+  Not repeated on f5546b2be: only a counter under `KERNEL_TESTS`, a test and a probe's nap change.
+- **NOT RUN.** The full SMP matrix, under the operator's hold of 2026-11-02; `tools/test-fault.sh`; the interactive
+  fleet; `tools/check-production.sh`, beyond the production-shape build `tools/test.sh` does first. The SMP subset here
+  is aux's reading of that hold as a narrow gate, not a vote: vote 17 named C4. The merge to main owes the rest.
+- **Still open, owned.** `seam-queue-note-fatal-after-post-wakes-nobody`, which item 11c decides. At the merge to main:
+  proc_flags bits 22 and 23 and the family word widths, as main was told on call 0276.
