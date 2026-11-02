@@ -6988,6 +6988,18 @@ void test_dev9p_cached_open_lock(void) {
     teardown(root);
 }
 
+// A fid as a peer's install would leave it: bound on the session, so a request
+// naming it reaches the wire and the close that clunks it is answered.
+static u32 co_peer_fid(void) {
+    u32 fid = p9_client_alloc_fid(&g_client);
+    if (fid == P9_NOFID) return P9_NOFID;
+    u16 nwqid = 0;
+    struct p9_qid qids[1];
+    if (p9_client_walk(&g_client, /*root_fid=*/0, fid, 0, NULL, NULL, &nwqid, qids) != 0)
+        return P9_NOFID;
+    return fid;
+}
+
 // Two threads can reach a cached open's first need together. The one that
 // installs second gives its own fid back and uses the fid installed: none leaks,
 // and none is replaced under a reader or a lock.
@@ -7007,7 +7019,8 @@ void test_dev9p_cached_open_install_race(void) {
     struct dev9p_priv *cp = dev9p_priv_of(co);
     TEST_ASSERT(cp != NULL, "priv");
 
-    const u32 peer_r = 0x7f000001u, peer_k = 0x7f000002u;
+    const u32 peer_r = co_peer_fid();
+    TEST_ASSERT(peer_r != P9_NOFID, "a peer's read fid");
     g_race_rfid_priv = cp; g_race_fid = peer_r;
     g_clunk_seen = 0; g_clunk_fid_n = 0;
     TEST_EXPECT_EQ((s64)dev9p.lock_sync(co, DEV_LOCK_SYNC_ACQUIRE), 0ll,
@@ -7024,6 +7037,8 @@ void test_dev9p_cached_open_install_race(void) {
     TEST_ASSERT(cp != NULL, "its priv");
     lock_wire_reset();
     g_ga_gen = 0x77;
+    const u32 peer_k = co_peer_fid();
+    TEST_ASSERT(peer_k != P9_NOFID, "a peer's kept fid");
     g_race_kfid_priv = cp; g_race_fid = peer_k;
     g_clunk_seen = 0; g_clunk_fid_n = 0;
     TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll,
