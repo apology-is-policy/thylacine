@@ -1858,7 +1858,14 @@ them, as Linux's prototypes do: a guest may leave the high half of a register
 unspecified.
 `viv_kill_for_test` drives the real shell with an explicit caller and a NULL
 `ctx`; a self-directed `snare:*` death answers 1 there instead of ending the
-harness (`notes.kill_family_gate`).
+harness (`notes.kill_family_gate`). A tid goes to `proc_note_thread` with the caller
+as sender, which only a self-managing target's queue records
+(`notes.direct_fallback_records_its_sender`).
+
+`rt_sigaction`'s tail is `viv_sigaction_settled`: what a stored disposition means for
+what is already pending. One that ignores discards it (`notes_discard_name`); one that
+terminates rouses every peer with a pending word (`proc_note_direct_rouse`,
+[[sub-kernel-notes]]). `viv_sigaction_settled_for_test` drives it.
 
 ## SYS_POSTNOTE answers errnos; a self-posted fault snare ends the caller (2026-10-14, S-3)
 

@@ -871,6 +871,14 @@ refuses a new process owner; the unpublished Proc keeps as NULL and follows
 normal rollback, balancing creation/destruction. Existing kernel descriptor pins
 alone do not block sharing. Private setup is still inactive.
 
+## A note aimed at one thread
+
+`proc_note_thread` sits beside the caught-note walk because both hold `threads_lock`
+and rouse under a thread's `wait_lock`. `proc_note_direct_rouse` is the same rouse for
+a disposition that has just become terminate: it walks under `threads_lock` and takes
+every thread but the caller with a nonzero word. Neither takes `q->lock`, which ARCH
+7.3.1 keeps apart from `threads_lock`. The mechanism is in [[sub-kernel-notes]].
+
 ## Private worker accounting tickets
 
 `proc_sqpoll_ticket_charge` resolves permanent creator stripes and the retained

@@ -2806,7 +2806,7 @@ tick while a peer that could unwind slept on.
 | `caught_target_buggy_direct_no_rouse.cfg` | `BUGGY_DIRECT_NO_ROUSE` | the same | violation (`NoDirectStrand`) | 792792 |
 | `caught_target_buggy_direct_no_observe.cfg` | `BUGGY_DIRECT_NO_OBSERVE` | the same | violation (`NoDirectStrand`) | 813712 |
 | `caught_target_buggy_fatal_unwinds_only.cfg` | `BUGGY_FATAL_UNWINDS_ONLY`, `DIRECT_FATAL` | the same | violation (`NoDirectStrand`) | 422531 |
-| `caught_target_buggy_direct_stale_mask.cfg` | `BUGGY_DIRECT_STALE_MASK` | the same | violation (`NoDirectStrand`) | pending |
+| `caught_target_buggy_direct_stale_mask.cfg` | `BUGGY_DIRECT_STALE_MASK` | the same | violation (`NoDirectStrand`) | 3174542 |
 
 Each counterexample was read for its mechanism, not only its verdict: the
 designee blocks in a hold wait holding the family while a peer sleeps in an
@@ -2833,9 +2833,9 @@ counts, since `MAX_DIRECT = 0` disables the post. Each new counterexample was re
 for its mechanism on the final model: a peer's tick tail takes the note the post
 named (`DIRECT_TO_QUEUE`, which is what `tkill` did before this chunk); a direct
 unwind takes the family while a peer holds its designation (`DIRECT_CLAIMS`); a
-peer's designation keeps the target from unwinding as it enters a wait, the queue
-then drains, and with the family no longer open the target sleeps on over its own
-note (`DIRECT_NEEDS_CLAIM`); the post leaves the target asleep in an unwinding
+peer's designation keeps the target from unwinding as it enters a wait, the peer's
+tail takes the queue's note and releases, and with the queue empty no walk comes
+back, so the target sleeps on over its own note (`DIRECT_NEEDS_CLAIM`); the post leaves the target asleep in an unwinding
 wait (`DIRECT_NO_ROUSE`); the post lands before the target enters a wait, the
 entry does not read the word, and nothing wakes it (`DIRECT_NO_OBSERVE`, the I-9
 shape); a fatal note leaves its target in a hold wait (`FATAL_UNWINDS_ONLY`); the
@@ -2847,7 +2847,8 @@ litmus test: the owner's plain store of `note_mask` and acquire read of the word
 the poster's OR and read of the mask, can each see the other's old value. The model
 cannot produce that order, since `Mask` and its tail's read are one step, so the
 ghost `wasMasked` stands for the stale read. It is `FALSE` in every other cfg and
-moves no count. A disposition turning fatal after the post is not modelled either:
+moves no count; in its own cfg it stays set, a stronger staleness than a store buffer
+holds, so that cfg's space (3174542 states) is by far the largest. A disposition turning fatal after the post is not modelled either:
 `DIRECT_FATAL` is a constant, and `proc_note_direct_rouse` is held by
 `rendez.direct_note_turns_fatal_when_the_handler_goes`.
 

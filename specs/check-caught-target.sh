@@ -45,7 +45,7 @@ caught_target_buggy_direct_needs_claim:NoDirectStrand:812160
 caught_target_buggy_direct_no_rouse:NoDirectStrand:792792
 caught_target_buggy_direct_no_observe:NoDirectStrand:813712
 caught_target_buggy_fatal_unwinds_only:NoDirectStrand:422531
-caught_target_buggy_direct_stale_mask:NoDirectStrand:-"
+caught_target_buggy_direct_stale_mask:NoDirectStrand:3174542"
 
 # Every temporal run is `-lncheck final`: liveness is judged once the whole
 # space is explored. Without it TLC checks liveness at TIME-triggered points

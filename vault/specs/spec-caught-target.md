@@ -23,7 +23,7 @@ cfgs:
   - "caught_target_buggy_direct_no_rouse.cfg -- the post leaves a blocked target asleep: NoDirectStrand (792792)"
   - "caught_target_buggy_direct_no_observe.cfg -- a thread entering a wait does not read its word: NoDirectStrand (813712)"
   - "caught_target_buggy_fatal_unwinds_only.cfg -- a fatal direct note ends only an unwinding wait: NoDirectStrand (422531)"
-  - "caught_target_buggy_direct_stale_mask.cfg -- the post skips the rouse on a mask its target has since cleared: NoDirectStrand (pending)"
+  - "caught_target_buggy_direct_stale_mask.cfg -- the post skips the rouse on a mask its target has since cleared: NoDirectStrand (3174542)"
 gate: "any change to proc_caught_note_walk, thread_caught_note_claim, notes_release_claims, sleep_caught_wait_enter, notes_handoff_target, notes_exit_drop_locked, proc_note_thread, notes_tail_candidate_locked, notes_tail_consume_locked, thread_die_pending, or where a claim, a designation or a direct bit is set or cleared; specs/check-caught-target.sh"
 created: 2026-10-12
 updated: 2026-11-02
