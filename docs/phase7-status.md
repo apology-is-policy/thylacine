@@ -2892,8 +2892,10 @@ an empty environment). On aux-3-join in the c7probe tree, built in the reap tree
   on their named assertions; regreen ELF identical. Production kernel ELF byte-identical to 842c0c908's
   (`1cba396bb13fcd39`), so the SMP result covers the production code exactly; the reworked and new tests had one suite
   and no SMP run.
-- **Still open, owned.** The F1 test's cleanup on an early assert has not executed (`fnd-aux-corona-join-r2-f1`): a
-  planted early failure, queued for aux's next Mac lease. corona/env-shapes and async-memory's later commits are a second
-  join; corona takes the lock conversions, the pts wakes and 842c0c908 from aux-3. The C7 residue stands as recorded
+- **Planted early failures, measured 2026-11-02 on 269ae1a69** (`chg-2026-11-02-join-planted-cleanup`, closing what
+  `fnd-aux-corona-join-r2-f1` left owed). The F1 test's cleanup ran from three early points. Each boot ended with one
+  FAIL line and only the suite's own extinction, and the interaction pool was empty after each cleanup, as predicted.
+- **Still open, owned.** corona/env-shapes (now on async-memory at 32cb9ada6) and async-memory's later commits are a
+  second join; corona takes the lock conversions, the pts wakes and 842c0c908 from aux-3. The C7 residue stands as recorded
   above (`seam-dirent-type-is-qid-type`, Ambush, the Go fork's minit comment, the ELF hash). The overhaul itself has C4
   and C8-C10 to go (`chg-2026-11-02-thread-overhaul-position`).
