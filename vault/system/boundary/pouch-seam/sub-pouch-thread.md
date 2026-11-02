@@ -15,7 +15,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -260,6 +260,19 @@ the caller's Proc).
   half -- main catches SIGINT, blocks and raises it so it queues, makes and joins
   a thread, and unblocks; the handler must run on main, where a newborn the
   kernel started unmasked would have taken it at its first entry.
+- **`pthread_kill` names one thread since 0067 (thread-model C4, 2026-11-02).**
+  It was the `SYS_tkill` sentinel, so it answered ENOSYS, and `raise` posted a
+  process-directed note a peer could take, although POSIX makes `raise` the same as
+  `pthread_kill(pthread_self())`. Both now call `SYS_postnote_tid` (138), under the
+  killlock for `pthread_kill`. SIGABRT is `snare:abort`. Signal 0 posts nothing, a
+  signal with no note is EINVAL, and a `tty:*` one is EPERM. `SIGUSR1` and `SIGUSR2`
+  have no note yet, and a blocked worker's wait rides the note out
+  ([[sub-kernel-notes]]'s seams), so `kill-blocked` asks only that the worker takes it
+  no later than the call's end. `kill-worker` (a spinning worker takes it, main does
+  not), `kill-masked` and `raise-masked` (a masked target keeps it while an open main
+  is left alone, and the unblock delivers) and `kill-answers` pin the rest.
+  `mask-queued` moved to `kill(getpid())`: `raise` now waits on its own thread, which
+  no newborn can take from, so the leg would prove nothing.
 - **C11 `thrd_create` works since 0066 (2026-10-29).** Until then `start_c11()`
   never registered `&__thread_list_lock` as clear_child_tid (0004 re-armed that
   handoff in `start()` only, having replaced musl's `CLONE_CHILD_CLEARTID`

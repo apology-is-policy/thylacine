@@ -22,7 +22,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Session registry factory
 
@@ -36,18 +36,22 @@ cannot be delegated by a caller lacking internal factory role bit 29.
 The C/kernel, C/libt and Rust compiled ABI witnesses agree on number, bit and
 record layout. See [[sub-kernel-devsrv]].
 
-Numbers 129..133 are assigned nothing on this tree (b3 holds them; 127 and 128
-are main's JIT_CREATE_SEALED and ICACHE_SYNC_SPACE).
+Numbers 129..133 and 135..137 are assigned nothing on this tree (b3 and main hold
+them; 127 and 128 are main's JIT_CREATE_SEALED and ICACHE_SYNC_SPACE).
 `syscall.native_gap_unassigned` (`kernel/test/test_syscall.c`) pins the gap by
 the unknown arm's own counter, `syscall_unknown_count()`, rather than by the -1
 that arm answers, because many native handlers refuse zeroed arguments with the
-same -1. Its control, 134, answers the factory-role gate and leaves the counter
-alone.
+same -1. Its controls leave the counter alone: 134 answers the factory-role gate
+and 138, whose empty name is its own refusal, answers EINVAL.
+
+Native call 138 is POSTNOTE_TID, which posts to one thread of the caller's own Proc
+([[sub-kernel-syscall-abi]], [[sub-kernel-notes]]). It shares `postnote_copy_name` with
+`SYS_POSTNOTE`.
 
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is now 134 (SRV_REGISTRY_NEW; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 138 (POSTNOTE_TID; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before

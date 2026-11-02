@@ -10,12 +10,18 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-27
+updated: 2026-11-02
 ---
-## Native ceiling 134
+## Native ceiling 138
 
-The native ceiling is SRV_REGISTRY_NEW, at 134 since vote 13 (2026-10-19)
-moved it from 127 and left 127..133 to other branches' syscalls. Raising the
+The native ceiling is POSTNOTE_TID, at 138 since vote 14 (2026-11-02). The rows that
+raise newly covers are argued per number in vivarium.c: rt_sigprocmask, rt_sigpending
+and rt_sigtimedwait (135..137) meet an empty gap on this tree, and rt_sigqueueinfo
+(138) collides with POSTNOTE_TID but is an ENOSYS row, so a Linux Proc never reaches
+the post, and a native program mis-declared as Linux reads ENOSYS and is exposed to
+nothing. The ceiling argument now starts at rt_sigreturn (139). SRV_REGISTRY_NEW held
+the ceiling at 134 from vote 13 (2026-10-19), which moved it from 127 and left 127..133
+to other branches' syscalls. Raising the
 ceiling from 127 to 134 put seven signal-family rows below it, and the
 ceiling assert stopped the build until each was argued on its own in
 vivarium.c. rt_sigaction (134) collides with SRV_REGISTRY_NEW: its row is
@@ -31,8 +37,7 @@ pinned by `syscall.native_gap_unassigned` (it counts the native switch's
 unknown arm, so a handler answering -1 cannot pass it), and each is consumed
 before the native switch (the kill family is TIER2 through
 `vivarium_kill_decide`; the other two are ENOSYS rows), pinned by name in
-`vivarium.rejects_are_deliberate`. The ceiling argument now starts
-at rt_sigprocmask (135). There is no Linux phenotype factory operation; the
+`vivarium.rejects_are_deliberate`. There is no Linux phenotype factory operation; the
 entry is native only and keeps the kernel role gate. See
 [[sub-kernel-syscall-abi]].
 
@@ -566,11 +571,6 @@ its reasoning fails a test rather than passing quietly.
 
 ## Seams
 
-- **`tkill` and `tgkill` reach a Proc, not a thread.** Notes are per-Proc,
-  so a thread-directed signal goes to whichever thread of the named thread's
-  Proc takes the note (the caught-note walk's pick), not necessarily the
-  thread named -- a stated imprecision (VIVARIUM 6.22). A program that sends
-  one thread a signal to wake it alone gets a Proc-wide note.
 - **`dup3` on a socket declines** rather than half-serving. Reproducing
   Linux needs a *refcounted* socktab entry, a real change to a table V-5
   audited; the idiom turned away is the inetd shape.

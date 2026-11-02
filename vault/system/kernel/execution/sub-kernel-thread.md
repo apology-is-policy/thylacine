@@ -254,7 +254,10 @@ for, set under its `wait_lock`, turned into its claim when it unwinds, released
 at its tail, handed off at a wait that cannot take them and dropped at its exit,
 and `caught_wait`, the kind of wait the thread is in (none, unwinds, holds),
 published under its `wait_lock` by the sleep cores (ARCH 8.8.3; both bytes come
-out of the padding beside `in_handler`); and since
+out of the padding beside `in_handler`); and since 2026-11-02 `note_direct`, the
+families posted to this thread alone, one bit each, set by any poster with an atomic
+OR and consumed at this thread's tail ([[sub-kernel-notes]]; a third byte from the
+same padding); and since
 2026-10-05 `cons_frozen_unwound`, the console's record that a caught note
 unwound one of the thread's frozen reads, so its next console read re-takes the
 reader slot by waiting; the thread sets and consumes it, and exec clears it

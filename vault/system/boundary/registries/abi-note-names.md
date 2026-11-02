@@ -17,8 +17,9 @@ mirrors:
   - "usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch: SIGTERM -> term, POUCH_NOTE_BIT_TERM; raise/kill of self with SIGABRT -> abort()"
   - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
   - "usr/lib/pouch/patches/0050-pouch-self-fault-signals-errnos.patch: raise/kill of self with SIGSEGV, SIGBUS, SIGILL or SIGFPE -> the snare:* self-post; kill's EACCES -> EPERM"
+  - "usr/lib/pouch/patches/0067-pouch-thread-directed-kill.patch: pthread_kill of any signal, and raise -> SYS_postnote_tid; pthread_kill with SIGABRT -> snare:abort"
 created: 2026-08-02
-updated: 2026-10-27
+updated: 2026-11-02
 ---
 ## The surface
 

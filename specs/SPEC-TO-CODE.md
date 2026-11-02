@@ -2798,6 +2798,14 @@ tick while a peer that could unwind slept on.
 | `caught_target_buggy_release_no_wake.cfg` | `BUGGY_RELEASE_NO_WAKE` | the same | violation (`NoStrand`) | 165597 |
 | `caught_target_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | the same | violation (`NoStrand`) | 613245 |
 | `caught_target_buggy_stale_keeps.cfg` | `BUGGY_STALE_KEEPS` | the same | violation (`NoStrand`) | 616829 |
+| `caught_target_direct.cfg` | none; one process-directed post, one direct, a caught family | `TypeOK` + `OneClaimant` + `NoStolenDirect` + `NoStrand` + `NoDirectStrand` | clean | 795560 |
+| `caught_target_direct_fatal.cfg` | none; the same, a family whose default terminates (`DIRECT_FATAL`) | the same | clean | 410299 |
+| `caught_target_buggy_direct_to_queue.cfg` | `BUGGY_DIRECT_TO_QUEUE` (no process-directed post) | the invariants | violation (`NoStolenDirect`) | 57 |
+| `caught_target_buggy_direct_claims.cfg` | `BUGGY_DIRECT_CLAIMS` | the invariants | violation (`OneClaimant`) | 993 |
+| `caught_target_buggy_direct_needs_claim.cfg` | `BUGGY_DIRECT_NEEDS_CLAIM` | the invariants + `NoDirectStrand` | violation (`NoDirectStrand`) | 799928 |
+| `caught_target_buggy_direct_no_rouse.cfg` | `BUGGY_DIRECT_NO_ROUSE` | the same | violation (`NoDirectStrand`) | 792792 |
+| `caught_target_buggy_direct_no_observe.cfg` | `BUGGY_DIRECT_NO_OBSERVE` | the same | violation (`NoDirectStrand`) | 801480 |
+| `caught_target_buggy_fatal_unwinds_only.cfg` | `BUGGY_FATAL_UNWINDS_ONLY`, `DIRECT_FATAL` | the same | violation (`NoDirectStrand`) | 410299 |
 
 Each counterexample was read for its mechanism, not only its verdict: the
 designee blocks in a hold wait holding the family while a peer sleeps in an
@@ -2815,9 +2823,25 @@ designation lands after its release, and the thread carries it into an
 unwinding wait while a peer sleeps in one (`STALE_KEEPS`). The 2-thread counts
 were re-pinned after the revision above (from 140075 clean).
 
+Thread-directed notes (ARCH 7.6.4; the C4 chunk of the thread-model overhaul)
+extended the model the same way: a word `dq` per thread, a post that names its
+target, and a ghost `stolen` that a delivery of the named note by any other
+thread sets. `NoStolenDirect` is `~stolen`, and `NoDirectStrand` says the word
+never stays set while its one thread could take it. The existing cfgs keep their
+counts, since `MAX_DIRECT = 0` disables the post. Each new counterexample was read
+for its mechanism on the final model: a peer's tick tail takes the note the post
+named (`DIRECT_TO_QUEUE`, which is what `tkill` did before this chunk); a direct
+unwind takes the family while a peer holds its designation (`DIRECT_CLAIMS`); a
+peer's designation keeps the target from unwinding as it enters a wait, the queue
+then drains, and with the family no longer open the target sleeps on over its own
+note (`DIRECT_NEEDS_CLAIM`); the post leaves the target asleep in an unwinding
+wait (`DIRECT_NO_ROUSE`); the post lands before the target enters a wait, the
+entry does not read the word, and nothing wakes it (`DIRECT_NO_OBSERVE`, the I-9
+shape); a fatal note leaves its target in a hold wait (`FATAL_UNWINDS_ONLY`).
+
 | Spec action | Code site (as-built) | Property pinned |
 |---|---|---|
-| `Post` | `notes_post` arming the caught bit, then the poster's `proc_caught_note_wake` under `g_proc_table_lock` (every caught-note poster; a release and an exit run it too) | -- |
+| `Post` | `notes_post` arming the caught bit, then the poster's `proc_caught_note_wake`, whose walk holds the Proc's `threads_lock` (every caught-note poster; a release and an exit run it too) | -- |
 | `Walk1` (re-wake every holder in an unwinding wait; pick a candidate, never `wskip`) | `kernel/proc.c::proc_caught_note_walk` (`proc_caught_note_wake` is the walk with no skip): the holder pass under each thread's `wait_lock` (`note_claim` / `note_target` holding a queued, claimed family, `caught_wait == CAUGHT_WAIT_UNWINDS` -> `wakeup`), then `caught_pick`, which reads `caught_candidate` (not `THREAD_EXITING`, the family unmasked, no handler, `caught_wait != CAUGHT_WAIT_HOLDS`) without the lock | `NoStrand` (`NO_REKICK` drops the holder pass) |
 | `Walk2` (re-check, designate) | `caught_designate`: the pick's `wait_lock` taken, `caught_candidate` again (`Fresh`: the wait's kind and the exit read exactly there, the mask and the handler flag exactly only for a blocked thread), then the CAS of the family's claim bit (caught set, claim clear) and `note_target`; a stale pick is re-picked with the same skip, and after `CAUGHT_REPICKS` the walk wakes every unwinding sleeper (`caught_wake_unwinders`) | `OneClaimant` (`DOUBLE_DESIGNATE` drops the open check); `NoStrand` (`UNLOCKED_DESIGNATE` drops the re-check) |
 | `EnterUWait` / `EnterHWait` / `Handoff` | `kernel/sched.c::sleep_caught_wait_enter`, called by `sleep_common` / `tsleep_common` under `wait_lock` on entry: `caught_wait` published (`thread_caught_wait_kind`; a thread in a handler waits as `HOLDS`), the outer kind restored on every exit (the stop park nests a wait in a wait); a designation the wait cannot honour, every family for a hold wait and a masked one for an unwinding wait (`uentry`), dropped by `notes_handoff_target`, which walks if the note is queued, before the thread blocks | `NoStrand` (`NO_HANDOFF`; `STALE_KEEPS` keeps the `uentry` designation) |
@@ -2825,13 +2849,24 @@ were re-pinned after the revision above (from 140075 clean).
 | `Unwound` / `FlushDone` / `ContWait` | the 9P client's caught-note unwind: `Tflush`, then the flush wait, killable only (ARCH 8.8.3 *A 9P wait honours flush(5)*); the claim kept to the tail | -- (the flush's end is a fairness assumption) |
 | `Irq` | `arch/arm64/vectors.S` `0x480` -> `.Lel0_return` (#964) | `NoStrand` (`IRQ_NO_NOTES`) |
 | `Deliver` / `Release` | `kernel/notes.c::notes_deliver_at_el0_return`: the delivery loop, then `notes_release_claims` (the claim and the designation; a walk skipping the releaser while the note is queued) | `NoStrand` (`RELEASE_NO_WAKE`) |
-| `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `g_proc_table_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
+| `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `threads_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
+| `PostDirect` | `kernel/proc.c::proc_note_thread`, under `p->threads_lock` alone (ARCH 7.3.1 has no `threads_lock` <-> `q->lock` edge): the tid found, an atomic OR of `Thread.note_direct`, then under the target's `wait_lock` the rouse unless the family is masked: `caught_rouse_locked` for a caught note, any rendez but `debug_rendez` plus a kick for a fatal one | `NoStolenDirect` (`DIRECT_TO_QUEUE`); `NoDirectStrand` (`DIRECT_NO_ROUSE`, `FATAL_UNWINDS_ONLY`) |
+| `DirectEnds` / `UnwindDirect` | `kernel/notes.c::thread_caught_note_claim`: an unmasked direct bit with a live handler returns true without touching `note_claim` or `note_target`; `thread_die_pending` for a fatal one, whose mask gate is the only one | `OneClaimant` (`DIRECT_CLAIMS`); `NoDirectStrand` (`DIRECT_NEEDS_CLAIM`) |
+| `HoldEnds` / `ResumeHold` | `thread_die_pending` in `sleep_common` and `tsleep_common`, register-then-observe and post-`sched()`: it ends every wait but the debug stop | `NoDirectStrand` (`FATAL_UNWINDS_ONLY`) |
+| The reads in `EnterUWait` / `EnterHWait` / `Handoff` | the same predicates, read under `wait_lock` on entry, the lock the post's rouse takes | `NoDirectStrand` (`DIRECT_NO_OBSERVE`) |
+| `TakesDirect` / `Deliver` | `kernel/notes.c::notes_tail_candidate_locked` (a queued kill, then the lowest unmasked direct bit, then the queue's FIFO) and `notes_tail_consume_locked` (a `fetch_and`, last, that delivers nothing if a discard took the bit) | `NoStolenDirect` |
+| `DeliverFatal` | the tail's `exits_note`, the group's one death | `NoDirectStrand` |
 
 Abstracted, said so the green reads no larger: one note family; a delivered
 note's handler is one bit (`inh`) that `rt_sigreturn` clears; discarded and
 uncaught notes (the terminate latch's wake is `death_wake.tla`'s and §8.8.2's);
 the preference order; the kick (the tick is the fairness that matters, a kick
-only makes it prompt); a call enters at most `MAX_WAITS` waits. The kernel
+only makes it prompt); a call enters at most `MAX_WAITS` waits. For a direct note,
+also: one post, so no coalescing; `SIG_IGN` at the post and in
+`notes_discard_name`'s walk; the self-managing fallback to the queue and
+`notes_mark_self_managing`'s move; a native Proc's direct note, which rides its
+waits out as a queued caught note does (`proc_caught_note_eintr_ready`), and is
+left out of the model. The kernel
 tests in `test_rendez.c` (`rendez.caught_note_prefers_awake`, `_poster_first`,
 `_handoff` (sleep and tsleep), `_exit_drop`, `_holder_rewake`,
 `_native_kicks_only`, `_repick_fallback` (the model's `Walk2` re-picks
@@ -2840,13 +2875,17 @@ sleeper instead, which this test holds with forced stale picks), and the
 rewritten `_one_unwind` and `_release_wakes_peer`), viv-pheno-probe L331-L333
 (a running main takes `SIGCHLD` with a polling peer undisturbed) and jc-probe's
 spinint and spinnote rungs (a native spinner ended by Ctrl-C, and one whose
-handler runs) hold the code to it.
+handler runs) hold the code to it. `test_rendez.c`'s `rendez.direct_note_*`, `test_notes.c`'s
+`notes.direct_*`, viv-pheno-probe L339-L343 and pouch-hello-threads' `kill-*` and
+`raise-masked` legs hold the direct half.
 
-Pre-commit gate: `specs/check-caught-target.sh` (the clean cfg at its pinned
-count, the 8 buggy cfgs violating their named properties), on any change to
+Pre-commit gate: `specs/check-caught-target.sh` (the 3 clean cfgs at their pinned
+counts, the 14 buggy cfgs violating their named properties), on any change to
 `proc_caught_note_walk`, `thread_caught_note_claim`, `notes_release_claims`,
 `sleep_caught_wait_enter`, `notes_handoff_target`, `notes_exit_drop_locked`,
-or where a claim or a designation is set or cleared.
+`proc_note_thread`, `notes_tail_candidate_locked`, `notes_tail_consume_locked`,
+`thread_die_pending`, or where a claim, a designation or a direct bit is set or
+cleared.
 
 ## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
 

@@ -852,7 +852,7 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // item 11 (ARCH 8.8.3): the CAUGHT-note twin -- arms a family bit iff the
     // committed note is caught (handler or self-managing). Same "arm on COMMIT"
     // ordering as the STOP twin. The wake of ALREADY-blocked peers is likewise
-    // the caller's duty (proc_caught_note_wake, needs g_proc_table_lock); a
+    // the caller's duty (proc_caught_note_wake); a
     // not-yet-sleeping thread reads this latch at its own register-then-observe.
     notes_arm_caught_note_locked(p, name);
 

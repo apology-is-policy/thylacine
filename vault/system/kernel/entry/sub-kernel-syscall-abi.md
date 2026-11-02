@@ -21,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Session registry factory ABI
 
@@ -232,6 +232,18 @@ empty. The 127..133 hole is deliberate and pinned
 native switch's unknown arm through `syscall_unknown_count()` rather than
 trusting the -1 many handlers also return): those numbers belong to other
 branches.
+
+**Thread-directed notes (2026-11-02, operator vote 14).** `SYS_POSTNOTE_TID` = 138:
+tid, name pointer, name length. Tid 0 is the calling thread, and the call reaches the
+caller's own Proc only, so it grants nothing a post to self does not. A name a program
+may not post is EINVAL, judged before the tid; a thread that has gone is ESRCH. A
+`snare:*` name is the caller's own death, as in `SYS_POSTNOTE`'s self arm, and `kill`
+goes through that arm's cascade. A fourth argument to `SYS_POSTNOTE` was not an option:
+x3 is unzeroed for old callers. `SYS__NATIVE_TOP` is 139 and `VIV_NATIVE_CEILING` 138.
+Measured on this tree: **128** live numbers, the span runs to 138 with holes at 26, 30,
+43, 129..133 and 135..137, `syscall_native_switch` has exactly 128 arms, and both set
+differences are empty. `syscall.native_gap_unassigned` counts the eight holes above 128.
+libt has `t_postnote_tid`, libthyla-rs the same name.
 
 **Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
 the three appends above meet: `SYS_JIT_CREATE_SEALED` = 127,
