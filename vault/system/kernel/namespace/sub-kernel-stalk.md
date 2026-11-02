@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-20
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -607,9 +607,12 @@ returning each walked component's full attributes. Then:
   same unsynchronized-snapshot TOCTOU envelope as the per-component loop).
 - **The sentinel latch**: `DEV_WALK_ATTRS_UNSUPPORTED` (a STATIC object
   that must NEVER reach `walkqid_free`) means this session's server lacks
-  the extension (dev9p latches the first ENOSYS). Release the untouched
+  the extension (dev9p latches the first ENOSYS), or, unlatched, that a walk of
+  several names failed with something other than ENOENT and cannot say at which
+  name (B-3h audit round 3). Release the untouched
   clone, rewind to `ends[0]`, `goto per_component` — the whole resolution
-  degrades to the per-component loop with identical results.
+  degrades to the per-component loop with identical results, so its X gates and
+  mount split run in order. Leg: `stalk.walk_attrs_unknown_failure`.
 - **The shape contract** (P-3 SA-11): a full BIND walk must have
   transitioned `nc` (`w->spoor == nc`); partial and query forms must carry
   `w->spoor == NULL`. Violations fail closed — pushing an untransitioned
@@ -805,7 +808,9 @@ to `T_E_IO` — never errno 1), or `T_E_IO` (OOM, cross failure, transport).
 The walk-NULL arm deliberately reports NOENT for the rare deep failures
 (session-dead, OOM) too: the kernel's own `perm_check` is the ACCES
 authority, so a walk NULL is never a masked permission denial (ER-2 — a
-walk-vtable errno out-param — is the in-flight refinement; see Seams).
+walk-vtable errno out-param — is the in-flight refinement; see Seams). A failure
+past the first name of a batched walk reaches this arm only from the per-component
+loop, after the sentinel, so the gate before that name has run.
 
 ## Performance
 

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## The lock slots (B-3h2, 2026-10-29)
 
@@ -30,6 +30,13 @@ Five slots serve [[sub-kernel-filelock]] (ARCH 9.6.11):
 - `wstat_bind(c)` readies `c` before SYS_WSTAT reads the stat its policy judges,
   so that stat is the file's own rather than its state at open. A failure refuses
   the wstat. NULL-permitted; dev9p binds a loose cached open.
+
+`fd_close(c)` runs on the closing thread when the last handle slot naming `c` goes,
+and may wait. It must be idempotent, because a take that lost the race with that
+close runs it again. `lock_held(c)` is non-blocking and says whether a lock was
+granted through `c`. `close(c)` runs at the last reference, which can fall on any
+thread, and must not wait. `fd_close` and `lock_held` are NULL-permitted (B-3h
+audit round 3, 2026-11-02; ARCH 7.9.1).
 
 The first four are NULL-permitted together: a Dev without `lock` answers
 ENOLCK, as NFS without lockd does. `lock_ident` is NULL-permitted alone. A

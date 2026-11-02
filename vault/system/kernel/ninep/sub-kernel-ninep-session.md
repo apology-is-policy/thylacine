@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Tlock and Tgetlock (B-3h, 2026-10-29)
 
@@ -258,8 +258,10 @@ inline `struct p9_tag_chunk`; `tag_dir`, `n_chunks`; the counters `n_active`,
 monotonic `next_op_id`, sent/completed counters. `struct p9_tag_chunk`: 64
 entries + `n_active` + `n_sync`. `struct p9_outstanding` (40 bytes): `active`, `kind`
 (the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`, `abandoned`,
-`holds_slot` (a reserved fid-table slot), `flush_oldtag`, `walk_nwname` (the
-walkgetattr full-walk comparand), `flush_tag` (a victim's Tflush), `async`,
+`holds_slot` (a reserved fid-table slot), `flush_oldtag`, `walk_nwname` (the walk's
+own count, which caps both walk kinds' replies and says whether one was full),
+`mutates` (the op changes the server: by kind, and a Tlopen only with `O_TRUNC`; leg
+`9p_session.mutates_mark`), `flush_tag` (a victim's Tflush), `async`,
 `owner` (the client's registered rpc). `n_reserved_slots` counts
 the held slots. Compile-time: MAX_OUTSTANDING ∈ [1, 0xFFFE] (room for NOTAG),
 MAX_FIDS ≥ 1.

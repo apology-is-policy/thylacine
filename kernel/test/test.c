@@ -2068,6 +2068,7 @@ void test_dev9p_lock_owner_clone(void);
 void test_dev9p_lock_owner_never_parks(void);
 void test_dev9p_lock_close_releases(void);
 void test_dev9p_lock_close_order(void);
+void test_dev9p_write_failure_drops_larder(void);
 void test_dev9p_wga_failure_at_an_unknown_name(void);
 void test_dev9p_wb_last_close_with_holder(void);
 void test_dev9p_wb_dying_waiter_leaves_flush_wait(void);
@@ -4632,6 +4633,7 @@ struct test_case g_tests[] = {
     { "dev9p.lock_owner_never_parks",  test_dev9p_lock_owner_never_parks,  false, NULL },
     { "dev9p.lock_close_releases",     test_dev9p_lock_close_releases,     false, NULL },
     { "dev9p.lock_close_order",        test_dev9p_lock_close_order,        false, NULL },
+    { "dev9p.write_failure_drops_larder", test_dev9p_write_failure_drops_larder, false, NULL },
     { "dev9p.wga_failure_at_an_unknown_name", test_dev9p_wga_failure_at_an_unknown_name, false, NULL },
     { "dev9p.wb_last_close_with_holder", test_dev9p_wb_last_close_with_holder, false, NULL },
     { "dev9p.wb_dying_waiter_leaves_flush_wait", test_dev9p_wb_dying_waiter_leaves_flush_wait, false, NULL },

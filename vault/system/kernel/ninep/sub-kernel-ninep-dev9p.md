@@ -90,11 +90,16 @@ dev9p serves the five lock slots of [[sub-kernel-dev]] for
 - A grant drops the qid's Larder attributes and pages. The invalidates log
   the qid, so a fill in flight from before the grant is dropped rather than
   installed after it.
-- A last close of a fid a lock was granted on (`lock_granted`, sticky) sends a
-  whole-file unlock after the flush and waits for it, then clunks. The clunk would
-  release the locks too, but it never waits (ARCH 7.9.1 part A) and Stratum's pool
-  may serve the next request first. A close that may not wait (`close_may_wait`)
-  leaves them to the clunk, and a run handed to a closer goes with its clunk.
+- `dev9p_fd_close`, the last descriptor's close (`Dev.fd_close`), flushes the
+  open's run, then exchanges `lock_granted` (sticky until then) and, if it was set,
+  sends a whole-file unlock and waits for it. `dev9p_close`, the last reference,
+  clunks. The clunk would release the locks too, but it never waits (ARCH 7.9.1
+  part A) and Stratum's pool may serve the next request first. A close that may not
+  wait (`close_may_wait`) queues the flush and the unlock to a closer when another
+  reference holds the Spoor (`dev9p_lock_flush_queue` with `release_locks`), and
+  otherwise leaves them to the last reference, which follows at once and hands the
+  run to a closer with its clunk. `dev9p_lock_held` tells the handle layer to land
+  every open's run first (ARCH 9.6.11).
 - Every set-lock first lands `c`'s write-behind run (`dev9p_lock_sync`): an
   unlock gives its range up, and a conversion to a read lock admits readers. A
   test lands nothing. A flush that fails still sends the request, and the error
@@ -256,12 +261,13 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    like any failure and the last close reports it (B-2b audit F1). Witnesses
    `dev9p.wb_interrupted_flush_keeps_run` (the claim held) and its control
    `dev9p.wb_server_eintr_latches` (none).
-   **A close that may not wait never flushes here** (2026-10-07, ARCH 7.9.1
-   part C): `close_may_wait()` is false on a die-pending thread (a killed
-   thread's own last close, or a final close a second kill forced) and on a
-   kernel thread marked `closes_never_wait` (the Loom SQPOLL kthread, which
-   `loom_free` joins). A run still staged after this step -- never tried, or
-   kept by a death that ended the flush -- goes to a closer with the fid's
+   **`dev9p_close` never flushes** (B-3h audit round 3, 2026-11-02): the last
+   reference can fall on any thread, an image-cache eviction or a Loom reap, so
+   the flush lives in `dev9p_fd_close` on the closing thread. That one flushes
+   only when `close_may_wait()` holds, which is false on a die-pending thread (a
+   killed thread's own last close, or a final close a second kill forced;
+   2026-10-07, ARCH 7.9.1 part C). A run still staged at the last reference --
+   never tried, or kept by a death that ended the flush -- goes to a closer with the fid's
    clunk (`wb_close_hand_off` -> `p9_attached_defer_close`, a
    `dev9p_close_job` owning the buffer and its budget charge), and the close
    returns 0: nothing is lost yet. The closer writes the run
@@ -748,6 +754,37 @@ gofmt 1352→1147 ms at L1f; S3 wire reads 6.7k→3.5k at G1; the arc ledgers
 live in the go-build measurement series. Hot-path allocations: one priv
 kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 × ~152 B is too big for the 16 KiB kstack above stalk's own arrays).
+
+## Last close and last reference (B-3h audit round 3, 2026-11-02)
+
+The image cache keeps a file's first map's own Spoor until 128 other images
+churn, so a lock or a staged run tied to the last reference outlived the Proc,
+and a flush at the last reference waited on a stranger's thread. `dev9p_fd_close`
+now does what the closing thread owes, and `dev9p_close` does what any thread may.
+
+- `dev9p_close`'s clunks go through `dev9p_close_clunk`, always
+  `p9_client_clunk_nowait`. A live thread's clunk used to wait out a full tag
+  pool; it now spills to a closer, which waits instead.
+- `dev9p_fd_close` is idempotent: `sys_file_lock_handler` runs it again for a take
+  that lost the race with the close (`spoor_fd_open`; [[sub-kernel-filelock]]). The
+  grant store and the close's exchange are sequentially consistent for that.
+- `dev9p_lock_flush_job` gains `release_locks`.
+- `wb_flush_locked`'s wait for another flusher leaves on `thread_die_pending` with
+  `-P9_E_IO`; a killed thread used to burn a CPU there.
+- `dev9p_lock` records `lock_granted` on a take's `-P9_E_IO`: a death may have
+  abandoned a reply that granted it.
+- `dev9p_write`'s failure arm drops the file's attr and pages: a server can fail a
+  write it applied in part. `larder_forget_all` covers the write nobody answered
+  ([[sub-kernel-larder]]).
+- `dev9p_walk_attrs` answers `DEV_WALK_ATTRS_UNSUPPORTED`, unlatched, for a walk of
+  several names that fails with anything but ENOENT: the reply cannot say at which
+  name, and [[sub-kernel-stalk]] runs its X gates and mount split in order by walking
+  name by name.
+
+Legs: `dev9p.lock_close_order`, `dev9p.wb_last_close_with_holder`,
+`dev9p.wb_dying_waiter_leaves_flush_wait`, `dev9p.wga_failure_at_an_unknown_name`,
+`p9_closer.dying_last_close_with_holder`, and the added arms of
+`dev9p.lock_close_releases`.
 
 ## Prosecution
 

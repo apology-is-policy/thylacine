@@ -778,13 +778,29 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   the cancellation by the note's claim, which every caught-note unwind takes
   and holds until the thread returns to EL0; a server that answers
   Rlerror(`EINTR`) itself, with no claim, has failed the write, and that
-  latches like any other failure. A last close that may not wait -- on a
-  die-pending thread, or on a kernel thread marked `closes_never_wait` -- does
-  not flush: the run goes to a closer with the fid's clunk (ARCH 7.9.1 part
-  C), which writes it and then DROPS the file's attr and pages instead of
+  latches like any other failure. A last close on a die-pending thread does
+  not flush, and neither does `Dev.close` at a last reference, which can fall on
+  any thread: the run goes to a closer, with the fid's clunk when no reference
+  remains and as a job of its own when a map or a Loom op still holds the file
+  (ARCH 7.9.1 part C). The closer writes it and then DROPS the file's attr and pages instead of
   installing them as OWN, because that late write is unordered with the
   file's later writers (the G1 write-populate premise holds only for a flush
   inside the open).
+- **An abandoned mutator** (B-3h audit round 3, 2026-11-02). A Twrite, a Tsetattr
+  or any op that changes the server, whose caller a death pulled out before its
+  reply, can still land, and the client no longer knows which file or name it
+  touched, since the caller's own invalidate never runs. `larder_forget_all`
+  drops the session's whole Larder at the three points that learn of it: the
+  abandonment itself, a late reply to the op, and a lone Rflush that answers for
+  it. Its generation jump (`LARDER_INVAL_RING + 1`) fails every fill in flight.
+  A write-through whose reply came back an error also drops the file's attr and
+  pages, because a server can fail a write it applied in part. The residual is
+  narrow: a fill that starts after the forget and reads the server before the
+  abandoned op lands installs the older value, and nothing drops it until the
+  late reply's forget. A reader in that window sees the file as it was before a
+  write whose author was killed before `write` returned, so no caller was ever
+  told the write happened. Loom never invalidates at all
+  (`seam-larder-loom-bypass`).
 - **Unlink** of a closed staged file needs nothing (the flush happened at
   close). An unlink-while-open flushes at close into the orphaned fid
   (9P keeps the fid live until clunk) — harmless; the skip-flush-on-unlinked

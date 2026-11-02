@@ -653,10 +653,10 @@ asleep).
 What bounds the join is the poll thread's own work, never a server. Its pumps
 never wait inside a frame (a frame found in part stays with the client), the
 ops that would wait on a wire RPC are refused on an SQPOLL ring
-(`loom_dir_mutation_gate`), and its reap's last close never waits either: the
-thread marks itself `closes_never_wait` at entry, so its Tclunk goes to the
-closer where it would wait for a tag or ring space (part A) and a staged
-write-behind run goes to the closer as a close job (part C)
+(`loom_dir_mutation_gate`), and its reap's last close never waits either, since
+`Dev.close` waits on no thread: its Tclunk goes to the closer where it would wait
+for a tag or ring space (part A) and a staged write-behind run goes to the closer
+as a close job (part C)
 ([[sub-kernel-ninep-dev9p]]). This closes the residual
 [[seam-close-flush-unbounded]] recorded here before.
 

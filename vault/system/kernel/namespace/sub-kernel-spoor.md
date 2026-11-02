@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-21
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -40,6 +40,9 @@ void          spoor_ref(struct Spoor *c);             // +1; extincts on NULL/co
 void          spoor_unref(struct Spoor *c);           // -1, free at 0; NO dev->close
 void          spoor_clunk(struct Spoor *c);           // -1, dev->close THEN free at 0
 int           spoor_clunk_rc(struct Spoor *c);        // spoor_clunk; returns dev->close's result
+void          spoor_fd_ref(struct Spoor *c);          // a handle slot now names c
+bool          spoor_fd_drop(struct Spoor *c);         // a slot left; true on the last; full fence
+bool          spoor_fd_open(const struct Spoor *c);   // does any slot name c? sequentially consistent
 struct Spoor *spoor_clone(struct Spoor *c);           // fresh Spoor, copied state, ref 1
 u64           spoor_next_devno(void);                 // monotonic from 1; never wraps, never reused
 int           spoor_stat_native(struct Spoor *c, struct t_stat *out);
@@ -216,6 +219,14 @@ two CPUs **exactly one sees `pre == 1`** and owns the free — and, in
 the decrement (so the count reads 0) but before the free, so it can
 still safely read `aux`, `dev` and `qid`. A `pre <= 0` on any path is
 treated as a use-after-free diagnostic and extincts.
+
+`fd_refs` counts handle slots, where `ref` counts every holder (B-3h audit round
+3, 2026-11-02; ARCH 7.9.1). Its last drop is the file's last close and `ref`'s is
+its last reference. `spoor_fd_drop` extincts on a drop below zero, and
+`spoor_clunk_rc` on a last reference that finds `fd_refs` non-zero, so a slot site
+missing its count shows in either direction. The fence in `spoor_fd_drop` pairs
+with `spoor_fd_open` in a take that has just recorded its grant
+([[sub-kernel-filelock]]).
 
 `spoor_clone` reads the source's ref atomically for diagnosis only; it
 does not mutate it, and the caller is responsible for holding the

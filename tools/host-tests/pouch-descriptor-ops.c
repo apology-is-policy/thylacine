@@ -38,8 +38,9 @@ static void *pouch_sock_resolve(int fd) { return fd==POUCH_SOCK_TAG && live_sock
 #endif
 static off_t cur_pos=100, file_size=1000;
 static int lseek_calls, fstat_calls, lseek_fail, fstat_fail;
+static long lseek_x0;
 static long mock(long n,long a,long b,long c) {
- if (n==SYS_lseek) { (void)a; lseek_calls++; assert(b==0 && c==SEEK_CUR); return lseek_fail==1 ? -EBADF : lseek_fail==2 ? -1 : cur_pos; }
+ if (n==SYS_lseek) { lseek_x0=a; lseek_calls++; assert(b==0 && c==SEEK_CUR); return lseek_fail==1 ? -EBADF : lseek_fail==2 ? -1 : cur_pos; }
  if (calls<4) { numbers[calls]=n; args0[calls]=a; args1[calls]=b; }
  calls++;number=n;a0=a;a1=b;a2=c;
  return results[calls-1<nresults ? calls-1 : nresults-1];
@@ -78,7 +79,7 @@ static long mock5(long n,long a,long b,long c,long d,long e,int cp) {
 }
 #define __syscall5(n,a,b,c,d,e) mock5(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),0)
 #define __syscall_cp(n,a,b,c,d,e) mock5(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),1)
-static int mock_fstat(int fd,struct stat *st) { (void)fd; fstat_calls++; if (fstat_fail) { errno=EBADF; return -1; } memset(st,0,sizeof *st); st->st_size=file_size; return 0; }
+static int mock_fstat(int fd,struct stat *st) { (void)fd; fstat_calls++; if (fstat_fail) { errno=fstat_fail==2 ? EIO : EBADF; return -1; } memset(st,0,sizeof *st); st->st_size=file_size; return 0; }
 #define __fstat mock_fstat
 #include "fcntl-under-test.c"
 #define flock tested_flock
@@ -127,11 +128,13 @@ int main(void) {
  LRESET(0);CASE("neg-len-to-zero",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,3,-3,0))==0 && a2==0 && la3==3);
  LRESET(0);CASE("neg-len-below-zero",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,2,-3,0))==-1 && errno==EINVAL && calls==1 && number==129);
  LRESET(0);CASE("neg-start",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,-1,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
- LRESET(0);cur_pos=100;CASE("whence-cur",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,-10,5,0))==0 && a2==90 && la3==5 && lseek_calls==1 && fstat_calls==0);
+ LRESET(0);cur_pos=100;lseek_x0=-1;CASE("whence-cur",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,-10,5,0))==0 && a2==90 && la3==5 && lseek_calls==1 && lseek_x0==8 && fstat_calls==0 && all_x0(8));
  LRESET(0);lseek_fail=1;CASE("whence-cur-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,0,1,0))==-1 && errno==EBADF && calls==0);
  LRESET(0);lseek_fail=2;CASE("whence-cur-no-cursor",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_CUR,3,1,0))==0 && calls==1 && a2==3 && la3==1 && lseek_calls==1);
  LRESET(0);file_size=1000;CASE("whence-end",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,-1,1,0))==0 && a2==999 && la3==1 && fstat_calls==1 && lseek_calls==0);
  LRESET(0);fstat_fail=1;CASE("whence-end-fails",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EBADF && calls==0);
+ LRESET(-ENOLCK);fstat_fail=2;CASE("whence-end-no-stat",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==ENOLCK && calls==1 && number==137 && (a1 & 0x20) && all_x0(8) && test_writes==0);
+ LRESET(0);fstat_fail=2;CASE("whence-end-eio-stands",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,0,1,0))==-1 && errno==EIO && calls==1 && number==137 && (a1 & 0x20));
  LRESET(0);CASE("whence-bad",tested_fcntl(8,F_SETLK,FL(F_WRLCK,9,0,1,0))==-1 && errno==EINVAL && calls==1 && number==129);
  LRESET(0);CASE("start-overflow",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_END,LLONG_MAX,1,0))==-1 && errno==EOVERFLOW && calls==1 && number==129);
  LRESET(0);CASE("len-overflow",tested_fcntl(8,F_SETLK,FL(F_WRLCK,SEEK_SET,10,LLONG_MAX,0))==-1 && errno==EOVERFLOW && calls==1);

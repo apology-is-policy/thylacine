@@ -58,7 +58,10 @@ Linux answers EFAULT. A socket's tag answers ENOSYS while it is live and EBADF
 once it is not.
 `fcntl`'s `SEEK_CUR` reads the cursor through the raw call: the kernel's flat -1 on a
 descriptor with no cursor reads as 0, Linux's `f_pos` of a pipe, where `__lseek` would
-report it as EIO.
+report it as EIO. `SEEK_END` reads `fstat`'s size, so the cursor never moves. When
+`fstat` answers EIO the Dev may have no stat at all, so a TEST, which changes nothing,
+asks the kernel, and ENOLCK replaces the EIO only when the kernel says the Dev locks
+nothing (`/cap` is such a Dev).
 
 `tools/test-pouch-descriptor-ops.py` runs the real `fcntl.c` and `flock.c` on the
 host, with the ABI parsed from the kernel's `syscall.h`: 132 cases at each of two

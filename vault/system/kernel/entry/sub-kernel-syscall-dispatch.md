@@ -19,7 +19,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## SYS_WSTAT on a resolved Spoor (2026-10-22, G12)
 
@@ -2012,6 +2012,14 @@ thread, which runs as kproc, whose pid and parent pid are both 0, so that
 assert alone cannot tell the parent from the Proc itself; it also asks the arm
 (`sys_getppid_for_test`) and the accessor of the child of a linked pair, where
 the two differ.
+
+## `lseek(fd, 0, SEEK_CUR)` does not store (2026-11-02, B-3h audit round 3)
+
+It answers the cursor and writes nothing, so `ftell` or a lock request's `SEEK_CUR`
+cannot rewind a read a peer thread has just finished. Linux's `fcntl` never writes
+`f_pos` either. Any other `lseek` still stores without a lock, and so does a read's
+own advance, so two threads racing on one cursor can lose an update, against POSIX's
+atomicity list (2.9.7).
 
 ## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
 

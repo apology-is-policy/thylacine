@@ -134,9 +134,9 @@ it was opened in: a process given the open file by another, as a command is
 given its output by the shell, reads and writes the opener's variable. When a
 process starts another, the kernel copies the starting process's variables into the new one,
 and the copy is independent from then on. A name holds at most 63 bytes and no
-`/`, a value at most 4096 bytes, and a process at most 64 variables. A program built
-with Pouch hands its whole `environ` to each child it starts, so once `environ` holds
-more than 64 names `posix_spawn` and `system` fail with `E2BIG`.
+`/`, a value at most 4096 bytes, and a process at most 64 variables. `posix_spawn`
+hands the child the envp it is given, and `system` hands it `environ`. A list of more
+than 64 names, or more than 32 KiB in all, fails with `E2BIG`.
 
 A process that replaces its program keeps its `/env`. The kernel also writes
 the variables into the new program's startup frame as `NAME=VALUE` strings,

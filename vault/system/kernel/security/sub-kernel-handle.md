@@ -24,6 +24,20 @@ exception: a peer answering ESTALE keeps its snapshot, because it can no longer
 reach the file (a loose cached open of a file renamed since), and the take through
 the descriptor that can reach it stands. A release still lands what it can.
 
+## Descriptor counts and the last close (B-3h audit round 3, 2026-11-02)
+
+`handle_fd_count` bumps `Spoor.fd_refs` at the four sites that put a Spoor in a
+slot: `handle_install_locked`, `handle_replace`, the table copy and `handle_dup_to`.
+`handle_get`'s snapshot is no slot and does not count, and neither does `dup`'s
+rollback. `handle_fd_left` is the path out of a slot: `lock_owners_on_close`, then
+`handle_fd_drop`, then the release, reporting `fd_close`'s error before the
+release's. `handle_fd_drop`, on the slot that takes the count to zero, lands every
+staged write the table can reach if `Dev.lock_held` says a lock is held, and runs
+`Dev.fd_close` on the closing thread. The sync sits after the decrement, so of two
+racing closes the one that sees the count reach zero does it. The teardown runs
+`handle_fd_drop` and the release per slot, and `fd_close` on each owner entry
+before its clunk. Leg: `filelock.last_descriptor_closes`.
+
 ## The Proc lock owners (B-3h2, 2026-10-29)
 
 The handle table now also holds the Proc owner of `SYS_FILE_LOCK_PROC` locks

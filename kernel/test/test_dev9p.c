@@ -44,6 +44,7 @@ void test_dev9p_walk_clone(void);
 void test_dev9p_open_lopens_fid(void);
 void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
+void test_dev9p_write_failure_drops_larder(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
@@ -1055,6 +1056,54 @@ static int dev9p_io_error_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     return dev9p_responder(ctx, req, req_len, resp, resp_cap);
+}
+
+// A failed write may have landed, so it drops what the Larder said of the file.
+void test_dev9p_write_failure_drops_larder(void) {
+    g_io_error_ecode = 0;
+    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp,
+                                  sizeof(g_loopback_resp),
+                                  dev9p_io_error_responder, NULL) == 0,
+                 "loopback init (error responder)");
+    TEST_ASSERT(p9_client_init(&g_client, /*root_fid=*/0, 8192,
+                                p9_loopback_ops_for(&g_loopback),
+                                g_recv_buf, sizeof(g_recv_buf)) == 0,
+                 "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                      aname, sizeof(aname), 0) == 0,
+                 "handshake");
+    struct Spoor *root = dev9p_attach_client(&g_client, /*root_fid=*/0);
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+
+    struct larder *l = &g_client.larder;
+    u64 key = nc->qid.path;
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0;
+    st.mode = 0644;
+    larder_attr_install(l, larder_gen_snapshot(l), key, /*cvers=*/1, &st, NULL);
+    static const u8 pg[5] = { 'S', 'T', 'A', 'L', 'E' };
+    larder_page_install(l, larder_gen_snapshot(l), key, /*page_index=*/0, /*cvers=*/1, pg, 5);
+    struct t_stat attr; u8 probe[16]; u64 s0 = 0;
+    TEST_ASSERT(larder_attr_serve(l, key, &attr, &s0), "the attr serves before the write");
+    TEST_EXPECT_EQ((u64)larder_page_serve(l, key, 0, 0, 16, 1, probe, &s0), (u64)5,
+                   "and the page");
+
+    g_io_error_ecode = 28u;     // ENOSPC
+    u8 wbuf[8] = {0};
+    TEST_EXPECT_EQ((u64)dev9p.write(nc, wbuf, 8, 0), (u64)(-(long)28), "the write fails");
+    g_io_error_ecode = 0;
+    TEST_ASSERT(!larder_attr_serve(l, key, &attr, &s0), "the attr is gone");
+    TEST_ASSERT(larder_page_serve(l, key, 0, 0, 16, 1, probe, &s0) == 0, "and the page");
+
+    spoor_clunk(nc);
+    teardown(root);
 }
 
 void test_dev9p_write_read_propagate_errno(void) {

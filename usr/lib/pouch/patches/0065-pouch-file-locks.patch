@@ -26,7 +26,9 @@ on one file conflict, LOCK_EX needs a descriptor open for writing (EBADF,
 flock(2) NOTES), and LOCK_NB's conflict is EWOULDBLOCK.
 
 Only a Dev that serves locks takes them (9P files, Stratum's lock table);
-every other file answers ENOLCK, as NFS without lockd does. A native
+every other file answers ENOLCK, as NFS without lockd does, and a SEEK_END
+request whose fstat fails with EIO asks the kernel with a TEST, so a Dev with
+neither a stat nor locks answers ENOLCK as well. A native
 caller's wait ends only on a grant or a kill until native waits take caught
 notes (ARCH 8.8.3), so F_SETLKW's EINTR is not reachable yet. Tagged Pouch
 sockets answer ENOSYS (B-3k gives them kernel descriptors).
@@ -88,7 +90,7 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
  
  /* The open-file status the kernel can change after open is O_NONBLOCK only:
   * O_APPEND lives in the server's open of the file, so F_SETFL may restate it
-@@ -19,6 +23,123 @@
+@@ -19,6 +23,131 @@
  	return fl;
  }
  
@@ -134,7 +136,15 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
 +	case SEEK_END: {
 +		/* fstat, not lseek: the lock must not move the cursor. */
 +		struct stat st;
-+		if (__fstat(fd, &st)) return -1;
++		if (__fstat(fd, &st)) {
++			/* EIO may mean this Dev has no stat at all, and a Dev with none that
++			 * also locks nothing owes ENOLCK. A TEST changes nothing and says so. */
++			struct pouch_file_lock ans;
++			if (errno == EIO && __syscall5(SYS_thyla_file_lock, fd,
++			        POUCH_FILE_LOCK_WR | POUCH_FILE_LOCK_TEST, 0, 0, &ans) == -ENOLCK)
++				errno = ENOLCK;
++			return -1;
++		}
 +		base = st.st_size;
 +		break;
 +	}
@@ -212,7 +222,7 @@ sockets answer ENOSYS (B-3k gives them kernel descriptors).
  int fcntl(int fd, int cmd, ...)
  {
      int arg = 0;
-@@ -36,6 +157,18 @@
+@@ -36,6 +165,18 @@
          va_end(ap);
          break;
      }

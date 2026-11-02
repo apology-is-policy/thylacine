@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## A closer entry may be a job alone (B-3h2, 2026-10-29)
 
@@ -523,8 +523,8 @@ writes, 256 patterned bytes staged at offset 0: `dying_close_hands_off_staged_ru
 then clunks), `forced_exit_close_hands_off_flush` (every send meets a full
 ring; a plain exit close sleeps -- the control -- until `proc_group_kill`
 forces it, then returns without the server, and the closer writes the run once
-the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread marked
-`closes_never_wait` returns at once). Each checks the Twrite's offset, length
+the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread's last
+reference returns at once, as any `Dev.close` does). Each checks the Twrite's offset, length
 and byte sum, that it precedes the Tclunk, one job, and the write-behind budget
 back at its baseline. Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.

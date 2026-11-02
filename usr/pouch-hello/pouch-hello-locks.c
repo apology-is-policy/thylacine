@@ -35,6 +35,14 @@
 //                 holder wrote.
 //   downgrade   : a write lock converted to a read lock lands the holder's
 //                 staged append first, so the reader it admits reads it.
+//   whence      : SEEK_CUR locks the byte under a real cursor and SEEK_END the
+//                 byte before the end, neither moving the cursor.
+//   mapped      : a map holds no lock: a flock goes at the descriptor's last
+//                 close, whether the map went first or is still held. Each half
+//                 has a file of its own, since only a file's first map pins the
+//                 descriptor's own Spoor.
+//   mapped-write: a staged byte reaches the server at the last close while a
+//                 map of it is still held.
 //   errors      : a write lock through a read-only descriptor and flock
 //                 LOCK_EX on one are EBADF, an OFD request with a pid and a
 //                 bad whence are EINVAL, a range past LLONG_MAX is EOVERFLOW,
@@ -48,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -58,6 +67,9 @@
 #define SELF "/bin/pouch-hello-locks"
 #define WORK "/pouch-locks"
 #define FILE_A WORK "/db"
+#define FILE_M1 WORK "/map1"
+#define FILE_M2 WORK "/map2"
+#define FILE_M3 WORK "/map3"
 
 // SQLite's lock bytes (os_unix.c): one byte each for PENDING and RESERVED,
 // then the 510-byte SHARED range.
@@ -111,7 +123,8 @@ static int child(const char *a1, const char *a2, const char *a3, const char *a4,
     return pid < 0 ? -1 : reap(pid);
 }
 
-// A child: open the file read-write and make one request.
+// A child: open the file read-write and make one request. A first argument
+// starting with '/' names the file instead of FILE_A.
 //   set  <s|o> <r|w|u> <start> <len> <errno>   F_SETLK / F_OFD_SETLK
 //   get  <r|w> <start> <len> <type> <start'>   F_GETLK; len' rides argv[7]
 //   flk  <ex|sh|un> <errno>                     flock with LOCK_NB
@@ -120,7 +133,10 @@ static int child(const char *a1, const char *a2, const char *a3, const char *a4,
 //   size <n>                                    fstat reports size n
 //   rbyte <off> <c>                             under a read lock on byte 0, byte off is c
 static int child_main(int argc, char **argv) {
-    int fd = open(FILE_A, O_RDWR);
+    const char *file = FILE_A;
+    if (argv[1][0] == '/') { file = argv[1]; argv++; argc--; }
+    if (argc < 2) return 89;
+    int fd = open(file, O_RDWR);
     if (fd < 0) return 90;
     const char *m = argv[1];
     if (!strcmp(m, "set") && argc >= 7) {
@@ -376,6 +392,65 @@ static int leg_downgrade(int fd) {
     return 0;
 }
 
+static int leg_whence(int fd) {
+    if (lseek(fd, 10, SEEK_SET) != 10) return fail("whence: lseek");
+    struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_CUR, .l_start = 0, .l_len = 1 };
+    if (fcntl(fd, F_SETLK, &fl) != 0) return fail("whence: F_SETLK SEEK_CUR");
+    if (other_get('r', 10, 1, 'w', 10, 1) != 0) return fail("whence: SEEK_CUR did not lock the byte under the cursor");
+    if (lseek(fd, 0, SEEK_CUR) != 10) return fail("whence: SEEK_CUR moved the cursor");
+    if (lk(fd, F_SETLK, 'u', 10, 1) != 0) return fail("whence: F_UNLCK");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 1) return fail("whence: fstat");
+    fl = (struct flock){ .l_type = F_WRLCK, .l_whence = SEEK_END, .l_start = -1, .l_len = 1 };
+    if (fcntl(fd, F_SETLK, &fl) != 0) return fail("whence: F_SETLK SEEK_END");
+    if (other_get('r', st.st_size - 1, 1, 'w', st.st_size - 1, 1) != 0)
+        return fail("whence: SEEK_END did not lock the last byte");
+    if (lseek(fd, 0, SEEK_CUR) != 10) return fail("whence: SEEK_END moved the cursor");
+    printf("pouch-hello-locks: whence ok\n");
+    return 0;
+}
+
+// A flock of a fresh file, a read-only map of it, then the last close: the map
+// goes first when unmap_first, and otherwise outlives the close.
+static int map_then_close(const char *path, int unmap_first) {
+    int f = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (f < 0) return fail("mapped: open");
+    if (write(f, "m", 1) != 1) return fail("mapped: write");
+    if (flock(f, LOCK_EX | LOCK_NB) != 0) return fail("mapped: flock");
+    void *m = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, f, 0);
+    if (m == MAP_FAILED) return fail("mapped: mmap");
+    if (child(path, "flk", "ex", num(0, EWOULDBLOCK), 0, 0) != 0) return fail("mapped: the flock is not held");
+    if (unmap_first && munmap(m, 4096) != 0) return fail("mapped: munmap");
+    if (close(f) != 0) return fail("mapped: close");
+    if (child(path, "flk", "ex", "0", 0, 0) != 0) return fail("mapped: the flock outlived the descriptor's last close");
+    if (!unmap_first && munmap(m, 4096) != 0) return fail("mapped: munmap after the close");
+    if (unlink(path) != 0) return fail("mapped: unlink");
+    return 0;
+}
+
+static int leg_mapped(void) {
+    if (map_then_close(FILE_M1, 1) || map_then_close(FILE_M2, 0)) return 1;
+    printf("pouch-hello-locks: mapped ok\n");
+    return 0;
+}
+
+static int leg_mapped_write(void) {
+    int w = open(FILE_M3, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (w < 0) return fail("mapped-write: create");
+    if (write(w, "z", 1) != 1) return fail("mapped-write: write");
+    void *m = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, w, 0);
+    if (m == MAP_FAILED) return fail("mapped-write: mmap");
+    if (*(volatile char *)m != 'z') return fail("mapped-write: the map does not read the staged byte");
+    if (child(FILE_M3, "size", "0", 0, 0, 0) != 0) return fail("mapped-write: the byte was not staged");
+    if (close(w) != 0) return fail("mapped-write: close");
+    if (child(FILE_M3, "size", "1", 0, 0, 0) != 0) return fail("mapped-write: the byte stayed staged past the last close");
+    if (child(FILE_M3, "rbyte", "0", "z", 0, 0) != 0) return fail("mapped-write: another open does not read the byte");
+    if (munmap(m, 4096) != 0) return fail("mapped-write: munmap");
+    if (unlink(FILE_M3) != 0) return fail("mapped-write: unlink");
+    printf("pouch-hello-locks: mapped-write ok\n");
+    return 0;
+}
+
 static int leg_errors(int fd) {
     int ro = open(FILE_A, O_RDONLY);
     if (ro < 0) return fail("errors: read-only open");
@@ -420,6 +495,9 @@ int main(int argc, char **argv) {
         || leg_sqlite(fd) || release_all(fd) != 0
         || leg_cached_ro() || release_all(fd) != 0
         || leg_downgrade(fd) || release_all(fd) != 0
+        || leg_whence(fd) || release_all(fd) != 0
+        || leg_mapped() || release_all(fd) != 0
+        || leg_mapped_write() || release_all(fd) != 0
         || leg_errors(fd))
         return 1;
     if (unlink(FILE_A) != 0) return fail("unlink");

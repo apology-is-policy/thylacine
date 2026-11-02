@@ -674,8 +674,15 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
 - `p9_client_walk` and `p9_client_walkgetattr` copy `r.nwqid` elements into the
   caller's arrays, which the walk's `nwname` sizes; the session has refused a reply
   naming more, and the session goes dead with it.
-- Partial walks (`nwqid < nwname`) return `-EIO` at this layer (the
-  resolver's pounce handles partial semantics above).
+- A partial walk (`nwqid < nwname`) succeeds at this layer with the elements it
+  got, and the caller reads the short count (`co_bind` and the resolver's pounce
+  decide what it means).
+- **An abandoned mutator** (B-3h audit round 3, 2026-11-02): an op marked `mutates`
+  in the session whose caller a death pulled out can still land, and its caller's
+  own invalidate never runs. `client_abandon_forgets_locked` runs
+  `larder_forget_all` in both died arms of the send and receive, and the demux runs
+  it for a late reply to such an op and for a lone Rflush that answers for one
+  ([[sub-kernel-larder]]). Leg: `9p_client.dying_mutator_forgets_larder`.
 
 ## Performance
 
@@ -792,7 +799,7 @@ the reader unwinds at any byte).
 2. `read`/`readdir`/`readlink` are COPY semantics at the public API; the
    internal zero-copy alias is valid only under the `done_reply_buf`
    discipline.
-3. Partial walks are `-EIO` at this layer.
+3. A partial walk succeeds at this layer; `nwqid` says how far it got.
 4. Rlerror ecodes are bounded to `[1,4095]` here (`map_error`) before
    negation — NOT passed through unbounded — yielding the `[-4095,-1]`
    passthrough window; a zero or out-of-range ecode collapses to `-EIO`

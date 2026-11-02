@@ -556,10 +556,10 @@ session (operator vote 2026-09-29).
 - If a spare cannot be spawned, the queued sessions wait for a closer to
   finish. Nothing is lost.
 - A queued entry is a fid, or a close job (2026-10-07,
-  `dec-2026-10-07-exit-close` part C): the rest of a dev9p last close whose
-  write-behind flush may not wait (a die-pending thread's, or a kernel
-  thread's that something joins without bound, `closes_never_wait`; ARCH
-  7.9.1). The closer writes the staged run with Twrites,
+  `dec-2026-10-07-exit-close` part C): the rest of a dev9p last reference that
+  finds a write-behind run still staged, because a die-pending thread's close
+  could not flush it (ARCH 7.9.1). `Dev.close` itself never flushes, since it can
+  fall on any thread. The closer writes the staged run with Twrites,
   waiting as long as the server takes, drops the file's cached attributes and
   pages, sends the Tclunk, and frees the run and its budget charge. A session
   that died meanwhile takes the run with it, as it takes its fids.
@@ -569,6 +569,11 @@ session (operator vote 2026-09-29).
   another Proc still shares, then the lock fid's Tclunk, which its death
   refuses too. The closer runs the job and sends no Tclunk for it; a failed
   flush stays latched on the open file, which still holds its run.
+- A die-pending thread's last close of a descriptor whose Spoor another
+  reference still holds (a map, a Loom op) queues the same kind of job with
+  `release_locks` set: the closer flushes, then sends the whole-file unlock
+  now, since nothing says when that reference will go, and the fid waits for
+  it (B-3h audit round 3, ARCH 9.6.11).
 
 **A flushed request's reply is honoured** (flush(5)). The client flushes a
 request only when its owner has died or been interrupted by a note, so

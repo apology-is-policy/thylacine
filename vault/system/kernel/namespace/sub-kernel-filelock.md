@@ -213,6 +213,28 @@ Audit round 2's regressions, each of which must go red at its own leg (not yet r
 - G38, a bind leaves the Larder's attributes: `dev9p.cached_open_loose_wstat`.
 - G39, an open-file set-lock lands only its own run: `filelock.file_owner`.
 
+Audit round 3's regressions, each of which must go red at its own leg (not yet run;
+G34 to G37 were retargeted to `dev9p_fd_close`):
+- G34, the last close sends no unlock; G36, only a fid-owning open's does; G59, an
+  unknown take records no grant: `dev9p.lock_close_releases`.
+- G37, the unlock before the flush: `dev9p.lock_close_order`.
+- G35, a dying last close with a holder queues nothing; G47, its job releases no lock:
+  `p9_closer.dying_last_close_with_holder`.
+- G46, the last close does not flush: `dev9p.wb_last_close_with_holder`.
+- G48, the take's re-check of an open descriptor removed; G49, the close that drops a
+  lock lands only its own run: `filelock.last_descriptor_closes`.
+- G44, G45, no count at the table copy, at `dup_to`: read by hand, since the miscount
+  extincts (`spoor_fd_drop`).
+- G50, G51, G52, no forget at the kill, a late reply, a lone Rflush; G53, no generation
+  jump: `9p_client.dying_mutator_forgets_larder`.
+- G54, a failed write keeps the Larder: `dev9p.write_failure_drops_larder`.
+- G55, a killed waiter stays in the flush wait: `dev9p.wb_dying_waiter_leaves_flush_wait`.
+- G56, G57, a short Twalk reply binds, on time and late: `9p_session.walk_reply_overcount`.
+- G58, a multi-name walk's failure reads as its first name's:
+  `dev9p.wga_failure_at_an_unknown_name`.
+`lseek(fd, 0, SEEK_CUR)`'s missing store has no deterministic leg: only a peer thread's
+read landing inside the call can show it.
+
 ## Cached opens and the take's sync (B-3h3, 2026-11-02)
 
 A take must leave the snapshot of every open it covers, or the holder reads the
@@ -227,6 +249,37 @@ reach the file stands. A peer's other failures refuse: nothing says the file
 moved. The descriptor's own ESTALE refuses first. A cached open's
 close now matches entries by generation as any open's does: both kinds learn one
 at mint.
+
+## The last close and the last reference (audit round 3, 2026-11-02)
+
+A Spoor's last reference can fall on any thread. The image cache keeps a file's first
+map's own Spoor until 128 other images churn, and a Loom op, a poll or a territory can
+hold one. Round 2 hung the release and the flush on that reference, so a read-only map
+kept an open-file lock past its Proc's exit, left a staged run unlanded after `close`
+returned 0, and made a stranger's `exec` or `mmap` wait on the owner's server. So the
+file's last close is now separate from its last reference, as Linux's `f_op->flush` is
+from `f_op->release`: `Spoor.fd_refs` counts handle slots, the slot that takes it to
+zero runs `Dev.fd_close` on the closing thread, and `Dev.close` waits on no thread
+([[sub-kernel-handle]], [[sub-kernel-spoor]], [[sub-kernel-ninep-dev9p]]). This covers
+every pin by construction, needs no wire at `mmap` and has no failure path. The
+reviewer's proposal, a private Spoor per map plus a per-thread marker, costs two round
+trips per image miss and can fail on a `chmod` made since the open.
+
+The visible posture: a read-only map no longer keeps a `flock` alive past the last
+close, where Linux's `fput` would. The documented "all descriptors closed" holds, and
+manual section 22 says so.
+
+A take in flight when the last close runs would otherwise leave a lock nothing
+releases, with the Spoor held for as long as a map likes. The closer decrements
+`fd_refs` (`spoor_fd_drop`, with a full fence), then exchanges `lock_granted`. The
+taker stores `lock_granted` sequentially consistent, then reads `spoor_fd_open`. Either
+the close sees the grant or the taker sees the close; the taker's arm runs
+`Dev.fd_close` again, which is idempotent, and answers EBADF. A latch on the priv would
+answer a later take through a re-published Spoor with a false success, so there is none.
+
+A dying thread cannot send. If it holds the last reference, `Dev.close` follows at once
+and hands the run and the fid to a closer, the well-tested path. With another holder,
+`dev9p_fd_close` queues a job that flushes and then unlocks now.
 
 ## Seams
 
@@ -246,7 +299,8 @@ still a no-op on Thylacine (OPEN-BUGS 2026-11-02).
 
 Boosty B-3h2 (commits d1853e821, c95ef3916, b693e2729 on branch b3h; close
 commit in [[chg-2026-10-29-b3h2-file-locks]]). Scripture 87ecc8153. B-3h3 and
-B-3h4: [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]]. Stratum's half (POSIX range records,
+B-3h4: [[chg-2026-11-02-b3h3-b3h4-cached-locks-pouch]]. Audit round 3:
+[[chg-2026-11-02-b3h-audit-r3-fixes]]. Stratum's half (POSIX range records,
 the zero-name clone of an open fid, ENOLCK caps) lands as one Stratum commit
 after the B-3h audit.
 

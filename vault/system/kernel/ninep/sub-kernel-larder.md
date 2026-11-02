@@ -118,6 +118,10 @@ lazily-allocated array + page buffer.
 - `larder_page_invalidate_range` — G1b: drop only `[first_idx, last_idx]`
   (the write-through discipline — a ~100-byte buildid pwrite must not
   nuke a just-populated archive); same event logging.
+- `larder_forget_all` — drop everything in this Larder and move `gen` by
+  `LARDER_INVAL_RING + 1`, so every fill in flight fails safe. For an op that
+  changed the server and whose caller is gone: nothing says which file it touched
+  (B-3h audit round 3, LARDER-DESIGN section 12, which states the residual).
 
 **Cached-open pure readers** (FID-LIFECYCLE; mutate nothing beyond the
 CLOCK ref bit):
