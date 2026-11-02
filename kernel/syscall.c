@@ -9658,6 +9658,11 @@ VISIBLE_IF_KERNEL_TESTS
 void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     if (perm_flags & SPAWN_PERM_SESSION_REGISTRY) proc_mark_session_registry(p);
     if (perm_flags & SPAWN_PERM_SEAT_MANAGER) proc_mark_seat_manager(p);
+    // A refused seat designation (the role is taken, or the seat cannot take
+    // it now) leaves the child roleless, as a lost renderer race does below:
+    // every seat op refuses a Proc holding no role, lictor's probe begins
+    // with SEAT_STATUS, and lictor admits a compositor only by the designated
+    // pid and stripes, so a roleless child serves nothing.
     if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
     if (perm_flags & SPAWN_PERM_SEAT_CLIENT) (void)proc_set_seat_client(p);
 
