@@ -100,6 +100,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-proc-name-torn-read]] | open | sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc | chg-2026-08-02-introspection-sweep | task #17 |
 | [[seam-proxy-coord-eof]] | open | sub-stratum-session | chg-2026-08-02-stratum-sweep |  |
+| [[seam-queue-note-fatal-after-post-wakes-nobody]] | open | sub-kernel-notes | fnd-thread-c4-r2-f1 | OPEN-BUGS 2026-11-02T11:37Z; owned by item 11c |
 | [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |
 | [[seam-runq-rbtree]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 8.4 design intent; Phase 7 |

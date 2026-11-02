@@ -40,6 +40,8 @@ needed the operator.
 
 **Exactly what is verified at this entry.** On ce6e929a1: the suite, the guest legs, K01-K33, G2-G6, G8 and P1, on one boot each with no SMP matrix. NOT yet verified: 84987124d's extinction line, K34, G1 and G7 as reworked, and the SMP subset. The landing lease owes all of those, and this entry gains a line when it reports. The full SMP matrix did not run and will not at landing, under the operator's hold.
 
+**What the landing lease proved, on f27c9f4ea.** Suite 2169/0, the boot reached joey, the guest legs passed, and regreen rebuilt an identical ELF (facf5e46ed8407b2). K23 ended the boot on `notes_move_to_queue_locked: no spare slot -- N-2 violation`, so 84987124d's line is proven, not argued. K34 went red on two tests, with no flag and no race. G1 went red on kill-worker, `on_worker=0 on_main=1`, this time for its own reason. G7, with the claim mutated too, went red on L341 with `on_peer=1`, so L341 holds and needs no race note. The SMP subset passed, `default-smp4` and `ubsan-smp4` each 10/10 with 0 corruption. The full matrix did not run, nor `tools/test-fault.sh`, the interactive fleet or `tools/check-production.sh`; the merge to main owes them.
+
 ## 2026-10-29 (aux, Opus 5.5 1M) -- the corona join: aux-3 carries env-a and env-c; the merge hid three seams
 
 aux-3 merged corona/async-memory at its pushed tip c38f1cb1f for env-a + env-c (yip 0267, 0272; corona confirmed the
