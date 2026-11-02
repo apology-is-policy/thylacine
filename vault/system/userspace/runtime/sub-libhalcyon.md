@@ -52,6 +52,9 @@ Coordinator. Kernel-derived Peer identity is separate from decoded records.
 Eight slots retain live cancellation obligations across notification, EOF and
 failed episodes. Exact peer/lane/generation/revision checks, fresh rejoin,
 request/identity exhaustion and an initially unknown seat all fail closed.
+`Refusals` says which refused requests a joined participant re-samples from: a
+Cancelled, a Retire, and a Join once per snapshot, since a Join refused twice at one
+snapshot raced nothing and retrying would spin. A first Join stays fatal.
 Thirteen actual-core schedules pass; six coordinator mutations and two Lictor
 gate mutations fail at their intended assertions. This does not activate HIN1.
 

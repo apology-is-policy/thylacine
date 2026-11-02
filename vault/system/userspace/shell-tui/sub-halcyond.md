@@ -114,6 +114,12 @@ interaction registration, preserving the pane's terminal. Host metadata is a
 fixed 32-entry desired table, pruned with route removal. It is not an application
 registration endpoint and does not make a path token an authority credential.
 
+The seat can move under any request `session_seat::Link` has in flight, so a refusal
+from a joined participant re-samples and restores no authority
+(`seat_control::Refusals`); a seat recovery moves the generation
+([[dec-2026-11-02-seat-failure-retires-generation]]), and a Join refused for that
+reason must not end the session. Any other seat link error still exits the whole
+process (`paneplace`), because a participant unsure of its cancellation must die.
 `session_seat::Link` dispatches Bind/Unbind through the already-preopened ordered
 HIA channel on the dedicated service executor. Interaction supplies the shared
 request sequence and transport slot. `hostbindings::Bindings` separately tracks

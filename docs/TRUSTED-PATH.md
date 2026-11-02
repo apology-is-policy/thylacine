@@ -249,7 +249,10 @@ which cancelled the grant, must not read the same. Both such returns move the
 generation: the service's death and RESTORED from failed. A commit keeps it, and it
 moves at the return and not at the failure because Lictor keys its failure notice
 on the generation it activated. Corvus then answers the requester with an internal
-error, and the requester's redeem fails either way. Corvus also asks before a
+error, and the requester's redeem fails either way. The compositor's clients see the
+same move: Lictor stores the phase and generation from one RESTORED reply, so they
+never read a new phase with the old generation, and a Join that still loses a race
+with the seat is sampled again rather than ending the session. Corvus also asks before a
 graphical END: END names no episode, so one sent after a failure could close a
 serial episode the operator has just opened, eating its prompt and unfreezing the
 console. The query narrows that race to the two calls; only an END that names its

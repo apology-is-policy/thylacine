@@ -210,7 +210,9 @@ impl Seat {
                 }
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
                 if ep::call(ep::RESTORED, &mut m).is_ok() {
-                    self.phase = m.phase; self.failed_since = None;
+                    // A recovery moves the generation. SeatState serves this pair,
+                    // and a new phase with the old generation stales a client's Join.
+                    self.phase = m.phase; self.generation = m.generation; self.failed_since = None;
                     super::diagnostic("lictor: trusted seat recovered; nothing was conferred\n");
                 }
             }
