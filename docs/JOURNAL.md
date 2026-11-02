@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-11-02 (aux, Opus 5.5 1M) -- thread-model C4: a note aimed at one thread, and the wake I had narrowed
+
+**Decisions that were the operator's:** votes 14-17 of project_aux_votes_1021: `SYS_POSTNOTE_TID` at 138, SIGUSR1/2 as the next chunk, item 11c as its own chunk, and the SMP amplifier subset at landing, since the 11-02 hold forbids the full matrix.
+
+**What it is.** `tkill` and `tgkill` posted a process-directed note, so a peer could take a note aimed at someone else. Each thread now has a word beside the queue, one bit per family, and only that thread's tail takes from it. Pouch's `pthread_kill` and `raise` use it through patch 0067.
+
+**The wake I narrowed.** To make a test pass, I had the post skip the rouse when the target's mask held the family, with a written argument that a blocked thread's mask cannot change. Fable's round 1 showed that this is the store-buffer litmus test: the owner's plain store of its mask and read of the word, against the poster's OR and read of the mask, can each see the other's old value on ARMv8. It is latent today, because every served unmask has an eret and an svc before a wait, and the first served unmask-and-wait syscall would make it live. The model could not see it, since its `Mask` step and the tail's read are atomic. Nothing checked that argument but the audit. The rouse no longer asks the mask; the reader's re-check is the precision, which is what the queue's wakers already did for this reason (proc.c, "per-family mask precision lives in the reader's re-check"). A new buggy cfg holds it, at 3174542 states, because the ghost that stands for the stale read is monotone.
+
+**A check on the revert.** Removing the narrowing should put every count back, and it did exactly: direct 807792, direct_fatal 434763, needs_claim 812160, no_observe 813712, fatal_unwinds_only 422531, all as measured before I narrowed it. The whole checker then passed 18 of 18.
+
+**Round 1's four P3s, and what the plan missed.** A note moved on a full ring was dropped after its poster was told 0; a bit could go back on a Proc turned self-managing; a caught note made fatal after its post woke nobody; the fallback recorded sender 0. Applying them surfaced two things neither the audit nor my plan had: three test files walking the ring by hand, and `SA_RESETHAND` at a delivery, a third store that turns a disposition fatal. The second came from enumerating the stores instead of trusting the list of two. Round 2 enumerated them independently and found the same three.
+
+**Round 2.** Fable 5.1 on the fixes, 0 P0, 0 P1, 0 P2, 2 P3, 2 observations. The silent overflow arm now extincts. The other P3 is the process queue's twin of round 1's fatal-after-post, pre-existing since LS-5c and pinned as a contract by two tests. It is NOT fixed here: it is in OPEN-BUGS, owned by 11c, because it bites a native wait that rode the note out at post, which 11c changes, and what remains after that is Linux-equivalent. 11c must decide it.
+
+**Wrong turns the lease caught.** Lease 1 ended on one test expecting `SLEEP_*` from a `tsleep`, which answers `TSLEEP_*`, and a failed suite stops the boot, so joey never ran. On lease 2 the suite passed 2169 of 2169, the boot reached joey, and every kernel sabotage K01-K33 went red with its own message; regreen rebuilt a byte-identical ELF (5088ce7a12fadf07). Two guest sabotages did not earn their reds, and reading why mattered more than the count. G1 "failed" in 11 seconds: the mutation left `postnote_tid` unused, so the production shape did not compile, and the FAIL line in its summary was K33's left-over log. G7 stayed green, and I had predicted it might lose a race, but the cause was worse: it mutated `thread_caught_note_deliverable` alone, while a wait unwinds through `thread_caught_note_claim`, so it could never have fired. Had I taken the race explanation, L341 would have kept a witness that had never turned red. Both are reworked, and K34 is the same mutation with no flag and no race.
+
+**Exactly what is verified at this entry.** On ce6e929a1: the suite, the guest legs, K01-K33, G2-G6, G8 and P1, on one boot each with no SMP matrix. NOT yet verified: 84987124d's extinction line, K34, G1 and G7 as reworked, and the SMP subset. The landing lease owes all of those, and this entry gains a line when it reports. The full SMP matrix did not run and will not at landing, under the operator's hold.
+
 ## 2026-10-29 (aux, Opus 5.5 1M) -- the corona join: aux-3 carries env-a and env-c; the merge hid three seams
 
 aux-3 merged corona/async-memory at its pushed tip c38f1cb1f for env-a + env-c (yip 0267, 0272; corona confirmed the
