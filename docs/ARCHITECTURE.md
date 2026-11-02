@@ -2946,11 +2946,16 @@ writes, as with NFS and Linux's v9fs, so:
 - **Taking a lock** drops this file's Larder attributes and pages, so the next
   read goes to the server. An affected open stops serving its snapshot: the
   locking open for an open-file lock, or every open of the file in the Proc's
-  table for a Proc lock. A cached open has no fid, and an open needs one to
-  lock. It re-walks the run that minted it from the walk start it keeps, and
-  accepts the result only if it reaches the same `qid.path` and generation. If
-  the file was renamed away, unlinked or replaced, the lock answers `ESTALE`
-  and binds nothing, and the fd's reads keep serving its snapshot.
+  table for a Proc lock. An open needs a fid to lock. A strict cached open kept
+  its walk's (operator vote 20). A loose one kept none, so that its open stays
+  wire-free (vote B1): on its first lock it re-walks the run that minted it from
+  the walk start it keeps, and accepts the result only if it reaches the same
+  `qid.path` and generation. If the file was renamed away, unlinked or replaced,
+  the lock answers `ESTALE` and binds nothing, and the fd's reads keep serving
+  its snapshot. For a Proc lock, another descriptor in the table that cannot
+  reach the file this way also keeps its snapshot, and the take through the
+  descriptor that can reach it stands. FID-LIFECYCLE section 3.3 has the rest,
+  including `wstat`, which binds the same way.
 - **Releasing a lock** flushes the write-behind run first: the open's own run
   for an open-file lock, or the run of every open of the file in the Proc's
   table for a Proc lock. This applies to an unlock and to the close that drops
@@ -2970,7 +2975,13 @@ writes, as with NFS and Linux's v9fs, so:
   `SEEK_END` from `fstat`. A negative `l_len` is normalised. Both are read when
   the call is made, which advisory locking tolerates.
 - `flock` takes a whole-file lock on the open file and waits unless `LOCK_NB`
-  is given; a conflict answers `EWOULDBLOCK`.
+  is given; a conflict answers `EWOULDBLOCK`. `LOCK_EX` needs a descriptor open
+  for writing (`EBADF`), as on Linux's NFS client (`flock(2)`, NOTES).
+- The refusals come in Linux's order: `l_whence`, the range, the type, the access
+  mode, then an OFD request's `l_pid`. A closed descriptor answers `EBADF` first,
+  even for a request Pouch refuses itself. A `struct flock` the caller cannot read
+  or write faults in the caller, where Linux answers `EFAULT`.
+- `F_GETLK` answers `l_pid` -1, and when nothing conflicts it changes only `l_type`.
 - Every kind of lock goes to one server table, so `flock` and `fcntl` locks
   interact. Linux's NFS client behaves the same; Linux's local filesystems
   keep them apart.
@@ -2987,7 +2998,7 @@ off by default and needs `MAP_SHARED`.
 - **I-9**: the wait loop parks interruptibly and loses no note.
 - **I-38**: lock-to-unlock consistency strengthens close-to-open; it never
   weakens it.
-- **I-33**: a cached open's re-walk follows the names it kept only as a hint,
+- **I-33**: a loose cached open's re-walk follows the names it kept only as a hint,
   checked by `qid.path` and generation, never trusted.
 
 The call, the owner table, the dev9p lock path and the Stratum table are
