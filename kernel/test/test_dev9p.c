@@ -115,6 +115,7 @@ void test_dev9p_cached_open_loose_wstat(void);
 void test_dev9p_lock_ident_generation(void);
 void test_dev9p_cached_open_lock(void);
 void test_dev9p_cached_open_loom(void);
+void test_dev9p_cached_open_install_race(void);
 
 extern struct Dev devnone;
 
@@ -248,6 +249,11 @@ static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
 static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
 static u32  g_wga_lerror_ecode;  // != 0: the NEXT Twalkgetattr answers Rlerror, then clears
 static bool g_wga_no_gen;        // an Rwalkgetattr leaves the generation out of `valid`
+// A peer thread reaching a cached open's first need: its fid lands while this
+// call's Twalkgetattr or Tlopen is on the wire. One-shot.
+static struct dev9p_priv *g_race_kfid_priv;
+static struct dev9p_priv *g_race_rfid_priv;
+static u32 g_race_fid;
 
 // B-3h file locks: what the last Tlock / Tgetlock / zero-name Twalk carried,
 // and the answers the responder gives. lock_wire_reset() restores them all.
@@ -391,6 +397,10 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     if (type == P9_TLOPEN) {
         g_lopen_seen++;
         if (req_len >= P9_HDR_LEN + 4) g_tlopen_fid = le32_at(req + 7);
+        if (g_race_rfid_priv) {
+            __atomic_store_n(&g_race_rfid_priv->co_rfid, g_race_fid, __ATOMIC_RELEASE);
+            g_race_rfid_priv = NULL;
+        }
         if (g_tlopen_fail_ecode) {
             u32 error = g_tlopen_fail_ecode;
             g_tlopen_fail_ecode = 0;
@@ -691,6 +701,10 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // capability latch by ERRNO. A foreign server that does not implement
         // message 140 answers here, and WHICH code it picks is not ours to
         // choose -- npxf says EOPNOTSUPP, our native servers say ENOSYS.
+        if (g_race_kfid_priv) {
+            __atomic_store_n(&g_race_kfid_priv->co_kfid, g_race_fid, __ATOMIC_RELEASE);
+            g_race_kfid_priv = NULL;
+        }
         if (g_wga_lerror_ecode) {
             u32 ec = g_wga_lerror_ecode;
             g_wga_lerror_ecode = 0;                   // one-shot, like the siblings
@@ -6350,6 +6364,61 @@ void test_dev9p_cached_open_lock(void) {
     spoor_clunk(co);
     (void)p9_client_reader_pump_ready(&g_client);
 
+    lock_wire_reset();
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// Two threads can reach a cached open's first need together. The one that
+// installs second gives its own fid back and uses the fid installed: none leaks,
+// and none is replaced under a reader or a lock.
+void test_dev9p_cached_open_install_race(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 7 + 3);
+    co_prime(root, "fileA", 5);
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data, (u32)sizeof(data));
+    lock_wire_reset();
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co != NULL, "a cached open");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL, "priv");
+
+    const u32 peer_r = 0x7f000001u, peer_k = 0x7f000002u;
+    g_race_rfid_priv = cp; g_race_fid = peer_r;
+    g_clunk_seen = 0; g_clunk_fid_n = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock_sync(co, DEV_LOCK_SYNC_ACQUIRE), 0ll,
+                   "an ACQUIRE a peer's read fid beat");
+    TEST_EXPECT_EQ((u64)cp->co_rfid, (u64)peer_r, "keeps the peer's");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "and gives its own back");
+    TEST_EXPECT_EQ((u64)g_clunk_fids[0], (u64)g_twalk_clone_newfid, "the clone it opened");
+    spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    co = co_loose_mint(root, data, (u32)sizeof(data), 0x77);
+    TEST_ASSERT(co != NULL, "a loose cached open");
+    cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL, "its priv");
+    lock_wire_reset();
+    g_ga_gen = 0x77;
+    g_race_kfid_priv = cp; g_race_fid = peer_k;
+    g_clunk_seen = 0; g_clunk_fid_n = 0;
+    TEST_EXPECT_EQ((s64)dev9p.lock(co, SYS_FILE_LOCK_RD, 0, 0, NULL), 0ll,
+                   "a take a peer's bind beat");
+    TEST_EXPECT_EQ((u64)cp->co_kfid, (u64)peer_k, "keeps the peer's fid");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "gives its own back");
+    TEST_EXPECT_EQ((u64)g_clunk_fids[0], (u64)g_wga_newfid, "the one its walk bound");
+    TEST_EXPECT_EQ((u64)g_tlock_fid, (u64)peer_k, "and locks on the peer's");
+    spoor_clunk(co);
+    (void)p9_client_reader_pump_ready(&g_client);
+
+    g_race_rfid_priv = NULL;
+    g_race_kfid_priv = NULL;
     lock_wire_reset();
     larder_destroy(l);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);

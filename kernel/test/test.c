@@ -2063,6 +2063,7 @@ void test_dev9p_cached_open_loose_wstat(void);
 void test_dev9p_lock_ident_generation(void);
 void test_dev9p_cached_open_lock(void);
 void test_dev9p_cached_open_loom(void);
+void test_dev9p_cached_open_install_race(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -4611,6 +4612,7 @@ struct test_case g_tests[] = {
     { "dev9p.lock_ident_generation",   test_dev9p_lock_ident_generation,   false, NULL },
     { "dev9p.cached_open_lock",        test_dev9p_cached_open_lock,        false, NULL },
     { "dev9p.cached_open_loom",        test_dev9p_cached_open_loom,        false, NULL },
+    { "dev9p.cached_open_install_race", test_dev9p_cached_open_install_race, false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
