@@ -27,10 +27,12 @@ static void spin_unlock(pthread_mutex_t *m){assert(locked);locked=0;assert(!pthr
 static struct HandleTable *proc_handles_or_extinct(struct Proc *p){assert(p);return &p->table;}
 static bool handle_slot_may_alias(struct Handle *s){assert(locked);return s->kind==KOBJ_PROCESS;}
 static void handle_acquire_obj(enum kobj_kind k,void *o){assert(locked && k==KOBJ_PROCESS);atomic_fetch_add(&((struct Object*)o)->refs,1);}
-static void handle_release_obj(enum kobj_kind k,void *o){assert(!locked && k==KOBJ_PROCESS);assert(atomic_fetch_sub(&((struct Object*)o)->refs,1)>0);}
+static int handle_release_obj(enum kobj_kind k,void *o){assert(!locked && k==KOBJ_PROCESS);assert(atomic_fetch_sub(&((struct Object*)o)->refs,1)>0);return 0;}
 static void cloexec_set_locked(struct HandleTable *t,int fd,bool v){assert(locked);t->flags[fd]=v;}
 static atomic_int g_lock_hook_calls;
 static void lock_owners_on_close(struct HandleTable *t,enum kobj_kind k,void *o){assert(!locked && t==&proc.table && k==KOBJ_PROCESS);assert(atomic_load(&((struct Object*)o)->refs)>0);atomic_fetch_add(&g_lock_hook_calls,1);} /* outside the lock, before the release */
+static void handle_fd_count(enum kobj_kind k,void *o){assert(locked && k==KOBJ_PROCESS && o);}
+static int handle_fd_drop(struct HandleTable *t,enum kobj_kind k,void *o,bool heard){assert(!locked && t==&proc.table && k==KOBJ_PROCESS && o && !heard);return 0;} /* a replace hands the answer to no program */
 #include "target-under-test.c"
 static void install(int fd,int object){spin_lock(&proc.table.lock);assert(!proc.table.slots[fd].magic);proc.table.slots[fd]=(struct Handle){HANDLE_MAGIC,KOBJ_PROCESS,4,&objects[object]};handle_acquire_obj(KOBJ_PROCESS,&objects[object]);spin_unlock(&proc.table.lock);}
 static void remove_slot(int fd){spin_lock(&proc.table.lock);struct Handle h=proc.table.slots[fd];proc.table.slots[fd].magic=0;spin_unlock(&proc.table.lock);if(h.magic)handle_release_obj(h.kind,h.obj);}
