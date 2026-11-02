@@ -4,7 +4,7 @@ type: chg
 title: "A server write count is bounded by the request"
 date: 2026-11-02
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["8c3e221e6"]
 touched:
   - sub-kernel-ninep-client
   - sub-kernel-loom
