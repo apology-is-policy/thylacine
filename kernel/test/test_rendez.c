@@ -2129,6 +2129,226 @@ static bool nt_teardown(struct Thread *t[2]) {
     return true;
 }
 
+// Yield until thread i finishes the step it is on; bounded, true iff it did.
+static bool nt_wait_done(u32 i) {
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (!nt_done(i) && timer_now_ns() < dl) sched();
+    return nt_done(i);
+}
+
+// What a post left on the threads' words is the tail's to take, and a kernel thread
+// has none: clear them before teardown, as a fatal one would end any later wait.
+static void nt_clear_words(struct Thread *t[2]) {
+    for (u32 i = 0; i < 2u; i++)
+        if (t[i]) __atomic_store_n(&t[i]->note_direct, 0, __ATOMIC_RELEASE);
+}
+
+// rendez.direct_note_unwinds_only_its_target -- ARCH 7.6.4. Both threads asleep in
+// waits a caught note unwinds, and a post names one: it unwinds, holding no claim,
+// and its peer never re-reads its cond. The same post at the peer is the control.
+void test_rendez_direct_note_unwinds_only_its_target(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool asleep0 = made && nt_run(t[0], 0, NT_UWAIT, true);
+    bool asleep1 = asleep0 && nt_run(t[1], 1, NT_UWAIT, true);
+    u32  ev1  = g_nt[1].evals;
+    int  rc0  = asleep1 ? proc_note_thread(g_nt_proc, g_nt_tid[0], NOTE_NAME_INTERRUPT) : -99;
+    bool done0 = asleep1 && nt_wait_done(0);
+    int  wait0 = g_nt[0].rc;
+    bool peer_still = asleep1 && nt_blocked(t[1], 1) && g_nt[1].evals == ev1;
+    u8   claim = made ? (u8)(nt_claim(t[0]) | nt_claim(t[1])) : 0;
+    u8   tgt   = made ? (u8)(nt_target(t[0]) | nt_target(t[1])) : 0;
+    u32  caught = made ? (u32)__atomic_load_n(&g_nt_proc->note_caught, __ATOMIC_ACQUIRE) : 0;
+    u8   word0 = made ? __atomic_load_n(&t[0]->note_direct, __ATOMIC_ACQUIRE) : 0;
+    u32  queued = made ? g_nt_proc->notes->count : 0;
+    int  rc1  = asleep1 ? proc_note_thread(g_nt_proc, g_nt_tid[1], NOTE_NAME_INTERRUPT) : -99;
+    bool done1 = asleep1 && nt_wait_done(1);
+    int  wait1 = g_nt[1].rc;
+    if (made) nt_clear_words(t);
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made && asleep1, "two threads asleep in unwinding waits");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_EXPECT_EQ(rc0, 0, "the post at the first answers 0");
+    TEST_ASSERT(done0, "the named thread woke");
+    TEST_EXPECT_EQ(wait0, SLEEP_NOTEINTR, "unwound for the note");
+    TEST_ASSERT(peer_still, "its peer slept on and never re-read its cond");
+    TEST_EXPECT_EQ(claim, 0u, "no thread holds a claim for it");
+    TEST_EXPECT_EQ(tgt, 0u, "no thread was designated for it");
+    TEST_EXPECT_EQ(caught, 0u, "no family bit armed");
+    TEST_EXPECT_EQ(word0, (u8)NT_FAM, "the note waits on the word for the tail");
+    TEST_EXPECT_EQ(queued, 0u, "and the queue holds nothing");
+    TEST_EXPECT_EQ(rc1, 0, "control: the post at the peer answers 0");
+    TEST_ASSERT(done1, "control: the peer woke");
+    TEST_EXPECT_EQ(wait1, SLEEP_NOTEINTR, "control: unwound for the note");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.direct_note_held_waits_ride_it_out -- a wait that will not unwind for a
+// caught note leaves the note on the word: a hold wait, a timed hold wait, and an
+// unwinding wait with the family masked. Each thread's evals stay put, and each
+// wait ends on its own cond with its normal answer.
+void test_rendez_direct_note_held_waits_ride_it_out(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool asleep0 = made && nt_run(t[0], 0, NT_HWAIT, true);
+    bool asleep1 = asleep0 && nt_run(t[1], 1, NT_MUWAIT, true);
+    u32  ev0 = g_nt[0].evals, ev1 = g_nt[1].evals;
+    int  rc0 = asleep1 ? proc_note_thread(g_nt_proc, g_nt_tid[0], NOTE_NAME_INTERRUPT) : -99;
+    int  rc1 = asleep1 ? proc_note_thread(g_nt_proc, g_nt_tid[1], NOTE_NAME_INTERRUPT) : -99;
+    for (u32 i = 0; i < 16u; i++) sched();
+    bool still0 = asleep1 && nt_blocked(t[0], 0) && g_nt[0].evals == ev0;
+    bool still1 = asleep1 && nt_blocked(t[1], 1) && g_nt[1].evals == ev1;
+    for (u32 i = 0; made && i < 2u; i++) {
+        g_nt[i].release = true;
+        (void)wakeup(&g_nt[i].rendez);
+    }
+    bool done0 = asleep1 && nt_wait_done(0);
+    bool done1 = asleep1 && nt_wait_done(1);
+    int  wait0 = g_nt[0].rc, wait1 = g_nt[1].rc;
+    u8   word0 = made ? __atomic_load_n(&t[0]->note_direct, __ATOMIC_ACQUIRE) : 0;
+    u8   word1 = made ? __atomic_load_n(&t[1]->note_direct, __ATOMIC_ACQUIRE) : 0;
+    bool timed = done0 && nt_run(t[0], 0, NT_THWAIT, true);
+    u32  evt   = g_nt[0].evals;
+    int  rct   = timed ? proc_note_thread(g_nt_proc, g_nt_tid[0], NOTE_NAME_INTERRUPT) : -99;
+    for (u32 i = 0; i < 16u; i++) sched();
+    bool still_t = timed && nt_blocked(t[0], 0) && g_nt[0].evals == evt;
+    if (made) nt_clear_words(t);
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made && asleep1, "a hold wait and a masked unwinding wait");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_EXPECT_EQ(rc0, 0, "the post at the hold wait answers 0");
+    TEST_EXPECT_EQ(rc1, 0, "and at the masked wait");
+    TEST_ASSERT(still0, "the hold wait rode it out");
+    TEST_ASSERT(still1, "the masked wait rode it out");
+    TEST_ASSERT(done0 && done1, "both ended on their conds");
+    TEST_EXPECT_EQ(wait0, 0, "with a normal answer");
+    TEST_EXPECT_EQ(wait1, 0, "both");
+    TEST_EXPECT_EQ(word0, (u8)NT_FAM, "the note stays on the word");
+    TEST_EXPECT_EQ(word1, (u8)NT_FAM, "on both");
+    TEST_ASSERT(timed, "a timed hold wait");
+    TEST_EXPECT_EQ(rct, 0, "the post answers 0");
+    TEST_ASSERT(still_t, "and it rode it out too");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.direct_note_read_at_wait_entry -- I-9: a post before the wait is read by the
+// wait, under the lock a post's rouse takes. A thread entering an unwinding wait with
+// the note already on its word returns at once, and so does one entering any wait
+// with a fatal note there. The controls are the same waits with an empty word,
+// above and in rendez.direct_note_unwinds_only_its_target.
+void test_rendez_direct_note_read_at_wait_entry(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    int  rc0  = made ? proc_note_thread(g_nt_proc, g_nt_tid[0], NOTE_NAME_INTERRUPT) : -99;
+    bool u_back = made && nt_run(t[0], 0, NT_UWAIT, false);
+    int  u_rc = g_nt[0].rc;
+    bool t_back = u_back && nt_run(t[0], 0, NT_TUWAIT, false);
+    int  t_rc = g_nt[0].rc;
+    int  rc1  = made ? proc_note_thread(g_nt_proc, g_nt_tid[1], NOTE_NAME_TERM) : -99;
+    bool h_back = made && nt_run(t[1], 1, NT_HWAIT, false);
+    int  h_rc = g_nt[1].rc;
+    bool th_back = h_back && nt_run(t[1], 1, NT_THWAIT, false);
+    int  th_rc = g_nt[1].rc;
+    if (made) nt_clear_words(t);
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made, "two threads");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_EXPECT_EQ(rc0, 0, "the caught post answers 0");
+    TEST_ASSERT(u_back, "an unwinding wait entered with it returns");
+    TEST_EXPECT_EQ(u_rc, SLEEP_NOTEINTR, "unwound");
+    TEST_ASSERT(t_back, "a timed unwinding wait too");
+    TEST_EXPECT_EQ(t_rc, SLEEP_NOTEINTR, "unwound");
+    TEST_EXPECT_EQ(rc1, 0, "the fatal post answers 0");
+    TEST_ASSERT(h_back, "a hold wait entered with a fatal note returns");
+    TEST_EXPECT_EQ(h_rc, SLEEP_INTR, "to die");
+    TEST_ASSERT(th_back, "a timed hold wait too");
+    TEST_EXPECT_EQ(th_rc, SLEEP_INTR, "to die");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.direct_note_fatal_ends_any_wait -- `term` has no handler here, so a post at
+// a thread in a hold wait ends that wait to die, and only that thread's: the group's
+// end comes from its tail, through exits_note. A masked fatal note waits behind that
+// one thread's mask, as Linux keeps it pending and reaches no group exit.
+void test_rendez_direct_note_fatal_ends_any_wait(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool asleep0 = made && nt_run(t[0], 0, NT_HWAIT, true);
+    bool asleep1 = asleep0 && nt_run(t[1], 1, NT_HWAIT, true);
+    u32  ev1 = g_nt[1].evals;
+    int  rc0 = asleep1 ? proc_note_thread(g_nt_proc, g_nt_tid[0], NOTE_NAME_TERM) : -99;
+    bool done0 = asleep1 && nt_wait_done(0);
+    int  wait0 = g_nt[0].rc;
+    bool peer_still = asleep1 && nt_blocked(t[1], 1) && g_nt[1].evals == ev1;
+    const char *group = made ? __atomic_load_n(&g_nt_proc->group_exit_msg, __ATOMIC_ACQUIRE) : NULL;
+    if (made) nt_clear_words(t);
+
+    // The masked leg: t[1] is released, then masks term from the test's side, which
+    // is safe with it parked between steps, and takes a hold wait.
+    bool freed1 = false;
+    if (asleep1) {
+        g_nt[1].release = true;
+        (void)wakeup(&g_nt[1].rendez);
+        freed1 = nt_wait_done(1);
+    }
+    if (freed1) t[1]->note_mask |= (u64)(1u << NOTE_BIT_TERM);
+    bool asleep_m = freed1 && nt_run(t[1], 1, NT_HWAIT, true);
+    u32  evm = g_nt[1].evals;
+    int  rcm = asleep_m ? proc_note_thread(g_nt_proc, g_nt_tid[1], NOTE_NAME_TERM) : -99;
+    for (u32 i = 0; i < 16u; i++) sched();
+    bool masked_still = asleep_m && nt_blocked(t[1], 1) && g_nt[1].evals == evm;
+    if (made) nt_clear_words(t);
+    if (t[1]) t[1]->note_mask &= ~(u64)(1u << NOTE_BIT_TERM);
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made && asleep1, "two threads asleep in hold waits");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_EXPECT_EQ(rc0, 0, "the post answers 0");
+    TEST_ASSERT(done0, "the named thread woke");
+    TEST_EXPECT_EQ(wait0, SLEEP_INTR, "to die");
+    TEST_ASSERT(peer_still, "its peer slept on");
+    TEST_ASSERT(group == NULL, "and the post itself ended no group");
+    TEST_ASSERT(asleep_m, "a hold wait with term masked");
+    TEST_EXPECT_EQ(rcm, 0, "the post answers 0");
+    TEST_ASSERT(masked_still, "and the masked thread rode it out");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.direct_note_native_rides_it_out -- item 11c: a native Proc's wait never
+// unwinds for a caught note, thread-directed or not. The same wait in a phenotype
+// Proc is the control, in rendez.direct_note_unwinds_only_its_target.
+void test_rendez_direct_note_native_rides_it_out(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    if (made) {
+        g_nt_proc->phenotype = PHENO_NATIVE;
+        __atomic_store_n(&g_nt_proc->handler_va, 0x1000ull, __ATOMIC_RELEASE);
+    }
+    bool asleep0 = made && nt_run(t[0], 0, NT_UWAIT, true);
+    u32  ev0 = g_nt[0].evals;
+    int  rc0 = asleep0 ? proc_note_thread(g_nt_proc, g_nt_tid[0], NOTE_NAME_INTERRUPT) : -99;
+    for (u32 i = 0; i < 16u; i++) sched();
+    bool still0 = asleep0 && nt_blocked(t[0], 0) && g_nt[0].evals == ev0;
+    u8   word0 = made ? __atomic_load_n(&t[0]->note_direct, __ATOMIC_ACQUIRE) : 0;
+    if (made) nt_clear_words(t);
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made && asleep0, "a native thread asleep in a listed call's wait");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_EXPECT_EQ(rc0, 0, "the post answers 0");
+    TEST_ASSERT(still0, "the wait rode it out");
+    TEST_EXPECT_EQ(word0, (u8)NT_FAM, "and the note waits on the word for the tail");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
 // rendez.caught_note_prefers_awake -- the walk prefers a thread that is not
 // blocked: main, awake, is designated and the peer asleep in an unwinding wait
 // is not woken (the L285 shape). Main then enters an unwinding wait and unwinds

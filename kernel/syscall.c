@@ -6250,19 +6250,14 @@ s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
 }
 #endif
 
-static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
-                                 u64 name_va, u64 name_len_raw) {
-    struct Thread *t = current_thread();
-    if (!t || !t->proc) return -(s64)T_E_INVAL;
-    struct Proc *p = t->proc;
-
+// A post's name, from the caller's memory into buf: 0, or the syscall's errno.
+static s64 postnote_copy_name(u64 name_va, u64 name_len_raw, char buf[NOTE_NAME_MAX]) {
     if (name_len_raw == 0) return -(s64)T_E_INVAL;
     if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -(s64)T_E_INVAL;
     if (name_va == 0) return -(s64)T_E_FAULT;
     if (name_va >= UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
     if (name_va + name_len_raw > UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
 
-    char buf[NOTE_NAME_MAX];
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) buf[i] = 0;
     for (u32 i = 0; i < (u32)name_len_raw; i++) {
         u8 b;
@@ -6275,6 +6270,18 @@ static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
         buf[i] = (char)b;
     }
     buf[(u32)name_len_raw] = 0;
+    return 0;
+}
+
+static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
+                                 u64 name_va, u64 name_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    struct Proc *p = t->proc;
+
+    char buf[NOTE_NAME_MAX];
+    s64 name_err = postnote_copy_name(name_va, name_len_raw, buf);
+    if (name_err) return name_err;
 
     s32 target_pid = 0;
     if (!sys_s32_arg(pid_raw, &target_pid))          return -T_E_INVAL;
@@ -6309,6 +6316,44 @@ static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
     }
 
     return postnote_cross(p, target_pid, buf);
+}
+
+// SYS_POSTNOTE_TID past its copy. The name is judged before the tid is looked
+// for, and the tid before any death, so a pthread_kill naming a thread that has
+// gone is ESRCH even for a signal that would end the group. A NULL ctx is the
+// test entry, whose current thread is the harness's: a snare death answers 1.
+static s64 postnote_tid(struct exception_context *ctx, struct Proc *p, int tid,
+                        const char *name) {
+    const char *snare = notes_self_death_snare(name);
+    bool        kill  = notes_name_is_kill(name);
+    if (!snare && !kill && notes_direct_bit(name) < 0) return -(s64)T_E_INVAL;
+    if (!proc_holds_tid(p, tid)) return -(s64)T_E_SRCH;
+    if (snare) {
+        if (!ctx) return 1;
+        proc_fault_terminate(snare, ctx->elr);
+    }
+    if (kill) return postnote_self(p, name);
+    return (s64)proc_note_thread(p, tid, name);
+}
+
+#ifdef KERNEL_TESTS
+s64 sys_postnote_tid_for_test(struct Proc *caller, int tid, const char *name) {
+    return postnote_tid(NULL, caller, tid, name);
+}
+#endif
+
+static s64 sys_postnote_tid_handler(struct exception_context *ctx, u64 tid_raw,
+                                    u64 name_va, u64 name_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+
+    char buf[NOTE_NAME_MAX];
+    s64 name_err = postnote_copy_name(name_va, name_len_raw, buf);
+    if (name_err) return name_err;
+
+    s32 tid = 0;
+    if (!sys_s32_arg(tid_raw, &tid)) return -(s64)T_E_INVAL;
+    return postnote_tid(ctx, t->proc, tid ? tid : t->tid, buf);
 }
 
 // SYS_NOTE_MASK(new_mask, old_mask_out_va) — swap-and-return mask.
@@ -17335,6 +17380,12 @@ static void syscall_native_switch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_postnote_handler(ctx, ctx->regs[0],
                                                   ctx->regs[1],
                                                   ctx->regs[2]);
+        return;
+
+    case SYS_POSTNOTE_TID:
+        ctx->regs[0] = (u64)sys_postnote_tid_handler(ctx, ctx->regs[0],
+                                                      ctx->regs[1],
+                                                      ctx->regs[2]);
         return;
 
     case SYS_NOTE_MASK:

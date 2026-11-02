@@ -44,12 +44,24 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is rt_sigprocmask
-// (135); execve (221) is the newest. If the ceiling ever rises past one of
-// these, the build stops and the reader is forced back to the argument instead
-// of inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RT_SIGPROCMASK > VIV_NATIVE_CEILING,
-               "the signal family above rt_sigaction argues by the ceiling");
+// rather than by a per-number one. The lowest such number is rt_sigreturn (139);
+// execve (221) is the newest. If the ceiling ever rises past one of these, the
+// build stops and the reader is forced back to the argument instead of inheriting
+// a claim that has quietly become false.
+_Static_assert(VIV_LINUX_RT_SIGRETURN > VIV_NATIVE_CEILING,
+               "the signal family above rt_sigqueueinfo argues by the ceiling");
+// SYS_POSTNOTE_TID at 138 (vote 2026-11-02) lifted the ceiling over 135..138.
+// Linux rt_sigqueueinfo (138) collides with it. The row is VIV_ENOSYS, so a Linux
+// Proc never reaches the post (tgkill is how it names a thread). A native program
+// mis-declared as Linux loses it and reads ENOSYS; the post grants nothing beyond
+// the caller's own Proc, so nothing is exposed either way.
+_Static_assert(VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID,
+               "revisit rt_sigqueueinfo / POSTNOTE_TID collision on renumber");
+// rt_sigprocmask (135), rt_sigpending (136) and rt_sigtimedwait (137) meet NO
+// native number on this tree: main holds them for READLINK, LSTAT and FILE_LOCK,
+// and syscall.native_gap_unassigned pins that they are empty here. Each is
+// consumed before the native switch regardless (TIER2, ENOSYS, ENOSYS), and
+// vivarium.rejects_are_deliberate pins each verdict by name.
 // SYS_SRV_REGISTRY_NEW at 134 (vote 13) lifted the ceiling over the signal
 // family's 129..134, and the assert above, then keyed to kill, stopped the
 // build until each was argued on its own. viv_linux_dispatch consumes every

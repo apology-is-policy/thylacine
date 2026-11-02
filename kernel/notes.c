@@ -1802,6 +1802,26 @@ static int notes_tail_consume_locked(struct Proc *p, struct Thread *t, int direc
     return 1;
 }
 
+#ifdef KERNEL_TESTS
+// The candidate + consume split with q->lock around each, as the tail holds it
+// across both: a test runs a discard between them, which is the race they exist
+// for. A kernel test's own thread has no tail to drive them.
+int notes_tail_candidate_for_test(struct Proc *p, struct Thread *t, struct Note *out,
+                                  int *direct) {
+    spin_lock(&p->notes->lock);
+    int r = notes_tail_candidate_locked(p, t, out, direct);
+    spin_unlock(&p->notes->lock);
+    return r;
+}
+int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                struct Note *out) {
+    spin_lock(&p->notes->lock);
+    int r = notes_tail_consume_locked(p, t, direct, out);
+    spin_unlock(&p->notes->lock);
+    return r;
+}
+#endif
+
 // Put a consumed candidate back after a push that faulted. Native only, and a
 // native Proc has no sigaction to discard a direct bit, so the bit cannot have
 // been owed a discard while it was out.

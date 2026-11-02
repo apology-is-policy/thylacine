@@ -569,7 +569,12 @@ enum {
 // rt_sigaction (134) meets a native number there. The arguments for it and for
 // the empty 129..133 are per-number, in vivarium.c, and the lowest
 // signal-family number still argued by the ceiling is rt_sigprocmask (135).
-#define VIV_NATIVE_CEILING 134
+//
+// SYS_POSTNOTE_TID lands at 138 (operator vote 2026-11-02), and the ceiling rises
+// over rt_sigprocmask, rt_sigpending, rt_sigtimedwait and rt_sigqueueinfo. Only
+// rt_sigqueueinfo meets a native number there; each has its per-number argument
+// in vivarium.c, and the lowest still argued by the ceiling is rt_sigreturn (139).
+#define VIV_NATIVE_CEILING 138
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

@@ -244,7 +244,9 @@ Post == /\ posted < MAX_POSTS
 \* tkill. The post holds the Proc's threads_lock, so an exited target is seen
 \* exactly and nothing is posted to it. It rouses the target under the target's
 \* wait_lock, where the target's entry to a wait publishes the wait and reads
-\* the word, so the two are atomic with respect to each other.
+\* the word, so the two are atomic with respect to each other. A masked note
+\* leaves it asleep: a blocked thread's mask cannot change, and it reads the word
+\* again when it next enters a wait.
 PostDirect(t) == /\ dposted < MAX_DIRECT /\ ts[t] # "exited"
                  /\ dposted' = dposted + 1
                  /\ IF BUGGY_DIRECT_TO_QUEUE
@@ -256,9 +258,10 @@ PostDirect(t) == /\ dposted < MAX_DIRECT /\ ts[t] # "exited"
                        ELSE /\ dq' = [dq EXCEPT ![t] = TRUE]
                             /\ woken' = IF BUGGY_DIRECT_NO_ROUSE THEN woken
                                         ELSE [woken EXCEPT ![t] =
-                                                @ \/ ts[t] = "uwait"
-                                                  \/ (ts[t] = "hwait" /\ DIRECT_FATAL
-                                                      /\ ~BUGGY_FATAL_UNWINDS_ONLY)]
+                                                @ \/ (~masked[t] /\
+                                                      (ts[t] = "uwait"
+                                                       \/ (ts[t] = "hwait" /\ DIRECT_FATAL
+                                                           /\ ~BUGGY_FATAL_UNWINDS_ONLY)))]
                             /\ UNCHANGED <<q, walkOwed, wskip, dtgt>>
                  /\ UNCHANGED <<ts, masked, inh, des, own, posted, wpick, nwait, wcur, stolen>>
 

@@ -1,0 +1,128 @@
+pouch boundary-line patch 0067 - pthread_kill and raise name one thread.
+
+Thread-model C4, operator votes 5 (2026-10-21) and 14 (2026-11-02). musl's
+pthread_kill calls SYS_tkill, whose number here is the 0xFFFF sentinel (0001),
+so every pthread_kill answered ENOSYS. raise was retargeted at 0007 to
+SYS_postnote(pid=0), which is process-directed: any unmasked peer could take a
+note the raising thread had just raised. POSIX says raise(sig) is
+pthread_kill(pthread_self(), sig).
+
+  arch/aarch64/bits/syscall.h.in  Adds __NR_postnote_tid 138, and corrects the
+      table's raise / pthread_kill row. After a musl re-vendor, extend 0001's awk
+      filter: m["postnote_tid"]="138";
+
+  src/thread/pthread_kill.c       Posts through SYS_postnote_tid under killlock,
+      musl's guard on a thread's tid, with every note blocked so a self-post
+      cannot run its handler while killlock is held. Signal 0 posts nothing.
+      SIGABRT and the fault signals name their snare, which ends the Proc,
+      as they do for raise(). tty:* is receive-only and answers EPERM. A signal
+      with no note answers EINVAL: SIGUSR1 and SIGUSR2 until their chunk lands,
+      and SIGCANCEL, so pthread_cancel of another thread reads EINVAL where it
+      read ENOSYS (still refused; POUCH-DESIGN defers cancellation).
+
+  src/signal/raise.c              SYS_postnote_tid(0, name, len). A blocked
+      raise now waits on this thread alone. The snare and abort arms are
+      unchanged: the Proc ends either way.
+
+kill(pid, sig), including kill(getpid(), sig), stays process-directed.
+
+Witnesses: pouch-hello-threads `kill-worker`, `kill-masked`, `raise-masked` and
+`kill-answers`. Its `mask-queued` leg moved from raise to kill(getpid()) so it
+still reaches the queue that leg is about.
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -381,7 +381,7 @@
+  * notes substrate per POUCH-DESIGN.md section 6.4 (the fd-first novel
+  * angle landed at sub-chunk 13a, ARCH section 7.6 + NOVEL.md section 3.1):
+  *   sigaction()             pouch sigtab[NSIG] + SYS_notify(handler_va)
+- *   raise() / pthread_kill  SYS_postnote(pid=0=self, name, name_len)
++ *   raise() / pthread_kill  SYS_postnote_tid(tid, name, name_len)
+  *   kill()                  SYS_postnote(target_pid, name, name_len)
+  *   sigprocmask() /         SYS_note_mask(new_mask, &old_mask)
+  *     pthread_sigmask()
+@@ -470,3 +470,10 @@
+ #define __NR_tty_acquire 95
+ #define __NR_tty_set_fg 96
+ #define __NR_tty_get_fg 97
++
++/* Thread-model C4: post a note at one thread of the caller's own Proc. Number
++ * per kernel/include/thylacine/syscall.h. After a musl re-vendor, extend 0001's
++ * awk filter:
++ *   m["postnote_tid"]="138";
++ */
++#define __NR_postnote_tid 138
+--- a/src/signal/raise.c
++++ b/src/signal/raise.c
+@@ -1,13 +1,9 @@
+-/* raise(3) over Thylacine notes (pouch sub-chunk 13b). Replaces musl's
+- * Linux SYS_tkill with SYS_postnote(pid=0=self, name, name_len) — the
+- * kernel's self-post sentinel routes the note to the caller's own Proc
+- * without needing a userspace getpid lookup.
+- *
+- * POSIX raise(sig) is equivalent to pthread_kill(pthread_self(), sig).
+- * On Thylacine the SYS_POSTNOTE gate fires synchronously: the kernel
+- * queues the note, then the EL0-return-tail of THIS syscall dispatches
+- * the bootstrap handler. By the time raise() returns 0, the handler has
+- * run.
++/* raise(3) over Thylacine notes. Replaces musl's Linux SYS_tkill with
++ * SYS_postnote_tid(tid=0=self, name, name_len), because POSIX raise(sig) is
++ * pthread_kill(pthread_self(), sig): only this thread may take the note, and
++ * if this thread blocks it, it waits here while every peer stays clear of it.
++ * Unblocked, the EL0-return tail of THIS syscall dispatches the bootstrap
++ * handler, so by the time raise() returns 0 the handler has run.
+  */
+ 
+ #include <signal.h>
+@@ -57,9 +53,8 @@
+ 		return -1;
+ 	}
+ 
+-	/* pid = 0 is the kernel's self-post sentinel (sys_postnote_handler
+-	 * fast-path; see kernel/syscall.c). The kernel handles the kill-vs-
+-	 * multi-thread gate internally. */
++	/* tid = 0 is the calling thread. `kill` still ends the whole Proc,
++	 * through the kernel's one cascade. */
+ 	unsigned long len = (unsigned long)strlen(name);
+-	return syscall(SYS_postnote, 0L, name, len);
++	return syscall(SYS_postnote_tid, 0L, name, len);
+ }
+--- a/src/thread/pthread_kill.c
++++ b/src/thread/pthread_kill.c
+@@ -1,17 +1,34 @@
++/* pthread_kill(3) over Thylacine notes. musl's SYS_tkill has no number here
++ * (0001); SYS_postnote_tid posts at the one thread, and only it takes the note.
++ * The signal is judged first, whatever the thread's state, as raise() judges it.
++ */
++#include <string.h>
+ #include "pthread_impl.h"
+ #include "lock.h"
++#include "_pouch_signal.h"
+ 
+ int pthread_kill(pthread_t t, int sig)
+ {
+ 	int r;
+ 	sigset_t set;
++	const char *name = 0;
++	/* Signal 0 only asks whether t is there, so it stays NULL and posts
++	 * nothing. The snare signals have no note and no disposition but the
++	 * default: the kernel ends the Proc with the snare named. */
++	if (sig == SIGABRT)
++		name = "snare:abort";
++	else if (!(name = __pouch_self_snare(sig)) && sig &&
++	         __pouch_sig_to_note(sig, &name) != 0)
++		return EINVAL;
++	/* tty:* is receive-only (PTY-3), raise()'s and kill()'s answer. */
++	if (name && !strncmp(name, "tty:", 4))
++		return EPERM;
+ 	/* Block not just app signals, but internal ones too, since
+ 	 * pthread_kill is used to implement pthread_cancel, which
+ 	 * must be async-cancel-safe. */
+ 	__block_all_sigs(&set);
+ 	LOCK(t->killlock);
+-	r = t->tid ? -__syscall(SYS_tkill, t->tid, sig)
+-		: (sig+0U >= _NSIG ? EINVAL : 0);
++	r = t->tid && name ? -__syscall(SYS_postnote_tid, t->tid, name, strlen(name)) : 0;
+ 	UNLOCK(t->killlock);
+ 	__restore_sigs(&set);
+ 	return r;

@@ -813,6 +813,10 @@ const char *notes_known_name_for_test(u32 i);
 u32 notes_name_terminate_latch_for_test(const char *name);
 void notes_release_claims_for_test(struct Thread *t);
 const char *notes_snare_death_name_for_test(u32 i);
+int notes_tail_candidate_for_test(struct Proc *p, struct Thread *t, struct Note *out,
+                                  int *direct);
+int notes_tail_consume_for_test(struct Proc *p, struct Thread *t, int direct,
+                                struct Note *out);
 #endif // KERNEL_TESTS
 
 #endif  // THYLACINE_NOTES_H

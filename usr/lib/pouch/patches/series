@@ -179,3 +179,5 @@
 # 0066 (thread-model C7): a thrd_create thread registers clear_child_tid + its tid
 # as start() does -- without it thrd_join hangs.
 0066-pouch-c11-thread-registers.patch
+# 0067 (thread-model C4, operator votes 5 and 14): pthread_kill and raise name one thread over SYS_postnote_tid; kill(pid) stays process-directed.
+0067-pouch-thread-directed-kill.patch

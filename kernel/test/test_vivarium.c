@@ -388,6 +388,18 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 8) == VIV_TRANSLATED,
                 "control: the same call at sigsetsize 8 translates");
 
+    // SYS_POSTNOTE_TID at 138 lifted the ceiling over 135..138 (vivarium.c).
+    TEST_ASSERT(VIV_LINUX_RT_SIGQUEUEINFO == SYS_POSTNOTE_TID,
+                "rt_sigqueueinfo collides with SYS_POSTNOTE_TID -- known, and reachable by neither");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPROCMASK, args, &out),
+                   (int)VIV_TIER2, "rt_sigprocmask (135) is a TIER2 row");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
+                   (int)VIV_ENOSYS, "rt_sigpending (136) is an ENOSYS row");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGTIMEDWAIT, args, &out),
+                   (int)VIV_ENOSYS, "rt_sigtimedwait (137) is an ENOSYS row");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGQUEUEINFO, args, &out),
+                   (int)VIV_ENOSYS, "rt_sigqueueinfo (138) is an ENOSYS row");
+
     // restart_syscall (128) meets SYS_ICACHE_SYNC_SPACE (asserted in
     // vivarium.c); the other four meet an empty gap (syscall.native_gap_
     // unassigned pins it). Each is consumed before the native switch: its

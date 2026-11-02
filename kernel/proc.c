@@ -3661,7 +3661,10 @@ int proc_note_thread(struct Proc *p, int tid, const char *name) {
         to_queue = proc_is_self_managing_notes(p);
         if (!to_queue && !notes_direct_ignored(p, name)) {
             __atomic_or_fetch(&x->note_direct, (u8)(1u << (u32)bit), __ATOMIC_RELEASE);
-            if (x != current_thread()) {
+            // A masked note leaves its target asleep, as Linux's wants_signal does.
+            // A blocked thread's mask cannot change; a thread racing to unmask
+            // reaches a tail or a wait entry, and each reads the word.
+            if (x != current_thread() && !(x->note_mask & (1ull << (u32)bit))) {
                 irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
                 if (notes_direct_is_fatal(p, name)) {
                     struct Rendez *r = x->rendez_blocked_on;
