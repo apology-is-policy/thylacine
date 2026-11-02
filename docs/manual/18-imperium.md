@@ -82,6 +82,10 @@ workspace, so no program can read a key typed into a frozen prompt. The serial
 console reports `lictor: input withheld from the compositor`. Use a serial
 recovery session, or restart the machine.
 
+If Lictor itself exits, nothing restarts it, and the display stays dark until
+the machine restarts. The kernel cancels any pending request and returns the
+seat to normal, so a serial recovery session still works.
+
 The current QEMU backend uses a neutral dark background during authorization.
 The workspace is suspended from display and input while its panes remain alive.
 A blurred workspace snapshot is not yet provided by this backend.

@@ -2630,7 +2630,8 @@ static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
         }
     } else if (g_seat.phase != SEAT_NORMAL) {
         // A serial BREAK cannot redirect a live/failed graphical episode into
-        // a different medium. Recovery must first rebuild its trusted owner.
+        // a different medium. A live owner recovers its seat (RESTORED); a dead
+        // one's seat is already NORMAL.
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         return false;
     }
@@ -4236,9 +4237,19 @@ static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
         if (g_seat.phase != SEAT_NORMAL) proc_seat_fail_locked();
         g_seat.client = NULL;
     }
+    // The service is the seat's only owner, and nothing replaces it: warden
+    // leaves a persistent service unsupervised once it is READY. A seat left
+    // FAILED could never be restored, and it would refuse the serial BREAK for
+    // the boot. So its death fails the seat (cancelling the grant, scrubbing
+    // the secrets, closing the episode the seat opened) and then ends it as
+    // RESTORED from FAILED does, releasing nothing. A seat with no service
+    // routes no input and no frame, so NORMAL lends the client nothing.
     if (g_seat.service == p) {
         proc_seat_fail_locked();
         g_seat.service = NULL;
+        g_seat.phase = SEAT_NORMAL;
+        seat_zero(g_seat.held, sizeof(g_seat.held));
+        g_seat.masked_len = 0;
     }
     if (g_console_trusted_proc == p && g_seat.phase != SEAT_NORMAL)
         proc_seat_fail_locked();

@@ -205,6 +205,22 @@ The display is lost for the boot either way. Rejected:
 - giving input back, which lets any client that can hang the host GPU for 30 s
   receive a password typed into a frozen trusted prompt.
 
+**An owner that dies** (operator vote 36, 2026-10-29). Warden leaves Lictor
+unsupervised once it is READY, so nothing replaces a dead seat service, and a
+seat left failed would refuse the serial BREAK for the rest of the boot. The
+service's death therefore fails the seat -- the grant is cancelled, the secrets
+are scrubbed and an episode the seat opened is closed -- and then returns it to
+normal, as RESTORED from FAILED does, releasing nothing. A seat with no service
+routes no input and no frame, so a compositor that outlives the service gains
+nothing from it. A failed seat whose service lives still refuses the BREAK and
+recovers through RESTORED. The serial console is how the operator recovers
+from here; the display stays dark until a reboot. Rejected:
+- admitting the BREAK into a failed seat that has no service, which recovers
+  the same way but leaves the seat reading FAILED with no owner able to restore
+  it;
+- restarting Lictor and Tapestry after READY, which is a change to warden, and
+  rebuilding the GPU state after a restart is unproven.
+
 The
 current backend uses the neutral field because private workspace capture is not
 implemented. Serial authorization requires `thylacine.serial-sak=1`; the QEMU dev

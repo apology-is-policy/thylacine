@@ -38,7 +38,9 @@ deliberately NOT sealed: they are the kernel's attestation ABOUT a Proc, and bec
 `SYS_SET_DUMPABLE(0)` is an ungated one-way self-call, sealing them would have let an
 elevated Proc permanently suppress the kernel's record of its own elevation.) The
 SERVICE's death
-fails the seat and no process inherits its hardware ownership. The compositor's
+fails the seat and then returns it to NORMAL, releasing nothing, so the serial
+BREAK works again ([[dec-2026-10-29-seat-service-death]]); no process inherits
+its hardware ownership. The compositor's
 death fails the seat only while an episode is in progress; in the normal phase it
 just clears the client slot, so warden can seat a new one. `proc_seat_fail_locked`
 cancels the held grant, scrubs the key queue and closes the console episode ONLY

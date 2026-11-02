@@ -375,9 +375,10 @@ Bad peers, reserved IDs, malformed sequences, oversized frames and unsupported
 operations are refused. Transport EAGAIN retains partial progress. GPU ambiguity
 retains reservations instead of freeing potentially live backing. Failed takeover
 and stale or expired generations cancel the episode and recover as above. Owner
-death is different: a dead service leaves the seat failed until warden starts a
-new one, which must re-establish hardware ownership; no ordinary client
-inherits the seat. The ledger validates a request before it reserves an id, so
+death is different: nothing restarts a dead service (warden leaves a persistent
+service unsupervised once it is READY), so the kernel fails the seat and then
+returns it to normal, releasing nothing. The serial BREAK works again, the
+display stays dark for the boot, and no ordinary client inherits the seat. The ledger validates a request before it reserves an id, so
 a refused request leaves no reservation behind. A dead engine refuses every
 retirement (its pins stay) and fails every command that would reach the ring;
 queries the broker answers from its own state still answer, and seat traffic

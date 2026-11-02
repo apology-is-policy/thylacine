@@ -4264,25 +4264,34 @@ void test_cons_graphical_seat_service_death(void) {
     TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) != 0);
     struct Proc *service = __atomic_load_n(&g_seat_child, __ATOMIC_ACQUIRE);
     SEAT_CHECK(g_epd_state == 1 && service && proc_is_seat_service(service), "the child bound as the service");
+    SEAT_CHECK(proc_set_seat_client(f.owner) == 0, "a live compositor holds the client slot");
+    (void)proc_test_serial_sak(1);
+    // Control, one variable away: a FAILED seat whose service LIVES still
+    // refuses the serial BREAK -- it recovers through RESTORED -- so the
+    // BREAK below opens because the service died, not because FAILED stopped
+    // mattering.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "first episode");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && m.phase == SEAT_FAILED, "the live service fails it");
+    SEAT_CHECK(!proc_console_sak() && !cons_episode_active(),
+               "control: serial cannot take over a failed seat whose service lives");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL, "the live service restores it");
     SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode over a live service");
     __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE);
     SEAT_CHECK(epd_reap(pid) == pid, "reaped the service child");
     pid = -1;
     SEAT_CHECK(!cons_episode_active(), "the service's death closed its episode");
     seat_zero(&m, sizeof(m));
-    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_FAILED,
-               "Corvus reads a failed seat");
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_NORMAL,
+               "the service's death ends the seat: Corvus reads NORMAL");
     m.generation = generation;
     SEAT_CHECK(proc_seat_op(f.trusted, SEAT_RESTORED, &m) == -1 && proc_seat_op(f.owner, SEAT_RESTORED, &m) == -1,
-               "no survivor recovers an ownerless seat");
-    // The refusal must be the SEAT's: with the serial posture enabled, the
-    // same BREAK opens an episode the moment the seat is NORMAL again.
-    (void)proc_test_serial_sak(1);
-    SEAT_CHECK(!proc_console_sak() && !cons_episode_active(),
-               "and serial cannot take over a failed graphical seat");
-    proc_test_seat_reset();
-    SEAT_CHECK(proc_console_sak() && cons_episode_active(), "control: the same BREAK opens over a NORMAL seat");
-    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "control episode ends");
+               "no survivor speaks for the dead service");
+    SEAT_CHECK(proc_console_sak() && cons_episode_active(),
+               "the serial BREAK reaches the console with the service dead and its client alive");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "the serial episode ends");
 cleanup:
     if (pid > 0) { __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE); (void)epd_reap(pid); }
     (void)proc_test_serial_sak(1);

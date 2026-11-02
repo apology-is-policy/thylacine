@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-27
+updated: 2026-10-29
 ---
 ## Session registry retirement
 
@@ -131,7 +131,8 @@ exit and a kill alike:
 - clearing `g_console_owner`, `g_console_trusted_proc`, `g_console_renderer`
   and `g_init_proc` if this Proc held them, so none ever dangles;
 - the graphical seat's three arms, before the trusted-proc clear: the seat
-  SERVICE's death fails the seat; the compositor CLIENT's death fails it only
+  SERVICE's death fails the seat and then returns it to NORMAL, since nothing
+  replaces the service ([[dec-2026-10-29-seat-service-death]]); the compositor CLIENT's death fails it only
   mid-episode and otherwise just clears the slot; corvus's death fails it when
   an episode is in progress. A seat failure closes a console episode only when
   the seat opened it ([[sub-kernel-proc]]). The client and service arms are
