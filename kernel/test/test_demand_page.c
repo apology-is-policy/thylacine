@@ -273,12 +273,12 @@ void test_pgtable_install_user_pte_idempotent(void) {
 
     // Snapshot free pages — second identical install must not allocate
     // new sub-tables.
-    u64 free_before_second = phys_free_pages();
+    u64 free_before_second = test_free_pages_settled();
 
     rc = mmu_install_user_pte(p->as, proc_resource_exempt(p),
                               USER_VA, backing_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, 1, "idempotent second install returns 1: already there, nothing written");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before_second,
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before_second,
         "no buddy alloc on idempotent re-install");
 
     // Mismatching install (different PA) returns -1.
@@ -389,7 +389,7 @@ void test_demand_page_permission_denied(void) {
 void test_demand_page_lifecycle_round_trip(void) {
     // Snapshot before any allocation. proc_free + burrow_unref must
     // restore phys_free_pages to baseline.
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
 
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -426,7 +426,7 @@ void test_demand_page_lifecycle_round_trip(void) {
     // returns the 4 backing pages.
     burrow_unref(v);
 
-    u64 free_after = phys_free_pages();
+    u64 free_after = test_free_pages_settled();
     TEST_EXPECT_EQ(free_after, free_before,
         "phys_free_pages must return to baseline (no leak in demand-page "
         "lifecycle: VMA → burrow_release_mapping; sub-tables → "
@@ -1464,7 +1464,7 @@ void test_demand_page_lazy_zero_fill(void) {
 }
 
 void test_demand_page_lazy_decommit_refault(void) {
-    u64 free_before = phys_free_pages();
+    u64 free_before = test_free_pages_settled();
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
     struct Burrow *v = burrow_create_anon_lazy(FOUR_PAGES);
@@ -1503,7 +1503,7 @@ void test_demand_page_lazy_decommit_refault(void) {
 
     drop_proc(p);
     burrow_unref(v);
-    TEST_EXPECT_EQ(phys_free_pages(), free_before,
+    TEST_EXPECT_EQ(test_free_pages_settled(), free_before,
         "lazy fault + decommit + re-fault + teardown leaks no pages "
         "(sparse pages freed; sub-tables freed by proc_pgtable_destroy)");
 }
@@ -1886,8 +1886,7 @@ void test_demand_page_idle_image_reclaimed_under_pressure(void) {
 
     // The physical control (magazines drained): what the pool releases the
     // buddy must GAIN -- a strip that only uncharged would leave it where it was.
-    magazines_drain_all();
-    const u64 pf0 = phys_free_pages();
+    const u64 pf0 = test_free_pages_settled();
     const u32 ch0 = capacity_pool_charged();
 
     // Park the pool full: a user allocation must now be served by the reclaim,
@@ -1920,7 +1919,7 @@ void test_demand_page_idle_image_reclaimed_under_pressure(void) {
     magazines_drain_all();
     const u32 ch1 = capacity_pool_charged();
     TEST_ASSERT(ch1 + 2u <= ch0, "the image's two pages left the pool");
-    TEST_EXPECT_EQ(phys_free_pages(), pf0 + (u64)(ch0 - ch1),
+    TEST_EXPECT_EQ(test_free_pages_settled(), pf0 + (u64)(ch0 - ch1),
                    "CONTROL: the buddy gained exactly what the pool released -- the pages "
                    "were freed, not merely uncharged");
 

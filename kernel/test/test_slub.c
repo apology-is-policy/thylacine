@@ -23,7 +23,7 @@
 void test_slub_kmem_smoke(void) {
     static void *smalls[KMEM_SMOKE_SMALL_N];
 
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     // Many kmalloc(8) — exercises slab-fill across multiple slab
     // pages. 1500 / 512 = 2.93 slab pages allocated and drained.
@@ -60,8 +60,7 @@ void test_slub_kmem_smoke(void) {
     kmem_cache_free(c, t2);
     kmem_cache_destroy(c);
 
-    magazines_drain_all();
-    u64 after = phys_free_pages();
+    u64 after = test_free_pages_settled();
     TEST_ASSERT(after == baseline,
         "phys_free_pages drift: free count not restored after kmem smoke");
 }
@@ -103,7 +102,7 @@ void test_slub_kmalloc_overflow_guard(void) {
 // at create (pre-fix it built a cache with objects_per_slab == 0 whose
 // first alloc NULL-deref'd the empty freelist).
 void test_slub_cache_destroy_guards(void) {
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     // F-S1: a fresh cache; one partial slab; live-count tracks exactly.
     struct kmem_cache *c = kmem_cache_create("guard-typed", 48, 8, 0);
@@ -131,8 +130,7 @@ void test_slub_cache_destroy_guards(void) {
                 "align 8192 (> PAGE_SIZE) must be rejected, not yield a "
                 "0-object cache");
 
-    magazines_drain_all();
-    TEST_ASSERT(phys_free_pages() == baseline,
+    TEST_ASSERT(test_free_pages_settled() == baseline,
                 "phys_free_pages drift after destroy-guard test");
 }
 
@@ -149,7 +147,7 @@ void test_slub_cache_destroy_guards(void) {
 // Test runs in <50 ms on QEMU virt; well within the 10-s test
 // timeout.
 void test_slub_leak_10k(void) {
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     for (unsigned i = 0; i < 10000; i++) {
         void *p = kmalloc(64, 0);
@@ -157,9 +155,8 @@ void test_slub_leak_10k(void) {
         kfree(p);
     }
 
-    magazines_drain_all();
 
-    u64 after = phys_free_pages();
+    u64 after = test_free_pages_settled();
     TEST_ASSERT(after == baseline,
         "phys_free_pages drift after 10000-iter kmalloc/kfree");
 }

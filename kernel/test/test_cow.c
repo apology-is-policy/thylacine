@@ -231,11 +231,9 @@ void test_burrow_lazy_free_is_conditional_on_share(void) {
     TEST_ASSERT(pa != NULL, "run A: populate");
     TEST_EXPECT_EQ((u64)cow_page_share_for_test(pa), 1ull,
                    "populate establishes the page as solely held");
-    magazines_drain_all();
-    u64 before_a = phys_free_pages();
+    u64 before_a = test_free_pages_settled();
     burrow_unref(va);
-    magazines_drain_all();
-    u64 delta_a = phys_free_pages() - before_a;
+    u64 delta_a = test_free_pages_settled() - before_a;
 
     // Run B -- co-held, as a fork's second Burrow would hold it. Identical
     // teardown, so the filepages[] kfree contributes identically and cancels.
@@ -244,11 +242,9 @@ void test_burrow_lazy_free_is_conditional_on_share(void) {
     TEST_ASSERT(pb != NULL, "run B: populate");
     cow_page_get(pb);                       // the simulated co-holder
     TEST_EXPECT_EQ((u64)cow_page_share_for_test(pb), 2ull, "run B is co-held");
-    magazines_drain_all();
-    u64 before_b = phys_free_pages();
+    u64 before_b = test_free_pages_settled();
     burrow_unref(vb);
-    magazines_drain_all();
-    u64 delta_b = phys_free_pages() - before_b;
+    u64 delta_b = test_free_pages_settled() - before_b;
 
     // THE claim: the co-held teardown returns exactly one page FEWER. Stated as
     // the difference so nothing depends on what else the teardown frees.
@@ -939,8 +935,7 @@ static void f20_last_share_probe(struct Proc *p, struct page *original) {
     // the drain and the sample.
     vma_drain_in(g_f20_parent->as);
     g_f20_share_after_drain = cow_page_share_for_test(original);
-    magazines_drain_all();
-    g_f20_free_at_probe = phys_free_pages();
+    g_f20_free_at_probe = test_free_pages_settled();
 }
 
 void test_cow_break_copy_last_share_frees_after_the_replace(void) {
@@ -986,8 +981,7 @@ void test_cow_break_copy_last_share_frees_after_the_replace(void) {
                    "at the probe, the other holder gone, the copy's own share is the LAST -- "
                    "held through the drain (put early, the drain would have freed the "
                    "original under the child's live read-only leaf)");
-    magazines_drain_all();
-    TEST_EXPECT_EQ(phys_free_pages(), g_f20_free_at_probe + 1ull,
+    TEST_EXPECT_EQ(test_free_pages_settled(), g_f20_free_at_probe + 1ull,
                    "after the replace the last share's put returned the original to the "
                    "buddy, exactly once");
 

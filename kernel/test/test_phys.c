@@ -30,8 +30,7 @@ void test_phys_alloc_smoke(void) {
     // two pages, leaving ~5 pages resident at test entry. Without a
     // pre-drain, the post-drain comparison reads HIGHER than baseline
     // by the resident count and the test reports false drift.
-    magazines_drain_all();
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     // Order-0 (4 KiB) allocations — exercises magazine[0] refill/drain.
     for (int i = 0; i < SMOKE_N; i++) {
@@ -54,9 +53,8 @@ void test_phys_alloc_smoke(void) {
 
     // Drain magazines so the comparison is exact (otherwise the
     // refill residency holds 7-8 pages per magazine).
-    magazines_drain_all();
 
-    u64 after = phys_free_pages();
+    u64 after = test_free_pages_settled();
     TEST_ASSERT(after == baseline,
         "phys_free_pages drift: free count not restored after smoke");
 }
@@ -80,8 +78,7 @@ void test_phys_leak_10k(void) {
     // Same robustness rule as alloc_smoke: drain pre-baseline so the
     // post-drain comparison is exact regardless of resident magazine
     // pages at test entry.
-    magazines_drain_all();
-    u64 baseline = phys_free_pages();
+    u64 baseline = test_free_pages_settled();
 
     for (unsigned i = 0; i < 10000; i++) {
         struct page *p = alloc_pages(0, KP_ZERO);
@@ -89,9 +86,8 @@ void test_phys_leak_10k(void) {
         free_pages(p, 0);
     }
 
-    magazines_drain_all();
 
-    u64 after = phys_free_pages();
+    u64 after = test_free_pages_settled();
     TEST_ASSERT(after == baseline,
         "phys_free_pages drift after 10000-iter alloc/free");
 }
@@ -176,9 +172,6 @@ void test_phys_drain_meets_live_owners(void) {
     u32 left = __atomic_load_n(&g_dmo_running, __ATOMIC_ACQUIRE);
     for (unsigned i = 0; i < DMO_OWNERS; i++)
         test_kthread_join_free(t[i], &g_dmo_exited[i]);
-    // The next test's gauge reads the buddy without draining first: leave none of
-    // the owners' pages, or their freed stacks, in a magazine.
-    magazines_drain_all();
 
     TEST_EXPECT_EQ(left, 0u, "every owner must finish its churn");
     TEST_ASSERT(drains > 0, "the drainer never drained");

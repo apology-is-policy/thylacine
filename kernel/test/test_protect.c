@@ -386,8 +386,7 @@ void test_protect_seal_lowers_ceiling(void) {
 }
 
 void test_protect_split_three_way_then_merge(void) {
-    magazines_drain_all();
-    u64 free0  = phys_free_pages();
+    u64 free0  = test_free_pages_settled();
     u64 vmas0  = vma_total_allocated() - vma_total_freed();
 
     struct Proc *p = mk();
@@ -444,8 +443,7 @@ void test_protect_split_three_way_then_merge(void) {
     TEST_EXPECT_EQ(p->as->vma_count, 1u,       "count follows the merge");
 
     drop(p);
-    magazines_drain_all();
-    TEST_EXPECT_EQ(phys_free_pages(), free0, "no page leaked across split + merge + teardown");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free0, "no page leaked across split + merge + teardown");
     TEST_EXPECT_EQ(vma_total_allocated() - vma_total_freed(), vmas0, "no Vma struct leaked");
 }
 
@@ -722,8 +720,7 @@ void test_cow_clone_refuses_eager_anon_with_writable_ceiling(void) {
 }
 
 void test_sys_burrow_detach_piece_frees_only_its_pages(void) {
-    magazines_drain_all();
-    u64 free0 = phys_free_pages();
+    u64 free0 = test_free_pages_settled();
 
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -763,8 +760,7 @@ void test_sys_burrow_detach_piece_frees_only_its_pages(void) {
     TEST_EXPECT_EQ(count_vmas(p->as), 0u, "nothing mapped");
 
     drop(p);
-    magazines_drain_all();
-    TEST_EXPECT_EQ(phys_free_pages(), free0, "every page came back");
+    TEST_EXPECT_EQ(test_free_pages_settled(), free0, "every page came back");
 }
 
 // =============================================================================

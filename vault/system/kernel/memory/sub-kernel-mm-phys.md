@@ -397,7 +397,9 @@ trip with no drain reads 8 short on a kernel with no leak when the test's CPU st
 with an empty magazine: forcing that gave `free_before=487439 free_after=487431`, with
 the leak test's message. One boot's suite likely died this way (2026-11-02; that boot
 printed no numbers). The kernel tests' exact round trips use `test_free_pages_settled`,
-which drains first; a peer refilling during the drain still leaves a narrow window.
+which drains and reads until two reads agree, so a peer's refill during a walk does not
+count and a real leak still reads short. A peer holding a page across a test still does;
+only stopping the peers would remove that. `test_burrow` keeps its raw read and a stated slop.
 
 **The earlier draft of the same test was worse — it passed.** It asserted
 on `PG_FREE`, which is unusable here because the buddy's coalesce anchors

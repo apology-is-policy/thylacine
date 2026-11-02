@@ -3507,8 +3507,18 @@ volatile unsigned    g_test_proc_wait_timeouts;
 const char *volatile g_test_proc_wait_what;
 
 u64 test_free_pages_settled(void) {
+    // A peer can refill a set this walk has already passed, so one drained read
+    // can be short. A real leak stays short on every read, so two agreeing reads
+    // keep it red. The bound only stops a peer that never pauses.
     magazines_drain_all();
-    return phys_free_pages();
+    u64 count = phys_free_pages();
+    for (int i = 0; i < 16; i++) {
+        magazines_drain_all();
+        u64 again = phys_free_pages();
+        if (again == count) break;
+        count = again;
+    }
+    return count;
 }
 
 bool test_all_passed(void) {
