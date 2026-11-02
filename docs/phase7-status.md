@@ -2859,3 +2859,40 @@ there runs longer. Code eb8e8b807.
   nora's `END_GRACE` was sized on gopls); F7 this section and the journal entry.
 - **Lesson.** A bound verified only on the servers the image carried is unverified: every gate before this ran with
   clangd absent, and the skip read as green.
+
+## The corona join: aux-3 carries env-a and env-c — 2026-10-29 (landed 2026-11-02)
+
+aux-3 merged corona/async-memory at its pushed tip c38f1cb1f (corona confirmed the tip on yip 0272): the spawn
+environment tail (`SPAWN_EXT_ENV`, `SYS_SPAWN_FULL_ARGV` ext bit 2) and pouch 0064 (`posix_spawn` with a NULL envp gives
+an empty environment). On aux-3-join in the c7probe tree, built in the reap tree.
+`vault/record/changes/chg-2026-10-29-aux-corona-join.md`.
+
+- **The merge** (f7c4b5e14). Thirty conflicts, each read. `struct Proc` 504; one `SPAWN_PERM_ALL` assert; pouch series
+  0050, 0064, 0065, 0066; JOURNAL and this file interleaved by date with every header kept. Every `posix_spawn` in the
+  merged tree already passes `environ`, so 0064's NULL rule changes nothing in tree.
+- **Three seams no conflict marked.** Fourteen raw `c->lock` sites in corona's private-progress paths and four raw
+  `g_proc_table_lock` sites: all converted to the deferring helpers, and `tools/check-lock-helpers.py` (a68fc0eca, run by
+  `build.sh`) fails any raw site. The first compile found the third: Astra's protocol index embeds 64
+  `struct poll_waiter` and asserted one page, and the poll chunk's `prev` link made it 4176 bytes; it is now charged by
+  its buddy footprint, two pages, one more 4 KiB per private service Loom (842c0c908). A sweep found no other corona-side
+  fixed-size allocation holding a grown struct outside a static assert.
+- **Declarations** (69dcfcdd6). The C7 and poll test hooks follow corona's votes 19/20; `test_registry.h` gained aux's 29.
+- **Audit r1** (Fable 5.1, start == end; f7c4b5e14..a68fc0eca): 0/0/0/2, fixed (f3f5b4b7b). F1: the pts interaction woke
+  binding pollers under the table lock; the wakes now follow each holder's release (`struct pts_wakes`). F2: the
+  checker's blind spots.
+- **Audit r2** (Fable 5.1, start == end; f3f5b4b7b + 842c0c908, owed because F1 moved a wake): 0/0/0/4, fixed (009d20767,
+  tests and tooling only). The F1 test's fixture leak on an early assert; the checker's header-member, parenthesised,
+  cast and header-inline blind spots; its two exempted lock-word writes; a witness that the index charge equals
+  kmalloc's real order (`loom.metadata_charge_matches_kmalloc_order`).
+- **Gates on 842c0c908.** Suite and regreen 2150 / 0 with identical ELFs; the probe's threads leg, the three pouch mask
+  legs and corona's env witnesses pass; check-decls and check-production PASS; `specs/check-poll.sh` all as claimed; SJ1
+  and SJ2 red (`poll_deferred_await inside a deferring lock`), SJ4 red; SMP gate default-smp1/4/8 + ubsan-smp4/8 each
+  10/10, 0 corruption.
+- **Gates on 009d20767.** Suite 2151 / 0 with every marker; check-decls and check-production PASS; SJ3a, SJ3b and SJ5 red
+  on their named assertions; regreen ELF identical. Production kernel ELF byte-identical to 842c0c908's
+  (`1cba396bb13fcd39`), so the SMP result covers the production code exactly; the reworked and new tests had one suite
+  and no SMP run.
+- **Still open, owned.** The F1 test's cleanup on an early assert has not executed (`fnd-aux-corona-join-r2-f1`): a
+  planted early failure, queued for aux's next Mac lease. corona/env-shapes and async-memory's later commits are a second
+  join; corona takes the lock conversions, the pts wakes and 842c0c908 from aux-3. The C7 residue stands as recorded
+  above (`seam-dirent-type-is-qid-type`, Ambush, the Go fork's minit comment, the ELF hash).

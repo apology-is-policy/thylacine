@@ -159,6 +159,21 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 tools/check-decls.py --build-dir build/kernel    # 0 ok; non-zero on a violation or a tree it cannot read
 tools/check-decls.py --self-test                 # each rule turns red on a seeded case
 
+# Deferring-lock helpers (aux, the corona join, 2026-10-29). Three locks defer or
+# owe hook walks (specs/poll_defer.tla, poll_owed.tla) and work only if every
+# acquire and release goes through the helper: a raw release after the helper's
+# acquire compiles, passes, and loses the walks the thread defers after it. The
+# join merged eighteen such sites with no conflict. FATAL in build.sh, textual
+# (comments and literals blanked, calls matched across lines, headers read;
+# client names derived from their declarations), self-test first: a planted raw
+# site per file, split over lines, through an alias, a _raw variant, a store to
+# .value, a re-init, just past a helper's closing brace, a client lock through a
+# header member, parenthesised, cast, or in a header inline, each red; comment,
+# string, .value-read and own-lock controls green; each helper renamed, red; and
+# load() must return the client header:
+tools/check-lock-helpers.py                      # 0 ok; names each raw site
+tools/check-lock-helpers.py --self-test
+
 # Kernel-to-userspace prot-bit mirror (corona, 2026-10-07). Userspace cannot
 # include a kernel header, so VMA_PROT_* and BURROW_PROT_* are RETYPED in
 # usr/lib/libt and usr/lib/libthyla-rs behind a comment asking the author to keep

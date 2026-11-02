@@ -24,10 +24,13 @@ Read it WITH two standing facts about this surface:
   found the seam, not a new bug.
 
 <!-- generated:begin -->
-18 closed findings on [[sub-kernel-poll]] — do NOT re-report
+21 closed findings on [[sub-kernel-poll]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
+- [[fnd-aux-corona-join-r1-f2]] [P3] check-lock-helpers missed multi-line calls, aliases, the _raw variants and client locks in other files (fixed)
+- [[fnd-aux-corona-join-r2-f2]] [P3] check-lock-helpers missed a client lock through a header member, parenthesised, or in a header (fixed)
+- [[fnd-aux-corona-join-r2-f3]] [P3] check-lock-helpers exempted two shapes that write a deferring lock's word (fixed)
 - [[fnd-b0poll-r5-f1]] [P1] A noise-driven poll(-1) holds its CPU IRQ-masked for as long as the noise lasts, and the noise is unprivileged (fixed) — FIXED at the time with a per-thread spin budget (`nsleeps`) plus a 1 ms
 - [[fnd-b0poll-r6-s1]] [P1] Two masked pollers on one CPU hand it to each other through sched() inside the masked syscall, so a per-thread sleep bound never unmasks the CPU (fixed) — FIXED by [[chg-2026-09-22-poll-preemption-point]]: the backstop is deleted and
 - [[fnd-b0poll-r7-f3]] [P2] Both point tests stay GREEN with sched_preempt_point's body replaced by `return;` -- the test pollers are kthreads, so the unmask is inert (fixed) — FIXED by `sched.preempt_point_takes_a_pending_irq`: mask with

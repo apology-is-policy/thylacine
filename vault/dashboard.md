@@ -127,6 +127,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-29 [[chg-2026-10-29-aux-corona-join]] — The corona join: aux-3 carries env-a and env-c, and every deferring lock is taken through its helper
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7-close]] — Thread-model C7 close: round 2, the C11 join fix, the final gates
 - 2026-10-29 [[chg-2026-10-29-thread-model-c7]] — Thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 - 2026-10-28 [[chg-2026-10-28-poll-hook-walks]] — Hook walks are batched, and none runs under its owner's lock (poll chunk, votes 12 + 13)
@@ -134,5 +135,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-22 [[chg-2026-10-22-thread-cap-live]] — The thread cap charges live threads (thread-model C1, vote 7)
 - 2026-10-22 [[chg-2026-10-22-thread-model-c1]] — Thread-model C1: an exited user thread is freed by the resume path of its last switch-out
 - 2026-10-22 [[chg-2026-10-22-thread-model-c3]] — Thread-model C3: each Proc's threads under their own lock
-- 2026-10-21 [[chg-2026-10-21-thread-model-c7a]] — Thread-model C7a: the debug focus falls back to main, never the newest thread
 <!-- generated:end -->

@@ -22,6 +22,67 @@ needed the operator.
 
 
 ---
+## 2026-10-29 (aux, Opus 5.5 1M) -- the corona join: aux-3 carries env-a and env-c; the merge hid three seams
+
+aux-3 merged corona/async-memory at its pushed tip c38f1cb1f for env-a + env-c (yip 0267, 0272; corona confirmed the
+tip at 16:04Z), on aux-3-join in the c7probe tree, built in the reap tree. The gates finished 2026-10-29 18:33Z; the
+landing commit after 009d20767 went to aux-3 and GitHub on 2026-11-02, for the reason under "What I got wrong".
+
+**Thirty conflicts were the easy part.** Each was read and resolved: `struct Proc` 504 (456 + D7's ledger 16 +
+`child_owed` 32), one `SPAWN_PERM_ALL` assert, pouch series 0050, 0064, 0065, 0066, JOURNAL / phase7-status interleaved
+by date with every header kept (406 and 57 = ours + theirs - base). The NULL-envp sweep found every `posix_spawn` in
+the merged tree already passing `environ`, so pouch 0064's empty-environment rule changes nothing in tree.
+
+**The merge hid three seams no conflict marked.** Two were the poll chunk's deferring locks: corona's private-progress
+code took `c->lock` raw fourteen times -- one inside `submit_async`, which poll-e had moved to `client_lock`, so the
+raw release left `defer_depth` raised -- and `g_proc_table_lock` raw four times. Both read as correct code on either
+branch alone. All eighteen now take the helpers, and `tools/check-lock-helpers.py` (a68fc0eca) fails any raw site.
+The third surfaced only at the first compile (842c0c908): Astra's protocol index embeds 64 `struct poll_waiter` and
+was sized to one 4096-byte page at 32 bytes a hook; the poll chunk's `prev` link made it 4176. It is now charged by
+its buddy footprint, the pattern the same function uses for its other tables. A sweep found no other corona-side
+fixed-size allocation holding a struct aux grew outside a static assert.
+
+**The audit.** Fable r1 (5.1, start == end): 0/0/0/2. F1: corona's pts interaction woke binding pollers under
+`g_proc_table_lock` -- the walk vote 13 removed -- now carried out of each holder in a `struct pts_wakes` of u8 pool
+slots (a list of pointers would have put 520 bytes on the exit and exec frames). F2: the checker's first form missed
+multi-line calls, aliases, `_raw` variants and client locks outside `9p_client.c`. F1 moved a wake, so round 2 was owed
+on the fixes: 0/0/0/4, all fixed in 009d20767 -- the F1 test leaked its fixture on an early assert; the checker still
+missed a client lock through a header member, parenthesised, cast or in a header, and exempted two shapes that write
+the table lock's word; nothing pinned the index charge to kmalloc's real order. The header plant "passed" the old
+checker too, because a planted header joins the sources whatever `load()` reads, so the self-test now asserts `load()`
+returns the client header, and it goes red with header scanning removed. I took the checker change over the
+reviewer's field rename because the rename would have changed production code after the SMP gate had run on it.
+
+**What the sabotages said.** SJ1 and SJ2 (a raw client unlock in the private-progress paths) extinct `poll_deferred_await
+inside a deferring lock` in `loom.private_native_operations`: the seam has a runtime witness, by a different guard than
+the `thread_free` one my runner was counting. SJ4 (the index charged one page) reds `loom.private_slot_owner`. SJ3a and
+SJ3b put the pts wake back in its pre-F1 place, one path each, and each reds the F1 test on that path's own assertion.
+SJ5 (kmalloc over-allocating two-page requests) reds the new charge test, on the pool table, first in its order of the
+two-page sizes.
+
+**Gates** (`~/projects/aux-gate/join/runs/summary.txt`). On 842c0c908: ci bake, suite and regreen 2150 tests / 0 fails
+with identical ELFs, the C7 and env markers, `specs/check-poll.sh` all as claimed, SMP gate default-smp1/4/8 +
+ubsan-smp4/8 each 10/10, 0 corruption. On 009d20767: suite 2151 / 0 with every marker, check-decls and check-production
+PASS, regreen ELF identical. The production kernel ELF is byte-identical between the two (`1cba396bb13fcd39`), so the
+SMP result covers the production code exactly; the reworked and new tests had one suite and no SMP run. Owed: the F1
+test's cleanup on an early assert has not executed, since SJ3a/b fail at its last asserts; a planted early failure is
+queued for my next lease.
+
+**What I got wrong.** The first SJ3 was a broken sabotage: an inline `pti_wake` inside the invalidate's `g_pts_lock`
+loop retakes that lock, so the boot hung in an earlier test for 300 s and never reached the F1 test. Its rc=1 read as
+red; asserting which message fired is what showed otherwise. I declared the SMP gate at 50 minutes; it is 50 boots of
+about two minutes, and I re-stated the lease at 17:15Z. I told the operator the tests with no same-line verdict were
+"gated off"; measured, all 2151 started and none failed, and the difference was my pattern. My first checker loop
+under zsh passed `"name --self-test"` as one filename, so five checkers "failed" with rc 2.
+
+And the lease. `run-final.sh` ended at 18:33:56Z with no release in it, relying on me to read the monitor. The session
+stopped there, so the Mac showed EXPIRED under my name until 2026-11-02 08:03Z (87.9 h held), and the landing waited
+too. No ref in the repo moved in that time and nobody was queued at the release, so I have no evidence it held anyone
+up, and none that it did not: corona had been queued behind me at 17:15Z. A chained last runner should release the
+lease itself.
+
+Evidence: memory design_aux_corona_join.md and audit_aux_corona_join_closed_list.md.
+
 ## 2026-10-29 (aux, Opus 5.5 1M) -- thread-model C7: one first entry, per-thread /proc, a new thread inherits its creator's mask
 
 The overhaul's last chunk, run across three compactions. C7b routes every first entry to EL0 through the shared

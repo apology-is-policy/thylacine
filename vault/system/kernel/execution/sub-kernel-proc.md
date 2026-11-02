@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-28
+updated: 2026-11-02
 ---
 ## Session posting ownership
 
@@ -586,7 +586,12 @@ a release may RETAKE the lock: no caller holds a lock ordered after it across a
 release. The reap (`proc_unlink_child`) cancels a Proc's two records under the
 lock; `proc_free` extincts on a record still chained and waits (yielding the
 CPU) until no walk's bookmark is on `child_waiters` or the notes poll list --
-the pin that replaces the lock's coverage of the walk.
+the pin that replaces the lock's coverage of the walk. The corona join converted corona's raw sites (the SQPOLL ticket's
+charge and release walks, `proc_console_renderer_held`, `proc_pts_interaction`;
+[[chg-2026-10-29-aux-corona-join]]), and `tools/check-lock-helpers.py` fails any
+mention of `g_proc_table_lock` outside the two wrappers bar its definition and an
+`__atomic_load_n` of its word. The lock is statically initialised, so a
+`spin_lock_init` of it -- like a store to `.value` -- would release it, and fails.
 
 Two locks. [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
 and exposed only as an acquire/release pair, guards the children lists, the

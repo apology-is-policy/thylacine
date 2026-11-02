@@ -3,13 +3,13 @@ id: sub-kernel-poll
 type: sub
 parent: moc-kernel-ipc-wake
 title: "poll — one thread waiting on N readiness sources"
-code: ["kernel/poll.c", "kernel/include/thylacine/poll.h"]
+code: ["kernel/poll.c", "kernel/include/thylacine/poll.h", "kernel/test/test_poll.c"]
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-poll-walk, spec-poll-owed, spec-poll-defer, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-10-29
+updated: 2026-11-02
 ---
 ## Purpose
 
@@ -335,7 +335,16 @@ inc-not-zero; the drainer's last put may free the owner, as
 role lists, a Loom's CQ list, the test loopback/mq -- each free calls
 `poll_deferred_await` once nothing can post (spin until off every chain, then
 until no bookmark; extincts inside a deferring lock or on a record its own chain
-holds).
+holds). Both locks, and `g_proc_table_lock` ([[sub-kernel-proc]]), are taken only
+through their helpers: `tools/check-lock-helpers.py` (run by `build.sh`,
+self-testing) fails any other mention of the two named locks (a `.value` read
+and one boot init excepted), any `spin_*` call in `9p_client.c` outside
+`client_lock` / `client_unlock`, and any `NAME->lock` of a client-typed name --
+declared in the file, a header member, or a cast -- in any other kernel file or
+header, because a raw
+release after the helper's acquire leaves `defer_depth` raised and the walks the
+thread defers after it never run. The corona join merged eighteen such sites
+without a textual conflict ([[chg-2026-10-29-aux-corona-join]]).
 
 **Every wait yields the CPU** (audit [[adt-pollwalk-r1]] F1). The walker of an
 owed or deferred walk is preemptible and may sit runnable on a CPU's run tree
