@@ -27,6 +27,18 @@
 (* tail delivered it) and a later note of the family must still reach     *)
 (* that holder.                                                            *)
 (*                                                                         *)
+(* A THREAD-DIRECTED note (operator vote 5, 2026-10-21; thread-model C4:    *)
+(* tkill, tgkill, pthread_kill) has one taker, so none of the above applies *)
+(* to it: it sits on the target's own word (dq, Thread.note_direct), takes  *)
+(* no claim and needs no walk, and the post rouses the target itself. The   *)
+(* target's tail takes it before anything queued. Under a mask it waits for *)
+(* that thread's unmask, whatever its peers have masked. DIRECT_FATAL makes *)
+(* the note one whose default ends the Proc: then any wait ends for it, not *)
+(* only an unwinding one, and the tail runs the group's one death. With     *)
+(* MAX_DIRECT = 0 none of this is reachable and the process-directed state  *)
+(* space is the one the older cfgs pin, so a changed count there means the  *)
+(* extension disturbed the protocol above.                                  *)
+(*                                                                         *)
 (* What is abstracted:                                                     *)
 (*   - One note family. A tail delivers at most one note (one handler) and *)
 (*     the handler runs at EL0 until rt_sigreturn (inh). Discarded notes   *)
@@ -70,6 +82,9 @@
 (*   NoStrand    -- a note queued forever means no thread stays a          *)
 (*       candidate to take it: while any thread could take it soon, some  *)
 (*       thread eventually does.                                           *)
+(*   NoStolenDirect -- a thread-directed note runs on its target alone.    *)
+(*   NoDirectStrand -- a direct note pending forever means its target does *)
+(*       not stay able to take it.                                         *)
 (*                                                                         *)
 (* Knobs, each a defect the design must not have:                          *)
 (*   BUGGY_NO_HANDOFF         -- a designee keeps its designation into a   *)
@@ -90,13 +105,27 @@
 (*   BUGGY_STALE_KEEPS        -- a designee entering an unwinding wait     *)
 (*       keeps a designation it cannot unwind for, masked or in a handler  *)
 (*       (NoStrand).                                                       *)
+(*   BUGGY_DIRECT_TO_QUEUE    -- a direct post goes on the process queue,  *)
+(*       which is what tkill did until C4 (NoStolenDirect).                *)
+(*   BUGGY_DIRECT_NEEDS_CLAIM -- a direct note unwinds its target only if  *)
+(*       the family is open, so a peer's claim blocks it (NoDirectStrand). *)
+(*   BUGGY_DIRECT_CLAIMS      -- a direct unwind takes the family's claim  *)
+(*       although a peer may hold it (OneClaimant).                        *)
+(*   BUGGY_DIRECT_NO_ROUSE    -- the post leaves a blocked target asleep   *)
+(*       (NoDirectStrand).                                                 *)
+(*   BUGGY_DIRECT_NO_OBSERVE  -- a thread entering a wait does not read    *)
+(*       its word after registering (I-9; NoDirectStrand).                 *)
+(*   BUGGY_FATAL_UNWINDS_ONLY -- a fatal direct note ends only an unwinding*)
+(*       wait, as a caught one does (NoDirectStrand).                      *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Threads, MAX_POSTS, MAX_WAITS, NONE,
+CONSTANTS Threads, MAX_POSTS, MAX_WAITS, MAX_DIRECT, DIRECT_FATAL, NONE,
           BUGGY_NO_HANDOFF, BUGGY_UNLOCKED_DESIGNATE, BUGGY_NO_REKICK,
           BUGGY_DOUBLE_DESIGNATE, BUGGY_EXIT_KEEPS, BUGGY_RELEASE_NO_WAKE,
-          BUGGY_IRQ_NO_NOTES, BUGGY_STALE_KEEPS
+          BUGGY_IRQ_NO_NOTES, BUGGY_STALE_KEEPS,
+          BUGGY_DIRECT_TO_QUEUE, BUGGY_DIRECT_NEEDS_CLAIM, BUGGY_DIRECT_CLAIMS,
+          BUGGY_DIRECT_NO_ROUSE, BUGGY_DIRECT_NO_OBSERVE, BUGGY_FATAL_UNWINDS_ONLY
 
 ASSUME NONE \notin Threads
 
@@ -126,10 +155,18 @@ VARIABLES ts,        \* per-thread state
           wpick,     \* NONE, or the candidate Walk1 picked for Walk2
           nwait,     \* waits the thread's current call has entered
           wskip,     \* NONE, or the releaser the owed walk skips
-          wcur       \* the skip of the walk in flight (for its re-pick)
+          wcur,      \* the skip of the walk in flight (for its re-pick)
+          dq,        \* a thread-directed note is pending on the thread's word
+          dposted,   \* thread-directed notes posted so far
+          dtgt,      \* ghost: NONE, or the target of a direct post the buggy
+                     \* cfg put on the queue
+          stolen     \* ghost: a direct note ran on a thread it did not name
 
 vars == <<ts, masked, inh, woken, des, own, q, posted, walkOwed, wpick, nwait,
-          wskip, wcur>>
+          wskip, wcur, dq, dposted, dtgt, stolen>>
+
+\* The fields of the direct extension, for actions it does not touch.
+dvars == <<dq, dposted, dtgt, stolen>>
 
 Claimed  == des \cup own
 Open     == Claimed = {}
@@ -149,16 +186,38 @@ Unwind(t) == /\ own'   = own \cup {t}
              /\ ts'    = [ts EXCEPT ![t] = IF t \in own THEN "deliver" ELSE "unwound"]
              /\ woken' = [woken EXCEPT ![t] = FALSE]
 
+\* The target's own note ends the wait it is entering or blocked in. A caught
+\* one follows the caught gates: the mask, and no handler running. A fatal one
+\* follows thread_die_pending, which asks the mask alone.
+DirectEnds(t) == /\ dq[t] /\ ~masked[t]
+                 /\ DIRECT_FATAL \/ ~inh[t]
+                 /\ BUGGY_DIRECT_NEEDS_CLAIM => (t \in Claimed \/ Open)
+
+\* A direct unwind takes no claim: nobody else could have taken the note. A
+\* caught one returns through the flush path, a fatal one straight to the tail.
+\* A designation it holds stays until the tail, where it always ends.
+UnwindDirect(t) == /\ ts'    = [ts EXCEPT ![t] = IF DIRECT_FATAL THEN "deliver" ELSE "unwound"]
+                   /\ woken' = [woken EXCEPT ![t] = FALSE]
+                   /\ own'   = IF BUGGY_DIRECT_CLAIMS THEN own \cup {t} ELSE own
+                   /\ des'   = des
+
+\* A fatal note ends a hold wait too.
+HoldEnds(t) == DIRECT_FATAL /\ ~BUGGY_FATAL_UNWINDS_ONLY /\ dq[t] /\ ~masked[t]
+
 TypeOK == /\ ts \in [Threads -> States]
           /\ masked \in [Threads -> BOOLEAN]
           /\ inh \in [Threads -> BOOLEAN]
           /\ woken \in [Threads -> BOOLEAN]
           /\ des \subseteq Threads /\ own \subseteq Threads
-          /\ q \in 0..MAX_POSTS /\ posted \in 0..MAX_POSTS
+          /\ q \in 0..(MAX_POSTS + MAX_DIRECT) /\ posted \in 0..MAX_POSTS
           /\ walkOwed \in BOOLEAN
           /\ wpick \in Threads \cup {NONE}
           /\ nwait \in [Threads -> 0..MAX_WAITS]
           /\ wskip \in Threads \cup {NONE} /\ wcur \in Threads \cup {NONE}
+          /\ dq \in [Threads -> BOOLEAN]
+          /\ dposted \in 0..MAX_DIRECT
+          /\ dtgt \in Threads \cup {NONE}
+          /\ stolen \in BOOLEAN
 
 Init == /\ ts = [t \in Threads |-> "user"]
         /\ masked = [t \in Threads |-> FALSE]
@@ -169,6 +228,8 @@ Init == /\ ts = [t \in Threads |-> "user"]
         /\ walkOwed = FALSE /\ wpick = NONE
         /\ nwait = [t \in Threads |-> 0]
         /\ wskip = NONE /\ wcur = NONE
+        /\ dq = [t \in Threads |-> FALSE]
+        /\ dposted = 0 /\ dtgt = NONE /\ stolen = FALSE
 
 -----------------------------------------------------------------------------
 \* The environment: a child exits, a key is pressed.
@@ -178,6 +239,28 @@ Post == /\ posted < MAX_POSTS
         /\ walkOwed' = TRUE
         /\ wskip' = NONE
         /\ UNCHANGED <<ts, masked, inh, woken, des, own, wpick, nwait, wcur>>
+        /\ UNCHANGED dvars
+
+\* tkill. The post holds the Proc's threads_lock, so an exited target is seen
+\* exactly and nothing is posted to it. It rouses the target under the target's
+\* wait_lock, where the target's entry to a wait publishes the wait and reads
+\* the word, so the two are atomic with respect to each other.
+PostDirect(t) == /\ dposted < MAX_DIRECT /\ ts[t] # "exited"
+                 /\ dposted' = dposted + 1
+                 /\ IF BUGGY_DIRECT_TO_QUEUE
+                       THEN /\ q' = q + 1
+                            /\ walkOwed' = TRUE
+                            /\ wskip' = NONE
+                            /\ dtgt' = t
+                            /\ UNCHANGED <<dq, woken>>
+                       ELSE /\ dq' = [dq EXCEPT ![t] = TRUE]
+                            /\ woken' = IF BUGGY_DIRECT_NO_ROUSE THEN woken
+                                        ELSE [woken EXCEPT ![t] =
+                                                @ \/ ts[t] = "uwait"
+                                                  \/ (ts[t] = "hwait" /\ DIRECT_FATAL
+                                                      /\ ~BUGGY_FATAL_UNWINDS_ONLY)]
+                            /\ UNCHANGED <<q, walkOwed, wskip, dtgt>>
+                 /\ UNCHANGED <<ts, masked, inh, des, own, posted, wpick, nwait, wcur, stolen>>
 
 \* The walk: re-wake the claim holders, then pick a candidate for an open
 \* family, skipping the releaser when a release owes the walk.
@@ -193,6 +276,7 @@ Walk1 == /\ walkOwed /\ wpick = NONE
          /\ wcur' = wskip
          /\ wskip' = NONE
          /\ UNCHANGED <<ts, masked, inh, des, own, q, posted, nwait>>
+         /\ UNCHANGED dvars
 
 \* Walk2's re-check, under the pick's wait_lock. The mask and the handler flag
 \* read exactly only while the pick is blocked (see the header).
@@ -214,6 +298,7 @@ Walk2 == /\ wpick \in Threads
                            ELSE IF walkOwed THEN NONE ELSE wcur
          /\ wpick' = NONE
          /\ UNCHANGED <<ts, masked, inh, own, q, posted, nwait, wcur>>
+         /\ UNCHANGED dvars
 
 -----------------------------------------------------------------------------
 \* A thread at EL0.
@@ -221,17 +306,20 @@ Syscall(t)   == /\ ts[t] = "user"
                 /\ ts' = [ts EXCEPT ![t] = "pre"]
                 /\ nwait' = [nwait EXCEPT ![t] = 0]
                 /\ UNCHANGED <<masked, inh, woken, des, own, q, posted, walkOwed, wpick, wskip, wcur>>
+                /\ UNCHANGED dvars
 
 \* rt_sigreturn: the handler ends, through the syscall tail.
 Sigreturn(t) == /\ ts[t] = "user" /\ inh[t]
                 /\ inh' = [inh EXCEPT ![t] = FALSE]
                 /\ ts' = [ts EXCEPT ![t] = "deliver"]
                 /\ UNCHANGED <<masked, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                /\ UNCHANGED dvars
 
 \* A tick or a kick: the IRQ-from-EL0 tail.
 Irq(t)       == /\ ts[t] = "user"
                 /\ ts' = [ts EXCEPT ![t] = IF BUGGY_IRQ_NO_NOTES THEN "user" ELSE "deliver"]
                 /\ UNCHANGED <<masked, inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                /\ UNCHANGED dvars
 
 \* A syscall body: a wait of either kind, a return, a mask change (which
 \* returns through the tail), or the thread's exit.
@@ -243,31 +331,39 @@ EnterUWait(t) == /\ ts[t] = "pre" /\ nwait[t] < MAX_WAITS
                  /\ IF t \in des /\ (masked[t] \/ inh[t]) /\ ~BUGGY_STALE_KEEPS
                        THEN /\ ts' = [ts EXCEPT ![t] = "uentry"]
                             /\ UNCHANGED <<woken, des, own>>
+                    ELSE IF DirectEnds(t) /\ ~BUGGY_DIRECT_NO_OBSERVE
+                       THEN UnwindDirect(t)
                     ELSE IF MayUnwind(t)
                        THEN Unwind(t)
                        ELSE /\ ts' = [ts EXCEPT ![t] = "uwait"]
                             /\ woken' = [woken EXCEPT ![t] = FALSE]
                             /\ UNCHANGED <<des, own>>
                  /\ UNCHANGED <<masked, inh, q, posted, walkOwed, wpick, wskip, wcur>>
+                 /\ UNCHANGED dvars
 
 EnterHWait(t) == /\ ts[t] = "pre" /\ nwait[t] < MAX_WAITS
                  /\ nwait' = [nwait EXCEPT ![t] = @ + 1]
-                 /\ ts' = [ts EXCEPT ![t] = IF t \in des /\ ~BUGGY_NO_HANDOFF
-                                              THEN "hentry" ELSE "hwait"]
+                 /\ ts' = [ts EXCEPT ![t] = IF t \in des /\ ~BUGGY_NO_HANDOFF THEN "hentry"
+                                            ELSE IF HoldEnds(t) /\ ~BUGGY_DIRECT_NO_OBSERVE
+                                                 THEN "deliver" ELSE "hwait"]
                  /\ UNCHANGED <<masked, inh, woken, des, own, q, posted, walkOwed, wpick,
                                  wskip, wcur>>
+                 /\ UNCHANGED dvars
 
 Return(t)     == /\ ts[t] = "pre"
                  /\ ts' = [ts EXCEPT ![t] = "deliver"]
                  /\ UNCHANGED <<masked, inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 
 Mask(t)       == /\ ts[t] = "pre" /\ t \notin own
                  /\ masked' = [masked EXCEPT ![t] = ~masked[t]]
                  /\ ts' = [ts EXCEPT ![t] = "deliver"]
                  /\ UNCHANGED <<inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 
 \* The EXITING commit, under the threads_lock (so never inside a walk). The
-\* exit call is a new syscall, so no claim of its own is held.
+\* exit call is a new syscall, so no claim of its own is held. A direct note
+\* still on its word goes with it.
 Exit(t)       == /\ ts[t] = "pre" /\ t \notin own /\ wpick = NONE
                  /\ ts' = [ts EXCEPT ![t] = "exited"]
                  /\ IF BUGGY_EXIT_KEEPS
@@ -277,28 +373,46 @@ Exit(t)       == /\ ts[t] = "pre" /\ t \notin own /\ wpick = NONE
                                /\ walkOwed' = (walkOwed \/ owes)
                                /\ wskip' = IF owes THEN NONE ELSE wskip
                  /\ UNCHANGED <<masked, inh, woken, own, q, posted, wpick, nwait, wcur>>
+                 /\ UNCHANGED dvars
 
 PreStep(t) == EnterUWait(t) \/ EnterHWait(t) \/ Return(t) \/ Mask(t) \/ Exit(t)
 
 \* The hand-off: the designation is dropped before the thread blocks, and a
-\* walk is owed while the note is queued.
+\* walk is owed while the note is queued. The register-then-observe comes after
+\* it, so a fatal direct note ends the wait here.
 Handoff(t)    == /\ ts[t] \in {"hentry", "uentry"}
                  /\ des' = des \ {t}
                  /\ LET owes == t \in des /\ q > 0
                     IN /\ walkOwed' = (walkOwed \/ owes)
                        /\ wskip' = IF owes THEN NONE ELSE wskip
-                 /\ ts' = [ts EXCEPT ![t] = IF ts[t] = "hentry" THEN "hwait" ELSE "uwait"]
+                 /\ ts' = [ts EXCEPT ![t] =
+                             IF BUGGY_DIRECT_NO_OBSERVE THEN IF ts[t] = "hentry" THEN "hwait" ELSE "uwait"
+                             ELSE IF ts[t] = "hentry"
+                                  THEN IF HoldEnds(t) THEN "deliver" ELSE "hwait"
+                                  ELSE IF DIRECT_FATAL /\ DirectEnds(t) THEN "deliver" ELSE "uwait"]
                  /\ UNCHANGED <<masked, inh, woken, own, q, posted, wpick, nwait, wcur>>
+                 /\ UNCHANGED dvars
 
-\* A blocked thread resumes: woken by a walk (fair), or spuriously. It
-\* unwinds or re-parks; MayUnwind is the post-sched() test.
+\* A blocked thread resumes: woken by a walk or a direct post (fair), or
+\* spuriously. It unwinds or re-parks; DirectEnds and MayUnwind are the
+\* post-sched() test.
 Resume(t)     == /\ ts[t] = "uwait"
-                 /\ IF MayUnwind(t)
+                 /\ IF DirectEnds(t)
+                       THEN UnwindDirect(t)
+                    ELSE IF MayUnwind(t)
                        THEN Unwind(t)
                        ELSE /\ woken' = [woken EXCEPT ![t] = FALSE]
                             /\ UNCHANGED <<ts, des, own>>
                  /\ UNCHANGED <<masked, inh, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 WokenResume(t) == woken[t] /\ Resume(t)
+
+\* A fatal direct post wakes a hold wait: thread_die_pending ends every wait.
+ResumeHold(t) == /\ ts[t] = "hwait" /\ woken[t] /\ DIRECT_FATAL
+                 /\ ts' = [ts EXCEPT ![t] = IF HoldEnds(t) THEN "deliver" ELSE "hwait"]
+                 /\ woken' = [woken EXCEPT ![t] = FALSE]
+                 /\ UNCHANGED <<masked, inh, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 
 \* The wait's condition comes true: the call continues, or, for a claimant
 \* carrying on after its flush, returns.
@@ -306,34 +420,63 @@ WaitDone(t)   == /\ ts[t] \in {"uwait", "hwait"}
                  /\ ts' = [ts EXCEPT ![t] = IF t \in own THEN "deliver" ELSE "pre"]
                  /\ woken' = [woken EXCEPT ![t] = FALSE]
                  /\ UNCHANGED <<masked, inh, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 
 \* After the unwind: the call returns, or sends Tflush and waits for it.
 Unwound(t)    == /\ ts[t] = "unwound"
                  /\ \E nx \in {"deliver", "flush"} : ts' = [ts EXCEPT ![t] = nx]
                  /\ UNCHANGED <<masked, inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 \* The Rflush came first (the call returns EINTR), or the original reply did
 \* and the call carries on (a multi-RPC call's next RPC) holding its claim.
 FlushDone(t)  == /\ ts[t] = "flush"
                  /\ \E nx \in {"deliver", "cont"} : ts' = [ts EXCEPT ![t] = nx]
                  /\ UNCHANGED <<masked, inh, woken, des, own, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 \* The carried-on call's one further wait: its claim unwinds it at once while
-\* the note is queued; a claim that outlived its note blocks in it.
+\* the note is queued, and its word does while the note sits there; a claim
+\* that outlived its note blocks in it.
 ContWait(t)   == /\ ts[t] = "cont"
-                 /\ IF MayUnwind(t)
+                 /\ IF DirectEnds(t)
+                       THEN /\ ts' = [ts EXCEPT ![t] = "deliver"]
+                            /\ woken' = [woken EXCEPT ![t] = FALSE]
+                            /\ UNCHANGED <<des, own>>
+                    ELSE IF MayUnwind(t)
                        THEN Unwind(t)
                        ELSE /\ ts' = [ts EXCEPT ![t] = "uwait"]
                             /\ woken' = [woken EXCEPT ![t] = FALSE]
                             /\ UNCHANGED <<des, own>>
                  /\ UNCHANGED <<masked, inh, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED dvars
 
-\* The tail's notes leg: at most one handler.
+TakesDirect(t) == dq[t] /\ ~masked[t] /\ ~inh[t]
+
+\* The tail's notes leg: at most one handler, and the thread's own note first.
 Deliver(t)    == /\ ts[t] = "deliver"
-                 /\ IF q > 0 /\ ~masked[t] /\ ~inh[t]
+                 /\ ~(DIRECT_FATAL /\ TakesDirect(t))
+                 /\ IF TakesDirect(t)
+                       THEN /\ dq' = [dq EXCEPT ![t] = FALSE]
+                            /\ inh' = [inh EXCEPT ![t] = TRUE]
+                            /\ UNCHANGED <<q, stolen>>
+                    ELSE IF q > 0 /\ ~masked[t] /\ ~inh[t]
                        THEN /\ q' = q - 1
                             /\ inh' = [inh EXCEPT ![t] = TRUE]
-                       ELSE UNCHANGED <<q, inh>>
+                            /\ stolen' = (stolen \/ (dtgt # NONE /\ dtgt # t))
+                            /\ UNCHANGED dq
+                       ELSE UNCHANGED <<q, inh, dq, stolen>>
                  /\ ts' = [ts EXCEPT ![t] = "release"]
-                 /\ UNCHANGED <<masked, woken, des, own, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                 /\ UNCHANGED <<masked, woken, des, own, posted, walkOwed, wpick, nwait, wskip, wcur,
+                                 dposted, dtgt>>
+
+\* The default of a fatal direct note: exits_note, the group's one death. Its
+\* claim on the group commits under the threads_lock, so never inside a walk.
+DeliverFatal(t) == /\ ts[t] = "deliver" /\ DIRECT_FATAL /\ TakesDirect(t) /\ wpick = NONE
+                   /\ ts' = [x \in Threads |-> "exited"]
+                   /\ woken' = [x \in Threads |-> FALSE]
+                   /\ des' = {}
+                   /\ own' = {}
+                   /\ UNCHANGED <<masked, inh, q, posted, walkOwed, wpick, nwait, wskip, wcur>>
+                   /\ UNCHANGED dvars
 
 \* The claim ends at the tail, delivered or not. The walk it owes skips it.
 Release(t)    == /\ ts[t] = "release"
@@ -345,12 +488,15 @@ Release(t)    == /\ ts[t] = "release"
                                    ELSE IF walkOwed THEN NONE ELSE t
                  /\ ts' = [ts EXCEPT ![t] = "user"]
                  /\ UNCHANGED <<masked, inh, woken, q, posted, wpick, nwait, wcur>>
+                 /\ UNCHANGED dvars
 
 Next == \/ Post \/ Walk1 \/ Walk2
         \/ \E t \in Threads :
+              \/ PostDirect(t)
               \/ Syscall(t) \/ Sigreturn(t) \/ Irq(t) \/ PreStep(t)
-              \/ Handoff(t) \/ Resume(t) \/ WaitDone(t)
-              \/ Unwound(t) \/ FlushDone(t) \/ ContWait(t) \/ Deliver(t) \/ Release(t)
+              \/ Handoff(t) \/ Resume(t) \/ ResumeHold(t) \/ WaitDone(t)
+              \/ Unwound(t) \/ FlushDone(t) \/ ContWait(t) \/ Deliver(t) \/ DeliverFatal(t)
+              \/ Release(t)
 
 Spec == Init /\ [][Next]_vars
 
@@ -361,12 +507,14 @@ Live == /\ Spec
         /\ WF_vars(Walk1) /\ WF_vars(Walk2)
         /\ \A t \in Threads :
               /\ WF_vars(Irq(t)) /\ WF_vars(PreStep(t)) /\ WF_vars(Handoff(t))
-              /\ WF_vars(WokenResume(t))
+              /\ WF_vars(WokenResume(t)) /\ WF_vars(ResumeHold(t))
               /\ WF_vars(Unwound(t)) /\ WF_vars(FlushDone(t)) /\ WF_vars(ContWait(t))
-              /\ WF_vars(Deliver(t)) /\ WF_vars(Release(t))
+              /\ WF_vars(Deliver(t)) /\ WF_vars(DeliverFatal(t)) /\ WF_vars(Release(t))
 
 -----------------------------------------------------------------------------
 OneClaimant == Cardinality(Claimed) <= 1
+
+NoStolenDirect == ~stolen
 
 \* For the liveness question a candidate is a thread at EL0 or blocked in an
 \* unwinding wait, unmasked and outside a handler. A thread inside a syscall
@@ -375,5 +523,13 @@ OneClaimant == Cardinality(Claimed) <= 1
 Ready(t) == ~masked[t] /\ ~inh[t] /\ ts[t] \in {"user", "uwait"}
 
 NoStrand == <>[](q > 0) => <>[](\A t \in Threads : ~Ready(t))
+
+\* The direct twin: the one thread that can take it, and for a fatal note a hold
+\* wait counts, since it ends for one. A caught note rides a hold wait out.
+DirectReady(t) == /\ ~masked[t] /\ ~inh[t]
+                  /\ \/ ts[t] \in {"user", "uwait"}
+                     \/ DIRECT_FATAL /\ ts[t] = "hwait"
+
+NoDirectStrand == \A t \in Threads : <>[](dq[t]) => <>[](~DirectReady(t))
 
 =============================================================================

@@ -274,7 +274,14 @@ struct Thread {
     // Set at create, before anything can free the thread; returned once, by
     // thread_destroy. Carved from in_handler's pad -- no size change.
     u8                 pool_pages;
-    u8                 _pad_in_handler[4];   // explicit 8-byte alignment
+    // ARCH 7.6.4: the note families posted at this thread by name (tkill,
+    // tgkill, pthread_kill, raise). No other thread can take them, whatever its
+    // mask. A poster sets a bit holding the Proc's threads_lock; the owner's
+    // tail, or a discard holding that lock, clears it, each by an atomic AND
+    // whose old value says who took the note. q->lock does not guard it. KP_ZERO;
+    // not inherited by a spawn or a fork; survives exec, as the queue does.
+    u8                 note_direct;
+    u8                 _pad_in_handler[3];   // explicit 8-byte alignment
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;

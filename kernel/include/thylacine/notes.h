@@ -510,6 +510,14 @@ int notes_name_is_kill(const char *name);
 // makes "no stale ignored note survives" hold. See kernel/notes.c.
 u32 notes_discard_name(struct Proc *p, const char *name);
 
+// Thread-directed notes (ARCH 7.6.4). notes_direct_bit: the family bit of a name a
+// program may aim at one thread, or -1 (`kill`, and every name no program may
+// post). notes_direct_is_fatal: this name's default would end `p` now.
+// notes_direct_ignored: `p` has chosen to ignore it, so a post drops it.
+int  notes_direct_bit(const char *name);
+bool notes_direct_is_fatal(struct Proc *p, const char *name);
+bool notes_direct_ignored(struct Proc *p, const char *name);
+
 #ifdef KERNEL_TESTS
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure

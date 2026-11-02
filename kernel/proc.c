@@ -3635,6 +3635,58 @@ static void caught_wake_unwinders(struct Proc *p, u32 fam) {
     }
 }
 
+// ARCH 7.6.4: post `name` at the one thread `tid` of `p`. The caller pins `p`
+// (it is the caller's own, or g_proc_table_lock is held). A thread not yet freed
+// but past THREAD_EXITING accepts the note and nothing receives it, as a dead
+// child accepts one from its parent.
+//
+// Reading the disposition and setting the bit share one hold of threads_lock, the
+// hold notes_discard_name's walk comes after its disposition store: see there.
+// Rousing the target under its wait_lock pairs with the register-then-observe in
+// sleep_common and tsleep_common, which read the word under that lock (I-9).
+int proc_note_thread(struct Proc *p, int tid, const char *name) {
+    if (!p || p->magic != PROC_MAGIC || p == g_kproc) return -(int)T_E_SRCH;
+    int bit = notes_direct_bit(name);
+    if (bit < 0) return -(int)T_E_INVAL;
+
+    irq_state_t s = proc_threads_lock(p);
+    struct Thread *x = p->threads;
+    while (x && x->tid != tid) x = x->next_in_proc;
+    if (!x) {
+        proc_threads_unlock(p, s);
+        return -(int)T_E_SRCH;
+    }
+    bool to_queue = false;
+    if (p->state == PROC_STATE_ALIVE && x->state != THREAD_EXITING) {
+        to_queue = proc_is_self_managing_notes(p);
+        if (!to_queue && !notes_direct_ignored(p, name)) {
+            __atomic_or_fetch(&x->note_direct, (u8)(1u << (u32)bit), __ATOMIC_RELEASE);
+            if (x != current_thread()) {
+                irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+                if (notes_direct_is_fatal(p, name)) {
+                    struct Rendez *r = x->rendez_blocked_on;
+                    if (r && r != &x->debug_rendez) wakeup(r);
+                    sched_kick_thread(x);
+                } else {
+                    caught_rouse_locked(x);
+                }
+                spin_unlock_irqrestore(&x->wait_lock, ws);
+            }
+        }
+    }
+    proc_threads_unlock(p, s);
+    if (!to_queue) return 0;
+
+    // A self-managing Proc reads its notes from an fd, which has no per-thread
+    // reader, and runs no handler: the note joins the queue.
+    int rc = notes_post(p, name, 0u, NULL, false);
+    if (rc == 0) {
+        proc_interrupt_terminate_wake(p);
+        proc_caught_note_wake(p);
+    }
+    return rc;
+}
+
 void proc_caught_note_walk(struct Proc *p, struct Thread *skip) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;            // belt: the arm never latches kproc

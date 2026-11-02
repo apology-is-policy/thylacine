@@ -23,10 +23,14 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="caught_target:613245"
+CLEAN="caught_target:613245
+caught_target_direct:807792
+caught_target_direct_fatal:434763"
 
 # buggy: cfg, invariant that must be the one reported
-BUGGY="caught_target_buggy_double_designate:OneClaimant"
+BUGGY="caught_target_buggy_double_designate:OneClaimant
+caught_target_buggy_direct_to_queue:NoStolenDirect
+caught_target_buggy_direct_claims:OneClaimant"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
@@ -36,7 +40,11 @@ caught_target_buggy_no_rekick:NoStrand:613245
 caught_target_buggy_exit_keeps:NoStrand:639673
 caught_target_buggy_release_no_wake:NoStrand:165597
 caught_target_buggy_irq_no_notes:NoStrand:613245
-caught_target_buggy_stale_keeps:NoStrand:616829"
+caught_target_buggy_stale_keeps:NoStrand:616829
+caught_target_buggy_direct_needs_claim:NoDirectStrand:812160
+caught_target_buggy_direct_no_rouse:NoDirectStrand:792792
+caught_target_buggy_direct_no_observe:NoDirectStrand:813712
+caught_target_buggy_fatal_unwinds_only:NoDirectStrand:422531"
 
 # Every temporal run is `-lncheck final`: liveness is judged once the whole
 # space is explored. Without it TLC checks liveness at TIME-triggered points

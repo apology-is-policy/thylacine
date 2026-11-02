@@ -6143,6 +6143,15 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         return 1;
     }
 
+    // A tid names one thread, so the note goes on its word. Its threads_lock
+    // nests under the proc_table_lock this walk holds.
+    if (w->target_tid > 0) {
+        int trc = proc_note_thread(target, w->target_tid, w->name);
+        w->result = (trc == 0) ? 1 : -1;
+        if (trc != 0) w->err = (s64)trc;
+        return 1;
+    }
+
     // Post. notes_post is safe under proc_table_lock -- see the lock-order
     // discussion in sys_postnote_handler.
     int rc = notes_post(target, w->name, 0u, w->caller, false);
@@ -14649,6 +14658,10 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
             if (!ctx) return 1;
             proc_fault_terminate(name, ctx->elr);
         }
+        // tkill and tgkill name a thread; `kill` ends the group wherever it is
+        // aimed, through the self arm's one cascade.
+        if (tid > 0 && !notes_name_is_kill(name))
+            return (s64)proc_note_thread(p, tid, name);
         return postnote_self(p, name);
     }
     // A snare:* death is the caller's own to choose, never another Proc's.
