@@ -832,6 +832,22 @@ if [[ -s "$TIMINGS" ]]; then
     ' "$TIMINGS"
 fi
 
+# A race fails some attempts, not all, so a scenario that failed and then passed
+# is a failure the retry let through. Printed last on both exits: the line a
+# reader stops at must not say "all" without it (q-seat7, 2026-11-02: both
+# findings were boots that a retry would have hidden).
+report_retried() {
+    local retried
+    retried="$(awk -F'\t' '
+        $2 == "TOTAL" { if ($4 == "PASS" && ($1 in f)) printf "%s (%d failed attempt(s))\n", $1, f[$1]; next }
+        $4 == "FAIL" { f[$1]++ }
+    ' "$TIMINGS")"
+    [[ -z "$retried" ]] && return 0
+    echo "==> LS-CI: UNEXPLAINED -- $(printf '%s\n' "$retried" | wc -l | tr -d ' ') scenario(s) passed only on a retry: hunt it, a retry is not a diagnosis." >&2
+    printf '%s\n' "$retried" | sed 's/^/        /' >&2
+    echo "        evidence: $BUILD_DIR/ls-ci-<scenario>.attempt<N>.{log,steps}" >&2
+}
+
 if [[ $fails -gt 0 ]]; then
     guest_fails=$((fails - infra_fails - harness_fails - image_fails))
     echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed" \
@@ -842,6 +858,7 @@ if [[ $fails -gt 0 ]]; then
              "the rest LOST coverage to the environment, the harness or the image -- re-run, fix the harness, or re-bake." >&2
     fi
     [[ $skips -gt 0 ]] && echo "    ($skips scenario(s) SKIPPED -- a missing optional host artifact, not a guest result)" >&2
+    report_retried
     exit 1
 fi
 if [[ $skips -gt 0 ]]; then
@@ -849,4 +866,5 @@ if [[ $skips -gt 0 ]]; then
 else
     echo "==> LS-CI: PASS -- all ${#scenarios[@]} scenario(s)."
 fi
+report_retried
 exit 0
