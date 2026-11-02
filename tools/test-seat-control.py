@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual-source seat/route schedules and nine named counterexamples.
+"""Actual-source seat/route schedules and eleven named counterexamples.
 
 Run from Astra's resource-leased checkout. No source edits or persistent model
 state: extracted production definitions and mutants live in a temporary directory.
@@ -36,6 +36,8 @@ cases=[
  ('wrong-lane',c,'|| m.lane != Some(lane)','|| false','exact_peer_lane_generation_and_revision_required'),
  ('wrong-stripes',c,'|| m.peer.stripes != stripes','|| false','exact_peer_lane_generation_and_revision_required'),
  ('drop-on-normal-eof',c,'v.enabled = false;','v.enabled = false; v.potential = false;','declaration_loss_keeps_live_obligation_and_prevents_rejoin'),
+ ('join-not-resampled',c,'            Op::Join => self.join.replace((q.generation, q.revision)) != Some((q.generation, q.revision)),\n','','a_joined_participant_resamples_a_refusal_once_per_snapshot'),
+ ('join-spins',c,'Op::Join => self.join.replace((q.generation, q.revision)) != Some((q.generation, q.revision)),','Op::Join => true,','a_joined_participant_resamples_a_refusal_once_per_snapshot'),
  ('gate-without-ack',g,'&& self.acknowledged','&& true','exact_generation_and_quiescing_required'),
  ('gate-replay',g,'self.acknowledged = false;','/* stale acknowledgement survives */','no_replay_across_episode_failure_or_restoration'),
  ]

@@ -68,6 +68,21 @@ proc witness {stage} {
     }
 }
 
+# The seat's return re-enables the session's own participant, not only the
+# pixels: typing proves the shell, and this proves the link. A recovery moves the
+# generation under whatever the link has in flight, so this leg is where a client
+# that treats that as fatal, or never rejoins, turns red.
+proc rejoined {stage} {
+    global timeout
+    set timeout 15
+    expect {
+        -re {halcyond: seat link rejoined generation=[0-9]+} { lc_step "the session's seat link rejoined ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "rejoin ($stage)" }
+        timeout { lc_fail "no seat link rejoin within 15s ($stage) -- the session's participant stayed disabled" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+
 lc_boot
 set timeout $lc_boot_timeout
 expect {
@@ -136,6 +151,7 @@ expect {
     timeout { lc_fail "part-way: within 30s: revived=$revived restored=$restored and no recovery" }
 }
 if {!$revived} { lc_fail "part-way: the seat restored, but lictor never said the engine revived -- which path ran it?" }
+rejoined part-way
 after 1500
 witness restored
 
@@ -207,6 +223,7 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "after the refused RESTORED" }
     timeout { lc_fail "refused: within 30s: restored=$restored and no recovery" }
 }
+rejoined refused
 after 1500
 witness cancelled
 

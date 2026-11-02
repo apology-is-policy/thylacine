@@ -575,10 +575,12 @@ mod tests {
         let mut r = Refusals::default();
         assert!(r.stale(&q(Op::Cancelled, 1, 1), true));
         assert!(r.stale(&q(Op::Retire, 1, 1), true));
-        assert!(r.stale(&q(Op::Join, 1, 5), true), "a Join lost a race");
-        assert!(!r.stale(&q(Op::Join, 1, 5), true), "the same snapshot twice raced nothing");
-        assert!(r.stale(&q(Op::Join, 2, 6), true), "the seat moved again");
-        assert!(!r.stale(&q(Op::State, 2, 6), true), "a refused State has nothing to sample");
+        // A Join lost a race; the same snapshot twice raced nothing; then the seat moved.
+        assert!(r.stale(&q(Op::Join, 1, 5), true));
+        assert!(!r.stale(&q(Op::Join, 1, 5), true));
+        assert!(r.stale(&q(Op::Join, 2, 6), true));
+        // A refused State has nothing left to sample with.
+        assert!(!r.stale(&q(Op::State, 2, 6), true));
     }
     #[test]
     fn a_first_join_refused_stays_fatal() {
@@ -587,17 +589,41 @@ mod tests {
         assert!(!r.stale(&q(Op::Cancelled, 1, 1), false));
     }
     #[test]
-    fn a_generation_moved_under_a_join_is_refused_then_a_resample_joins() {
+    fn a_chord_under_a_rejoin_is_refused_and_the_resample_still_owes_its_cancellation() {
         let mut c = table();
         let s = join(&mut c, 1);
         c.observe(s.generation, FAILED).unwrap();
-        c.observe(s.generation, NORMAL).unwrap();
+        c.observe(s.generation + 1, NORMAL).unwrap();
         let sampled = c.state(s.registration, 1, 1).unwrap();
         assert!(!sampled.enabled);
-        c.observe(s.generation + 1, NORMAL).unwrap();
+        c.observe(s.generation + 2, QUIESCING).unwrap();
         assert_eq!(c.join(s.registration, 1, 1, sampled.generation, sampled.revision), Err(Error::Denied));
+        assert_eq!(c.aggregate(), None);
         let fresh = c.state(s.registration, 1, 1).unwrap();
+        assert_eq!(fresh.phase, QUIESCING);
+        c.cancelled(s.registration, 1, 1, fresh.generation, fresh.revision).unwrap();
+        assert_eq!(c.aggregate(), Some(s.generation + 2));
+    }
+    #[test]
+    fn a_recovery_at_a_new_generation_rejoins() {
+        let mut c = table();
+        let s = join(&mut c, 1);
+        c.observe(s.generation, FAILED).unwrap();
+        c.observe(s.generation + 1, NORMAL).unwrap();
+        let fresh = c.state(s.registration, 1, 1).unwrap();
+        assert!(!fresh.enabled);
         assert!(c.join(s.registration, 1, 1, fresh.generation, fresh.revision).unwrap().enabled);
+    }
+    #[test]
+    fn a_sample_that_missed_failed_still_owes_cancellation() {
+        let mut c = table();
+        let a = join(&mut c, 1);
+        c.observe(1, QUIESCING).unwrap();
+        c.observe(2, NORMAL).unwrap();
+        c.observe(3, QUIESCING).unwrap();
+        assert_eq!(c.aggregate(), None);
+        cancel(&mut c, a, 1);
+        assert_eq!(c.aggregate(), Some(3));
     }
     #[test]
     fn declaration_loss_keeps_live_obligation_and_prevents_rejoin() {
@@ -804,12 +830,12 @@ mod tests {
         let a = join(&mut c, 1);
         c.observe(1, QUIESCING).unwrap();
         c.observe(1, FAILED).unwrap();
-        c.observe(1, NORMAL).unwrap();
+        c.observe(2, NORMAL).unwrap();
         assert!(!c.admitted(peer(1), a.registration));
-        c.observe(2, QUIESCING).unwrap();
+        c.observe(3, QUIESCING).unwrap();
         assert_eq!(c.aggregate(), None);
         cancel(&mut c, a, 1);
-        assert_eq!(c.aggregate(), Some(2));
+        assert_eq!(c.aggregate(), Some(3));
     }
     #[test]
     fn orderly_retirement_and_unenabled_withdrawal() {

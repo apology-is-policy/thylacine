@@ -55,8 +55,8 @@ request/identity exhaustion and an initially unknown seat all fail closed.
 `Refusals` says which refused requests a joined participant re-samples from: a
 Cancelled, a Retire, and a Join once per snapshot, since a Join refused twice at one
 snapshot raced nothing and retrying would spin. A first Join stays fatal.
-Thirteen actual-core schedules pass; six coordinator mutations and two Lictor
-gate mutations fail at their intended assertions. This does not activate HIN1.
+`tools/test-seat-control.py` runs the actual-core schedules and fails eight
+coordinator mutations and two Lictor gate mutations at their intended assertions. This does not activate HIN1.
 
 ## Renderer admission codec (October 1)
 

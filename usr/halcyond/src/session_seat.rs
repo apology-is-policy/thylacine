@@ -242,6 +242,13 @@ impl Link {
             if !self.state.enabled || self.state.phase != 0 {
                 return Err(Error::PermissionDenied);
             }
+            // Safe to write: this member now owes a cancellation, so the seat
+            // cannot reach EXCLUSIVE, where console output parks, without us.
+            #[cfg(feature="test-mode")]
+            if self.joined {
+                let _ = libthyla_rs::t_putstr(&alloc::format!(
+                    "halcyond: seat link rejoined generation={}\n", self.state.generation));
+            }
             self.joined = true;
             let _ = self.interaction.seat(Some(self.state.generation));
         }

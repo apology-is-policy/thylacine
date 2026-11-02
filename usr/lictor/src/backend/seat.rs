@@ -68,7 +68,7 @@ impl Seat {
                         }
                     }
                     if ep::call(ep::INPUT, &mut m).is_err() { self.phase = 4; }
-                    else { self.phase = m.phase; self.generation = m.generation; }
+                    else { self.adopt(&m); }
                 }
                 if self.phase == 0 && self.withheld {
                     if !core::mem::replace(&mut self.withheld_said, true) {
@@ -86,6 +86,12 @@ impl Seat {
         }
         if self.phase != 0 { for input in inputs { input.events.clear(); } }
     }
+    // SeatState serves this pair, so a reply is taken whole: a recovery moves the
+    // generation, and a new phase with the old one stales a client's Join.
+    fn adopt(&mut self, m: &ep::Message) {
+        self.phase = m.phase;
+        self.generation = m.generation;
+    }
     fn fail(&mut self, why: &str) {
         self.phase = 4;
         let mut m = ep::Message::default(); m.generation = self.generation;
@@ -95,7 +101,7 @@ impl Seat {
     pub fn step(&mut self, device: &mut Device, screen: &mut Screen, inputs: &mut [Input]) {
         let mut m = ep::Message::default();
         if ep::call(ep::STATUS, &mut m).is_err() { self.fail("status"); return; }
-        self.phase = m.phase; self.generation = m.generation;
+        self.adopt(&m);
         self.quiescence.observe(self.generation, self.phase);
         let released = inputs.iter().all(|i| i.held.iter().all(|held| !held));
         match self.phase {
@@ -166,7 +172,7 @@ impl Seat {
                 // A refused RESTORED leaves restoration owed: the FAILED arm
                 // rebinds again before the seat may return.
                 if refused || ep::call(ep::RESTORED, &mut m).is_err() { self.fail("restoration acknowledgement"); return; }
-                self.phase = m.phase; self.displaced = false;
+                self.adopt(&m); self.displaced = false;
             }
             _ => {
                 // The kernel already cancelled any grant and scrubbed the key
@@ -210,9 +216,7 @@ impl Seat {
                 }
                 self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
                 if ep::call(ep::RESTORED, &mut m).is_ok() {
-                    // A recovery moves the generation. SeatState serves this pair,
-                    // and a new phase with the old generation stales a client's Join.
-                    self.phase = m.phase; self.generation = m.generation; self.failed_since = None;
+                    self.adopt(&m); self.failed_since = None;
                     super::diagnostic("lictor: trusted seat recovered; nothing was conferred\n");
                 }
             }
