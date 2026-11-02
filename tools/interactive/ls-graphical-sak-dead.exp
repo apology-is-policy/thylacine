@@ -83,6 +83,30 @@ proc rejoined {stage} {
     }
 }
 
+# A failure here can be rare, and the kill erases the state it left. Before the
+# kill, ask what still works: a line typed now says whether input reaches the
+# shell, and a second chord whether it reaches the seat.
+set ::lc_fail_probe {
+    type "caps-probe --seat-denied\n"
+    set timeout 12
+    expect {
+        -ex "seat-probe: PASS denied" { lc_step "fail-probe: typing reaches the shell" }
+        -ex "seat-probe: FAIL" { lc_step "fail-probe: the shell ran the probe and it failed" }
+        -ex "lictor: input withheld" { lc_step "fail-probe: lictor withheld the keys" }
+        timeout { lc_step "fail-probe: typing did not reach the shell within 12s" }
+        eof { lc_step "fail-probe: EOF after typing" }
+    }
+    key "ctrl+alt+f10"
+    set timeout 12
+    expect {
+        -re {lictor: trusted scanout active|lictor: seat failed[^\r\n]*|INJECTED by test-latch-dead[^\r\n]*} {
+            lc_step "fail-probe: a second chord took: $expect_out(0,string)"
+        }
+        timeout { lc_step "fail-probe: a second chord took nothing within 12s" }
+        eof { lc_step "fail-probe: EOF after the chord" }
+    }
+}
+
 lc_boot
 set timeout $lc_boot_timeout
 expect {
